@@ -608,72 +608,35 @@ func TestNeedsWidening(t *testing.T) {
 	}
 }
 
-// On a destination that stores int (and float) widths identically (BigQuery,
-// Snowflake), an override to a narrower numeric width must emit no change. This
-// is the BigQuery merge regression: int32 override vs stored int64 produced a
-// pointless ALTER that BigQuery rejects on key columns.
-func TestCompare_WidthCollapsingScheme_NoChange(t *testing.T) {
-	tests := []struct {
-		name     string
-		stored   schema.DataType
-		override schema.DataType
-	}{
-		{"int32 over int64", schema.TypeInt64, schema.TypeInt32},
-		{"float32 over float64", schema.TypeFloat64, schema.TypeFloat32},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: tt.stored}}}
-			dest := &schema.TableSchema{
-				Name:        "test",
-				Columns:     []schema.Column{{Name: "c", DataType: tt.stored}},
-				PrimaryKeys: []string{"c"},
-			}
-			opts := &CompareOptions{
-				Overrides:         ColumnOverrides{"c": {Name: "c", DataType: tt.override}},
-				DestinationScheme: "bigquery",
-			}
-
-			result, err := Compare(source, dest, opts)
-			require.NoError(t, err)
-			assert.False(t, result.HasChanges, "override the destination stores identically must not produce a change")
-			assert.Empty(t, result.Changes)
-		})
-	}
-}
-
-// Only numeric widths collapse: even on BigQuery, an override to a genuinely
-// different physical type (date over a stored timestamp) must still change.
-func TestCompare_WidthCollapsingScheme_NonNumericStillChanges(t *testing.T) {
-	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeTimestamp}}}
-	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeTimestamp}}}
-	opts := &CompareOptions{
-		Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeDate}},
-		DestinationScheme: "bigquery",
-	}
-
-	result, err := Compare(source, dest, opts)
-	require.NoError(t, err)
-	require.True(t, result.HasChanges, "override to a type the destination stores differently must not be suppressed")
-	require.Len(t, result.Changes, 1)
-	assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
-	assert.Equal(t, schema.TypeDate, result.Changes[0].NewColumn.DataType)
-}
-
-// On a destination with a distinct int32 (Postgres, etc.) the widths don't
-// collapse, so a genuine int32-vs-int64 override still produces a change.
-func TestCompare_NonCollapsingScheme_StillChanges(t *testing.T) {
+// A narrower integer override against a wider stored integer must emit no change
+// (BigQuery merge regression: int32 override vs stored int64 produced a pointless
+// ALTER that BigQuery rejects on key columns).
+func TestCompare_OverrideNarrowerInt_NoChange(t *testing.T) {
 	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
-	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
-	opts := &CompareOptions{
-		Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}},
-		DestinationScheme: "postgres",
+	dest := &schema.TableSchema{
+		Name:        "test",
+		Columns:     []schema.Column{{Name: "c", DataType: schema.TypeInt64}},
+		PrimaryKeys: []string{"c"},
 	}
+	opts := &CompareOptions{Overrides: ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}}}
 
 	result, err := Compare(source, dest, opts)
 	require.NoError(t, err)
-	require.True(t, result.HasChanges)
+	assert.False(t, result.HasChanges, "int32 override against a stored int64 must not produce a change")
+	assert.Empty(t, result.Changes)
+}
+
+// Suppression is integer-only: a non-integer narrowing override (float32 over a
+// stored float64) must still produce a change.
+func TestCompare_OverrideNarrowerNonInt_StillChanges(t *testing.T) {
+	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeFloat64}}}
+	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeFloat64}}}
+	opts := &CompareOptions{Overrides: ColumnOverrides{"c": {Name: "c", DataType: schema.TypeFloat32}}}
+
+	result, err := Compare(source, dest, opts)
+	require.NoError(t, err)
+	require.True(t, result.HasChanges, "non-integer narrowing override must not be silently suppressed")
 	require.Len(t, result.Changes, 1)
 	assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
-	assert.Equal(t, schema.TypeInt32, result.Changes[0].NewColumn.DataType)
+	assert.Equal(t, schema.TypeFloat32, result.Changes[0].NewColumn.DataType)
 }

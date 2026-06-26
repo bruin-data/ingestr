@@ -10,9 +10,6 @@ import (
 // CompareOptions contains optional parameters for schema comparison.
 type CompareOptions struct {
 	Overrides ColumnOverrides
-	// DestinationScheme identifies the destination (e.g. "bigquery") so the
-	// comparison can ignore type changes that destination stores identically.
-	DestinationScheme string
 }
 
 // Compare compares source and destination schemas and returns the differences.
@@ -26,10 +23,8 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}
 
 	var overrides ColumnOverrides
-	var destScheme string
 	if opts != nil {
 		overrides = opts.Overrides
-		destScheme = opts.DestinationScheme
 	}
 
 	destColumnMap := make(map[string]schema.Column)
@@ -53,23 +48,22 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			newCol := override.ApplyToColumn(srcCol)
 			newCol.Nullable = true
 
-			// Skip when the destination already holds the override: an exact match,
-			// or a numeric width the destination stores identically (e.g. int32 vs
-			// int64 on BigQuery), so an existing column of one already holds the other.
-			if exists {
-				if destCol.DataType == newCol.DataType {
-					if newCol.DataType != schema.TypeDecimal {
-						continue
-					}
-					// For decimal, check integer digits and scale separately
-					destIntDigits := destCol.Precision - destCol.Scale
-					newIntDigits := newCol.Precision - newCol.Scale
-					if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
-						continue
-					}
-				} else if numericWidthsEquivalent(destScheme, newCol.DataType, destCol.DataType) {
+			// If destination exists and matches override, no change needed
+			if exists && destCol.DataType == newCol.DataType {
+				if newCol.DataType != schema.TypeDecimal {
 					continue
 				}
+				// For decimal, check integer digits and scale separately
+				destIntDigits := destCol.Precision - destCol.Scale
+				newIntDigits := newCol.Precision - newCol.Scale
+				if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
+					continue
+				}
+			}
+			// A narrower integer override against a wider stored integer (e.g. int32
+			// vs int64 on BigQuery, which stores every int as INT64) needs no change.
+			if exists && isInt(newCol.DataType) && isInt(destCol.DataType) && CanWiden(newCol.DataType, destCol.DataType) {
+				continue
 			}
 
 			changeType := ChangeOverrideType
@@ -155,34 +149,8 @@ func makeNullable(col schema.Column) schema.Column {
 	return col
 }
 
-// widthCollapsingSchemes are destinations whose physical storage uses a single
-// width per numeric family — every integer is INT64-equivalent and every float
-// is 64-bit (BigQuery, Snowflake). For these, an int32 (or float32) override
-// against a stored int64 (float64) is a no-op, so no ALTER is needed.
-var widthCollapsingSchemes = map[string]bool{
-	"bigquery":  true,
-	"snowflake": true,
-}
-
-// numericWidthsEquivalent reports whether destScheme stores a and b as the same
-// physical type because it collapses numeric width families. False for any other
-// destination, so dialects with a distinct int32 keep honoring genuine changes.
-func numericWidthsEquivalent(destScheme string, a, b schema.DataType) bool {
-	if !widthCollapsingSchemes[destScheme] {
-		return false
-	}
-	return numericWidthClass(a) == numericWidthClass(b)
-}
-
-func numericWidthClass(t schema.DataType) schema.DataType {
-	switch t {
-	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
-		return schema.TypeInt64
-	case schema.TypeFloat32, schema.TypeFloat64:
-		return schema.TypeFloat64
-	default:
-		return t
-	}
+func isInt(t schema.DataType) bool {
+	return t == schema.TypeInt8 || t == schema.TypeInt16 || t == schema.TypeInt32 || t == schema.TypeInt64
 }
 
 func needsWidening(src, dest schema.Column) bool {
