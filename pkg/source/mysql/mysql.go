@@ -19,9 +19,9 @@ import (
 )
 
 type MySQLSource struct {
-	db       *sql.DB
-	uri      string
-	database string
+	db          *sql.DB
+	uri         string
+	database    string
 	sessionInit []string
 }
 
@@ -291,8 +291,8 @@ type rowQuerier interface {
 }
 
 // querier returns something to run a query on plus a cleanup func. When the
-// source has session-init statements, it pins a dedicated connection and 
-// applies them there, since session settings do not carry across the pool. 
+// source has session-init statements, it pins a dedicated connection and
+// applies them there, since session settings do not carry across the pool.
 // Otherwise it returns the pool itself.
 func (s *MySQLSource) querier(ctx context.Context) (rowQuerier, func(), error) {
 	if len(s.sessionInit) == 0 {
