@@ -652,3 +652,30 @@ func TestCompare_OverrideWiderThanDest_StillChanges(t *testing.T) {
 	assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
 	assert.Equal(t, schema.TypeInt64, result.Changes[0].NewColumn.DataType)
 }
+
+// Suppression is integer-only: a non-integer narrowing override (date over a
+// stored timestamp, float32 over float64) must still produce a change.
+func TestCompare_OverrideNarrowerCrossFamily_StillChanges(t *testing.T) {
+	tests := []struct {
+		name     string
+		stored   schema.DataType
+		override schema.DataType
+	}{
+		{"date over timestamp", schema.TypeTimestamp, schema.TypeDate},
+		{"float32 over float64", schema.TypeFloat64, schema.TypeFloat32},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: tt.stored}}}
+			dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: tt.stored}}}
+			opts := &CompareOptions{Overrides: ColumnOverrides{"c": {Name: "c", DataType: tt.override}}}
+
+			result, err := Compare(source, dest, opts)
+			require.NoError(t, err)
+			require.True(t, result.HasChanges, "non-integer narrowing override must not be silently suppressed")
+			require.Len(t, result.Changes, 1)
+			assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
+			assert.Equal(t, tt.override, result.Changes[0].NewColumn.DataType)
+		})
+	}
+}

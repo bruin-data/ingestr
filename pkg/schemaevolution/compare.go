@@ -48,8 +48,8 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			newCol := override.ApplyToColumn(srcCol)
 			newCol.Nullable = true
 
-			// Skip when the destination already holds the override: exact match,
-			// or the override is narrower than the stored type (e.g. int32 vs int64).
+			// Skip when the destination already holds the override: exact match, or a
+			// narrower integer override against a wider stored integer (int32 vs int64).
 			if exists {
 				if destCol.DataType == newCol.DataType {
 					if newCol.DataType != schema.TypeDecimal {
@@ -61,7 +61,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 					if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
 						continue
 					}
-				} else if CanWiden(newCol.DataType, destCol.DataType) {
+				} else if isIntegerType(newCol.DataType) && isIntegerType(destCol.DataType) && CanWiden(newCol.DataType, destCol.DataType) {
 					continue
 				}
 			}
@@ -147,6 +147,15 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 func makeNullable(col schema.Column) schema.Column {
 	col.Nullable = true
 	return col
+}
+
+func isIntegerType(t schema.DataType) bool {
+	switch t {
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+		return true
+	default:
+		return false
+	}
 }
 
 func needsWidening(src, dest schema.Column) bool {
