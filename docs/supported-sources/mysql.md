@@ -19,6 +19,11 @@ URI parameters:
 
 The same URI structure and table can be used both for sources and destinations. You can read more about SQLAlchemy's MySQL dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#mysql).
 
+## Vitess / PlanetScale
+[Vitess](https://vitess.io/) and [PlanetScale](https://planetscale.com/) are supported out of the box — use the same `mysql://` URI as above, no extra configuration needed.
+
+By default Vitess caps queries at 100,000 rows, which would otherwise break bulk reads of larger tables. ingestr detects Vitess automatically and works around this, so large tables ingest fully.
+
 ## Change data capture
 MySQL CDC is supported with the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes. It reads a consistent snapshot first, then resumes from the destination table's maximum `_cdc_lsn` on subsequent runs.
 

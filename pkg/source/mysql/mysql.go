@@ -22,6 +22,7 @@ type MySQLSource struct {
 	db       *sql.DB
 	uri      string
 	database string
+	sessionInit []string
 }
 
 func NewMySQLSource() *MySQLSource {
@@ -51,6 +52,13 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("failed to ping MySQL: %w", err)
+	}
+
+	if vitess, verr := isVitessServer(ctx, db); verr != nil {
+		config.Debug("[SOURCE] failed to detect server version: %v", verr)
+	} else if vitess {
+		config.Debug("[SOURCE] detected Vitess server; enabling OLAP workload")
+		s.sessionInit = []string{"SET workload = 'OLAP'"}
 	}
 
 	s.db = db
@@ -108,6 +116,14 @@ func uriToDSN(uri string) (string, string, error) {
 	}
 
 	return dsn, database, nil
+}
+
+func isVitessServer(ctx context.Context, db *sql.DB) (bool, error) {
+	var version string
+	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
+		return false, err
+	}
+	return strings.Contains(strings.ToLower(version), "vitess"), nil
 }
 
 func (s *MySQLSource) Close(ctx context.Context) error {
@@ -269,6 +285,33 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 	}, nil
 }
 
+// rowQuerier is satisfied by both *sql.DB and *sql.Conn.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// querier returns something to run a query on plus a cleanup func. When the
+// source has session-init statements, it pins a dedicated connection and 
+// applies them there, since session settings do not carry across the pool. 
+// Otherwise it returns the pool itself.
+func (s *MySQLSource) querier(ctx context.Context) (rowQuerier, func(), error) {
+	if len(s.sessionInit) == 0 {
+		return s.db, func() {}, nil
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	for _, stmt := range s.sessionInit {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			_ = conn.Close()
+			return nil, nil, fmt.Errorf("failed to apply session setting %q: %w", stmt, err)
+		}
+	}
+	return conn, func() { _ = conn.Close() }, nil
+}
+
 func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
 	config.Debug("[SOURCE] Starting read from %s", table)
@@ -296,8 +339,15 @@ func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schem
 
 		query := buildSelectQuery(table, columns, opts)
 
+		q, cleanup, err := s.querier(ctx)
+		if err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
+		}
+		defer cleanup()
+
 		startQuery := time.Now()
-		rows, err := s.db.QueryContext(ctx, query)
+		rows, err := q.QueryContext(ctx, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
 			return
@@ -345,7 +395,14 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		defer close(results)
 
 		config.Debug("[SOURCE] Executing custom query: %s", query)
-		rows, err := s.db.QueryContext(ctx, query)
+		q, cleanup, err := s.querier(ctx)
+		if err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
+		}
+		defer cleanup()
+
+		rows, err := q.QueryContext(ctx, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
