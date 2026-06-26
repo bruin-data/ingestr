@@ -40,10 +40,15 @@ type PostgresCDCSource struct {
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
 	pos *streamPosition
+	// caughtUp holds the LSN a batch run streamed up to (its targetLSN). It is
+	// sent as a final standby status update by FinalizeBatch so the slot's
+	// confirmed_flush_lsn advances even when the run catches up before the
+	// replicator's 10s standby timer fires. Stays zero in streaming mode.
+	caughtUp *streamPosition
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
-	return &PostgresCDCSource{pos: newStreamPosition()}
+	return &PostgresCDCSource{pos: newStreamPosition(), caughtUp: newStreamPosition()}
 }
 
 func (s *PostgresCDCSource) Schemes() []string {
@@ -145,6 +150,42 @@ func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
 	}
 	s.pos.Commit(lsn)
 	config.Debug("[CDC] Confirmed durable LSN: %s", lsn)
+	return nil
+}
+
+// recordCaughtUpLSN records the LSN a batch run has streamed up to. It is sent
+// to the slot by FinalizeBatch once the destination write is durable.
+func (s *PostgresCDCSource) recordCaughtUpLSN(lsn pglogrepl.LSN) {
+	if s.caughtUp != nil {
+		s.caughtUp.Commit(lsn)
+	}
+}
+
+// FinalizeBatch sends a final standby status update confirming the LSN the batch
+// run caught up to. The pipeline calls it only after a successful, durable
+// write, so confirming the streamed position cannot discard WAL the destination
+// has not persisted. Without it, a batch run that catches up before the
+// replicator's 10s standby timer fires never advances the slot's
+// confirmed_flush_lsn, so lag and retained WAL grow without bound across runs.
+// Best-effort: a failure here does not fail an otherwise-successful ingest.
+func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
+	if s.replConn == nil || s.caughtUp == nil {
+		return nil
+	}
+	lsn := s.caughtUp.Committed()
+	if lsn == 0 {
+		return nil
+	}
+	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: lsn,
+		WALFlushPosition: lsn,
+		WALApplyPosition: lsn,
+	})
+	if err != nil {
+		config.Debug("[CDC] Failed to send final standby status at LSN %s: %v", lsn, err)
+		return fmt.Errorf("failed to send final standby status: %w", err)
+	}
+	config.Debug("[CDC] Sent final standby status confirming LSN %s", lsn)
 	return nil
 }
 
@@ -357,8 +398,9 @@ const (
 )
 
 var (
-	_ source.Source           = (*PostgresCDCSource)(nil)
-	_ source.MultiTableSource = (*PostgresCDCSource)(nil)
-	_ source.StreamingSource  = (*PostgresCDCSource)(nil)
-	_ source.StreamCommitter  = (*PostgresCDCSource)(nil)
+	_ source.Source            = (*PostgresCDCSource)(nil)
+	_ source.MultiTableSource  = (*PostgresCDCSource)(nil)
+	_ source.StreamingSource   = (*PostgresCDCSource)(nil)
+	_ source.StreamCommitter   = (*PostgresCDCSource)(nil)
+	_ source.CDCBatchFinalizer = (*PostgresCDCSource)(nil)
 )

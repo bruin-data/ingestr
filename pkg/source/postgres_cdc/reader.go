@@ -132,7 +132,13 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		return forwardFillUnchanged(batch, pkNames)
 	}
 
-	return streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
+	err = streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
+	if err == nil && mode == ModeBatch {
+		// Record the caught-up position so FinalizeBatch can confirm it to the
+		// slot once the destination write is durable.
+		r.source.recordCaughtUpLSN(repl.CurrentLSN())
+	}
+	return err
 }
 
 func parseStoredPostgresLSN(raw string) (pglogrepl.LSN, error) {
