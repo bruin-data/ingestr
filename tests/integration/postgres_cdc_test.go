@@ -1308,3 +1308,126 @@ func cdcReplicationSlotName(tableName, publication, suffix string) string {
 	}
 	return name
 }
+
+// cdcReplicationSlotState returns the (single) ingestr replication slot's
+// confirmed_flush_lsn and the current lag in bytes (current WAL - confirmed).
+func cdcReplicationSlotState(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (confirmedFlushLSN string, lagBytes int64) {
+	t.Helper()
+	err := pool.QueryRow(ctx, `
+		SELECT confirmed_flush_lsn::text,
+		       pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint
+		FROM pg_replication_slots
+		ORDER BY slot_name
+		LIMIT 1`).Scan(&confirmedFlushLSN, &lagBytes)
+	require.NoError(t, err)
+	return confirmedFlushLSN, lagBytes
+}
+
+// lsnGreater reports whether LSN a is strictly greater than LSN b.
+func lsnGreater(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a, b string) bool {
+	t.Helper()
+	var greater bool
+	require.NoError(t, pool.QueryRow(ctx, "SELECT $1::pg_lsn > $2::pg_lsn", a, b).Scan(&greater))
+	return greater
+}
+
+// assertBatchRunsAdvanceSlot drives an initial snapshot run plus several resume
+// runs, each catching up a small delta well under the replicator's 10s
+// standby-status interval. Without a final standby status update on a successful
+// run the slot's confirmed_flush_lsn stays frozen and lag grows without bound;
+// this asserts the slot advances and lag shrinks after each run instead.
+func assertBatchRunsAdvanceSlot(t *testing.T, ctx context.Context, sourceConnString string, makeCfg func() *config.IngestConfig) {
+	t.Helper()
+
+	sourcePool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer sourcePool.Close()
+
+	// Initial run: snapshot, creates the replication slot.
+	require.NoError(t, pipeline.New(makeCfg()).Run(ctx))
+
+	prevConf, _ := cdcReplicationSlotState(t, ctx, sourcePool)
+	require.NotEmpty(t, prevConf, "slot should exist after the snapshot run")
+
+	for i := 1; i <= 3; i++ {
+		// Generate WAL so the slot is behind before the run.
+		_, err = sourcePool.Exec(ctx,
+			`INSERT INTO public.test_cdc (name, value) SELECT 'gen' || g, g FROM generate_series(1, 200) g`)
+		require.NoError(t, err)
+
+		_, lagBefore := cdcReplicationSlotState(t, ctx, sourcePool)
+		require.Positive(t, lagBefore, "run %d: expected positive lag before catch-up", i)
+
+		require.NoError(t, pipeline.New(makeCfg()).Run(ctx))
+
+		confAfter, lagAfter := cdcReplicationSlotState(t, ctx, sourcePool)
+		assert.Truef(t, lsnGreater(t, ctx, sourcePool, confAfter, prevConf),
+			"run %d: confirmed_flush_lsn must advance (%s -> %s); the slot stays frozen without the final standby update",
+			i, prevConf, confAfter)
+		assert.Lessf(t, lagAfter, lagBefore,
+			"run %d: lag should shrink after catching up (before=%d after=%d)", i, lagBefore, lagAfter)
+		prevConf = confAfter
+	}
+}
+
+// TestPostgresCDC_BatchRunAdvancesReplicationSlot covers the full-database
+// (multi-table) path: repeated batch runs must keep advancing the replication
+// slot so lag returns toward zero across runs.
+func TestPostgresCDC_BatchRunAdvancesReplicationSlot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	setupCDCSource(t, ctx, sourceConnString)
+
+	tmpDir, err := os.MkdirTemp("", "cdc_slot_mt_*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	duckdbURI := fmt.Sprintf("duckdb:///%s/test.duckdb", tmpDir)
+
+	// Full-database CDC: no SourceTable -> multi-table path.
+	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
+	assertBatchRunsAdvanceSlot(t, ctx, sourceConnString, func() *config.IngestConfig {
+		return &config.IngestConfig{
+			SourceURI:           cdcSourceURI,
+			DestURI:             duckdbURI,
+			IncrementalStrategy: "merge",
+		}
+	})
+}
+
+// TestPostgresCDC_SingleTableBatchRunAdvancesReplicationSlot covers the
+// single-table path (--source-table) which streams via a different reader but
+// must confirm the slot the same way.
+func TestPostgresCDC_SingleTableBatchRunAdvancesReplicationSlot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	setupCDCSource(t, ctx, sourceConnString)
+
+	tmpDir, err := os.MkdirTemp("", "cdc_slot_st_*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	duckdbURI := fmt.Sprintf("duckdb:///%s/test.duckdb", tmpDir)
+
+	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
+	assertBatchRunsAdvanceSlot(t, ctx, sourceConnString, func() *config.IngestConfig {
+		return &config.IngestConfig{
+			SourceURI:           cdcSourceURI,
+			DestURI:             duckdbURI,
+			SourceTable:         "public.test_cdc",
+			DestTable:           "test_cdc_dest",
+			PrimaryKeys:         []string{"id"},
+			IncrementalStrategy: "merge",
+		}
+	})
+}

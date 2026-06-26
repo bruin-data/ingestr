@@ -116,6 +116,15 @@ type StreamCommitter interface {
 	CommitStream(ctx context.Context, token any) error
 }
 
+// CDCBatchFinalizer is an optional capability for CDC sources that perform a
+// final bookkeeping step after a successful batch run (e.g. confirming the
+// replication slot's flush position). The pipeline calls FinalizeBatch only
+// after the destination write is durable, so the source may safely confirm the
+// position it streamed up to.
+type CDCBatchFinalizer interface {
+	FinalizeBatch(ctx context.Context) error
+}
+
 // MultiTableSource represents a source that emits data from multiple tables.
 // This is used for CDC sources that capture changes across multiple tables.
 type MultiTableSource interface {
