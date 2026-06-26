@@ -37,6 +37,9 @@ func TestIsVitessServer(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("version %q: got %v, want %v", tc.version, got, tc.want)
 		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("version %q: unmet expectations: %v", tc.version, err)
+		}
 		_ = db.Close()
 	}
 }
