@@ -1053,7 +1053,10 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 
 	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
-	opts := &schemaevolution.CompareOptions{Overrides: overrides}
+	// DestinationScheme lets the comparison ignore type changes the destination stores identically
+	// (e.g. int32 vs int64 on BigQuery), avoiding a pointless ALTER that BigQuery rejects on key columns.
+	scheme := p.dest.GetScheme()
+	opts := &schemaevolution.CompareOptions{Overrides: overrides, DestinationScheme: scheme}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
@@ -1151,7 +1154,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 
 	// Get dialect for the destination
-	dialect := schemaevolution.GetDialect(p.dest.GetScheme())
+	dialect := schemaevolution.GetDialect(scheme)
 	if dialect == nil {
 		config.Debug("[SCHEMA EVOLUTION] No dialect registered for scheme %s, skipping", p.dest.GetScheme())
 		return &schemaevolution.EvolutionPlan{
