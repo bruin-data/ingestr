@@ -23,6 +23,12 @@ const (
 	defaultBatchSize = 50
 	rateLimit        = 10
 	rateLimitBurst   = 5
+
+	// maxRetries is the number of retries for 429 and 5xx responses.
+	maxRetries = 5
+	// baseRetryWait and maxRetryWait bound the retry backoff.
+	baseRetryWait = 1 * time.Second
+	maxRetryWait  = 60 * time.Second
 )
 
 var supportedTables = []string{
@@ -217,6 +223,7 @@ var tagsFields = []schema.Column{
 type MondaySource struct {
 	apiToken string
 	client   *httpclient.Client
+	baseURL  string // defaults to graphqlBaseUrl; overridden in tests
 }
 
 func NewMondaySource() *MondaySource {
@@ -238,10 +245,19 @@ func (s *MondaySource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.apiToken = apiToken
+	baseURL := s.baseURL
+	if baseURL == "" {
+		baseURL = graphqlBaseUrl
+	}
+	// GraphQL uses POST, so non-idempotent retries are enabled; mondayRetryStrategy
+	// supplies the per-attempt wait.
 	s.client = httpclient.New(
-		httpclient.WithBaseURL(graphqlBaseUrl),
+		httpclient.WithBaseURL(baseURL),
 		httpclient.WithTimeout(60*time.Second),
 		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithRetry(maxRetries, baseRetryWait, maxRetryWait),
+		httpclient.WithAllowNonIdempotentRetry(),
+		httpclient.WithRetryStrategy(mondayRetryStrategy),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Authorization", s.apiToken),
 		httpclient.WithHeader("Content-Type", "application/json"),
@@ -540,6 +556,8 @@ type graphQLError struct {
 	Message string `json:"message"`
 }
 
+// executeGraphQL runs a query and returns its data. The HTTP client retries 429
+// and 5xx responses.
 func (s *MondaySource) executeGraphQL(ctx context.Context, query string, variables map[string]interface{}) (json.RawMessage, error) {
 	reqBody := graphQLRequest{
 		Query:     query,
@@ -548,11 +566,14 @@ func (s *MondaySource) executeGraphQL(ctx context.Context, query string, variabl
 
 	config.Debug("[Monday] Executing GraphQL query")
 
+	// rlErr captures a 429 body so the retry strategy can read retry_in_seconds.
 	var resp graphQLResponse
+	var rlErr mondayRetryError
 	httpResp, err := s.client.R(ctx).
 		SetHeader("Content-Type", "application/json").
 		SetBody(reqBody).
 		SetResult(&resp).
+		SetError(&rlErr).
 		Post("")
 	if err != nil {
 		return nil, fmt.Errorf("graphql request failed: %w", err)
@@ -563,7 +584,7 @@ func (s *MondaySource) executeGraphQL(ctx context.Context, query string, variabl
 	}
 
 	if len(resp.Errors) > 0 {
-		var errMsgs []string
+		errMsgs := make([]string, 0, len(resp.Errors))
 		for _, e := range resp.Errors {
 			errMsgs = append(errMsgs, e.Message)
 		}
@@ -571,6 +592,67 @@ func (s *MondaySource) executeGraphQL(ctx context.Context, query string, variabl
 	}
 
 	return resp.Data, nil
+}
+
+// Monday rate limits return HTTP 429. The minute, concurrency, and IP limits send
+// a Retry-After header, which the client honors. The complexity limit returns
+// COMPLEXITY_BUDGET_EXHAUSTED with the wait in the body's retry_in_seconds field,
+// which mondayRetryStrategy reads instead.
+// https://developer.monday.com/api-reference/docs/rate-limits
+
+// mondayRetryError holds the retry_in_seconds from a Monday error body. It is the
+// SetError target, so the client parses a 429 body into it.
+type mondayRetryError struct {
+	Errors []struct {
+		Extensions struct {
+			RetryInSeconds float64 `json:"retry_in_seconds"`
+		} `json:"extensions"`
+	} `json:"errors"`
+}
+
+// mondayRetryStrategy returns the wait before the next attempt: the body's
+// retry_in_seconds if present, otherwise exponential backoff.
+func mondayRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
+	if resp != nil {
+		if d, ok := retryInSecondsFromError(resp.Error()); ok {
+			return d, nil
+		}
+		if a := resp.Attempt(); a > 0 {
+			return backoff(a), nil
+		}
+	}
+	return backoff(1), nil
+}
+
+// retryInSecondsFromError returns the largest retry_in_seconds in a parsed Monday
+// error body, if any.
+func retryInSecondsFromError(v interface{}) (time.Duration, bool) {
+	e, ok := v.(*mondayRetryError)
+	if !ok || e == nil {
+		return 0, false
+	}
+	var secs float64
+	for _, er := range e.Errors {
+		if er.Extensions.RetryInSeconds > secs {
+			secs = er.Extensions.RetryInSeconds
+		}
+	}
+	if secs <= 0 {
+		return 0, false
+	}
+	return time.Duration(secs * float64(time.Second)), true
+}
+
+// backoff returns baseRetryWait doubled per attempt, capped at maxRetryWait.
+func backoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := baseRetryWait << (attempt - 1)
+	if d <= 0 || d > maxRetryWait {
+		return maxRetryWait
+	}
+	return d
 }
 
 // readAccount reads the account information and sends it as a single record batch
@@ -929,6 +1011,15 @@ func (s *MondaySource) consumeUpdatesChan(
 			}
 		case update, ok := <-updatesCh:
 			if !ok {
+				// updatesCh closes only after all workers return, so a worker error
+				// is already buffered. Check it before treating the close as success.
+				select {
+				case err := <-errCh:
+					if err != nil {
+						return err
+					}
+				default:
+				}
 				if err := flush(); err != nil {
 					return err
 				}

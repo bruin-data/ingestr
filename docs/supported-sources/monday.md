@@ -82,5 +82,5 @@ ingestr ingest --source-table "items:5091839751:linked" ...
 > `:linked` discovers sub-boards by the convention that **an item on the master board has the same title as the sub-board's name**. So if your master board has an item called `Q1 Roadmap` and you also have a board called `Q1 Roadmap`, that board is treated as a linked sub-board and its items are included in the result.
 
 > [!NOTE]
-> Monday.com has rate limits for API requests. The source handles pagination automatically and respects the API's maximum page size of 100 items.
+> Monday.com rate limits API requests, mainly by query complexity per minute. The source paginates automatically (up to the API's 100-item page size), throttles its own request rate, and retries throttled (HTTP 429) and transient (5xx) responses. It waits the time Monday asks for, whether from the `Retry-After` header or the `retry_in_seconds` field a complexity error returns instead.
 
