@@ -25,6 +25,10 @@ const graphBase = "https://graph.microsoft.com/v1.0"
 // Azure AD app registration.
 var graphScopes = []string{"https://graph.microsoft.com/.default"}
 
+// userAgent decorates requests so SharePoint throttles them less.
+// Microsoft's expected format: ISV|CompanyName|AppName/Version.
+const userAgent = "ISV|Bruin|ingestr/1.0"
+
 // graphClient talks to the Microsoft Graph API for a single SharePoint site.
 // Authentication uses the OAuth2 client-credentials flow via azidentity, which
 // caches and refreshes the access token internally.
@@ -65,6 +69,7 @@ func newGraphClient(cfg connConfig) (*graphClient, error) {
 	client := httpclient.New(
 		httpclient.WithTimeout(120*time.Second),
 		httpclient.WithRetry(5, 2*time.Second, 30*time.Second),
+		httpclient.WithUserAgent(userAgent),
 		httpclient.WithDebug(config.DebugMode),
 	)
 
