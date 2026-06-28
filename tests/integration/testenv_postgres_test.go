@@ -65,6 +65,7 @@ var (
 	dynamoDBDest    dynamoDBEnv
 	cassandraShared cassandraEnv
 	rabbitmqShared  rabbitmqEnv
+	mqttShared      mqttEnv
 )
 
 func TestMain(m *testing.M) {
@@ -165,6 +166,11 @@ func TestMain(m *testing.M) {
 		rabbitmqShared = rabbitmqEnv{container: rmqC, uri: rmqURI}
 	}
 
+	mqttC, mqttURI, mqttErr := startMQTTContainerForMain(ctx)
+	if mqttErr == nil {
+		mqttShared = mqttEnv{container: mqttC, uri: mqttURI}
+	}
+
 	code := m.Run()
 
 	containers := []testcontainers.Container{
@@ -186,6 +192,9 @@ func TestMain(m *testing.M) {
 	twg.Wait()
 	if rabbitmqShared.container != nil {
 		_ = rabbitmqShared.container.Terminate(ctx)
+	}
+	if mqttShared.container != nil {
+		_ = mqttShared.container.Terminate(ctx)
 	}
 	if maxcomputeDest.dbPath != "" {
 		_ = os.Remove(maxcomputeDest.dbPath)
