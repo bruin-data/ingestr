@@ -221,7 +221,8 @@ func TestRetryInSecondsFromError(t *testing.T) {
 
 	var e mondayRetryError
 	require.NoError(t, json.Unmarshal(
-		[]byte(`{"errors":[{"extensions":{"retry_in_seconds":3}},{"extensions":{"retry_in_seconds":11}}]}`), &e))
+		[]byte(`{"errors":[{"extensions":{"retry_in_seconds":3}},{"extensions":{"retry_in_seconds":11}}]}`), &e,
+	))
 	d, ok := retryInSecondsFromError(&e)
 	assert.True(t, ok)
 	assert.Equal(t, 11*time.Second, d, "uses the largest retry_in_seconds")
