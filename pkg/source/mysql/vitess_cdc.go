@@ -311,7 +311,15 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 		rules = append(rules, &binlogdatapb.Rule{Match: t.bareName, Filter: "select * from " + t.bareName})
 	}
 
-	startVGtid, ordinal, fromResume, err := s.resolveVitessStart(targets, resumeByBare)
+	shards, err := s.listShards(ctx)
+	if err != nil {
+		return err
+	}
+	if len(shards) == 0 {
+		return fmt.Errorf("no shards found for keyspace %s", s.keyspace)
+	}
+
+	startVGtid, ordinal, fromResume, err := s.resolveVitessStart(targets, resumeByBare, shards)
 	if err != nil {
 		return err
 	}
@@ -412,6 +420,13 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 				if ev.Vgtid != nil {
 					latestVGtid = ev.Vgtid
 				}
+				// The copy phase delimits row batches with VGTID (from LASTPK)
+				// events and sends no COMMIT, so flush here to bound memory and
+				// capture copy rows. During streaming txnRows is already empty
+				// at this point (the prior COMMIT flushed it), so this is a no-op.
+				if err := flushTxn(); err != nil {
+					return err
+				}
 
 			case binlogdatapb.VEventType_COMMIT:
 				if err := flushTxn(); err != nil {
@@ -440,7 +455,7 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 // ordinal from stored resume cursors. VStream's VGTID is cumulative (every
 // commit carries the latest GTID for all shards), so persisting and resuming the
 // whole VGTID handles both unsharded and sharded keyspaces with one cursor.
-func (s *VitessCDCSource) resolveVitessStart(targets []vitessCDCTarget, resumeByBare map[string]string) (*binlogdatapb.VGtid, uint64, bool, error) {
+func (s *VitessCDCSource) resolveVitessStart(targets []vitessCDCTarget, resumeByBare map[string]string, shards []string) (*binlogdatapb.VGtid, uint64, bool, error) {
 	haveAll := true
 	anyResume := false
 	var minOrdinal uint64 = math.MaxUint64
@@ -486,9 +501,42 @@ func (s *VitessCDCSource) resolveVitessStart(targets []vitessCDCTarget, resumeBy
 	}
 
 	// Fresh (or mixed) run: empty Gtid triggers VStream's consistent copy phase.
-	// Empty Shard means all shards of the keyspace.
-	fresh := &binlogdatapb.VGtid{ShardGtids: []*binlogdatapb.ShardGtid{{Keyspace: s.keyspace, Shard: "", Gtid: ""}}}
+	// Shards are listed explicitly (one ShardGtid each) rather than relying on the
+	// empty-Shard "all shards" expansion, which vtcombo resolves unreliably. An
+	// unsharded keyspace has a single shard named "-".
+	shardGtids := make([]*binlogdatapb.ShardGtid, 0, len(shards))
+	for _, sh := range shards {
+		shardGtids = append(shardGtids, &binlogdatapb.ShardGtid{Keyspace: s.keyspace, Shard: sh, Gtid: ""})
+	}
+	fresh := &binlogdatapb.VGtid{ShardGtids: shardGtids}
 	return fresh, ordinal, false, nil
+}
+
+// listShards returns the shard names of the keyspace (e.g. ["-"] when unsharded,
+// ["-80", "80-"] when sharded) via vtgate's SHOW VITESS_SHARDS.
+func (s *VitessCDCSource) listShards(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SHOW VITESS_SHARDS")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Vitess shards: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	prefix := s.keyspace + "/"
+	var shards []string
+	for rows.Next() {
+		var entry string
+		if err := rows.Scan(&entry); err != nil {
+			return nil, fmt.Errorf("failed to scan Vitess shard: %w", err)
+		}
+		entry = strings.TrimSpace(entry)
+		if name, ok := strings.CutPrefix(entry, prefix); ok {
+			shards = append(shards, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return shards, nil
 }
 
 func vitessDecodeRowChanges(re *binlogdatapb.RowEvent, outSchema *schema.TableSchema, info *vitessFieldInfo) ([]vitessTxnRow, error) {
