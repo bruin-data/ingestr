@@ -54,13 +54,6 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
-	if vitess, verr := isVitessServer(ctx, db); verr != nil {
-		config.Debug("[SOURCE] failed to detect server version: %v", verr)
-	} else if vitess {
-		config.Debug("[SOURCE] detected Vitess server; enabling OLAP workload")
-		s.sessionInit = []string{"SET workload = 'OLAP'"}
-	}
-
 	s.db = db
 	s.uri = uri
 	s.database = database
