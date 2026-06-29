@@ -9,9 +9,7 @@ import (
 
 // CompareOptions contains optional parameters for schema comparison.
 type CompareOptions struct {
-	Overrides ColumnOverrides
-	// DestinationScheme is the destination's URI scheme (e.g. "bigquery"), used
-	// to limit type-equivalence handling to destinations that need it.
+	Overrides         ColumnOverrides
 	DestinationScheme string
 }
 
