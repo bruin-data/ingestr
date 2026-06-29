@@ -548,8 +548,7 @@ func (s *SquareSource) readCashDrawerShifts(ctx context.Context, opts source.Rea
 		go func(loc string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			query := map[string]string{"location_id": loc, "limit": strconv.Itoa(maxPageSize)}
-			if err := s.readGetList(ctx, "/v2/cash-drawers/shifts", "cash_drawer_shifts", query, opts, results); err != nil {
+			if err := s.readCashDrawerShiftsForLocation(ctx, loc, opts, results); err != nil {
 				errCh <- err
 				cancel()
 			}
@@ -563,6 +562,43 @@ func (s *SquareSource) readCashDrawerShifts(ctx context.Context, opts source.Rea
 		}
 	}
 	return nil
+}
+
+// Square's CashDrawerShiftSummary doesn't include location_id in the response
+// body, so inject it per row to keep the composite PK [id, location_id] populated.
+func (s *SquareSource) readCashDrawerShiftsForLocation(ctx context.Context, loc string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	query := map[string]string{"location_id": loc, "limit": strconv.Itoa(maxPageSize)}
+	return s.paginate(ctx, opts, results, "cash_drawer_shifts", func(cursor string) ([]map[string]interface{}, string, error) {
+		req := s.client.R(ctx)
+		if cursor == "" {
+			req = req.SetQueryParams(query)
+		} else {
+			req = req.SetQueryParam("cursor", cursor)
+		}
+		resp, err := req.Get("/v2/cash-drawers/shifts")
+		if err != nil {
+			return nil, "", err
+		}
+		if !resp.IsSuccess() {
+			return nil, "", fmt.Errorf("square API /v2/cash-drawers/shifts returned status %d: %s", resp.StatusCode(), resp.String())
+		}
+		items, next, err := decodeListResponse(resp.Body(), "cash_drawer_shifts")
+		if err != nil {
+			return nil, "", err
+		}
+		injectFieldIfMissing(items, "location_id", loc)
+		return items, next, nil
+	})
+}
+
+// Sets field to value on rows that don't already have it; existing values are
+// preserved so we never override what Square actually sent.
+func injectFieldIfMissing(items []map[string]interface{}, field string, value interface{}) {
+	for _, item := range items {
+		if _, exists := item[field]; !exists {
+			item[field] = value
+		}
+	}
 }
 
 func (s *SquareSource) listLocationIDs(ctx context.Context) ([]string, error) {

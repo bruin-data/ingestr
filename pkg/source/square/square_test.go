@@ -144,6 +144,25 @@ func TestFilterItemsByInterval(t *testing.T) {
 	}
 }
 
+func TestInjectFieldIfMissing(t *testing.T) {
+	items := []map[string]interface{}{
+		{"id": "a"},                            // missing → injected
+		{"id": "b", "location_id": "existing"}, // present → preserved
+		{"id": "c", "location_id": ""},         // empty string IS present → preserved
+	}
+	injectFieldIfMissing(items, "location_id", "LOC1")
+
+	if got := items[0]["location_id"]; got != "LOC1" {
+		t.Errorf("row 0 location_id = %v, want LOC1", got)
+	}
+	if got := items[1]["location_id"]; got != "existing" {
+		t.Errorf("row 1 location_id = %v, want existing (must not override)", got)
+	}
+	if got := items[2]["location_id"]; got != "" {
+		t.Errorf("row 2 location_id = %v, want \"\" (empty string is present)", got)
+	}
+}
+
 func TestParseTimestamp(t *testing.T) {
 	cases := []struct {
 		in string
