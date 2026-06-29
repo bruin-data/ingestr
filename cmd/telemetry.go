@@ -9,11 +9,11 @@ import (
 )
 
 func trackCommandTriggered(ctx context.Context, command string) {
-	trackTelemetry(ctx, "command_triggered", commandTelemetryProperties(command, nil))
+	trackTelemetryAsync(ctx, "command_triggered", commandTelemetryProperties(command, nil))
 }
 
 func trackCommandRunning(ctx context.Context, command string, properties map[string]any) {
-	trackTelemetry(ctx, "command_running", commandTelemetryProperties(command, properties))
+	trackTelemetryAsync(ctx, "command_running", commandTelemetryProperties(command, properties))
 }
 
 func trackCommandFinished(ctx context.Context, command string, err error) {
@@ -25,10 +25,10 @@ func trackCommandFinished(ctx context.Context, command string, err error) {
 		properties["error"] = commandTelemetryError(err)
 	}
 
-	trackTelemetry(context.WithoutCancel(ctx), "command_finished", properties)
+	telemetry.Track(context.WithoutCancel(ctx), "command_finished", properties, versionFlagValue())
 }
 
-func trackTelemetry(ctx context.Context, event string, properties map[string]any) {
+func trackTelemetryAsync(ctx context.Context, event string, properties map[string]any) {
 	if telemetry.Disabled() {
 		return
 	}
