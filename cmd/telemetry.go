@@ -3,17 +3,20 @@ package cmd
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/telemetry"
 )
 
+var telemetryWG sync.WaitGroup
+
 func trackCommandTriggered(ctx context.Context, command string) {
-	telemetry.Track(ctx, "command_triggered", commandTelemetryProperties(command, nil), versionFlagValue())
+	trackTelemetryAsync(ctx, "command_triggered", commandTelemetryProperties(command, nil))
 }
 
 func trackCommandRunning(ctx context.Context, command string, properties map[string]any) {
-	telemetry.Track(ctx, "command_running", commandTelemetryProperties(command, properties), versionFlagValue())
+	trackTelemetryAsync(ctx, "command_running", commandTelemetryProperties(command, properties))
 }
 
 func trackCommandFinished(ctx context.Context, command string, err error) {
@@ -25,7 +28,22 @@ func trackCommandFinished(ctx context.Context, command string, err error) {
 		properties["error"] = commandTelemetryError(err)
 	}
 
+	telemetryWG.Wait()
 	telemetry.Track(context.WithoutCancel(ctx), "command_finished", properties, versionFlagValue())
+}
+
+func trackTelemetryAsync(ctx context.Context, event string, properties map[string]any) {
+	if telemetry.Disabled() {
+		return
+	}
+
+	ctx = context.WithoutCancel(ctx)
+	version := versionFlagValue()
+	telemetryWG.Add(1)
+	go func() {
+		defer telemetryWG.Done()
+		telemetry.Track(ctx, event, properties, version)
+	}()
 }
 
 func commandTelemetryProperties(command string, properties map[string]any) map[string]any {
