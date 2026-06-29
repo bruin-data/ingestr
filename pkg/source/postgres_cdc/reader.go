@@ -136,7 +136,12 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	if err == nil && mode == ModeBatch {
 		// Record the caught-up position so FinalizeBatch can confirm it to the
 		// slot once the destination write is durable.
-		r.source.recordCaughtUpLSN(repl.CurrentLSN())
+		caughtUp := repl.CurrentLSN()
+		r.source.recordCaughtUpLSN(caughtUp)
+		// Keep the walsender alive while the destination drains the results
+		// channel. FinalizeBatch will stop it before sending the final
+		// WALFlush-bearing standby update.
+		r.source.startKeepalive(ctx, caughtUp)
 	}
 	return err
 }

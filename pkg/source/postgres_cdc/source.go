@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -14,6 +16,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// keepaliveInterval bounds how often we ping the walsender with a
+// WALWritePosition-only standby status update during the destination-write
+// phase. Postgres's default wal_sender_timeout is 60s and any send from the
+// client resets it server-side; pinging every 5s leaves ample margin if the
+// server is configured lower (e.g. 10s) without flooding the connection.
+const keepaliveInterval = 5 * time.Second
 
 // CDCMode represents the CDC operation mode
 type CDCMode string
@@ -45,6 +54,16 @@ type PostgresCDCSource struct {
 	// confirmed_flush_lsn advances even when the run catches up before the
 	// replicator's 10s standby timer fires. Stays zero in streaming mode.
 	caughtUp *streamPosition
+
+	// keepalive coordinates a goroutine that periodically pings the
+	// walsender with a WALWritePosition-only standby update during the
+	// destination-write phase. Without it, a write that outlasts
+	// wal_sender_timeout causes PG to kill the walsender; the later
+	// FinalizeBatch's SendStandbyStatusUpdate then succeeds at the TCP layer
+	// but the slot's confirmed_flush_lsn never advances.
+	keepaliveMu   sync.Mutex
+	keepaliveStop chan struct{}
+	keepaliveDone chan struct{}
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
@@ -105,6 +124,10 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 func (s *PostgresCDCSource) Close(ctx context.Context) error {
 	var errs []error
 
+	// Stop the keepalive goroutine first so it does not race the connection
+	// close. stopKeepalive is idempotent.
+	s.stopKeepalive()
+
 	if s.replConn != nil {
 		if err := s.replConn.Close(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close replication connection: %w", err))
@@ -119,6 +142,80 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 		return errs[0]
 	}
 	return nil
+}
+
+// startKeepalive spawns a goroutine that pings the walsender every
+// keepaliveInterval with WALWritePosition=lsn (no WALFlush, so the slot does
+// not advance from these pings). It is meant to be called once the readers
+// have stopped pulling from the replication connection (after streamLoop
+// returns) so the destination-write phase can run for longer than
+// wal_sender_timeout without the walsender being killed server-side.
+//
+// Calling startKeepalive a second time without an intervening stop is a no-op.
+// The returned goroutine exits on ctx cancellation, stopKeepalive, or the
+// first standby-send error (a dead conn surfaces as an error here and the
+// follow-up FinalizeBatch send will fail in the same way; the run still
+// completes — the slot just stays where it was, same as before).
+func (s *PostgresCDCSource) startKeepalive(ctx context.Context, lsn pglogrepl.LSN) {
+	if s.replConn == nil || lsn == 0 {
+		return
+	}
+	s.keepaliveMu.Lock()
+	if s.keepaliveStop != nil {
+		s.keepaliveMu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.keepaliveStop = stop
+	s.keepaliveDone = done
+	s.keepaliveMu.Unlock()
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				err := pglogrepl.SendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
+					WALWritePosition: lsn,
+				})
+				if err != nil {
+					config.Debug("[CDC] Keepalive standby status failed (replication connection lost): %v", err)
+					return
+				}
+				config.Debug("[CDC] Keepalive standby status sent at LSN %s", lsn)
+			}
+		}
+	}()
+}
+
+// stopKeepalive signals the keepalive goroutine to exit and waits for it.
+// Safe to call multiple times.
+func (s *PostgresCDCSource) stopKeepalive() {
+	s.keepaliveMu.Lock()
+	stop := s.keepaliveStop
+	done := s.keepaliveDone
+	s.keepaliveStop = nil
+	s.keepaliveDone = nil
+	s.keepaliveMu.Unlock()
+	if stop == nil {
+		return
+	}
+	select {
+	case <-stop:
+		// already closed
+	default:
+		close(stop)
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func (s *PostgresCDCSource) HandlesIncrementality() bool {
@@ -172,6 +269,11 @@ func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
 	if s.replConn == nil || s.caughtUp == nil {
 		return nil
 	}
+	// Stop the keepalive goroutine before sending so we are the sole writer
+	// on the replication connection. The keepalive only sends
+	// WALWritePosition (it cannot have advanced the slot); the final send
+	// below carries WALFlush=lsn which actually moves confirmed_flush_lsn.
+	s.stopKeepalive()
 	lsn := s.caughtUp.Committed()
 	if lsn == 0 {
 		return nil
