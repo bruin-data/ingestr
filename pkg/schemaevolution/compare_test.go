@@ -608,28 +608,56 @@ func TestNeedsWidening(t *testing.T) {
 	}
 }
 
-// On destinations that store all int widths as one type (BigQuery, Snowflake,
-// Trino), an int32 override against a stored int64 must emit no change.
-func TestCompare_OverrideNarrowerInt_CollapsingDest_NoChange(t *testing.T) {
-	for _, scheme := range []string{"bigquery", "snowflake", "trino"} {
-		t.Run(scheme, func(t *testing.T) {
-			source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
-			dest := &schema.TableSchema{
-				Name:        "test",
-				Columns:     []schema.Column{{Name: "c", DataType: schema.TypeInt64}},
-				PrimaryKeys: []string{"c"},
-			}
-			opts := &CompareOptions{
-				Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}},
-				DestinationScheme: scheme,
-			}
-
-			result, err := Compare(source, dest, opts)
-			require.NoError(t, err)
-			assert.False(t, result.HasChanges, "int32 override against a stored int64 must not produce a change")
-			assert.Empty(t, result.Changes)
-		})
+// On destinations that store all int (and float) widths as one type (BigQuery,
+// Snowflake, Trino), a narrower-width override within the same numeric family
+// (int32 vs int64, float32 vs float64) must emit no change.
+func TestCompare_OverrideNarrowerWidth_CollapsingDest_NoChange(t *testing.T) {
+	cases := []struct {
+		name     string
+		stored   schema.DataType
+		override schema.DataType
+	}{
+		{"int32 over int64", schema.TypeInt64, schema.TypeInt32},
+		{"float32 over float64", schema.TypeFloat64, schema.TypeFloat32},
 	}
+	for _, scheme := range []string{"bigquery", "snowflake", "trino"} {
+		for _, tc := range cases {
+			t.Run(scheme+"/"+tc.name, func(t *testing.T) {
+				source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: tc.stored}}}
+				dest := &schema.TableSchema{
+					Name:        "test",
+					Columns:     []schema.Column{{Name: "c", DataType: tc.stored}},
+					PrimaryKeys: []string{"c"},
+				}
+				opts := &CompareOptions{
+					Overrides:         ColumnOverrides{"c": {Name: "c", DataType: tc.override}},
+					DestinationScheme: scheme,
+				}
+
+				result, err := Compare(source, dest, opts)
+				require.NoError(t, err)
+				assert.False(t, result.HasChanges, "same-family width override must not produce a change")
+				assert.Empty(t, result.Changes)
+			})
+		}
+	}
+}
+
+// Cross-family overrides are real changes even on a collapsing destination: an
+// int override against a stored float must still produce a change.
+func TestCompare_OverrideCrossFamily_CollapsingDest_StillChanges(t *testing.T) {
+	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeFloat64}}}
+	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeFloat64}}}
+	opts := &CompareOptions{
+		Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt64}},
+		DestinationScheme: "bigquery",
+	}
+
+	result, err := Compare(source, dest, opts)
+	require.NoError(t, err)
+	require.True(t, result.HasChanges, "int override against a stored float must still change")
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, schema.TypeInt64, result.Changes[0].NewColumn.DataType)
 }
 
 // The skip is BigQuery-specific: a destination with a distinct int32 (Postgres,

@@ -63,10 +63,12 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 					continue
 				}
 			}
-			// Where the destination stores all int widths as one type (e.g. BigQuery),
-			// a narrower int override against a stored int64 is a no-op, so skip it.
-			if exists && collapsesIntegerWidths(destScheme) && isInt(newCol.DataType) && isInt(destCol.DataType) && CanWiden(newCol.DataType, destCol.DataType) {
-				continue
+			// Where the destination stores all int (and float) widths as one type,
+			// an override within the same numeric family is a no-op, so skip it.
+			if exists && collapsesNumericWidths(destScheme) {
+				if c := numericWidthClass(newCol.DataType); c != schema.TypeUnknown && c == numericWidthClass(destCol.DataType) {
+					continue
+				}
 			}
 
 			changeType := ChangeOverrideType
@@ -152,9 +154,9 @@ func makeNullable(col schema.Column) schema.Column {
 	return col
 }
 
-// collapsesIntegerWidths reports whether a destination stores every integer
-// width as one physical type (BigQuery, Snowflake, Trino), making them interchangeable.
-func collapsesIntegerWidths(scheme string) bool {
+// collapsesNumericWidths reports whether a destination stores every integer width
+// as one type and every float width as one type (BigQuery, Snowflake, Trino).
+func collapsesNumericWidths(scheme string) bool {
 	switch scheme {
 	case "bigquery", "snowflake", "trino":
 		return true
@@ -163,8 +165,17 @@ func collapsesIntegerWidths(scheme string) bool {
 	}
 }
 
-func isInt(t schema.DataType) bool {
-	return t == schema.TypeInt8 || t == schema.TypeInt16 || t == schema.TypeInt32 || t == schema.TypeInt64
+// numericWidthClass maps a type to the single width such destinations store it as
+// (all ints -> int64, all floats -> float64); TypeUnknown for non-numeric types.
+func numericWidthClass(t schema.DataType) schema.DataType {
+	switch t {
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+		return schema.TypeInt64
+	case schema.TypeFloat32, schema.TypeFloat64:
+		return schema.TypeFloat64
+	default:
+		return schema.TypeUnknown
+	}
 }
 
 func needsWidening(src, dest schema.Column) bool {
