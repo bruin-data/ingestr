@@ -342,6 +342,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("rabbitmq", "RabbitMQ", []string{"amqp", "amqps"}, true, false),
 		genericURIConnector("redditads", "Reddit Ads", []string{"redditads"}, true, false),
 		genericURIConnector("redis", "Redis Streams", []string{"redis", "rediss"}, true, false),
+		genericURIConnector("recurly", "Recurly", []string{"recurly"}, true, false),
 		genericURIConnector("redshift", "Redshift", []string{"redshift", "redshift+psycopg2"}, true, true),
 		genericURIConnector("revenuecat", "RevenueCat", []string{"revenuecat"}, true, false),
 		genericURIConnector("salesforce", "Salesforce", []string{"salesforce"}, true, false),
