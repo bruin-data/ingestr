@@ -220,6 +220,48 @@ func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
 	assert.ElementsMatch(t, []string{"public.logged_items", "public.logged_items_2"}, tables)
 }
 
+// TestPostgresCDC_ManagedPublicationHandlesPartitionedTables guards against
+// listing a partitioned parent together with its partitions in the publication,
+// which Postgres rejects (failing Connect). Only the leaf partition, which
+// physically holds rows, is published.
+func TestPostgresCDC_ManagedPublicationHandlesPartitionedTables(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, connString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = container.Terminate(ctx) }()
+
+	pool, err := pgxpool.New(ctx, connString)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	_, err = pool.Exec(ctx, `CREATE TABLE public.measurements (
+		id INT,
+		taken_on DATE,
+		PRIMARY KEY (id, taken_on)
+	) PARTITION BY RANGE (taken_on)`)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `CREATE TABLE public.measurements_2024 PARTITION OF public.measurements
+		FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')`)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	cdcURI := "postgres+cdc://" + connString[len("postgres://"):] + "&mode=batch"
+
+	src := postgres_cdc.NewPostgresCDCSource()
+	require.NoError(t, src.Connect(ctx, cdcURI), "Connect must not fail when partitioned tables are present")
+	defer func() { _ = src.Close(ctx) }()
+
+	tables := publicationTables(t, ctx, pool, "ingestr_publication")
+	assert.Contains(t, tables, "public.measurements_2024", "leaf partition should be published")
+	assert.NotContains(t, tables, "public.measurements", "partitioned parent should not be listed")
+}
+
 // TestPostgresCDC_ManagedPublicationEndToEnd runs the full pipeline through the
 // auto-managed publication (no publication= in the URI) and verifies that only
 // eligible tables are replicated: a logged table with a primary key replicates

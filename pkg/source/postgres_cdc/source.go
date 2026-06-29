@@ -430,14 +430,17 @@ func (s skippedTable) warning(pubName string) string {
 
 // selectPublishableTables inspects the user tables and splits them into those
 // that can be added to a logical-replication publication (logged, with a usable
-// replica identity) and those that must be skipped, along with the reason.
-// Temporary tables and system catalogs are ignored.
+// replica identity) and those that must be skipped, along with the reason. Only
+// relations that physically hold rows are considered (relkind 'r' — ordinary
+// tables and leaf partitions); partitioned parents are excluded so the
+// publication never lists a parent alongside a partition it already covers,
+// which Postgres rejects. Temporary tables and system catalogs are ignored.
 func selectPublishableTables(ctx context.Context, pool *pgxpool.Pool) (included []pgTableRef, skipped []skippedTable, err error) {
 	const q = `
 		SELECT n.nspname, c.relname, c.relpersistence::text, ` + replicaIdentityClause + ` AS has_replica_identity
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.relkind IN ('r', 'p')
+		WHERE c.relkind = 'r'
 		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 		ORDER BY n.nspname, c.relname
 	`
@@ -586,7 +589,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 			SELECT n.nspname, c.relname
 			FROM pg_class c
 			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE c.relkind IN ('r', 'p')
+			WHERE c.relkind = 'r'
 			  AND c.relpersistence = 'p'
 			  AND ` + replicaIdentityClause + `
 			  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
