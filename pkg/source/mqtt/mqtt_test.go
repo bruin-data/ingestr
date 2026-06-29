@@ -161,9 +161,9 @@ func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
 	differentPayload := msg
 	differentPayload.payload = []byte(`{"device":"a","value":22.0}`)
 
-	msgID, numericID := mqttMsgID(msg, 7)
-	redeliveryID, _ := mqttMsgID(redelivery, 100)
-	otherID, _ := mqttMsgID(differentPayload, 8)
+	msgID, numericID := mqttMsgID(msg)
+	redeliveryID, _ := mqttMsgID(redelivery)
+	otherID, _ := mqttMsgID(differentPayload)
 
 	if numericID != int64(42) {
 		t.Fatalf("numericID = %v, want 42", numericID)
@@ -176,7 +176,7 @@ func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
 	}
 }
 
-func TestMessageToItemGeneratesIDWhenPacketIDMissing(t *testing.T) {
+func TestMessageToItemGeneratesStableIDWhenPacketIDMissing(t *testing.T) {
 	msg := fakeMessage{
 		topic:   "sensors/temp",
 		qos:     0,
@@ -199,8 +199,13 @@ func TestMessageToItemGeneratesIDWhenPacketIDMissing(t *testing.T) {
 		t.Fatalf("generated msg_id should be deterministic for same seq: %v != %v", item["msg_id"], again["msg_id"])
 	}
 	otherSeq := messageToItem(msg, 2)
-	if item["msg_id"] == otherSeq["msg_id"] {
-		t.Fatal("generated msg_id should include sequence to avoid same-payload collisions")
+	if item["msg_id"] != otherSeq["msg_id"] {
+		t.Fatalf("generated msg_id should be stable across reads: %v != %v", item["msg_id"], otherSeq["msg_id"])
+	}
+	otherPayload := msg
+	otherPayload.payload = []byte("other")
+	if item["msg_id"] == messageToItem(otherPayload, 2)["msg_id"] {
+		t.Fatal("generated msg_id should include payload fingerprint")
 	}
 }
 
