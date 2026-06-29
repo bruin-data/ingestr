@@ -128,11 +128,11 @@ func applyEvolutionPlan(ctx context.Context, dest destination.Destination, plan 
 	}
 	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
 	warnings, err := evolver.ApplySchemaEvolution(ctx, plan.Table, plan.Comparison)
-	for _, w := range warnings {
-		fmt.Printf("Warning: %s\n", w)
-	}
 	if err != nil {
 		return err
+	}
+	for _, w := range warnings {
+		fmt.Printf("Warning: %s\n", w)
 	}
 	// Mark the plan applied so a repeat call is a no-op. This mirrors the prior
 	// EvolutionPlan.Apply contract (which cleared its rendered statements) and

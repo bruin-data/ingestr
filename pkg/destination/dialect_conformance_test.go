@@ -5,16 +5,22 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/athena"
 	"github.com/bruin-data/ingestr/pkg/destination/bigquery"
 	"github.com/bruin-data/ingestr/pkg/destination/cassandra"
 	"github.com/bruin-data/ingestr/pkg/destination/clickhouse"
+	"github.com/bruin-data/ingestr/pkg/destination/cratedb"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	"github.com/bruin-data/ingestr/pkg/destination/fabric"
+	"github.com/bruin-data/ingestr/pkg/destination/maxcompute"
 	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/destination/mysql"
+	"github.com/bruin-data/ingestr/pkg/destination/oracle"
 	"github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/destination/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
 	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
+	"github.com/bruin-data/ingestr/pkg/destination/synapse"
 	"github.com/bruin-data/ingestr/pkg/destination/trino"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
@@ -27,6 +33,7 @@ import (
 // conformance tests reference the concrete types instead.
 func dialectsByScheme() map[string]destination.Dialect {
 	return map[string]destination.Dialect{
+		"athena":     &athena.Dialect{},
 		"postgres":   &postgres.Dialect{},
 		"duckdb":     &duckdb.Dialect{},
 		"sqlite":     &sqlite.Dialect{},
@@ -34,10 +41,15 @@ func dialectsByScheme() map[string]destination.Dialect {
 		"bigquery":   &bigquery.Dialect{},
 		"cassandra":  &cassandra.Dialect{},
 		"clickhouse": &clickhouse.Dialect{},
+		"cratedb":    &cratedb.Dialect{},
+		"fabric":     &fabric.Dialect{},
+		"maxcompute": &maxcompute.Dialect{},
 		"mysql":      &mysql.Dialect{},
 		"mssql":      &mssql.Dialect{},
+		"oracle":     &oracle.Dialect{},
 		"redshift":   &redshift.Dialect{},
 		"trino":      &trino.Dialect{},
+		"synapse":    &synapse.Dialect{},
 	}
 }
 
@@ -77,14 +89,20 @@ func TestAllDialects_QuoteIdentifier(t *testing.T) {
 		expected string
 	}{
 		{"postgres", "column_name", `"column_name"`},
+		{"athena", "column_name", `"column_name"`},
 		{"duckdb", "column_name", `"column_name"`},
 		{"sqlite", "column_name", `"column_name"`},
 		{"snowflake", "column_name", `"COLUMN_NAME"`}, // Snowflake uppercases identifiers
 		{"bigquery", "column_name", "`column_name`"},
 		{"clickhouse", "column_name", "`column_name`"},
+		{"cratedb", "column_name", `"column_name"`},
+		{"fabric", "column_name", "[column_name]"},
+		{"maxcompute", "column_name", "`column_name`"},
 		{"mysql", "column_name", "`column_name`"},
 		{"mssql", "column_name", "[column_name]"},
+		{"oracle", "column_name", `"COLUMN_NAME"`},
 		{"redshift", "column_name", `"column_name"`},
+		{"synapse", "column_name", "[column_name]"},
 		{"trino", "column_name", `"column_name"`},
 	}
 
@@ -100,15 +118,21 @@ func TestAllDialects_TypeName_Boolean(t *testing.T) {
 	col := schema.Column{Name: "flag", DataType: schema.TypeBoolean}
 
 	expected := map[string]string{
+		"athena":     "BOOLEAN",
 		"postgres":   "BOOLEAN",
 		"duckdb":     "BOOLEAN",
 		"sqlite":     "INTEGER",
 		"snowflake":  "BOOLEAN",
 		"bigquery":   "BOOL",
 		"clickhouse": "Bool",
+		"cratedb":    "BOOLEAN",
+		"fabric":     "BIT",
+		"maxcompute": "BOOLEAN",
 		"mysql":      "TINYINT(1)",
 		"mssql":      "BIT",
+		"oracle":     "NUMBER(1,0)",
 		"redshift":   "BOOLEAN",
+		"synapse":    "BIT",
 		"trino":      "BOOLEAN",
 	}
 
@@ -127,45 +151,63 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 		{
 			schema.TypeInt16,
 			map[string]string{
+				"athena":     "SMALLINT",
 				"postgres":   "SMALLINT",
 				"duckdb":     "SMALLINT",
 				"sqlite":     "INTEGER",
 				"snowflake":  "SMALLINT",
 				"bigquery":   "INT64",
 				"clickhouse": "Int16",
+				"cratedb":    "BIGINT",
+				"fabric":     "SMALLINT",
+				"maxcompute": "SMALLINT",
 				"mysql":      "SMALLINT",
 				"mssql":      "SMALLINT",
+				"oracle":     "NUMBER(5,0)",
 				"redshift":   "SMALLINT",
+				"synapse":    "SMALLINT",
 				"trino":      "SMALLINT",
 			},
 		},
 		{
 			schema.TypeInt32,
 			map[string]string{
+				"athena":     "INTEGER",
 				"postgres":   "INTEGER",
 				"duckdb":     "INTEGER",
 				"sqlite":     "INTEGER",
 				"snowflake":  "INT",
 				"bigquery":   "INT64",
 				"clickhouse": "Int32",
+				"cratedb":    "BIGINT",
+				"fabric":     "INT",
+				"maxcompute": "INT",
 				"mysql":      "INT",
 				"mssql":      "INT",
+				"oracle":     "NUMBER(10,0)",
 				"redshift":   "INTEGER",
+				"synapse":    "INT",
 				"trino":      "INTEGER",
 			},
 		},
 		{
 			schema.TypeInt64,
 			map[string]string{
+				"athena":     "BIGINT",
 				"postgres":   "BIGINT",
 				"duckdb":     "BIGINT",
 				"sqlite":     "INTEGER",
 				"snowflake":  "BIGINT",
 				"bigquery":   "INT64",
 				"clickhouse": "Int64",
+				"cratedb":    "BIGINT",
+				"fabric":     "BIGINT",
+				"maxcompute": "BIGINT",
 				"mysql":      "BIGINT",
 				"mssql":      "BIGINT",
+				"oracle":     "NUMBER(19,0)",
 				"redshift":   "BIGINT",
+				"synapse":    "BIGINT",
 				"trino":      "BIGINT",
 			},
 		},
@@ -191,30 +233,42 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 		{
 			schema.TypeFloat32,
 			map[string]string{
+				"athena":     "REAL",
 				"postgres":   "REAL",
 				"duckdb":     "REAL",
 				"sqlite":     "REAL",
 				"snowflake":  "FLOAT",
 				"bigquery":   "FLOAT64",
 				"clickhouse": "Float32",
+				"cratedb":    "DOUBLE PRECISION",
+				"fabric":     "REAL",
+				"maxcompute": "FLOAT",
 				"mysql":      "FLOAT",
 				"mssql":      "REAL",
+				"oracle":     "BINARY_FLOAT",
 				"redshift":   "REAL",
+				"synapse":    "REAL",
 				"trino":      "REAL",
 			},
 		},
 		{
 			schema.TypeFloat64,
 			map[string]string{
+				"athena":     "DOUBLE",
 				"postgres":   "DOUBLE PRECISION",
 				"duckdb":     "DOUBLE",
 				"sqlite":     "REAL",
 				"snowflake":  "DOUBLE",
 				"bigquery":   "FLOAT64",
 				"clickhouse": "Float64",
+				"cratedb":    "DOUBLE PRECISION",
+				"fabric":     "FLOAT",
+				"maxcompute": "DOUBLE",
 				"mysql":      "DOUBLE",
 				"mssql":      "FLOAT",
+				"oracle":     "BINARY_DOUBLE",
 				"redshift":   "DOUBLE PRECISION",
+				"synapse":    "FLOAT",
 				"trino":      "DOUBLE",
 			},
 		},
@@ -298,7 +352,7 @@ func TestAllDialects_AddColumnSQL(t *testing.T) {
 		t.Run(dt.Scheme, func(t *testing.T) {
 			sql := dt.Dialect.AddColumnSQL("test_table", col)
 			assert.Contains(t, sql, "ALTER TABLE")
-			assert.Contains(t, sql, "test_table")
+			assert.True(t, strings.Contains(strings.ToLower(sql), "test_table"), "SQL should contain table name")
 			assert.Contains(t, sql, "ADD")
 			// Column names may be uppercased (Snowflake), so check case-insensitively.
 			assert.True(t, strings.Contains(strings.ToLower(sql), "new_column"), "SQL should contain column name")
@@ -348,8 +402,8 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 }
 
 func TestDialect_SupportsAlterType(t *testing.T) {
-	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift"}
-	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra"}
+	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse"}
+	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "fabric", "maxcompute", "oracle"}
 
 	for _, scheme := range dialectsWithAlter {
 		t.Run(scheme+"_supports", func(t *testing.T) {
