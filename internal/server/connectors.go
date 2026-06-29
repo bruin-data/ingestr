@@ -323,6 +323,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("mmap", "Memory-mapped File", []string{"mmap"}, true, false),
 		genericURIConnector("monday", "monday.com", []string{"monday"}, true, false),
 		genericURIConnector("motherduck", "MotherDuck", []string{"motherduck", "md"}, true, true),
+		genericURIConnector("mqtt", "MQTT", []string{"mqtt", "mqtts"}, true, false),
 		genericURIConnector("nats", "NATS JetStream", []string{"nats"}, true, false),
 		genericURIConnector("notion", "Notion", []string{"notion"}, true, false),
 		genericURIConnector("onelake", "OneLake", []string{"onelake"}, false, true),

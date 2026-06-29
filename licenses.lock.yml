@@ -697,6 +697,12 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/eclipse/paho.mqtt.golang
+      version: v1.5.1
+      licenses:
+        - EPL-2.0
+      status: manual-review
+      note: EPL-2.0 reviewed for the MQTT source dependency.
     - module: github.com/elastic/elastic-transport-go/v8
       version: v8.8.0
       licenses:
