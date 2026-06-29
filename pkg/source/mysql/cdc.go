@@ -394,6 +394,9 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 	query.Del("flavor")
 	query.Del("mode")
 	query.Del("server_id")
+	// Vitess-only parameters: irrelevant to (and rejected by) the MySQL DSN.
+	query.Del("grpc_port")
+	query.Del("grpc_host")
 	parsed.RawQuery = query.Encode()
 
 	normalizedURI := parsed.String()
