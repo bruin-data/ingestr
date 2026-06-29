@@ -553,6 +553,27 @@ func TestApplyExcludedColumnsNamingAware(t *testing.T) {
 	}
 }
 
+func TestApplyDestinationSchemaConstraints_OracleStringIncrementalKey(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "cursor", DataType: schema.TypeString},
+			{Name: "payload", DataType: schema.TypeString},
+		},
+		IncrementalKey: "cursor",
+	}
+	p := &Pipeline{dest: &mockDestination{scheme: "oracle"}}
+
+	p.applyDestinationSchemaConstraints(tableSchema)
+
+	if tableSchema.Columns[1].MaxLength != oracleComparableStringLen {
+		t.Fatalf("incremental key MaxLength = %d, want %d", tableSchema.Columns[1].MaxLength, oracleComparableStringLen)
+	}
+	if tableSchema.Columns[2].MaxLength != 0 {
+		t.Fatalf("non-incremental string MaxLength = %d, want 0", tableSchema.Columns[2].MaxLength)
+	}
+}
+
 func TestNamingConsistency(t *testing.T) {
 	camelCaseSourceSchema := &schema.TableSchema{
 		Columns: []schema.Column{
@@ -1364,6 +1385,63 @@ func TestPreserveSourceCDCColumnTypes(t *testing.T) {
 	}
 	if types["value"] != schema.TypeString {
 		t.Fatalf("value type = %v, want destination-aligned string", types["value"])
+	}
+}
+
+func TestPreserveLogicalPrimaryKeys(t *testing.T) {
+	ingest := tschema(
+		"items",
+		tcol("id", schema.TypeString),
+		tcol("value", schema.TypeString),
+	)
+	source := tschema(
+		"items",
+		tcol("id", schema.TypeString),
+		tcol("value", schema.TypeString),
+	)
+	source.PrimaryKeys = []string{"id"}
+
+	got := preserveLogicalPrimaryKeys(ingest, source)
+
+	if len(got.PrimaryKeys) != 1 || got.PrimaryKeys[0] != "id" {
+		t.Fatalf("primary keys = %v, want [id]", got.PrimaryKeys)
+	}
+	if len(ingest.PrimaryKeys) != 0 {
+		t.Fatalf("input schema was mutated: %v", ingest.PrimaryKeys)
+	}
+}
+
+func TestMarkPrimaryKeyColumns(t *testing.T) {
+	tableSchema := tschema(
+		"items",
+		tcol("id", schema.TypeString),
+		tcol("value", schema.TypeString),
+	)
+	tableSchema.PrimaryKeys = []string{"id"}
+
+	markPrimaryKeyColumns(tableSchema)
+
+	if !tableSchema.Columns[0].IsPrimaryKey {
+		t.Fatal("id should be marked as primary key")
+	}
+	if tableSchema.Columns[1].IsPrimaryKey {
+		t.Fatal("non-key column should not be marked as primary key")
+	}
+}
+
+func TestStrategyUsesLogicalPrimaryKeys(t *testing.T) {
+	if strategyUsesLogicalPrimaryKeys(config.StrategyAppend) {
+		t.Fatal("append should not preserve logical primary keys for destination prepare")
+	}
+	for _, strategy := range []config.IncrementalStrategy{
+		config.StrategyReplace,
+		config.StrategyMerge,
+		config.StrategyDeleteInsert,
+		config.StrategySCD2,
+	} {
+		if !strategyUsesLogicalPrimaryKeys(strategy) {
+			t.Fatalf("%s should preserve logical primary keys", strategy)
+		}
 	}
 }
 

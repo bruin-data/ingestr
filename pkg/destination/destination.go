@@ -77,6 +77,7 @@ type SCD2Options struct {
 	Columns        []string  // All original columns (excluding SCD columns)
 	IncrementalKey string    // Optional: for optimization (skip soft-delete if set)
 	Timestamp      time.Time // Single timestamp for the entire operation (used for _scd_valid_from and _scd_valid_to)
+	Schema         *schema.TableSchema
 }
 
 type Destination interface {
@@ -210,4 +211,10 @@ type ReplaceStagingPolicy struct {
 // staging tables should live while keeping strategy orchestration generic.
 type ReplaceStagingPolicyProvider interface {
 	ReplaceStagingPolicy() ReplaceStagingPolicy
+}
+
+// ManagedStagingPolicyProvider lets a destination declare where strategy-owned
+// staging tables should live when the user did not configure a staging dataset.
+type ManagedStagingPolicyProvider interface {
+	ManagedStagingPolicy() ReplaceStagingPolicy
 }

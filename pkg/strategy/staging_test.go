@@ -104,3 +104,43 @@ func TestGenerateReplaceStagingTableName(t *testing.T) {
 		})
 	}
 }
+
+type fakeManagedStagingPolicyProvider struct {
+	*fakeDestination
+
+	policy destination.ReplaceStagingPolicy
+}
+
+func (d *fakeManagedStagingPolicyProvider) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	return d.policy
+}
+
+func TestManagedStagingTableName_UsesDestinationPolicy(t *testing.T) {
+	dest := &fakeManagedStagingPolicyProvider{
+		fakeDestination: &fakeDestination{},
+		policy: destination.ReplaceStagingPolicy{
+			DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+			DefaultTargetSchema: "app",
+		},
+	}
+
+	got := managedStagingTableName(dest, "users", "merge", "")
+	if !strings.HasPrefix(got, "app.users_merge_") {
+		t.Fatalf("managedStagingTableName() = %q, want prefix %q", got, "app.users_merge_")
+	}
+}
+
+func TestManagedStagingTableName_ExplicitDatasetOverridesDestinationPolicy(t *testing.T) {
+	dest := &fakeManagedStagingPolicyProvider{
+		fakeDestination: &fakeDestination{},
+		policy: destination.ReplaceStagingPolicy{
+			DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+			DefaultTargetSchema: "app",
+		},
+	}
+
+	got := managedStagingTableName(dest, "analytics.users", "merge", "scratch")
+	if !strings.HasPrefix(got, "scratch.analytics__users_merge_") {
+		t.Fatalf("managedStagingTableName() = %q, want prefix %q", got, "scratch.analytics__users_merge_")
+	}
+}

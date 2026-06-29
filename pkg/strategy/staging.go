@@ -34,6 +34,13 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string
 	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
 }
 
+func managedStagingTableName(dest destination.Destination, targetTable, suffix, stagingDataset string) string {
+	if provider, ok := dest.(destination.ManagedStagingPolicyProvider); ok {
+		return GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset, provider.ManagedStagingPolicy())
+	}
+	return GenerateStagingTableName(targetTable, suffix, stagingDataset)
+}
+
 func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
 	policy = normaliseReplaceStagingPolicy(policy)
 	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)

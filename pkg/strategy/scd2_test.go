@@ -98,6 +98,7 @@ func TestSCD2Strategy_ExtendSchemaWithSCDColumns(t *testing.T) {
 
 	// Should have 3 additional columns
 	assert.Equal(t, 5, len(extended.Columns))
+	assert.Equal(t, []string{"id"}, extended.PrimaryKeys)
 
 	// Check SCD columns exist
 	colNames := make([]string, len(extended.Columns))

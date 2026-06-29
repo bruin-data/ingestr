@@ -36,6 +36,11 @@ type mssqlEnv struct {
 	uri       string
 }
 
+type oracleEnv struct {
+	container testcontainers.Container
+	uri       string
+}
+
 type cratedbEnv struct {
 	container testcontainers.Container
 	uri       string
@@ -53,6 +58,7 @@ var (
 	chDest          clickhouseEnv
 	mysqlDest       mysqlEnv
 	mssqlDest       mssqlEnv
+	oracleDest      oracleEnv
 	cratedbDest     cratedbEnv
 	maxcomputeDest  maxcomputeEnv
 	minioShared     minioEnv
@@ -80,7 +86,7 @@ func TestMain(m *testing.M) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(10)
+	wg.Add(11)
 	go func() {
 		defer wg.Done()
 		if c, uri, err := startPostgresContainerForMain(ctx, "shared-source"); err == nil {
@@ -109,6 +115,16 @@ func TestMain(m *testing.M) {
 		defer wg.Done()
 		if c, uri, err := startMSSQLContainerForMain(ctx, "shared-mssql"); err == nil {
 			mssqlDest = mssqlEnv{container: c, uri: uri}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if uri := os.Getenv("GONG_TEST_ORACLE_URI"); uri != "" {
+			oracleDest = oracleEnv{uri: uri}
+			return
+		}
+		if c, uri, err := startOracleContainerForMain(ctx, "shared-oracle"); err == nil {
+			oracleDest = oracleEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
@@ -153,7 +169,7 @@ func TestMain(m *testing.M) {
 
 	containers := []testcontainers.Container{
 		pgSource.container, pgDest.container, chDest.container,
-		mysqlDest.container, mssqlDest.container, cratedbDest.container,
+		mysqlDest.container, mssqlDest.container, oracleDest.container, cratedbDest.container,
 		maxcomputeDest.container, minioShared.container, dynamoDBDest.container,
 		cassandraShared.container,
 	}

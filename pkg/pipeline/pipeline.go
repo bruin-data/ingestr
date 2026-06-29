@@ -28,6 +28,8 @@ import (
 	"golang.org/x/term"
 )
 
+const oracleComparableStringLen = 4000
+
 type Pipeline struct {
 	config                   *config.IngestConfig
 	src                      source.Source
@@ -311,6 +313,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Shorten column names that exceed the destination's identifier length limit.
 	// Must run before schema evolution so ALTER TABLE uses shortened names.
 	p.shortenLongIdentifiers(tableSchema)
+	markPrimaryKeyColumns(tableSchema)
 
 	// setupIngestrColumns copies the schema and adds ingestr columns for the destination.
 	// The original tableSchema stays clean (used by sources for SELECT queries).
@@ -336,6 +339,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to apply column overrides: %w", err)
 		}
 	}
+	p.applyDestinationSchemaConstraints(destSchema)
 
 	var loadTimestamp time.Time
 	if !p.config.NoLoadTimestamp {
@@ -375,6 +379,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Staging mirrors the destination schema, with staging-only CDC columns retained.
 	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
 	ingestSchema = preserveSourceCDCColumnTypes(ingestSchema, fullSchema)
+	if strategyUsesLogicalPrimaryKeys(resolvedStrategy) {
+		ingestSchema = preserveLogicalPrimaryKeys(ingestSchema, fullSchema)
+	}
 
 	if inferBuffer != nil {
 		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
@@ -1175,7 +1182,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if dialect == nil {
 		config.Debug("[SCHEMA EVOLUTION] No dialect registered for scheme %s, skipping", p.dest.GetScheme())
 		return &schemaevolution.EvolutionPlan{
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
+			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
 			Migration:   nil,
 		}, nil
 	}
@@ -1199,7 +1206,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 
 	// Build the plan; migration is NOT applied here.
 	plan := &schemaevolution.EvolutionPlan{
-		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
+		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, schemaevolution.MigrationFinalComparison(p.filteredSchemaComparison, dialect)),
 		Migration:   migration,
 	}
 	config.Debug("[SCHEMA EVOLUTION] Built plan with %d statements (deferred apply)", len(migration.Statements))
@@ -1335,6 +1342,58 @@ func preserveSourceCDCColumnTypes(ingestSchema, sourceSchema *schema.TableSchema
 		result.Columns[i].ArrayType = sourceCol.ArrayType
 	}
 	return &result
+}
+
+func preserveLogicalPrimaryKeys(ingestSchema, sourceSchema *schema.TableSchema) *schema.TableSchema {
+	if ingestSchema == nil || sourceSchema == nil || len(sourceSchema.PrimaryKeys) == 0 {
+		return ingestSchema
+	}
+
+	result := *ingestSchema
+	result.PrimaryKeys = append([]string{}, sourceSchema.PrimaryKeys...)
+	return &result
+}
+
+func markPrimaryKeyColumns(tableSchema *schema.TableSchema) {
+	if tableSchema == nil || len(tableSchema.PrimaryKeys) == 0 {
+		return
+	}
+
+	primaryKeys := make(map[string]bool, len(tableSchema.PrimaryKeys))
+	for _, key := range tableSchema.PrimaryKeys {
+		primaryKeys[strings.ToLower(key)] = true
+	}
+	for i := range tableSchema.Columns {
+		tableSchema.Columns[i].IsPrimaryKey = primaryKeys[strings.ToLower(tableSchema.Columns[i].Name)]
+	}
+}
+
+func (p *Pipeline) applyDestinationSchemaConstraints(tableSchema *schema.TableSchema) {
+	if tableSchema == nil || tableSchema.IncrementalKey == "" || p.dest == nil {
+		return
+	}
+	if p.dest.GetScheme() != "oracle" && p.dest.GetScheme() != "oracle+cx_oracle" {
+		return
+	}
+
+	for i := range tableSchema.Columns {
+		col := &tableSchema.Columns[i]
+		if col.DataType != schema.TypeString || !strings.EqualFold(col.Name, tableSchema.IncrementalKey) {
+			continue
+		}
+		if col.MaxLength <= 0 || col.MaxLength > oracleComparableStringLen {
+			col.MaxLength = oracleComparableStringLen
+		}
+	}
+}
+
+func strategyUsesLogicalPrimaryKeys(strategy config.IncrementalStrategy) bool {
+	switch strategy {
+	case config.StrategyMerge, config.StrategyDeleteInsert, config.StrategySCD2, config.StrategyReplace:
+		return true
+	default:
+		return false
+	}
 }
 
 func loadTimestampColumnForSchema(s *schema.TableSchema) schema.Column {

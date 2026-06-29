@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -38,7 +39,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("destination %s does not support delete+insert strategy", job.Destination.GetScheme())
 	}
 
-	stagingTable := GenerateStagingTableName(job.Config.DestTable, "di", job.Config.StagingDataset)
+	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "di", job.Config.StagingDataset)
 	fmt.Printf("[DELETE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
@@ -69,8 +70,11 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		parallelism = 4
 	}
 
+	sourceIncrementalKey := sourceIncrementalKeyForRead(job)
+	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
+
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
+		IncrementalKey: sourceIncrementalKey,
 		IntervalStart:  job.Config.IntervalStart,
 		IntervalEnd:    job.Config.IntervalEnd,
 		PageSize:       job.Config.PageSize,
@@ -86,7 +90,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	intervalTracker := NewIntervalTracker(job.Config.IncrementalKey)
+	intervalTracker := NewIntervalTracker(destinationIncrementalKey)
 	records = intervalTracker.Wrap(records)
 
 	if job.Tracker != nil {
@@ -121,14 +125,6 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	config.Debug("[DELETE+INSERT] Interval: %v to %v", intervalStart, intervalEnd)
 	config.Debug("[DELETE+INSERT] Executing delete+insert operation")
 
-	var incrementalKeyType schema.DataType
-	for _, col := range job.Schema.Columns {
-		if col.Name == job.Config.IncrementalKey {
-			incrementalKeyType = col.DataType
-			break
-		}
-	}
-
 	// When the incremental key is DATE, convert timestamp interval bounds to date-only.
 	// This prevents type mismatches (e.g., TIMESTAMP vs DATE) in the DELETE query.
 	if incrementalKeyType == schema.TypeDate {
@@ -143,7 +139,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
 		StagingTable:       stagingTable,
 		TargetTable:        job.Config.DestTable,
-		IncrementalKey:     job.Config.IncrementalKey,
+		IncrementalKey:     destinationIncrementalKey,
 		IncrementalKeyType: incrementalKeyType,
 		IntervalStart:      intervalStart,
 		IntervalEnd:        intervalEnd,
@@ -160,6 +156,39 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}
 
 	return nil
+}
+
+func resolveSchemaColumn(tableSchema *schema.TableSchema, columnName string) (string, schema.DataType) {
+	if tableSchema == nil {
+		return columnName, schema.TypeUnknown
+	}
+	for _, col := range tableSchema.Columns {
+		if col.Name == columnName {
+			return col.Name, col.DataType
+		}
+	}
+	for _, col := range tableSchema.Columns {
+		if strings.EqualFold(col.Name, columnName) {
+			return col.Name, col.DataType
+		}
+	}
+	return columnName, schema.TypeUnknown
+}
+
+func sourceIncrementalKeyForRead(job *IngestionJob) string {
+	sourceKey := job.Config.IncrementalKey
+	if job.SourceSchema != nil && job.SourceSchema.IncrementalKey != "" {
+		sourceKey = job.SourceSchema.IncrementalKey
+	} else if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
+		for src, dst := range job.ColumnRenamer.Mapping() {
+			if dst == job.Config.IncrementalKey || strings.EqualFold(dst, job.Config.IncrementalKey) {
+				sourceKey = src
+				break
+			}
+		}
+	}
+	sourceKey, _ = resolveSchemaColumn(job.SourceSchema, sourceKey)
+	return sourceKey
 }
 
 func resolveIntervalBound(userProvided interface{}, autoDetected interface{}) interface{} {

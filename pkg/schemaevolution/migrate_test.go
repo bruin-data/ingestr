@@ -115,6 +115,62 @@ func TestGenerateMigration_WidenType_NotSupported(t *testing.T) {
 	assert.Contains(t, migration.Warnings[0], "does not support")
 }
 
+func TestMigrationFinalComparison_DropsUnsupportedTypeChanges(t *testing.T) {
+	oldCol := schema.Column{Name: "age", DataType: schema.TypeInt64}
+	comparison := &SchemaComparison{
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeAddColumn,
+				ColumnName: "email",
+				NewColumn:  schema.Column{Name: "email", DataType: schema.TypeString},
+			},
+			{
+				Type:       ChangeWidenType,
+				ColumnName: "age",
+				OldColumn:  &oldCol,
+				NewColumn:  schema.Column{Name: "age", DataType: schema.TypeString},
+			},
+		},
+		HasChanges: true,
+	}
+
+	dialect := GetDialect("sqlite")
+	require.NotNil(t, dialect)
+	require.False(t, dialect.SupportsAlterType())
+
+	final := MigrationFinalComparison(comparison, dialect)
+
+	require.True(t, final.HasChanges)
+	require.Len(t, final.Changes, 1)
+	assert.Equal(t, ChangeAddColumn, final.Changes[0].Type)
+	assert.Equal(t, "email", final.Changes[0].ColumnName)
+}
+
+func TestMigrationFinalComparison_KeepsSupportedTypeChanges(t *testing.T) {
+	oldCol := schema.Column{Name: "age", DataType: schema.TypeInt64}
+	comparison := &SchemaComparison{
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeWidenType,
+				ColumnName: "age",
+				OldColumn:  &oldCol,
+				NewColumn:  schema.Column{Name: "age", DataType: schema.TypeString},
+			},
+		},
+		HasChanges: true,
+	}
+
+	dialect := GetDialect("postgres")
+	require.NotNil(t, dialect)
+	require.True(t, dialect.SupportsAlterType())
+
+	final := MigrationFinalComparison(comparison, dialect)
+
+	require.True(t, final.HasChanges)
+	require.Len(t, final.Changes, 1)
+	assert.Equal(t, ChangeWidenType, final.Changes[0].Type)
+}
+
 func TestGenerateMigration_MultipleChanges(t *testing.T) {
 	oldCol := schema.Column{Name: "score", DataType: schema.TypeInt32}
 
