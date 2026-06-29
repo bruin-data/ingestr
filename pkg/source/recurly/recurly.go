@@ -23,7 +23,7 @@ const (
 	apiVersion   = "v2021-02-25"
 	acceptHeader = "application/vnd.recurly." + apiVersion
 
-	maxPageSize = 200
+	maxPageSize        = 200
 	rateLimitPerSecond = 5
 	rateLimitBurst     = 5
 )
