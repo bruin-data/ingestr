@@ -1287,7 +1287,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: go.mongodb.org/mongo-driver
-      version: v1.17.6
+      version: v1.17.7
       licenses:
         - Apache-2.0
       status: allowed
