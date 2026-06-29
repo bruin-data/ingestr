@@ -9,8 +9,7 @@ import (
 
 // CompareOptions contains optional parameters for schema comparison.
 type CompareOptions struct {
-	Overrides         ColumnOverrides
-	DestinationScheme string
+	Overrides ColumnOverrides
 }
 
 // Compare compares source and destination schemas and returns the differences.
@@ -24,10 +23,8 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}
 
 	var overrides ColumnOverrides
-	var destScheme string
 	if opts != nil {
 		overrides = opts.Overrides
-		destScheme = opts.DestinationScheme
 	}
 
 	destColumnMap := make(map[string]schema.Column)
@@ -60,13 +57,6 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 				destIntDigits := destCol.Precision - destCol.Scale
 				newIntDigits := newCol.Precision - newCol.Scale
 				if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
-					continue
-				}
-			}
-			// Where the destination stores all int (and float) widths as one type,
-			// an override within the same numeric family is a no-op, so skip it.
-			if exists && collapsesNumericWidths(destScheme) {
-				if c := numericWidthClass(newCol.DataType); c != schema.TypeUnknown && c == numericWidthClass(destCol.DataType) {
 					continue
 				}
 			}
@@ -152,30 +142,6 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 func makeNullable(col schema.Column) schema.Column {
 	col.Nullable = true
 	return col
-}
-
-// collapsesNumericWidths reports whether a destination stores every integer width
-// as one type and every float width as one type (BigQuery, Snowflake, Trino).
-func collapsesNumericWidths(scheme string) bool {
-	switch scheme {
-	case "bigquery", "snowflake", "trino":
-		return true
-	default:
-		return false
-	}
-}
-
-// numericWidthClass maps a type to the single width such destinations store it as
-// (all ints -> int64, all floats -> float64); TypeUnknown for non-numeric types.
-func numericWidthClass(t schema.DataType) schema.DataType {
-	switch t {
-	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
-		return schema.TypeInt64
-	case schema.TypeFloat32, schema.TypeFloat64:
-		return schema.TypeFloat64
-	default:
-		return schema.TypeUnknown
-	}
 }
 
 func needsWidening(src, dest schema.Column) bool {
