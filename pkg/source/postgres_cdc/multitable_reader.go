@@ -336,6 +336,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
 				accum.flushAll(results, token)
+				// Record the caught-up position so FinalizeBatch can confirm it
+				// to the slot once the destination write is durable.
+				r.source.recordCaughtUpLSN(currentLSN)
 				return nil
 			}
 		}

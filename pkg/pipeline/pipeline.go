@@ -501,6 +501,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return fmt.Errorf("ingestion failed: %w", err)
 	}
 
+	// After a successful, durable write, let CDC sources confirm the position
+	// they caught up to (e.g. advance the replication slot's flush LSN). Safe
+	// here because the write above committed. Best-effort: a failure to confirm
+	// must not fail an otherwise-successful run.
+	if finalizer, ok := src.(source.CDCBatchFinalizer); ok {
+		if err := finalizer.FinalizeBatch(ctx); err != nil {
+			config.Debug("[PIPELINE] CDC batch finalize failed: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -1012,6 +1022,16 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
 		return fmt.Errorf("multi-table ingestion failed: %w", err)
+	}
+
+	// After a successful, durable write, let CDC sources confirm the position
+	// they caught up to (e.g. advance the replication slot's flush LSN). This is
+	// safe here because the write above has committed. Best-effort: a failure to
+	// confirm must not fail an otherwise-successful run.
+	if finalizer, ok := src.(source.CDCBatchFinalizer); ok {
+		if err := finalizer.FinalizeBatch(ctx); err != nil {
+			config.Debug("[PIPELINE] CDC batch finalize failed: %v", err)
+		}
 	}
 
 	return nil
