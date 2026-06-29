@@ -608,25 +608,30 @@ func TestNeedsWidening(t *testing.T) {
 	}
 }
 
-// On BigQuery, a narrower integer override against a stored int64 must emit no
-// change (merge regression: int32 override vs stored int64 produced a pointless
-// ALTER that BigQuery rejects on key columns).
-func TestCompare_OverrideNarrowerInt_BigQuery_NoChange(t *testing.T) {
-	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
-	dest := &schema.TableSchema{
-		Name:        "test",
-		Columns:     []schema.Column{{Name: "c", DataType: schema.TypeInt64}},
-		PrimaryKeys: []string{"c"},
-	}
-	opts := &CompareOptions{
-		Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}},
-		DestinationScheme: "bigquery",
-	}
+// On destinations that store every integer width as one physical type (BigQuery,
+// Snowflake, Trino), a narrower integer override against a stored int64 must emit
+// no change (merge regression: it produced a pointless ALTER rejected on key
+// columns).
+func TestCompare_OverrideNarrowerInt_CollapsingDest_NoChange(t *testing.T) {
+	for _, scheme := range []string{"bigquery", "snowflake", "trino"} {
+		t.Run(scheme, func(t *testing.T) {
+			source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
+			dest := &schema.TableSchema{
+				Name:        "test",
+				Columns:     []schema.Column{{Name: "c", DataType: schema.TypeInt64}},
+				PrimaryKeys: []string{"c"},
+			}
+			opts := &CompareOptions{
+				Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}},
+				DestinationScheme: scheme,
+			}
 
-	result, err := Compare(source, dest, opts)
-	require.NoError(t, err)
-	assert.False(t, result.HasChanges, "int32 override against a stored int64 on BigQuery must not produce a change")
-	assert.Empty(t, result.Changes)
+			result, err := Compare(source, dest, opts)
+			require.NoError(t, err)
+			assert.False(t, result.HasChanges, "int32 override against a stored int64 must not produce a change")
+			assert.Empty(t, result.Changes)
+		})
+	}
 }
 
 // The skip is BigQuery-specific: a destination with a distinct int32 (Postgres,

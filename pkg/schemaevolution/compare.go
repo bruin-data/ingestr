@@ -156,10 +156,16 @@ func makeNullable(col schema.Column) schema.Column {
 }
 
 // collapsesIntegerWidths reports whether a destination stores every integer
-// width as a single physical type (e.g. BigQuery's INT64), so int8/16/32/64 are
-// interchangeable. Add other such destinations (e.g. "snowflake") here.
+// width as a single physical type, so int8/16/32/64 are interchangeable and an
+// int32 override against a stored int64 needs no ALTER: BigQuery (INT64),
+// Snowflake (NUMBER(38,0)), and Trino (reads all ints back as int64).
 func collapsesIntegerWidths(scheme string) bool {
-	return scheme == "bigquery"
+	switch scheme {
+	case "bigquery", "snowflake", "trino":
+		return true
+	default:
+		return false
+	}
 }
 
 func isInt(t schema.DataType) bool {
