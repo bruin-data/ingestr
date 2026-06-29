@@ -135,7 +135,7 @@ var supportedTables = map[string]tableConfig{
 		read:        getList("/v2/bank-accounts", "bank_accounts", limitQuery()),
 	},
 	"cash_drawers": {
-		primaryKeys: []string{"id"},
+		primaryKeys: []string{"id", "location_id"},
 		strategy:    config.StrategyReplace,
 		read:        (*SquareSource).readCashDrawerShifts,
 	},
@@ -506,15 +506,16 @@ func (s *SquareSource) readInventory(ctx context.Context, opts source.ReadOption
 	return s.readSearchFiltered(ctx, "/v2/inventory/counts/batch-retrieve", "counts", baseBody, endField, opts, results)
 }
 
-// include_deleted_objects surfaces deletions as is_deleted rows so merge applies
-// them. catalog/search has no end bound, so end is applied client-side on updated_at.
+// include_deleted_objects is always set so tombstones (is_deleted=true) land on
+// every run; merge then propagates deletes even on a full refresh or end-only
+// bounded run. catalog/search has no end bound, so end is applied client-side.
 func (s *SquareSource) readCatalog(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	baseBody := map[string]interface{}{
-		"limit": maxPageSize,
+		"limit":                   maxPageSize,
+		"include_deleted_objects": true,
 	}
 	if opts.IntervalStart != nil {
 		baseBody["begin_time"] = opts.IntervalStart.UTC().Format(time.RFC3339)
-		baseBody["include_deleted_objects"] = true
 	}
 	endField := ""
 	if opts.IntervalEnd != nil {
