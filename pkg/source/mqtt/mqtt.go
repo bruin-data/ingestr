@@ -365,7 +365,7 @@ func (s *MQTTSource) trackMessage(msg paho.Message) int64 {
 	if s.pendingByKey == nil {
 		s.pendingByKey = make(map[string]int64)
 	}
-	if seq, ok := s.pendingByKey[key]; ok {
+	if seq, ok := s.pendingByKey[key]; ok && msg.Duplicate() {
 		s.pending[seq] = msg
 		return seq
 	}
@@ -461,17 +461,22 @@ func messageMetadata(msg paho.Message, numericID any) map[string]any {
 }
 
 func mqttMsgID(msg paho.Message, seq int64) (string, any) {
-	if id := msg.MessageID(); id != 0 {
-		return fmt.Sprintf("%s:%d", mqttDeliveryKey(msg), seq), int64(id)
+	numericID := numericMessageID(msg)
+	if msg.Retained() {
+		return mqttDeliveryKey(msg), numericID
 	}
-	return mqttDeliveryKey(msg), nil
+	return fmt.Sprintf("%s:%d", mqttDeliveryKey(msg), seq), numericID
 }
 
 func mqttDeliveryKey(msg paho.Message) string {
-	if id := msg.MessageID(); id != 0 {
-		return fmt.Sprintf("%s:%d:%s", msg.Topic(), id, mqttMessageFingerprint(msg))
-	}
 	return fmt.Sprintf("%s:%s", msg.Topic(), mqttMessageFingerprint(msg))
+}
+
+func numericMessageID(msg paho.Message) any {
+	if id := msg.MessageID(); id != 0 {
+		return int64(id)
+	}
+	return nil
 }
 
 func mqttMessageFingerprint(msg paho.Message) string {

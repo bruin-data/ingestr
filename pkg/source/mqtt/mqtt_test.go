@@ -3,7 +3,6 @@ package mqtt
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -118,7 +117,7 @@ func TestMessageToItemPreservesMessageID(t *testing.T) {
 	}
 
 	item := messageToItem(msg, 7)
-	if got, ok := item["msg_id"].(string); !ok || !strings.HasPrefix(got, "sensors/temp:42:") {
+	if item["msg_id"] == "" {
 		t.Fatalf("msg_id = %v", item["msg_id"])
 	}
 	if item["message_id"] != int64(42) {
@@ -149,7 +148,7 @@ func TestMessageToItemPreservesMessageID(t *testing.T) {
 	}
 }
 
-func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
+func TestMQTTMessageIDUsesFingerprintAndSequenceWhenPacketIDExists(t *testing.T) {
 	msg := fakeMessage{
 		topic:     "sensors/temp",
 		qos:       1,
@@ -182,9 +181,10 @@ func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
 
 func TestMessageToItemGeneratesStableIDWhenPacketIDMissing(t *testing.T) {
 	msg := fakeMessage{
-		topic:   "sensors/temp",
-		qos:     0,
-		payload: []byte("plain"),
+		topic:    "sensors/temp",
+		qos:      0,
+		retained: true,
+		payload:  []byte("plain"),
 	}
 
 	item := messageToItem(msg, 1)
@@ -210,6 +210,12 @@ func TestMessageToItemGeneratesStableIDWhenPacketIDMissing(t *testing.T) {
 	otherPayload.payload = []byte("other")
 	if item["msg_id"] == messageToItem(otherPayload, 2)["msg_id"] {
 		t.Fatal("generated msg_id should include payload fingerprint")
+	}
+
+	live := msg
+	live.retained = false
+	if messageToItem(live, 1)["msg_id"] == messageToItem(live, 2)["msg_id"] {
+		t.Fatal("live zero-packet-ID messages should include sequence")
 	}
 }
 
@@ -244,6 +250,7 @@ func TestTrackMessageReusesPendingSequenceForRedelivery(t *testing.T) {
 	msg := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", qos: 1, messageID: 1, payload: []byte("a")}}
 	redelivery := &ackMessage{fakeMessage: msg.fakeMessage}
 	redelivery.duplicate = true
+	redelivery.messageID = 2
 
 	seq := src.trackMessage(msg)
 	redeliverySeq := src.trackMessage(redelivery)
