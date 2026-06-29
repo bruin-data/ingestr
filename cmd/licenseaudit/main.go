@@ -321,6 +321,11 @@ func checkLock(lock *lockFile, scanned []scanEntry) error {
 			b.WriteString(problem)
 			b.WriteByte('\n')
 		}
+		b.WriteString("\nTo resolve:\n")
+		b.WriteString("  1. Run `make licenses-audit-update` to regenerate licenses.lock.yml from the current dependencies.\n")
+		b.WriteString("  2. Review the diff and set an accepted status (allowed or manual-review) for any needs-review entries.\n")
+		b.WriteString("  3. Commit the updated licenses.lock.yml.\n")
+		b.WriteString("See docs/licensing.md for the review policy.")
 		return errors.New(strings.TrimRight(b.String(), "\n"))
 	}
 
