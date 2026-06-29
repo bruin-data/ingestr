@@ -699,6 +699,62 @@ func TestSupportsStrategies(t *testing.T) {
 	}
 }
 
+// TestEnsureDatasetExists_ConcurrentCallers exercises the knownDatasets
+// mutex. Without the mutex (the bug fix), running ensureDatasetExists from
+// many goroutines for the same (project, dataset) racing all the way through
+// the success path would either panic with "fatal error: concurrent map
+// writes" or be flagged by `go test -race`. The fix lives in
+// ensureDatasetExists and markDatasetKnown (bigquery.go).
+func TestEnsureDatasetExists_ConcurrentCallers(t *testing.T) {
+	ctx := context.Background()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Respond to any dataset metadata GET with a minimal stub.
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{
+					"projectId": "test-project",
+					"datasetId": "test-dataset",
+				},
+				"location": "US",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:    client,
+		projectID: "test-project",
+		location:  "US",
+	}
+
+	const goroutines = 32
+	errs := make(chan error, goroutines)
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			<-start
+			errs <- dest.ensureDatasetExists(ctx, "test-project", "test-dataset")
+		}()
+	}
+	close(start)
+
+	for i := 0; i < goroutines; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("ensureDatasetExists returned error: %v", err)
+		}
+	}
+}
+
 func TestBeginTransaction_ReturnsScriptTransaction(t *testing.T) {
 	dest := NewBigQueryDestination()
 	tx, err := dest.BeginTransaction(context.Background())
