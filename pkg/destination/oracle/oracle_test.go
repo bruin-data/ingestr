@@ -365,6 +365,19 @@ func TestOracleDialectTypeName_PrimaryKeyStringUsesVarchar(t *testing.T) {
 	}))
 }
 
+func TestOracleDialectAddColumnSQL_StringIncrementalKeyMetadataUsesVarchar(t *testing.T) {
+	dialect := &Dialect{}
+
+	got := dialect.AddColumnSQL("users", schema.Column{
+		Name:      "cursor",
+		DataType:  schema.TypeString,
+		MaxLength: oracleDefaultComparableStringLength,
+		Nullable:  true,
+	})
+
+	assert.Equal(t, `ALTER TABLE "USERS" ADD "CURSOR" VARCHAR2(4000 CHAR)`, got)
+}
+
 func TestOracleMaxCDCLSNQueries(t *testing.T) {
 	assert.Equal(
 		t,

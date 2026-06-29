@@ -553,6 +553,27 @@ func TestApplyExcludedColumnsNamingAware(t *testing.T) {
 	}
 }
 
+func TestApplyDestinationSchemaConstraints_OracleStringIncrementalKey(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "cursor", DataType: schema.TypeString},
+			{Name: "payload", DataType: schema.TypeString},
+		},
+		IncrementalKey: "cursor",
+	}
+	p := &Pipeline{dest: &mockDestination{scheme: "oracle"}}
+
+	p.applyDestinationSchemaConstraints(tableSchema)
+
+	if tableSchema.Columns[1].MaxLength != oracleComparableStringLen {
+		t.Fatalf("incremental key MaxLength = %d, want %d", tableSchema.Columns[1].MaxLength, oracleComparableStringLen)
+	}
+	if tableSchema.Columns[2].MaxLength != 0 {
+		t.Fatalf("non-incremental string MaxLength = %d, want 0", tableSchema.Columns[2].MaxLength)
+	}
+}
+
 func TestNamingConsistency(t *testing.T) {
 	camelCaseSourceSchema := &schema.TableSchema{
 		Columns: []schema.Column{

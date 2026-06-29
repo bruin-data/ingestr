@@ -28,6 +28,8 @@ import (
 	"golang.org/x/term"
 )
 
+const oracleComparableStringLen = 4000
+
 type Pipeline struct {
 	config                   *config.IngestConfig
 	src                      source.Source
@@ -337,6 +339,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to apply column overrides: %w", err)
 		}
 	}
+	p.applyDestinationSchemaConstraints(destSchema)
 
 	var loadTimestamp time.Time
 	if !p.config.NoLoadTimestamp {
@@ -1362,6 +1365,25 @@ func markPrimaryKeyColumns(tableSchema *schema.TableSchema) {
 	}
 	for i := range tableSchema.Columns {
 		tableSchema.Columns[i].IsPrimaryKey = primaryKeys[strings.ToLower(tableSchema.Columns[i].Name)]
+	}
+}
+
+func (p *Pipeline) applyDestinationSchemaConstraints(tableSchema *schema.TableSchema) {
+	if tableSchema == nil || tableSchema.IncrementalKey == "" || p.dest == nil {
+		return
+	}
+	if p.dest.GetScheme() != "oracle" && p.dest.GetScheme() != "oracle+cx_oracle" {
+		return
+	}
+
+	for i := range tableSchema.Columns {
+		col := &tableSchema.Columns[i]
+		if col.DataType != schema.TypeString || !strings.EqualFold(col.Name, tableSchema.IncrementalKey) {
+			continue
+		}
+		if col.MaxLength <= 0 || col.MaxLength > oracleComparableStringLen {
+			col.MaxLength = oracleComparableStringLen
+		}
 	}
 }
 
