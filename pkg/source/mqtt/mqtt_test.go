@@ -250,7 +250,6 @@ func TestTrackMessageReusesPendingSequenceForRedelivery(t *testing.T) {
 	msg := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", qos: 1, messageID: 1, payload: []byte("a")}}
 	redelivery := &ackMessage{fakeMessage: msg.fakeMessage}
 	redelivery.duplicate = true
-	redelivery.messageID = 2
 
 	seq := src.trackMessage(msg)
 	redeliverySeq := src.trackMessage(redelivery)
@@ -268,6 +267,25 @@ func TestTrackMessageReusesPendingSequenceForRedelivery(t *testing.T) {
 	reusedSeq := src.trackMessage(msg)
 	if reusedSeq == seq {
 		t.Fatalf("reused packet ID after ack kept old sequence %d", seq)
+	}
+}
+
+func TestTrackMessageDistinguishesPacketIDsForPendingRedelivery(t *testing.T) {
+	src := NewMQTTSource()
+	msg1 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", qos: 1, messageID: 1, payload: []byte("a")}}
+	msg2 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", qos: 1, messageID: 2, payload: []byte("a")}}
+
+	seq1 := src.trackMessage(msg1)
+	seq2 := src.trackMessage(msg2)
+	if seq1 == seq2 {
+		t.Fatalf("different packet IDs reused pending sequence %d", seq1)
+	}
+
+	redelivery := &ackMessage{fakeMessage: msg1.fakeMessage}
+	redelivery.duplicate = true
+	redeliverySeq := src.trackMessage(redelivery)
+	if redeliverySeq != seq1 {
+		t.Fatalf("redelivery sequence = %d, want %d", redeliverySeq, seq1)
 	}
 }
 

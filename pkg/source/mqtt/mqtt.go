@@ -351,7 +351,7 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 }
 
 func (s *MQTTSource) trackMessage(msg paho.Message) int64 {
-	key := mqttDeliveryKey(msg)
+	key := mqttPendingKey(msg)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -470,6 +470,13 @@ func mqttMsgID(msg paho.Message, seq int64) (string, any) {
 
 func mqttDeliveryKey(msg paho.Message) string {
 	return fmt.Sprintf("%s:%s", msg.Topic(), mqttMessageFingerprint(msg))
+}
+
+func mqttPendingKey(msg paho.Message) string {
+	if id := msg.MessageID(); id != 0 {
+		return fmt.Sprintf("%s:%d:%s", msg.Topic(), id, mqttMessageFingerprint(msg))
+	}
+	return mqttDeliveryKey(msg)
 }
 
 func numericMessageID(msg paho.Message) any {
