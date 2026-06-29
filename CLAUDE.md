@@ -32,9 +32,14 @@ go run . ingest --source-uri=<uri> --dest-uri=<uri> --source-table=<table>
 # Format and lint
 make format                   # gci + gofumpt + go vet + golangci-lint
 make lint                     # Linters only
+
+# After changing dependencies (go.mod/go.sum), refresh the license audit lock
+make licenses-audit-update    # CI runs `make licenses-audit` (--check) and fails if the lock is stale
 ```
 
 Always run `make format`, `make lint` and `make test` when you are done with making your changes, ensure they pass.
+
+When your change touches `go.mod`/`go.sum`, also run `make licenses-audit-update` and commit any resulting lock changes — CI's `make licenses-audit` will fail otherwise. (A version bump within the same license set may produce no diff, which is fine.)
 
 ## Architecture Overview
 
