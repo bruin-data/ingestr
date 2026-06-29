@@ -81,7 +81,7 @@ func (s *MQTTSource) SupportsStreaming() bool {
 }
 
 func (s *MQTTSource) DefaultStreamingStrategy() config.IncrementalStrategy {
-	return config.StrategyAppend
+	return config.StrategyMerge
 }
 
 func (s *MQTTSource) Connect(ctx context.Context, rawURI string) error {
@@ -198,12 +198,10 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 	}
 
 	streaming := opts.Streaming
-	if streaming {
-		s.mu.Lock()
-		s.nextSeq = 0
-		s.pending = make(map[int64]paho.Message)
-		s.mu.Unlock()
-	}
+	s.mu.Lock()
+	s.nextSeq = 0
+	s.pending = make(map[int64]paho.Message)
+	s.mu.Unlock()
 
 	incoming := make(chan paho.Message, batchSize)
 	done := make(chan struct{})
@@ -239,7 +237,6 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 		}
 
 		batch := make([]map[string]any, 0, batchSize)
-		batchMessages := make([]paho.Message, 0, batchSize)
 		var batchSeqs []int64
 		if streaming {
 			batchSeqs = make([]int64, 0, batchSize)
@@ -277,14 +274,7 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 			}
 			results <- res
 
-			if !streaming {
-				for _, msg := range batchMessages {
-					msg.Ack()
-				}
-			}
-
 			batch = batch[:0]
-			batchMessages = batchMessages[:0]
 			if streaming {
 				batchSeqs = batchSeqs[:0]
 			}
@@ -306,17 +296,14 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 				return
 
 			case msg := <-incoming:
-				var seq int64
+				seq := s.trackMessage(msg)
 				if streaming {
-					seq = s.trackMessage(msg)
 					batch = append(batch, messageToEnvelope(msg, seq))
 					batchSeqs = append(batchSeqs, seq)
 				} else {
 					totalRead++
-					seq = totalRead
 					batch = append(batch, messageToItem(msg, seq))
 				}
-				batchMessages = append(batchMessages, msg)
 				if streaming {
 					totalRead++
 				}
@@ -378,6 +365,14 @@ func (s *MQTTSource) CommitStream(_ context.Context, token any) error {
 	return nil
 }
 
+func (s *MQTTSource) FinalizeBatch(_ context.Context) error {
+	msgs := s.pendingThrough(s.currentSeq())
+	for _, msg := range msgs {
+		msg.Ack()
+	}
+	return nil
+}
+
 func (s *MQTTSource) pendingThrough(maxSeq int64) []paho.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -390,6 +385,12 @@ func (s *MQTTSource) pendingThrough(maxSeq int64) []paho.Message {
 		}
 	}
 	return msgs
+}
+
+func (s *MQTTSource) currentSeq() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextSeq
 }
 
 func messageToItem(msg paho.Message, seq int64) map[string]any {
@@ -673,7 +674,8 @@ func sanitizeURI(raw string) string {
 }
 
 var (
-	_ source.Source          = (*MQTTSource)(nil)
-	_ source.StreamingSource = (*MQTTSource)(nil)
-	_ source.StreamCommitter = (*MQTTSource)(nil)
+	_ source.Source            = (*MQTTSource)(nil)
+	_ source.StreamingSource   = (*MQTTSource)(nil)
+	_ source.StreamCommitter   = (*MQTTSource)(nil)
+	_ source.CDCBatchFinalizer = (*MQTTSource)(nil)
 )

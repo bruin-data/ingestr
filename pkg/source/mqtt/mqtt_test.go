@@ -1,9 +1,13 @@
 package mqtt
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/bruin-data/ingestr/internal/config"
+	sourcepkg "github.com/bruin-data/ingestr/pkg/source"
 )
 
 func TestParseMQTTURI(t *testing.T) {
@@ -86,6 +90,24 @@ func TestParseMQTTURI(t *testing.T) {
 	}
 }
 
+func TestStreamingTableDefaultsToMerge(t *testing.T) {
+	src := NewMQTTSource()
+	table, err := src.GetTable(context.Background(), sourcepkg.TableRequest{
+		Name:      "events/#",
+		Streaming: true,
+	})
+	if err != nil {
+		t.Fatalf("GetTable returned error: %v", err)
+	}
+	if got := table.Strategy(); got != config.StrategyMerge {
+		t.Fatalf("Strategy = %q, want %q", got, config.StrategyMerge)
+	}
+	pks := table.PrimaryKeys()
+	if len(pks) != 1 || pks[0] != "msg_id" {
+		t.Fatalf("PrimaryKeys = %v, want [msg_id]", pks)
+	}
+}
+
 func TestMessageToItemPreservesMessageID(t *testing.T) {
 	msg := fakeMessage{
 		topic:     "sensors/temp",
@@ -154,6 +176,57 @@ func TestMessageToItemGeneratesIDWhenPacketIDMissing(t *testing.T) {
 	}
 }
 
+func TestFinalizeBatchAcksPendingMessages(t *testing.T) {
+	src := NewMQTTSource()
+	msg1 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", messageID: 1}}
+	msg2 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", messageID: 2}}
+
+	src.trackMessage(msg1)
+	src.trackMessage(msg2)
+	if msg1.ackCount != 0 || msg2.ackCount != 0 {
+		t.Fatalf("messages were acked before finalize: %d, %d", msg1.ackCount, msg2.ackCount)
+	}
+
+	if err := src.FinalizeBatch(context.Background()); err != nil {
+		t.Fatalf("FinalizeBatch returned error: %v", err)
+	}
+	if msg1.ackCount != 1 || msg2.ackCount != 1 {
+		t.Fatalf("ack counts = %d, %d; want 1, 1", msg1.ackCount, msg2.ackCount)
+	}
+
+	if err := src.FinalizeBatch(context.Background()); err != nil {
+		t.Fatalf("second FinalizeBatch returned error: %v", err)
+	}
+	if msg1.ackCount != 1 || msg2.ackCount != 1 {
+		t.Fatalf("second finalize ack counts = %d, %d; want 1, 1", msg1.ackCount, msg2.ackCount)
+	}
+}
+
+func TestCommitStreamAcksThroughToken(t *testing.T) {
+	src := NewMQTTSource()
+	msg1 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", messageID: 1}}
+	msg2 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", messageID: 2}}
+	msg3 := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", messageID: 3}}
+
+	src.trackMessage(msg1)
+	src.trackMessage(msg2)
+	src.trackMessage(msg3)
+
+	if err := src.CommitStream(context.Background(), mqttCommitToken{MaxSeq: 2}); err != nil {
+		t.Fatalf("CommitStream returned error: %v", err)
+	}
+	if msg1.ackCount != 1 || msg2.ackCount != 1 || msg3.ackCount != 0 {
+		t.Fatalf("ack counts = %d, %d, %d; want 1, 1, 0", msg1.ackCount, msg2.ackCount, msg3.ackCount)
+	}
+
+	if err := src.CommitStream(context.Background(), mqttCommitToken{MaxSeq: 3}); err != nil {
+		t.Fatalf("second CommitStream returned error: %v", err)
+	}
+	if msg3.ackCount != 1 {
+		t.Fatalf("msg3 ack count = %d, want 1", msg3.ackCount)
+	}
+}
+
 type fakeMessage struct {
 	topic     string
 	qos       byte
@@ -188,3 +261,12 @@ func (m fakeMessage) Payload() []byte {
 }
 
 func (m fakeMessage) Ack() {}
+
+type ackMessage struct {
+	fakeMessage
+	ackCount int
+}
+
+func (m *ackMessage) Ack() {
+	m.ackCount++
+}
