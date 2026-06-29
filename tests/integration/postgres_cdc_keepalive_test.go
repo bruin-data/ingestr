@@ -137,11 +137,13 @@ func setupPostgresCDCContainerWithTimeout(t *testing.T, ctx context.Context, wal
 // the slot's confirmed_flush_lsn never advances; the CLI exits 0 and lag
 // grows across "successful" runs.
 //
-// This test forces that scenario deterministically: wal_sender_timeout=2s on
-// the source, and slowduckdb with delay=4s on the destination. Without the
-// keepalive goroutine, assertBatchRunsAdvanceSlot would fail on the very
-// first resume run because confirmed_flush_lsn stays frozen at the snapshot
-// LSN.
+// This test forces that scenario deterministically: wal_sender_timeout=8s on
+// the source, and slowduckdb with delay=10s on the destination. The
+// destination phase outlasts the source's timeout; without the keepalive
+// goroutine, assertBatchRunsAdvanceSlot fails on the first resume run
+// because confirmed_flush_lsn stays frozen at the snapshot LSN. The timeout
+// is chosen well above keepaliveInterval (5s) so the keepalive's
+// send-then-tick cadence comfortably refreshes the walsender.
 func TestPostgresCDC_BatchRunAdvancesSlotWithSlowWrites(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -149,7 +151,7 @@ func TestPostgresCDC_BatchRunAdvancesSlotWithSlowWrites(t *testing.T) {
 
 	ctx := context.Background()
 
-	sourceContainer, sourceConnString := setupPostgresCDCContainerWithTimeout(t, ctx, "2s")
+	sourceContainer, sourceConnString := setupPostgresCDCContainerWithTimeout(t, ctx, "8s")
 	defer func() { _ = sourceContainer.Terminate(ctx) }()
 	setupCDCSource(t, ctx, sourceConnString)
 
@@ -157,9 +159,9 @@ func TestPostgresCDC_BatchRunAdvancesSlotWithSlowWrites(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// slowduckdb adds a 4s sleep before each Write/WriteParallel call, which
-	// is comfortably longer than the 2s wal_sender_timeout above.
-	destURI := fmt.Sprintf("slowduckdb:///%s/test.duckdb?delay=4s", tmpDir)
+	// slowduckdb adds a 10s sleep before each Write/WriteParallel call,
+	// pushing the destination phase past the 8s wal_sender_timeout above.
+	destURI := fmt.Sprintf("slowduckdb:///%s/test.duckdb?delay=10s", tmpDir)
 	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
 
 	assertBatchRunsAdvanceSlot(t, ctx, sourceConnString, func() *config.IngestConfig {

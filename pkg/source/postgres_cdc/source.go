@@ -173,6 +173,24 @@ func (s *PostgresCDCSource) startKeepalive(ctx context.Context, lsn pglogrepl.LS
 
 	go func() {
 		defer close(done)
+		send := func() bool {
+			err := pglogrepl.SendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
+				WALWritePosition: lsn,
+			})
+			if err != nil {
+				config.Debug("[CDC] Keepalive standby status failed (replication connection lost): %v", err)
+				return false
+			}
+			config.Debug("[CDC] Keepalive standby status sent at LSN %s", lsn)
+			return true
+		}
+		// Send once immediately so the walsender's idle timer resets at the
+		// start of the destination-write phase. Without this, a
+		// wal_sender_timeout shorter than keepaliveInterval would kill the
+		// connection before the first tick.
+		if !send() {
+			return
+		}
 		ticker := time.NewTicker(keepaliveInterval)
 		defer ticker.Stop()
 		for {
@@ -182,14 +200,9 @@ func (s *PostgresCDCSource) startKeepalive(ctx context.Context, lsn pglogrepl.LS
 			case <-stop:
 				return
 			case <-ticker.C:
-				err := pglogrepl.SendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: lsn,
-				})
-				if err != nil {
-					config.Debug("[CDC] Keepalive standby status failed (replication connection lost): %v", err)
+				if !send() {
 					return
 				}
-				config.Debug("[CDC] Keepalive standby status sent at LSN %s", lsn)
 			}
 		}
 	}()
