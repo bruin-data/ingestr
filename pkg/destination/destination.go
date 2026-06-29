@@ -212,3 +212,9 @@ type ReplaceStagingPolicy struct {
 type ReplaceStagingPolicyProvider interface {
 	ReplaceStagingPolicy() ReplaceStagingPolicy
 }
+
+// ManagedStagingPolicyProvider lets a destination declare where strategy-owned
+// staging tables should live when the user did not configure a staging dataset.
+type ManagedStagingPolicyProvider interface {
+	ManagedStagingPolicy() ReplaceStagingPolicy
+}

@@ -39,7 +39,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("destination %s does not support delete+insert strategy", job.Destination.GetScheme())
 	}
 
-	stagingTable := GenerateStagingTableName(job.Config.DestTable, "di", job.Config.StagingDataset)
+	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "di", job.Config.StagingDataset)
 	fmt.Printf("[DELETE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{

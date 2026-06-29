@@ -704,6 +704,10 @@ func (d *OracleDestination) ReplaceStagingPolicy() destination.ReplaceStagingPol
 	}
 }
 
+func (d *OracleDestination) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	return d.ReplaceStagingPolicy()
+}
+
 func (d *OracleDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	maxLSN, err := d.queryMaxCDCLSN(ctx, oracleMaxCDCLSNQuery(table))
 	if err != nil {

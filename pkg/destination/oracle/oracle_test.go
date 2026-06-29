@@ -92,9 +92,14 @@ func TestQuoteTable(t *testing.T) {
 			want:  `"HR"."EMPLOYEES"`,
 		},
 		{
-			name:  "generated staging schema is honored",
+			name:  "explicit staging schema is honored",
 			table: "_bruin_staging.hr__employees_merge_123",
 			want:  `"_BRUIN_STAGING"."HR__EMPLOYEES_MERGE_123"`,
+		},
+		{
+			name:  "custom staging schema is honored",
+			table: "custom_staging.hr__employees_merge_123",
+			want:  `"CUSTOM_STAGING"."HR__EMPLOYEES_MERGE_123"`,
 		},
 		{
 			name:  "embedded quote",
@@ -273,6 +278,16 @@ func TestOracleReplaceUsesStagedPath(t *testing.T) {
 	assert.True(t, dest.SupportsAtomicSwap())
 
 	policy := dest.ReplaceStagingPolicy()
+	assert.Equal(t, destination.ReplaceStagingTargetSchema, policy.DefaultPlacement)
+	assert.Equal(t, "INGESTR", policy.DefaultTargetSchema)
+	assert.Equal(t, defaultOracleStagingSchema, policy.DefaultManagedSchema)
+}
+
+func TestOracleManagedStagingUsesCurrentUserByDefault(t *testing.T) {
+	dest := &OracleDestination{currentUser: "INGESTR"}
+
+	policy := dest.ManagedStagingPolicy()
+
 	assert.Equal(t, destination.ReplaceStagingTargetSchema, policy.DefaultPlacement)
 	assert.Equal(t, "INGESTR", policy.DefaultTargetSchema)
 	assert.Equal(t, defaultOracleStagingSchema, policy.DefaultManagedSchema)
