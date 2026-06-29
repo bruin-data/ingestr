@@ -608,10 +608,8 @@ func TestNeedsWidening(t *testing.T) {
 	}
 }
 
-// On destinations that store every integer width as one physical type (BigQuery,
-// Snowflake, Trino), a narrower integer override against a stored int64 must emit
-// no change (merge regression: it produced a pointless ALTER rejected on key
-// columns).
+// On destinations that store all int widths as one type (BigQuery, Snowflake,
+// Trino), an int32 override against a stored int64 must emit no change.
 func TestCompare_OverrideNarrowerInt_CollapsingDest_NoChange(t *testing.T) {
 	for _, scheme := range []string{"bigquery", "snowflake", "trino"} {
 		t.Run(scheme, func(t *testing.T) {

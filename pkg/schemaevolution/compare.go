@@ -65,9 +65,8 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 					continue
 				}
 			}
-			// On destinations that store every integer width as one physical type
-			// (BigQuery's INT64), a narrower int override against a stored int64 is a
-			// no-op; the ALTER it would emit is rejected on key/partition columns.
+			// Where the destination stores all int widths as one type (e.g. BigQuery),
+			// a narrower int override against a stored int64 is a no-op, so skip it.
 			if exists && collapsesIntegerWidths(destScheme) && isInt(newCol.DataType) && isInt(destCol.DataType) && CanWiden(newCol.DataType, destCol.DataType) {
 				continue
 			}
@@ -156,9 +155,7 @@ func makeNullable(col schema.Column) schema.Column {
 }
 
 // collapsesIntegerWidths reports whether a destination stores every integer
-// width as a single physical type, so int8/16/32/64 are interchangeable and an
-// int32 override against a stored int64 needs no ALTER: BigQuery (INT64),
-// Snowflake (NUMBER(38,0)), and Trino (reads all ints back as int64).
+// width as one physical type (BigQuery, Snowflake, Trino), making them interchangeable.
 func collapsesIntegerWidths(scheme string) bool {
 	switch scheme {
 	case "bigquery", "snowflake", "trino":
