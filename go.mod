@@ -86,7 +86,7 @@ require (
 	github.com/urfave/cli/v3 v3.0.0-beta1
 	github.com/xuri/excelize/v2 v2.10.1
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
-	go.mongodb.org/mongo-driver v1.17.6
+	go.mongodb.org/mongo-driver v1.17.7
 	golang.org/x/crypto v0.50.0
 	golang.org/x/exp v0.0.0-20251209150349-8475f28825e9
 	golang.org/x/net v0.53.0
