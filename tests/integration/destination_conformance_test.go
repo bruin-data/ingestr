@@ -31,6 +31,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	_ "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/azuread" // registers the "azuresql" driver for Fabric
+	_ "github.com/sijms/go-ora/v2"
 	_ "github.com/snowflakedb/gosnowflake"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -250,6 +251,31 @@ func destinationCases() []destCase {
 			replaceDedupCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
+		},
+		{
+			name: "oracle",
+			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
+				if oracleDest.uri == "" {
+					t.Skip("shared oracle destination container not available")
+				}
+
+				table := fmt.Sprintf("CONFORMANCE_%s", uniqueSuffix())
+				cleanup := func() {
+					db, err := sql.Open("oracle", oracleSQLConnString(oracleDest.uri))
+					if err == nil {
+						_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s PURGE", quoteTableOracle(table)))
+						_ = db.Close()
+					}
+				}
+				return oracleDest.uri, table, cleanup
+			},
+			sqlBackend:             oracleBackend(),
+			mergeCapable:           true,
+			deleteInsertCapable:    true,
+			truncateInsertCapable:  true,
+			replaceDedupCapable:    true,
+			scd2Capable:            true,
+			schemaEvolutionCapable: false, // Oracle needs a data-preserving rewrite path for type changes like NUMBER -> CLOB.
 		},
 		{
 			name: "maxcompute",
@@ -1814,6 +1840,136 @@ func normalizeMySQLType(mysqlType string) string {
 	}
 }
 
+func oracleSQLConnString(rawURI string) string {
+	normalized := rawURI
+	if strings.HasPrefix(strings.ToLower(normalized), "oracle+cx_oracle://") {
+		normalized = "oracle://" + normalized[len("oracle+cx_oracle://"):]
+	}
+
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return rawURI
+	}
+
+	query := u.Query()
+	if serviceName := query.Get("service_name"); serviceName != "" {
+		query.Del("service_name")
+		u.Path = "/" + serviceName
+		u.RawQuery = query.Encode()
+	}
+	return u.String()
+}
+
+func oracleCurrentUser(db *sql.DB) (string, error) {
+	var user string
+	if err := db.QueryRow("SELECT USER FROM DUAL").Scan(&user); err != nil {
+		return "", err
+	}
+	return strings.ToUpper(user), nil
+}
+
+func quoteOracleIdentifier(identifier string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(identifier)), `"`, `""`))
+}
+
+func quoteTableOracle(table string) string {
+	schemaName, tableName := splitSchemaTable(table, "")
+	if schemaName != "" {
+		return quoteOracleIdentifier(schemaName) + "." + quoteOracleIdentifier(tableName)
+	}
+	return quoteOracleIdentifier(tableName)
+}
+
+func oracleBackend() *sqlBackend {
+	return &sqlBackend{
+		openDB: func(uri string) (*sql.DB, error) {
+			return sql.Open("oracle", oracleSQLConnString(uri))
+		},
+		schemaTypes: func(db *sql.DB, table string) (map[string]string, error) {
+			schemaName, tableName := splitSchemaTable(table, "")
+			if schemaName == "" {
+				currentUser, err := oracleCurrentUser(db)
+				if err != nil {
+					return nil, err
+				}
+				schemaName = currentUser
+			}
+
+			rows, err := db.Query(`
+				SELECT COLUMN_NAME, DATA_TYPE, DATA_PRECISION, DATA_SCALE
+				FROM ALL_TAB_COLUMNS
+				WHERE OWNER = :1 AND TABLE_NAME = :2
+				ORDER BY COLUMN_ID
+			`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = rows.Close() }()
+
+			out := map[string]string{}
+			for rows.Next() {
+				var name, dataType string
+				var precision, scale sql.NullInt64
+				if err := rows.Scan(&name, &dataType, &precision, &scale); err != nil {
+					return nil, err
+				}
+				out[strings.ToLower(name)] = normalizeOracleType(dataType, precision, scale)
+			}
+			return out, rows.Err()
+		},
+		expectedTypes: map[string]string{
+			"id":     "number",
+			"name":   "clob",
+			"active": "number",
+			"score":  "binary_double",
+		},
+		countQuery: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteTableOracle(table))
+		},
+		nameByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT %s FROM %s WHERE %s=%d", quoteOracleIdentifier("name"), quoteTableOracle(table), quoteOracleIdentifier("id"), id)
+		},
+		ageByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT %s FROM %s WHERE %s=%d", quoteOracleIdentifier("age"), quoteTableOracle(table), quoteOracleIdentifier("id"), id)
+		},
+		scd2CountCurrent: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = 1", quoteTableOracle(table), quoteOracleIdentifier("_scd_is_current"))
+		},
+		scd2CountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = %d", quoteTableOracle(table), quoteOracleIdentifier("id"), id)
+		},
+		scd2HistNoValidTo: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = 0 AND %s IS NULL", quoteTableOracle(table), quoteOracleIdentifier("_scd_is_current"), quoteOracleIdentifier("_scd_valid_to"))
+		},
+	}
+}
+
+func normalizeOracleType(dataType string, precision, scale sql.NullInt64) string {
+	oracleType := strings.ToUpper(strings.TrimSpace(dataType))
+	switch {
+	case oracleType == "NUMBER" || strings.HasPrefix(oracleType, "NUMBER("):
+		_ = precision
+		_ = scale
+		return "number"
+	case oracleType == "BINARY_FLOAT":
+		return "binary_float"
+	case oracleType == "BINARY_DOUBLE" || oracleType == "FLOAT":
+		return "binary_double"
+	case oracleType == "CLOB" || oracleType == "NCLOB" || oracleType == "LONG":
+		return "clob"
+	case strings.HasPrefix(oracleType, "VARCHAR2") || oracleType == "CHAR" || oracleType == "NCHAR" || oracleType == "NVARCHAR2":
+		return "varchar2"
+	case strings.HasPrefix(oracleType, "TIMESTAMP"):
+		return "timestamp"
+	case oracleType == "DATE":
+		return "date"
+	case oracleType == "BLOB" || oracleType == "RAW" || oracleType == "LONG RAW":
+		return "blob"
+	default:
+		return normalizeTypeName(oracleType)
+	}
+}
+
 func mssqlConnString(uri string) string {
 	// Convert mssql://user:pass@host:port/db to sqlserver://user:pass@host:port?database=db
 	uri = strings.TrimPrefix(uri, "mssql://")
@@ -2349,7 +2505,7 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 			continue
 		}
 		// Include backends that use SwapTable in replace strategy.
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" {
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}
@@ -2447,6 +2603,26 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 			INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
 			WHERE s.name = '%s' AND t.name LIKE '%s_old_%%'
 		`, schemaName, tableName)
+	case strings.Contains(uri, "oracle"):
+		if schemaName == "" {
+			currentUser, err := oracleCurrentUser(db)
+			if err != nil {
+				t.Logf("Warning: failed to get Oracle current user: %v", err)
+				return 0
+			}
+			schemaName = currentUser
+		}
+		query = `
+			SELECT COUNT(*)
+			FROM ALL_TABLES
+			WHERE OWNER = :1 AND TABLE_NAME LIKE :2
+		`
+		err = db.QueryRow(query, strings.ToUpper(schemaName), strings.ToUpper(tableName)+"_OLD_%").Scan(&count)
+		if err != nil {
+			t.Logf("Warning: failed to count Oracle _old_ tables: %v", err)
+			return 0
+		}
+		return count
 	case strings.Contains(uri, "sqlite"):
 		// SQLite: query sqlite_master
 		query = fmt.Sprintf(`
@@ -2521,6 +2697,32 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 			  AND tc.constraint_type = 'PRIMARY KEY'
 			  AND kcu.column_name = '%s'
 		`, schemaName, tableName, column)
+	case strings.Contains(uri, "oracle"):
+		if schemaName == "" {
+			currentUser, err := oracleCurrentUser(db)
+			if err != nil {
+				t.Logf("Warning: failed to get Oracle current user: %v", err)
+				return false
+			}
+			schemaName = currentUser
+		}
+		query = `
+			SELECT COUNT(*)
+			FROM ALL_CONSTRAINTS c
+			JOIN ALL_CONS_COLUMNS cc
+			  ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+			 AND c.OWNER = cc.OWNER
+			WHERE c.CONSTRAINT_TYPE = 'P'
+			  AND c.OWNER = :1
+			  AND c.TABLE_NAME = :2
+			  AND cc.COLUMN_NAME = :3
+		`
+		var count int
+		if err := db.QueryRow(query, strings.ToUpper(schemaName), strings.ToUpper(tableName), strings.ToUpper(column)).Scan(&count); err != nil {
+			t.Logf("Warning: failed to query Oracle primary key: %v", err)
+			return false
+		}
+		return count > 0
 	case strings.Contains(uri, "sqlite"):
 		// SQLite: PRAGMA table_info reports pk > 0 for primary-key columns.
 		query = fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE pk > 0 AND name = '%s'`, tableName, column)
@@ -2555,7 +2757,7 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 		if tc.sqlBackend == nil {
 			continue
 		}
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" {
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}
@@ -2624,7 +2826,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 			}
 			require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" {
+			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" || tc.name == "oracle" {
 				assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 					"target should keep its PRIMARY KEY after a deduplicated replace")
 			}
@@ -2694,7 +2896,7 @@ func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 			}
 			require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" {
+			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" || tc.name == "oracle" {
 				assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 					"target should keep its PRIMARY KEY after a deduplicated replace")
 			}

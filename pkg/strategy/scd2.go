@@ -144,6 +144,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		Columns:        job.Schema.ColumnNames(),
 		IncrementalKey: job.Config.IncrementalKey,
 		Timestamp:      processTimestamp,
+		Schema:         job.Schema,
 	}); err != nil {
 		return fmt.Errorf("failed to perform SCD2 merge: %w", err)
 	}
@@ -181,7 +182,7 @@ func extendSchemaWithSCDColumns(original *schema.TableSchema) *schema.TableSchem
 		Name:        original.Name,
 		Schema:      original.Schema,
 		Columns:     make([]schema.Column, len(original.Columns)+len(toAdd)),
-		PrimaryKeys: nil, // SCD2 tables don't have primary keys
+		PrimaryKeys: append([]string(nil), original.PrimaryKeys...),
 	}
 
 	copy(extended.Columns, original.Columns)

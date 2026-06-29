@@ -75,6 +75,29 @@ func GenerateMigration(comparison *SchemaComparison, dialect Dialect, table stri
 	return migration, nil
 }
 
+// MigrationFinalComparison returns the subset of changes that the generated
+// migration can make visible in the destination schema.
+func MigrationFinalComparison(comparison *SchemaComparison, dialect Dialect) *SchemaComparison {
+	if comparison == nil || !comparison.HasChanges || dialect == nil {
+		return &SchemaComparison{}
+	}
+
+	filtered := &SchemaComparison{
+		Changes: make([]SchemaChange, 0, len(comparison.Changes)),
+	}
+	for _, change := range comparison.Changes {
+		switch change.Type {
+		case ChangeWidenType, ChangeOverrideType:
+			if !dialect.SupportsAlterType() {
+				continue
+			}
+		}
+		filtered.Changes = append(filtered.Changes, change)
+	}
+	filtered.HasChanges = len(filtered.Changes) > 0
+	return filtered
+}
+
 // ApplyMigration executes the migration statements.
 func ApplyMigration(ctx context.Context, executor SQLExecutor, migration *Migration) error {
 	if migration == nil || len(migration.Statements) == 0 {

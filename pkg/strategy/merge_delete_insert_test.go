@@ -211,6 +211,33 @@ func TestDeleteInsertStrategy_Execute_UsesAutoDetectedInterval(t *testing.T) {
 	}
 }
 
+func TestDeleteInsertStrategy_Execute_TracksIncrementalKeyCaseInsensitive(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+	job.Config.IncrementalKey = "id"
+	job.Schema.Columns[0].Name = "ID"
+	job.Schema.PrimaryKeys = []string{"ID"}
+
+	rec := int64RecordBatch(t, "ID", []int64{5, 10, 7}, map[int]bool{1: false})
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: rec})
+
+	strat := &DeleteInsertStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.diCalls) != 1 {
+		t.Fatalf("expected 1 DeleteInsertTable call, got %d", len(dest.diCalls))
+	}
+	di := dest.diCalls[0]
+	if di.IncrementalKey != "ID" {
+		t.Fatalf("DeleteInsertOptions.IncrementalKey = %q, want ID", di.IncrementalKey)
+	}
+	if di.IntervalStart != int64(5) || di.IntervalEnd != int64(10) {
+		t.Fatalf("DeleteInsertOptions interval = %v..%v, want 5..10", di.IntervalStart, di.IntervalEnd)
+	}
+}
+
 func TestDeleteInsertStrategy_Execute_UserIntervalOverridesAuto(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyDeleteInsert

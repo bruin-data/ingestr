@@ -77,6 +77,7 @@ type SCD2Options struct {
 	Columns        []string  // All original columns (excluding SCD columns)
 	IncrementalKey string    // Optional: for optimization (skip soft-delete if set)
 	Timestamp      time.Time // Single timestamp for the entire operation (used for _scd_valid_from and _scd_valid_to)
+	Schema         *schema.TableSchema
 }
 
 type Destination interface {
