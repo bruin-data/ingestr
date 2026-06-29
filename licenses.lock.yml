@@ -623,7 +623,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/go-chi/chi/v5
-      version: v5.2.3
+      version: v5.3.0
       licenses:
         - MIT
       status: allowed
