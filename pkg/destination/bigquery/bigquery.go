@@ -63,8 +63,12 @@ type BigQueryDestination struct {
 	partitionBy string
 	clusterBy   []string
 
-	// Cache for dataset existence checks
-	knownDatasets map[string]bool
+	// Cache for dataset existence checks. Multi-table writes call
+	// PrepareTable from one goroutine per table; each may reach
+	// ensureDatasetExists concurrently for the same (project, dataset) key,
+	// so reads and writes of knownDatasets must be serialized.
+	knownDatasetsMu sync.Mutex
+	knownDatasets   map[string]bool
 
 	// Async table creation: overlaps staging table creation with source read.
 	// State is tracked per table so concurrent multi-table writes don't race.
@@ -236,19 +240,20 @@ func (d *BigQueryDestination) Close(ctx context.Context) error {
 // ensureDatasetExists creates the dataset if it doesn't exist.
 func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, datasetID string) error {
 	datasetKey := project + "." + datasetID
+
+	d.knownDatasetsMu.Lock()
 	if d.knownDatasets[datasetKey] {
+		d.knownDatasetsMu.Unlock()
 		return nil
 	}
+	d.knownDatasetsMu.Unlock()
 
 	ds := d.client.DatasetInProject(project, datasetID)
 
 	// Check if dataset exists
 	_, err := ds.Metadata(ctx)
 	if err == nil {
-		if d.knownDatasets == nil {
-			d.knownDatasets = make(map[string]bool)
-		}
-		d.knownDatasets[datasetKey] = true
+		d.markDatasetKnown(datasetKey)
 		return nil
 	}
 
@@ -269,17 +274,24 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	if err := ds.Create(ctx, metadata); err != nil {
 		// Check if it was created by another process in the meantime
 		if isAlreadyExistsError(err) {
+			d.markDatasetKnown(datasetKey)
 			return nil
 		}
 		return fmt.Errorf("failed to create dataset: %w", err)
 	}
 
 	config.Debug("[DEST] Dataset created: %s", datasetKey)
+	d.markDatasetKnown(datasetKey)
+	return nil
+}
+
+func (d *BigQueryDestination) markDatasetKnown(datasetKey string) {
+	d.knownDatasetsMu.Lock()
+	defer d.knownDatasetsMu.Unlock()
 	if d.knownDatasets == nil {
 		d.knownDatasets = make(map[string]bool)
 	}
 	d.knownDatasets[datasetKey] = true
-	return nil
 }
 
 // parseTable resolves a possibly project-qualified destination table into its

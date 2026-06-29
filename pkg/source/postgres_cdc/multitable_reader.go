@@ -339,6 +339,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// Record the caught-up position so FinalizeBatch can confirm it
 				// to the slot once the destination write is durable.
 				r.source.recordCaughtUpLSN(currentLSN)
+				// Keep the walsender alive while the destination drains the
+				// results channel. FinalizeBatch will stop it before sending
+				// the final WALFlush-bearing standby update.
+				r.source.startKeepalive(ctx, currentLSN)
 				return nil
 			}
 		}
