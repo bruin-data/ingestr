@@ -161,9 +161,10 @@ func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
 	differentPayload := msg
 	differentPayload.payload = []byte(`{"device":"a","value":22.0}`)
 
-	msgID, numericID := mqttMsgID(msg)
-	redeliveryID, _ := mqttMsgID(redelivery)
-	otherID, _ := mqttMsgID(differentPayload)
+	msgID, numericID := mqttMsgID(msg, 7)
+	redeliveryID, _ := mqttMsgID(redelivery, 7)
+	otherID, _ := mqttMsgID(differentPayload, 8)
+	reusedPacketID, _ := mqttMsgID(msg, 8)
 
 	if numericID != int64(42) {
 		t.Fatalf("numericID = %v, want 42", numericID)
@@ -173,6 +174,9 @@ func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
 	}
 	if msgID == otherID {
 		t.Fatalf("different payload with reused packet ID produced same msg_id: %q", msgID)
+	}
+	if msgID == reusedPacketID {
+		t.Fatalf("reused packet ID after ack should produce a new msg_id: %q", msgID)
 	}
 }
 
@@ -232,6 +236,31 @@ func TestFinalizeBatchAcksPendingMessages(t *testing.T) {
 	}
 	if msg1.ackCount != 1 || msg2.ackCount != 1 {
 		t.Fatalf("second finalize ack counts = %d, %d; want 1, 1", msg1.ackCount, msg2.ackCount)
+	}
+}
+
+func TestTrackMessageReusesPendingSequenceForRedelivery(t *testing.T) {
+	src := NewMQTTSource()
+	msg := &ackMessage{fakeMessage: fakeMessage{topic: "sensors/temp", qos: 1, messageID: 1, payload: []byte("a")}}
+	redelivery := &ackMessage{fakeMessage: msg.fakeMessage}
+	redelivery.duplicate = true
+
+	seq := src.trackMessage(msg)
+	redeliverySeq := src.trackMessage(redelivery)
+	if seq != redeliverySeq {
+		t.Fatalf("redelivery sequence = %d, want %d", redeliverySeq, seq)
+	}
+
+	if err := src.CommitStream(context.Background(), mqttCommitToken{MaxSeq: seq}); err != nil {
+		t.Fatalf("CommitStream returned error: %v", err)
+	}
+	if msg.ackCount != 0 || redelivery.ackCount != 1 {
+		t.Fatalf("ack counts = %d, %d; want latest redelivery only", msg.ackCount, redelivery.ackCount)
+	}
+
+	reusedSeq := src.trackMessage(msg)
+	if reusedSeq == seq {
+		t.Fatalf("reused packet ID after ack kept old sequence %d", seq)
 	}
 }
 

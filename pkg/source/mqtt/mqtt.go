@@ -52,10 +52,12 @@ type MQTTSource struct {
 	cfg    mqttConfig
 	client paho.Client
 
-	mu       sync.Mutex
-	nextSeq  int64
-	pending  map[int64]paho.Message
-	connLost chan error
+	mu           sync.Mutex
+	nextSeq      int64
+	pending      map[int64]paho.Message
+	pendingKeys  map[int64]string
+	pendingByKey map[string]int64
+	connLost     chan error
 }
 
 type mqttCommitToken struct {
@@ -64,7 +66,9 @@ type mqttCommitToken struct {
 
 func NewMQTTSource() *MQTTSource {
 	return &MQTTSource{
-		pending: make(map[int64]paho.Message),
+		pending:      make(map[int64]paho.Message),
+		pendingKeys:  make(map[int64]string),
+		pendingByKey: make(map[string]int64),
 	}
 }
 
@@ -201,6 +205,8 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 	s.mu.Lock()
 	s.nextSeq = 0
 	s.pending = make(map[int64]paho.Message)
+	s.pendingKeys = make(map[int64]string)
+	s.pendingByKey = make(map[string]int64)
 	s.mu.Unlock()
 
 	incoming := make(chan paho.Message, batchSize)
@@ -345,10 +351,29 @@ func (s *MQTTSource) read(ctx context.Context, topic string, opts source.ReadOpt
 }
 
 func (s *MQTTSource) trackMessage(msg paho.Message) int64 {
+	key := mqttDeliveryKey(msg)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.pending == nil {
+		s.pending = make(map[int64]paho.Message)
+	}
+	if s.pendingKeys == nil {
+		s.pendingKeys = make(map[int64]string)
+	}
+	if s.pendingByKey == nil {
+		s.pendingByKey = make(map[string]int64)
+	}
+	if seq, ok := s.pendingByKey[key]; ok {
+		s.pending[seq] = msg
+		return seq
+	}
+
 	s.nextSeq++
 	s.pending[s.nextSeq] = msg
+	s.pendingKeys[s.nextSeq] = key
+	s.pendingByKey[key] = s.nextSeq
 	return s.nextSeq
 }
 
@@ -382,6 +407,10 @@ func (s *MQTTSource) pendingThrough(maxSeq int64) []paho.Message {
 		if seq <= maxSeq {
 			msgs = append(msgs, msg)
 			delete(s.pending, seq)
+			if key, ok := s.pendingKeys[seq]; ok {
+				delete(s.pendingByKey, key)
+				delete(s.pendingKeys, seq)
+			}
 		}
 	}
 	return msgs
@@ -394,7 +423,7 @@ func (s *MQTTSource) currentSeq() int64 {
 }
 
 func messageToItem(msg paho.Message, seq int64) map[string]any {
-	id, numericID := mqttMsgID(msg)
+	id, numericID := mqttMsgID(msg, seq)
 	return map[string]any{
 		"msg_id":          id,
 		"message_id":      numericID,
@@ -431,11 +460,18 @@ func messageMetadata(msg paho.Message, numericID any) map[string]any {
 	}
 }
 
-func mqttMsgID(msg paho.Message) (string, any) {
+func mqttMsgID(msg paho.Message, seq int64) (string, any) {
 	if id := msg.MessageID(); id != 0 {
-		return fmt.Sprintf("%s:%d:%s", msg.Topic(), id, mqttMessageFingerprint(msg)), int64(id)
+		return fmt.Sprintf("%s:%d", mqttDeliveryKey(msg), seq), int64(id)
 	}
-	return fmt.Sprintf("%s:%s", msg.Topic(), mqttMessageFingerprint(msg)), nil
+	return mqttDeliveryKey(msg), nil
+}
+
+func mqttDeliveryKey(msg paho.Message) string {
+	if id := msg.MessageID(); id != 0 {
+		return fmt.Sprintf("%s:%d:%s", msg.Topic(), id, mqttMessageFingerprint(msg))
+	}
+	return fmt.Sprintf("%s:%s", msg.Topic(), mqttMessageFingerprint(msg))
 }
 
 func mqttMessageFingerprint(msg paho.Message) string {
