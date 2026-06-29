@@ -355,6 +355,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("solidgate", "Solidgate", []string{"solidgate"}, true, false),
 		genericURIConnector("spanner", "Spanner", []string{"spanner"}, true, false),
 		genericURIConnector("sqs", "SQS", []string{"sqs"}, true, false),
+		genericURIConnector("square", "Square", []string{"square"}, true, false),
 		genericURIConnector("stripe", "Stripe", []string{"stripe"}, true, false),
 		genericURIConnector("surveymonkey", "SurveyMonkey", []string{"surveymonkey"}, true, false),
 		genericURIConnector("synapse", "Azure Synapse", []string{"synapse"}, false, true),
