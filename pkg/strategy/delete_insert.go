@@ -73,7 +73,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	incrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
+		IncrementalKey: incrementalKey,
 		IntervalStart:  job.Config.IntervalStart,
 		IntervalEnd:    job.Config.IntervalEnd,
 		PageSize:       job.Config.PageSize,

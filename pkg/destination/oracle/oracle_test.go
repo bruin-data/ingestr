@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -91,9 +92,9 @@ func TestQuoteTable(t *testing.T) {
 			want:  `"HR"."EMPLOYEES"`,
 		},
 		{
-			name:  "generated staging schema stored in connected user",
+			name:  "generated staging schema is honored",
 			table: "_bruin_staging.hr__employees_merge_123",
-			want:  `"HR__EMPLOYEES_MERGE_123"`,
+			want:  `"_BRUIN_STAGING"."HR__EMPLOYEES_MERGE_123"`,
 		},
 		{
 			name:  "embedded quote",
@@ -121,7 +122,7 @@ func TestMapDataTypeToOracle(t *testing.T) {
 		{name: "decimal capped", col: schema.Column{DataType: schema.TypeDecimal, Precision: 60, Scale: 50}, want: "NUMBER(38,38)"},
 		{name: "short string", col: schema.Column{DataType: schema.TypeString, MaxLength: 255}, want: "VARCHAR2(255 CHAR)"},
 		{name: "long string", col: schema.Column{DataType: schema.TypeString}, want: "CLOB"},
-		{name: "cdc lsn string", col: schema.Column{Name: "_cdc_lsn", DataType: schema.TypeString}, want: "VARCHAR2(255 CHAR)"},
+		{name: "cdc lsn string", col: schema.Column{Name: "_cdc_lsn", DataType: schema.TypeString}, want: "VARCHAR2(4000 CHAR)"},
 		{name: "timestamp tz", col: schema.Column{DataType: schema.TypeTimestampTZ}, want: "TIMESTAMP(6) WITH TIME ZONE"},
 		{name: "json", col: schema.Column{DataType: schema.TypeJSON}, want: "CLOB"},
 	}
@@ -163,7 +164,7 @@ func TestBuildCreateTableSQL_StringPrimaryKeyUsesVarchar(t *testing.T) {
 	got := buildCreateTableSQL("users", tableSchema, []string{"id"})
 
 	assert.Equal(t, `CREATE TABLE "USERS" (
-  "ID" VARCHAR2(255 CHAR),
+  "ID" VARCHAR2(4000 CHAR),
   "NAME" CLOB,
   PRIMARY KEY ("ID")
 )`, got)
@@ -181,7 +182,7 @@ func TestBuildCreateTableSQL_SchemaPrimaryKeyUsesVarcharWithoutConstraint(t *tes
 	got := buildCreateTableSQL("users_staging", tableSchema, nil)
 
 	assert.Equal(t, `CREATE TABLE "USERS_STAGING" (
-  "ID" VARCHAR2(255 CHAR),
+  "ID" VARCHAR2(4000 CHAR),
   "NAME" CLOB
 )`, got)
 }
@@ -205,10 +206,28 @@ func TestBuildMergeSQL(t *testing.T) {
 	)
 
 	assert.Equal(t, `MERGE INTO "USERS" target
-USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "UPDATED_AT" DESC) bruin_dedup_rn FROM "USERS_MERGE_123") bruin_numbered WHERE bruin_dedup_rn = 1) source
+USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "UPDATED_AT" DESC) bruin_dedup_rn FROM "_BRUIN_STAGING"."USERS_MERGE_123") bruin_numbered WHERE bruin_dedup_rn = 1) source
 ON (target."ID" = source."ID")
 WHEN MATCHED THEN UPDATE SET target."NAME" = source."NAME", target."UPDATED_AT" = source."UPDATED_AT"
 WHEN NOT MATCHED THEN INSERT ("ID", "NAME", "UPDATED_AT") VALUES (source."ID", source."NAME", source."UPDATED_AT")`, got)
+}
+
+func TestMergeTableRequiresPrimaryKey(t *testing.T) {
+	dest := NewOracleDestination()
+
+	err := dest.MergeTable(context.Background(), destination.MergeOptions{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "primary key")
+}
+
+func TestSCD2TableRequiresPrimaryKey(t *testing.T) {
+	dest := NewOracleDestination()
+
+	err := dest.SCD2Table(context.Background(), destination.SCD2Options{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "primary key")
 }
 
 func TestBuildChangeConditions_UsesLOBCompareForLOBColumns(t *testing.T) {
@@ -249,12 +268,13 @@ func TestBuildChangeConditions_UsesDirectCompareForNonLOBColumns(t *testing.T) {
 }
 
 func TestOracleReplaceUsesStagedPath(t *testing.T) {
-	dest := NewOracleDestination()
+	dest := &OracleDestination{currentUser: "INGESTR"}
 
 	assert.True(t, dest.SupportsAtomicSwap())
 
 	policy := dest.ReplaceStagingPolicy()
 	assert.Equal(t, destination.ReplaceStagingTargetSchema, policy.DefaultPlacement)
+	assert.Equal(t, "INGESTR", policy.DefaultTargetSchema)
 	assert.Equal(t, defaultOracleStagingSchema, policy.DefaultManagedSchema)
 }
 
@@ -279,7 +299,7 @@ func TestOracleDialectDoesNotSupportDirectTypeAlter(t *testing.T) {
 func TestOracleDialectTypeName_PrimaryKeyStringUsesVarchar(t *testing.T) {
 	dialect := &Dialect{}
 
-	assert.Equal(t, "VARCHAR2(255 CHAR)", dialect.TypeName(schema.Column{
+	assert.Equal(t, "VARCHAR2(4000 CHAR)", dialect.TypeName(schema.Column{
 		Name:         "id",
 		DataType:     schema.TypeString,
 		IsPrimaryKey: true,

@@ -312,7 +312,7 @@ func (d *OracleDestination) SwapTable(ctx context.Context, opts destination.Swap
 	stagingSchema, _ := parseTableName(opts.StagingTable)
 	targetSchema, targetName := parseTableName(opts.TargetTable)
 
-	if !strings.EqualFold(normalizeStagingSchema(stagingSchema), normalizeStagingSchema(targetSchema)) {
+	if !d.sameSchema(stagingSchema, targetSchema) {
 		return d.copySwapTable(ctx, opts)
 	}
 
@@ -423,6 +423,10 @@ func (d *OracleDestination) copySwapTable(ctx context.Context, opts destination.
 
 func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
+	if len(opts.PrimaryKeys) == 0 {
+		return fmt.Errorf("oracle merge requires at least one primary key")
+	}
+
 	columns := opts.Columns
 	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
 	isCDC := destination.HasCDCDeletedColumn(columns)
@@ -552,6 +556,9 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 
 func (d *OracleDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
 	startOp := time.Now()
+	if len(opts.PrimaryKeys) == 0 {
+		return fmt.Errorf("oracle SCD2 requires at least one primary key")
+	}
 
 	tableSchema := opts.Schema
 	if tableSchema == nil {
@@ -692,6 +699,7 @@ func (d *OracleDestination) SupportsCDCMerge() bool             { return true }
 func (d *OracleDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
 	return destination.ReplaceStagingPolicy{
 		DefaultPlacement:     destination.ReplaceStagingTargetSchema,
+		DefaultTargetSchema:  d.currentUser,
 		DefaultManagedSchema: defaultOracleStagingSchema,
 	}
 }
@@ -844,18 +852,18 @@ func (d *OracleDestination) tableExists(ctx context.Context, table string) (bool
 
 func (d *OracleDestination) effectiveSchemaTable(table string) (string, string) {
 	schemaName, tableName := parseTableName(table)
-	schemaName = normalizeStagingSchema(schemaName)
-	if schemaName == "" {
-		schemaName = d.currentUser
-	}
-	return canonicalIdentifier(schemaName), canonicalIdentifier(tableName)
+	return d.effectiveSchemaName(schemaName), canonicalIdentifier(tableName)
 }
 
-func normalizeStagingSchema(schemaName string) string {
-	if strings.EqualFold(schemaName, defaultOracleStagingSchema) {
-		return ""
+func (d *OracleDestination) effectiveSchemaName(schemaName string) string {
+	if schemaName == "" {
+		return d.currentUser
 	}
-	return schemaName
+	return canonicalIdentifier(schemaName)
+}
+
+func (d *OracleDestination) sameSchema(left, right string) bool {
+	return strings.EqualFold(d.effectiveSchemaName(left), d.effectiveSchemaName(right))
 }
 
 func parseTableName(table string) (string, string) {
@@ -874,7 +882,7 @@ func extractTableName(table string) string {
 func backupTableName(schemaName, tableName string) string {
 	candidate := fmt.Sprintf("%s_OLD_%d", canonicalIdentifier(tableName), time.Now().UnixNano())
 	backupName := destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("oracle"))
-	if schemaName == "" || strings.EqualFold(schemaName, defaultOracleStagingSchema) {
+	if schemaName == "" {
 		return backupName
 	}
 	return schemaName + "." + backupName
@@ -939,9 +947,6 @@ func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string,
 
 func quoteTable(table string) string {
 	parts := tablename.Split(table)
-	if len(parts) == 2 && strings.EqualFold(parts[0], defaultOracleStagingSchema) {
-		return quoteColumn(parts[1])
-	}
 	quoted := make([]string, 0, len(parts))
 	for _, part := range parts {
 		quoted = append(quoted, quoteColumn(part))

@@ -8,7 +8,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-const oracleDefaultComparableStringLength = 255
+const oracleDefaultComparableStringLength = 4000
 
 func MapDataTypeToOracle(col schema.Column) string {
 	return mapDataTypeToOracle(col, false)

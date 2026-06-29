@@ -233,6 +233,12 @@ func TestDeleteInsertStrategy_Execute_TracksIncrementalKeyCaseInsensitive(t *tes
 	if di.IncrementalKey != "ID" {
 		t.Fatalf("DeleteInsertOptions.IncrementalKey = %q, want ID", di.IncrementalKey)
 	}
+	src.mu.Lock()
+	readIncrementalKey := src.readOpts.IncrementalKey
+	src.mu.Unlock()
+	if readIncrementalKey != "ID" {
+		t.Fatalf("ReadOptions.IncrementalKey = %q, want ID", readIncrementalKey)
+	}
 	if di.IntervalStart != int64(5) || di.IntervalEnd != int64(10) {
 		t.Fatalf("DeleteInsertOptions interval = %v..%v, want 5..10", di.IntervalStart, di.IntervalEnd)
 	}
