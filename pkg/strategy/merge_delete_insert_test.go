@@ -215,6 +215,13 @@ func TestDeleteInsertStrategy_Execute_TracksIncrementalKeyCaseInsensitive(t *tes
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
 	job.Config.IncrementalKey = "id"
+	job.SourceSchema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	}
 	job.Schema.Columns[0].Name = "ID"
 	job.Schema.PrimaryKeys = []string{"ID"}
 
@@ -236,8 +243,8 @@ func TestDeleteInsertStrategy_Execute_TracksIncrementalKeyCaseInsensitive(t *tes
 	src.mu.Lock()
 	readIncrementalKey := src.readOpts.IncrementalKey
 	src.mu.Unlock()
-	if readIncrementalKey != "ID" {
-		t.Fatalf("ReadOptions.IncrementalKey = %q, want ID", readIncrementalKey)
+	if readIncrementalKey != "id" {
+		t.Fatalf("ReadOptions.IncrementalKey = %q, want id", readIncrementalKey)
 	}
 	if di.IntervalStart != int64(5) || di.IntervalEnd != int64(10) {
 		t.Fatalf("DeleteInsertOptions interval = %v..%v, want 5..10", di.IntervalStart, di.IntervalEnd)

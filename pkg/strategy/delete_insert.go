@@ -70,10 +70,11 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		parallelism = 4
 	}
 
-	incrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
+	sourceIncrementalKey, _ := resolveSchemaColumn(job.SourceSchema, job.Config.IncrementalKey)
+	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: incrementalKey,
+		IncrementalKey: sourceIncrementalKey,
 		IntervalStart:  job.Config.IntervalStart,
 		IntervalEnd:    job.Config.IntervalEnd,
 		PageSize:       job.Config.PageSize,
@@ -89,7 +90,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
-	intervalTracker := NewIntervalTracker(incrementalKey)
+	intervalTracker := NewIntervalTracker(destinationIncrementalKey)
 	records = intervalTracker.Wrap(records)
 
 	if job.Tracker != nil {
@@ -138,7 +139,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
 		StagingTable:       stagingTable,
 		TargetTable:        job.Config.DestTable,
-		IncrementalKey:     incrementalKey,
+		IncrementalKey:     destinationIncrementalKey,
 		IncrementalKeyType: incrementalKeyType,
 		IntervalStart:      intervalStart,
 		IntervalEnd:        intervalEnd,
