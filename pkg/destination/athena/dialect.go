@@ -5,14 +5,9 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	schemaevolution.RegisterDialect("athena", &Dialect{})
-}
-
-// Dialect implements schemaevolution.Dialect for Athena. Athena's SQL grammar
+// Dialect implements destination.Dialect for Athena. Athena's SQL grammar
 // is Trino-compatible, so this mirrors the historical shared Trino dialect.
 type Dialect struct{}
 

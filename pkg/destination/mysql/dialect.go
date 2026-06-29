@@ -5,17 +5,9 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("mysql", dialect)
-	schemaevolution.RegisterDialect("mysql+pymysql", dialect)
-	schemaevolution.RegisterDialect("mariadb", dialect)
-}
-
-// Dialect implements the schemaevolution.Dialect interface for MySQL/MariaDB.
+// Dialect implements the destination.Dialect interface for MySQL/MariaDB.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

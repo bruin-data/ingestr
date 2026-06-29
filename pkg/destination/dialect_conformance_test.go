@@ -1,90 +1,65 @@
-package schemaevolution_test
+package destination_test
 
 import (
 	"strings"
 	"testing"
 
-	// Import destination packages to register their dialects
-	_ "github.com/bruin-data/ingestr/pkg/destination/bigquery"
-	_ "github.com/bruin-data/ingestr/pkg/destination/cassandra"
-	_ "github.com/bruin-data/ingestr/pkg/destination/clickhouse"
-	_ "github.com/bruin-data/ingestr/pkg/destination/duckdb"
-	_ "github.com/bruin-data/ingestr/pkg/destination/mssql"
-	_ "github.com/bruin-data/ingestr/pkg/destination/mysql"
-	_ "github.com/bruin-data/ingestr/pkg/destination/postgres"
-	_ "github.com/bruin-data/ingestr/pkg/destination/redshift"
-	_ "github.com/bruin-data/ingestr/pkg/destination/snowflake"
-	_ "github.com/bruin-data/ingestr/pkg/destination/sqlite"
-	_ "github.com/bruin-data/ingestr/pkg/destination/trino"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/bigquery"
+	"github.com/bruin-data/ingestr/pkg/destination/cassandra"
+	"github.com/bruin-data/ingestr/pkg/destination/clickhouse"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	"github.com/bruin-data/ingestr/pkg/destination/mssql"
+	"github.com/bruin-data/ingestr/pkg/destination/mysql"
+	"github.com/bruin-data/ingestr/pkg/destination/postgres"
+	"github.com/bruin-data/ingestr/pkg/destination/redshift"
+	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
+	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
+	"github.com/bruin-data/ingestr/pkg/destination/trino"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// dialectConformanceTest runs a standard set of tests for all dialects
-type dialectConformanceTest struct {
+// dialectsByScheme returns each destination's concrete destination.Dialect.
+// These were previously discovered through a global registry; the registry was
+// removed (production code instantiates each dialect directly), so the
+// conformance tests reference the concrete types instead.
+func dialectsByScheme() map[string]destination.Dialect {
+	return map[string]destination.Dialect{
+		"postgres":   &postgres.Dialect{},
+		"duckdb":     &duckdb.Dialect{},
+		"sqlite":     &sqlite.Dialect{},
+		"snowflake":  &snowflake.Dialect{},
+		"bigquery":   &bigquery.Dialect{},
+		"cassandra":  &cassandra.Dialect{},
+		"clickhouse": &clickhouse.Dialect{},
+		"mysql":      &mysql.Dialect{},
+		"mssql":      &mssql.Dialect{},
+		"redshift":   &redshift.Dialect{},
+		"trino":      &trino.Dialect{},
+	}
+}
+
+type dialectConformanceCase struct {
 	Scheme  string
-	Dialect schemaevolution.Dialect
+	Dialect destination.Dialect
 }
 
-// allDialects returns all registered dialects for testing
-func allDialects() []dialectConformanceTest {
-	schemes := []string{
-		"postgres",
-		"duckdb",
-		"sqlite",
-		"snowflake",
-		"bigquery",
-		"cassandra",
-		"clickhouse",
-		"mysql",
-		"mssql",
-		"redshift",
-		"trino",
+func allDialects() []dialectConformanceCase {
+	m := dialectsByScheme()
+	cases := make([]dialectConformanceCase, 0, len(m))
+	for scheme, d := range m {
+		cases = append(cases, dialectConformanceCase{Scheme: scheme, Dialect: d})
 	}
-
-	var dialects []dialectConformanceTest
-	for _, scheme := range schemes {
-		d := schemaevolution.GetDialect(scheme)
-		if d != nil {
-			dialects = append(dialects, dialectConformanceTest{Scheme: scheme, Dialect: d})
-		}
-	}
-	return dialects
+	return cases
 }
 
-func TestDialectRegistry(t *testing.T) {
-	schemes := []string{
-		"postgres",
-		"postgresql",
-		"postgresql+psycopg2",
-		"duckdb",
-		"sqlite",
-		"snowflake",
-		"bigquery",
-		"clickhouse",
-		"mysql",
-		"mysql+pymysql",
-		"mariadb",
-		"mssql",
-		"sqlserver",
-		"mssql+pyodbc",
-		"redshift",
-		"trino",
-	}
-
-	for _, scheme := range schemes {
-		t.Run(scheme, func(t *testing.T) {
-			d := schemaevolution.GetDialect(scheme)
-			assert.NotNil(t, d, "dialect should be registered for scheme %s", scheme)
-		})
-	}
-}
-
-func TestDialectRegistry_Unknown(t *testing.T) {
-	d := schemaevolution.GetDialect("unknown_dialect")
-	assert.Nil(t, d)
+func dialectForScheme(t *testing.T, scheme string) destination.Dialect {
+	t.Helper()
+	d, ok := dialectsByScheme()[scheme]
+	require.True(t, ok, "no dialect for scheme %s", scheme)
+	return d
 }
 
 func TestAllDialects_HaveName(t *testing.T) {
@@ -115,8 +90,7 @@ func TestAllDialects_QuoteIdentifier(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.scheme, func(t *testing.T) {
-			d := schemaevolution.GetDialect(tt.scheme)
-			require.NotNil(t, d)
+			d := dialectForScheme(t, tt.scheme)
 			assert.Equal(t, tt.expected, d.QuoteIdentifier(tt.input))
 		})
 	}
@@ -140,9 +114,7 @@ func TestAllDialects_TypeName_Boolean(t *testing.T) {
 
 	for scheme, exp := range expected {
 		t.Run(scheme, func(t *testing.T) {
-			d := schemaevolution.GetDialect(scheme)
-			require.NotNil(t, d)
-			assert.Equal(t, exp, d.TypeName(col))
+			assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
 		})
 	}
 }
@@ -204,9 +176,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 			col := schema.Column{Name: "val", DataType: tt.dataType}
 			for scheme, exp := range tt.expected {
 				t.Run(scheme, func(t *testing.T) {
-					d := schemaevolution.GetDialect(scheme)
-					require.NotNil(t, d)
-					assert.Equal(t, exp, d.TypeName(col))
+					assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
 				})
 			}
 		})
@@ -255,9 +225,7 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 			col := schema.Column{Name: "val", DataType: tt.dataType}
 			for scheme, exp := range tt.expected {
 				t.Run(scheme, func(t *testing.T) {
-					d := schemaevolution.GetDialect(scheme)
-					require.NotNil(t, d)
-					assert.Equal(t, exp, d.TypeName(col))
+					assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
 				})
 			}
 		})
@@ -285,79 +253,12 @@ func TestAllDialects_TypeName_DecimalDefault(t *testing.T) {
 
 	for _, dt := range allDialects() {
 		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
+			assert.NotEmpty(t, dt.Dialect.TypeName(col))
 		})
 	}
 }
 
-func TestAllDialects_TypeName_String(t *testing.T) {
-	col := schema.Column{Name: "val", DataType: schema.TypeString}
-
-	for _, dt := range allDialects() {
-		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
-		})
-	}
-}
-
-func TestAllDialects_TypeName_StringWithMaxLength(t *testing.T) {
-	col := schema.Column{Name: "val", DataType: schema.TypeString, MaxLength: 255}
-
-	for _, dt := range allDialects() {
-		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
-		})
-	}
-}
-
-func TestAllDialects_TypeName_Timestamp(t *testing.T) {
-	col := schema.Column{Name: "created_at", DataType: schema.TypeTimestamp}
-
-	for _, dt := range allDialects() {
-		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
-		})
-	}
-}
-
-func TestAllDialects_TypeName_TimestampTZ(t *testing.T) {
-	col := schema.Column{Name: "created_at", DataType: schema.TypeTimestampTZ}
-
-	for _, dt := range allDialects() {
-		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
-		})
-	}
-}
-
-func TestAllDialects_TypeName_JSON(t *testing.T) {
-	col := schema.Column{Name: "data", DataType: schema.TypeJSON}
-
-	for _, dt := range allDialects() {
-		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
-		})
-	}
-}
-
-func TestAllDialects_TypeName_UUID(t *testing.T) {
-	col := schema.Column{Name: "id", DataType: schema.TypeUUID}
-
-	for _, dt := range allDialects() {
-		t.Run(dt.Scheme, func(t *testing.T) {
-			typeName := dt.Dialect.TypeName(col)
-			assert.NotEmpty(t, typeName)
-		})
-	}
-}
-
-func TestAllDialects_TypeName_AllTypes(t *testing.T) {
+func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
 	types := []schema.DataType{
 		schema.TypeBoolean,
 		schema.TypeInt16,
@@ -382,9 +283,10 @@ func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 		t.Run(dt.Scheme, func(t *testing.T) {
 			for _, dataType := range types {
 				col := schema.Column{Name: "test", DataType: dataType, Precision: 10, Scale: 2}
-				typeName := dt.Dialect.TypeName(col)
-				assert.NotEmpty(t, typeName, "type %s should produce non-empty type name", dataType.String())
+				assert.NotEmptyf(t, dt.Dialect.TypeName(col), "type %s should produce non-empty type name", dataType.String())
 			}
+			// String with max length must also resolve.
+			assert.NotEmpty(t, dt.Dialect.TypeName(schema.Column{Name: "v", DataType: schema.TypeString, MaxLength: 255}))
 		})
 	}
 }
@@ -398,14 +300,14 @@ func TestAllDialects_AddColumnSQL(t *testing.T) {
 			assert.Contains(t, sql, "ALTER TABLE")
 			assert.Contains(t, sql, "test_table")
 			assert.Contains(t, sql, "ADD")
-			// Column names may be uppercased (Snowflake), so check case-insensitively
+			// Column names may be uppercased (Snowflake), so check case-insensitively.
 			assert.True(t, strings.Contains(strings.ToLower(sql), "new_column"), "SQL should contain column name")
 		})
 	}
 }
 
 func TestAllDialects_AddColumnSQL_Nullable(t *testing.T) {
-	// Dialects that include NULL/NOT NULL in AddColumnSQL
+	// Dialects that include NULL/NOT NULL in AddColumnSQL.
 	dialectsWithNullability := map[string]bool{
 		"mysql": true,
 		"mssql": true,
@@ -416,17 +318,15 @@ func TestAllDialects_AddColumnSQL_Nullable(t *testing.T) {
 
 	for _, dt := range allDialects() {
 		if !dialectsWithNullability[dt.Scheme] {
-			continue // Skip dialects that don't include nullability in AddColumnSQL
+			continue
 		}
 
 		t.Run(dt.Scheme+"/nullable", func(t *testing.T) {
-			sql := dt.Dialect.AddColumnSQL("t", nullableCol)
-			assert.NotContains(t, sql, "NOT NULL")
+			assert.NotContains(t, dt.Dialect.AddColumnSQL("t", nullableCol), "NOT NULL")
 		})
 
 		t.Run(dt.Scheme+"/not_nullable", func(t *testing.T) {
-			sql := dt.Dialect.AddColumnSQL("t", nonNullableCol)
-			assert.Contains(t, sql, "NOT NULL")
+			assert.Contains(t, dt.Dialect.AddColumnSQL("t", nonNullableCol), "NOT NULL")
 		})
 	}
 }
@@ -442,7 +342,6 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 			sql := dt.Dialect.AlterColumnTypeSQL("test_table", "val", newType)
 			assert.Contains(t, sql, "ALTER TABLE")
 			assert.Contains(t, sql, "test_table")
-			// Column names may be uppercased (Snowflake), so check case-insensitively
 			assert.True(t, strings.Contains(strings.ToLower(sql), "val"), "SQL should contain column name")
 		})
 	}
@@ -454,89 +353,61 @@ func TestDialect_SupportsAlterType(t *testing.T) {
 
 	for _, scheme := range dialectsWithAlter {
 		t.Run(scheme+"_supports", func(t *testing.T) {
-			d := schemaevolution.GetDialect(scheme)
-			require.NotNil(t, d)
-			assert.True(t, d.SupportsAlterType())
+			assert.True(t, dialectForScheme(t, scheme).SupportsAlterType())
 		})
 	}
 
 	for _, scheme := range dialectsWithoutAlter {
 		t.Run(scheme+"_not_supports", func(t *testing.T) {
-			d := schemaevolution.GetDialect(scheme)
-			require.NotNil(t, d)
-			assert.False(t, d.SupportsAlterType())
+			assert.False(t, dialectForScheme(t, scheme).SupportsAlterType())
 		})
 	}
 }
 
-// PostgreSQL-specific tests
+// PostgreSQL-specific
 func TestPostgresDialect_AlterWithUSING(t *testing.T) {
-	d := schemaevolution.GetDialect("postgres")
-	require.NotNil(t, d)
-
+	d := dialectForScheme(t, "postgres")
 	newType := schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}
-	sql := d.AlterColumnTypeSQL("t", "val", newType)
-	assert.Contains(t, sql, "USING")
+	assert.Contains(t, d.AlterColumnTypeSQL("t", "val", newType), "USING")
 }
 
-// BigQuery-specific tests
+// BigQuery-specific
 func TestBigQueryDialect_TypeName_Date(t *testing.T) {
-	d := schemaevolution.GetDialect("bigquery")
-	require.NotNil(t, d)
-
-	col := schema.Column{Name: "d", DataType: schema.TypeDate}
-	assert.Equal(t, "DATE", d.TypeName(col))
+	d := dialectForScheme(t, "bigquery")
+	assert.Equal(t, "DATE", d.TypeName(schema.Column{Name: "d", DataType: schema.TypeDate}))
 }
 
 func TestBigQueryDialect_TypeName_DefaultNumeric(t *testing.T) {
-	d := schemaevolution.GetDialect("bigquery")
-	require.NotNil(t, d)
-
-	col := schema.Column{Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 9}
-	assert.Equal(t, "NUMERIC", d.TypeName(col))
+	d := dialectForScheme(t, "bigquery")
+	assert.Equal(t, "NUMERIC", d.TypeName(schema.Column{Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 9}))
 }
 
-// ClickHouse-specific tests
+// ClickHouse-specific
 func TestClickHouseDialect_TypeName_Nullable(t *testing.T) {
-	d := schemaevolution.GetDialect("clickhouse")
-	require.NotNil(t, d)
-
-	col := schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}
-	sql := d.AddColumnSQL("t", col)
-	assert.Contains(t, sql, "Nullable(")
+	d := dialectForScheme(t, "clickhouse")
+	assert.Contains(t, d.AddColumnSQL("t", schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}), "Nullable(")
 }
 
-// MySQL-specific tests
+// MySQL-specific
 func TestMySQLDialect_TypeName_JSON(t *testing.T) {
-	d := schemaevolution.GetDialect("mysql")
-	require.NotNil(t, d)
-
-	col := schema.Column{Name: "data", DataType: schema.TypeJSON}
-	assert.Equal(t, "JSON", d.TypeName(col))
+	d := dialectForScheme(t, "mysql")
+	assert.Equal(t, "JSON", d.TypeName(schema.Column{Name: "data", DataType: schema.TypeJSON}))
 }
 
-// Snowflake-specific tests
+// Snowflake-specific
 func TestSnowflakeDialect_TypeName_Variant(t *testing.T) {
-	d := schemaevolution.GetDialect("snowflake")
-	require.NotNil(t, d)
-
-	col := schema.Column{Name: "data", DataType: schema.TypeJSON}
-	assert.Equal(t, "VARIANT", d.TypeName(col))
+	d := dialectForScheme(t, "snowflake")
+	assert.Equal(t, "VARIANT", d.TypeName(schema.Column{Name: "data", DataType: schema.TypeJSON}))
 }
 
-// Redshift-specific tests
+// Redshift-specific
 func TestRedshiftDialect_TypeName_JSON(t *testing.T) {
-	d := schemaevolution.GetDialect("redshift")
-	require.NotNil(t, d)
-
-	col := schema.Column{Name: "data", DataType: schema.TypeJSON}
-	assert.Equal(t, "SUPER", d.TypeName(col))
+	d := dialectForScheme(t, "redshift")
+	assert.Equal(t, "SUPER", d.TypeName(schema.Column{Name: "data", DataType: schema.TypeJSON}))
 }
 
-// MSSQL-specific tests
+// MSSQL-specific
 func TestMSSQLDialect_QuoteIdentifier(t *testing.T) {
-	d := schemaevolution.GetDialect("mssql")
-	require.NotNil(t, d)
-
+	d := dialectForScheme(t, "mssql")
 	assert.Equal(t, "[column_name]", d.QuoteIdentifier("column_name"))
 }

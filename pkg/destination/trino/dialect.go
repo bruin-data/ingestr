@@ -5,14 +5,9 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	schemaevolution.RegisterDialect("trino", &Dialect{})
-}
-
-// Dialect implements the schemaevolution.Dialect interface for Trino.
+// Dialect implements the destination.Dialect interface for Trino.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

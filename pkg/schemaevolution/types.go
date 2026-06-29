@@ -66,9 +66,3 @@ type SchemaComparison struct {
 	Changes    []SchemaChange
 	HasChanges bool
 }
-
-// Migration contains the SQL statements and warnings for a schema migration.
-type Migration struct {
-	Statements []string
-	Warnings   []string
-}

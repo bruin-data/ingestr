@@ -4,14 +4,7 @@ import (
 	"fmt"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
-
-func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("oracle", dialect)
-	schemaevolution.RegisterDialect("oracle+cx_oracle", dialect)
-}
 
 type Dialect struct{}
 

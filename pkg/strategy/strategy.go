@@ -77,12 +77,10 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 }
 
 // ApplyEvolution applies the pending schema evolution plan to the destination.
+// The destination turns the abstract plan into DDL and executes it; this
+// strategy layer only decides when the plan runs.
 func (j *IngestionJob) ApplyEvolution(ctx context.Context) error {
-	if j.EvolutionPlan == nil || !j.EvolutionPlan.HasMigration() {
-		return nil
-	}
-	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
-	return j.EvolutionPlan.Apply(ctx, j.Destination)
+	return applyEvolutionPlan(ctx, j.Destination, j.EvolutionPlan)
 }
 
 type WriteStrategy interface {
@@ -114,12 +112,33 @@ type MultiTableIngestionJob struct {
 
 // ApplyEvolutionFor applies the pending schema evolution plan for a source table.
 func (j *MultiTableIngestionJob) ApplyEvolutionFor(ctx context.Context, sourceTable string) error {
-	plan := j.EvolutionPlans[sourceTable]
-	if plan == nil || !plan.HasMigration() {
+	return applyEvolutionPlan(ctx, j.Destination, j.EvolutionPlans[sourceTable])
+}
+
+// applyEvolutionPlan asks the destination to apply an abstract evolution plan.
+// Destinations that cannot evolve schemas (do not implement SchemaEvolver) are
+// silently skipped, matching the previous no-dialect behavior.
+func applyEvolutionPlan(ctx context.Context, dest destination.Destination, plan *schemaevolution.EvolutionPlan) error {
+	if plan == nil || !plan.HasChanges() {
+		return nil
+	}
+	evolver, ok := dest.(schemaevolution.SchemaEvolver)
+	if !ok {
 		return nil
 	}
 	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
-	return plan.Apply(ctx, j.Destination)
+	warnings, err := evolver.ApplySchemaEvolution(ctx, plan.Table, plan.Comparison)
+	for _, w := range warnings {
+		fmt.Printf("Warning: %s\n", w)
+	}
+	if err != nil {
+		return err
+	}
+	// Mark the plan applied so a repeat call is a no-op. This mirrors the prior
+	// EvolutionPlan.Apply contract (which cleared its rendered statements) and
+	// prevents re-issuing ADD COLUMN/ALTER on a double-apply.
+	plan.Comparison = nil
+	return nil
 }
 
 // GetDestTableName returns the destination table name for a source table.

@@ -6,17 +6,9 @@ import (
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("postgres", dialect)
-	schemaevolution.RegisterDialect("postgresql", dialect)
-	schemaevolution.RegisterDialect("postgresql+psycopg2", dialect)
-}
-
-// Dialect implements the schemaevolution.Dialect interface for PostgreSQL.
+// Dialect implements the destination.Dialect interface for PostgreSQL.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {
