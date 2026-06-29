@@ -1,7 +1,13 @@
 package monday
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -191,4 +197,160 @@ func TestParseMondaySpec(t *testing.T) {
 			assert.Equal(t, tt.wantLinked, spec.linked)
 		})
 	}
+}
+
+// newTestSource connects a MondaySource pointed at a test server.
+func newTestSource(t *testing.T, baseURL string) *MondaySource {
+	t.Helper()
+	s := &MondaySource{baseURL: baseURL}
+	require.NoError(t, s.Connect(context.Background(), "monday://?api_token=tok"))
+	return s
+}
+
+func TestRetryInSecondsFromError(t *testing.T) {
+	t.Parallel()
+
+	_, ok := retryInSecondsFromError(nil)
+	assert.False(t, ok)
+	_, ok = retryInSecondsFromError("not a monday error")
+	assert.False(t, ok)
+
+	var empty mondayRetryError
+	_, ok = retryInSecondsFromError(&empty)
+	assert.False(t, ok, "no retry_in_seconds means no server-directed wait")
+
+	var e mondayRetryError
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{"errors":[{"extensions":{"retry_in_seconds":3}},{"extensions":{"retry_in_seconds":11}}]}`), &e,
+	))
+	d, ok := retryInSecondsFromError(&e)
+	assert.True(t, ok)
+	assert.Equal(t, 11*time.Second, d, "uses the largest retry_in_seconds")
+}
+
+// A 429 (POST) is retried and the request succeeds.
+func TestExecuteGraphQLRetriesRateLimitedPOST(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errors":[{"message":"Complexity budget exhausted"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"account":{"id":"42"}}}`))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(t, srv.URL)
+	defer func() { _ = s.client.Close() }()
+
+	data, err := s.executeGraphQL(context.Background(), `query{account{id}}`, nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"id":"42"`)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "expected one retry after the 429")
+}
+
+// A 429 with no Retry-After header is retried, waiting the body's retry_in_seconds.
+func TestExecuteGraphQLRetriesOn429WithoutRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if atomic.AddInt32(&hits, 1) == 1 {
+			// No Retry-After header; the wait is in the body.
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errors":[{"message":"Complexity budget exhausted","extensions":{"code":"COMPLEXITY_BUDGET_EXHAUSTED","retry_in_seconds":1}}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"account":{"id":"5"}}}`))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(t, srv.URL)
+	defer func() { _ = s.client.Close() }()
+
+	start := time.Now()
+	data, err := s.executeGraphQL(context.Background(), `query{account{id}}`, nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"id":"5"`)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "429 without Retry-After must still retry")
+	assert.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond, "should honor the body retry_in_seconds wait")
+}
+
+// A persistent 429 is retried maxRetries+1 times, then surfaced as an error.
+func TestExecuteGraphQLExhaustsRetriesOn429(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Complexity budget exhausted"}]}`))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(t, srv.URL)
+	defer func() { _ = s.client.Close() }()
+
+	_, err := s.executeGraphQL(context.Background(), `query{account{id}}`, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "429")
+	assert.Equal(t, int32(maxRetries+1), atomic.LoadInt32(&hits), "expected 1 initial + maxRetries attempts")
+}
+
+// A 500 is retried and the request succeeds.
+func TestExecuteGraphQLRetriesServerError(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"errors":[{"message":"internal error"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"account":{"id":"99"}}}`))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(t, srv.URL)
+	defer func() { _ = s.client.Close() }()
+
+	data, err := s.executeGraphQL(context.Background(), `query{account{id}}`, nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"id":"99"`)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "a 500 should be retried")
+}
+
+// A normal GraphQL error (HTTP 200 with errors[]) is surfaced without retrying.
+func TestExecuteGraphQLDoesNotRetryOrdinaryError(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Field 'bogus' doesn't exist"}]}`))
+	}))
+	defer srv.Close()
+
+	s := newTestSource(t, srv.URL)
+	defer func() { _ = s.client.Close() }()
+
+	_, err := s.executeGraphQL(context.Background(), `query{bogus}`, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bogus")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits), "ordinary errors must not be retried")
 }
