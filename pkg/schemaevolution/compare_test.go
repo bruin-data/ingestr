@@ -607,3 +607,36 @@ func TestNeedsWidening(t *testing.T) {
 		})
 	}
 }
+
+// A declared `integer` now maps to int64, so against a stored int64 column it
+// produces no change (the BigQuery merge regression, fixed at the type mapping).
+func TestCompare_IntegerOverride_NoChange(t *testing.T) {
+	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
+	dest := &schema.TableSchema{
+		Name:        "test",
+		Columns:     []schema.Column{{Name: "c", DataType: schema.TypeInt64}},
+		PrimaryKeys: []string{"c"},
+	}
+	overrides, err := ParseColumnOverrides("c:integer")
+	require.NoError(t, err)
+
+	result, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+	require.NoError(t, err)
+	assert.False(t, result.HasChanges, "integer override (int64) against a stored int64 must not change")
+	assert.Empty(t, result.Changes)
+}
+
+// Against a column stored as int32 (e.g. an older Postgres table), the int64
+// override is a safe widening, so it still produces a change.
+func TestCompare_IntegerOverride_WidensInt32(t *testing.T) {
+	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt32}}}
+	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt32}}}
+	overrides, err := ParseColumnOverrides("c:integer")
+	require.NoError(t, err)
+
+	result, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+	require.NoError(t, err)
+	require.True(t, result.HasChanges)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, schema.TypeInt64, result.Changes[0].NewColumn.DataType)
+}

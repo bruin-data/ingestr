@@ -398,7 +398,7 @@ func TestColumnOverrides_DroppedColumn_ReappearsViaOverride(t *testing.T) {
 
 		types := readDuckDBColumnTypes(t, duckDBPath, "main.sparse")
 		assert.Equal(t, "VARCHAR", types["email"], "email override should re-add the column")
-		assert.Equal(t, "INTEGER", types["age"], "age override should retype the column")
+		assert.Equal(t, "BIGINT", types["age"], "age override should retype the column")
 		assert.Equal(t, 3, readDuckDBRowCount(t, duckDBPath, "main.sparse"))
 
 		db := openDuckDBForTest(t, duckDBPath)
