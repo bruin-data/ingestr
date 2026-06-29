@@ -1053,7 +1053,8 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 
 	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
-	opts := &schemaevolution.CompareOptions{Overrides: overrides}
+	// DestinationScheme lets the comparison skip int-width changes BigQuery stores identically.
+	opts := &schemaevolution.CompareOptions{Overrides: overrides, DestinationScheme: p.dest.GetScheme()}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)

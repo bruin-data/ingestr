@@ -10,6 +10,9 @@ import (
 // CompareOptions contains optional parameters for schema comparison.
 type CompareOptions struct {
 	Overrides ColumnOverrides
+	// DestinationScheme is the destination's URI scheme (e.g. "bigquery"), used
+	// to limit type-equivalence handling to destinations that need it.
+	DestinationScheme string
 }
 
 // Compare compares source and destination schemas and returns the differences.
@@ -23,8 +26,10 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}
 
 	var overrides ColumnOverrides
+	var destScheme string
 	if opts != nil {
 		overrides = opts.Overrides
+		destScheme = opts.DestinationScheme
 	}
 
 	destColumnMap := make(map[string]schema.Column)
@@ -60,9 +65,10 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 					continue
 				}
 			}
-			// A narrower integer override against a wider stored integer (e.g. int32
-			// vs int64 on BigQuery, which stores every int as INT64) needs no change.
-			if exists && isInt(newCol.DataType) && isInt(destCol.DataType) && CanWiden(newCol.DataType, destCol.DataType) {
+			// On destinations that store every integer width as one physical type
+			// (BigQuery's INT64), a narrower int override against a stored int64 is a
+			// no-op; the ALTER it would emit is rejected on key/partition columns.
+			if exists && collapsesIntegerWidths(destScheme) && isInt(newCol.DataType) && isInt(destCol.DataType) && CanWiden(newCol.DataType, destCol.DataType) {
 				continue
 			}
 
@@ -147,6 +153,13 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 func makeNullable(col schema.Column) schema.Column {
 	col.Nullable = true
 	return col
+}
+
+// collapsesIntegerWidths reports whether a destination stores every integer
+// width as a single physical type (e.g. BigQuery's INT64), so int8/16/32/64 are
+// interchangeable. Add other such destinations (e.g. "snowflake") here.
+func collapsesIntegerWidths(scheme string) bool {
+	return scheme == "bigquery"
 }
 
 func isInt(t schema.DataType) bool {

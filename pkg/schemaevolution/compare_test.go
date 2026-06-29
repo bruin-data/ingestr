@@ -608,35 +608,41 @@ func TestNeedsWidening(t *testing.T) {
 	}
 }
 
-// A narrower integer override against a wider stored integer must emit no change
-// (BigQuery merge regression: int32 override vs stored int64 produced a pointless
+// On BigQuery, a narrower integer override against a stored int64 must emit no
+// change (merge regression: int32 override vs stored int64 produced a pointless
 // ALTER that BigQuery rejects on key columns).
-func TestCompare_OverrideNarrowerInt_NoChange(t *testing.T) {
+func TestCompare_OverrideNarrowerInt_BigQuery_NoChange(t *testing.T) {
 	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
 	dest := &schema.TableSchema{
 		Name:        "test",
 		Columns:     []schema.Column{{Name: "c", DataType: schema.TypeInt64}},
 		PrimaryKeys: []string{"c"},
 	}
-	opts := &CompareOptions{Overrides: ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}}}
+	opts := &CompareOptions{
+		Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}},
+		DestinationScheme: "bigquery",
+	}
 
 	result, err := Compare(source, dest, opts)
 	require.NoError(t, err)
-	assert.False(t, result.HasChanges, "int32 override against a stored int64 must not produce a change")
+	assert.False(t, result.HasChanges, "int32 override against a stored int64 on BigQuery must not produce a change")
 	assert.Empty(t, result.Changes)
 }
 
-// Suppression is integer-only: a non-integer narrowing override (float32 over a
-// stored float64) must still produce a change.
-func TestCompare_OverrideNarrowerNonInt_StillChanges(t *testing.T) {
-	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeFloat64}}}
-	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeFloat64}}}
-	opts := &CompareOptions{Overrides: ColumnOverrides{"c": {Name: "c", DataType: schema.TypeFloat32}}}
+// The skip is BigQuery-specific: a destination with a distinct int32 (Postgres,
+// etc.) still produces a change for the same int32-vs-int64 override.
+func TestCompare_OverrideNarrowerInt_OtherDest_StillChanges(t *testing.T) {
+	source := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
+	dest := &schema.TableSchema{Name: "test", Columns: []schema.Column{{Name: "c", DataType: schema.TypeInt64}}}
+	opts := &CompareOptions{
+		Overrides:         ColumnOverrides{"c": {Name: "c", DataType: schema.TypeInt32}},
+		DestinationScheme: "postgres",
+	}
 
 	result, err := Compare(source, dest, opts)
 	require.NoError(t, err)
-	require.True(t, result.HasChanges, "non-integer narrowing override must not be silently suppressed")
+	require.True(t, result.HasChanges, "int32 override on a destination with a distinct int32 must still change")
 	require.Len(t, result.Changes, 1)
 	assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
-	assert.Equal(t, schema.TypeFloat32, result.Changes[0].NewColumn.DataType)
+	assert.Equal(t, schema.TypeInt32, result.Changes[0].NewColumn.DataType)
 }
