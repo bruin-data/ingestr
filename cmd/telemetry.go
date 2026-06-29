@@ -3,10 +3,13 @@ package cmd
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/telemetry"
 )
+
+var telemetryWG sync.WaitGroup
 
 func trackCommandTriggered(ctx context.Context, command string) {
 	trackTelemetryAsync(ctx, "command_triggered", commandTelemetryProperties(command, nil))
@@ -25,6 +28,7 @@ func trackCommandFinished(ctx context.Context, command string, err error) {
 		properties["error"] = commandTelemetryError(err)
 	}
 
+	telemetryWG.Wait()
 	telemetry.Track(context.WithoutCancel(ctx), "command_finished", properties, versionFlagValue())
 }
 
@@ -35,7 +39,9 @@ func trackTelemetryAsync(ctx context.Context, event string, properties map[strin
 
 	ctx = context.WithoutCancel(ctx)
 	version := versionFlagValue()
+	telemetryWG.Add(1)
 	go func() {
+		defer telemetryWG.Done()
 		telemetry.Track(ctx, event, properties, version)
 	}()
 }
