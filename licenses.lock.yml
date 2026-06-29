@@ -1648,7 +1648,7 @@ dependencies:
         - MIT
       status: allowed
     - module: golang.org/x/crypto
-      version: v0.50.0
+      version: v0.52.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1658,12 +1658,12 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/mod
-      version: v0.34.0
+      version: v0.35.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/net
-      version: v0.53.0
+      version: v0.54.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1678,17 +1678,17 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/sys
-      version: v0.43.0
+      version: v0.45.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/term
-      version: v0.42.0
+      version: v0.43.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/text
-      version: v0.36.0
+      version: v0.37.0
       licenses:
         - BSD-3-Clause
       status: allowed
