@@ -32,6 +32,10 @@ const (
 	ModeStream CDCMode = "stream" // Continuous streaming mode
 )
 
+// defaultPublicationName is the publication ingestr creates and manages when the
+// URI does not specify one.
+const defaultPublicationName = "ingestr_publication"
+
 type CDCConfig struct {
 	Publication   string
 	SlotName      string
@@ -96,12 +100,14 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping postgres: %w", err)
 	}
 
-	// Auto-create publication if not specified
+	// When no publication is specified in the URI, ingestr manages a default
+	// publication. Reconcile it on every run so it tracks the current set of
+	// logged tables; unlogged tables cannot be replicated and are skipped.
 	if cdcConfig.Publication == "" {
-		cdcConfig.Publication = "ingestr_publication"
-		if err := ensurePublicationExists(ctx, queryPool, cdcConfig.Publication); err != nil {
+		cdcConfig.Publication = defaultPublicationName
+		if err := ensureManagedPublication(ctx, queryPool, cdcConfig.Publication); err != nil {
 			queryPool.Close()
-			return fmt.Errorf("failed to create publication: %w", err)
+			return fmt.Errorf("failed to ensure publication: %w", err)
 		}
 	}
 
@@ -357,33 +363,181 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 	return cfg, parsed.String(), nil
 }
 
-func ensurePublicationExists(ctx context.Context, pool *pgxpool.Pool, pubName string) error {
-	var exists bool
-	err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = $1)", pubName).Scan(&exists)
-	if err != nil {
-		return fmt.Errorf("failed to check publication existence: %w", err)
-	}
+// pgTableRef identifies a Postgres table by schema and name.
+type pgTableRef struct {
+	schema string
+	name   string
+}
 
-	if exists {
-		config.Debug("[CDC] Publication %s already exists", pubName)
-		return nil
-	}
+// quoted returns the schema-qualified, safely quoted identifier for use in DDL.
+func (t pgTableRef) quoted() string {
+	return pgx.Identifier{t.schema, t.name}.Sanitize()
+}
 
-	config.Debug("[CDC] Creating publication %s FOR ALL TABLES", pubName)
-	// Use pgx.Identifier to safely quote the publication name - DDL statements don't support parameter placeholders
-	pubIdent := pgx.Identifier{pubName}.Sanitize()
-	_, err = pool.Exec(ctx, fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES", pubIdent))
+// display returns a human-readable schema.table name for log and warning output.
+func (t pgTableRef) display() string {
+	return t.schema + "." + t.name
+}
+
+// quotePublicationTables renders refs as a comma-separated, safely quoted list
+// for a CREATE/ALTER PUBLICATION ... TABLE clause.
+func quotePublicationTables(tables []pgTableRef) string {
+	parts := make([]string, len(tables))
+	for i, t := range tables {
+		parts[i] = t.quoted()
+	}
+	return strings.Join(parts, ", ")
+}
+
+// replicaIdentityClause is a SQL predicate over alias c (pg_class) that is true
+// when a table has a replica identity usable for publishing UPDATE/DELETE:
+// REPLICA IDENTITY FULL, DEFAULT backed by a primary key, or a valid USING INDEX.
+// A table failing this would raise SQLSTATE 55000 on UPDATE/DELETE once it is
+// part of a publication that publishes those operations.
+const replicaIdentityClause = `(
+	c.relreplident = 'f'
+	OR (c.relreplident = 'd' AND EXISTS (
+		SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary))
+	OR (c.relreplident = 'i' AND EXISTS (
+		SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisreplident AND i.indisvalid))
+)`
+
+// skipReason explains why a table is excluded from the managed publication.
+type skipReason int
+
+const (
+	skipUnlogged skipReason = iota
+	skipNoReplicaIdentity
+)
+
+// skippedTable pairs an excluded table with the reason it was excluded.
+type skippedTable struct {
+	ref    pgTableRef
+	reason skipReason
+}
+
+// warning returns the user-facing message describing why the table is skipped.
+func (s skippedTable) warning(pubName string) string {
+	switch s.reason {
+	case skipUnlogged:
+		return fmt.Sprintf("table %s is unlogged and will be skipped from CDC publication %q; changes to unlogged tables are not replicated", s.ref.display(), pubName)
+	case skipNoReplicaIdentity:
+		return fmt.Sprintf("table %s has no replica identity (no primary key) and will be skipped from CDC publication %q; including it would make UPDATE/DELETE on the source fail", s.ref.display(), pubName)
+	default:
+		return fmt.Sprintf("table %s will be skipped from CDC publication %q", s.ref.display(), pubName)
+	}
+}
+
+// selectPublishableTables inspects the user tables and splits them into those
+// that can be added to a logical-replication publication (logged, with a usable
+// replica identity) and those that must be skipped, along with the reason.
+// Temporary tables and system catalogs are ignored.
+func selectPublishableTables(ctx context.Context, pool *pgxpool.Pool) (included []pgTableRef, skipped []skippedTable, err error) {
+	const q = `
+		SELECT n.nspname, c.relname, c.relpersistence::text, ` + replicaIdentityClause + ` AS has_replica_identity
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind IN ('r', 'p')
+		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		ORDER BY n.nspname, c.relname
+	`
+	rows, err := pool.Query(ctx, q)
 	if err != nil {
-		// Handle race condition: another instance may have created the publication concurrently
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && (pgErr.Code == pgErrDuplicate || pgErr.Code == pgErrAlreadyExists) {
-			config.Debug("[CDC] Publication %s was created by another instance (concurrent race)", pubName)
-			return nil
+		return nil, nil, fmt.Errorf("failed to list tables: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			t                  pgTableRef
+			persistence        string
+			hasReplicaIdentity bool
+		)
+		if err := rows.Scan(&t.schema, &t.name, &persistence, &hasReplicaIdentity); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan table: %w", err)
 		}
-		return fmt.Errorf("failed to create publication: %w", err)
+		switch {
+		case persistence == "u":
+			skipped = append(skipped, skippedTable{ref: t, reason: skipUnlogged})
+		case persistence != "p":
+			// Temporary or other non-permanent relations are not replicated.
+			continue
+		case !hasReplicaIdentity:
+			skipped = append(skipped, skippedTable{ref: t, reason: skipNoReplicaIdentity})
+		default:
+			included = append(included, t)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("error iterating tables: %w", err)
+	}
+	return included, skipped, nil
+}
+
+// ensureManagedPublication creates or updates the ingestr-managed publication so
+// it covers exactly the tables currently eligible for logical replication. It
+// runs on every connection (only when no publication is supplied in the URI), so
+// the publication tracks tables added, dropped, or changed since the previous
+// run. Tables that are unlogged or lack a usable replica identity are skipped
+// with a warning.
+func ensureManagedPublication(ctx context.Context, pool *pgxpool.Pool, pubName string) error {
+	included, skipped, err := selectPublishableTables(ctx, pool)
+	if err != nil {
+		return err
 	}
 
-	config.Debug("[CDC] Publication %s created successfully", pubName)
+	for _, s := range skipped {
+		fmt.Printf("Warning: %s\n", s.warning(pubName))
+	}
+
+	if len(included) == 0 {
+		return fmt.Errorf("no tables eligible for replication for publication %q", pubName)
+	}
+
+	tableList := quotePublicationTables(included)
+	// Use pgx.Identifier to safely quote identifiers - DDL does not support parameter placeholders.
+	pubIdent := pgx.Identifier{pubName}.Sanitize()
+
+	var pubAllTables bool
+	err = pool.QueryRow(ctx, "SELECT puballtables FROM pg_publication WHERE pubname = $1", pubName).Scan(&pubAllTables)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		config.Debug("[CDC] Creating publication %s for %d table(s)", pubName, len(included))
+		if _, err = pool.Exec(ctx, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pubIdent, tableList)); err != nil {
+			// Another instance may have created it concurrently; fall back to
+			// reconciling its table set instead of failing the run.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && (pgErr.Code == pgErrDuplicate || pgErr.Code == pgErrAlreadyExists) {
+				config.Debug("[CDC] Publication %s created concurrently; updating its table set", pubName)
+				return setPublicationTables(ctx, pool, pubIdent, tableList)
+			}
+			return fmt.Errorf("failed to create publication: %w", err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to check publication existence: %w", err)
+	case pubAllTables:
+		// A publication left over from an older ingestr as FOR ALL TABLES cannot
+		// have its table set altered, so recreate it with the explicit list.
+		config.Debug("[CDC] Recreating FOR ALL TABLES publication %s with explicit logged-table list", pubName)
+		if _, err = pool.Exec(ctx, fmt.Sprintf("DROP PUBLICATION %s", pubIdent)); err != nil {
+			return fmt.Errorf("failed to drop legacy publication: %w", err)
+		}
+		if _, err = pool.Exec(ctx, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pubIdent, tableList)); err != nil {
+			return fmt.Errorf("failed to recreate publication: %w", err)
+		}
+		return nil
+	default:
+		config.Debug("[CDC] Updating publication %s to cover %d table(s)", pubName, len(included))
+		return setPublicationTables(ctx, pool, pubIdent, tableList)
+	}
+}
+
+// setPublicationTables replaces the table set of an existing FOR TABLE publication.
+func setPublicationTables(ctx context.Context, pool *pgxpool.Pool, pubIdent, tableList string) error {
+	if _, err := pool.Exec(ctx, fmt.Sprintf("ALTER PUBLICATION %s SET TABLE %s", pubIdent, tableList)); err != nil {
+		return fmt.Errorf("failed to update publication tables: %w", err)
+	}
 	return nil
 }
 
@@ -424,12 +578,19 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	var query string
 	if pubAllTables {
-		// For "FOR ALL TABLES" publications, query all user tables directly
+		// For "FOR ALL TABLES" publications, query all user tables directly.
+		// Exclude unlogged tables (their changes never reach the WAL) and tables
+		// without a usable replica identity (publishing them would make
+		// UPDATE/DELETE on the source fail), mirroring the managed-publication path.
 		query = `
-			SELECT schemaname, tablename
-			FROM pg_tables
-			WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-			ORDER BY schemaname, tablename
+			SELECT n.nspname, c.relname
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind IN ('r', 'p')
+			  AND c.relpersistence = 'p'
+			  AND ` + replicaIdentityClause + `
+			  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+			ORDER BY n.nspname, c.relname
 		`
 	} else {
 		// For specific table publications, use pg_publication_tables
