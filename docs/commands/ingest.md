@@ -72,6 +72,9 @@ ingestr ingest \
 ```
 
 > [!INFO]
+> **Postgres publications.** Pass `publication=<name>` to use a publication you manage yourself. If you omit it, ingestr creates and maintains a publication named `ingestr_publication`, refreshing it on every run to include every logged table that has a replica identity (a primary key, `REPLICA IDENTITY FULL`, or a replica-identity index). Tables that are unlogged, or that lack a replica identity, are skipped with a warning — their changes either never reach the WAL or would make `UPDATE`/`DELETE` on the source fail.
+
+> [!INFO]
 > Schema changes are picked up at startup. If the source schema changes while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
 
 ## General flags

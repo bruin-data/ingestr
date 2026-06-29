@@ -3,10 +3,12 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
+	"github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -94,6 +97,257 @@ func setupCDCSource(t *testing.T, ctx context.Context, connString string) {
 	// Grant replication privilege
 	_, err = pool.Exec(ctx, `ALTER USER testuser REPLICATION`)
 	require.NoError(t, err)
+}
+
+// publicationTables returns the "schema.table" entries currently in the named publication.
+func publicationTables(t *testing.T, ctx context.Context, pool *pgxpool.Pool, pub string) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = $1`, pub)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var schemaName, tableName string
+		require.NoError(t, rows.Scan(&schemaName, &tableName))
+		out = append(out, schemaName+"."+tableName)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// captureStdout runs fn while capturing everything written to os.Stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, r)
+	require.NoError(t, err)
+	return buf.String()
+}
+
+// assertRelationAbsent fails if schema.table exists in the destination database.
+func assertRelationAbsent(t *testing.T, ctx context.Context, db *sql.DB, schema, table string) {
+	t.Helper()
+	var present bool
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
+		schema, table).Scan(&present))
+	assert.Falsef(t, present, "table %s.%s should not have been replicated", schema, table)
+}
+
+// TestPostgresCDC_ManagedPublicationSelectsReplicatableTables verifies that when
+// no publication is supplied in the URI, ingestr builds and maintains a
+// publication containing only the tables eligible for logical replication. It
+// skips unlogged tables and tables without a replica identity (no primary key),
+// warns about each, and reconciles the table set on every connection.
+func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, connString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = container.Terminate(ctx) }()
+
+	pool, err := pgxpool.New(ctx, connString)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// logged_items: logged + primary key -> eligible.
+	_, err = pool.Exec(ctx, `CREATE TABLE public.logged_items (id SERIAL PRIMARY KEY, name TEXT)`)
+	require.NoError(t, err)
+	// unlogged_items: unlogged (even with a primary key) -> skipped.
+	_, err = pool.Exec(ctx, `CREATE UNLOGGED TABLE public.unlogged_items (id SERIAL PRIMARY KEY, name TEXT)`)
+	require.NoError(t, err)
+	// nopk_items: logged but no primary key -> skipped (no replica identity).
+	_, err = pool.Exec(ctx, `CREATE TABLE public.nopk_items (id INT, name TEXT)`)
+	require.NoError(t, err)
+
+	// CDC opens a replication connection, which requires the replication privilege.
+	_, err = pool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	// No publication param -> ingestr manages the default publication.
+	cdcURI := "postgres+cdc://" + connString[len("postgres://"):] + "&mode=batch"
+
+	src := postgres_cdc.NewPostgresCDCSource()
+	var connErr error
+	out := captureStdout(t, func() { connErr = src.Connect(ctx, cdcURI) })
+	require.NoError(t, connErr)
+	defer func() { _ = src.Close(ctx) }()
+
+	// Each excluded table is reported with the reason it was skipped.
+	assert.Contains(t, out, "public.unlogged_items")
+	assert.Contains(t, out, "unlogged")
+	assert.Contains(t, out, "public.nopk_items")
+	assert.Contains(t, out, "replica identity")
+
+	// The managed publication contains only the eligible table.
+	tables := publicationTables(t, ctx, pool, "ingestr_publication")
+	assert.Equal(t, []string{"public.logged_items"}, tables)
+
+	// GetTables (what the pipeline iterates) also excludes the ineligible tables.
+	infos, err := src.GetTables(ctx)
+	require.NoError(t, err)
+	var names []string
+	for _, ti := range infos {
+		names = append(names, ti.Name)
+	}
+	assert.Contains(t, names, "logged_items")
+	assert.NotContains(t, names, "unlogged_items")
+	assert.NotContains(t, names, "nopk_items")
+
+	// A logged table created after the first run is picked up on the next
+	// connection (publication is reconciled every run).
+	_, err = pool.Exec(ctx, `CREATE TABLE public.logged_items_2 (id SERIAL PRIMARY KEY)`)
+	require.NoError(t, err)
+
+	src2 := postgres_cdc.NewPostgresCDCSource()
+	require.NoError(t, src2.Connect(ctx, cdcURI))
+	defer func() { _ = src2.Close(ctx) }()
+
+	tables = publicationTables(t, ctx, pool, "ingestr_publication")
+	assert.ElementsMatch(t, []string{"public.logged_items", "public.logged_items_2"}, tables)
+}
+
+// TestPostgresCDC_ManagedPublicationHandlesPartitionedTables guards against
+// listing a partitioned parent together with its partitions in the publication,
+// which Postgres rejects (failing Connect). Only the leaf partition, which
+// physically holds rows, is published.
+func TestPostgresCDC_ManagedPublicationHandlesPartitionedTables(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, connString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = container.Terminate(ctx) }()
+
+	pool, err := pgxpool.New(ctx, connString)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	_, err = pool.Exec(ctx, `CREATE TABLE public.measurements (
+		id INT,
+		taken_on DATE,
+		PRIMARY KEY (id, taken_on)
+	) PARTITION BY RANGE (taken_on)`)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `CREATE TABLE public.measurements_2024 PARTITION OF public.measurements
+		FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')`)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	cdcURI := "postgres+cdc://" + connString[len("postgres://"):] + "&mode=batch"
+
+	src := postgres_cdc.NewPostgresCDCSource()
+	require.NoError(t, src.Connect(ctx, cdcURI), "Connect must not fail when partitioned tables are present")
+	defer func() { _ = src.Close(ctx) }()
+
+	tables := publicationTables(t, ctx, pool, "ingestr_publication")
+	assert.Contains(t, tables, "public.measurements_2024", "leaf partition should be published")
+	assert.NotContains(t, tables, "public.measurements", "partitioned parent should not be listed")
+}
+
+// TestPostgresCDC_ManagedPublicationEndToEnd runs the full pipeline through the
+// auto-managed publication (no publication= in the URI) and verifies that only
+// eligible tables are replicated: a logged table with a primary key replicates
+// end-to-end (snapshot then CDC insert/update), while an unlogged table and a
+// table without a primary key are excluded entirely.
+func TestPostgresCDC_ManagedPublicationEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if pgDest.uri == "" {
+		t.Skip("shared postgres dest container not available")
+	}
+
+	ctx := context.Background()
+
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	// widgets: logged + primary key -> eligible (happy path).
+	_, err = srcPool.Exec(ctx, `CREATE TABLE public.widgets (id INT PRIMARY KEY, name TEXT)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.widgets (id, name) VALUES (1, 'alpha'), (2, 'beta')`)
+	require.NoError(t, err)
+
+	// events_unlogged: unlogged -> skipped.
+	_, err = srcPool.Exec(ctx, `CREATE UNLOGGED TABLE public.events_unlogged (id INT PRIMARY KEY, name TEXT)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.events_unlogged (id, name) VALUES (1, 'nope')`)
+	require.NoError(t, err)
+
+	// logs_nopk: logged but no primary key -> skipped (no replica identity).
+	_, err = srcPool.Exec(ctx, `CREATE TABLE public.logs_nopk (id INT, msg TEXT)`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.logs_nopk (id, msg) VALUES (1, 'nope')`)
+	require.NoError(t, err)
+
+	_, err = srcPool.Exec(ctx, `ALTER USER testuser REPLICATION`)
+	require.NoError(t, err)
+
+	destSchema := uniqueSchemaName(t, "cdc_managed")
+	ensurePostgresSchema(t, ctx, pgDest.uri, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, pgDest.uri, destSchema) })
+
+	// No publication= -> ingestr manages the publication itself.
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&mode=batch&dest_schema=" + destSchema,
+		DestURI: pgDest.uri,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	pg, err := sql.Open("pgx", pgDest.uri)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pg.Close() })
+
+	// Happy path: the eligible table is snapshotted to the destination.
+	var count int
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q.widgets`, destSchema)).Scan(&count))
+	assert.Equal(t, 2, count, "widgets snapshot")
+
+	// The excluded tables must not have been replicated at all.
+	assertRelationAbsent(t, ctx, pg, destSchema, "events_unlogged")
+	assertRelationAbsent(t, ctx, pg, destSchema, "logs_nopk")
+
+	// Subsequent CDC: an insert and an update on the eligible table propagate.
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.widgets (id, name) VALUES (3, 'gamma')`)
+	require.NoError(t, err)
+	_, err = srcPool.Exec(ctx, `UPDATE public.widgets SET name = 'alpha2' WHERE id = 1`)
+	require.NoError(t, err)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q.widgets`, destSchema)).Scan(&count))
+	assert.Equal(t, 3, count, "widgets after CDC insert")
+
+	var name string
+	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT name FROM %q.widgets WHERE id = 1`, destSchema)).Scan(&name))
+	assert.Equal(t, "alpha2", name, "widgets after CDC update")
+
+	// The excluded tables remain absent after a second run.
+	assertRelationAbsent(t, ctx, pg, destSchema, "events_unlogged")
+	assertRelationAbsent(t, ctx, pg, destSchema, "logs_nopk")
 }
 
 func TestPostgresCDC_Snapshot(t *testing.T) {

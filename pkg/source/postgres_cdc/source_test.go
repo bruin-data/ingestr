@@ -102,6 +102,36 @@ func TestParseURIConfig(t *testing.T) {
 	}
 }
 
+func TestQuotePublicationTables(t *testing.T) {
+	tests := []struct {
+		name   string
+		tables []pgTableRef
+		want   string
+	}{
+		{
+			name:   "single public table",
+			tables: []pgTableRef{{schema: "public", name: "users"}},
+			want:   `"public"."users"`,
+		},
+		{
+			name:   "multiple schemas",
+			tables: []pgTableRef{{schema: "public", name: "users"}, {schema: "app", name: "orders"}},
+			want:   `"public"."users", "app"."orders"`,
+		},
+		{
+			name:   "identifiers needing quoting",
+			tables: []pgTableRef{{schema: "public", name: "Mixed Case"}, {schema: "public", name: `weird"name`}},
+			want:   `"public"."Mixed Case", "public"."weird""name"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, quotePublicationTables(tt.tables))
+		})
+	}
+}
+
 func TestBuildReplicationConnString(t *testing.T) {
 	tests := []struct {
 		name string
