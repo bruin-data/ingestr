@@ -3,6 +3,7 @@ package mqtt
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,7 +118,7 @@ func TestMessageToItemPreservesMessageID(t *testing.T) {
 	}
 
 	item := messageToItem(msg, 7)
-	if item["msg_id"] != "sensors/temp:42" {
+	if got, ok := item["msg_id"].(string); !ok || !strings.HasPrefix(got, "sensors/temp:42:") {
 		t.Fatalf("msg_id = %v", item["msg_id"])
 	}
 	if item["message_id"] != int64(42) {
@@ -145,6 +146,33 @@ func TestMessageToItemPreservesMessageID(t *testing.T) {
 	metadata := decoded["metadata"].(map[string]any)
 	if metadata["message_id"] != float64(42) {
 		t.Fatalf("metadata message_id = %v", metadata["message_id"])
+	}
+}
+
+func TestMQTTMessageIDIncludesFingerprintWhenPacketIDExists(t *testing.T) {
+	msg := fakeMessage{
+		topic:     "sensors/temp",
+		qos:       1,
+		messageID: 42,
+		payload:   []byte(`{"device":"a","value":21.5}`),
+	}
+	redelivery := msg
+	redelivery.duplicate = true
+	differentPayload := msg
+	differentPayload.payload = []byte(`{"device":"a","value":22.0}`)
+
+	msgID, numericID := mqttMsgID(msg, 7)
+	redeliveryID, _ := mqttMsgID(redelivery, 100)
+	otherID, _ := mqttMsgID(differentPayload, 8)
+
+	if numericID != int64(42) {
+		t.Fatalf("numericID = %v, want 42", numericID)
+	}
+	if msgID != redeliveryID {
+		t.Fatalf("redelivery msg_id changed: %q != %q", msgID, redeliveryID)
+	}
+	if msgID == otherID {
+		t.Fatalf("different payload with reused packet ID produced same msg_id: %q", msgID)
 	}
 }
 

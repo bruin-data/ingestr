@@ -433,7 +433,7 @@ func messageMetadata(msg paho.Message, numericID any) map[string]any {
 
 func mqttMsgID(msg paho.Message, seq int64) (string, any) {
 	if id := msg.MessageID(); id != 0 {
-		return fmt.Sprintf("%s:%d", msg.Topic(), id), int64(id)
+		return fmt.Sprintf("%s:%d:%s", msg.Topic(), id, mqttMessageFingerprint(msg)), int64(id)
 	}
 	h := sha256.New()
 	h.Write([]byte(msg.Topic()))
@@ -441,6 +441,20 @@ func mqttMsgID(msg paho.Message, seq int64) (string, any) {
 	_, _ = fmt.Fprintf(h, ":%d", seq)
 	sum := h.Sum(nil)
 	return strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:18]), "="), nil
+}
+
+func mqttMessageFingerprint(msg paho.Message) string {
+	h := sha256.New()
+	h.Write([]byte(msg.Topic()))
+	h.Write([]byte{msg.Qos()})
+	if msg.Retained() {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
+	h.Write(msg.Payload())
+	sum := h.Sum(nil)
+	return strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:12]), "=")
 }
 
 func decodePayload(payload []byte) any {
