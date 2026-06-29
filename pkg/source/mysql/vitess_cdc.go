@@ -398,19 +398,22 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 				for i, f := range fe.Fields {
 					info.idxByName[strings.ToLower(f.Name)] = i
 				}
-				fieldsByTable[fe.TableName] = info
+				fieldsByTable[s.bareTableName(fe.TableName)] = info
 
 			case binlogdatapb.VEventType_ROW:
 				re := ev.RowEvent
 				if re == nil {
 					continue
 				}
-				outSchema := schemaByTable[re.TableName]
-				info := fieldsByTable[re.TableName]
+				// VStream reports keyspace-qualified table names (e.g. "vtdb.items");
+				// our keys are bare table names.
+				bare := s.bareTableName(re.TableName)
+				outSchema := schemaByTable[bare]
+				info := fieldsByTable[bare]
 				if outSchema == nil || info == nil {
 					continue
 				}
-				rows, derr := vitessDecodeRowChanges(re, outSchema, info)
+				rows, derr := vitessDecodeRowChanges(bare, re, outSchema, info)
 				if derr != nil {
 					return derr
 				}
@@ -539,7 +542,7 @@ func (s *VitessCDCSource) listShards(ctx context.Context) ([]string, error) {
 	return shards, nil
 }
 
-func vitessDecodeRowChanges(re *binlogdatapb.RowEvent, outSchema *schema.TableSchema, info *vitessFieldInfo) ([]vitessTxnRow, error) {
+func vitessDecodeRowChanges(bareName string, re *binlogdatapb.RowEvent, outSchema *schema.TableSchema, info *vitessFieldInfo) ([]vitessTxnRow, error) {
 	sourceCols := sourceColumnsWithoutMySQLCDC(outSchema)
 	pkIdx := vitessPKFieldIndexes(outSchema.PrimaryKeys, info.idxByName)
 
@@ -552,14 +555,14 @@ func vitessDecodeRowChanges(re *binlogdatapb.RowEvent, outSchema *schema.TableSc
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, vitessTxnRow{bareName: re.TableName, values: vals, deleted: false})
+			out = append(out, vitessTxnRow{bareName: bareName, values: vals, deleted: false})
 
 		case after == nil && before != nil: // DELETE
 			vals, err := vitessRowValues(info.fields, before, sourceCols, info.idxByName)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, vitessTxnRow{bareName: re.TableName, values: vals, deleted: true})
+			out = append(out, vitessTxnRow{bareName: bareName, values: vals, deleted: true})
 
 		case after != nil && before != nil: // UPDATE
 			if vitessPKChanged(info.fields, before, after, pkIdx) {
@@ -567,16 +570,25 @@ func vitessDecodeRowChanges(re *binlogdatapb.RowEvent, outSchema *schema.TableSc
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, vitessTxnRow{bareName: re.TableName, values: vals, deleted: true})
+				out = append(out, vitessTxnRow{bareName: bareName, values: vals, deleted: true})
 			}
 			vals, err := vitessRowValues(info.fields, after, sourceCols, info.idxByName)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, vitessTxnRow{bareName: re.TableName, values: vals, deleted: false})
+			out = append(out, vitessTxnRow{bareName: bareName, values: vals, deleted: false})
 		}
 	}
 	return out, nil
+}
+
+// bareTableName strips the leading "keyspace." that VStream prefixes onto event
+// table names, yielding the bare table name used as our internal map key.
+func (s *VitessCDCSource) bareTableName(name string) string {
+	if after, ok := strings.CutPrefix(name, s.keyspace+"."); ok {
+		return after
+	}
+	return name
 }
 
 // vitessRowValues decodes a VStream row into source-column-ordered Go values,

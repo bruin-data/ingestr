@@ -37,10 +37,14 @@ func startVitessCDCContainer(ctx context.Context) (testcontainers.Container, str
 			Image:        "vitess/vttestserver:mysql80",
 			ExposedPorts: []string{vitessCDCMySQLPort, vitessCDCGRPCPort},
 			Env: map[string]string{
-				"PORT":            vitessCDCBasePort,
-				"KEYSPACES":       vitessCDCKeyspace,
-				"NUM_SHARDS":      "1",
-				"MYSQL_BIND_HOST": "0.0.0.0",
+				"PORT":       vitessCDCBasePort,
+				"KEYSPACES":  vitessCDCKeyspace,
+				"NUM_SHARDS": "1",
+				// vtcombo binds its gRPC service to 127.0.0.1 by default, which is
+				// unreachable through the mapped port; bind both MySQL and vtcombo
+				// (vtgate gRPC, used by VStream) to all interfaces.
+				"MYSQL_BIND_HOST":   "0.0.0.0",
+				"VTCOMBO_BIND_HOST": "0.0.0.0",
 			},
 			WaitingFor: wait.ForListeningPort(vitessCDCMySQLPort).WithStartupTimeout(240 * time.Second),
 		},

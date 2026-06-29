@@ -142,7 +142,7 @@ func TestVitessDecodeRowChanges(t *testing.T) {
 	}
 
 	t.Run("insert", func(t *testing.T) {
-		changes, err := vitessDecodeRowChanges(&binlogdatapb.RowEvent{
+		changes, err := vitessDecodeRowChanges("items", &binlogdatapb.RowEvent{
 			TableName:  "items",
 			RowChanges: []*binlogdatapb.RowChange{{After: row(1, "a")}},
 		}, out, info)
@@ -158,7 +158,7 @@ func TestVitessDecodeRowChanges(t *testing.T) {
 	})
 
 	t.Run("delete", func(t *testing.T) {
-		changes, err := vitessDecodeRowChanges(&binlogdatapb.RowEvent{
+		changes, err := vitessDecodeRowChanges("items", &binlogdatapb.RowEvent{
 			TableName:  "items",
 			RowChanges: []*binlogdatapb.RowChange{{Before: row(2, "b")}},
 		}, out, info)
@@ -171,7 +171,7 @@ func TestVitessDecodeRowChanges(t *testing.T) {
 	})
 
 	t.Run("update without pk change", func(t *testing.T) {
-		changes, err := vitessDecodeRowChanges(&binlogdatapb.RowEvent{
+		changes, err := vitessDecodeRowChanges("items", &binlogdatapb.RowEvent{
 			TableName:  "items",
 			RowChanges: []*binlogdatapb.RowChange{{Before: row(1, "a"), After: row(1, "b")}},
 		}, out, info)
@@ -184,7 +184,7 @@ func TestVitessDecodeRowChanges(t *testing.T) {
 	})
 
 	t.Run("update with pk change emits tombstone and upsert", func(t *testing.T) {
-		changes, err := vitessDecodeRowChanges(&binlogdatapb.RowEvent{
+		changes, err := vitessDecodeRowChanges("items", &binlogdatapb.RowEvent{
 			TableName:  "items",
 			RowChanges: []*binlogdatapb.RowChange{{Before: row(1, "a"), After: row(2, "a")}},
 		}, out, info)
