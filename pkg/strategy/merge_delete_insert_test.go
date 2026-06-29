@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
 func TestMergeStrategy_Validate(t *testing.T) {
@@ -248,6 +249,46 @@ func TestDeleteInsertStrategy_Execute_TracksIncrementalKeyCaseInsensitive(t *tes
 	}
 	if di.IntervalStart != int64(5) || di.IntervalEnd != int64(10) {
 		t.Fatalf("DeleteInsertOptions interval = %v..%v, want 5..10", di.IntervalStart, di.IntervalEnd)
+	}
+}
+
+func TestDeleteInsertStrategy_Execute_ReadsWithSourceIncrementalKeyAfterRename(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+	job.Config.IncrementalKey = "updated_at"
+	job.Schema.Columns = []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "updated_at", DataType: schema.TypeInt64, Nullable: false},
+	}
+	job.Schema.IncrementalKey = "updated_at"
+	job.SourceSchema = &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "updatedAt", DataType: schema.TypeInt64, Nullable: false},
+		},
+		IncrementalKey: "updatedAt",
+	}
+	job.ColumnRenamer = transformer.NewColumnRenamer(map[string]string{"updatedAt": "updated_at"})
+
+	rec := int64RecordBatch(t, "updated_at", []int64{5, 10, 7}, nil)
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: rec})
+
+	strat := &DeleteInsertStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	src.mu.Lock()
+	readIncrementalKey := src.readOpts.IncrementalKey
+	src.mu.Unlock()
+	if readIncrementalKey != "updatedAt" {
+		t.Fatalf("ReadOptions.IncrementalKey = %q, want updatedAt", readIncrementalKey)
+	}
+	if len(dest.diCalls) != 1 {
+		t.Fatalf("expected 1 DeleteInsertTable call, got %d", len(dest.diCalls))
+	}
+	if got := dest.diCalls[0].IncrementalKey; got != "updated_at" {
+		t.Fatalf("DeleteInsertOptions.IncrementalKey = %q, want updated_at", got)
 	}
 }
 

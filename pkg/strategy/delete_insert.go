@@ -70,7 +70,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		parallelism = 4
 	}
 
-	sourceIncrementalKey, _ := resolveSchemaColumn(job.SourceSchema, job.Config.IncrementalKey)
+	sourceIncrementalKey := sourceIncrementalKeyForRead(job)
 	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
 
 	readOpts := source.ReadOptions{
@@ -173,6 +173,22 @@ func resolveSchemaColumn(tableSchema *schema.TableSchema, columnName string) (st
 		}
 	}
 	return columnName, schema.TypeUnknown
+}
+
+func sourceIncrementalKeyForRead(job *IngestionJob) string {
+	sourceKey := job.Config.IncrementalKey
+	if job.SourceSchema != nil && job.SourceSchema.IncrementalKey != "" {
+		sourceKey = job.SourceSchema.IncrementalKey
+	} else if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
+		for src, dst := range job.ColumnRenamer.Mapping() {
+			if dst == job.Config.IncrementalKey || strings.EqualFold(dst, job.Config.IncrementalKey) {
+				sourceKey = src
+				break
+			}
+		}
+	}
+	sourceKey, _ = resolveSchemaColumn(job.SourceSchema, sourceKey)
+	return sourceKey
 }
 
 func resolveIntervalBound(userProvided interface{}, autoDetected interface{}) interface{} {

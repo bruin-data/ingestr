@@ -482,6 +482,13 @@ WHERE source.%s = 1`,
 			config.LogFailedQuery(markDeletedSQL, err)
 			return fmt.Errorf("failed to mark deleted records: %w", err)
 		}
+
+		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQL(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys)
+		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
+		if _, err := tx.ExecContext(ctx, insertDeletedSQL); err != nil {
+			config.LogFailedQuery(insertDeletedSQL, err)
+			return fmt.Errorf("failed to insert CDC delete tombstones: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -509,6 +516,19 @@ func buildMergeSQL(targetTable, sourceExpr string, columns, primaryKeys, updateC
 		strings.Join(sourceColumnRefs(columns, "source"), ", "),
 	)
 	return b.String()
+}
+
+func buildCDCDeleteTombstoneInsertSQL(targetTable, sourceExpr string, columns, primaryKeys []string) string {
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.%s = 1 AND NOT EXISTS (SELECT 1 FROM %s target WHERE %s)",
+		quoteTable(targetTable),
+		strings.Join(quoteColumns(columns), ", "),
+		strings.Join(sourceColumnRefs(columns, "source"), ", "),
+		sourceExpr,
+		quoteColumn(destination.CDCDeletedColumn),
+		quoteTable(targetTable),
+		buildJoinCondition(primaryKeys, "target", "source"),
+	)
 }
 
 func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -917,8 +937,8 @@ func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryK
 
 	colDefs := make([]string, 0, len(columns)+1)
 	for _, col := range columns {
-		isPrimaryKey := col.IsPrimaryKey || primaryKeySet[strings.ToLower(col.Name)]
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), mapDataTypeToOracle(col, isPrimaryKey)))
+		isComparableString := col.IsPrimaryKey || primaryKeySet[strings.ToLower(col.Name)] || strings.EqualFold(col.Name, tableSchema.IncrementalKey)
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), mapDataTypeToOracle(col, isComparableString)))
 	}
 	if len(primaryKeys) > 0 {
 		quotedKeys := quoteColumns(primaryKeys)

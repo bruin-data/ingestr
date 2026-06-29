@@ -175,6 +175,26 @@ func TestBuildCreateTableSQL_StringPrimaryKeyUsesVarchar(t *testing.T) {
 )`, got)
 }
 
+func TestBuildCreateTableSQL_StringIncrementalKeyUsesVarchar(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "cursor", DataType: schema.TypeString},
+			{Name: "name", DataType: schema.TypeString},
+		},
+		IncrementalKey: "cursor",
+	}
+
+	got := buildCreateTableSQL("users", tableSchema, []string{"id"})
+
+	assert.Equal(t, `CREATE TABLE "USERS" (
+  "ID" NUMBER(19,0),
+  "CURSOR" VARCHAR2(4000 CHAR),
+  "NAME" CLOB,
+  PRIMARY KEY ("ID")
+)`, got)
+}
+
 func TestBuildCreateTableSQL_SchemaPrimaryKeyUsesVarcharWithoutConstraint(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
@@ -215,6 +235,26 @@ USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT"
 ON (target."ID" = source."ID")
 WHEN MATCHED THEN UPDATE SET target."NAME" = source."NAME", target."UPDATED_AT" = source."UPDATED_AT"
 WHEN NOT MATCHED THEN INSERT ("ID", "NAME", "UPDATED_AT") VALUES (source."ID", source."NAME", source."UPDATED_AT")`, got)
+}
+
+func TestBuildCDCDeleteTombstoneInsertSQL(t *testing.T) {
+	source := oracleDedupSource(
+		[]string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		[]string{"id"},
+		quoteTable("users_staging"),
+		destination.CDCLatestOverallOrderBy(quoteColumn),
+		"",
+		"source",
+	)
+
+	got := buildCDCDeleteTombstoneInsertSQL(
+		"users",
+		source,
+		[]string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		[]string{"id"},
+	)
+
+	assert.Equal(t, `INSERT INTO "USERS" ("ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT") SELECT source."ID", source."NAME", source."_CDC_LSN", source."_CDC_DELETED", source."_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) bruin_dedup_rn FROM "USERS_STAGING") bruin_numbered WHERE bruin_dedup_rn = 1) source WHERE source."_CDC_DELETED" = 1 AND NOT EXISTS (SELECT 1 FROM "USERS" target WHERE target."ID" = source."ID")`, got)
 }
 
 func TestMergeTableRequiresPrimaryKey(t *testing.T) {
