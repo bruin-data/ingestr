@@ -281,9 +281,10 @@ func prepareIcebergRESTLocalDataDir(t *testing.T, destURI, table string) {
 	require.Len(t, parts, 2)
 
 	tableDir := filepath.Join(warehouse, parts[0], parts[1])
-	require.NoError(t, os.MkdirAll(filepath.Join(tableDir, "data"), 0o777))
-	require.NoError(t, os.Chmod(tableDir, 0o777))
-	require.NoError(t, os.Chmod(filepath.Join(tableDir, "data"), 0o777))
+	for _, dir := range []string{tableDir, filepath.Join(tableDir, "data"), filepath.Join(tableDir, "metadata")} {
+		require.NoError(t, os.MkdirAll(dir, 0o777))
+		require.NoError(t, os.Chmod(dir, 0o777))
+	}
 }
 
 func dockerSharedTempDir(t *testing.T, prefix string) string {
