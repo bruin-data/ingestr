@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
@@ -331,6 +332,12 @@ func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 		Table:  tableName,
 		Schema: evolvedSchema,
 	}))
+	_, err = dest.ApplySchemaEvolution(ctx, tableName, addColumnComparison(schema.Column{
+		Name:     "age",
+		DataType: schema.TypeInt64,
+		Nullable: true,
+	}))
+	require.NoError(t, err)
 	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64PairBatch(t, "id", []int64{4}, "age", []int64{31})), destination.WriteOptions{
 		Table:  tableName,
 		Schema: evolvedSchema,
@@ -362,6 +369,42 @@ func TestDestinationMergeUnsupported(t *testing.T) {
 
 	require.False(t, dest.SupportsMergeStrategy())
 	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{}), "merge strategy is not supported")
+}
+
+func TestDestinationApplySchemaEvolutionPromotesColumnType(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.promoted_events"
+	initialSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt32, Nullable: false},
+		},
+	}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() {
+		require.NoError(t, dest.Close(ctx))
+	}()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  tableName,
+		Schema: initialSchema,
+	}))
+	_, err := dest.ApplySchemaEvolution(ctx, tableName, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type:       schemaevolution.ChangeWidenType,
+			ColumnName: "id",
+			OldColumn:  &initialSchema.Columns[0],
+			NewColumn:  schema.Column{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		}},
+	})
+	require.NoError(t, err)
+
+	gotSchema, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.Equal(t, schema.TypeInt64, icebergColumn(t, gotSchema, "id").DataType)
+	require.True(t, icebergColumn(t, gotSchema, "id").Nullable)
 }
 
 func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
@@ -574,6 +617,17 @@ func recordBatchesThenError(err error, batches ...arrow.RecordBatch) <-chan sour
 	records <- source.RecordBatchResult{Err: err}
 	close(records)
 	return records
+}
+
+func addColumnComparison(col schema.Column) *schemaevolution.SchemaComparison {
+	return &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type:       schemaevolution.ChangeAddColumn,
+			ColumnName: col.Name,
+			NewColumn:  col,
+		}},
+	}
 }
 
 func icebergRowCount(ctx context.Context, t *testing.T, dest *Destination, tableName string) int64 {

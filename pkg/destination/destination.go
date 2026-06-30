@@ -144,12 +144,6 @@ type CDCMergeAware interface {
 	SupportsCDCMerge() bool
 }
 
-// PrepareTableSchemaEvolver is an optional interface for destinations that
-// apply destination schema changes inside PrepareTable instead of SQL migration.
-type PrepareTableSchemaEvolver interface {
-	SupportsPrepareTableSchemaEvolution() bool
-}
-
 // AtomicCommitWriter is an optional interface for destinations that can make a
 // write atomically visible after the write phase completes.
 type AtomicCommitWriter interface {

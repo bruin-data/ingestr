@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
@@ -40,11 +41,15 @@ func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (st
 	return "", nil
 }
 
-type mockPrepareEvolutionDestination struct {
+type mockSchemaEvolutionDestination struct {
 	mockDestination
 }
 
-func (m *mockPrepareEvolutionDestination) SupportsPrepareTableSchemaEvolution() bool {
+func (m *mockSchemaEvolutionDestination) ApplySchemaEvolution(_ context.Context, _ string, _ *schemaevolution.SchemaComparison) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockSchemaEvolutionDestination) SupportsColumnTypeChanges() bool {
 	return true
 }
 
@@ -582,7 +587,7 @@ func TestApplyDestinationSchemaConstraints_OracleStringIncrementalKey(t *testing
 	}
 }
 
-func TestEvolveSchemaIfNeededKeepsFinalSchemaForPrepareTableEvolution(t *testing.T) {
+func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 	destSchema := tschema(
 		"events",
 		tcol("id", schema.TypeInt64),
@@ -596,10 +601,10 @@ func TestEvolveSchemaIfNeededKeepsFinalSchemaForPrepareTableEvolution(t *testing
 		config: &config.IngestConfig{
 			DestTable: "events",
 		},
-		dest: &mockPrepareEvolutionDestination{
+		dest: &mockSchemaEvolutionDestination{
 			mockDestination: mockDestination{
 				tableSchema: destSchema,
-				scheme:      "prepare_evolver_without_dialect",
+				scheme:      "schema_evolver_without_dialect",
 			},
 		},
 	}
@@ -611,8 +616,14 @@ func TestEvolveSchemaIfNeededKeepsFinalSchemaForPrepareTableEvolution(t *testing
 	if plan == nil || plan.FinalSchema == nil {
 		t.Fatal("expected final schema plan")
 	}
-	if plan.HasMigration() {
-		t.Fatal("prepare-table evolution should not create SQL migration")
+	if plan.Table != "events" {
+		t.Fatalf("plan table = %q, want events", plan.Table)
+	}
+	if !plan.HasChanges() {
+		t.Fatal("expected abstract comparison changes")
+	}
+	if len(plan.Comparison.Changes) != 1 || plan.Comparison.Changes[0].Type != schemaevolution.ChangeAddColumn {
+		t.Fatalf("unexpected plan comparison: %#v", plan.Comparison)
 	}
 
 	gotColumns := plan.FinalSchema.ColumnNames()

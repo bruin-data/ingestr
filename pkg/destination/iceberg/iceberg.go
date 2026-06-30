@@ -100,16 +100,12 @@ func (d *Destination) PrepareTable(ctx context.Context, opts destination.Prepare
 		return err
 	}
 	if exists {
-		tbl, err := d.catalog.LoadTable(ctx, ident)
-		if err != nil {
-			return fmt.Errorf("iceberg: failed to load table %s: %w", opts.Table, err)
-		}
 		if opts.DropFirst {
-			if err := validateIdentifierFieldsForEvolution(tbl.Schema(), tableSchema, true); err != nil {
-				return err
+			tbl, err := d.catalog.LoadTable(ctx, ident)
+			if err != nil {
+				return fmt.Errorf("iceberg: failed to load table %s: %w", opts.Table, err)
 			}
-		} else {
-			if err := d.evolveTableSchema(ctx, tbl, tableSchema, false); err != nil {
+			if err := validateIdentifierFieldsForEvolution(tbl.Schema(), tableSchema, true); err != nil {
 				return err
 			}
 		}
@@ -249,9 +245,6 @@ func (d *Destination) SupportsMergeStrategy() bool        { return false }
 func (d *Destination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *Destination) SupportsSCD2Strategy() bool         { return false }
 func (d *Destination) SupportsAtomicSwap() bool           { return false }
-func (d *Destination) SupportsPrepareTableSchemaEvolution() bool {
-	return true
-}
 
 func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identifier, opts destination.PrepareOptions) error {
 	iceSchema, err := icebergSchemaFromTableSchema(opts.Schema)
@@ -281,21 +274,6 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 			return nil
 		}
 		return fmt.Errorf("iceberg: failed to create table %s: %w", strings.Join(ident, "."), err)
-	}
-	return nil
-}
-
-func (d *Destination) evolveTableSchema(ctx context.Context, tbl *icebergtable.Table, desired *schema.TableSchema, reset bool) error {
-	txn := tbl.NewTransaction()
-	changed, err := d.stageTableSchemaUpdate(txn, tbl, desired, reset)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-	if _, err := txn.Commit(ctx); err != nil {
-		return fmt.Errorf("iceberg: failed to commit schema update: %w", err)
 	}
 	return nil
 }
