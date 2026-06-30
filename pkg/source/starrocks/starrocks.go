@@ -420,18 +420,20 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 		}
 	}
 
-	if rowCount == 0 {
-		for _, b := range builders {
-			b.Release()
-		}
-		return nil, 0, nil
-	}
-
+	// Check rows.Err() before the empty-result return: a mid-stream error makes
+	// rows.Next() report false, which is otherwise indistinguishable from EOF.
 	if err := rows.Err(); err != nil {
 		for _, b := range builders {
 			b.Release()
 		}
 		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	if rowCount == 0 {
+		for _, b := range builders {
+			b.Release()
+		}
+		return nil, 0, nil
 	}
 
 	arrays := make([]arrow.Array, len(builders))
