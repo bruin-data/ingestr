@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,8 +67,25 @@ func mergeStagingInto(ctx context.Context, dest destination.Destination, staging
 		TargetTable:    targetTable,
 		PrimaryKeys:    primaryKeys,
 		Columns:        destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
-		IncrementalKey: incrementalKey,
+		IncrementalKey: mergeIncrementalKeyForSchema(tableSchema, incrementalKey),
 	})
+}
+
+func mergeIncrementalKeyForSchema(tableSchema *schema.TableSchema, incrementalKey string) string {
+	if incrementalKey == "" || tableSchema == nil {
+		return ""
+	}
+	for _, col := range tableSchema.Columns {
+		if col.Name == incrementalKey {
+			return col.Name
+		}
+	}
+	for _, col := range tableSchema.Columns {
+		if strings.EqualFold(col.Name, incrementalKey) {
+			return col.Name
+		}
+	}
+	return ""
 }
 
 // warnIfCDCMergeUnsupported prints a warning when CDC data is headed at a
@@ -169,7 +187,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
 	config.Debug("[MERGE] Executing merge operation")
-	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, ""); err != nil {
+	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 

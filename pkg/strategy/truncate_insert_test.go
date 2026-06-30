@@ -30,6 +30,26 @@ func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	}
 }
 
+func TestTruncateInsertStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalKey = "updated_at"
+	src.readCh = mustClosedRecords()
+
+	strat := &TruncateInsertStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected 1 MergeTable call, got %d", len(dest.mergeCalls))
+	}
+	if dest.mergeCalls[0].IncrementalKey != "" {
+		t.Fatalf("MergeOptions.IncrementalKey = %q, want empty for missing staging column", dest.mergeCalls[0].IncrementalKey)
+	}
+}
+
 func TestTruncateInsertStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}

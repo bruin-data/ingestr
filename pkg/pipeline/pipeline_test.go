@@ -40,6 +40,14 @@ func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (st
 	return "", nil
 }
 
+type mockPrepareEvolutionDestination struct {
+	mockDestination
+}
+
+func (m *mockPrepareEvolutionDestination) SupportsPrepareTableSchemaEvolution() bool {
+	return true
+}
+
 func TestRunRejectsChangeTrackingSQLLimitBeforeSourceLookup(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.SourceURI = "mssql+ct://example:1433/app"
@@ -572,6 +580,43 @@ func TestApplyDestinationSchemaConstraints_OracleStringIncrementalKey(t *testing
 	if tableSchema.Columns[2].MaxLength != 0 {
 		t.Fatalf("non-incremental string MaxLength = %d, want 0", tableSchema.Columns[2].MaxLength)
 	}
+}
+
+func TestEvolveSchemaIfNeededKeepsFinalSchemaForPrepareTableEvolution(t *testing.T) {
+	destSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+	)
+	sourceSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol("age", schema.TypeInt64),
+	)
+	p := &Pipeline{
+		config: &config.IngestConfig{
+			DestTable: "events",
+		},
+		dest: &mockPrepareEvolutionDestination{
+			mockDestination: mockDestination{
+				tableSchema: destSchema,
+				scheme:      "prepare_evolver_without_dialect",
+			},
+		},
+	}
+
+	plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyAppend)
+	if err != nil {
+		t.Fatalf("evolveSchemaIfNeeded() error = %v", err)
+	}
+	if plan == nil || plan.FinalSchema == nil {
+		t.Fatal("expected final schema plan")
+	}
+	if plan.HasMigration() {
+		t.Fatal("prepare-table evolution should not create SQL migration")
+	}
+
+	gotColumns := plan.FinalSchema.ColumnNames()
+	assertColumns(t, "columns", gotColumns, []string{"id", "age"})
 }
 
 func TestNamingConsistency(t *testing.T) {

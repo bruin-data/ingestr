@@ -650,6 +650,7 @@ func TestStreaming_MergePassesIncrementalKeyForOrdering(t *testing.T) {
 	dest := &fakeDestination{}
 	st := mergeTableState("ds.tbl")
 	st.incrementalKey = "_ingestr_order"
+	st.schema.Columns = append(st.schema.Columns, schema.Column{Name: "_ingestr_order", DataType: schema.TypeInt64, Nullable: false})
 	loop := newTestLoop(dest, StreamingOptions{
 		FlushInterval: time.Hour,
 		FlushRecords:  1,
