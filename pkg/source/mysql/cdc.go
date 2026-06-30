@@ -394,9 +394,12 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 	query.Del("flavor")
 	query.Del("mode")
 	query.Del("server_id")
-	// Vitess-only parameters: irrelevant to (and rejected by) the MySQL DSN.
+	// Vitess-only parameters: irrelevant to (and rejected by) the MySQL DSN. The
+	// tls parameter is deliberately kept — it secures the MySQL-protocol probe and
+	// is also inherited by the VStream gRPC connection.
 	query.Del("grpc_port")
 	query.Del("grpc_host")
+	query.Del("grpc_tls")
 	parsed.RawQuery = query.Encode()
 
 	normalizedURI := parsed.String()
