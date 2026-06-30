@@ -220,8 +220,9 @@ func IngestCommand() *cli.Command {
 
 func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	trackCommandTriggered(ctx, "ingest")
+	var finishedProperties map[string]any
 	defer func() {
-		trackCommandFinished(ctx, "ingest", err)
+		trackCommandFinished(ctx, "ingest", err, finishedProperties)
 	}()
 
 	config.DebugMode = c.Bool("debug")
@@ -259,6 +260,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Stream = c.Bool("stream")
 	cfg.FlushInterval = c.Duration("flush-interval")
 	cfg.FlushRecords = int(c.Int("flush-records"))
+	finishedProperties = ingestTelemetryProperties(cfg)
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
@@ -308,8 +310,6 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		}
 	}
 
-	trackCommandRunning(ctx, "ingest", ingestTelemetryProperties(cfg))
-
 	p := pipeline.New(cfg)
 	if err := p.Run(ctx); err != nil {
 		return err
@@ -332,10 +332,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
 	properties := map[string]any{}
 	if sourceType := telemetryScheme(cfg.SourceURI); sourceType != "" {
-		properties["source_type"] = sourceType
+		properties["source_platform"] = sourceType
 	}
 	if destinationType := telemetryScheme(cfg.DestURI); destinationType != "" {
-		properties["destination_type"] = destinationType
+		properties["destination_platform"] = destinationType
 	}
 	return properties
 }

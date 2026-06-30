@@ -49,7 +49,7 @@ func ServerCommand() *cli.Command {
 func runServer(ctx context.Context, c *cli.Command) (err error) {
 	trackCommandTriggered(ctx, "server")
 	defer func() {
-		trackCommandFinished(ctx, "server", err)
+		trackCommandFinished(ctx, "server", err, nil)
 	}()
 
 	port := int(c.Int("port"))
@@ -57,8 +57,6 @@ func runServer(ctx context.Context, c *cli.Command) (err error) {
 	logsDir := c.String("logs-dir")
 	dbPath := c.String("db")
 	binaryPath := c.String("ingestr-binary")
-
-	trackCommandRunning(ctx, "server", nil)
 
 	s, err := server.NewWithBinary(port, credsFile, logsDir, dbPath, binaryPath)
 	if err != nil {

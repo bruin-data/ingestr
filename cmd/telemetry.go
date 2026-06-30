@@ -15,19 +15,19 @@ func trackCommandTriggered(ctx context.Context, command string) {
 	trackTelemetryAsync(ctx, "command_triggered", commandTelemetryProperties(command, nil))
 }
 
-func trackCommandRunning(ctx context.Context, command string, properties map[string]any) {
-	trackTelemetryAsync(ctx, "command_running", commandTelemetryProperties(command, properties))
-}
-
-func trackCommandFinished(ctx context.Context, command string, err error) {
-	properties := commandTelemetryProperties(command, map[string]any{
+func trackCommandFinished(ctx context.Context, command string, err error, additionalProperties map[string]any) {
+	finishedProperties := map[string]any{
 		"status": "success",
-	})
+	}
+	for key, value := range additionalProperties {
+		finishedProperties[key] = value
+	}
 	if err != nil {
-		properties["status"] = "failed"
-		properties["error"] = commandTelemetryError(err)
+		finishedProperties["status"] = "failed"
+		finishedProperties["error"] = commandTelemetryError(err)
 	}
 
+	properties := commandTelemetryProperties(command, finishedProperties)
 	telemetryWG.Wait()
 	telemetry.Track(context.WithoutCancel(ctx), "command_finished", properties, versionFlagValue())
 }
