@@ -157,4 +157,34 @@ func TestRateLimitBackoffCapped(t *testing.T) {
 	}
 }
 
+func TestRateLimitBackoffNoPanicOnTinyDelay(t *testing.T) {
+	b := newRetryBackend(nil)
+	b.baseDelay = time.Nanosecond
+	b.maxDelay = 2 * time.Nanosecond
+	// delay/4 rounds to 0; jitter must be skipped rather than panic.
+	if got := b.rateLimitBackoff(0); got <= 0 {
+		t.Fatalf("expected positive backoff, got %s", got)
+	}
+}
+
+func TestWrapWithRetryIsIdempotent(t *testing.T) {
+	original := stripe.GetBackend(stripe.APIBackend)
+	t.Cleanup(func() { stripe.SetBackend(stripe.APIBackend, original) })
+
+	wrapWithRetry(stripe.APIBackend)
+	first, ok := stripe.GetBackend(stripe.APIBackend).(*retryBackend)
+	if !ok {
+		t.Fatal("expected backend to be wrapped in a retryBackend")
+	}
+
+	wrapWithRetry(stripe.APIBackend)
+	second := stripe.GetBackend(stripe.APIBackend).(*retryBackend)
+	if second != first {
+		t.Fatal("second wrap should be a no-op, not stack another retryBackend")
+	}
+	if _, stacked := second.inner.(*retryBackend); stacked {
+		t.Fatal("retryBackend was wrapped around another retryBackend")
+	}
+}
+
 func stripeTestNow() time.Time { return time.Now() }

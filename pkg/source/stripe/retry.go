@@ -40,6 +40,18 @@ func newRetryBackend(inner stripe.Backend) *retryBackend {
 	}
 }
 
+// wrapWithRetry installs a retryBackend over the given backend type. It is
+// idempotent: if the current backend is already a retryBackend (e.g. Connect
+// was called more than once in the same process), it is left untouched so
+// retries don't compound across calls.
+func wrapWithRetry(backendType stripe.SupportedBackend) {
+	current := stripe.GetBackend(backendType)
+	if _, ok := current.(*retryBackend); ok {
+		return
+	}
+	stripe.SetBackend(backendType, newRetryBackend(current))
+}
+
 func (b *retryBackend) Call(method, path, key string, params stripe.ParamsContainer, v stripe.LastResponseSetter) error {
 	return b.withRetry(paramsContext(params), func() error {
 		return b.inner.Call(method, path, key, params, v)
@@ -78,6 +90,9 @@ func (b *retryBackend) withRetry(ctx context.Context, fn func() error) error {
 		delay := b.rateLimitBackoff(attempt)
 		config.Debug("[STRIPE] Rate limited (429), retry %d/%d after %s", attempt+1, b.maxRetries, delay)
 
+		// When the request params carry no context (legal for simple GET
+		// calls), there is nothing to cancel on, so the sleep is
+		// uninterruptible — but it is always bounded by maxDelay.
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
@@ -105,7 +120,11 @@ func (b *retryBackend) rateLimitBackoff(attempt int) time.Duration {
 	if delay > b.maxDelay || delay <= 0 {
 		delay = b.maxDelay
 	}
-	jitter := time.Duration(rand.Int63n(int64(delay) / 4)) //nolint:gosec // jitter does not require crypto randomness
+	quarter := int64(delay) / 4
+	var jitter time.Duration
+	if quarter > 0 {
+		jitter = time.Duration(rand.Int63n(quarter)) //nolint:gosec // jitter does not require crypto randomness
+	}
 	return delay - jitter
 }
 
