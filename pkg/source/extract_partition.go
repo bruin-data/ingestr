@@ -173,6 +173,9 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 			return nil, fmt.Errorf("extract partition interval must be a positive integer for numeric partition column %q", opts.ExtractPartitionBy)
 		}
 	}
+	if kind == ExtractPartitionKindNumeric && strings.TrimSpace(opts.IncrementalKey) == "" {
+		return nil, fmt.Errorf("numeric extract partitioning requires an incremental key to discover bounded partition ranges")
+	}
 
 	jobsToRun, err := extractPartitionJobs(ctx, opts, discover)
 	if err != nil {
@@ -417,11 +420,12 @@ func extractAutoPartitionTarget(parallelism int) int64 {
 }
 
 func ceilDivInt64(value, divisor int64) int64 {
-	if divisor <= 0 {
+	if divisor == 0 {
 		return value
 	}
 	result := value / divisor
-	if value%divisor != 0 {
+	remainder := value % divisor
+	if remainder != 0 && ((remainder > 0) == (divisor > 0)) {
 		result++
 	}
 	return result
@@ -562,6 +566,18 @@ func SQLIntValue(value any) (int64, error) {
 		return int64(v), nil
 	case uint64:
 		return uintToInt64(v)
+	case float32:
+		return floatToInt64(float64(v), "float32")
+	case float64:
+		return floatToInt64(v, "float64")
+	case *big.Int:
+		if v == nil {
+			return 0, fmt.Errorf("value is null")
+		}
+		if !v.IsInt64() {
+			return 0, fmt.Errorf("value %v overflows int64", v)
+		}
+		return v.Int64(), nil
 	case string:
 		return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	case []byte:
@@ -569,6 +585,19 @@ func SQLIntValue(value any) (int64, error) {
 	default:
 		return 0, fmt.Errorf("unsupported value type %T", value)
 	}
+}
+
+func floatToInt64(v float64, typeName string) (int64, error) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("%s value %v is not finite", typeName, v)
+	}
+	if v != math.Trunc(v) {
+		return 0, fmt.Errorf("%s value %v is not an integer", typeName, v)
+	}
+	if v < float64(math.MinInt64) || v >= float64(math.MaxInt64) {
+		return 0, fmt.Errorf("%s value %v overflows int64", typeName, v)
+	}
+	return int64(v), nil
 }
 
 func uintToInt64(v uint64) (int64, error) {

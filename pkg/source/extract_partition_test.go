@@ -2,6 +2,8 @@ package source
 
 import (
 	"context"
+	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +116,28 @@ func TestAutoExtractNumericPartitionInterval(t *testing.T) {
 	}
 	if got != 7 {
 		t.Fatalf("interval = %d, want 7", got)
+	}
+}
+
+func TestCeilDivInt64(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int64
+		divisor int64
+		want    int64
+	}{
+		{name: "positive", value: 7, divisor: 3, want: 3},
+		{name: "negative value", value: -7, divisor: 3, want: -2},
+		{name: "negative divisor", value: 7, divisor: -3, want: -2},
+		{name: "both negative", value: -7, divisor: -3, want: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ceilDivInt64(tt.value, tt.divisor); got != tt.want {
+				t.Fatalf("ceilDivInt64(%d, %d) = %d, want %d", tt.value, tt.divisor, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -474,6 +498,40 @@ func TestReadExtractPartitionsDiscoversNumericBounds(t *testing.T) {
 	}
 }
 
+func TestReadExtractPartitionsRejectsNumericBoundsWithoutIncrementalKey(t *testing.T) {
+	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+		},
+	}
+
+	discoverCalled := false
+	_, err := ReadExtractPartitions(context.Background(), ReadOptions{
+		IntervalStart:                   &intervalStart,
+		IntervalEnd:                     &intervalEnd,
+		ExtractPartitionBy:              "id",
+		ExtractPartitionNumericInterval: 10,
+		Parallelism:                     1,
+	}, tableSchema, func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
+		t.Fatal("read should not be called")
+		return nil, nil
+	}, func(ctx context.Context, opts ReadOptions) (ExtractPartitionBounds, error) {
+		discoverCalled = true
+		return ExtractPartitionBounds{}, nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "incremental key") {
+		t.Fatalf("error = %v, want incremental key message", err)
+	}
+	if discoverCalled {
+		t.Fatal("bounds discovery should not be called")
+	}
+}
+
 func TestReadExtractPartitionsAutoNumeric(t *testing.T) {
 	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
@@ -552,5 +610,35 @@ func TestExtractPartitionBoundsFromNumericValues(t *testing.T) {
 	}
 	if got.NumericStart != 10 || got.NumericEnd != 42 {
 		t.Fatalf("numeric bounds = %d..%d, want 10..42", got.NumericStart, got.NumericEnd)
+	}
+}
+
+func TestSQLIntValueAcceptsFloatAndBigIntValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  int64
+	}{
+		{name: "float32", value: float32(12), want: 12},
+		{name: "float64", value: float64(42), want: 42},
+		{name: "big int", value: big.NewInt(99), want: 99},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := SQLIntValue(tt.value)
+			if err != nil {
+				t.Fatalf("SQLIntValue() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("SQLIntValue() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSQLIntValueRejectsNonIntegerFloat(t *testing.T) {
+	if _, err := SQLIntValue(42.5); err == nil {
+		t.Fatal("expected error")
 	}
 }
