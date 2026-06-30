@@ -187,6 +187,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Google Cloud Storage (GCS)", link: "/supported-sources/gcs.md" },
               { text: "Google Analytics", link: "/supported-sources/google_analytics.md" },
               { text: "Google Ads", link: "/supported-sources/google-ads.md" },
+              { text: "Google Search Console", link: "/supported-sources/google_search_console.md" },
               { text: "GitHub", link: "/supported-sources/github.md" },
               { text: "GitLab", link: "/supported-sources/gitlab.md" },
               { text: "Google Sheets", link: "/supported-sources/gsheets.md" },
