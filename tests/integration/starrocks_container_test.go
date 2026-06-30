@@ -29,7 +29,13 @@ func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "starrocks/allin1-ubuntu:3.3-latest",
 			ExposedPorts: []string{"9030/tcp"},
-			WaitingFor:   wait.ForListeningPort("9030/tcp").WithStartupTimeout(300 * time.Second),
+			// Relax the backend disk-flood thresholds before startup: the defaults
+			// (~1 GiB free / <95% used) mark the BE unavailable for tablet placement
+			// on disk-constrained CI runners, so CREATE TABLE finds no usable backend.
+			Cmd: []string{"/bin/sh", "-c", "echo 'storage_flood_stage_usage_percent=99' >> /data/deploy/starrocks/be/conf/be.conf && " +
+				"echo 'storage_flood_stage_left_capacity_bytes=104857600' >> /data/deploy/starrocks/be/conf/be.conf && " +
+				"cd /data/deploy && ./entrypoint.sh"},
+			WaitingFor: wait.ForListeningPort("9030/tcp").WithStartupTimeout(300 * time.Second),
 		},
 		Started: true,
 	})
@@ -101,6 +107,22 @@ func starRocksBackendAlive(db *sql.DB) bool {
 	return false
 }
 
+// execEventually runs stmt, retrying until it succeeds or the deadline passes.
+func execEventually(t *testing.T, db *sql.DB, stmt string) {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if _, err := db.Exec(stmt); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("statement did not succeed within deadline: %v\nstatement: %s", lastErr, stmt)
+}
+
 func TestStarRocksToSQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -114,13 +136,13 @@ func TestStarRocksToSQLite(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	_, err = db.Exec("CREATE DATABASE IF NOT EXISTS analytics")
-	require.NoError(t, err)
-	_, err = db.Exec(`CREATE TABLE analytics.events (
+	execEventually(t, db, "CREATE DATABASE IF NOT EXISTS analytics")
+	// CREATE TABLE can briefly fail with "no available backend" right after the
+	// BE reports alive but before its disk capacity propagates to the FE.
+	execEventually(t, db, `CREATE TABLE IF NOT EXISTS analytics.events (
 		id BIGINT, name VARCHAR(100), active BOOLEAN, score DOUBLE,
 		amount DECIMAL(18,4), big LARGEINT, created_date DATE, updated_at DATETIME
 	) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1')`)
-	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO analytics.events VALUES
 		(1,'alpha',true,9.5,100.2500,170141183460469231731687303715884105727,'2024-01-01','2024-01-01 08:30:00'),
 		(2,'beta',false,3.25,50.0000,-12345,'2024-01-15','2024-01-15 12:00:00'),
