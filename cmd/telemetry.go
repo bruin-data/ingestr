@@ -16,12 +16,11 @@ func trackCommandTriggered(ctx context.Context, command string) {
 }
 
 func trackCommandFinished(ctx context.Context, command string, err error, additionalProperties map[string]any) {
-	finishedProperties := map[string]any{
-		"status": "success",
-	}
+	finishedProperties := map[string]any{}
 	for key, value := range additionalProperties {
 		finishedProperties[key] = value
 	}
+	finishedProperties["status"] = "success"
 	if err != nil {
 		finishedProperties["status"] = "failed"
 		finishedProperties["error"] = commandTelemetryError(err)
