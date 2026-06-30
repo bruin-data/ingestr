@@ -95,6 +95,8 @@ ingestr ingest \
     --dest-table 'main.trips'
 ```
 
+These URI defaults only fill in the parts you leave out: anything qualified in `--source-table` takes priority. With the connection above, `--source-table 'other_catalog.db.events'` is still read as-is, ignoring the catalog and database from the URI.
+
 ## Incremental loading
 StarRocks supports incremental loads. Provide an incremental key column (e.g. an event timestamp) together with `--interval-start`/`--interval-end` so each run only pulls rows in that window, and use `merge` with a primary key to upsert them:
 
