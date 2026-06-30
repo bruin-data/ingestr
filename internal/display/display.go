@@ -5,12 +5,27 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/fatih/color"
 )
 
 func PrintSummary(cfg *config.IngestConfig) {
+	if output.IsJSON() {
+		output.EventStart(output.StartInfo{
+			SourceType:     displayFromURI(cfg.SourceURI)[0],
+			DestType:       displayFromURI(cfg.DestURI)[0],
+			SourceTable:    cfg.SourceTable,
+			DestTable:      cfg.DestTable,
+			Strategy:       string(cfg.IncrementalStrategy),
+			IncrementalKey: cfg.IncrementalKey,
+			PrimaryKey:     cfg.PrimaryKeys,
+			SchemaNaming:   cfg.SchemaNaming,
+		})
+		return
+	}
+
 	green := color.New(color.FgGreen, color.Bold).SprintFunc()
 	yellow := color.New(color.FgYellow, color.Bold).SprintFunc()
 	magenta := color.New(color.FgMagenta).SprintFunc()

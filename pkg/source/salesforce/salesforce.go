@@ -11,6 +11,7 @@ import (
 
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -457,7 +458,7 @@ func (s *salesforceSource) getRecords(ctx context.Context, sobject string, lastS
 	if s.useBulkAPI {
 		err := s.getRecordsBulk(ctx, sobject, query, dateFields, opts, results)
 		if err == nil {
-			fmt.Printf("\n[SALESFORCE] Fetched %s using Bulk API\n", sobject)
+			output.Statusf("\n[SALESFORCE] Fetched %s using Bulk API\n", sobject)
 			return nil
 		}
 		s.useBulkAPI = false
@@ -468,7 +469,7 @@ func (s *salesforceSource) getRecords(ctx context.Context, sobject string, lastS
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\n[SALESFORCE] Fetched %s using REST API, since your account does not have Bulk API enabled\n", sobject)
+	output.Statusf("\n[SALESFORCE] Fetched %s using REST API, since your account does not have Bulk API enabled\n", sobject)
 	return nil
 }
 

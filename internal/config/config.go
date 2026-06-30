@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bruin-data/ingestr/internal/output"
 )
 
 var DebugMode bool
 
-func Debug(format string, args ...interface{}) {
+func Debug(format string, args ...any) {
 	if DebugMode {
-		fmt.Printf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), fmt.Sprintf(format, args...))
+		line := fmt.Sprintf("%s\tDEBUG\t%s\n", time.Now().Format("2006-01-02T15:04:05.000Z0700"), fmt.Sprintf(format, args...))
+		output.WriteDebug(line)
 	}
 }
 
@@ -31,6 +34,7 @@ type ProgressMode string
 const (
 	ProgressInteractive ProgressMode = "interactive"
 	ProgressLog         ProgressMode = "log"
+	ProgressJSON        ProgressMode = "json"
 )
 
 type IngestConfig struct {

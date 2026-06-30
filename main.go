@@ -9,6 +9,7 @@ import (
 
 	"github.com/bruin-data/ingestr/cmd"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/fatih/color"
 )
 
@@ -26,10 +27,14 @@ func main() {
 
 	if err := cmd.Run(ctx, os.Args); err != nil {
 		if errors.Is(err, context.Canceled) {
-			color.Red("\nPipeline cancelled.")
+			if !output.IsJSON() {
+				color.Red("\nPipeline cancelled.")
+			}
 			os.Exit(1)
 		}
-		color.Red("Error: %v", err)
+		if !output.IsJSON() {
+			color.Red("Error: %v", err)
+		}
 		config.PrintFailedQuery()
 		os.Exit(1)
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -708,7 +709,7 @@ func (s *Hubspotsource) readPipelines(ctx context.Context, opts source.ReadOptio
 	}
 
 	if len(scopeSkipped) > 0 {
-		fmt.Printf("\n[HUBSPOT] pipelines skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
+		output.Warnf("\n[HUBSPOT] pipelines skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
 	}
 
 	if len(rows) == 0 {
@@ -752,7 +753,7 @@ func (s *Hubspotsource) readPipelineStages(ctx context.Context, opts source.Read
 	}
 
 	if len(scopeSkipped) > 0 {
-		fmt.Printf("\n[HUBSPOT] pipeline_stages skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
+		output.Warnf("\n[HUBSPOT] pipeline_stages skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
 	}
 
 	if len(rows) == 0 {

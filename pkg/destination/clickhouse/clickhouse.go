@@ -18,6 +18,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -780,7 +781,7 @@ func validateEngineType(engineType string, hasPrimaryKeys bool) (string, bool) {
 			valid = append(valid, k)
 		}
 		sort.Strings(valid)
-		fmt.Printf("[WARNING] unsupported ClickHouse engine %q, defaulting based on primary keys (valid: %s)\n", engineType, strings.Join(valid, ", "))
+		output.Warnf("[WARNING] unsupported ClickHouse engine %q, defaulting based on primary keys (valid: %s)\n", engineType, strings.Join(valid, ", "))
 	}
 	if hasPrimaryKeys {
 		return "ReplacingMergeTree()", true

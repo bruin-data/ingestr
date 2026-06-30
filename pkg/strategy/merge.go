@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/multitable"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -73,7 +74,7 @@ func mergeStagingInto(ctx context.Context, dest destination.Destination, staging
 // destination that can't process deletes during merge.
 func warnIfCDCMergeUnsupported(dest destination.Destination) {
 	if cdcAware, ok := dest.(destination.CDCMergeAware); !ok || !cdcAware.SupportsCDCMerge() {
-		fmt.Printf("Warning: CDC data detected but the destination does not support CDC-aware merge; deleted rows will be inserted as regular data with _cdc_deleted=true instead of being processed as deletes\n")
+		output.Warnf("Warning: CDC data detected but the destination does not support CDC-aware merge; deleted rows will be inserted as regular data with _cdc_deleted=true instead of being processed as deletes\n")
 	}
 }
 
@@ -99,7 +100,7 @@ func (s *MergeStrategy) RequiresIncrementalKey() bool {
 func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Generate staging table name
 	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "merge", job.Config.StagingDataset)
-	fmt.Printf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	isCDC := hasCDCColumns(job.Schema)
 	if isCDC {
 		warnIfCDCMergeUnsupported(job.Destination)

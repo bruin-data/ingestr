@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -40,7 +41,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	// Generate staging table name
 	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "scd2", job.Config.StagingDataset)
-	fmt.Printf("[SCD2] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	output.Statusf("[SCD2] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	config.Debug("[SCD2] Using process timestamp: %s", processTimestamp.Format(time.RFC3339Nano))
 
 	// Extend schema with SCD columns

@@ -17,8 +17,9 @@ type Tracker interface {
 	// Start begins progress tracking and display updates.
 	Start(ctx context.Context)
 
-	// Stop halts progress tracking and displays the final summary.
-	Stop()
+	// Stop halts progress tracking and displays the final summary. A non-nil err
+	// indicates the ingestion failed and is surfaced by error-aware displays.
+	Stop(err error)
 
 	// GetMetrics returns the current metrics snapshot.
 	GetMetrics() Metrics
@@ -31,8 +32,9 @@ type Display interface {
 	// Updates are throttled based on the display implementation (500ms interactive, 1s log).
 	Start(ctx context.Context, collector *MetricsCollector)
 
-	// Stop halts display updates and shows the final summary.
-	Stop(metrics Metrics)
+	// Stop halts display updates and shows the final summary. A non-nil err
+	// indicates the ingestion failed.
+	Stop(metrics Metrics, err error)
 }
 
 // Metrics contains all progress tracking data collected during ingestion.

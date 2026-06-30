@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -188,7 +189,7 @@ func (s *GoogleSheetsSource) readSheet(ctx context.Context, spreadsheetID, sheet
 		if count, exists := seen[str]; exists {
 			seen[str] = count + 1
 			renamed := fmt.Sprintf("%s_%d", str, count+1)
-			fmt.Printf("Warning: duplicate header %q found in sheet %s, renaming to %q\n", str, sheetName, renamed)
+			output.Warnf("Warning: duplicate header %q found in sheet %s, renaming to %q\n", str, sheetName, renamed)
 			str = renamed
 		} else {
 			seen[str] = 1
