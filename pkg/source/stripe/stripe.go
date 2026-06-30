@@ -86,6 +86,12 @@ func (s *StripeSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.apiKey = apiKey
 	stripe.Key = apiKey
+
+	// Wrap the default backends so rate-limit (429) responses are retried with
+	// exponential backoff. stripe-go does not retry rate-limit 429s on its own.
+	wrapWithRetry(stripe.APIBackend)
+	wrapWithRetry(stripe.UploadsBackend)
+
 	config.Debug("[STRIPE] Connected successfully")
 	return nil
 }
