@@ -307,6 +307,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		token = func() any { return safeCommitLSN(repl, accum) }
 	}
 
+	// lastIdleToken is the highest LSN already handed to the pipeline via a bare
+	// idle commit token, so we only emit one when the caught-up position has
+	// actually advanced (instead of every 100ms idle tick).
+	var lastIdleToken pglogrepl.LSN
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -350,6 +355,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		// When idle (no WAL activity), flush any pending batches
 		if !hadActivity {
 			accum.flushAll(results, token)
+			// Confirm the caught-up position so the slot advances over WAL that
+			// carried no rows for us; otherwise an idle stream's lag grows forever.
+			if opts.Streaming {
+				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+			}
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
