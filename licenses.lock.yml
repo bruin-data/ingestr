@@ -265,6 +265,11 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/DataDog/zstd
+      version: v1.5.6
+      licenses:
+        - BSD-3-Clause
+      status: allowed
     - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
       version: v1.6.0
       licenses:
