@@ -24,10 +24,10 @@ The same URI structure and table can be used both for sources and destinations. 
 
 By default Vitess caps queries at 100,000 rows, which would otherwise break bulk reads of larger tables. ingestr detects Vitess automatically and works around this, so large tables ingest fully.
 
-Change data capture is also supported for Vitess — see [Change data capture](#change-data-capture) below.
+Change data capture is also supported for both Vitess and PlanetScale — see [Change data capture](#change-data-capture) below.
 
 ## Change data capture
-CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes. ingestr detects the server when it connects and picks the right mechanism automatically: standard MySQL and MariaDB stream the binary log, while Vitess and PlanetScale stream changes through [VStream](https://vitess.io/docs/reference/vreplication/vstream/) — Vitess is a sharded layer with no standard binary log to tail. Both produce the same `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resume from the destination table's maximum `_cdc_lsn` on subsequent runs.
+CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes. ingestr detects the target when it connects and picks the right mechanism automatically: standard MySQL and MariaDB stream the binary log; self-hosted Vitess streams through [VStream](https://vitess.io/docs/reference/vreplication/vstream/) (a sharded layer with no standard binary log to tail); and PlanetScale streams through its hosted `psdbconnect` API, because PlanetScale does not expose vtgate's VStream port to external clients. All three produce the same `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resume from the destination table's maximum `_cdc_lsn` on subsequent runs.
 
 ### MySQL & MariaDB (binary log)
 This path reads a consistent snapshot first, then streams the binary log, resuming from the destination table's maximum `_cdc_lsn` on subsequent runs.
@@ -63,8 +63,8 @@ CDC URI parameters:
 
 Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
 
-### Vitess & PlanetScale (VStream)
-For Vitess and PlanetScale, ingestr streams changes through vtgate's VStream API over gRPC. Use the same `mysql+cdc://` scheme — Vitess is detected automatically. None of the binary-log requirements above apply: there is no `FLUSH TABLES`, and `log_bin`/`binlog_format`/`binlog_row_image` settings are irrelevant.
+### Vitess (VStream)
+For self-hosted Vitess, ingestr streams changes through vtgate's VStream API over gRPC. Use the same `mysql+cdc://` scheme — Vitess is detected automatically. None of the binary-log requirements above apply: there is no `FLUSH TABLES`, and `log_bin`/`binlog_format`/`binlog_row_image` settings are irrelevant. (For PlanetScale, use the [PlanetScale (psdbconnect)](#planetscale-psdbconnect) path below — its VStream port is not reachable externally.)
 
 VStream performs a consistent copy-phase snapshot first, then streams changes. Position is tracked with a Vitess GTID (VGTID) serialized into `_cdc_lsn`, and subsequent runs resume from the destination's maximum `_cdc_lsn`. This works for both unsharded and sharded keyspaces, since the VGTID covers every shard. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild. Like the binary-log path, incremental runs use the `merge` strategy so updates and deletes are applied by primary key.
 
@@ -86,5 +86,32 @@ Vitess CDC URI parameters:
 
 Requirements:
 - The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).
+- Source tables must have primary keys, or `--primary-key` must be provided.
+- Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
+
+### PlanetScale (psdbconnect)
+PlanetScale does not expose vtgate's VStream gRPC port to external clients, so ingestr streams changes through PlanetScale's hosted `psdbconnect` API on the database host over TLS (port 443), authenticated with a PlanetScale **service token**. ingestr selects this path automatically when the host ends in `.psdb.cloud` or when a service token is supplied; for private endpoints or custom domains, force it with `cdc_backend=planetscale`.
+
+Provide the service token name and value with `psdb_token_name` and `psdb_token`, and keep `tls=true` (required for the schema-discovery connection over the MySQL protocol). The database in the URI is the PlanetScale keyspace. Unlike the Vitess path, there is no `grpc_port` — the psdbconnect endpoint is always the database host on 443.
+
+psdbconnect performs a per-shard snapshot first (resumable by primary key) and then streams inserts, updates, and deletes. Position is tracked per shard and serialized into `_cdc_lsn`, and subsequent runs resume from the destination's maximum `_cdc_lsn` for both unsharded and sharded keyspaces. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key. (PlanetScale delivers only the primary keys of deleted rows; the destination marks them deleted without disturbing the other columns.)
+
+```shell
+ingestr ingest \
+  --source-uri "mysql+cdc://user:password@host.connect.psdb.cloud:3306/keyspace?tls=true&psdb_token_name=TOKEN_NAME&psdb_token=TOKEN_VALUE" \
+  --dest-uri "duckdb:///tmp/planetscale_cdc.duckdb" \
+  --source-table "orders" \
+  --dest-table "orders"
+```
+
+PlanetScale CDC URI parameters:
+- `psdb_token_name`: **required** — the PlanetScale service token name.
+- `psdb_token`: **required** — the PlanetScale service token value.
+- `tls`: keep `tls=true` for the MySQL-protocol schema-discovery connection.
+- `cdc_backend`: optional override — `planetscale` forces this path (for example on a custom domain), `vstream` forces the self-hosted Vitess path.
+- `dest_schema`: optional destination schema for multi-table CDC runs.
+
+Requirements:
+- A PlanetScale service token with read access to the branch/keyspace.
 - Source tables must have primary keys, or `--primary-key` must be provided.
 - Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
