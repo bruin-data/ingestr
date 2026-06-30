@@ -203,14 +203,14 @@ func TestStreamModeIdleSlotAdvances_Repro(t *testing.T) {
 	)
 
 	steps := []replStep{
-		{batch: nil, hadActivity: true, lsn: 10},                   // BEGIN
-		{batch: nil, hadActivity: true, lsn: 11},                   // INSERT
+		{batch: nil, hadActivity: true, lsn: 10},                    // BEGIN
+		{batch: nil, hadActivity: true, lsn: 11},                    // INSERT
 		{batch: makeRowBatch(1), hadActivity: true, lsn: dataTxLSN}, // COMMIT -> 1 row at LSN 12
-		{batch: nil, hadActivity: false, lsn: 0},                   // idle: flush the row, confirm LSN 12
-		{batch: nil, hadActivity: true, lsn: 500},                  // keepalive: other tables' WAL
-		{batch: nil, hadActivity: false, lsn: 0},                   // idle: nothing for us at LSN 500
-		{batch: nil, hadActivity: true, lsn: receivedFinal},        // keepalive: more unrelated WAL
-		{batch: nil, hadActivity: false, lsn: 0},                   // idle: nothing for us at LSN 600
+		{batch: nil, hadActivity: false, lsn: 0},                    // idle: flush the row, confirm LSN 12
+		{batch: nil, hadActivity: true, lsn: 500},                   // keepalive: other tables' WAL
+		{batch: nil, hadActivity: false, lsn: 0},                    // idle: nothing for us at LSN 500
+		{batch: nil, hadActivity: true, lsn: receivedFinal},         // keepalive: more unrelated WAL
+		{batch: nil, hadActivity: false, lsn: 0},                    // idle: nothing for us at LSN 600
 	}
 
 	src := NewPostgresCDCSource()
