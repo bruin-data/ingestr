@@ -169,6 +169,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 		p.config.SourceTable = source.CustomQueryTableName
 	}
+	if err := validateExtractPartitionSupport(p.config, table); err != nil {
+		return err
+	}
 
 	preFetchStrategy := resolveStrategy(p.config, src, table)
 	preFetchConfig := *p.config
@@ -250,6 +253,14 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 				return nil
 			}
 		}
+	}
+
+	if p.config.ExtractPartitionBy != "" {
+		partitionColumn, err := source.ValidateExtractPartitionColumn(tableSchema, p.config.ExtractPartitionBy)
+		if err != nil {
+			return err
+		}
+		p.config.ExtractPartitionBy = partitionColumn
 	}
 
 	// Ensure table-level keys are on the schema before naming convention runs
@@ -643,15 +654,19 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: table.IncrementalKey(),
-		IntervalStart:  p.config.IntervalStart,
-		IntervalEnd:    p.config.IntervalEnd,
-		PageSize:       p.config.PageSize,
-		Limit:          p.config.SQLLimit,
-		ExcludeColumns: p.config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		FullRefresh:    p.config.FullRefresh,
-		Columns:        p.config.Columns,
+		IncrementalKey:                  table.IncrementalKey(),
+		IntervalStart:                   p.config.IntervalStart,
+		IntervalEnd:                     p.config.IntervalEnd,
+		ExtractPartitionBy:              p.config.ExtractPartitionBy,
+		ExtractPartitionInterval:        p.config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: p.config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            p.config.ExtractPartitionAuto,
+		PageSize:                        p.config.PageSize,
+		Limit:                           p.config.SQLLimit,
+		ExcludeColumns:                  p.config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		FullRefresh:                     p.config.FullRefresh,
+		Columns:                         p.config.Columns,
 	}
 
 	records, err := table.Read(ctx, readOpts)
@@ -1689,6 +1704,20 @@ func resolvePartitionBy(cfg *config.IngestConfig, table source.SourceTable) stri
 	return ""
 }
 
+func validateExtractPartitionSupport(cfg *config.IngestConfig, table source.SourceTable) error {
+	if cfg.ExtractPartitionBy == "" {
+		return nil
+	}
+	if table.Name() == source.CustomQueryTableName {
+		return fmt.Errorf("custom queries do not support extract partitioning")
+	}
+	provider, ok := table.(source.ExtractPartitioningProvider)
+	if !ok || !provider.SupportsExtractPartitioning() {
+		return fmt.Errorf("source table %q does not support extract partitioning; v1 supports normal SQL table scans for postgres, mysql, mssql, sqlite, and ADBC-backed sources", table.Name())
+	}
+	return nil
+}
+
 // rewriteReplaceForPostgres swaps the replace strategy for truncate+insert when
 // the destination is Postgres. Replace drops and recreates the table, which
 // breaks dependent views, grants, and foreign keys; truncate+insert preserves
@@ -1726,6 +1755,11 @@ func isManagedChangeSource(uri string) bool {
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
+	if cfg.ExtractPartitionBy != "" || cfg.ExtractPartitionInterval != 0 || cfg.ExtractPartitionNumericInterval != 0 || cfg.ExtractPartitionAuto {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+	}
 	if isChangeTrackingSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
 		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
 	}

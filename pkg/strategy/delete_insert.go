@@ -75,15 +75,19 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: sourceIncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		IntervalEnd:    job.Config.IntervalEnd,
-		PageSize:       job.Config.PageSize,
-		Limit:          job.Config.SQLLimit,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		FullRefresh:    job.Config.FullRefresh,
+		IncrementalKey:                  sourceIncrementalKey,
+		IntervalStart:                   job.Config.IntervalStart,
+		IntervalEnd:                     job.Config.IntervalEnd,
+		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
+		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
+		PageSize:                        job.Config.PageSize,
+		Limit:                           job.Config.SQLLimit,
+		ExcludeColumns:                  job.Config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		Schema:                          job.SourceSchema,
+		FullRefresh:                     job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)

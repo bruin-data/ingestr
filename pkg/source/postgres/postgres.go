@@ -102,12 +102,13 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:              req.Name,
-		TablePrimaryKeys:       pks,
-		TablePrimaryKeysUnique: pksUnique,
-		TableIncrementalKey:    req.IncrementalKey,
-		TableStrategy:          strategy,
-		KnownSchema:            true,
+		TableName:                        req.Name,
+		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
+		TableIncrementalKey:              req.IncrementalKey,
+		TableStrategy:                    strategy,
+		TableSupportsExtractPartitioning: true,
+		KnownSchema:                      true,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil
 		},
@@ -257,6 +258,17 @@ func (s *PostgresSource) read(ctx context.Context, table string, tableSchema *sc
 		batchSize = 100000
 	}
 
+	read := func(ctx context.Context, readOpts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+		return s.readQuery(ctx, table, columns, arrowSchema, batchSize, startTotal, readOpts)
+	}
+	discover := func(ctx context.Context, readOpts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+		return s.discoverExtractPartitionBounds(ctx, table, readOpts)
+	}
+
+	return source.ReadExtractPartitions(ctx, opts, tableSchema, read, discover)
+}
+
+func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -308,6 +320,23 @@ func (s *PostgresSource) read(ctx context.Context, table string, tableSchema *sc
 	}()
 
 	return results, nil
+}
+
+func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, quoteIdentifier, quoteTableName, source.DefaultSQLTimeFormat)
+
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := conn.QueryRow(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }
 
 func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -435,13 +464,9 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
-		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf(`%s >= '%s'`, quoteIdentifier(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02 15:04:05")))
-		}
-		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf(`%s <= '%s'`, quoteIdentifier(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02 15:04:05")))
-		}
+		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteIdentifier, source.DefaultSQLTimeFormat)...)
 	}
+	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteIdentifier, source.DefaultSQLTimeFormat)...)
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")

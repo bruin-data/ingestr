@@ -112,6 +112,12 @@ func TestIngestionJob_GetRecords_AddsSameLoadTimestampToEveryBatch(t *testing.T)
 func TestAppendStrategy_Execute_HappyPath(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.LoaderFileSize = 321
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	job.Config.IntervalStart = &start
+	job.Config.IntervalEnd = &end
+	job.Config.ExtractPartitionBy = "created_at"
+	job.Config.ExtractPartitionInterval = 7 * 24 * time.Hour
 	src.readCh = mustClosedRecords()
 
 	strat := &AppendStrategy{}
@@ -155,6 +161,12 @@ func TestAppendStrategy_Execute_HappyPath(t *testing.T) {
 	}
 	if src.readOpts.Schema != job.SourceSchema {
 		t.Fatalf("ReadOptions.Schema not set to job.SourceSchema")
+	}
+	if src.readOpts.ExtractPartitionBy != job.Config.ExtractPartitionBy {
+		t.Fatalf("ReadOptions.ExtractPartitionBy = %q, want %q", src.readOpts.ExtractPartitionBy, job.Config.ExtractPartitionBy)
+	}
+	if src.readOpts.ExtractPartitionInterval != job.Config.ExtractPartitionInterval {
+		t.Fatalf("ReadOptions.ExtractPartitionInterval = %v, want %v", src.readOpts.ExtractPartitionInterval, job.Config.ExtractPartitionInterval)
 	}
 }
 
