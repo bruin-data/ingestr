@@ -631,6 +631,26 @@ func convertTextValue(text string, col schema.Column) interface{} {
 		return nil
 	case schema.TypeDecimal:
 		return text // Keep as string for decimal handling
+	case schema.TypeArray:
+		// Logical replication delivers arrays as Postgres array literals
+		// ({a,b}), not JSON arrays, so parse the literal and convert each
+		// element by the element type. Returning a []interface{} lets the list
+		// builder populate the array; the snapshot path produces the same shape
+		// via pgx, keeping streaming and snapshot consistent.
+		elems, ok := parsePostgresArrayLiteral(text)
+		if !ok {
+			return nil
+		}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		out := make([]interface{}, len(elems))
+		for i, e := range elems {
+			if e.isNull {
+				out[i] = nil
+				continue
+			}
+			out[i] = convertTextValue(e.value, elemCol)
+		}
+		return out
 	default:
 		return text
 	}
