@@ -135,6 +135,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },
               { text: "Socrata", link: "/supported-sources/socrata.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
+              { text: "StarRocks", link: "/supported-sources/starrocks.md" },
               {
                 text: "Experimental",
                 items: [
