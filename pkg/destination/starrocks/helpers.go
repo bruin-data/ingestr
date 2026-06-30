@@ -100,6 +100,9 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Time64:
 		micros := int64(a.Value(idx))
+		if a.DataType().(*arrow.Time64Type).Unit == arrow.Nanosecond {
+			micros /= 1_000
+		}
 		secs := micros / 1_000_000
 		return fmt.Sprintf("%02d:%02d:%02d.%06d", secs/3600, (secs%3600)/60, secs%60, micros%1_000_000)
 	case *array.Timestamp:
@@ -118,7 +121,9 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		}
 		return val
 	default:
-		return fmt.Sprintf("%v", arr)
+		// ValueStr returns the value at idx for any Arrow type; never format the
+		// whole array (which would corrupt every row for uncovered types).
+		return arr.ValueStr(idx)
 	}
 }
 

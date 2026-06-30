@@ -74,7 +74,9 @@ func (s *streamLoader) load(ctx context.Context, db, table, label string, body [
 	if err := json.Unmarshal(data, &slResp); err != nil {
 		return fmt.Errorf("failed to parse stream load response: %w (body: %s)", err, string(data))
 	}
-	if slResp.Status != "Success" {
+	// "Publish Timeout" means the data was loaded and is durable — StarRocks
+	// says not to retry — so it is a success, not a failure.
+	if slResp.Status != "Success" && slResp.Status != "Publish Timeout" {
 		msg := slResp.Message
 		if slResp.ErrorURL != "" {
 			msg += " (details: " + slResp.ErrorURL + ")"
