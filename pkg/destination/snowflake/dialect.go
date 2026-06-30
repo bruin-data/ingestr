@@ -5,14 +5,9 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	schemaevolution.RegisterDialect("snowflake", &Dialect{})
-}
-
-// Dialect implements the schemaevolution.Dialect interface for Snowflake.
+// Dialect implements the destination.Dialect interface for Snowflake.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

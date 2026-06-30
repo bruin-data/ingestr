@@ -6,14 +6,9 @@ import (
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	schemaevolution.RegisterDialect("redshift", &Dialect{})
-}
-
-// Dialect implements the schemaevolution.Dialect interface for Amazon Redshift.
+// Dialect implements the destination.Dialect interface for Amazon Redshift.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

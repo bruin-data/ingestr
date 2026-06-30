@@ -6,14 +6,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/maxcomputeutil"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
-
-func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("maxcompute", dialect)
-	schemaevolution.RegisterDialect("odps", dialect)
-}
 
 type Dialect struct{}
 

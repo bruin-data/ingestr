@@ -1,31 +1,29 @@
 package schemaevolution
 
 import (
-	"context"
-
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-// EvolutionPlan represents what the destination should look like after the
-// pending migration is applied, without actually applying it yet.
+// EvolutionPlan is an abstract, database-agnostic description of how a
+// destination table should change to accommodate a new source schema. It
+// carries the set of column-level actions (the Comparison) rather than any
+// pre-rendered SQL. Destinations turn the plan into DDL and apply it
+// themselves via the SchemaEvolver interface.
 type EvolutionPlan struct {
+	// Table is the fully-qualified destination table the plan applies to.
+	Table string
+	// Comparison is the set of schema changes the destination should apply.
+	// It is nil or empty when no migration is required.
+	Comparison *SchemaComparison
+	// FinalSchema is what the destination table will look like once the
+	// applicable changes have been applied.
 	FinalSchema *schema.TableSchema
-	Migration   *Migration
 }
 
-func (p *EvolutionPlan) HasMigration() bool {
-	return p != nil && p.Migration != nil && len(p.Migration.Statements) > 0
-}
-
-func (p *EvolutionPlan) Apply(ctx context.Context, executor SQLExecutor) error {
-	if p == nil || p.Migration == nil || len(p.Migration.Statements) == 0 {
-		return nil
-	}
-	if err := ApplyMigration(ctx, executor, p.Migration); err != nil {
-		return err
-	}
-	p.Migration.Statements = nil
-	return nil
+// HasChanges reports whether the plan contains any column changes that a
+// destination needs to apply.
+func (p *EvolutionPlan) HasChanges() bool {
+	return p != nil && p.Comparison != nil && len(p.Comparison.Changes) > 0
 }
 
 // BuildFinalSchema computes what the destination table will look like AFTER a

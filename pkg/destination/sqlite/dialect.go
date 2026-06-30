@@ -6,14 +6,9 @@ import (
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	schemaevolution.RegisterDialect("sqlite", &Dialect{})
-}
-
-// Dialect implements the schemaevolution.Dialect interface for SQLite.
+// Dialect implements the destination.Dialect interface for SQLite.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

@@ -6,12 +6,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/cassandrautil"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
-
-func init() {
-	schemaevolution.RegisterDialect("cassandra", &Dialect{})
-}
 
 type Dialect struct{}
 
