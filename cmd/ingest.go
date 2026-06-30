@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
@@ -102,7 +104,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "progress",
-				Usage:   "The progress display type (interactive, log)",
+				Usage:   "The progress display type (interactive, log, json)",
 				Value:   "interactive",
 				Sources: cli.EnvVars("PROGRESS", "INGESTR_PROGRESS"),
 			},
@@ -221,10 +223,16 @@ func IngestCommand() *cli.Command {
 func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	trackCommandTriggered(ctx, "ingest")
 	defer func() {
+		output.EnsureTerminal(err)
 		trackCommandFinished(ctx, "ingest", err)
 	}()
 
 	config.DebugMode = c.Bool("debug")
+	outputMode := output.ModeText
+	if config.ProgressMode(c.String("progress")) == config.ProgressJSON {
+		outputMode = output.ModeJSON
+	}
+	output.Init(os.Stdout, os.Stderr, outputMode)
 	cfg := config.DefaultConfig()
 
 	cfg.SourceURI = c.String("source-uri")
@@ -319,13 +327,17 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
 		// stop; the pipeline has already flushed pending data.
 		if cfg.Stream {
-			color.Green("Streaming ingestion stopped.")
+			if !output.IsJSON() {
+				color.Green("Streaming ingestion stopped.")
+			}
 			return nil
 		}
 		return ctx.Err()
 	}
 
-	color.Green("Ingestion completed successfully!")
+	if !output.IsJSON() {
+		color.Green("Ingestion completed successfully!")
+	}
 	return nil
 }
 

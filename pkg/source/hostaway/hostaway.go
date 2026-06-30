@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -361,7 +362,7 @@ func filterByInterval(item map[string]any, field string, start, end *time.Time) 
 	if !ok || raw == nil || raw == "" {
 		if start != nil || end != nil {
 			id := item["id"]
-			fmt.Printf("[HOSTAWAY] WARNING: skipping record (id=%v) with null/missing %s field\n", id, field)
+			output.Warnf("[HOSTAWAY] WARNING: skipping record (id=%v) with null/missing %s field\n", id, field)
 			return false
 		}
 		return true
@@ -371,7 +372,7 @@ func filterByInterval(item map[string]any, field string, start, end *time.Time) 
 	if !ok {
 		if start != nil || end != nil {
 			id := item["id"]
-			fmt.Printf("[HOSTAWAY] WARNING: skipping record (id=%v) with unparseable %s field: %v\n", id, field, raw)
+			output.Warnf("[HOSTAWAY] WARNING: skipping record (id=%v) with unparseable %s field: %v\n", id, field, raw)
 			return false
 		}
 		return true
@@ -382,7 +383,7 @@ func filterByInterval(item map[string]any, field string, start, end *time.Time) 
 		t, err = time.Parse("2006-01-02 15:04:05", ts)
 		if err != nil {
 			id := item["id"]
-			fmt.Printf("[HOSTAWAY] WARNING: skipping record (id=%v) with unparseable %s value: %q\n", id, field, ts)
+			output.Warnf("[HOSTAWAY] WARNING: skipping record (id=%v) with unparseable %s value: %q\n", id, field, ts)
 			return false
 		}
 	}

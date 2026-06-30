@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/naming"
@@ -364,7 +365,7 @@ func (s *MixpanelSource) flattenProperties(event map[string]interface{}) {
 		key = naming.ToSnakeCase(key)
 		if str, ok := value.(string); ok && (str == "undefined" || str == "<null>") {
 			s.nullWarningOnce.Do(func() {
-				fmt.Printf("\nWarning: Mixpanel returns \"undefined\" and \"<null>\" as string literals for missing values, these will be converted to NULL\n")
+				output.Warnf("\nWarning: Mixpanel returns \"undefined\" and \"<null>\" as string literals for missing values, these will be converted to NULL\n")
 			})
 			value = nil
 		}

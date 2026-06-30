@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -419,7 +420,7 @@ func (s *StripeSource) read(ctx context.Context, table string, opts source.ReadO
 			}
 
 			if hoursSince := time.Since(*intervalStart).Hours(); hoursSince > 30*24 {
-				fmt.Printf("Warning: interval-start is %.0f days ago, but the Stripe Events API only retains 30 days of history. Falling back to sync incremental mode. To use the events endpoint, set interval-start to within the last 30 days.\n", hoursSince/24)
+				output.Warnf("Warning: interval-start is %.0f days ago, but the Stripe Events API only retains 30 days of history. Falling back to sync incremental mode. To use the events endpoint, set interval-start to within the last 30 days.\n", hoursSince/24)
 				mode = modeSyncIncremental
 			} else {
 				intervalEnd := opts.IntervalEnd

@@ -37,13 +37,13 @@ func (t *DefaultTracker) Start(ctx context.Context) {
 }
 
 // Stop halts progress tracking and displays the final summary.
-func (t *DefaultTracker) Stop() {
+func (t *DefaultTracker) Stop(err error) {
 	if t.cancel != nil {
 		t.cancel()
 	}
 
 	metrics := t.collector.Snapshot()
-	t.display.Stop(metrics)
+	t.display.Stop(metrics, err)
 	config.Debug("[PROGRESS] Tracker stopped")
 }
 

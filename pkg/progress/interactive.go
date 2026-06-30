@@ -133,7 +133,7 @@ func (d *InteractiveDisplay) Start(ctx context.Context, collector *MetricsCollec
 }
 
 // Stop halts the display and shows the final summary.
-func (d *InteractiveDisplay) Stop(metrics Metrics) {
+func (d *InteractiveDisplay) Stop(metrics Metrics, _ error) {
 	if d.spinner.ticker != nil {
 		d.spinner.ticker.Stop()
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/multitable"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -216,7 +217,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	writeTable := targetTable
 	if useStaging {
 		writeTable = replaceStagingTableName(job.Destination, targetTable, job.Config.StagingDataset)
-		fmt.Printf("[STRATEGY] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), writeTable)
+		output.Statusf("[STRATEGY] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), writeTable)
 	} else {
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
 	}

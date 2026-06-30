@@ -8,6 +8,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -168,7 +169,7 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 	switch e.opts.Strategy {
 	case config.StrategyMerge:
 		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
-		fmt.Printf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
+		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		return prepareMergeTables(ctx, dest, mergeTableParams{
 			DestTable:    st.destTable,
 			StagingTable: st.stagingTable,
@@ -375,7 +376,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 
 	l.cycles++
 	if flushedRows > 0 {
-		fmt.Printf("[STREAM] %s | cycle %d: flushed %d rows in %s\n", time.Now().Format("15:04:05"), l.cycles, flushedRows, time.Since(start).Round(time.Millisecond))
+		output.Statusf("[STREAM] %s | cycle %d: flushed %d rows in %s\n", time.Now().Format("15:04:05"), l.cycles, flushedRows, time.Since(start).Round(time.Millisecond))
 	}
 	return nil
 }
