@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -105,7 +106,7 @@ func BuildTableMetadata(tableSchema *schema.TableSchema, primaryKeys []string, l
 		// The constraint is NOT ENFORCED (informational only), and MERGE SQL
 		// keys on the in-memory PK list independently, so skipping it here is safe.
 		if len(primaryKeys) > bigQueryMaxPKColumns {
-			fmt.Printf("[WARNING] BigQuery supports at most %d primary key columns; "+
+			output.Warnf("[WARNING] BigQuery supports at most %d primary key columns; "+
 				"creating table without PRIMARY KEY constraint (got %d cols)\n",
 				bigQueryMaxPKColumns, len(primaryKeys))
 		} else {

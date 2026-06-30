@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/display"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -54,7 +55,7 @@ func (p *Pipeline) SetLogWriter(w io.Writer) {
 	p.logWriter = w
 }
 
-func (p *Pipeline) Run(ctx context.Context) error {
+func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	// Parse query annotations once and carry the base payload on the context.
 	// Destinations read it (plus a per-operation step) to annotate queries for
 	// cost attribution. Absent caller annotations just means ingestr's own keys
@@ -159,7 +160,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// GetTable. Only warn if the user's --incremental-key was actually dropped;
 	// a source that adopts it (resolved key matches) needs no warning.
 	if src.HandlesIncrementality() && p.config.IncrementalKey != "" && table.IncrementalKey() != p.config.IncrementalKey {
-		fmt.Printf("Warning: source handles incrementality internally, ignoring --incremental-key=%s\n", p.config.IncrementalKey)
+		output.Warnf("Warning: source handles incrementality internally, ignoring --incremental-key=%s\n", p.config.IncrementalKey)
 	}
 
 	if table.Name() == source.CustomQueryTableName {
@@ -178,7 +179,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	display.PrintSummary(&preFetchConfig)
 
 	if shouldWarnCDCStrategy(p.config, preFetchStrategy) {
-		fmt.Printf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
+		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
 	}
 
 	tracker, err := p.createTracker(ctx)
@@ -186,7 +187,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return err
 	}
 	if tracker != nil {
-		defer tracker.Stop()
+		defer func() { tracker.Stop(retErr) }()
 	}
 
 	// Check if source has known schema or needs inference
@@ -242,10 +243,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 				tableSchema = synthetic
 				bufferedRecords = emptyRecordChannel()
-				fmt.Printf("Warning: table %q produced no rows; creating destination table from --columns\n", table.Name())
+				output.Warnf("Warning: table %q produced no rows; creating destination table from --columns\n", table.Name())
 				config.Debug("[PIPELINE] Built synthetic schema with %d columns from --columns", len(synthetic.Columns))
 			} else {
-				fmt.Printf("Warning: table %q has no inferred columns; skipping ingestion\n", table.Name())
+				output.Warnf("Warning: table %q has no inferred columns; skipping ingestion\n", table.Name())
 				return nil
 			}
 		}
@@ -423,7 +424,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Println("\nStarting data ingestion...")
+	output.Statusf("\nStarting data ingestion...\n")
 
 	// Don't pass tracker to the job when bufferedRecords is set,
 	// because the tracker already counted rows during schema inference.
@@ -607,6 +608,8 @@ func (p *Pipeline) createTracker(ctx context.Context) (progress.Tracker, error) 
 		display = progress.NewWriterLogDisplay(p.logWriter)
 	} else {
 		switch progressMode {
+		case config.ProgressJSON:
+			display = progress.NewJSONDisplay()
 		case config.ProgressInteractive:
 			display = progress.NewInteractiveDisplay()
 		case config.ProgressLog:
@@ -859,7 +862,7 @@ func (p *Pipeline) applyExcludedColumnsToSchema(tableSchema *schema.TableSchema,
 	return &filtered
 }
 
-func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSource) error {
+func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSource) (retErr error) {
 	tables, err := src.GetTables(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get tables from multi-table source: %w", err)
@@ -896,7 +899,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	if shouldWarnCDCStrategy(p.config, resolvedStrategy) {
-		fmt.Printf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", resolvedStrategy, config.StrategyMerge)
+		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", resolvedStrategy, config.StrategyMerge)
 	}
 
 	strat, err := strategy.Get(resolvedStrategy)
@@ -927,7 +930,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		return err
 	}
 	if tracker != nil {
-		defer tracker.Stop()
+		defer func() { tracker.Stop(retErr) }()
 	}
 
 	tableDestNames := make(map[string]string)
@@ -1098,7 +1101,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	// Log warnings for removed columns (Fivetran-style soft removal)
 	for _, change := range comparison.Changes {
 		if change.Type == schemaevolution.ChangeRemoveColumn {
-			fmt.Printf("Warning: Column %q no longer exists in source, future values will be NULL\n", change.ColumnName)
+			output.Warnf("Warning: Column %q no longer exists in source, future values will be NULL\n", change.ColumnName)
 		}
 	}
 
@@ -1124,7 +1127,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	case schemaevolution.ContractDiscardRow:
 		if contractResult.HasViolations() {
 			for _, v := range contractResult.Violations {
-				fmt.Printf("Warning: %s - rows with schema violations will be discarded\n", v.Description)
+				output.Warnf("Warning: %s - rows with schema violations will be discarded\n", v.Description)
 			}
 			config.Debug("[SCHEMA EVOLUTION] Discard row mode will filter out incompatible rows during ingestion")
 		}
@@ -1134,7 +1137,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	case schemaevolution.ContractDiscardValue:
 		if contractResult.HasViolations() {
 			for _, v := range contractResult.Violations {
-				fmt.Printf("Warning: %s - non-conforming values will be set to NULL\n", v.Description)
+				output.Warnf("Warning: %s - non-conforming values will be set to NULL\n", v.Description)
 			}
 			config.Debug("[SCHEMA EVOLUTION] Discard value mode will NULL out incompatible values during ingestion")
 
@@ -1196,7 +1199,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 
 	// Log warnings
 	for _, w := range migration.Warnings {
-		fmt.Printf("Warning: %s\n", w)
+		output.Warnf("Warning: %s\n", w)
 	}
 
 	// Log SQL statements in debug mode
@@ -1470,7 +1473,7 @@ func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namin
 	for src, dest := range columnMapping {
 		config.Debug("[NAMING] Column rename: %s -> %s", src, dest)
 	}
-	fmt.Printf("Naming convention: %s (%d columns will be renamed)\n", namingConv.Name(), len(columnMapping))
+	output.Infof("Naming convention: %s (%d columns will be renamed)\n", namingConv.Name(), len(columnMapping))
 
 	p.namingMapping = columnMapping
 	p.applyColumnMapping(sourceSchema, columnMapping)
@@ -1483,7 +1486,7 @@ func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
 	if len(mapping) == 0 {
 		return
 	}
-	fmt.Printf("Identifier shortening: %d column(s) shortened to fit %d-byte limit\n", len(mapping), maxLen)
+	output.Infof("Identifier shortening: %d column(s) shortened to fit %d-byte limit\n", len(mapping), maxLen)
 	p.applyColumnMapping(sourceSchema, mapping)
 }
 
@@ -1616,7 +1619,7 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
 			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
-				fmt.Printf("Column override: %q type changed from %s(p=%v,s=%v) to %s(p=%v,s=%v)\n",
+				output.Infof("Column override: %q type changed from %s(p=%v,s=%v) to %s(p=%v,s=%v)\n",
 					col.Name, col.DataType, col.Precision, col.Scale, newCol.DataType, newCol.Precision, newCol.Scale)
 			}
 			sourceSchema.Columns[i] = newCol
@@ -1626,7 +1629,7 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 
 		if override.RenameTo != "" && override.RenameTo != sourceSchema.Columns[i].Name {
 			renameMap[sourceSchema.Columns[i].Name] = override.RenameTo
-			fmt.Printf("Column rename: %q -> %q (from --columns)\n", sourceSchema.Columns[i].Name, override.RenameTo)
+			output.Infof("Column rename: %q -> %q (from --columns)\n", sourceSchema.Columns[i].Name, override.RenameTo)
 		}
 	}
 

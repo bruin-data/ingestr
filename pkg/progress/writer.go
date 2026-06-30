@@ -44,7 +44,7 @@ func (d *WriterLogDisplay) Start(ctx context.Context, collector *MetricsCollecto
 	config.Debug("[PROGRESS] Writer display started")
 }
 
-func (d *WriterLogDisplay) Stop(metrics Metrics) {
+func (d *WriterLogDisplay) Stop(metrics Metrics, _ error) {
 	if d.ticker != nil {
 		d.ticker.Stop()
 	}

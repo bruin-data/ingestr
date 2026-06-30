@@ -17,6 +17,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
@@ -430,7 +431,7 @@ func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.S
 
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingFull)
 	if _, dropErr := d.db.ExecContext(ctx, dropSQL); dropErr != nil {
-		fmt.Printf("[DEST] Warning: failed to drop old staging table after swap: %v\n", dropErr)
+		output.Warnf("[DEST] Warning: failed to drop old staging table after swap: %v\n", dropErr)
 	}
 
 	config.Debug("[DEST] Table swap completed in %v", time.Since(startSwap))

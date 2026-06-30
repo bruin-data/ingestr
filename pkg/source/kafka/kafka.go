@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -221,7 +222,7 @@ func (s *KafkaSource) readStreaming(ctx context.Context, topic string, opts sour
 	}
 
 	if opts.IntervalStart != nil {
-		fmt.Printf("Warning: --interval-start is ignored for streaming Kafka; the consumer group's committed offsets determine the start position\n")
+		output.Warnf("Warning: --interval-start is ignored for streaming Kafka; the consumer group's committed offsets determine the start position\n")
 	}
 
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
@@ -711,7 +712,7 @@ func (s *KafkaSource) getPartitions(ctx context.Context, dialer *kafkago.Dialer,
 func (s *KafkaSource) offsetForTime(_ context.Context, conn *kafkago.Conn, t time.Time) (int64, error) {
 	offset, err := conn.ReadOffset(t)
 	if err != nil {
-		fmt.Printf("Warning: could not resolve offset for time %v: %v, falling back to last offset\n", t, err)
+		output.Warnf("Warning: could not resolve offset for time %v: %v, falling back to last offset\n", t, err)
 		last, lastErr := conn.ReadLastOffset()
 		if lastErr != nil {
 			return 0, fmt.Errorf("failed to read offset for time %v: %w", t, err)

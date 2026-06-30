@@ -41,6 +41,13 @@ var (
 		Labels: [3]string{"catalog", "schema", "table"}, FormatDesc: "catalog.schema.table",
 	}
 
+	// StarRocks: catalog.database.table (catalog selects the internal store or an
+	// external lakehouse catalog such as Iceberg/Hudi/Hive).
+	StarRocks = Capability{
+		Platform: "starrocks", MinComponents: 1, MaxComponents: 3,
+		Labels: [3]string{"catalog", "database", "table"}, FormatDesc: "catalog.database.table",
+	}
+
 	// DuckDB / MotherDuck: catalog.schema.table (catalog = attached database).
 	DuckDB = Capability{
 		Platform: "duckdb", MinComponents: 1, MaxComponents: 3,

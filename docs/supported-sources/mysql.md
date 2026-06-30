@@ -19,8 +19,20 @@ URI parameters:
 
 The same URI structure and table can be used both for sources and destinations. You can read more about SQLAlchemy's MySQL dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#mysql).
 
+## TLS / SSL
+Servers that require encrypted connections (for example PlanetScale, or any vtgate started with `--mysql_server_require_secure_transport`) reject plain connections with `server does not allow insecure connections, client must use SSL/TLS`. Enable TLS with the `tls` query parameter:
+
+```plaintext
+mysql://user:password@host:port/dbname?tls=true
+```
+
+Accepted values:
+- `tls=true`: connect over TLS and verify the server certificate against the system roots (use this for PlanetScale and any server with a publicly trusted certificate).
+- `tls=skip-verify`: connect over TLS but skip certificate verification (use for self-signed certificates).
+- `tls=preferred`: use TLS if the server offers it, otherwise fall back to plaintext.
+
 ## Vitess / PlanetScale
-[Vitess](https://vitess.io/) and [PlanetScale](https://planetscale.com/) are supported out of the box — use the same `mysql://` URI as above, no extra configuration needed.
+[Vitess](https://vitess.io/) and [PlanetScale](https://planetscale.com/) are supported out of the box — use the same `mysql://` URI as above. PlanetScale (and any TLS-only vtgate) requires `?tls=true`; see [TLS / SSL](#tls-ssl) above.
 
 By default Vitess caps queries at 100,000 rows, which would otherwise break bulk reads of larger tables. ingestr detects Vitess automatically and works around this, so large tables ingest fully.
 
@@ -70,6 +82,8 @@ VStream performs a consistent copy-phase snapshot first, then streams changes. P
 
 VStream uses vtgate's **gRPC** port, which is different from the MySQL protocol port and cannot be derived from it, so you must supply it with `grpc_port`. The database in the URI is the Vitess keyspace.
 
+CDC over Vitess opens two connections: the MySQL protocol (for schema discovery) and the vtgate gRPC port (for the change stream). A single `tls=true` secures **both** — the gRPC connection inherits the `tls` setting — so PlanetScale CDC needs only `?grpc_port=<port>&tls=true`. To control the gRPC side independently, use `grpc_tls` (see below).
+
 ```shell
 ingestr ingest \
   --source-uri "mysql+cdc://user:password@host:3306/keyspace?grpc_port=15991&mode=batch" \
@@ -81,6 +95,7 @@ ingestr ingest \
 Vitess CDC URI parameters:
 - `grpc_port`: **required** — the vtgate gRPC port (for example `15991`). The run fails with a clear error if it is missing on a Vitess server.
 - `grpc_host`: optional vtgate gRPC host; defaults to the host in the URI.
+- `grpc_tls`: optional override for the gRPC connection's TLS, independent of `tls`. `true` verifies the server certificate, `skip-verify` skips verification, `false` forces plaintext. When omitted, the gRPC connection inherits `tls` (`true`/`skip-verify` enable it; `preferred` and custom CA names do not).
 - `mode`: `batch`; defaults to `batch`.
 - `dest_schema`: optional destination schema for multi-table CDC runs.
 

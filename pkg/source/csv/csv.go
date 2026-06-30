@@ -12,6 +12,7 @@ import (
 
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -191,12 +192,12 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			if incrementalKey != "" && startTime != nil {
 				incValue, ok := row[incrementalKey].(string)
 				if !ok {
-					fmt.Printf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
+					output.Warnf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
 					continue
 				}
 				incTime, err := dateparse.ParseAny(incValue)
 				if err != nil {
-					fmt.Printf("[CSV] Row %d: skipping row with unparseable incremental key value '%s'\n", lineNum, incValue)
+					output.Warnf("[CSV] Row %d: skipping row with unparseable incremental key value '%s'\n", lineNum, incValue)
 					continue
 				}
 				if incTime.Before(*startTime) {

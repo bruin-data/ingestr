@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -40,7 +41,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}
 
 	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "di", job.Config.StagingDataset)
-	fmt.Printf("[DELETE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	output.Statusf("[DELETE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,

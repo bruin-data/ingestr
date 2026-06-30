@@ -49,7 +49,7 @@ func (d *LogDisplay) Start(ctx context.Context, collector *MetricsCollector) {
 }
 
 // Stop halts the display and shows the final summary.
-func (d *LogDisplay) Stop(metrics Metrics) {
+func (d *LogDisplay) Stop(metrics Metrics, _ error) {
 	if d.ticker != nil {
 		d.ticker.Stop()
 	}
