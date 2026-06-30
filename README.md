@@ -276,6 +276,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>✅</td>
     </tr>
     <tr>
+        <td>StarRocks</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Synapse</td>
         <td>-</td>
         <td>✅</td>
