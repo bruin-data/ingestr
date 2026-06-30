@@ -246,7 +246,7 @@ func (s *GoogleSearchConsoleSource) read(ctx context.Context, cfg *tableConfig, 
 
 	return s.readPerSite(ctx, opts, func(ctx context.Context, siteURL string, out chan<- source.RecordBatchResult) error {
 		if cfg.name == "sitemaps" {
-			return s.fetchSitemaps(ctx, siteURL, out)
+			return s.fetchSitemaps(ctx, opts, siteURL, out)
 		}
 		return s.fetchSearchAnalytics(ctx, cfg, opts, siteURL, out)
 	}), nil
@@ -436,7 +436,7 @@ func (s *GoogleSearchConsoleSource) fetchSites(ctx context.Context, opts source.
 	return nil
 }
 
-func (s *GoogleSearchConsoleSource) fetchSitemaps(ctx context.Context, siteURL string, out chan<- source.RecordBatchResult) error {
+func (s *GoogleSearchConsoleSource) fetchSitemaps(ctx context.Context, opts source.ReadOptions, siteURL string, out chan<- source.RecordBatchResult) error {
 	resp, err := s.client.Sitemaps.List(siteURL).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("failed to list sitemaps for site %q: %w", siteURL, err)
@@ -461,7 +461,7 @@ func (s *GoogleSearchConsoleSource) fetchSitemaps(ctx context.Context, siteURL s
 		})
 	}
 
-	rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, nil)
+	rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 	if err != nil {
 		return fmt.Errorf("failed to convert to arrow: %w", err)
 	}
