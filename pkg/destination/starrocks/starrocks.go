@@ -77,7 +77,9 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 		}
 		dsn += "@"
 	}
-	dsn += fmt.Sprintf("tcp(%s:%s)/%s?parseTime=true", host, port, d.database)
+	// The database is omitted from the DSN: it may not exist yet (the destination
+	// creates it), and pinning it would make the driver USE it on connect.
+	dsn += fmt.Sprintf("tcp(%s:%s)/?parseTime=true", host, port)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
