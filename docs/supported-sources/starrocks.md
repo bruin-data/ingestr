@@ -73,6 +73,28 @@ ingestr ingest \
     --dest-table 'analytics.payments'
 ```
 
+### Set the default database in the URI
+With a single path segment, unqualified table names resolve against that database in the internal catalog. Here `events` resolves to `default_catalog.analytics.events`:
+
+```bash
+ingestr ingest \
+    --source-uri 'starrocks://root:pass@localhost:9030/analytics' \
+    --source-table 'events' \
+    --dest-uri 'duckdb:///output.db' \
+    --dest-table 'main.events'
+```
+
+### Set the default catalog and database in the URI
+With two path segments (`/<catalog>/<database>`), unqualified table names resolve against that external catalog — useful when reading many tables from one lakehouse catalog. Here `trips` resolves to `iceberg_catalog.lakehouse.trips`:
+
+```bash
+ingestr ingest \
+    --source-uri 'starrocks://root:pass@localhost:9030/iceberg_catalog/lakehouse' \
+    --source-table 'trips' \
+    --dest-uri 'duckdb:///output.db' \
+    --dest-table 'main.trips'
+```
+
 ## Incremental loading
 StarRocks supports incremental loads. Provide an incremental key column (e.g. an event timestamp) together with `--interval-start`/`--interval-end` so each run only pulls rows in that window, and use `merge` with a primary key to upsert them:
 
