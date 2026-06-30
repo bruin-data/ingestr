@@ -1,6 +1,7 @@
 package destination
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -82,4 +83,16 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 	}
 
 	return statements, warnings
+}
+
+// ApplyEvolution renders the abstract schema-change plan into dialect-specific
+// DDL and executes each statement against the destination.
+func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
+	statements, warnings := BuildMigration(dialect, table, comparison)
+	for _, stmt := range statements {
+		if err := dest.Exec(ctx, stmt); err != nil {
+			return warnings, fmt.Errorf("apply schema evolution: %s: %w", stmt, err)
+		}
+	}
+	return warnings, nil
 }
