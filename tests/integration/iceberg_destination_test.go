@@ -247,6 +247,8 @@ func writeIcebergJSONL(t *testing.T, name string, rows ...string) string {
 func runIcebergPipeline(t *testing.T, ctx context.Context, sourceURI, destURI, table string, strategy ingestconfig.IncrementalStrategy) {
 	t.Helper()
 
+	prepareIcebergRESTLocalDataDir(t, destURI, table)
+
 	cfg := ingestconfig.DefaultConfig()
 	cfg.SourceURI = sourceURI
 	cfg.SourceTable = filepath.Base(strings.TrimPrefix(sourceURI, "jsonl://"))
@@ -259,6 +261,29 @@ func runIcebergPipeline(t *testing.T, ctx context.Context, sourceURI, destURI, t
 	cfg.ExtractParallelism = 2
 
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
+}
+
+func prepareIcebergRESTLocalDataDir(t *testing.T, destURI, table string) {
+	t.Helper()
+
+	parsed, err := url.Parse(destURI)
+	require.NoError(t, err)
+	if parsed.Scheme != "iceberg+rest" {
+		return
+	}
+
+	warehouse := firstIcebergTestQueryValue(parsed.Query(), "warehouse_path", "warehouse-path", "warehouse")
+	if warehouse == "" || strings.Contains(warehouse, "://") {
+		return
+	}
+
+	parts := strings.Split(table, ".")
+	require.Len(t, parts, 2)
+
+	tableDir := filepath.Join(warehouse, parts[0], parts[1])
+	require.NoError(t, os.MkdirAll(filepath.Join(tableDir, "data"), 0o777))
+	require.NoError(t, os.Chmod(tableDir, 0o777))
+	require.NoError(t, os.Chmod(filepath.Join(tableDir, "data"), 0o777))
 }
 
 func dockerSharedTempDir(t *testing.T, prefix string) string {
@@ -286,8 +311,6 @@ func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse stri
 
 	req := testcontainers.ContainerRequest{
 		Image:        "apache/iceberg-rest-fixture:1.9.2",
-		Entrypoint:   []string{"sh", "-c"},
-		Cmd:          []string{"umask 000 && exec java -jar iceberg-rest-adapter.jar"},
 		ExposedPorts: []string{"8181/tcp"},
 		Env: map[string]string{
 			"CATALOG_WAREHOUSE": warehouse,
