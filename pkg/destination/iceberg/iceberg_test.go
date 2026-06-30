@@ -95,10 +95,10 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 		},
 		{
 			name: "postgres sql catalog",
-			uri:  "iceberg+postgres://iceberg_user:secret@metadata-db.internal:5432/iceberg_catalog?sslmode=require&connect_timeout=5&storage=s3&bucket=company-lake&region=eu-west-1",
+			uri:  "iceberg+postgres://iceberg_user@metadata-db.internal:5432/iceberg_catalog?password=secret&sslmode=require&connect_timeout=5&storage=s3&bucket=company-lake&region=eu-west-1",
 			wantProp: map[string]string{
 				"type":        "sql",
-				"uri":         "postgres://iceberg_user:secret@metadata-db.internal:5432/iceberg_catalog?connect_timeout=5&sslmode=require",
+				"uri":         "postgres://iceberg_user@metadata-db.internal:5432/iceberg_catalog?connect_timeout=5&password=secret&sslmode=require",
 				"sql.driver":  "pgx",
 				"sql.dialect": "postgres",
 				"warehouse":   "s3://company-lake/",

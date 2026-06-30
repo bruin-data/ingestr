@@ -185,7 +185,7 @@ func postgresCatalogURI(parsed *url.URL) string {
 func isPostgresDSNParam(key string) bool {
 	switch key {
 	case "application_name", "connect_timeout", "fallback_application_name", "krbsrvname", "options",
-		"passfile", "replication", "requiressl", "service", "servicefile", "sslcert", "sslcompression",
+		"passfile", "password", "replication", "requiressl", "service", "servicefile", "sslcert", "sslcompression",
 		"sslcrl", "sslcrldir", "sslkey", "sslmode", "sslpassword", "sslrootcert", "sslsni",
 		"target_session_attrs", "tcp_user_timeout":
 		return true
@@ -329,7 +329,6 @@ func applyPropertyAliases(props iceberggo.Properties) {
 	aliasIfMissing(props, "secret_access_key", "s3.secret-access-key")
 	aliasIfMissing(props, "session_token", "glue.session-token")
 	aliasIfMissing(props, "session_token", "s3.session-token")
-	aliasIfMissing(props, "endpoint", "s3.endpoint")
 	aliasIfMissing(props, "endpoint_url", "s3.endpoint")
 }
 

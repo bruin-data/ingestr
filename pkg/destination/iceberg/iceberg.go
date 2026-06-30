@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -65,7 +66,14 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 }
 
 func (d *Destination) Close(ctx context.Context) error {
+	cat := d.catalog
 	d.catalog = nil
+	d.prepared = nil
+	if closer, ok := cat.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			return fmt.Errorf("iceberg: failed to close catalog: %w", err)
+		}
+	}
 	return nil
 }
 
