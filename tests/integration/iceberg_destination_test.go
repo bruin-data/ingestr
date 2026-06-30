@@ -273,6 +273,7 @@ func dockerSharedTempDir(t *testing.T, prefix string) string {
 
 	dir, err := os.MkdirTemp(base, "iceberg-"+prefix+"-")
 	require.NoError(t, err)
+	require.NoError(t, os.Chmod(dir, 0o777))
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	abs, err := filepath.Abs(dir)
