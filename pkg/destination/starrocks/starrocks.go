@@ -236,11 +236,43 @@ func (d *StarRocksDestination) nextLabel(table string) string {
 	return fmt.Sprintf("ingestr_%s_%d_%d", safe, time.Now().UnixNano(), n)
 }
 
-// SwapTable is unused: StarRocks SWAP WITH / RENAME are single-database only,
-// but ingestr stages into a separate database. SupportsAtomicSwap returns false
-// so the replace strategy writes directly to the target instead.
+// SwapTable atomically replaces the target's data from staging. StarRocks
+// SWAP WITH / RENAME are single-database only (and ingestr stages into a
+// separate database), so instead it uses INSERT OVERWRITE: StarRocks loads into
+// temporary partitions and swaps them in only on success, leaving the target's
+// existing data intact if the load fails.
 func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
-	return fmt.Errorf("starrocks: atomic swap is not supported; replace writes directly to the target")
+	if db, _ := splitDatabaseTable(opts.TargetTable); db != "" {
+		createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteColumn(db))
+		if _, err := d.db.ExecContext(ctx, createDB); err != nil {
+			config.LogFailedQuery(createDB, err)
+			return fmt.Errorf("failed to ensure target database: %w", err)
+		}
+	}
+	if opts.Schema != nil {
+		createSQL := d.buildCreateTableSQL(opts.TargetTable, opts.Schema.Columns, opts.PrimaryKeys)
+		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			config.LogFailedQuery(createSQL, err)
+			return fmt.Errorf("failed to create target table: %w", err)
+		}
+	}
+
+	overwriteSQL := fmt.Sprintf("INSERT OVERWRITE %s SELECT * FROM %s",
+		quoteTable(opts.TargetTable), quoteTable(opts.StagingTable))
+	if opts.Schema != nil && len(opts.Schema.Columns) > 0 {
+		cols := make([]string, len(opts.Schema.Columns))
+		for i, c := range opts.Schema.Columns {
+			cols[i] = quoteColumn(c.Name)
+		}
+		list := strings.Join(cols, ", ")
+		overwriteSQL = fmt.Sprintf("INSERT OVERWRITE %s (%s) SELECT %s FROM %s",
+			quoteTable(opts.TargetTable), list, list, quoteTable(opts.StagingTable))
+	}
+	if _, err := d.db.ExecContext(ctx, overwriteSQL); err != nil {
+		config.LogFailedQuery(overwriteSQL, err)
+		return fmt.Errorf("failed to overwrite target table: %w", err)
+	}
+	return d.DropTable(ctx, opts.StagingTable)
 }
 
 func (d *StarRocksDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -352,6 +384,6 @@ func (d *StarRocksDestination) SupportsAppendStrategy() bool       { return true
 func (d *StarRocksDestination) SupportsMergeStrategy() bool        { return true }
 func (d *StarRocksDestination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *StarRocksDestination) SupportsSCD2Strategy() bool         { return false }
-func (d *StarRocksDestination) SupportsAtomicSwap() bool           { return false }
+func (d *StarRocksDestination) SupportsAtomicSwap() bool           { return true }
 
 var _ destination.Destination = (*StarRocksDestination)(nil)

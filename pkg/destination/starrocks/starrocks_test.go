@@ -125,7 +125,10 @@ func TestStrategySupport(t *testing.T) {
 	if !d.SupportsReplaceStrategy() || !d.SupportsAppendStrategy() || !d.SupportsMergeStrategy() {
 		t.Error("replace/append/merge should be supported")
 	}
-	if d.SupportsDeleteInsertStrategy() || d.SupportsSCD2Strategy() || d.SupportsAtomicSwap() {
-		t.Error("delete+insert / scd2 / atomic swap should not be supported")
+	if !d.SupportsAtomicSwap() {
+		t.Error("atomic swap should be supported (INSERT OVERWRITE)")
+	}
+	if d.SupportsDeleteInsertStrategy() || d.SupportsSCD2Strategy() {
+		t.Error("delete+insert / scd2 should not be supported")
 	}
 }
