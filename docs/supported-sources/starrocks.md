@@ -95,7 +95,7 @@ ingestr ingest \
     --dest-table 'main.trips'
 ```
 
-These URI defaults only fill in the parts you leave out: anything qualified in `--source-table` takes priority.
+The URI path only provides defaults for the parts the table name omits. A `database.table` source table overrides the URI's default database; a `catalog.database.table` source table overrides both the default catalog and database.
 
 ## Incremental loading
 StarRocks supports incremental loads. Provide an incremental key column (e.g. an event timestamp) together with `--interval-start`/`--interval-end` so each run only pulls rows in that window, and use `merge` with a primary key to upsert them:
