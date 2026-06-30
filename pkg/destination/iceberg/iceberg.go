@@ -165,6 +165,9 @@ func (d *Destination) WriteParallel(ctx context.Context, records <-chan source.R
 	} else {
 		props["ingestr.operation"] = "append"
 		_, err = tbl.Append(ctx, reader, props)
+		if err == nil {
+			err = reader.Err()
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("iceberg: failed to write table %s: %w", opts.Table, err)
@@ -401,6 +404,9 @@ func (d *Destination) overwritePrepared(ctx context.Context, tbl *icebergtable.T
 		return nil, err
 	}
 	if err := txn.Overwrite(ctx, reader, props); err != nil {
+		return nil, err
+	}
+	if err := reader.Err(); err != nil {
 		return nil, err
 	}
 	return txn.Commit(ctx)

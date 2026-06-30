@@ -364,6 +364,34 @@ func TestDestinationMergeUnsupported(t *testing.T) {
 	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{}), "merge strategy is not supported")
 }
 
+func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.failed_append_events"
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		},
+	}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() {
+		require.NoError(t, dest.Close(ctx))
+	}()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  tableName,
+		Schema: tableSchema,
+	}))
+
+	writeErr := errors.New("reader failed")
+	err := dest.WriteParallel(ctx, recordBatchesThenError(writeErr, int64Batch(t, 1)), destination.WriteOptions{
+		Table:  tableName,
+		Schema: tableSchema,
+	})
+	require.ErrorIs(t, err, writeErr)
+}
+
 func TestDestinationReplaceAddsNewRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.required_events"
@@ -444,7 +472,7 @@ func TestDestinationReplaceWriteFailureDoesNotMutateExistingMetadata(t *testing.
 	}))
 
 	writeErr := errors.New("reader failed")
-	err := dest.WriteParallel(ctx, errorRecordBatches(writeErr), destination.WriteOptions{
+	err := dest.WriteParallel(ctx, recordBatchesThenError(writeErr, int64Batch(t, 9)), destination.WriteOptions{
 		Table:  tableName,
 		Schema: replacementSchema,
 	})
@@ -538,8 +566,11 @@ func recordBatches(batches ...arrow.RecordBatch) <-chan source.RecordBatchResult
 	return records
 }
 
-func errorRecordBatches(err error) <-chan source.RecordBatchResult {
-	records := make(chan source.RecordBatchResult, 1)
+func recordBatchesThenError(err error, batches ...arrow.RecordBatch) <-chan source.RecordBatchResult {
+	records := make(chan source.RecordBatchResult, len(batches)+1)
+	for _, batch := range batches {
+		records <- source.RecordBatchResult{Batch: batch}
+	}
 	records <- source.RecordBatchResult{Err: err}
 	close(records)
 	return records
