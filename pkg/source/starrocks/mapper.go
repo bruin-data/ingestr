@@ -9,7 +9,9 @@ import (
 )
 
 var (
-	decimalPrecisionRegex = regexp.MustCompile(`(?i)(?:decimal|decimalv2|decimal32|decimal64|decimal128|numeric)\(\s*(\d+)(?:\s*,\s*(\d+))?\s*\)`)
+	// Anchored to the start so it does not match a decimal nested inside a
+	// composite type (e.g. array<decimal(10,2)>), which must map to TypeArray.
+	decimalPrecisionRegex = regexp.MustCompile(`(?i)^(?:decimal|decimalv2|decimal32|decimal64|decimal128|numeric)\(\s*(\d+)(?:\s*,\s*(\d+))?\s*\)`)
 	arrayTypeRegex        = regexp.MustCompile(`(?i)^array<\s*(.+)\s*>$`)
 )
 
