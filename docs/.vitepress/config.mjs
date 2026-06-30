@@ -129,6 +129,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "MotherDuck", link: "/supported-sources/motherduck.md" },
               { text: "MySQL", link: "/supported-sources/mysql.md" },
               { text: "Oracle", link: "/supported-sources/oracle.md" },
+              { text: "PlanetScale", link: "/supported-sources/planetscale.md" },
               { text: "Postgres", link: "/supported-sources/postgres.md" },
               { text: "RabbitMQ", link: "/supported-sources/rabbitmq.md" },
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
