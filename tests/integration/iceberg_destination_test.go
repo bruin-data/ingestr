@@ -286,6 +286,8 @@ func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse stri
 
 	req := testcontainers.ContainerRequest{
 		Image:        "apache/iceberg-rest-fixture:1.9.2",
+		Entrypoint:   []string{"sh", "-c"},
+		Cmd:          []string{"umask 000 && exec java -jar iceberg-rest-adapter.jar"},
 		ExposedPorts: []string{"8181/tcp"},
 		Env: map[string]string{
 			"CATALOG_WAREHOUSE": warehouse,
