@@ -69,6 +69,11 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	}
 	d.replicationNum = query.Get("replication_num")
 
+	tls, err := tlsParam(query.Get("ssl"))
+	if err != nil {
+		return err
+	}
+
 	dsn := ""
 	if user != "" {
 		dsn = user
@@ -80,6 +85,9 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	// The database is omitted from the DSN: it may not exist yet (the destination
 	// creates it), and pinning it would make the driver USE it on connect.
 	dsn += fmt.Sprintf("tcp(%s:%s)/?parseTime=true", host, port)
+	if tls != "" {
+		dsn += "&tls=" + tls
+	}
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

@@ -14,6 +14,21 @@ func quoteColumn(name string) string {
 	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
+// tlsParam maps a user-facing `ssl` value to go-sql-driver/mysql's `tls` DSN
+// value (empty = plaintext). Mirrors the StarRocks source's handling.
+func tlsParam(ssl string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(ssl)) {
+	case "", "false", "0", "disable", "disabled":
+		return "", nil
+	case "true", "1", "enable", "enabled", "require", "required":
+		return "true", nil
+	case "skip-verify", "skip_verify", "insecure":
+		return "skip-verify", nil
+	default:
+		return "", fmt.Errorf("invalid ssl value %q: use true, false, or skip-verify", ssl)
+	}
+}
+
 func quoteColumns(names []string) []string {
 	out := make([]string, len(names))
 	for i, n := range names {

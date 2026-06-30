@@ -120,6 +120,34 @@ func TestNextLabelUnique(t *testing.T) {
 	}
 }
 
+func TestTLSParam(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"false", "", false},
+		{"true", "true", false},
+		{"require", "true", false},
+		{"skip-verify", "skip-verify", false},
+		{"insecure", "skip-verify", false},
+		{"yes", "", true},
+	}
+	for _, c := range cases {
+		got, err := tlsParam(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("tlsParam(%q): expected error", c.in)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("tlsParam(%q) = (%q,%v) want (%q,nil)", c.in, got, err, c.want)
+		}
+	}
+}
+
 func TestStrategySupport(t *testing.T) {
 	d := NewStarRocksDestination()
 	if !d.SupportsReplaceStrategy() || !d.SupportsAppendStrategy() || !d.SupportsMergeStrategy() {
