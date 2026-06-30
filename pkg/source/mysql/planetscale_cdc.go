@@ -26,8 +26,8 @@ import (
 // PlanetScaleCDCSource captures changes from a PlanetScale (managed Vitess)
 // keyspace. PlanetScale does not expose vtgate's raw VStream port; instead it
 // fronts change capture with the psdbconnect gRPC API on the database host over
-// TLS/443, authenticated with a service token. Schema/PK/shard discovery still
-// uses the MySQL wire protocol.
+// TLS/443, authenticated with the database credentials from the URI. Schema/PK/
+// shard discovery still uses the MySQL wire protocol.
 //
 // It emits the same Arrow batches and CDC metadata columns (_cdc_lsn,
 // _cdc_deleted, _cdc_synced_at) as the other CDC sources, reusing the in-package
@@ -37,8 +37,8 @@ type PlanetScaleCDCSource struct {
 	keyspace   string
 	destSchema string
 	host       string
-	tokenName  string
-	token      string
+	username   string
+	password   string
 }
 
 func NewPlanetScaleCDCSource() *PlanetScaleCDCSource {
@@ -57,11 +57,11 @@ func (s *PlanetScaleCDCSource) Connect(ctx context.Context, uri string) error {
 	if connInfo.Database == "" {
 		return fmt.Errorf("source URI must include a keyspace (database) for PlanetScale CDC")
 	}
-	if cfg.PSDBToken == "" || cfg.PSDBTokenName == "" {
-		return fmt.Errorf("PlanetScale CDC requires a service token; add psdb_token_name and psdb_token to the source URI")
-	}
 	if connInfo.Host == "" {
 		return fmt.Errorf("source URI must include the PlanetScale host")
+	}
+	if connInfo.User == "" || connInfo.Password == "" {
+		return fmt.Errorf("PlanetScale CDC requires database credentials (user:password) in the source URI")
 	}
 
 	dsn, database, err := uriToDSN(normalizedURI)
@@ -86,8 +86,8 @@ func (s *PlanetScaleCDCSource) Connect(ctx context.Context, uri string) error {
 	s.keyspace = database
 	s.destSchema = cfg.DestSchema
 	s.host = connInfo.Host
-	s.tokenName = cfg.PSDBTokenName
-	s.token = cfg.PSDBToken
+	s.username = connInfo.User
+	s.password = connInfo.Password
 	return nil
 }
 
@@ -362,8 +362,9 @@ func (s *PlanetScaleCDCSource) runPsdbConnect(ctx context.Context, targets []psd
 	if len(shards) == 0 {
 		return fmt.Errorf("no shards found for keyspace %s", s.keyspace)
 	}
+	config.Debug("[SOURCE] PlanetScale CDC: keyspace=%q shards=%v tables=%d", s.keyspace, shards, len(targets))
 
-	client, err := psdbconnect.Dial(s.host, s.tokenName, s.token)
+	client, err := psdbconnect.Dial(s.host, s.username, s.password)
 	if err != nil {
 		return err
 	}
@@ -409,10 +410,12 @@ func (s *PlanetScaleCDCSource) streamTable(ctx context.Context, client *psdbconn
 		if err != nil {
 			return err
 		}
+		config.Debug("[SOURCE] PlanetScale CDC: %s shard=%q startPos=%q hasLastPk=%v stopPos=%q", t.bareName, shard, start.GetPosition(), start.GetLastKnownPk() != nil, stopPos)
 		// A resumed shard with no pending snapshot that has already reached the
 		// current position has nothing to stream; skip it (and avoid blocking on
 		// an idle stream that would never return).
 		if start.GetLastKnownPk() == nil && start.GetPosition() != "" && psdbAtLeast(start.GetPosition(), stopPos) {
+			config.Debug("[SOURCE] PlanetScale CDC: %s shard=%q already caught up; skipping", t.bareName, shard)
 			continue
 		}
 
@@ -437,6 +440,13 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 	}
 
 	cursor := start
+	// A fresh stream (empty position) or a resumed pending snapshot must run the
+	// copy phase before the loop may stop; an incremental resume has no copy.
+	copyDone := start.GetPosition() != "" && start.GetLastKnownPk() == nil
+	sawLastPk := start.GetLastKnownPk() != nil
+	anchor := ""
+	pendingCopyStart := -1
+	var copyCheckpoint *mysqlCDCChange
 	for {
 		select {
 		case <-ctx.Done():
@@ -447,6 +457,7 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 		resp, err := stream.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				config.Debug("[SOURCE] PlanetScale CDC: %s/%s stream EOF", t.bareName, shard)
 				return nil
 			}
 			if ctx.Err() != nil {
@@ -471,6 +482,44 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 			}
 			state.Shards[shard] = sc
 		}
+		pos := cursor.GetPosition()
+		hasLastPk := cursor.GetLastKnownPk() != nil
+		if hasLastPk {
+			sawLastPk = true
+		}
+		if anchor == "" && pos != "" {
+			anchor = pos
+		}
+
+		// Log only on real activity (changes or copy-phase rows); heartbeat-only
+		// responses advance the GTID constantly and would otherwise flood --debug.
+		if len(changes) > 0 || hasLastPk {
+			config.Debug("[SOURCE] PlanetScale CDC: %s/%s resp result=%d updates=%d deletes=%d changes=%d pos=%q hasLastPk=%v copyDone=%v",
+				t.bareName, shard, len(resp.GetResult()), len(resp.GetUpdates()), len(resp.GetDeletes()), len(changes), pos, hasLastPk, copyDone)
+		}
+
+		// The snapshot is finished once the per-row primary-key checkpoint clears
+		// after appearing, or (for an empty table) the position advances past the
+		// snapshot's anchor.
+		if !copyDone && psdbCopyFinished(sawLastPk, pos, anchor, hasLastPk) {
+			copyDone = true
+			payload, err := encodePsdbCursor(*state)
+			if err != nil {
+				return err
+			}
+			if psdbRewriteBufferedLSNs(buffers, t.bareName, pendingCopyStart, *ordinal, payload) {
+				(*ordinal)++
+			} else if copyCheckpoint != nil {
+				checkpoint := *copyCheckpoint
+				checkpoint.lsn = formatVitessLSN(*ordinal, 0, payload)
+				if err := appendMySQLCDCBufferedChanges(buffers, t.bareName, t.schema, t.resultName, []mysqlCDCChange{checkpoint}, batchSize, results); err != nil {
+					return err
+				}
+				(*ordinal)++
+			}
+			pendingCopyStart = -1
+			copyCheckpoint = nil
+		}
 
 		if len(changes) > 0 {
 			payload, err := encodePsdbCursor(*state)
@@ -480,18 +529,57 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 			for i := range changes {
 				changes[i].lsn = formatVitessLSN(*ordinal, i, payload)
 			}
+			copyPhase := !copyDone && hasLastPk
+			beforeLen := 0
+			if copyPhase {
+				if buffer := buffers[t.bareName]; buffer != nil {
+					beforeLen = len(buffer.changes)
+				}
+				checkpoint := changes[len(changes)-1]
+				copyCheckpoint = &checkpoint
+			}
 			if err := appendMySQLCDCBufferedChanges(buffers, t.bareName, t.schema, t.resultName, changes, batchSize, results); err != nil {
 				return err
+			}
+			if copyPhase {
+				if buffer := buffers[t.bareName]; buffer != nil && len(buffer.changes) >= beforeLen+len(changes) {
+					if pendingCopyStart < 0 {
+						pendingCopyStart = beforeLen
+					}
+				} else {
+					pendingCopyStart = -1
+				}
 			}
 			(*ordinal)++
 		}
 
-		// Stop once the snapshot has finished and the stream has caught up to the
-		// position observed when this shard's stream started.
-		if psdbCopyComplete(cursor) && psdbAtLeast(cursor.GetPosition(), stopPos) {
+		// In batch mode, stop once the snapshot is done and the stream has caught
+		// up to the position observed when it started: an empty, non-copy response
+		// at or beyond stopPos. (The keyspace GTID keeps advancing via heartbeats,
+		// so exact-equality alone would never settle.)
+		if copyDone && !hasLastPk && len(changes) == 0 && psdbAtLeast(pos, stopPos) {
+			config.Debug("[SOURCE] PlanetScale CDC: %s/%s stop: caught up (pos=%q >= stop=%q)", t.bareName, shard, pos, stopPos)
 			return nil
 		}
 	}
+}
+
+func psdbCopyFinished(sawLastPk bool, pos, anchor string, hasLastPk bool) bool {
+	return !hasLastPk && (sawLastPk || (pos != "" && anchor != "" && pos != anchor))
+}
+
+func psdbRewriteBufferedLSNs(buffers map[string]*mysqlCDCChangeBuffer, key string, start int, ordinal uint64, payload string) bool {
+	if start < 0 {
+		return false
+	}
+	buffer := buffers[key]
+	if buffer == nil || start >= len(buffer.changes) {
+		return false
+	}
+	for i := start; i < len(buffer.changes); i++ {
+		buffer.changes[i].lsn = formatVitessLSN(ordinal, i-start, payload)
+	}
+	return true
 }
 
 // peekPosition opens a short-lived Sync at the special "current" position to read
@@ -627,12 +715,6 @@ func psdbPKChanged(before, after []interface{}, pkPositions []int) bool {
 		}
 	}
 	return false
-}
-
-// psdbCopyComplete reports whether the snapshot for a shard has finished: the
-// server reports a real GTID position and no pending primary-key checkpoint.
-func psdbCopyComplete(c *psdbconnect.TableCursor) bool {
-	return c != nil && c.GetPosition() != "" && c.GetLastKnownPk() == nil
 }
 
 // psdbAtLeast reports whether position pos is at or beyond stop, comparing as

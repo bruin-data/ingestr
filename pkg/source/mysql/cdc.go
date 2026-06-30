@@ -51,12 +51,9 @@ type MySQLCDCConfig struct {
 	DestSchema string
 	ServerID   uint32
 	Flavor     string
-	// PlanetScale (managed Vitess) psdbconnect options. When a service token is
-	// present the CDC dispatcher routes to the PlanetScale backend instead of
-	// vtgate VStream. CDCBackend forces the choice for private endpoints.
-	PSDBToken     string
-	PSDBTokenName string
-	CDCBackend    string
+	// PlanetScale (managed Vitess) routing. CDCBackend forces the psdbconnect vs
+	// vtgate VStream choice for private endpoints / custom domains.
+	CDCBackend string
 }
 
 type mysqlCDCConnInfo struct {
@@ -396,8 +393,6 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		cfg.ServerID = uint32(serverID)
 	}
 
-	cfg.PSDBToken = strings.TrimSpace(query.Get("psdb_token"))
-	cfg.PSDBTokenName = strings.TrimSpace(query.Get("psdb_token_name"))
 	cfg.CDCBackend = strings.ToLower(strings.TrimSpace(query.Get("cdc_backend")))
 
 	query.Del("dest_schema")
@@ -407,8 +402,6 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 	// Vitess- and PlanetScale-only parameters: irrelevant to (and rejected by) the MySQL DSN.
 	query.Del("grpc_port")
 	query.Del("grpc_host")
-	query.Del("psdb_token")
-	query.Del("psdb_token_name")
 	query.Del("cdc_backend")
 	parsed.RawQuery = query.Encode()
 

@@ -106,16 +106,13 @@ func (d *mysqlCDCDispatcher) Connect(ctx context.Context, uri string) error {
 
 // usePlanetScaleCDC reports whether CDC should use PlanetScale's psdbconnect API
 // instead of vtgate VStream. An explicit cdc_backend override wins; otherwise a
-// service token or a *.psdb.cloud host selects PlanetScale.
+// *.psdb.cloud host selects PlanetScale.
 func usePlanetScaleCDC(cfg MySQLCDCConfig, host string) bool {
 	switch cfg.CDCBackend {
 	case "planetscale", "psdb", "psdbconnect":
 		return true
 	case "vstream", "vitess":
 		return false
-	}
-	if cfg.PSDBToken != "" || cfg.PSDBTokenName != "" {
-		return true
 	}
 	return strings.HasSuffix(strings.ToLower(host), ".psdb.cloud")
 }

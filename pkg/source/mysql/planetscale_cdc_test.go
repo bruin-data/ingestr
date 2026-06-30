@@ -13,19 +13,13 @@ import (
 )
 
 func TestParseMySQLCDCURIPlanetScaleParams(t *testing.T) {
-	uri := "mysql+cdc://user:pass@abc.connect.psdb.cloud:3306/mydb?tls=true&psdb_token_name=tok-name&psdb_token=tok-secret&cdc_backend=planetscale"
+	uri := "mysql+cdc://user:pscale_pw_secret@abc.connect.psdb.cloud:3306/mydb?tls=true&cdc_backend=planetscale"
 
 	cfg, normalized, connInfo, err := parseMySQLCDCURI(uri)
 	if err != nil {
 		t.Fatalf("parseMySQLCDCURI: %v", err)
 	}
 
-	if cfg.PSDBToken != "tok-secret" {
-		t.Errorf("PSDBToken: got %q want %q", cfg.PSDBToken, "tok-secret")
-	}
-	if cfg.PSDBTokenName != "tok-name" {
-		t.Errorf("PSDBTokenName: got %q want %q", cfg.PSDBTokenName, "tok-name")
-	}
 	if cfg.CDCBackend != "planetscale" {
 		t.Errorf("CDCBackend: got %q want %q", cfg.CDCBackend, "planetscale")
 	}
@@ -35,13 +29,15 @@ func TestParseMySQLCDCURIPlanetScaleParams(t *testing.T) {
 	if connInfo.Database != "mydb" {
 		t.Errorf("Database: got %q", connInfo.Database)
 	}
+	// psdbconnect authenticates with the database credentials from the URI.
+	if connInfo.User != "user" || connInfo.Password != "pscale_pw_secret" {
+		t.Errorf("credentials: got %q:%q", connInfo.User, connInfo.Password)
+	}
 
-	// PlanetScale-only params must be stripped from the MySQL URI (the driver
-	// rejects unknown params), but tls must survive for the schema connection.
-	for _, leaked := range []string{"psdb_token", "psdb_token_name", "cdc_backend"} {
-		if strings.Contains(normalized, leaked) {
-			t.Errorf("normalized URI must not contain %q: %s", leaked, normalized)
-		}
+	// cdc_backend must be stripped from the MySQL URI (the driver rejects unknown
+	// params), but tls must survive for the connection.
+	if strings.Contains(normalized, "cdc_backend") {
+		t.Errorf("normalized URI must not contain cdc_backend: %s", normalized)
 	}
 	if !strings.Contains(normalized, "tls=true") {
 		t.Errorf("normalized URI must retain tls=true: %s", normalized)
@@ -55,12 +51,10 @@ func TestUsePlanetScaleCDC(t *testing.T) {
 		host string
 		want bool
 	}{
-		{"service token", MySQLCDCConfig{PSDBToken: "x", PSDBTokenName: "y"}, "db.example", true},
-		{"token name only", MySQLCDCConfig{PSDBTokenName: "y"}, "db.example", true},
 		{"psdb.cloud host", MySQLCDCConfig{}, "abc.connect.psdb.cloud", true},
 		{"psdb.cloud host uppercase", MySQLCDCConfig{}, "ABC.CONNECT.PSDB.CLOUD", true},
 		{"backend override on", MySQLCDCConfig{CDCBackend: "planetscale"}, "db.example", true},
-		{"backend override off wins over token", MySQLCDCConfig{CDCBackend: "vstream", PSDBToken: "x"}, "abc.psdb.cloud", false},
+		{"backend override forces vstream on psdb.cloud", MySQLCDCConfig{CDCBackend: "vstream"}, "abc.psdb.cloud", false},
 		{"plain mysql", MySQLCDCConfig{}, "db.example", false},
 	}
 	for _, tc := range cases {
@@ -154,23 +148,61 @@ func TestPsdbStartCursorLastKnownPk(t *testing.T) {
 	}
 }
 
-func TestPsdbCopyComplete(t *testing.T) {
+func TestPsdbCopyFinished(t *testing.T) {
 	cases := []struct {
-		name string
-		cur  *psdbconnect.TableCursor
-		want bool
+		name      string
+		sawLastPk bool
+		pos       string
+		anchor    string
+		hasLastPk bool
+		want      bool
 	}{
-		{"nil", nil, false},
-		{"copying (last_known_pk set)", &psdbconnect.TableCursor{LastKnownPk: &querypb.QueryResult{}}, false},
-		{"empty position", &psdbconnect.TableCursor{Position: ""}, false},
-		{"streaming", &psdbconnect.TableCursor{Position: "MySQL56/abc:1-5"}, true},
+		{"copy start cursor", false, "MySQL56/abc:1-5", "MySQL56/abc:1-5", false, false},
+		{"copy row checkpoint", true, "MySQL56/abc:1-5", "MySQL56/abc:1-5", true, false},
+		{"advanced copy row checkpoint", true, "MySQL56/abc:1-6", "MySQL56/abc:1-5", true, false},
+		{"copy checkpoint cleared", true, "MySQL56/abc:1-5", "MySQL56/abc:1-5", false, true},
+		{"empty table position advanced", false, "MySQL56/abc:1-6", "MySQL56/abc:1-5", false, true},
+		{"no position", false, "", "", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := psdbCopyComplete(tc.cur); got != tc.want {
-				t.Errorf("psdbCopyComplete = %v, want %v", got, tc.want)
+			if got := psdbCopyFinished(tc.sawLastPk, tc.pos, tc.anchor, tc.hasLastPk); got != tc.want {
+				t.Errorf("psdbCopyFinished = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPsdbRewriteBufferedLSNs(t *testing.T) {
+	payload, err := encodePsdbCursor(psdbCursorState{Shards: map[string]psdbShardCursor{
+		"-": {Position: "MySQL56/abc:1-10"},
+	}})
+	if err != nil {
+		t.Fatalf("encodePsdbCursor: %v", err)
+	}
+
+	buffers := map[string]*mysqlCDCChangeBuffer{
+		"users": {changes: []mysqlCDCChange{
+			{values: []interface{}{"kept"}, lsn: "old-0"},
+			{values: []interface{}{"rewritten-1"}, lsn: "old-1"},
+			{values: []interface{}{"rewritten-2"}, lsn: "old-2"},
+		}},
+	}
+
+	if !psdbRewriteBufferedLSNs(buffers, "users", 1, 9, payload) {
+		t.Fatal("expected buffered LSNs to be rewritten")
+	}
+	if buffers["users"].changes[0].lsn != "old-0" {
+		t.Errorf("first change should be untouched, got %q", buffers["users"].changes[0].lsn)
+	}
+	if want := formatVitessLSN(9, 0, payload); buffers["users"].changes[1].lsn != want {
+		t.Errorf("rewritten lsn[1]: got %q want %q", buffers["users"].changes[1].lsn, want)
+	}
+	if want := formatVitessLSN(9, 1, payload); buffers["users"].changes[2].lsn != want {
+		t.Errorf("rewritten lsn[2]: got %q want %q", buffers["users"].changes[2].lsn, want)
+	}
+	if psdbRewriteBufferedLSNs(buffers, "users", len(buffers["users"].changes), 10, payload) {
+		t.Error("out-of-range start should not rewrite")
 	}
 }
 

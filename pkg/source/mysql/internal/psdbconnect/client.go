@@ -14,8 +14,9 @@ import (
 
 const connectSyncMethod = "/psdbconnect.v1alpha1.Connect/Sync"
 
-// basicAuth carries a PlanetScale service token as an HTTP Basic credential, where
-// the token name is the username and the token value is the password.
+// basicAuth carries PlanetScale credentials as an HTTP Basic credential. The
+// psdbconnect endpoint accepts the database username/password (or, equivalently,
+// a service token's name/value) as the Basic auth user/secret.
 type basicAuth struct {
 	header string
 }
@@ -37,8 +38,9 @@ type Client struct {
 }
 
 // Dial connects to a PlanetScale psdbconnect host (e.g. <db>.<org>.connect.psdb.cloud)
-// over TLS, defaulting to port 443, authenticating with a service token.
-func Dial(host, tokenName, tokenValue string) (*Client, error) {
+// over TLS, defaulting to port 443, authenticating with database credentials via
+// HTTP Basic auth.
+func Dial(host, username, password string) (*Client, error) {
 	if host == "" {
 		return nil, fmt.Errorf("psdbconnect: empty host")
 	}
@@ -49,7 +51,7 @@ func Dial(host, tokenName, tokenValue string) (*Client, error) {
 	cc, err := grpc.NewClient(
 		target,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})),
-		grpc.WithPerRPCCredentials(newBasicAuth(tokenName, tokenValue)),
+		grpc.WithPerRPCCredentials(newBasicAuth(username, password)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("psdbconnect: dial %s: %w", target, err)
