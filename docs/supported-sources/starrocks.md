@@ -2,7 +2,7 @@
 
 [StarRocks](https://www.starrocks.io/) is a high-performance analytical (OLAP) database. Alongside its own internal storage, StarRocks can query open lakehouse table formats — such as **Apache Iceberg**, **Apache Hudi**, **Apache Hive**, and **Delta Lake** — through external catalogs.
 
-ingestr supports StarRocks as a source, including tables exposed through external lakehouse catalogs.
+ingestr supports StarRocks as a source (including tables exposed through external lakehouse catalogs) and as a destination.
 
 ## URI format
 The URI format for StarRocks is as follows:
@@ -117,3 +117,28 @@ The interval flags are optional. If you omit them, ingestr reads all rows and `m
 
 ## Custom queries
 You can read the result of an arbitrary SQL query instead of a table. See [Custom Queries](/supported-sources/custom_queries.md) for details.
+
+## Using StarRocks as a destination
+StarRocks can also be a destination. ingestr creates the table (a duplicate-key table, or a primary-key table when a primary key is given) and loads rows through StarRocks' [Stream Load](https://docs.starrocks.io/docs/loading/StreamLoad/) HTTP API.
+
+Stream Load uses the FE HTTP port (default `8030`), which is separate from the query port (`9030`). Set it with the `http_port` query parameter if it differs:
+
+```bash
+ingestr ingest \
+    --source-uri 'postgresql://user:pass@localhost:5432/sourcedb' \
+    --source-table 'public.events' \
+    --dest-uri 'starrocks://root:pass@localhost:9030/analytics?http_port=8030' \
+    --dest-table 'analytics.events'
+```
+
+Destination URI parameters:
+- `http_port` (optional): the FE HTTP port used for Stream Load. Defaults to `8030`.
+- `replication_num` (optional): the replica count for created tables. If omitted, the cluster default is used; set it to `1` for single-backend clusters.
+- `ssl` (optional): same TLS handling as the source (applies to the query-port connection).
+
+### Supported write dispositions
+- `replace` — atomically replaces the target's data. A failed load leaves the existing data intact.
+- `append` — loads rows into the existing table.
+- `merge` — upserts by primary key (the table is created as a StarRocks primary-key table). Requires `--primary-key`.
+
+`delete+insert` and `scd2` are not currently supported for StarRocks destinations.
