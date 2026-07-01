@@ -74,6 +74,13 @@ func TestParseStarRocksURI(t *testing.T) {
 			wantCatalog:  defaultCatalog,
 			wantDatabase: "db",
 		},
+		{
+			name:         "destination-only params are stripped from the DSN",
+			uri:          "starrocks://root@host:9030/db?http_port=8030&replication_num=1",
+			wantDSN:      "root@tcp(host:9030)/?parseTime=true",
+			wantCatalog:  defaultCatalog,
+			wantDatabase: "db",
+		},
 	}
 
 	for _, tt := range tests {
