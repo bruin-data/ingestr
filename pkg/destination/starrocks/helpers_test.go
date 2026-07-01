@@ -24,7 +24,8 @@ func TestRecordBatchToJSONList(t *testing.T) {
 
 	rec := array.NewRecordBatch(
 		arrow.NewSchema([]arrow.Field{{Name: "c", Type: arr.DataType()}}, nil),
-		[]arrow.Array{arr}, 2)
+		[]arrow.Array{arr}, 2,
+	)
 	defer rec.Release()
 
 	body, n, err := recordBatchToJSON(rec)
