@@ -1749,6 +1749,8 @@ func mysqlDSN(uri string) string {
 	// Convert mysql://user:pass@host:port/db to user:pass@tcp(host:port)/db?parseTime=true
 	uri = strings.TrimPrefix(uri, "mysql://")
 	uri = strings.TrimPrefix(uri, "mariadb://")
+	uri = strings.TrimPrefix(uri, "vitess://")
+	uri = strings.TrimPrefix(uri, "planetscale://")
 
 	// Find the @ to split user:pass from host
 	atIdx := strings.Index(uri, "@")

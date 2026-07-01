@@ -23,6 +23,9 @@ type MySQLSource struct {
 	uri         string
 	database    string
 	sessionInit []string
+	// vitessBackend is set by VitessSource. When false, Connect rejects servers
+	// that identify as Vitess so mysql:// URIs fail fast against Vitess/PlanetScale.
+	vitessBackend bool
 }
 
 func NewMySQLSource() *MySQLSource {
@@ -54,6 +57,16 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
+	if s.vitessBackend {
+		// Vitess enforces a per-query row-count cap in its default OLTP workload;
+		// OLAP lifts it so full-table reads are not silently truncated.
+		config.Debug("[SOURCE] Vitess source: enabling OLAP workload")
+		s.sessionInit = []string{"SET workload = 'OLAP'"}
+	} else if isVitess, _ := isVitessServer(ctx, db); isVitess {
+		_ = db.Close()
+		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead of mysql://", database)
+	}
+
 	s.db = db
 	s.uri = uri
 	s.database = database
@@ -72,7 +85,7 @@ func uriToDSN(uri string) (string, string, error) {
 
 	// Normalize scheme
 	scheme := strings.ToLower(u.Scheme)
-	if !strings.HasPrefix(scheme, "mysql") && scheme != "mariadb" {
+	if !isMySQLFamilyScheme(scheme) {
 		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
 	}
 
@@ -105,9 +118,9 @@ func uriToDSN(uri string) (string, string, error) {
 	query := u.Query()
 	query.Set("parseTime", "true") // Always parse time
 	// PlanetScale requires TLS on MySQL-wire connections; enable it automatically for
-	// *.psdb.cloud hosts unless the caller already set a tls value. Mirrors the MySQL
-	// destination so a PlanetScale source works without an explicit ?tls=true.
-	if !query.Has("tls") && strings.HasSuffix(strings.ToLower(host), ".psdb.cloud") {
+	// the planetscale scheme and *.psdb.cloud hosts unless the caller already set a
+	// tls value, so tls=skip-verify or a custom config still wins.
+	if !query.Has("tls") && (scheme == "planetscale" || strings.HasSuffix(strings.ToLower(host), ".psdb.cloud")) {
 		query.Set("tls", "true")
 	}
 	if len(query) > 0 {
@@ -115,6 +128,17 @@ func uriToDSN(uri string) (string, string, error) {
 	}
 
 	return dsn, database, nil
+}
+
+// isMySQLFamilyScheme reports whether scheme names a MySQL-wire connector handled
+// by this package: MySQL/MariaDB, Vitess, or PlanetScale.
+func isMySQLFamilyScheme(scheme string) bool {
+	switch {
+	case strings.HasPrefix(scheme, "mysql"), scheme == "mariadb", scheme == "vitess", scheme == "planetscale":
+		return true
+	default:
+		return false
+	}
 }
 
 func isVitessServer(ctx context.Context, db *sql.DB) (bool, error) {

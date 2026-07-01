@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	psdbconnect "github.com/bruin-data/ingestr/pkg/source/mysql/internal/psdbconnect"
 	"google.golang.org/protobuf/proto"
@@ -13,16 +14,13 @@ import (
 )
 
 func TestParseMySQLCDCURIPlanetScaleParams(t *testing.T) {
-	uri := "mysql+cdc://user:pscale_pw_secret@abc.connect.psdb.cloud:3306/mydb?tls=true&cdc_backend=planetscale"
+	uri := "planetscale+cdc://user:pscale_pw_secret@abc.connect.psdb.cloud:3306/mydb"
 
-	cfg, normalized, connInfo, err := parseMySQLCDCURI(uri)
+	_, normalized, connInfo, err := parseMySQLCDCURI(uri)
 	if err != nil {
 		t.Fatalf("parseMySQLCDCURI: %v", err)
 	}
 
-	if cfg.CDCBackend != "planetscale" {
-		t.Errorf("CDCBackend: got %q want %q", cfg.CDCBackend, "planetscale")
-	}
 	if connInfo.Host != "abc.connect.psdb.cloud" {
 		t.Errorf("Host: got %q", connInfo.Host)
 	}
@@ -34,33 +32,35 @@ func TestParseMySQLCDCURIPlanetScaleParams(t *testing.T) {
 		t.Errorf("credentials: got %q:%q", connInfo.User, connInfo.Password)
 	}
 
-	// cdc_backend must be stripped from the MySQL URI (the driver rejects unknown
-	// params), but tls must survive for the connection.
-	if strings.Contains(normalized, "cdc_backend") {
-		t.Errorf("normalized URI must not contain cdc_backend: %s", normalized)
-	}
-	if !strings.Contains(normalized, "tls=true") {
-		t.Errorf("normalized URI must retain tls=true: %s", normalized)
+	// The +cdc suffix is stripped, leaving the planetscale scheme so uriToDSN can
+	// auto-enable TLS for the underlying MySQL connection.
+	if !strings.HasPrefix(normalized, "planetscale://") {
+		t.Errorf("normalized URI must keep the planetscale scheme: %s", normalized)
 	}
 }
 
-func TestUsePlanetScaleCDC(t *testing.T) {
+// TestCDCSchemeRouting verifies each scheme resolves to its dedicated backend via
+// the registry, replacing the old probe-based dispatch.
+func TestCDCSchemeRouting(t *testing.T) {
 	cases := []struct {
-		name string
-		cfg  MySQLCDCConfig
-		host string
-		want bool
+		scheme string
+		want   interface{}
 	}{
-		{"psdb.cloud host", MySQLCDCConfig{}, "abc.connect.psdb.cloud", true},
-		{"psdb.cloud host uppercase", MySQLCDCConfig{}, "ABC.CONNECT.PSDB.CLOUD", true},
-		{"backend override on", MySQLCDCConfig{CDCBackend: "planetscale"}, "db.example", true},
-		{"backend override forces vstream on psdb.cloud", MySQLCDCConfig{CDCBackend: "vstream"}, "abc.psdb.cloud", false},
-		{"plain mysql", MySQLCDCConfig{}, "db.example", false},
+		{"mysql", (*MySQLSource)(nil)},
+		{"vitess", (*VitessSource)(nil)},
+		{"planetscale", (*VitessSource)(nil)},
+		{"mysql+cdc", (*MySQLCDCSource)(nil)},
+		{"vitess+cdc", (*VitessCDCSource)(nil)},
+		{"planetscale+cdc", (*PlanetScaleCDCSource)(nil)},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := usePlanetScaleCDC(tc.cfg, tc.host); got != tc.want {
-				t.Errorf("usePlanetScaleCDC(%+v, %q) = %v, want %v", tc.cfg, tc.host, got, tc.want)
+		t.Run(tc.scheme, func(t *testing.T) {
+			ctor, err := registry.Default.GetSourceConstructor(tc.scheme)
+			if err != nil {
+				t.Fatalf("GetSourceConstructor(%q): %v", tc.scheme, err)
+			}
+			if got := ctor(); reflect.TypeOf(got) != reflect.TypeOf(tc.want) {
+				t.Errorf("scheme %q routed to %T, want %T", tc.scheme, got, tc.want)
 			}
 		})
 	}

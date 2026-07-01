@@ -56,7 +56,7 @@ func NewVitessCDCSource() *VitessCDCSource {
 }
 
 func (s *VitessCDCSource) Schemes() []string {
-	return []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}
+	return []string{"vitess+cdc"}
 }
 
 func (s *VitessCDCSource) Connect(ctx context.Context, uri string) error {

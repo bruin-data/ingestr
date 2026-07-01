@@ -137,6 +137,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Socrata", link: "/supported-sources/socrata.md" },
               { text: "SQLite", link: "/supported-sources/sqlite.md" },
               { text: "StarRocks", link: "/supported-sources/starrocks.md" },
+              { text: "Vitess", link: "/supported-sources/vitess.md" },
               {
                 text: "Experimental",
                 items: [

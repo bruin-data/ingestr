@@ -32,7 +32,7 @@ func NewMySQLDestination() *MySQLDestination {
 }
 
 func (d *MySQLDestination) Schemes() []string {
-	return []string{"mysql", "mysql+pymysql", "mariadb"}
+	return []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "planetscale"}
 }
 
 func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
@@ -55,19 +55,26 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
-	// Vitess (including PlanetScale) speaks the MySQL wire protocol via vtgate but
-	// differs in ways that matter for writes: CREATE DATABASE is unsupported, and
-	// sharded keyspaces cannot be written to safely. Detect it once here so those
-	// paths can adapt.
-	isVitess := detectVitess(ctx, db)
+	// Routing is by scheme: vitess:// and planetscale:// select the Vitess-aware
+	// write paths (CREATE DATABASE is unsupported via vtgate, and sharded keyspaces
+	// cannot be written to safely). A mysql:// URI pointed at a Vitess server is a
+	// mistake, so fail fast with a clear message rather than misbehaving mid-load.
+	scheme := ""
+	if u, err := url.Parse(uri); err == nil {
+		scheme = strings.ToLower(u.Scheme)
+	}
+	isVitess := scheme == "vitess" || scheme == "planetscale"
 	if isVitess {
-		config.Debug("[MYSQL] Detected Vitess/PlanetScale server (vtgate)")
+		config.Debug("[MYSQL] Vitess/PlanetScale destination (scheme=%s)", scheme)
 		if sharded, err := isShardedKeyspace(ctx, db, database); err != nil {
 			output.Warnf("[WARNING] could not verify whether Vitess/PlanetScale keyspace %q is sharded (%v); proceeding as unsharded, but a sharded keyspace will fail mid-load — ingestr supports only unsharded keyspaces as a destination\n", database, err)
 		} else if sharded {
 			_ = db.Close()
 			return fmt.Errorf("keyspace %q is sharded; ingestr supports only unsharded (single-shard) Vitess/PlanetScale keyspaces as a destination", database)
 		}
+	} else if detectVitess(ctx, db) {
+		_ = db.Close()
+		return fmt.Errorf("server for keyspace %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead of mysql://", database)
 	}
 
 	d.db = db
@@ -127,7 +134,7 @@ func uriToDSN(uri string) (string, string, error) {
 	}
 
 	scheme := strings.ToLower(u.Scheme)
-	if !strings.HasPrefix(scheme, "mysql") && scheme != "mariadb" {
+	if !strings.HasPrefix(scheme, "mysql") && scheme != "mariadb" && scheme != "vitess" && scheme != "planetscale" {
 		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
 	}
 
@@ -159,9 +166,10 @@ func uriToDSN(uri string) (string, string, error) {
 	query.Set("parseTime", "true")
 	query.Set("allowNativePasswords", "true")
 	// PlanetScale requires TLS on MySQL-wire connections and rejects plaintext with
-	// "client must use SSL/TLS". Enable it automatically for *.psdb.cloud hosts unless
-	// the caller already set a tls value, so tls=skip-verify or a custom config still wins.
-	if !query.Has("tls") && strings.HasSuffix(strings.ToLower(host), ".psdb.cloud") {
+	// "client must use SSL/TLS". Enable it automatically for the planetscale scheme
+	// and *.psdb.cloud hosts unless the caller already set a tls value, so
+	// tls=skip-verify or a custom config still wins.
+	if !query.Has("tls") && (scheme == "planetscale" || strings.HasSuffix(strings.ToLower(host), ".psdb.cloud")) {
 		query.Set("tls", "true")
 	}
 	dsn += "?" + query.Encode()

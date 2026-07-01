@@ -63,15 +63,15 @@ func startVitessContainer(ctx context.Context) (testcontainers.Container, string
 		return nil, "", "", err
 	}
 
-	uri := fmt.Sprintf("mysql://root@%s:%s/%s", host, port.Port(), vitessKeyspace)
+	uri := fmt.Sprintf("vitess://root@%s:%s/%s", host, port.Port(), vitessKeyspace)
 	return container, uri, mysqlDSN(uri), nil
 }
 
-// TestMySQLSourceReadsVitessBeyondRowCap proves the MySQL source transparently
-// handles Vitess: it seeds more rows than the OLTP row cap, confirms a plain read
-// is rejected by that cap, then verifies ingestr reads every row (only possible
-// once the source detects Vitess and enables the OLAP workload).
-func TestMySQLSourceReadsVitessBeyondRowCap(t *testing.T) {
+// TestVitessSourceReadsBeyondRowCap proves the Vitess source (vitess:// scheme)
+// reads past the OLTP row cap: it seeds more rows than the cap, confirms a plain
+// read is rejected by that cap, then verifies ingestr reads every row (only
+// possible because the Vitess source enables the OLAP workload).
+func TestVitessSourceReadsBeyondRowCap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -98,8 +98,8 @@ func TestMySQLSourceReadsVitessBeyondRowCap(t *testing.T) {
 	// workload kicked in.
 	requireRowCapHit(t, ctx, db)
 
-	// ingestr should detect Vitess via SELECT @@version, switch to OLAP, and read
-	// every row despite the cap.
+	// The vitess:// source runs in the OLAP workload and reads every row despite
+	// the cap.
 	duckPath := filepath.Join(t.TempDir(), "vitess.duckdb")
 	cfg := &config.IngestConfig{
 		SourceURI:           uri,
@@ -111,6 +111,41 @@ func TestMySQLSourceReadsVitessBeyondRowCap(t *testing.T) {
 	require.NoError(t, pipeline.New(cfg).Run(ctx), "ingest from Vitess should succeed")
 
 	require.Equal(t, vitessSeedRows, countDuckDBRows(t, ctx, duckPath, "main."+vitessTable))
+}
+
+// TestMySQLSchemeRejectsVitess proves mysql:// fails fast against a Vitess server,
+// pointing the user at the dedicated vitess:// scheme rather than silently
+// misbehaving (e.g. hitting the OLTP row cap).
+func TestMySQLSchemeRejectsVitess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, uri, dsn, err := startVitessContainer(ctx)
+	require.NoError(t, err, "failed to start vttestserver")
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	db, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	require.Eventually(t, func() bool {
+		return db.PingContext(ctx) == nil
+	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+
+	// The connect-time probe fails before any table is read, so no seeding is needed.
+	mysqlURI := strings.Replace(uri, "vitess://", "mysql://", 1)
+	cfg := &config.IngestConfig{
+		SourceURI:           mysqlURI,
+		SourceTable:         fmt.Sprintf("%s.%s", vitessKeyspace, vitessTable),
+		DestURI:             fmt.Sprintf("duckdb:///%s", filepath.Join(t.TempDir(), "reject.duckdb")),
+		DestTable:           "main." + vitessTable,
+		IncrementalStrategy: config.StrategyReplace,
+	}
+	err = pipeline.New(cfg).Run(ctx)
+	require.Error(t, err, "mysql:// against a Vitess server should fail fast")
+	require.Contains(t, err.Error(), "vitess://")
 }
 
 func seedVitessTable(t *testing.T, ctx context.Context, db *sql.DB) {
