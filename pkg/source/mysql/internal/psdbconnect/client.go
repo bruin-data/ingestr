@@ -14,6 +14,12 @@ import (
 
 const connectSyncMethod = "/psdbconnect.v1alpha1.Connect/Sync"
 
+// maxRecvMsgSize raises the gRPC receive limit well above the 4MB default so the
+// Sync copy/snapshot phase can deliver its batched rows; a single message can
+// exceed 4MB. This mirrors the tuned max message size the Vitess VStream path
+// relies on for the same reason.
+const maxRecvMsgSize = 64 * 1024 * 1024
+
 // basicAuth carries PlanetScale credentials as an HTTP Basic credential. The
 // psdbconnect endpoint accepts the database username/password (or, equivalently,
 // a service token's name/value) as the Basic auth user/secret.
@@ -52,6 +58,7 @@ func Dial(host, username, password string) (*Client, error) {
 		target,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})),
 		grpc.WithPerRPCCredentials(newBasicAuth(username, password)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgSize)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("psdbconnect: dial %s: %w", target, err)
