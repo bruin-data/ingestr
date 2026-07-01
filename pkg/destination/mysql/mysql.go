@@ -23,6 +23,7 @@ type MySQLDestination struct {
 	db       *sql.DB
 	uri      string
 	database string
+	isVitess bool
 }
 
 func NewMySQLDestination() *MySQLDestination {
@@ -53,11 +54,69 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
+	// Vitess (including PlanetScale) speaks the MySQL wire protocol via vtgate but
+	// differs in ways that matter for writes: CREATE DATABASE is unsupported, and
+	// sharded keyspaces cannot be written to safely. Detect it once here so those
+	// paths can adapt.
+	isVitess := detectVitess(ctx, db)
+	if isVitess {
+		config.Debug("[MYSQL] Detected Vitess/PlanetScale server (vtgate)")
+		if sharded, err := isShardedKeyspace(ctx, db, database); err != nil {
+			config.Debug("[MYSQL] Could not determine sharding for keyspace %q (assuming unsharded): %v", database, err)
+		} else if sharded {
+			_ = db.Close()
+			return fmt.Errorf("keyspace %q is sharded; ingestr supports only unsharded (single-shard) Vitess/PlanetScale keyspaces as a destination", database)
+		}
+	}
+
 	d.db = db
 	d.uri = uri
 	d.database = database
+	d.isVitess = isVitess
 	config.Debug("[MYSQL] Connected to database: %s", database)
 	return nil
+}
+
+// detectVitess reports whether the server identifies as Vitess (this also covers
+// PlanetScale, which is built on Vitess). On any probe error it returns false so
+// the destination behaves as plain MySQL, matching the source dispatcher's fallback.
+func detectVitess(ctx context.Context, db *sql.DB) bool {
+	var version string
+	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
+		config.Debug("[MYSQL] Vitess detection failed (assuming plain MySQL): %v", err)
+		return false
+	}
+	return strings.Contains(strings.ToLower(version), "vitess")
+}
+
+// isShardedKeyspace reports whether the given Vitess keyspace has more than one
+// shard. SHOW VITESS_SHARDS lists shards as "<keyspace>/<shard>"; an unsharded
+// keyspace has exactly one shard (named "0" or "-").
+func isShardedKeyspace(ctx context.Context, db *sql.DB, keyspace string) (bool, error) {
+	if keyspace == "" {
+		return false, nil
+	}
+	rows, err := db.QueryContext(ctx, "SHOW VITESS_SHARDS")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	prefix := keyspace + "/"
+	var count int
+	for rows.Next() {
+		var shard string
+		if err := rows.Scan(&shard); err != nil {
+			return false, err
+		}
+		if strings.HasPrefix(shard, prefix) {
+			count++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return count > 1, nil
 }
 
 func uriToDSN(uri string) (string, string, error) {
@@ -98,6 +157,12 @@ func uriToDSN(uri string) (string, string, error) {
 	query := u.Query()
 	query.Set("parseTime", "true")
 	query.Set("allowNativePasswords", "true")
+	// PlanetScale requires TLS on MySQL-wire connections and rejects plaintext with
+	// "client must use SSL/TLS". Enable it automatically for *.psdb.cloud hosts unless
+	// the caller already set a tls value, so tls=skip-verify or a custom config still wins.
+	if !query.Has("tls") && strings.HasSuffix(strings.ToLower(host), ".psdb.cloud") {
+		query.Set("tls", "true")
+	}
 	dsn += "?" + query.Encode()
 
 	return dsn, database, nil
@@ -158,6 +223,12 @@ func (d *MySQLDestination) ensureDatabaseExists(ctx context.Context, database st
 	}
 	if exists {
 		return nil
+	}
+	// vtgate does not support CREATE DATABASE by default (it errors with "create
+	// database not allowed", and does not ignore IF NOT EXISTS). Keyspaces must be
+	// created out-of-band via the Vitess/PlanetScale control plane.
+	if d.isVitess {
+		return fmt.Errorf("keyspace %q does not exist; create it via your Vitess/PlanetScale control plane (CREATE DATABASE is not supported through vtgate)", database)
 	}
 	escaped := strings.ReplaceAll(database, "`", "``")
 	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", escaped)
@@ -678,6 +749,29 @@ func (t *mysqlTransaction) Commit(ctx context.Context) error {
 
 func (t *mysqlTransaction) Rollback(ctx context.Context) error {
 	return t.tx.Rollback()
+}
+
+// ReplaceStagingPolicy governs where replace stages its intermediate table. Plain
+// MySQL uses the managed _bruin_staging database (auto-created on demand). Vitess and
+// PlanetScale cannot auto-create that keyspace (CREATE DATABASE is unsupported via
+// vtgate), so staging goes into the target keyspace instead.
+func (d *MySQLDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	if d.isVitess {
+		return destination.ReplaceStagingPolicy{
+			DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+			DefaultTargetSchema: d.database,
+		}
+	}
+	return destination.ReplaceStagingPolicy{
+		DefaultPlacement:     destination.ReplaceStagingManagedSchema,
+		DefaultManagedSchema: "_bruin_staging",
+	}
+}
+
+// ManagedStagingPolicy governs merge / delete-insert / scd2 staging placement; it
+// follows the same rule as ReplaceStagingPolicy.
+func (d *MySQLDestination) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	return d.ReplaceStagingPolicy()
 }
 
 func (d *MySQLDestination) SupportsReplaceStrategy() bool      { return true }
