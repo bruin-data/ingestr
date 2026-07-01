@@ -499,6 +499,10 @@ func parseStarRocksURI(uri string) (dsn, catalog, database string, err error) {
 	if tlsErr := applyTLSParams(query); tlsErr != nil {
 		return "", "", "", tlsErr
 	}
+	// Drop destination-only params so a connection shared with the StarRocks
+	// destination doesn't leak them into the go-sql-driver DSN.
+	query.Del("http_port")
+	query.Del("replication_num")
 
 	dsn = ""
 	if user != "" {
