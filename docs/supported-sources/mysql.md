@@ -38,7 +38,7 @@ By default Vitess caps queries at 100,000 rows, which would otherwise break bulk
 
 Change data capture is also supported for Vitess. See [Change data capture](#change-data-capture) below.
 
-[PlanetScale](/supported-sources/planetscale.md) is documented separately because it uses the same MySQL-compatible connector with PlanetScale-specific TLS and VStream connection guidance.
+[PlanetScale](/supported-sources/planetscale.md) is documented separately: it uses the same MySQL-compatible connector but has its own change-data-capture path (`psdbconnect`) and PlanetScale-specific TLS guidance.
 
 ## Change data capture
 CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes. ingestr detects the server when it connects and picks the right mechanism automatically: standard MySQL and MariaDB stream the binary log, while Vitess streams changes through [VStream](https://vitess.io/docs/reference/vreplication/vstream/) because Vitess is a sharded layer with no standard binary log to tail. Both produce the same `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resume from the destination table's maximum `_cdc_lsn` on subsequent runs.
@@ -103,30 +103,5 @@ Vitess CDC URI parameters:
 
 Requirements:
 - The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).
-- Source tables must have primary keys, or `--primary-key` must be provided.
-- Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
-
-### PlanetScale (psdbconnect)
-PlanetScale does not expose vtgate's VStream gRPC port to external clients, so ingestr streams changes through PlanetScale's hosted `psdbconnect` API on the database host over TLS (port 443). It authenticates with the **database credentials already in the URI** — the same `user:password` used for the MySQL connection — so no separate token is required. ingestr selects this path automatically when the host ends in `.psdb.cloud`; for private endpoints or custom domains, force it with `cdc_backend=planetscale`.
-
-Keep `tls=true` (required for both the MySQL-protocol schema discovery and the psdbconnect endpoint). The database in the URI is the PlanetScale keyspace. Unlike the Vitess path, there is no `grpc_port` — the psdbconnect endpoint is always the database host on 443.
-
-psdbconnect performs a per-shard snapshot first (resumable by primary key) and then streams inserts, updates, and deletes. Position is tracked per shard and serialized into `_cdc_lsn`, and subsequent runs resume from the destination's maximum `_cdc_lsn` for both unsharded and sharded keyspaces. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key. (PlanetScale delivers only the primary keys of deleted rows; the destination marks them deleted without disturbing the other columns.)
-
-```shell
-ingestr ingest \
-  --source-uri "mysql+cdc://user:password@host.connect.psdb.cloud:3306/keyspace?tls=true" \
-  --dest-uri "duckdb:///tmp/planetscale_cdc.duckdb" \
-  --source-table "orders" \
-  --dest-table "orders"
-```
-
-PlanetScale CDC URI parameters:
-- `tls`: keep `tls=true` — required for the connection.
-- `cdc_backend`: optional override — `planetscale` forces this path (for example on a custom domain), `vstream` forces the self-hosted Vitess path.
-- `dest_schema`: optional destination schema for multi-table CDC runs.
-
-Requirements:
-- PlanetScale database credentials (`user:password`) with read access to the branch/keyspace.
 - Source tables must have primary keys, or `--primary-key` must be provided.
 - Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
