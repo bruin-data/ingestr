@@ -124,6 +124,28 @@ func TestFlattenRow(t *testing.T) {
 	assertMissing(t, search, "ad_group_ad_ad_responsive_display_ad_format_setting")
 }
 
+func TestParseGoogleAdsURIAllowsMissingCredentials(t *testing.T) {
+	customerIDs, devToken, _, credentialsJSON, err := parseGoogleAdsURI("googleads://1234567890?dev_token=abc")
+	if err != nil {
+		t.Fatalf("parseGoogleAdsURI returned error: %v", err)
+	}
+	if credentialsJSON != nil {
+		t.Fatalf("credentialsJSON = %v, want nil when no credentials provided", credentialsJSON)
+	}
+	if len(customerIDs) != 1 || customerIDs[0] != "1234567890" {
+		t.Fatalf("customerIDs = %#v", customerIDs)
+	}
+	if devToken != "abc" {
+		t.Fatalf("devToken = %q", devToken)
+	}
+}
+
+func TestParseGoogleAdsURIRequiresDevToken(t *testing.T) {
+	if _, _, _, _, err := parseGoogleAdsURI("googleads://1234567890"); err == nil {
+		t.Fatal("expected error when dev_token is missing, got nil")
+	}
+}
+
 func TestReportPrimaryKeys(t *testing.T) {
 	tests := []struct {
 		name     string

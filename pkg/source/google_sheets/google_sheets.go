@@ -40,16 +40,20 @@ func (s *GoogleSheetsSource) Connect(ctx context.Context, uri string) error {
 		return err
 	}
 
-	credType, err := detectCredentialType(credsJSON)
-	if err != nil {
-		return fmt.Errorf("failed to detect credential type: %w", err)
+	opts := []option.ClientOption{
+		option.WithScopes("https://www.googleapis.com/auth/spreadsheets.readonly"),
+	}
+	// Credentials are optional: when none are provided, the client falls back
+	// to Application Default Credentials (e.g. the gcloud ADC file on the machine).
+	if len(credsJSON) > 0 {
+		credType, err := detectCredentialType(credsJSON)
+		if err != nil {
+			return fmt.Errorf("failed to detect credential type: %w", err)
+		}
+		opts = append(opts, option.WithAuthCredentialsJSON(credType, credsJSON))
 	}
 
-	client, err := sheets.NewService(
-		ctx,
-		option.WithAuthCredentialsJSON(credType, credsJSON),
-		option.WithScopes("https://www.googleapis.com/auth/spreadsheets.readonly"),
-	)
+	client, err := sheets.NewService(ctx, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create Google Sheets service: %w", err)
 	}
@@ -106,7 +110,8 @@ func parseURI(uri string) ([]byte, error) {
 		return data, nil
 	}
 
-	return nil, fmt.Errorf("gsheets URI requires credentials_path or credentials_base64 parameter")
+	// No credentials provided: fall back to Application Default Credentials.
+	return nil, nil
 }
 
 func (s *GoogleSheetsSource) Close(ctx context.Context) error {

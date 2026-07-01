@@ -20,9 +20,16 @@ gsheets://?credentials_base64=<base64_encoded_credentials>
 
 URI parameters:
 
-- `credentials_path`: the path to the service account JSON file
+- `credentials_path`: **Optional**. The path to the service account JSON file. If omitted, the source uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (the `GOOGLE_APPLICATION_CREDENTIALS` env var, or the `gcloud auth application-default login` token on your machine).
+- `credentials_base64`: **Optional**. The base64-encoded service account JSON (alternative to `credentials_path`).
 
 The URI is used to connect to the Google Sheets API for extracting data.
+
+To authenticate with your own Google account instead of a service account key, run `gcloud auth application-default login` and omit both credential parameters:
+
+```
+gsheets://
+```
 
 ## Setting up a Google Sheets integration
 

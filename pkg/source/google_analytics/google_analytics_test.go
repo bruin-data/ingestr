@@ -61,6 +61,25 @@ func TestRealtimeReportPrimaryKeysIncludeDateRangeForMultipleMinuteRanges(t *tes
 	}
 }
 
+func TestParseConnectionURIAllowsMissingCredentials(t *testing.T) {
+	credJSON, propertyIDs, err := parseConnectionURI("googleanalytics://?property_id=123")
+	if err != nil {
+		t.Fatalf("parseConnectionURI returned error: %v", err)
+	}
+	if credJSON != nil {
+		t.Fatalf("credJSON = %v, want nil when no credentials provided", credJSON)
+	}
+	if !reflect.DeepEqual(propertyIDs, []string{"123"}) {
+		t.Fatalf("propertyIDs = %#v", propertyIDs)
+	}
+}
+
+func TestParseConnectionURIRequiresPropertyID(t *testing.T) {
+	if _, _, err := parseConnectionURI("googleanalytics://"); err == nil {
+		t.Fatal("expected error when property_id is missing, got nil")
+	}
+}
+
 func tableRequest(name string) source.TableRequest {
 	return source.TableRequest{Name: name}
 }

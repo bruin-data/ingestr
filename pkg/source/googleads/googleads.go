@@ -130,12 +130,15 @@ func parseGoogleAdsURI(uri string) ([]string, string, string, []byte, error) {
 
 	credentialsJSON, err := getCredentials(params)
 	if err != nil {
-		return nil, "", "", nil, fmt.Errorf("credentials_path or credentials_base64 is required in google ads URI: %w", err)
+		return nil, "", "", nil, err
 	}
 
 	return customerIDs, devToken, loginCustomerID, credentialsJSON, nil
 }
 
+// getCredentials reads the service account credentials from the URI. Credentials
+// are optional: when neither is provided, it returns nil and the client falls
+// back to Application Default Credentials (e.g. the gcloud ADC file on the machine).
 func getCredentials(params url.Values) ([]byte, error) {
 	if path := params.Get("credentials_path"); path != "" {
 		data, err := os.ReadFile(path)
@@ -153,7 +156,7 @@ func getCredentials(params url.Values) ([]byte, error) {
 		return data, nil
 	}
 
-	return nil, fmt.Errorf("credentials_path or credentials_base64 is required in google ads URI")
+	return nil, nil
 }
 
 func (s *GoogleAdsSource) Close(ctx context.Context) error {
