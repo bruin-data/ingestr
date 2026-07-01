@@ -1826,7 +1826,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: vitess.io/vitess
-      version: v0.23.2
+      version: v0.23.3
       licenses:
         - Apache-2.0
         - BSD-2-Clause
