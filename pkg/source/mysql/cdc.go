@@ -51,6 +51,9 @@ type MySQLCDCConfig struct {
 	DestSchema string
 	ServerID   uint32
 	Flavor     string
+	// PlanetScale (managed Vitess) routing. CDCBackend forces the psdbconnect vs
+	// vtgate VStream choice for private endpoints / custom domains.
+	CDCBackend string
 }
 
 type mysqlCDCConnInfo struct {
@@ -390,16 +393,20 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		cfg.ServerID = uint32(serverID)
 	}
 
+	cfg.CDCBackend = strings.ToLower(strings.TrimSpace(query.Get("cdc_backend")))
+
 	query.Del("dest_schema")
 	query.Del("flavor")
 	query.Del("mode")
 	query.Del("server_id")
+
 	// Vitess-only parameters: irrelevant to (and rejected by) the MySQL DSN. The
 	// tls parameter is deliberately kept — it secures the MySQL-protocol probe and
 	// is also inherited by the VStream gRPC connection.
 	query.Del("grpc_port")
 	query.Del("grpc_host")
 	query.Del("grpc_tls")
+	query.Del("cdc_backend")
 	parsed.RawQuery = query.Encode()
 
 	normalizedURI := parsed.String()

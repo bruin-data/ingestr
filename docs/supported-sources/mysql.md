@@ -38,7 +38,7 @@ By default Vitess caps queries at 100,000 rows, which would otherwise break bulk
 
 Change data capture is also supported for Vitess. See [Change data capture](#change-data-capture) below.
 
-[PlanetScale](/supported-sources/planetscale.md) is documented separately because it uses the same MySQL-compatible connector with PlanetScale-specific TLS and VStream connection guidance.
+[PlanetScale](/supported-sources/planetscale.md) is documented separately: it uses the same MySQL-compatible connector but has its own change-data-capture path (`psdbconnect`) and PlanetScale-specific TLS guidance.
 
 ## Change data capture
 CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes. ingestr detects the server when it connects and picks the right mechanism automatically: standard MySQL and MariaDB stream the binary log, while Vitess streams changes through [VStream](https://vitess.io/docs/reference/vreplication/vstream/) because Vitess is a sharded layer with no standard binary log to tail. Both produce the same `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resume from the destination table's maximum `_cdc_lsn` on subsequent runs.

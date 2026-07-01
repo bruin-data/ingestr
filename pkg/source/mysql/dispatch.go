@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -74,12 +75,22 @@ func (d *mysqlCDCDispatcher) Schemes() []string {
 }
 
 func (d *mysqlCDCDispatcher) Connect(ctx context.Context, uri string) error {
-	// parseMySQLCDCURI strips the +cdc scheme and CDC/Vitess-only query params,
-	// yielding a clean MySQL URI usable for the version probe.
-	_, normalizedURI, _, err := parseMySQLCDCURI(uri)
+	// parseMySQLCDCURI strips the +cdc scheme and CDC/Vitess/PlanetScale-only
+	// query params, yielding a clean MySQL URI usable for the version probe.
+	cfg, normalizedURI, connInfo, err := parseMySQLCDCURI(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse MySQL CDC URI: %w", err)
 	}
+
+	// PlanetScale's MySQL endpoint identifies as Vitess, so it must be selected
+	// before the @@version probe below would route it to VStream (which cannot
+	// reach PlanetScale's CDC API).
+	if usePlanetScaleCDC(cfg, connInfo.Host) {
+		config.Debug("[SOURCE] using PlanetScale psdbconnect CDC source")
+		d.backend = NewPlanetScaleCDCSource()
+		return d.backend.Connect(ctx, uri)
+	}
+
 	dsn, _, err := uriToDSN(normalizedURI)
 	if err != nil {
 		return fmt.Errorf("failed to parse MySQL URI: %w", err)
@@ -91,6 +102,19 @@ func (d *mysqlCDCDispatcher) Connect(ctx context.Context, uri string) error {
 		d.backend = NewMySQLCDCSource()
 	}
 	return d.backend.Connect(ctx, uri)
+}
+
+// usePlanetScaleCDC reports whether CDC should use PlanetScale's psdbconnect API
+// instead of vtgate VStream. An explicit cdc_backend override wins; otherwise a
+// *.psdb.cloud host selects PlanetScale.
+func usePlanetScaleCDC(cfg MySQLCDCConfig, host string) bool {
+	switch cfg.CDCBackend {
+	case "planetscale", "psdb", "psdbconnect":
+		return true
+	case "vstream", "vitess":
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(host), ".psdb.cloud")
 }
 
 func (d *mysqlCDCDispatcher) Close(ctx context.Context) error {

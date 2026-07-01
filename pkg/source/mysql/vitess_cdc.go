@@ -541,13 +541,20 @@ func (s *VitessCDCSource) resolveVitessStart(targets []vitessCDCTarget, resumeBy
 // listShards returns the shard names of the keyspace (e.g. ["-"] when unsharded,
 // ["-80", "80-"] when sharded) via vtgate's SHOW VITESS_SHARDS.
 func (s *VitessCDCSource) listShards(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, "SHOW VITESS_SHARDS")
+	return listVitessShards(ctx, s.db, s.keyspace)
+}
+
+// listVitessShards reports the shard names of a keyspace via vtgate's SHOW
+// VITESS_SHARDS. It is shared by the Vitess VStream and PlanetScale psdbconnect
+// CDC sources, which both speak the MySQL wire protocol to a vtgate.
+func listVitessShards(ctx context.Context, db *sql.DB, keyspace string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SHOW VITESS_SHARDS")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list Vitess shards: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	prefix := s.keyspace + "/"
+	prefix := keyspace + "/"
 	var shards []string
 	for rows.Next() {
 		var entry string
