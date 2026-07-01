@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
@@ -38,6 +39,18 @@ type mockCDCResumeDestination struct {
 
 func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (string, error) {
 	return "", nil
+}
+
+type mockSchemaEvolutionDestination struct {
+	mockDestination
+}
+
+func (m *mockSchemaEvolutionDestination) ApplySchemaEvolution(_ context.Context, _ string, _ *schemaevolution.SchemaComparison) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockSchemaEvolutionDestination) SupportsColumnTypeChanges() bool {
+	return true
 }
 
 func TestRunRejectsChangeTrackingSQLLimitBeforeSourceLookup(t *testing.T) {
@@ -572,6 +585,49 @@ func TestApplyDestinationSchemaConstraints_OracleStringIncrementalKey(t *testing
 	if tableSchema.Columns[2].MaxLength != 0 {
 		t.Fatalf("non-incremental string MaxLength = %d, want 0", tableSchema.Columns[2].MaxLength)
 	}
+}
+
+func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
+	destSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+	)
+	sourceSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol("age", schema.TypeInt64),
+	)
+	p := &Pipeline{
+		config: &config.IngestConfig{
+			DestTable: "events",
+		},
+		dest: &mockSchemaEvolutionDestination{
+			mockDestination: mockDestination{
+				tableSchema: destSchema,
+				scheme:      "schema_evolver_without_dialect",
+			},
+		},
+	}
+
+	plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyAppend)
+	if err != nil {
+		t.Fatalf("evolveSchemaIfNeeded() error = %v", err)
+	}
+	if plan == nil || plan.FinalSchema == nil {
+		t.Fatal("expected final schema plan")
+	}
+	if plan.Table != "events" {
+		t.Fatalf("plan table = %q, want events", plan.Table)
+	}
+	if !plan.HasChanges() {
+		t.Fatal("expected abstract comparison changes")
+	}
+	if len(plan.Comparison.Changes) != 1 || plan.Comparison.Changes[0].Type != schemaevolution.ChangeAddColumn {
+		t.Fatalf("unexpected plan comparison: %#v", plan.Comparison)
+	}
+
+	gotColumns := plan.FinalSchema.ColumnNames()
+	assertColumns(t, "columns", gotColumns, []string{"id", "age"})
 }
 
 func TestNamingConsistency(t *testing.T) {

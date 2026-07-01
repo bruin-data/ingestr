@@ -77,6 +77,9 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	if len(dest.mergeCalls[0].PrimaryKeys) != 1 || dest.mergeCalls[0].PrimaryKeys[0] != "id" {
 		t.Fatalf("MergeOptions.PrimaryKeys = %v", dest.mergeCalls[0].PrimaryKeys)
 	}
+	if dest.mergeCalls[0].IncrementalKey != "id" {
+		t.Fatalf("MergeOptions.IncrementalKey = %q, want id", dest.mergeCalls[0].IncrementalKey)
+	}
 	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
 		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)
 	}
@@ -85,6 +88,26 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	defer src.mu.Unlock()
 	if !src.readCalled {
 		t.Fatalf("expected Source.Read to be called")
+	}
+}
+
+func TestMergeStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyMerge
+	job.Config.PrimaryKeys = []string{"id"}
+	job.Config.IncrementalKey = "updated_at"
+	src.readCh = mustClosedRecords()
+
+	strat := &MergeStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected 1 MergeTable call, got %d", len(dest.mergeCalls))
+	}
+	if dest.mergeCalls[0].IncrementalKey != "" {
+		t.Fatalf("MergeOptions.IncrementalKey = %q, want empty for missing staging column", dest.mergeCalls[0].IncrementalKey)
 	}
 }
 

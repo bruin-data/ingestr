@@ -135,7 +135,7 @@ func run() error {
 			return err
 		}
 		if mode == "check" {
-			return checkLock(lock, scanned)
+			return checkLock(lock, scanned, modules)
 		}
 		lock.Version = 1
 		lock.Generated = generatedMetadata{
@@ -258,7 +258,7 @@ func findModule(library string, modules []moduleInfo) (moduleInfo, bool) {
 	return moduleInfo{}, false
 }
 
-func checkLock(lock *lockFile, scanned []scanEntry) error {
+func checkLock(lock *lockFile, scanned []scanEntry, modules []moduleInfo) error {
 	var problems []string
 
 	deps := make(map[string]dependencyReview, len(lock.Dependencies))
@@ -293,8 +293,18 @@ func checkLock(lock *lockFile, scanned []scanEntry) error {
 		}
 	}
 
+	selectedModules := make(map[string]string, len(modules))
+	for _, mod := range modules {
+		selectedModules[mod.Path] = mod.Version
+	}
 	for _, dep := range lock.Dependencies {
 		if !seen[dep.Module] {
+			if version, ok := selectedModules[dep.Module]; ok {
+				if version != "" && dep.Version != version {
+					problems = append(problems, fmt.Sprintf("%s version changed: lock has %s, go.mod selects %s", dep.Module, dep.Version, version))
+				}
+				continue
+			}
 			problems = append(problems, fmt.Sprintf("%s@%s is in licenses.lock.yml but was not found in the current scan", dep.Module, dep.Version))
 		}
 	}

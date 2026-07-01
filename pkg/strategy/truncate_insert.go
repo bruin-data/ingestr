@@ -209,7 +209,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		TargetTable:    targetTable,
 		PrimaryKeys:    job.Config.PrimaryKeys,
 		Columns:        job.Schema.ColumnNames(),
-		IncrementalKey: job.Config.IncrementalKey,
+		IncrementalKey: mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey),
 	}); err != nil {
 		return fmt.Errorf("failed to insert from staging: %w", err)
 	}
