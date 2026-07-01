@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -62,7 +63,7 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 	if isVitess {
 		config.Debug("[MYSQL] Detected Vitess/PlanetScale server (vtgate)")
 		if sharded, err := isShardedKeyspace(ctx, db, database); err != nil {
-			config.Debug("[MYSQL] Could not determine sharding for keyspace %q (assuming unsharded): %v", database, err)
+			output.Warnf("[WARNING] could not verify whether Vitess/PlanetScale keyspace %q is sharded (%v); proceeding as unsharded, but a sharded keyspace will fail mid-load — ingestr supports only unsharded keyspaces as a destination\n", database, err)
 		} else if sharded {
 			_ = db.Close()
 			return fmt.Errorf("keyspace %q is sharded; ingestr supports only unsharded (single-shard) Vitess/PlanetScale keyspaces as a destination", database)
