@@ -153,6 +153,36 @@ func (d *StarRocksDestination) PrepareTable(ctx context.Context, opts destinatio
 // buildCreateTableSQL renders StarRocks DDL. With primary keys it creates a
 // PRIMARY KEY table (key columns declared first and NOT NULL, hash-distributed
 // on the keys); otherwise a duplicate-key table with random distribution.
+// isStarRocksKeyable reports whether a column type may be a StarRocks key (and
+// therefore the leading column of a duplicate-key table).
+func isStarRocksKeyable(col schema.Column) bool {
+	switch col.DataType {
+	case schema.TypeFloat32, schema.TypeFloat64, schema.TypeBinary, schema.TypeJSON, schema.TypeArray:
+		return false
+	default:
+		return true
+	}
+}
+
+// keyableFirst returns columns with the first keyable column moved to the front
+// when the leading column isn't keyable, leaving order unchanged otherwise. If
+// no column is keyable the input is returned as-is.
+func keyableFirst(columns []schema.Column) []schema.Column {
+	if len(columns) == 0 || isStarRocksKeyable(columns[0]) {
+		return columns
+	}
+	for i, c := range columns {
+		if isStarRocksKeyable(c) {
+			out := make([]schema.Column, 0, len(columns))
+			out = append(out, c)
+			out = append(out, columns[:i]...)
+			out = append(out, columns[i+1:]...)
+			return out
+		}
+	}
+	return columns
+}
+
 func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
 	pkSet := make(map[string]bool, len(primaryKeys))
 	for _, k := range primaryKeys {
@@ -185,7 +215,12 @@ func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schem
 			}
 		}
 	} else {
-		for _, c := range columns {
+		// A duplicate-key table's leading column becomes the sort key, which
+		// StarRocks rejects for non-keyable types (FLOAT/DOUBLE/ARRAY/JSON/
+		// VARBINARY). Move the first keyable column to the front so table
+		// creation succeeds; Stream Load and the swap/merge SQL map by name, so
+		// column order is not otherwise significant.
+		for _, c := range keyableFirst(columns) {
 			colDefs = append(colDefs, colDef(c, false))
 		}
 	}

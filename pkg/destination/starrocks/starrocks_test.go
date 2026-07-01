@@ -88,6 +88,34 @@ func TestBuildCreateTableSQL_PrimaryKey(t *testing.T) {
 	}
 }
 
+func TestBuildCreateTableSQL_ReordersNonKeyableFirstColumn(t *testing.T) {
+	d := &StarRocksDestination{replicationNum: "1"}
+	cols := []schema.Column{
+		{Name: "tags", DataType: schema.TypeArray, ArrayType: schema.TypeString},
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "score", DataType: schema.TypeFloat64},
+	}
+	got := d.buildCreateTableSQL("db.t", cols, nil)
+	// The non-keyable array must not be the first column; the keyable id moves up.
+	if strings.Index(got, "`id`") > strings.Index(got, "`tags`") {
+		t.Errorf("keyable column should be declared first:\n%s", got)
+	}
+	if !strings.Contains(got, "DISTRIBUTED BY RANDOM") {
+		t.Errorf("expected duplicate-key layout:\n%s", got)
+	}
+}
+
+func TestKeyableFirstLeavesKeyableLeadUntouched(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "tags", DataType: schema.TypeArray},
+	}
+	got := keyableFirst(cols)
+	if got[0].Name != "id" || got[1].Name != "tags" {
+		t.Errorf("order should be unchanged when the first column is keyable: %+v", got)
+	}
+}
+
 func TestSplitDatabaseTable(t *testing.T) {
 	cases := []struct{ in, db, tbl string }{
 		{"db.t", "db", "t"},
