@@ -1,6 +1,7 @@
 package starrocks
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -54,15 +55,23 @@ func splitDatabaseTable(table string) (string, string) {
 }
 
 // recordBatchToJSON encodes an Arrow record batch as a JSON array of row
-// objects (keyed by column name) for Stream Load. Returns the body and the row
-// count.
-func recordBatchToJSON(record arrow.RecordBatch) ([]byte, int64, error) {
+// objects (keyed by column name) for Stream Load. It returns the body, the row
+// count, and the names of binary columns (base64-encoded in the body, so the
+// loader must decode them server-side).
+func recordBatchToJSON(record arrow.RecordBatch) ([]byte, int64, []string, error) {
 	numRows := record.NumRows()
 	if numRows == 0 {
-		return nil, 0, nil
+		return nil, 0, nil, nil
 	}
 	numCols := int(record.NumCols())
 	fields := record.Schema().Fields()
+
+	var binaryCols []string
+	for c := 0; c < numCols; c++ {
+		if id := fields[c].Type.ID(); id == arrow.BINARY || id == arrow.LARGE_BINARY {
+			binaryCols = append(binaryCols, fields[c].Name)
+		}
+	}
 
 	rows := make([]map[string]interface{}, 0, numRows)
 	for r := int64(0); r < numRows; r++ {
@@ -75,9 +84,28 @@ func recordBatchToJSON(record arrow.RecordBatch) ([]byte, int64, error) {
 
 	body, err := json.Marshal(rows)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
-	return body, numRows, nil
+	return body, numRows, binaryCols, nil
+}
+
+// columnsHeader builds the Stream Load `columns` value that decodes base64
+// binary columns back to their raw bytes, or "" when there are none. It lists
+// every batch column in order, then a from_base64() transform for each binary
+// column.
+func columnsHeader(sc *arrow.Schema, binaryCols []string) string {
+	if len(binaryCols) == 0 {
+		return ""
+	}
+	fields := sc.Fields()
+	parts := make([]string, 0, len(fields)+len(binaryCols))
+	for _, f := range fields {
+		parts = append(parts, f.Name)
+	}
+	for _, name := range binaryCols {
+		parts = append(parts, fmt.Sprintf("%s=from_base64(%s)", name, name))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // extractValue converts an Arrow value to a JSON-serializable Go value that
@@ -108,7 +136,11 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 	case *array.LargeString:
 		return a.Value(idx)
 	case *array.Binary:
-		return string(a.Value(idx))
+		// base64 keeps the bytes valid UTF-8 for JSON; the loader adds a
+		// from_base64() transform so StarRocks stores the original bytes.
+		return base64.StdEncoding.EncodeToString(a.Value(idx))
+	case *array.LargeBinary:
+		return base64.StdEncoding.EncodeToString(a.Value(idx))
 	case *array.Date32:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Date64:

@@ -277,14 +277,15 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 		}
 		batchNum++
 
-		body, rows, err := recordBatchToJSON(result.Batch)
+		body, rows, binaryCols, err := recordBatchToJSON(result.Batch)
 		if err != nil {
 			result.Batch.Release()
 			return fmt.Errorf("failed to encode batch %d: %w", batchNum, err)
 		}
 		if rows > 0 {
 			label := d.nextLabel(table)
-			if err := d.loader.load(ctx, db, table, label, body); err != nil {
+			columns := columnsHeader(result.Batch.Schema(), binaryCols)
+			if err := d.loader.load(ctx, db, table, label, body, columns); err != nil {
 				result.Batch.Release()
 				return fmt.Errorf("failed to stream load batch %d: %w", batchNum, err)
 			}

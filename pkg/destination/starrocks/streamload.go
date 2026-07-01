@@ -43,10 +43,10 @@ type streamLoadResponse struct {
 
 // load streams a JSON-array body into db.table, following the FE -> BE redirect
 // manually so the Authorization header and body survive the hop.
-func (s *streamLoader) load(ctx context.Context, db, table, label string, body []byte) error {
+func (s *streamLoader) load(ctx context.Context, db, table, label string, body []byte, columns string) error {
 	url := fmt.Sprintf("http://%s/api/%s/%s/_stream_load", s.endpoint, db, table)
 
-	resp, err := s.put(ctx, url, label, body)
+	resp, err := s.put(ctx, url, label, columns, body)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (s *streamLoader) load(ctx context.Context, db, table, label string, body [
 		if loc == "" {
 			return fmt.Errorf("stream load redirect without a Location header")
 		}
-		if resp, err = s.put(ctx, loc, label, body); err != nil {
+		if resp, err = s.put(ctx, loc, label, columns, body); err != nil {
 			return err
 		}
 	}
@@ -86,7 +86,7 @@ func (s *streamLoader) load(ctx context.Context, db, table, label string, body [
 	return nil
 }
 
-func (s *streamLoader) put(ctx context.Context, url, label string, body []byte) (*http.Response, error) {
+func (s *streamLoader) put(ctx context.Context, url, label, columns string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -97,6 +97,9 @@ func (s *streamLoader) put(ctx context.Context, url, label string, body []byte) 
 	req.Header.Set("format", "json")
 	req.Header.Set("strip_outer_array", "true")
 	req.Header.Set("label", label)
+	if columns != "" {
+		req.Header.Set("columns", columns)
+	}
 	return s.client.Do(req)
 }
 
