@@ -58,9 +58,36 @@ func MapDataTypeToStarRocks(col schema.Column) string {
 	case schema.TypeTimestamp, schema.TypeTimestampTZ:
 		// StarRocks DATETIME has no time zone; it stores the wall-clock value.
 		return "DATETIME"
-	case schema.TypeJSON, schema.TypeArray:
+	case schema.TypeArray:
+		if elem, ok := starRocksArrayElement(col); ok {
+			return fmt.Sprintf("ARRAY<%s>", elem)
+		}
+		// Fall back to JSON for element types a StarRocks ARRAY can't hold
+		// (binary, JSON, nested arrays, or an unknown element type).
+		return "JSON"
+	case schema.TypeJSON:
 		return "JSON"
 	default:
 		return "VARCHAR(65533)"
+	}
+}
+
+// starRocksArrayElement returns the DDL for an ARRAY's element type, or false
+// when a StarRocks ARRAY can't hold that element (so the caller uses JSON). The
+// element carries the column's precision/scale, matching the schema layer's
+// convention for array columns.
+func starRocksArrayElement(col schema.Column) (string, bool) {
+	switch col.ArrayType {
+	case schema.TypeBoolean, schema.TypeInt8, schema.TypeInt16, schema.TypeInt32,
+		schema.TypeInt64, schema.TypeFloat32, schema.TypeFloat64, schema.TypeDecimal,
+		schema.TypeString, schema.TypeUUID, schema.TypeInterval, schema.TypeDate,
+		schema.TypeTime, schema.TypeTimestamp, schema.TypeTimestampTZ:
+		return MapDataTypeToStarRocks(schema.Column{
+			DataType:  col.ArrayType,
+			Precision: col.Precision,
+			Scale:     col.Scale,
+		}), true
+	default:
+		return "", false
 	}
 }

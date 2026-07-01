@@ -28,6 +28,12 @@ func TestMapDataTypeToStarRocks(t *testing.T) {
 		{"timestamptz", schema.Column{DataType: schema.TypeTimestampTZ}, "DATETIME"},
 		{"json", schema.Column{DataType: schema.TypeJSON}, "JSON"},
 		{"binary", schema.Column{DataType: schema.TypeBinary}, "VARBINARY"},
+		{"array of int", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeInt64}, "ARRAY<BIGINT>"},
+		{"array of string", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeString}, "ARRAY<VARCHAR(65533)>"},
+		{"array of decimal", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 10, Scale: 2}, "ARRAY<DECIMAL(10, 2)>"},
+		{"array of unknown element falls back to json", schema.Column{DataType: schema.TypeArray}, "JSON"},
+		{"array of binary falls back to json", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeBinary}, "JSON"},
+		{"array of json falls back to json", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeJSON}, "JSON"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
