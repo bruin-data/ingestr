@@ -38,6 +38,12 @@ By default Vitess caps queries at 100,000 rows, which would otherwise break bulk
 
 Change data capture is also supported for Vitess. See [Change data capture](#change-data-capture) below.
 
+### Vitess as a destination
+Vitess is also supported as a destination over the same `mysql://` URI, and ingestr detects Vitess automatically. Two things differ from plain MySQL:
+
+- **The target keyspace must already exist.** `CREATE DATABASE` is not supported through vtgate, so ingestr never creates keyspaces — create the keyspace via your Vitess control plane first. Staging tables for the `replace`, `merge`, `delete+insert`, and `scd2` strategies are created inside the target keyspace rather than in a separate `_bruin_staging` database.
+- **Only unsharded (single-shard) keyspaces are supported.** If the target keyspace is sharded, ingestr fails fast at connect with a clear error instead of producing a broken load. Sharded keyspaces are unsupported because auto-created tables need a Primary Vindex to be routable, the `merge`/`delete+insert`/`scd2` strategies use `UPDATE … JOIN` / `INSERT … SELECT … WHERE NOT EXISTS` statements that Vitess rejects across shards, and the atomic `RENAME` swap used by `replace` is not atomic across shards. To load a sharded keyspace, pre-create the tables (with vindexes) and manage the load outside ingestr.
+
 [PlanetScale](/supported-sources/planetscale.md) is documented separately: it uses the same MySQL-compatible connector but has its own change-data-capture path (`psdbconnect`) and PlanetScale-specific TLS guidance.
 
 ## Change data capture

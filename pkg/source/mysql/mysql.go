@@ -104,6 +104,12 @@ func uriToDSN(uri string) (string, string, error) {
 	// Add query parameters
 	query := u.Query()
 	query.Set("parseTime", "true") // Always parse time
+	// PlanetScale requires TLS on MySQL-wire connections; enable it automatically for
+	// *.psdb.cloud hosts unless the caller already set a tls value. Mirrors the MySQL
+	// destination so a PlanetScale source works without an explicit ?tls=true.
+	if !query.Has("tls") && strings.HasSuffix(strings.ToLower(host), ".psdb.cloud") {
+		query.Set("tls", "true")
+	}
 	if len(query) > 0 {
 		dsn += "?" + query.Encode()
 	}
