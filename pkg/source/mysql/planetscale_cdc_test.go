@@ -173,6 +173,38 @@ func TestPsdbCopyFinished(t *testing.T) {
 	}
 }
 
+func TestPsdbReachedStop(t *testing.T) {
+	const uuid = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	stop := "MySQL56/" + uuid + ":1-77"
+	behind := "MySQL56/" + uuid + ":1-70"
+	ahead := "MySQL56/" + uuid + ":1-80"
+
+	cases := []struct {
+		name                string
+		copyDone, hasLastPk bool
+		pos, stopPos        string
+		want                bool
+	}{
+		// The regression case: the response carrying a shard's final change lands
+		// exactly on stopPos. On an idle shard no further (empty) response arrives,
+		// so the stream must stop here rather than block waiting for one.
+		{"caught up exactly on final change", true, false, stop, stop, true},
+		{"caught up beyond stop", true, false, ahead, stop, true},
+		{"still behind stop", true, false, behind, stop, false},
+		{"copy not finished yet", false, false, ahead, stop, false},
+		{"pending snapshot pk", true, true, ahead, stop, false},
+		{"empty position", true, false, "", stop, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := psdbReachedStop(tc.copyDone, tc.hasLastPk, tc.pos, tc.stopPos); got != tc.want {
+				t.Errorf("psdbReachedStop(%v, %v, %q, %q) = %v, want %v",
+					tc.copyDone, tc.hasLastPk, tc.pos, tc.stopPos, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPsdbRewriteBufferedLSNs(t *testing.T) {
 	payload, err := encodePsdbCursor(psdbCursorState{Shards: map[string]psdbShardCursor{
 		"-": {Position: "MySQL56/abc:1-10"},
