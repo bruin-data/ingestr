@@ -58,7 +58,13 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 		user = u.User.Username()
 		password, _ = u.User.Password()
 	}
-	d.database = strings.TrimPrefix(u.Path, "/")
+	// Accept a [catalog/]database path: a connection shared with the source may
+	// carry a catalog, but the destination writes to the native catalog, so use
+	// the last path segment as the database.
+	if trimmed := strings.Trim(u.Path, "/"); trimmed != "" {
+		parts := strings.Split(trimmed, "/")
+		d.database = parts[len(parts)-1]
+	}
 
 	query := u.Query()
 	httpPort := defaultHTTPPort
