@@ -101,12 +101,43 @@ func TestCheckLockReportsStaleManualAudit(t *testing.T) {
 			LicenseSHA256: "abc123",
 			Status:        "manual-review",
 		}},
-	}, nil)
+	}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if got := err.Error(); !containsString(got, "manual audit for example.com/not-selected is stale") {
 		t.Fatalf("error = %q, want stale manual audit message", got)
+	}
+}
+
+func TestCheckLockAllowsSelectedModuleAbsentFromPlatformScan(t *testing.T) {
+	err := checkLock(&lockFile{
+		Dependencies: []dependencyReview{{
+			Module:   "example.com/platform-specific",
+			Version:  "v1.0.0",
+			Licenses: []string{"MIT"},
+			Status:   "allowed",
+		}},
+	}, nil, []moduleInfo{{Path: "example.com/platform-specific", Version: "v1.0.0"}})
+	if err != nil {
+		t.Fatalf("expected selected module missing from scan to be allowed, got %v", err)
+	}
+}
+
+func TestCheckLockReportsSelectedModuleVersionChangeWhenAbsentFromPlatformScan(t *testing.T) {
+	err := checkLock(&lockFile{
+		Dependencies: []dependencyReview{{
+			Module:   "example.com/platform-specific",
+			Version:  "v1.0.0",
+			Licenses: []string{"MIT"},
+			Status:   "allowed",
+		}},
+	}, nil, []moduleInfo{{Path: "example.com/platform-specific", Version: "v1.1.0"}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); !containsString(got, "example.com/platform-specific version changed") {
+		t.Fatalf("error = %q, want version changed message", got)
 	}
 }
 
