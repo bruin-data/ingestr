@@ -26,13 +26,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	tcnetwork "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 type icebergCatalogTestEnv struct {
-	destURI string
-	client  *s3.Client
-	bucket  string
+	destURI      string
+	client       *s3.Client
+	bucket       string
+	objectPrefix string
 }
 
 func TestIcebergCatalogBackends(t *testing.T) {
@@ -60,6 +62,10 @@ func TestIcebergCatalogBackends(t *testing.T) {
 			name:  "rest catalog with local warehouse",
 			setup: setupIcebergRESTCatalog,
 		},
+		{
+			name:  "rest catalog with minio",
+			setup: setupIcebergRESTMinioCatalog,
+		},
 	}
 
 	for _, tt := range tests {
@@ -72,8 +78,9 @@ func TestIcebergCatalogBackends(t *testing.T) {
 			exerciseIcebergDestination(t, ctx, env.destURI, tableName)
 
 			if env.client != nil {
-				assert.Greater(t, countMinioObjects(t, ctx, env.client, env.bucket, namespace+"/"+table+"/data/"), 0)
-				assert.Greater(t, countMinioObjects(t, ctx, env.client, env.bucket, namespace+"/"+table+"/metadata/"), 0)
+				tablePrefix := joinIcebergObjectPrefix(env.objectPrefix, namespace, table)
+				assert.Greater(t, countMinioObjects(t, ctx, env.client, env.bucket, tablePrefix+"data/"), 0)
+				assert.Greater(t, countMinioObjects(t, ctx, env.client, env.bucket, tablePrefix+"metadata/"), 0)
 			}
 		})
 	}
@@ -130,6 +137,33 @@ func setupIcebergRESTCatalog(t *testing.T, ctx context.Context) icebergCatalogTe
 
 	return icebergCatalogTestEnv{
 		destURI: uri + "?" + values.Encode(),
+	}
+}
+
+func setupIcebergRESTMinioCatalog(t *testing.T, ctx context.Context) icebergCatalogTestEnv {
+	t.Helper()
+
+	nw, err := tcnetwork.New(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nw.Remove(ctx) })
+
+	minioContainer, minioEndpoint := startIcebergMinioContainer(t, ctx, nw.Name)
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(minioContainer) })
+	setIcebergMinioEnv(t, minioEndpoint)
+
+	client := createMinioClient(t, minioEndpoint)
+	bucket := "iceberg-" + uniqueSuffix()
+	createIcebergBucket(t, ctx, client, bucket)
+
+	restURI := startIcebergRESTContainerWithS3(t, ctx, nw.Name, bucket)
+
+	values := icebergMinioValues(minioEndpoint, bucket)
+	values.Set("prefix", "rest")
+	return icebergCatalogTestEnv{
+		destURI:      restURI + "?" + values.Encode(),
+		client:       client,
+		bucket:       bucket,
+		objectPrefix: "rest",
 	}
 }
 
@@ -344,6 +378,85 @@ func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse stri
 	return fmt.Sprintf("iceberg+rest://%s:%s", host, port.Port())
 }
 
+func startIcebergRESTContainerWithS3(t *testing.T, ctx context.Context, networkName, bucket string) string {
+	t.Helper()
+
+	req := testcontainers.ContainerRequest{
+		Image:        "apache/iceberg-rest-fixture:1.9.2",
+		ExposedPorts: []string{"8181/tcp"},
+		Env: map[string]string{
+			"AWS_ACCESS_KEY_ID":                 minioAccessKey,
+			"AWS_SECRET_ACCESS_KEY":             minioSecretKey,
+			"AWS_REGION":                        "us-east-1",
+			"CATALOG_WAREHOUSE":                 "s3://" + bucket + "/rest/",
+			"CATALOG_IO__IMPL":                  "org.apache.iceberg.aws.s3.S3FileIO",
+			"CATALOG_S3_ENDPOINT":               "http://minio:9000",
+			"CATALOG_S3_PATH__STYLE__ACCESS":    "true",
+			"CATALOG_S3_ACCESS__KEY__ID":        minioAccessKey,
+			"CATALOG_S3_SECRET__ACCESS__KEY":    minioSecretKey,
+			"CATALOG_CLIENT_REGION":             "us-east-1",
+			"CATALOG_S3_PRELOAD_CLIENT_ENABLED": "false",
+		},
+		Networks: []string{networkName},
+		NetworkAliases: map[string][]string{
+			networkName: {"iceberg-rest"},
+		},
+		WaitingFor: wait.ForHTTP("/v1/config").
+			WithPort("8181/tcp").
+			WithStartupTimeout(90 * time.Second),
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
+
+	host, err := container.Host(ctx)
+	require.NoError(t, err)
+
+	port, err := container.MappedPort(ctx, "8181")
+	require.NoError(t, err)
+
+	return fmt.Sprintf("iceberg+rest://%s:%s", host, port.Port())
+}
+
+func startIcebergMinioContainer(t *testing.T, ctx context.Context, networkName string) (testcontainers.Container, string) {
+	t.Helper()
+
+	req := testcontainers.ContainerRequest{
+		Image:        "minio/minio:latest",
+		ExposedPorts: []string{"9000/tcp"},
+		Env: map[string]string{
+			"MINIO_ROOT_USER":     minioAccessKey,
+			"MINIO_ROOT_PASSWORD": minioSecretKey,
+		},
+		Cmd:      []string{"server", "/data"},
+		Networks: []string{networkName},
+		NetworkAliases: map[string][]string{
+			networkName: {"minio"},
+		},
+		WaitingFor: wait.ForHTTP("/minio/health/ready").
+			WithPort("9000").
+			WithStartupTimeout(60 * time.Second),
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	require.NoError(t, err)
+
+	host, err := container.Host(ctx)
+	require.NoError(t, err)
+
+	port, err := container.MappedPort(ctx, "9000")
+	require.NoError(t, err)
+
+	return container, fmt.Sprintf("http://%s:%s", host, port.Port())
+}
+
 type icebergTableSummary struct {
 	rows        int64
 	fields      map[string]bool
@@ -416,7 +529,11 @@ func parseIcebergTestURI(rawURI string) (iceberggo.Properties, error) {
 	}
 
 	if bucket := query.Get("bucket"); bucket != "" {
-		props["warehouse"] = "s3://" + bucket + "/"
+		warehouse := "s3://" + bucket + "/"
+		if prefix := query.Get("prefix"); prefix != "" {
+			warehouse = "s3://" + bucket + "/" + strings.Trim(prefix, "/") + "/"
+		}
+		props["warehouse"] = warehouse
 	}
 	if warehouse := firstIcebergTestQueryValue(query, "warehouse", "warehouse_path", "warehouse-path"); warehouse != "" {
 		props["warehouse"] = warehouse
@@ -440,7 +557,7 @@ func parseIcebergTestURI(rawURI string) (iceberggo.Properties, error) {
 		if strings.HasPrefix(key, "table.") || key == "table_location" {
 			continue
 		}
-		if key == "storage" || key == "bucket" || key == "endpoint" || key == "use_ssl" || key == "region" || key == "access_key_id" || key == "secret_access_key" || key == "table_path" || key == "warehouse_path" || key == "warehouse-path" || key == "uri" {
+		if key == "storage" || key == "bucket" || key == "prefix" || key == "endpoint" || key == "use_ssl" || key == "region" || key == "access_key_id" || key == "secret_access_key" || key == "table_path" || key == "warehouse_path" || key == "warehouse-path" || key == "uri" {
 			continue
 		}
 		if len(values) > 0 {
@@ -477,4 +594,18 @@ func countMinioObjects(t *testing.T, ctx context.Context, client *s3.Client, buc
 	defer cancel()
 
 	return len(listObjects(t, listCtx, client, bucket, prefix))
+}
+
+func joinIcebergObjectPrefix(parts ...string) string {
+	joined := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(part, "/")
+		if part != "" {
+			joined = append(joined, part)
+		}
+	}
+	if len(joined) == 0 {
+		return ""
+	}
+	return strings.Join(joined, "/") + "/"
 }
