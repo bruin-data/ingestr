@@ -1091,8 +1091,8 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if !comparison.HasChanges {
 		config.Debug("[SCHEMA EVOLUTION] No schema changes detected")
 		return &schemaevolution.EvolutionPlan{
+			Table:       destTable,
 			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
-			Migration:   nil,
 		}, nil
 	}
 
@@ -1120,8 +1120,8 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		}
 		p.filteredSchemaComparison = comparison
 		return &schemaevolution.EvolutionPlan{
+			Table:       destTable,
 			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
-			Migration:   nil,
 		}, nil
 
 	case schemaevolution.ContractDiscardRow:
@@ -1165,8 +1165,8 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 				HasChanges: false,
 			}
 			return &schemaevolution.EvolutionPlan{
+				Table:       destTable,
 				FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
-				Migration:   nil,
 			}, nil
 		}
 		// For migration, only apply allowed changes (new columns) for discard_value mode
@@ -1180,39 +1180,30 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		p.filteredSchemaComparison = comparison
 	}
 
-	// Get dialect for the destination
-	dialect := schemaevolution.GetDialect(p.dest.GetScheme())
-	if dialect == nil {
-		config.Debug("[SCHEMA EVOLUTION] No dialect registered for scheme %s, skipping", p.dest.GetScheme())
+	// The destination is responsible for turning the abstract plan into DDL and
+	// applying it. Destinations that cannot evolve schemas (e.g. schema-less
+	// file or document stores) do not implement SchemaEvolver, so evolution is
+	// skipped and the table is left unchanged.
+	evolver, ok := p.dest.(schemaevolution.SchemaEvolver)
+	if !ok {
+		config.Debug("[SCHEMA EVOLUTION] Destination %s does not support schema evolution, skipping", p.dest.GetScheme())
 		return &schemaevolution.EvolutionPlan{
+			Table:       destTable,
 			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
-			Migration:   nil,
 		}, nil
 	}
 
-	// Generate migration using the FILTERED schema comparison (after contract filtering)
-	// This ensures we only apply allowed changes (e.g., new columns in discard_value mode)
-	migration, err := schemaevolution.GenerateMigration(p.filteredSchemaComparison, dialect, destTable)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate migration: %w", err)
-	}
+	// Compute the post-evolution schema from the changes that will actually take
+	// effect. Type changes only apply when the destination supports them; the
+	// abstract plan still carries them so the destination can warn at apply time.
+	applicable := schemaevolution.ApplicableComparison(p.filteredSchemaComparison, evolver.SupportsColumnTypeChanges())
 
-	// Log warnings
-	for _, w := range migration.Warnings {
-		output.Warnf("Warning: %s\n", w)
-	}
-
-	// Log SQL statements in debug mode
-	for _, sql := range migration.Statements {
-		config.Debug("[SCHEMA EVOLUTION] %s", sql)
-	}
-
-	// Build the plan; migration is NOT applied here.
 	plan := &schemaevolution.EvolutionPlan{
-		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, schemaevolution.MigrationFinalComparison(p.filteredSchemaComparison, dialect)),
-		Migration:   migration,
+		Table:       destTable,
+		Comparison:  p.filteredSchemaComparison,
+		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, applicable),
 	}
-	config.Debug("[SCHEMA EVOLUTION] Built plan with %d statements (deferred apply)", len(migration.Statements))
+	config.Debug("[SCHEMA EVOLUTION] Built plan with %d changes (deferred apply)", len(p.filteredSchemaComparison.Changes))
 	return plan, nil
 }
 

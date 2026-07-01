@@ -3,6 +3,9 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -107,6 +110,8 @@ type fakeDestination struct {
 	waitErr           error
 	dropErrByTable    map[string]error
 	noDeleteInsert    bool
+	evolutionWarnings []string
+	evolutionErr      error
 }
 
 func (d *fakeDestination) Schemes() []string                             { return nil }
@@ -122,6 +127,25 @@ func (d *fakeDestination) Exec(ctx context.Context, sql string, args ...interfac
 func (d *fakeDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
 	return nil, errors.New("not implemented")
 }
+
+// ApplySchemaEvolution turns the abstract plan into DDL and runs it via Exec,
+// mirroring how real destinations implement schemaevolution.SchemaEvolver.
+func (d *fakeDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
+	if comparison == nil {
+		return nil, nil
+	}
+	if d.evolutionWarnings != nil || d.evolutionErr != nil {
+		return d.evolutionWarnings, d.evolutionErr
+	}
+	for _, change := range comparison.Changes {
+		if err := d.Exec(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INT", table, change.ColumnName)); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func (d *fakeDestination) SupportsColumnTypeChanges() bool    { return true }
 func (d *fakeDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *fakeDestination) SupportsAppendStrategy() bool       { return true }
 func (d *fakeDestination) SupportsMergeStrategy() bool        { return true }
@@ -402,8 +426,12 @@ func minimalJob() (*IngestionJob, *fakeSourceTable, *fakeDestination) {
 func TestApplyEvolution_AnnotatesWithEvolveStep(t *testing.T) {
 	job, _, dest := minimalJob()
 	job.EvolutionPlan = &schemaevolution.EvolutionPlan{
-		Migration: &schemaevolution.Migration{
-			Statements: []string{"ALTER TABLE ds.tbl ADD COLUMN new_col INT"},
+		Table: "ds.tbl",
+		Comparison: &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col"},
+			},
 		},
 	}
 
@@ -416,6 +444,48 @@ func TestApplyEvolution_AnnotatesWithEvolveStep(t *testing.T) {
 	assert.True(t, strings.Contains(got, `"type":"ingestr_load"`), "missing type=ingestr_load: %s", got)
 }
 
+func TestApplyEvolution_IsIdempotent(t *testing.T) {
+	job, _, dest := minimalJob()
+	job.EvolutionPlan = &schemaevolution.EvolutionPlan{
+		Table: "ds.tbl",
+		Comparison: &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col"},
+			},
+		},
+	}
+
+	require.NoError(t, job.ApplyEvolution(context.Background()))
+	require.Len(t, dest.execCalls, 1, "first apply should execute the change")
+
+	// A second apply of the same plan must not re-issue the DDL.
+	require.NoError(t, job.ApplyEvolution(context.Background()))
+	require.Len(t, dest.execCalls, 1, "second apply should be a no-op")
+}
+
+func TestApplyEvolution_DoesNotPrintWarningsOnError(t *testing.T) {
+	job, _, dest := minimalJob()
+	dest.evolutionWarnings = []string{"column \"age\" type change skipped"}
+	dest.evolutionErr = errors.New("apply failed")
+	job.EvolutionPlan = &schemaevolution.EvolutionPlan{
+		Table: "ds.tbl",
+		Comparison: &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col"},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		require.ErrorIs(t, job.ApplyEvolution(context.Background()), dest.evolutionErr)
+	})
+
+	assert.NotContains(t, output, "Warning:")
+	assert.NotNil(t, job.EvolutionPlan.Comparison, "failed plans should remain retryable")
+}
+
 func TestApplyEvolution_NoMigrationDoesNothing(t *testing.T) {
 	job, _, dest := minimalJob()
 	// Nil plan
@@ -423,9 +493,30 @@ func TestApplyEvolution_NoMigrationDoesNothing(t *testing.T) {
 	assert.Empty(t, dest.execCalls)
 
 	// Empty plan
-	job.EvolutionPlan = &schemaevolution.EvolutionPlan{Migration: &schemaevolution.Migration{}}
+	job.EvolutionPlan = &schemaevolution.EvolutionPlan{Comparison: &schemaevolution.SchemaComparison{}}
 	require.NoError(t, job.ApplyEvolution(context.Background()))
 	assert.Empty(t, dest.execCalls)
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+		_ = r.Close()
+		_ = w.Close()
+	}()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
 }
 
 func TestDeleteInsertStrategy_UsesIncrementalKeyFromLaterBatch(t *testing.T) {

@@ -190,6 +190,11 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		token = func() any { return safeCommitLSN(repl, accum) }
 	}
 
+	// lastIdleToken is the highest LSN already handed to the pipeline via a bare
+	// idle commit token, so we only emit one when the caught-up position has
+	// actually advanced (instead of every 100ms idle tick).
+	var lastIdleToken pglogrepl.LSN
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -226,6 +231,11 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		// accumulating across transactions instead of flushing each one.
 		if !hadActivity {
 			accum.flushAll(results, token)
+			// Confirm the caught-up position so the slot advances over WAL that
+			// carried no rows for us; otherwise an idle stream's lag grows forever.
+			if streaming {
+				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+			}
 			time.Sleep(100 * time.Millisecond)
 		}
 	}

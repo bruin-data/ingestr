@@ -653,6 +653,9 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 		return fmt.Errorf("combined load job failed (job %s): %w", jobRef(job), err)
 	}
 	if err := status.Err(); err != nil {
+		if details := loadJobErrorDetails(status); details != "" {
+			return fmt.Errorf("combined load job error (job %s): %w; details: %s", jobRef(job), err, details)
+		}
 		return fmt.Errorf("combined load job error (job %s): %w", jobRef(job), err)
 	}
 
@@ -725,6 +728,9 @@ func (d *BigQueryDestination) runSingleLoadJob(
 				}
 				continue
 			}
+			if details := loadJobErrorDetails(status); details != "" {
+				return fmt.Errorf("load job error for chunk %d (job %s): %w; details: %s", chunk.index+1, jobRef(job), err, details)
+			}
 			return fmt.Errorf("load job error for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
 		}
 
@@ -733,6 +739,31 @@ func (d *BigQueryDestination) runSingleLoadJob(
 	}
 
 	return fmt.Errorf("load job error for chunk %d: exhausted retries", chunk.index+1)
+}
+
+// loadJobErrorDetails formats the per-row/per-field errors that BigQuery records
+// in JobStatus.Errors. JobStatus.Err() only returns the top-level summary (e.g.
+// "JSON table encountered too many errors"); the actual cause (the field or row
+// that failed) lives in the Errors slice the summary tells you to inspect.
+func loadJobErrorDetails(status *gcbq.JobStatus) string {
+	if status == nil || len(status.Errors) == 0 {
+		return ""
+	}
+	const maxDetails = 5
+	parts := make([]string, 0, min(len(status.Errors), maxDetails))
+	for _, e := range status.Errors {
+		if e == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("[reason=%s location=%q] %s", e.Reason, e.Location, e.Message))
+		if len(parts) >= maxDetails {
+			if remaining := len(status.Errors) - maxDetails; remaining > 0 {
+				parts = append(parts, fmt.Sprintf("... and %d more error(s)", remaining))
+			}
+			break
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func isRetryableLoadJobError(err error) bool {
@@ -1191,6 +1222,13 @@ func writeRecordBatchAsJSONL(writer *bufio.Writer, record arrow.RecordBatch) (in
 
 func extractJSONLValue(arr arrow.Array, idx int) any {
 	if arr.IsNull(idx) {
+		// BigQuery REPEATED fields cannot be null: a JSON null is rejected with
+		// "Repeated field must be imported as a JSON array". A null array column
+		// must therefore serialize as an empty array, not null.
+		switch arr.(type) {
+		case *array.List, *array.LargeList, *array.FixedSizeList:
+			return []any{}
+		}
 		return nil
 	}
 

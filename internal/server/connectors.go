@@ -296,6 +296,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("github", "GitHub", []string{"github"}, true, false),
 		genericURIConnector("gitlab", "GitLab", []string{"gitlab"}, true, false),
 		genericURIConnector("googleanalytics", "Google Analytics", []string{"googleanalytics"}, true, false),
+		genericURIConnector("gsc", "Google Search Console", []string{"gsc", "googlesearchconsole"}, true, false),
 		genericURIConnector("googleads", "Google Ads", []string{"googleads"}, true, false),
 		genericURIConnector("gsheets", "Google Sheets", []string{"gsheets"}, true, false),
 		genericURIConnector("gorgias", "Gorgias", []string{"gorgias"}, true, false),

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -18,14 +19,17 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"vitess.io/vitess/go/sqltypes"
+	"vitess.io/vitess/go/vt/grpcclient"
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 	querypb "vitess.io/vitess/go/vt/proto/query"
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	vtgatepb "vitess.io/vitess/go/vt/proto/vtgate"
-	_ "vitess.io/vitess/go/vt/vtgate/grpcvtgateconn" // registers the "grpc" dialer used by vtgateconn.Dial
-	"vitess.io/vitess/go/vt/vtgate/vtgateconn"
+	vtgateservicepb "vitess.io/vitess/go/vt/proto/vtgateservice"
 )
 
 // VitessCDCSource captures changes from a Vitess keyspace using the VStream gRPC
@@ -44,6 +48,7 @@ type VitessCDCSource struct {
 	keyspace   string
 	destSchema string
 	grpcTarget string
+	grpcCreds  credentials.TransportCredentials
 }
 
 func NewVitessCDCSource() *VitessCDCSource {
@@ -64,6 +69,11 @@ func (s *VitessCDCSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	grpcTarget, err := vitessGRPCTarget(uri, connInfo.Host)
+	if err != nil {
+		return err
+	}
+
+	grpcCreds, err := vitessGRPCTLSCredentials(uri)
 	if err != nil {
 		return err
 	}
@@ -90,6 +100,7 @@ func (s *VitessCDCSource) Connect(ctx context.Context, uri string) error {
 	s.keyspace = database
 	s.destSchema = cfg.DestSchema
 	s.grpcTarget = grpcTarget
+	s.grpcCreds = grpcCreds
 	return nil
 }
 
@@ -325,13 +336,25 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 	}
 
 	flags := &vtgatepb.VStreamFlags{HeartbeatInterval: 1, StopOnReshard: false}
-	gconn, err := vtgateconn.Dial(ctx, s.grpcTarget)
+
+	// vtgateconn.Dial is unusable for TLS: its registered gRPC dialer appends an
+	// insecure transport credential that overrides whatever we pass, so a TLS-only
+	// vtgate (e.g. PlanetScale) is unreachable through it. Dial the vtgate service
+	// directly with the resolved credentials. grpcclient.DialContext is reused so
+	// the connection keeps Vitess's tuned defaults (16MB max message size,
+	// keepalive), which matter for large copy-phase VStream messages.
+	cc, err := grpcclient.DialContext(ctx, s.grpcTarget, grpcclient.FailFast(false), grpc.WithTransportCredentials(s.grpcCreds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to vtgate gRPC at %s: %w", s.grpcTarget, err)
 	}
-	defer gconn.Close()
+	defer func() { _ = cc.Close() }()
 
-	reader, err := gconn.VStream(ctx, topodatapb.TabletType_PRIMARY, startVGtid, &binlogdatapb.Filter{Rules: rules}, flags)
+	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(ctx, &vtgatepb.VStreamRequest{
+		TabletType: topodatapb.TabletType_PRIMARY,
+		Vgtid:      startVGtid,
+		Filter:     &binlogdatapb.Filter{Rules: rules},
+		Flags:      flags,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to start Vitess VStream: %w", err)
 	}
@@ -373,7 +396,7 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 		default:
 		}
 
-		events, err := reader.Recv()
+		resp, err := reader.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if ferr := flushTxn(); ferr != nil {
@@ -387,7 +410,7 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 			return fmt.Errorf("vstream receive failed: %w", err)
 		}
 
-		for _, ev := range events {
+		for _, ev := range resp.Events {
 			switch ev.Type {
 			case binlogdatapb.VEventType_FIELD:
 				fe := ev.FieldEvent
@@ -672,6 +695,36 @@ func vitessGRPCTarget(rawURI string, defaultHost string) (string, error) {
 		host = "127.0.0.1"
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// vitessGRPCTLSCredentials resolves the transport credentials for the VStream
+// gRPC connection. grpc_tls, when set, takes precedence; otherwise the gRPC side
+// inherits the MySQL-protocol tls parameter so a single tls=true secures both
+// connections. Only true and skip-verify enable TLS (skip-verify skips
+// certificate verification); false, preferred, a custom go-sql-driver TLS config
+// name, or an unset value leave the gRPC connection plaintext.
+func vitessGRPCTLSCredentials(rawURI string) (credentials.TransportCredentials, error) {
+	u, err := url.Parse(rawURI)
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+
+	mode := strings.TrimSpace(strings.ToLower(q.Get("grpc_tls")))
+	if mode == "" {
+		mode = strings.TrimSpace(strings.ToLower(q.Get("tls")))
+	}
+
+	switch mode {
+	case "true", "skip-verify":
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+		if mode == "skip-verify" {
+			cfg.InsecureSkipVerify = true
+		}
+		return credentials.NewTLS(cfg), nil
+	default:
+		return insecure.NewCredentials(), nil
+	}
 }
 
 var vitessLSNRegex = regexp.MustCompile(`^(\d{20}):(\d{6}):(.+)$`)

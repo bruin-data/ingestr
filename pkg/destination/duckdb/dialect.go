@@ -5,17 +5,9 @@ import (
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("duckdb", dialect)
-	schemaevolution.RegisterDialect("motherduck", dialect)
-	schemaevolution.RegisterDialect("md", dialect)
-}
-
-// Dialect implements the schemaevolution.Dialect interface for DuckDB.
+// Dialect implements the destination.Dialect interface for DuckDB.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {

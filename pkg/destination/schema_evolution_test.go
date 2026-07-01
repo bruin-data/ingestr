@@ -1,0 +1,129 @@
+package destination_test
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeDialect is a minimal destination.Dialect for exercising BuildMigration.
+type fakeDialect struct {
+	supportsAlter bool
+}
+
+func (d *fakeDialect) Name() string { return "fake" }
+
+func (d *fakeDialect) AddColumnSQL(table string, col schema.Column) string {
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, d.QuoteIdentifier(col.Name), d.TypeName(col))
+}
+
+func (d *fakeDialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {
+	if !d.supportsAlter {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", table, d.QuoteIdentifier(colName), d.TypeName(newType))
+}
+
+func (d *fakeDialect) SupportsAlterType() bool { return d.supportsAlter }
+
+func (d *fakeDialect) TypeName(col schema.Column) string { return "T_" + col.DataType.String() }
+
+func (d *fakeDialect) QuoteIdentifier(name string) string { return `"` + name + `"` }
+
+// fakeBatchDialect adds BatchColumnAdder support.
+type fakeBatchDialect struct {
+	fakeDialect
+}
+
+func (d *fakeBatchDialect) BatchAddColumnsSQL(table string, cols []schema.Column) string {
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.Name
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMNS (%s)", table, strings.Join(names, ", "))
+}
+
+func addColumnComparison() *schemaevolution.SchemaComparison {
+	return &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col", NewColumn: schema.Column{Name: "new_col", DataType: schema.TypeString, Nullable: true}},
+		},
+	}
+}
+
+func widenComparison() *schemaevolution.SchemaComparison {
+	return &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeAddColumn, ColumnName: "added", NewColumn: schema.Column{Name: "added", DataType: schema.TypeString, Nullable: true}},
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "val", OldColumn: &schema.Column{Name: "val", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}},
+			{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "gone", OldColumn: &schema.Column{Name: "gone", DataType: schema.TypeString}},
+		},
+	}
+}
+
+func TestBuildMigration_NoChanges(t *testing.T) {
+	stmts, warnings := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "t", &schemaevolution.SchemaComparison{})
+	assert.Empty(t, stmts)
+	assert.Empty(t, warnings)
+}
+
+func TestBuildMigration_NilDialect(t *testing.T) {
+	stmts, warnings := destination.BuildMigration(nil, "t", addColumnComparison())
+	assert.Empty(t, stmts)
+	assert.Empty(t, warnings)
+}
+
+func TestBuildMigration_AddColumn(t *testing.T) {
+	stmts, warnings := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "t", addColumnComparison())
+	require.Len(t, stmts, 1)
+	assert.Contains(t, stmts[0], "ADD COLUMN")
+	assert.Contains(t, stmts[0], "new_col")
+	assert.Empty(t, warnings)
+}
+
+func TestBuildMigration_WidenTypeSupported(t *testing.T) {
+	stmts, _ := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "t", widenComparison())
+	// add + alter (remove is a soft no-op).
+	require.Len(t, stmts, 2)
+	assert.Contains(t, stmts[0], "ADD COLUMN")
+	assert.Contains(t, stmts[1], "ALTER COLUMN")
+}
+
+func TestBuildMigration_WidenTypeUnsupported(t *testing.T) {
+	stmts, warnings := destination.BuildMigration(&fakeDialect{supportsAlter: false}, "t", widenComparison())
+	// Only the ADD COLUMN runs; the type change is skipped with a warning.
+	require.Len(t, stmts, 1)
+	assert.Contains(t, stmts[0], "ADD")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "does not support")
+}
+
+func TestBuildMigration_Batch(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeAddColumn, ColumnName: "col_a", NewColumn: schema.Column{Name: "col_a", DataType: schema.TypeString}},
+			{Type: schemaevolution.ChangeAddColumn, ColumnName: "col_b", NewColumn: schema.Column{Name: "col_b", DataType: schema.TypeInt64}},
+			{Type: schemaevolution.ChangeAddColumn, ColumnName: "col_c", NewColumn: schema.Column{Name: "col_c", DataType: schema.TypeBoolean}},
+		},
+	}
+
+	// Batch dialect combines all ADD COLUMNs into a single statement.
+	batchStmts, _ := destination.BuildMigration(&fakeBatchDialect{}, "my_table", comparison)
+	require.Len(t, batchStmts, 1)
+	assert.Contains(t, batchStmts[0], "col_a")
+	assert.Contains(t, batchStmts[0], "col_b")
+	assert.Contains(t, batchStmts[0], "col_c")
+
+	// Non-batch dialect produces one statement per column.
+	stmts, _ := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "my_table", comparison)
+	require.Len(t, stmts, 3)
+}

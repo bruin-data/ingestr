@@ -5,17 +5,9 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-func init() {
-	dialect := &Dialect{}
-	schemaevolution.RegisterDialect("mssql", dialect)
-	schemaevolution.RegisterDialect("sqlserver", dialect)
-	schemaevolution.RegisterDialect("mssql+pyodbc", dialect)
-}
-
-// Dialect implements the schemaevolution.Dialect interface for Microsoft SQL Server.
+// Dialect implements the destination.Dialect interface for Microsoft SQL Server.
 type Dialect struct{}
 
 func (d *Dialect) Name() string {
