@@ -138,7 +138,7 @@ func (s *MySQLCDCSource) Connect(ctx context.Context, rawURI string) error {
 
 	if isVitess, _ := isVitessServer(ctx, db); isVitess {
 		_ = db.Close()
-		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale, which has no MySQL binlog; use the vitess+cdc:// or planetscale+cdc:// scheme instead of mysql+cdc://", database)
+		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale, which has no MySQL binlog; use the vitess+cdc:// or planetscale+cdc:// scheme instead", database)
 	}
 
 	if err := checkMySQLBinlogSettings(ctx, db); err != nil {

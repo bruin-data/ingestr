@@ -74,7 +74,7 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		}
 	} else if detectVitess(ctx, db) {
 		_ = db.Close()
-		return fmt.Errorf("server for keyspace %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead of mysql://", database)
+		return fmt.Errorf("server for keyspace %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead", database)
 	}
 
 	d.db = db

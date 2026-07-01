@@ -64,7 +64,7 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 		s.sessionInit = []string{"SET workload = 'OLAP'"}
 	} else if isVitess, _ := isVitessServer(ctx, db); isVitess {
 		_ = db.Close()
-		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead of mysql://", database)
+		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead", database)
 	}
 
 	s.db = db
