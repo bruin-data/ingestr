@@ -20,6 +20,10 @@ import (
 
 const defaultHTTPPort = 8030
 
+// syntheticSortKeyColumn is added as an auto-increment key only when a table
+// has no column StarRocks can use as a sort key (all columns non-keyable).
+const syntheticSortKeyColumn = "__ingestr_sort_key"
+
 // StarRocksDestination loads data into StarRocks. DDL and table swaps go over
 // the MySQL protocol (FE query port); row data is loaded via the Stream Load
 // HTTP API (FE http port).
@@ -198,6 +202,7 @@ func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schem
 	}
 
 	var colDefs []string
+	syntheticKey := false
 	if len(primaryKeys) > 0 {
 		// Key columns must be declared first, in key order, and NOT NULL.
 		byName := make(map[string]schema.Column, len(columns))
@@ -220,18 +225,29 @@ func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schem
 		// VARBINARY). Move the first keyable column to the front so table
 		// creation succeeds; Stream Load and the swap/merge SQL map by name, so
 		// column order is not otherwise significant.
-		for _, c := range keyableFirst(columns) {
+		ordered := keyableFirst(columns)
+		if len(ordered) > 0 && !isStarRocksKeyable(ordered[0]) {
+			// No column can be a sort key, so synthesize an auto-increment key.
+			// Stream Load fills it automatically since it isn't in the batch.
+			syntheticKey = true
+			colDefs = append(colDefs, quoteColumn(syntheticSortKeyColumn)+" BIGINT AUTO_INCREMENT")
+		}
+		for _, c := range ordered {
 			colDefs = append(colDefs, colDef(c, false))
 		}
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", quoteTable(table), strings.Join(colDefs, ",\n  "))
 
-	if len(primaryKeys) > 0 {
+	switch {
+	case len(primaryKeys) > 0:
 		keys := quoteColumns(primaryKeys)
 		joined := strings.Join(keys, ", ")
 		sql += fmt.Sprintf("\nPRIMARY KEY (%s)\nDISTRIBUTED BY HASH (%s)", joined, joined)
-	} else {
+	case syntheticKey:
+		k := quoteColumn(syntheticSortKeyColumn)
+		sql += fmt.Sprintf("\nDUPLICATE KEY (%s)\nDISTRIBUTED BY HASH (%s)", k, k)
+	default:
 		sql += "\nDISTRIBUTED BY RANDOM"
 	}
 

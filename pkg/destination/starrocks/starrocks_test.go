@@ -105,6 +105,24 @@ func TestBuildCreateTableSQL_ReordersNonKeyableFirstColumn(t *testing.T) {
 	}
 }
 
+func TestBuildCreateTableSQL_SyntheticKeyWhenNoKeyableColumn(t *testing.T) {
+	d := &StarRocksDestination{replicationNum: "1"}
+	cols := []schema.Column{
+		{Name: "f", DataType: schema.TypeFloat64},
+		{Name: "arr", DataType: schema.TypeArray, ArrayType: schema.TypeInt64},
+	}
+	got := d.buildCreateTableSQL("db.t", cols, nil)
+	for _, want := range []string{
+		"`__ingestr_sort_key` BIGINT AUTO_INCREMENT",
+		"DUPLICATE KEY (`__ingestr_sort_key`)",
+		"DISTRIBUTED BY HASH (`__ingestr_sort_key`)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestKeyableFirstLeavesKeyableLeadUntouched(t *testing.T) {
 	cols := []schema.Column{
 		{Name: "id", DataType: schema.TypeInt64},
