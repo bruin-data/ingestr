@@ -46,7 +46,7 @@ func NewPlanetScaleCDCSource() *PlanetScaleCDCSource {
 }
 
 func (s *PlanetScaleCDCSource) Schemes() []string {
-	return []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}
+	return []string{"planetscale+cdc"}
 }
 
 func (s *PlanetScaleCDCSource) Connect(ctx context.Context, uri string) error {

@@ -108,7 +108,7 @@ func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	require.NoError(t, err)
 
 	duckPath := filepath.Join(t.TempDir(), "vitess_cdc.duckdb")
-	cdcURI := fmt.Sprintf("mysql+cdc://root@%s:%s/%s?grpc_port=%s&mode=batch", host, mysqlPort, vitessCDCKeyspace, grpcPort)
+	cdcURI := fmt.Sprintf("vitess+cdc://root@%s:%s/%s?grpc_port=%s&mode=batch", host, mysqlPort, vitessCDCKeyspace, grpcPort)
 	cfg := &config.IngestConfig{
 		SourceURI:   cdcURI,
 		SourceTable: vitessCDCKeyspace + ".items",

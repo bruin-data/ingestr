@@ -381,7 +381,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 func TestMySQLDestination_Schemes(t *testing.T) {
 	dest := NewMySQLDestination()
 	schemes := dest.Schemes()
-	expected := []string{"mysql", "mysql+pymysql", "mariadb"}
+	expected := []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "planetscale"}
 	assert.Equal(t, expected, schemes)
 }
 

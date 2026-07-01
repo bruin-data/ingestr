@@ -78,9 +78,9 @@ func TestVitessGRPCTarget(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"port only defaults host", "mysql+cdc://root@db.example:3307/ks?grpc_port=15991", "db.example:15991", false},
-		{"explicit grpc_host", "mysql+cdc://root@db.example:3307/ks?grpc_port=15991&grpc_host=vtgate.internal", "vtgate.internal:15991", false},
-		{"missing grpc_port", "mysql+cdc://root@db.example:3307/ks", "", true},
+		{"port only defaults host", "vitess+cdc://root@db.example:3307/ks?grpc_port=15991", "db.example:15991", false},
+		{"explicit grpc_host", "vitess+cdc://root@db.example:3307/ks?grpc_port=15991&grpc_host=vtgate.internal", "vtgate.internal:15991", false},
+		{"missing grpc_port", "vitess+cdc://root@db.example:3307/ks", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,7 +105,7 @@ func TestVitessGRPCTarget(t *testing.T) {
 // go-sql-driver rejects them as unknown. The tls param, by contrast, is a real
 // driver param and must be retained.
 func TestMySQLCDCURIStripsGRPCParams(t *testing.T) {
-	_, normalizedURI, _, err := parseMySQLCDCURI("mysql+cdc://root@db.example:3307/ks?grpc_port=15991&grpc_host=vtgate&grpc_tls=true&tls=true")
+	_, normalizedURI, _, err := parseMySQLCDCURI("vitess+cdc://root@db.example:3307/ks?grpc_port=15991&grpc_host=vtgate&grpc_tls=true&tls=true")
 	if err != nil {
 		t.Fatalf("parseMySQLCDCURI: %v", err)
 	}
@@ -130,15 +130,15 @@ func TestVitessGRPCTLSCredentials(t *testing.T) {
 		uri     string
 		wantTLS bool
 	}{
-		{"no params is plaintext", "mysql+cdc://root@h:3307/ks?grpc_port=15991", false},
-		{"tls=true is inherited", "mysql+cdc://root@h:3307/ks?grpc_port=15991&tls=true", true},
-		{"tls=skip-verify is inherited", "mysql+cdc://root@h:3307/ks?grpc_port=15991&tls=skip-verify", true},
-		{"tls=false stays plaintext", "mysql+cdc://root@h:3307/ks?grpc_port=15991&tls=false", false},
-		{"tls=preferred does not map to gRPC", "mysql+cdc://root@h:3307/ks?grpc_port=15991&tls=preferred", false},
-		{"tls=customCA does not map to gRPC", "mysql+cdc://root@h:3307/ks?grpc_port=15991&tls=mycustomca", false},
-		{"grpc_tls=true overrides", "mysql+cdc://root@h:3307/ks?grpc_port=15991&grpc_tls=true", true},
-		{"grpc_tls=false overrides tls=true", "mysql+cdc://root@h:3307/ks?grpc_port=15991&tls=true&grpc_tls=false", false},
-		{"grpc_tls=skip-verify overrides", "mysql+cdc://root@h:3307/ks?grpc_port=15991&grpc_tls=skip-verify", true},
+		{"no params is plaintext", "vitess+cdc://root@h:3307/ks?grpc_port=15991", false},
+		{"tls=true is inherited", "vitess+cdc://root@h:3307/ks?grpc_port=15991&tls=true", true},
+		{"tls=skip-verify is inherited", "vitess+cdc://root@h:3307/ks?grpc_port=15991&tls=skip-verify", true},
+		{"tls=false stays plaintext", "vitess+cdc://root@h:3307/ks?grpc_port=15991&tls=false", false},
+		{"tls=preferred does not map to gRPC", "vitess+cdc://root@h:3307/ks?grpc_port=15991&tls=preferred", false},
+		{"tls=customCA does not map to gRPC", "vitess+cdc://root@h:3307/ks?grpc_port=15991&tls=mycustomca", false},
+		{"grpc_tls=true overrides", "vitess+cdc://root@h:3307/ks?grpc_port=15991&grpc_tls=true", true},
+		{"grpc_tls=false overrides tls=true", "vitess+cdc://root@h:3307/ks?grpc_port=15991&tls=true&grpc_tls=false", false},
+		{"grpc_tls=skip-verify overrides", "vitess+cdc://root@h:3307/ks?grpc_port=15991&grpc_tls=skip-verify", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

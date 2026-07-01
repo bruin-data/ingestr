@@ -140,7 +140,7 @@ func startVitessContainerSharded(ctx context.Context) (testcontainers.Container,
 		return nil, "", "", err
 	}
 
-	uri := fmt.Sprintf("mysql://root@%s:%s/%s", host, port.Port(), shardedVitessKeyspace)
+	uri := fmt.Sprintf("vitess://root@%s:%s/%s", host, port.Port(), shardedVitessKeyspace)
 	return container, uri, mysqlDSN(uri), nil
 }
 

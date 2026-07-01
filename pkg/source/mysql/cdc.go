@@ -51,9 +51,6 @@ type MySQLCDCConfig struct {
 	DestSchema string
 	ServerID   uint32
 	Flavor     string
-	// PlanetScale (managed Vitess) routing. CDCBackend forces the psdbconnect vs
-	// vtgate VStream choice for private endpoints / custom domains.
-	CDCBackend string
 }
 
 type mysqlCDCConnInfo struct {
@@ -137,6 +134,11 @@ func (s *MySQLCDCSource) Connect(ctx context.Context, rawURI string) error {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("failed to ping MySQL: %w", err)
+	}
+
+	if isVitess, _ := isVitessServer(ctx, db); isVitess {
+		_ = db.Close()
+		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale, which has no MySQL binlog; use the vitess+cdc:// or planetscale+cdc:// scheme instead", database)
 	}
 
 	if err := checkMySQLBinlogSettings(ctx, db); err != nil {
@@ -358,7 +360,7 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("unsupported MySQL CDC scheme: %s", parsed.Scheme)
 	}
 	switch baseScheme {
-	case "mysql", "mysql+pymysql":
+	case "mysql", "mysql+pymysql", "vitess", "planetscale":
 		parsed.Scheme = baseScheme
 	case "mariadb":
 		parsed.Scheme = "mariadb"
@@ -393,8 +395,6 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		cfg.ServerID = uint32(serverID)
 	}
 
-	cfg.CDCBackend = strings.ToLower(strings.TrimSpace(query.Get("cdc_backend")))
-
 	query.Del("dest_schema")
 	query.Del("flavor")
 	query.Del("mode")
@@ -406,7 +406,6 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 	query.Del("grpc_port")
 	query.Del("grpc_host")
 	query.Del("grpc_tls")
-	query.Del("cdc_backend")
 	parsed.RawQuery = query.Encode()
 
 	normalizedURI := parsed.String()

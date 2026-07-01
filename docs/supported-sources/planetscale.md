@@ -1,13 +1,13 @@
 # PlanetScale
 PlanetScale is a managed MySQL-compatible database built on Vitess.
 
-ingestr supports PlanetScale as both a source and destination through the MySQL connector. PlanetScale change data capture is also supported, through PlanetScale's hosted `psdbconnect` API.
+ingestr supports PlanetScale as both a source and destination through its dedicated `planetscale://` scheme. PlanetScale change data capture is also supported, through PlanetScale's hosted `psdbconnect` API.
 
 ## URI format
 The URI format for PlanetScale is as follows:
 
 ```plaintext
-mysql://user:password@host:port/database
+planetscale://user:password@host:port/database
 ```
 
 URI parameters:
@@ -15,34 +15,33 @@ URI parameters:
 - `password`: the password for the user
 - `host`: the PlanetScale database host
 - `port`: the MySQL protocol port, usually 3306
-- `database`: the PlanetScale database name
+- `database`: the PlanetScale database name (keyspace)
 
-Use the same URI structure for sources and destinations. PlanetScale uses the MySQL wire protocol, so the URI scheme remains `mysql://`.
+Use the same URI structure for sources and destinations. PlanetScale speaks the MySQL wire protocol, but it is selected with the `planetscale://` scheme (not `mysql://`) so ingestr uses the PlanetScale-aware read, write, and CDC paths. Pointing a `mysql://` URI at a PlanetScale server fails fast with a message telling you to use `planetscale://`.
 
 ## TLS
-PlanetScale requires encrypted connections and rejects plaintext ones with `server does not allow insecure connections, client must use SSL/TLS`. ingestr enables TLS automatically for `*.psdb.cloud` hosts — for **both source and destination** connections (and the MySQL-protocol probe the CDC path uses for schema discovery) — so you do not need to add `?tls=true` yourself.
+PlanetScale requires encrypted connections and rejects plaintext ones with `server does not allow insecure connections, client must use SSL/TLS`. ingestr enables TLS automatically for the `planetscale://` scheme — for **both source and destination** connections (and the MySQL-protocol connection the CDC path uses for schema discovery) — so you do not need to add `?tls=true` yourself.
 
 You can still set `tls` explicitly when you need to:
 - `tls=true`: connect over TLS and verify the server certificate against the system roots (this is the auto-enabled default).
 - `tls=skip-verify`: connect over TLS without verifying the certificate.
-- For a custom domain or private endpoint that does not end in `.psdb.cloud`, add `?tls=true` yourself — auto-enable only keys off the `*.psdb.cloud` host suffix.
 
 Example:
 
 ```shell
 ingestr ingest \
-  --source-uri "mysql://user:password@aws.connect.psdb.cloud:3306/database" \
+  --source-uri "planetscale://user:password@aws.connect.psdb.cloud:3306/database" \
   --dest-uri "duckdb:///tmp/planetscale.duckdb" \
   --source-table "orders" \
   --dest-table "orders"
 ```
 
-To load into PlanetScale, use the PlanetScale URI as the destination (TLS is enabled automatically for the `*.psdb.cloud` host):
+To load into PlanetScale, use the PlanetScale URI as the destination (TLS is enabled automatically):
 
 ```shell
 ingestr ingest \
   --source-uri "postgresql://user:password@host:5432/app" \
-  --dest-uri "mysql://user:password@aws.connect.psdb.cloud:3306/database" \
+  --dest-uri "planetscale://user:password@aws.connect.psdb.cloud:3306/database" \
   --source-table "public.orders" \
   --dest-table "orders"
 ```
@@ -50,18 +49,18 @@ ingestr ingest \
 When loading into PlanetScale, keep two things in mind:
 
 - **Direct DDL must be allowed on the target branch.** The `replace` strategy and any table creation issue `CREATE` / `RENAME` statements. On a branch with safe migrations enabled, PlanetScale rejects these with `ERROR 1105 (HY000): direct DDL is disabled` — load into a development branch (or a branch with safe migrations off) instead, or pre-create the tables and use `append`/`merge`. The PlanetScale database (keyspace) must already exist; ingestr does not create it.
-- **Only unsharded keyspaces are supported** as destinations. A sharded keyspace is detected at connect and rejected with a clear error. See [Vitess as a destination](/supported-sources/mysql.md#vitess-as-a-destination) for the underlying reasons.
+- **Only unsharded keyspaces are supported** as destinations. A sharded keyspace is detected at connect and rejected with a clear error. See [Vitess as a destination](/supported-sources/vitess.md#vitess-as-a-destination) for the underlying reasons.
 
 ## Change data capture
-PlanetScale change data capture uses the `mysql+cdc://` URI scheme. PlanetScale does not expose vtgate's VStream gRPC port to external clients, so ingestr streams changes through PlanetScale's hosted `psdbconnect` API on the database host over TLS (port 443). It authenticates with the **database credentials already in the URI** — the same `user:password` used for the MySQL connection — so no separate token is required.
+PlanetScale change data capture uses the `planetscale+cdc://` URI scheme. PlanetScale does not expose vtgate's VStream gRPC port to external clients, so ingestr streams changes through PlanetScale's hosted `psdbconnect` API on the database host over TLS (port 443). It authenticates with the **database credentials already in the URI** — the same `user:password` used for the MySQL connection — so no separate token is required.
 
-ingestr selects this path automatically when the host ends in `.psdb.cloud`; for private endpoints or custom domains, force it with `cdc_backend=planetscale`. TLS is required, and ingestr enables it automatically for `*.psdb.cloud` hosts (see [TLS](#tls)), so you don't need to add `tls=true` — the psdbconnect endpoint always uses TLS on port 443 regardless. The database in the URI is the PlanetScale keyspace. Unlike self-hosted Vitess, there is no `grpc_port` — the psdbconnect endpoint is always the database host on port 443.
+TLS is required, and ingestr enables it automatically for the `planetscale://` scheme (see [TLS](#tls)), so you don't need to add `tls=true` — the psdbconnect endpoint always uses TLS on port 443 regardless. The database in the URI is the PlanetScale keyspace. Unlike self-hosted Vitess, there is no `grpc_port` — the psdbconnect endpoint is always the database host on port 443.
 
 Example:
 
 ```shell
 ingestr ingest \
-  --source-uri "mysql+cdc://user:password@aws.connect.psdb.cloud:3306/database" \
+  --source-uri "planetscale+cdc://user:password@aws.connect.psdb.cloud:3306/database" \
   --dest-uri "duckdb:///tmp/planetscale_cdc.duckdb" \
   --source-table "orders" \
   --dest-table "orders"
@@ -70,8 +69,7 @@ ingestr ingest \
 psdbconnect performs a per-shard snapshot first (resumable by primary key) and then streams inserts, updates, and deletes. Position is tracked per shard and serialized into `_cdc_lsn`, and subsequent runs resume from the destination table's maximum `_cdc_lsn` for both unsharded and sharded keyspaces. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild the destination from a fresh snapshot. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key. (PlanetScale delivers only the primary keys of deleted rows; the destination marks them deleted without disturbing the other columns.)
 
 CDC URI parameters:
-- `tls`: auto-enabled for `*.psdb.cloud` hosts; set it explicitly only for a custom domain or to choose a different mode (see [TLS](#tls)).
-- `cdc_backend`: optional override — `planetscale` forces the psdbconnect path (for example on a custom domain or private endpoint), `vstream` forces the self-hosted Vitess VStream path.
+- `tls`: auto-enabled for the `planetscale://` scheme; set it explicitly only to choose a different mode (see [TLS](#tls)).
 - `dest_schema`: optional destination schema for multi-table CDC runs.
 
 Requirements:
@@ -80,4 +78,5 @@ Requirements:
 - Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
 
 ## Related docs
-- [MySQL](/supported-sources/mysql.md) for the generic MySQL connector, TLS options, and binary-log / Vitess VStream CDC.
+- [MySQL](/supported-sources/mysql.md) for the generic MySQL connector and binary-log CDC.
+- [Vitess](/supported-sources/vitess.md) for self-hosted Vitess and its VStream CDC path.

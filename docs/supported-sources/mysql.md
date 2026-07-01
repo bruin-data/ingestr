@@ -31,25 +31,17 @@ Accepted values:
 - `tls=skip-verify`: connect over TLS but skip certificate verification (use for self-signed certificates).
 - `tls=preferred`: use TLS if the server offers it, otherwise fall back to plaintext.
 
-## Vitess
-[Vitess](https://vitess.io/) is supported out of the box. Use the same `mysql://` URI as above. If your vtgate requires encrypted MySQL protocol connections, add `?tls=true`; see [TLS / SSL](#tls-ssl) above.
+## Vitess & PlanetScale
+Vitess and PlanetScale speak the MySQL wire protocol but are selected with their own URI schemes so ingestr uses the correct read, write, and CDC paths:
 
-By default Vitess caps queries at 100,000 rows, which would otherwise break bulk reads of larger tables. ingestr detects Vitess automatically and works around this, so large tables ingest fully.
+- **Vitess** — use the `vitess://` scheme. See [Vitess](/supported-sources/vitess.md).
+- **PlanetScale** — use the `planetscale://` scheme. See [PlanetScale](/supported-sources/planetscale.md).
 
-Change data capture is also supported for Vitess. See [Change data capture](#change-data-capture) below.
-
-### Vitess as a destination
-Vitess is also supported as a destination over the same `mysql://` URI, and ingestr detects Vitess automatically. Two things differ from plain MySQL:
-
-- **The target keyspace must already exist.** `CREATE DATABASE` is not supported through vtgate, so ingestr never creates keyspaces — create the keyspace via your Vitess control plane first. Staging tables for the `replace`, `merge`, `delete+insert`, and `scd2` strategies are created inside the target keyspace rather than in a separate `_bruin_staging` database.
-- **Only unsharded (single-shard) keyspaces are supported.** If the target keyspace is sharded, ingestr fails fast at connect with a clear error instead of producing a broken load. Sharded keyspaces are unsupported because auto-created tables need a Primary Vindex to be routable, the `merge`/`delete+insert`/`scd2` strategies use `UPDATE … JOIN` / `INSERT … SELECT … WHERE NOT EXISTS` statements that Vitess rejects across shards, and the atomic `RENAME` swap used by `replace` is not atomic across shards. To load a sharded keyspace, pre-create the tables (with vindexes) and manage the load outside ingestr.
-
-[PlanetScale](/supported-sources/planetscale.md) is documented separately: it uses the same MySQL-compatible connector but has its own change-data-capture path (`psdbconnect`) and PlanetScale-specific TLS guidance.
+Pointing a `mysql://` URI at a Vitess or PlanetScale server fails fast with a message telling you to switch to the dedicated scheme.
 
 ## Change data capture
-CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes. ingestr detects the server when it connects and picks the right mechanism automatically: standard MySQL and MariaDB stream the binary log, while Vitess streams changes through [VStream](https://vitess.io/docs/reference/vreplication/vstream/) because Vitess is a sharded layer with no standard binary log to tail. Both produce the same `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resume from the destination table's maximum `_cdc_lsn` on subsequent runs.
+CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes for standard MySQL and MariaDB, which stream the binary log. It produces the `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resumes from the destination table's maximum `_cdc_lsn` on subsequent runs. (Vitess and PlanetScale have their own CDC schemes — see [Vitess](/supported-sources/vitess.md) and [PlanetScale](/supported-sources/planetscale.md).)
 
-### MySQL & MariaDB (binary log)
 This path reads a consistent snapshot first, then streams the binary log, resuming from the destination table's maximum `_cdc_lsn` on subsequent runs.
 
 If the saved `_cdc_lsn` is invalid or no longer available in MySQL binary logs, the run fails instead of taking a partial snapshot. Run with `--full-refresh` to rebuild the destination from a fresh snapshot.
@@ -82,32 +74,3 @@ CDC URI parameters:
 - `flavor`: `mysql` or `mariadb`; inferred from the URI scheme unless overridden.
 
 Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
-
-### Vitess (VStream)
-For Vitess, ingestr streams changes through vtgate's VStream API over gRPC. Use the same `mysql+cdc://` scheme. Vitess is detected automatically. None of the binary-log requirements above apply: there is no `FLUSH TABLES`, and `log_bin`/`binlog_format`/`binlog_row_image` settings are irrelevant.
-
-VStream performs a consistent copy-phase snapshot first, then streams changes. Position is tracked with a Vitess GTID (VGTID) serialized into `_cdc_lsn`, and subsequent runs resume from the destination's maximum `_cdc_lsn`. This works for both unsharded and sharded keyspaces, since the VGTID covers every shard. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild. Like the binary-log path, incremental runs use the `merge` strategy so updates and deletes are applied by primary key.
-
-VStream uses vtgate's **gRPC** port, which is different from the MySQL protocol port and cannot be derived from it, so you must supply it with `grpc_port`. The database in the URI is the Vitess keyspace.
-
-CDC over Vitess opens two connections: the MySQL protocol connection for schema discovery and the vtgate gRPC port for the change stream. A single `tls=true` secures both connections because the gRPC connection inherits the `tls` setting. To control the gRPC side independently, use `grpc_tls` (see below).
-
-```shell
-ingestr ingest \
-  --source-uri "mysql+cdc://user:password@host:3306/keyspace?grpc_port=15991&mode=batch" \
-  --dest-uri "duckdb:///tmp/vitess_cdc.duckdb" \
-  --source-table "keyspace.orders" \
-  --dest-table "orders"
-```
-
-Vitess CDC URI parameters:
-- `grpc_port`: **required** — the vtgate gRPC port (for example `15991`). The run fails with a clear error if it is missing on a Vitess server.
-- `grpc_host`: optional vtgate gRPC host; defaults to the host in the URI.
-- `grpc_tls`: optional override for the gRPC connection's TLS, independent of `tls`. `true` verifies the server certificate, `skip-verify` skips verification, `false` forces plaintext. When omitted, the gRPC connection inherits `tls` (`true`/`skip-verify` enable it; `preferred` and custom CA names do not).
-- `mode`: `batch`; defaults to `batch`.
-- `dest_schema`: optional destination schema for multi-table CDC runs.
-
-Requirements:
-- The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).
-- Source tables must have primary keys, or `--primary-key` must be provided.
-- Source tables must not contain `ENUM`, `SET`, or `BIT` columns.

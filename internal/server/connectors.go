@@ -67,6 +67,34 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		{
+			ID:            "vitess",
+			Name:          "Vitess",
+			Schemes:       []string{"vitess"},
+			IsSource:      true,
+			IsDestination: true,
+			Fields: []ConnectorField{
+				{Name: "host", Label: "Host", Type: "string", Required: true, Placeholder: "localhost"},
+				{Name: "port", Label: "Port", Type: "number", Required: false, Default: "3306", Placeholder: "3306"},
+				{Name: "user", Label: "Username", Type: "string", Required: true, Placeholder: "root"},
+				{Name: "password", Label: "Password", Type: "password", Required: false},
+				{Name: "database", Label: "Keyspace", Type: "string", Required: true, Placeholder: "commerce"},
+			},
+		},
+		{
+			ID:            "planetscale",
+			Name:          "PlanetScale",
+			Schemes:       []string{"planetscale"},
+			IsSource:      true,
+			IsDestination: true,
+			Fields: []ConnectorField{
+				{Name: "host", Label: "Host", Type: "string", Required: true, Placeholder: "aws.connect.psdb.cloud"},
+				{Name: "port", Label: "Port", Type: "number", Required: false, Default: "3306", Placeholder: "3306"},
+				{Name: "user", Label: "Username", Type: "string", Required: true},
+				{Name: "password", Label: "Password", Type: "password", Required: true},
+				{Name: "database", Label: "Keyspace", Type: "string", Required: true, Placeholder: "mydb"},
+			},
+		},
+		{
 			ID:            "mssql",
 			Name:          "SQL Server",
 			Schemes:       []string{"mssql", "sqlserver", "mssql+pyodbc"},
@@ -82,6 +110,8 @@ func GetConnectors() []ConnectorType {
 		},
 		genericURIConnector("postgres-cdc", "PostgreSQL CDC", []string{"postgres+cdc", "postgresql+cdc"}, true, false),
 		genericURIConnector("mysql-cdc", "MySQL CDC", []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}, true, false),
+		genericURIConnector("vitess-cdc", "Vitess CDC", []string{"vitess+cdc"}, true, false),
+		genericURIConnector("planetscale-cdc", "PlanetScale CDC", []string{"planetscale+cdc"}, true, false),
 		genericURIConnector("mssql-cdc", "SQL Server CDC", []string{"mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc"}, true, false),
 		genericURIConnector("mssql-ct", "SQL Server Change Tracking", []string{"mssql+ct", "sqlserver+ct", "azuresql+ct", "azure-sql+ct"}, true, false),
 		genericURIConnector("mongodb-cdc", "MongoDB CDC", []string{"mongodb+cdc", "mongodb+srv+cdc"}, true, false),
@@ -414,6 +444,10 @@ func BuildURI(connectorID string, fields map[string]string) string {
 		return buildStandardURI("postgres", fields, "5432")
 	case "mysql":
 		return buildStandardURI("mysql", fields, "3306")
+	case "vitess":
+		return buildStandardURI("vitess", fields, "3306")
+	case "planetscale":
+		return buildStandardURI("planetscale", fields, "3306")
 	case "mssql":
 		return buildStandardURI("mssql", fields, "1433")
 	case "azuresql":
