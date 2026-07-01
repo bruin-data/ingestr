@@ -1158,7 +1158,10 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 				return "", nil
 			}
 			if strCol, ok := col.(*array.String); ok {
-				return strCol.Value(0), nil
+				// strCol.Value aliases the Arrow buffer, which the deferred
+				// reader.Release() frees before this string is used; clone it
+				// so the resume LSN survives the release (see GetTableSchema).
+				return strings.Clone(strCol.Value(0)), nil
 			}
 		}
 	}
