@@ -137,7 +137,7 @@ Destination URI parameters:
 - `ssl` (optional): same TLS handling as the source (applies to the query-port connection).
 
 ### Supported write dispositions
-- `replace` — loads into a staging table, then atomically replaces the target's data with `INSERT OVERWRITE`. StarRocks loads into temporary partitions and swaps them in only on success, so a failed load leaves the existing target data intact. (`SWAP WITH`/`RENAME` aren't used because they can't cross databases, and ingestr stages in a separate database.)
+- `replace` — atomically replaces the target's data. A failed load leaves the existing data intact.
 - `append` — loads rows into the existing table.
 - `merge` — upserts by primary key (the table is created as a StarRocks primary-key table). Requires `--primary-key`.
 
