@@ -19,7 +19,7 @@ URI parameters:
 
 - `customer_id`: Customer ID of the Google Ads account to use. You can specify multiple customer IDs separated by commas (e.g., `1234567890,0987654321,1122334455`).
 - `dev_token`: [developer token](https://developers.google.com/google-ads/api/docs/get-started/dev-token) to use for accessing the account.
-- `credentials_path`: path to the service account JSON file (service account auth).
+- `credentials_path`: path to the service account JSON file (service account auth). **Optional** — if omitted (and no OAuth2 parameters are provided), the source uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (the `GOOGLE_APPLICATION_CREDENTIALS` env var, or the `gcloud auth application-default login` token on your machine).
 - `client_id`: OAuth2 client ID (OAuth2 auth).
 - `client_secret`: OAuth2 client secret (OAuth2 auth).
 - `refresh_token`: OAuth2 refresh token (OAuth2 auth).

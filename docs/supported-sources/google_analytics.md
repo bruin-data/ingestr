@@ -16,8 +16,15 @@ googleanalytics://?credentials_base64=<base64_encoded_credentials>&property_id=<
 ```
 
 URI parameters:
-- `credentials_path`: The path to the service account JSON file.
+- `credentials_path`: **Optional**. The path to the service account JSON file. If omitted, the source uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (the `GOOGLE_APPLICATION_CREDENTIALS` env var, or the `gcloud auth application-default login` token on your machine).
+- `credentials_base64`: **Optional**. The base64-encoded service account JSON (alternative to `credentials_path`).
 - `property_id`: It is a unique number that identifies a particular property on Google Analytics. [Follow this guide](https://developers.google.com/analytics/devguides/reporting/data/v1/property-id#what_is_my_property_id) to know more about property ID.
+
+To authenticate with your own Google account instead of a service account key, run `gcloud auth application-default login` and omit both credential parameters:
+
+```
+googleanalytics://?property_id=<property_id>
+```
 
 ## Setting up a Google Analytics Integration
 

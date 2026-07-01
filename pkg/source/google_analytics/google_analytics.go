@@ -74,7 +74,12 @@ func (s *GoogleAnalyticsSource) Connect(ctx context.Context, uri string) error {
 		})
 	}
 
-	client, err := analyticsdata.NewService(ctx, option.WithAuthCredentialsJSON(option.ServiceAccount, credJSON))
+	var opts []option.ClientOption
+	if len(credJSON) > 0 {
+		opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, credJSON))
+	}
+
+	client, err := analyticsdata.NewService(ctx, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create analytics data service: %w", err)
 	}
@@ -409,6 +414,8 @@ func parseConnectionURI(uri string) (credJSON []byte, propertyIDs []string, err 
 	credPath := params.Get("credentials_path")
 	credBase64 := params.Get("credentials_base64")
 
+	// Credentials are optional: when neither is provided, the client falls back
+	// to Application Default Credentials (e.g. the gcloud ADC file on the machine).
 	switch {
 	case credPath != "":
 		credJSON, err = os.ReadFile(credPath)
@@ -420,8 +427,6 @@ func parseConnectionURI(uri string) (credJSON []byte, propertyIDs []string, err 
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to decode credentials_base64: %w", err)
 		}
-	default:
-		return nil, nil, fmt.Errorf("credentials_path or credentials_base64 is required to connect to Google Analytics")
 	}
 
 	rawPID := params.Get("property_id")
