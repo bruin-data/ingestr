@@ -1,9 +1,11 @@
 package postgres_cdc
 
 import (
+	"context"
 	"sync/atomic"
 	"time"
 
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 )
 
@@ -87,6 +89,31 @@ func safeCommitLSN(repl lowWaterReporter, accum *batchAccumulator) pglogrepl.LSN
 		return 0
 	}
 	return low - 1
+}
+
+// emitIdleCommitToken sends a bare CommitToken (no batch) on results when the
+// stream has caught up past lastEmitted. This lets the pipeline confirm the
+// replication slot over WAL that produced no rows for this slot (changes to
+// unpublished tables, keepalives advancing the received position). Without it,
+// an idle or low-traffic stream never advances the slot's confirmed_flush_lsn,
+// so retained WAL and replica lag grow without bound even though the
+// destination is fully caught up. The safe position already excludes any change
+// still pending in the replicator or accumulator, and the pipeline writes
+// buffered batches durably before committing, so confirming it cannot discard
+// un-emitted WAL. Returns the LSN to treat as the new lastEmitted; the caller
+// must only call this when streaming. The send respects ctx so a cancelled run
+// shutting down cannot wedge the reader on a channel the pipeline stopped draining.
+func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batchAccumulator, results chan<- source.RecordBatchResult, lastEmitted pglogrepl.LSN) pglogrepl.LSN {
+	safe := safeCommitLSN(repl, accum)
+	if safe <= lastEmitted {
+		return lastEmitted
+	}
+	select {
+	case results <- source.RecordBatchResult{CommitToken: safe}:
+		return safe
+	case <-ctx.Done():
+		return lastEmitted
+	}
 }
 
 // standbyUpdate computes the standby status positions to report to Postgres.
