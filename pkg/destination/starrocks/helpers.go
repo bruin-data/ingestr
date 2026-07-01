@@ -125,6 +125,12 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit).Format("2006-01-02 15:04:05.000000")
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.List:
+		start, end := a.ValueOffsets(idx)
+		return listElements(a.ListValues(), int(start), int(end))
+	case *array.LargeList:
+		start, end := a.ValueOffsets(idx)
+		return listElements(a.ListValues(), int(start), int(end))
 	case array.ExtensionArray:
 		storage := a.Storage()
 		val := extractValue(storage, idx)
@@ -140,6 +146,16 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		// whole array (which would corrupt every row for uncovered types).
 		return arr.ValueStr(idx)
 	}
+}
+
+// listElements converts an Arrow list slice into a Go slice so it serializes as
+// a JSON array (not a quoted string) into a StarRocks JSON column.
+func listElements(values arrow.Array, start, end int) []interface{} {
+	out := make([]interface{}, 0, end-start)
+	for j := start; j < end; j++ {
+		out = append(out, extractValue(values, j))
+	}
+	return out
 }
 
 func mapStarRocksTypeToSchema(dataType string) schema.DataType {
