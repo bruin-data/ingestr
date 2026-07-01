@@ -554,10 +554,12 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 		}
 
 		// In batch mode, stop once the snapshot is done and the stream has caught
-		// up to the position observed when it started: an empty, non-copy response
-		// at or beyond stopPos. (The keyspace GTID keeps advancing via heartbeats,
-		// so exact-equality alone would never settle.)
-		if copyDone && !hasLastPk && len(changes) == 0 && psdbAtLeast(pos, stopPos) {
+		// up to the position observed when it started (at or beyond stopPos). The
+		// current response's changes have already been emitted above, so returning
+		// here is safe even when this very response carried the shard's final
+		// change and landed on stopPos — see psdbReachedStop for why we must not
+		// wait for a separate empty response.
+		if psdbReachedStop(copyDone, hasLastPk, pos, stopPos) {
 			config.Debug("[SOURCE] PlanetScale CDC: %s/%s stop: caught up (pos=%q >= stop=%q)", t.bareName, shard, pos, stopPos)
 			return nil
 		}
@@ -566,6 +568,18 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 
 func psdbCopyFinished(sawLastPk bool, pos, anchor string, hasLastPk bool) bool {
 	return !hasLastPk && (sawLastPk || (pos != "" && anchor != "" && pos != anchor))
+}
+
+// psdbReachedStop reports whether a batch-mode shard stream has captured
+// everything up to the boundary observed when it started (stopPos) and may
+// return. It deliberately does NOT require a change-free response: the response
+// carrying a shard's final change usually lands exactly on stopPos, and on an
+// otherwise-idle shard no further heartbeat response ever arrives — waiting for
+// one would block Recv forever (and, since shards stream sequentially, stall
+// every later shard). Callers emit the current response's changes before
+// checking this, so stopping here loses nothing.
+func psdbReachedStop(copyDone, hasLastPk bool, pos, stopPos string) bool {
+	return copyDone && !hasLastPk && psdbAtLeast(pos, stopPos)
 }
 
 func psdbRewriteBufferedLSNs(buffers map[string]*mysqlCDCChangeBuffer, key string, start int, ordinal uint64, payload string) bool {
