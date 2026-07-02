@@ -224,12 +224,11 @@ func (d *Destination) mergeRowDelta(ctx context.Context, target, staging *iceber
 
 	incrementalIdx := -1
 	if opts.IncrementalKey != "" {
-		for i, col := range stagingCols {
-			if col == opts.IncrementalKey {
-				incrementalIdx = i
-				break
-			}
+		idx, err := incrementalKeyIndex(stagingCols, opts.IncrementalKey, opts.StagingTable)
+		if err != nil {
+			return err
 		}
+		incrementalIdx = idx
 	}
 
 	writeSchema, err := tableWriteSchema(target)

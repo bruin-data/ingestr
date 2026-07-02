@@ -151,6 +151,35 @@ func TestMergeTableDedupesByIncrementalKey(t *testing.T) {
 	require.Equal(t, "new-late", rows[int64(2)][1])
 }
 
+func TestMergeTableRequiresStagingIncrementalKeyWhenDedupingCopyOnWrite(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.merge.missing_key_cow_target"
+	staging := "lake.merge.missing_key_cow_staging"
+	stagingSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "score", DataType: schema.TypeFloat64, Nullable: true},
+		},
+	}
+
+	writeTableRows(t, dest, target, mergeTestSchema(), false, nil)
+	writeTableRows(t, dest, staging, stagingSchema, true, [][]any{
+		{int64(1), "first", 1.0},
+		{int64(1), "second", 2.0},
+	})
+
+	err := dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "name", "score"},
+		IncrementalKey: "updated_at",
+	})
+	require.ErrorContains(t, err, `iceberg: incremental key column "updated_at" not found in staging table lake.merge.missing_key_cow_staging`)
+}
+
 func TestMergeTableDedupesWithoutIncrementalKey(t *testing.T) {
 	dest := newHadoopDestination(t)
 	ctx := context.Background()

@@ -193,6 +193,28 @@ func TestMergeTableSpilledRuns(t *testing.T) {
 	requireEqualityDeletes(t, dest, target)
 }
 
+func TestMergeTableRequiresStagingIncrementalKeyWhenDedupingRowDelta(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.mor.missing_key_target"
+	staging := "lake.mor.missing_key_staging"
+
+	writeTableRows(t, dest, target, mergeTestSchema(), false, nil)
+	writeTableRows(t, dest, staging, mergeTestSchema(), true, [][]any{
+		{int64(1), "first", 1.0, nil},
+		{int64(1), "second", 2.0, nil},
+	})
+
+	err := dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "name", "score", "updated_at"},
+		IncrementalKey: "missing_key",
+	})
+	require.ErrorContains(t, err, `iceberg: incremental key column "missing_key" not found in staging table lake.mor.missing_key_staging`)
+}
+
 func TestSCD2TableUsesRowDeltaByDefault(t *testing.T) {
 	dest := newHadoopDestination(t)
 	target := "lake.mor.scd2_target"

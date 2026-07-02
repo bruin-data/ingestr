@@ -88,7 +88,7 @@ func (d *Destination) mergeCopyOnWrite(ctx context.Context, target, staging *ice
 		return nil
 	}
 
-	deduped, err := dedupeStagingRows(stagingRows, opts.PrimaryKeys, opts.IncrementalKey)
+	deduped, err := dedupeStagingRows(stagingRows, opts.PrimaryKeys, opts.IncrementalKey, opts.StagingTable)
 	if err != nil {
 		return err
 	}
@@ -196,15 +196,9 @@ func (d *Destination) DeleteInsertTable(ctx context.Context, opts destination.De
 			return fmt.Errorf("iceberg: staging table %s: %w", opts.StagingTable, err)
 		}
 
-		incrementalIdx := -1
-		for i, col := range stagingCols {
-			if col == opts.IncrementalKey {
-				incrementalIdx = i
-				break
-			}
-		}
-		if incrementalIdx < 0 {
-			return fmt.Errorf("iceberg: incremental key column %q not found in staging table %s", opts.IncrementalKey, opts.StagingTable)
+		incrementalIdx, err := incrementalKeyIndex(stagingCols, opts.IncrementalKey, opts.StagingTable)
+		if err != nil {
+			return err
 		}
 
 		produce = func(sink func(arrow.RecordBatch) error) error {
@@ -322,7 +316,7 @@ func (d *Destination) scd2CopyOnWrite(ctx context.Context, target, staging *iceb
 		return fmt.Errorf("iceberg: target table %s: %w", opts.TargetTable, err)
 	}
 
-	deduped, err := dedupeStagingRows(stagingRows, opts.PrimaryKeys, "")
+	deduped, err := dedupeStagingRows(stagingRows, opts.PrimaryKeys, "", opts.StagingTable)
 	if err != nil {
 		return err
 	}
@@ -515,21 +509,35 @@ func requireColumns(rows *scannedTable, columns []string, table string) error {
 	return nil
 }
 
+func incrementalKeyIndex(columns []string, incrementalKey, stagingTable string) (int, error) {
+	if incrementalKey == "" {
+		return -1, nil
+	}
+	for i, col := range columns {
+		if col == incrementalKey {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("iceberg: incremental key column %q not found in staging table %s", incrementalKey, stagingTable)
+}
+
 // dedupeStagingRows keeps a single winning row per primary key. For CDC data
 // the latest change by LSN wins (with the latest non-delete tracked
 // separately); otherwise the highest incremental key value wins, with arrival
 // order breaking ties.
-func dedupeStagingRows(staging *scannedTable, primaryKeys []string, incrementalKey string) (*dedupedStaging, error) {
+func dedupeStagingRows(staging *scannedTable, primaryKeys []string, incrementalKey, stagingTable string) (*dedupedStaging, error) {
 	out := &dedupedStaging{
 		entries: make(map[string]*mergeEntry),
 		isCDC:   staging.HasColumn(destination.CDCDeletedColumn),
 	}
 
 	incrementalIdx := -1
-	if !out.isCDC && incrementalKey != "" {
-		if idx, ok := staging.ColIdx[incrementalKey]; ok {
-			incrementalIdx = idx
+	if !out.isCDC {
+		idx, err := incrementalKeyIndex(staging.Columns, incrementalKey, stagingTable)
+		if err != nil {
+			return nil, err
 		}
+		incrementalIdx = idx
 	}
 
 	for _, row := range staging.Rows {
