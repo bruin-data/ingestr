@@ -175,18 +175,6 @@ func (d *Destination) SwapTable(ctx context.Context, opts destination.SwapOption
 	return nil
 }
 
-func (d *Destination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	return errors.New("delete+insert strategy is not supported for iceberg destination")
-}
-
-func (d *Destination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	return errors.New("merge strategy is not supported for iceberg destination")
-}
-
-func (d *Destination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
-	return errors.New("scd2 strategy is not supported for iceberg destination")
-}
-
 func (d *Destination) DropTable(ctx context.Context, table string) error {
 	if d.catalog == nil {
 		return errors.New("iceberg destination not connected")
@@ -241,10 +229,12 @@ func (d *Destination) GetScheme() string {
 
 func (d *Destination) SupportsReplaceStrategy() bool      { return true }
 func (d *Destination) SupportsAppendStrategy() bool       { return true }
-func (d *Destination) SupportsMergeStrategy() bool        { return false }
-func (d *Destination) SupportsDeleteInsertStrategy() bool { return false }
-func (d *Destination) SupportsSCD2Strategy() bool         { return false }
+func (d *Destination) SupportsMergeStrategy() bool        { return true }
+func (d *Destination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *Destination) SupportsSCD2Strategy() bool         { return true }
 func (d *Destination) SupportsAtomicSwap() bool           { return false }
+func (d *Destination) SupportsCDCMerge() bool             { return true }
+func (d *Destination) SupportsCDCUnchangedCols() bool     { return true }
 
 func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identifier, opts destination.PrepareOptions) error {
 	iceSchema, err := icebergSchemaFromTableSchema(opts.Schema)

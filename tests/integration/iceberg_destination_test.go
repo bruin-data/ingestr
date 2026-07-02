@@ -205,6 +205,18 @@ func exerciseIcebergDestination(t *testing.T, ctx context.Context, destURI, tabl
 	summary = loadIcebergTableSummary(t, ctx, destURI, tableName)
 	assert.EqualValues(t, 1, summary.rows)
 	assert.True(t, summary.fields["age"])
+
+	mergeRows := writeIcebergJSONL(
+		t, "merge.jsonl",
+		`{"id":9,"name":"replace-merged","active":false,"score":9.5,"age":56}`,
+		`{"id":10,"name":"merged-new","active":true,"score":10.5,"age":20}`,
+	)
+	runIcebergPipeline(t, ctx, mergeRows, destURI, tableName, ingestconfig.StrategyMerge)
+
+	rows := readIcebergRows(t, ctx, destURI, tableName)
+	assert.Len(t, rows, 2)
+	assert.Equal(t, "replace-merged", icebergNameByID(t, rows, 9), "merge should update the existing row in place")
+	assert.Equal(t, "merged-new", icebergNameByID(t, rows, 10), "merge should insert net-new rows")
 }
 
 func icebergSQLMinioDestinationURI(t *testing.T, minioEndpoint, bucket string) string {
