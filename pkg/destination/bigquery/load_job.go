@@ -995,6 +995,7 @@ func (s *chunkStager) abort(cause error) {
 	if s.chunkWriter == nil {
 		return
 	}
+	s.chunks = append(s.chunks, s.chunkMeta)
 	s.chunkWriter.Abort(cause)
 	s.chunkWriter = nil
 }
@@ -1092,7 +1093,7 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 	for result := range records {
 		if result.Err != nil {
 			stager.abort(result.Err)
-			return nil, stager.totalRows, result.Err
+			return stager.chunks, stager.totalRows, result.Err
 		}
 
 		record := result.Batch
