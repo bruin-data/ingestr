@@ -2,9 +2,14 @@ package snowflake
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"regexp"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -12,7 +17,9 @@ import (
 	pqfile "github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	pqschema "github.com/apache/arrow-go/v18/parquet/schema"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,6 +232,119 @@ func TestBuildCopyIntoSQLUsesParquetLogicalTypes(t *testing.T) {
 	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789")
 	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789 FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
 	assert.Equal(t, want, got)
+}
+
+func TestWriteParallelDoesNotHoldConnectionWhileWaitingForRecords(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	dest := &SnowflakeDestination{
+		db:          db,
+		uploadConns: newSnowflakeUploadConnPool(db, 1),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	idleRecords := make(chan source.RecordBatchResult)
+	idleDone := make(chan error, 1)
+	go func() {
+		idleDone <- dest.WriteParallel(ctx, idleRecords, destination.WriteOptions{
+			Table:       "public.idle_table",
+			Parallelism: 1,
+		})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 0, db.Stats().InUse)
+
+	mock.ExpectExec(regexp.QuoteMeta("PUT file://data.parquet")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("COPY INTO")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	activeRecords := make(chan source.RecordBatchResult, 1)
+	activeRecords <- source.RecordBatchResult{Batch: oneRowSnowflakeRecord()}
+	close(activeRecords)
+
+	require.NoError(t, dest.WriteParallel(ctx, activeRecords, destination.WriteOptions{
+		Table:       "public.active_table",
+		Parallelism: 1,
+	}))
+
+	close(idleRecords)
+	require.NoError(t, <-idleDone)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSnowflakeUploadConnPoolLimitsConcurrentConnections(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(2)
+	pool := newSnowflakeUploadConnPool(db, 1)
+
+	mock.ExpectExec("PUT").WillDelayFor(100 * time.Millisecond).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("PUT").WillDelayFor(100 * time.Millisecond).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stop := make(chan struct{})
+	var monitorWg sync.WaitGroup
+	var maxInUse int
+	monitorWg.Add(1)
+	go func() {
+		defer monitorWg.Done()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if inUse := db.Stats().InUse; inUse > maxInUse {
+					maxInUse = inUse
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- pool.Exec(ctx, "PUT file://data.parquet")
+		}()
+	}
+
+	wg.Wait()
+	close(stop)
+	monitorWg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+	require.LessOrEqual(t, maxInUse, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func oneRowSnowflakeRecord() arrow.RecordBatch {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+
+	builder.Field(0).(*array.Int64Builder).Append(1)
+	return builder.NewRecordBatch()
 }
 
 func TestSnowflakeParquetWriterTimestampLogicalTypes(t *testing.T) {

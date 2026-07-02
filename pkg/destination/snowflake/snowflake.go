@@ -27,14 +27,18 @@ import (
 )
 
 type SnowflakeDestination struct {
-	db        *sql.DB
-	account   string
-	user      string
-	password  string
-	database  string
-	warehouse string
-	role      string
+	db            *sql.DB
+	uploadConns   *snowflakeUploadConnPool
+	uploadConnsMu sync.Mutex
+	account       string
+	user          string
+	password      string
+	database      string
+	warehouse     string
+	role          string
 }
+
+const snowflakeUploadConnPoolSize = 16
 
 func NewSnowflakeDestination() *SnowflakeDestination {
 	return &SnowflakeDestination{}
@@ -77,6 +81,7 @@ func (d *SnowflakeDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.db = db
+	d.uploadConns = newSnowflakeUploadConnPool(db, snowflakeUploadConnPoolSize)
 	config.Debug("[DEST] Connected to Snowflake account: %s, database: %s", d.account, d.database)
 	return nil
 }
@@ -241,14 +246,6 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 		go func(workerID int) {
 			defer uploadWg.Done()
 
-			// Each worker gets its own connection for parallel uploads
-			conn, err := d.db.Conn(ctx)
-			if err != nil {
-				uploadResults <- uploadResult{err: fmt.Errorf("failed to get connection: %w", err)}
-				return
-			}
-			defer func() { _ = conn.Close() }()
-
 			for result := range records {
 				myBatch := int(atomic.AddInt64(&batchNum, 1))
 
@@ -303,8 +300,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				})
 
 				putSQL := fmt.Sprintf("PUT file://data.parquet @%s/%s/%s AUTO_COMPRESS=FALSE SOURCE_COMPRESSION=NONE OVERWRITE=TRUE", stageName, loadID, fileName)
-				_, err = conn.ExecContext(uploadCtx, putSQL)
-				if err != nil {
+				if err := d.execOnUploadConn(uploadCtx, putSQL); err != nil {
 					config.LogFailedQuery(putSQL, err)
 					uploadResults <- uploadResult{batchNum: myBatch, err: fmt.Errorf("failed to PUT file to stage: %w", err)}
 					return
@@ -363,6 +359,71 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	config.Debug("[DEST] COPY INTO completed in %v", time.Since(startCopy))
 	config.Debug("[DEST] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
+}
+
+func (d *SnowflakeDestination) execOnUploadConn(ctx context.Context, query string) error {
+	return d.uploadConnPool().Exec(ctx, query)
+}
+
+func (d *SnowflakeDestination) uploadConnPool() *snowflakeUploadConnPool {
+	d.uploadConnsMu.Lock()
+	defer d.uploadConnsMu.Unlock()
+	if d.uploadConns == nil {
+		d.uploadConns = newSnowflakeUploadConnPool(d.db, snowflakeUploadConnPoolSize)
+	}
+	return d.uploadConns
+}
+
+type snowflakeUploadConnPool struct {
+	db      *sql.DB
+	permits chan struct{}
+}
+
+func newSnowflakeUploadConnPool(db *sql.DB, size int) *snowflakeUploadConnPool {
+	if size <= 0 {
+		size = 1
+	}
+
+	permits := make(chan struct{}, size)
+	for i := 0; i < size; i++ {
+		permits <- struct{}{}
+	}
+
+	return &snowflakeUploadConnPool{
+		db:      db,
+		permits: permits,
+	}
+}
+
+func (p *snowflakeUploadConnPool) Exec(ctx context.Context, query string) error {
+	conn, err := p.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer p.release(conn)
+
+	_, err = conn.ExecContext(ctx, query)
+	return err
+}
+
+func (p *snowflakeUploadConnPool) acquire(ctx context.Context) (*sql.Conn, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-p.permits:
+	}
+
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		p.permits <- struct{}{}
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+	return conn, nil
+}
+
+func (p *snowflakeUploadConnPool) release(conn *sql.Conn) {
+	_ = conn.Close()
+	p.permits <- struct{}{}
 }
 
 func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.ArrowWriterProperties) {
