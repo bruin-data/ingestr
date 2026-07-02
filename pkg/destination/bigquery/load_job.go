@@ -978,13 +978,16 @@ func (s *chunkStager) closeChunk() error {
 	if s.chunkWriter == nil {
 		return nil
 	}
-	if err := s.chunkWriter.Close(); err != nil {
-		return err
-	}
+
+	chunkWriter := s.chunkWriter
 	s.chunks = append(s.chunks, s.chunkMeta)
 	s.chunkWriter = nil
 	s.currentRows = 0
 	s.part++
+
+	if err := chunkWriter.Close(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1066,7 +1069,7 @@ func (s *chunkStager) finish() ([]stagedLoadChunk, int64, error) {
 		return s.chunks, s.totalRows, nil
 	}
 	if err := s.closeChunk(); err != nil {
-		return nil, s.totalRows, fmt.Errorf("failed to finalize %s staging writer: %w", s.format, err)
+		return s.chunks, s.totalRows, fmt.Errorf("failed to finalize %s staging writer: %w", s.format, err)
 	}
 	return s.chunks, s.totalRows, nil
 }
@@ -1100,7 +1103,7 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 		err := stager.writeRecord(ctx, record)
 		record.Release()
 		if err != nil {
-			return nil, stager.totalRows, err
+			return stager.chunks, stager.totalRows, err
 		}
 	}
 
