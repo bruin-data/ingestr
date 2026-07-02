@@ -28,15 +28,17 @@ type RunJobRequest struct {
 	LoaderFileSize   int    `json:"loaderFileSize"`
 	LoaderFileFormat string `json:"loaderFileFormat"`
 
-	ExtractParallelism int      `json:"extractParallelism"`
-	SQLLimit           int      `json:"sqlLimit"`
-	SQLExcludeColumns  []string `json:"sqlExcludeColumns"`
-	SQLBackend         []string `json:"sqlBackend"`
-	Columns            string   `json:"columns"`
-	NoInference        bool     `json:"noInference"`
-	Mask               []string `json:"mask"`
-	TrimWhitespace     bool     `json:"trimWhitespace"`
-	NoLoadTimestamp    bool     `json:"noLoadTimestamp"`
+	ExtractParallelism       int      `json:"extractParallelism"`
+	ExtractPartitionBy       string   `json:"extractPartitionBy"`
+	ExtractPartitionInterval string   `json:"extractPartitionInterval"`
+	SQLLimit                 int      `json:"sqlLimit"`
+	SQLExcludeColumns        []string `json:"sqlExcludeColumns"`
+	SQLBackend               []string `json:"sqlBackend"`
+	Columns                  string   `json:"columns"`
+	NoInference              bool     `json:"noInference"`
+	Mask                     []string `json:"mask"`
+	TrimWhitespace           bool     `json:"trimWhitespace"`
+	NoLoadTimestamp          bool     `json:"noLoadTimestamp"`
 
 	PipelinesDir     string `json:"pipelinesDir"`
 	StagingBucket    string `json:"stagingBucket"`
@@ -92,6 +94,8 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendInt("loader-file-size", r.LoaderFileSize)
 	appendString("loader-file-format", r.LoaderFileFormat)
 	appendInt("extract-parallelism", r.ExtractParallelism)
+	appendString("extract-partition-by", r.ExtractPartitionBy)
+	appendString("extract-partition-interval", r.ExtractPartitionInterval)
 	appendInt("sql-limit", r.SQLLimit)
 	appendStringSlice("sql-exclude-columns", r.SQLExcludeColumns)
 	appendStringSlice("sql-backend", r.SQLBackend)

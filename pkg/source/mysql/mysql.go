@@ -123,11 +123,12 @@ func (s *MySQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 
 	tableName := req.Name
 	return &source.DynamicSourceTable{
-		TableName:           tableName,
-		TablePrimaryKeys:    pks,
-		TableIncrementalKey: req.IncrementalKey,
-		TableStrategy:       strategy,
-		KnownSchema:         true,
+		TableName:                        tableName,
+		TablePrimaryKeys:                 pks,
+		TableIncrementalKey:              req.IncrementalKey,
+		TableStrategy:                    strategy,
+		TableSupportsExtractPartitioning: true,
+		KnownSchema:                      true,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil
 		},
@@ -250,6 +251,7 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 // rowQuerier is satisfied by both *sql.DB and *sql.Conn.
 type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // querier returns something to run a query on plus a cleanup func. When the
@@ -294,6 +296,17 @@ func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schem
 		batchSize = 100000
 	}
 
+	read := func(ctx context.Context, readOpts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+		return s.readQuery(ctx, table, columns, arrowSchema, batchSize, startTotal, readOpts)
+	}
+	discover := func(ctx context.Context, readOpts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+		return s.discoverExtractPartitionBounds(ctx, table, readOpts)
+	}
+
+	return source.ReadExtractPartitions(ctx, opts, tableSchema, read, discover)
+}
+
+func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -343,6 +356,23 @@ func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schem
 	}()
 
 	return results, nil
+}
+
+func (s *MySQLSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.DefaultSQLTimeFormat)
+
+	q, cleanup, err := s.querier(ctx)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, err
+	}
+	defer cleanup()
+
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := q.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }
 
 func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -458,13 +488,9 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
-		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02 15:04:05")))
-		}
-		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteColumn(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02 15:04:05")))
-		}
+		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteColumn, source.DefaultSQLTimeFormat)...)
 	}
+	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteColumn, source.DefaultSQLTimeFormat)...)
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")

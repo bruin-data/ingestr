@@ -56,17 +56,9 @@ func BuildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	var conditions []string
 	config.Debug("[QUERY] Building query with IncrementalKey=%s, IntervalStart=%v, IntervalEnd=%v", opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd)
 	if opts.IncrementalKey != "" {
-		if opts.IntervalStart != nil {
-			timeStr := opts.IntervalStart.Format("2006-01-02 15:04:05")
-			conditions = append(conditions, fmt.Sprintf(`%s >= '%s'`, quoteFunc(opts.IncrementalKey), timeStr))
-			config.Debug("[QUERY] Added start condition: %s >= '%s'", opts.IncrementalKey, timeStr)
-		}
-		if opts.IntervalEnd != nil {
-			timeStr := opts.IntervalEnd.Format("2006-01-02 15:04:05")
-			conditions = append(conditions, fmt.Sprintf(`%s <= '%s'`, quoteFunc(opts.IncrementalKey), timeStr))
-			config.Debug("[QUERY] Added end condition: %s <= '%s'", opts.IncrementalKey, timeStr)
-		}
+		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteFunc, source.DefaultSQLTimeFormat)...)
 	}
+	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteFunc, source.DefaultSQLTimeFormat)...)
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
