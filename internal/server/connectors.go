@@ -329,7 +329,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("googleanalytics", "Google Analytics", []string{"googleanalytics"}, true, false),
 		genericURIConnector("gsc", "Google Search Console", []string{"gsc", "googlesearchconsole"}, true, false),
 		genericURIConnector("googleads", "Google Ads", []string{"googleads"}, true, false),
-		genericURIConnector("gsheets", "Google Sheets", []string{"gsheets"}, true, false),
+		genericURIConnector("gsheets", "Google Sheets", []string{"gsheets"}, true, true),
 		genericURIConnector("gorgias", "Gorgias", []string{"gorgias"}, true, false),
 		genericURIConnector("granola", "Granola", []string{"granola"}, true, false),
 		genericURIConnector("hostaway", "Hostaway", []string{"hostaway"}, true, false),
