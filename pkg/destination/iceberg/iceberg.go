@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -459,9 +460,22 @@ func (d *Destination) ensureLocalTableDirs(ident icebergtable.Identifier) error 
 	if !ok {
 		return nil
 	}
+	mode := fs.FileMode(0o755)
+	forceMode := false
+	if d.cfg.Properties.Get("type", "") == "rest" {
+		// A local REST warehouse is shared by the catalog server and this process,
+		// which may run as different UIDs.
+		mode = 0o777
+		forceMode = true
+	}
 	for _, dir := range []string{location, filepath.Join(location, "data"), filepath.Join(location, "metadata")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, mode); err != nil {
 			return fmt.Errorf("iceberg: failed to create local table directory %s: %w", dir, err)
+		}
+		if forceMode {
+			if err := os.Chmod(dir, mode); err != nil {
+				return fmt.Errorf("iceberg: failed to set local table directory permissions %s: %w", dir, err)
+			}
 		}
 	}
 	return nil
