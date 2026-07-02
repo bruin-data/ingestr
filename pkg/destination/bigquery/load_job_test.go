@@ -42,6 +42,16 @@ func (t *trackingWriteCloser) Close() error {
 	return nil
 }
 
+type closeErrorWriteCloser struct {
+	bytes.Buffer
+	closeCount int
+}
+
+func (c *closeErrorWriteCloser) Close() error {
+	c.closeCount++
+	return errors.New("close failed")
+}
+
 type shortWriteCloser struct{}
 
 func (s shortWriteCloser) Write([]byte) (int, error) { return 0, nil }
@@ -293,6 +303,38 @@ func TestWriteLoadJobChunksSplitsJSONLByLoaderFileSize(t *testing.T) {
 		if len(lines) != int(wantRows[i]) {
 			t.Fatalf("writer %d line count = %d, want %d", i, len(lines), wantRows[i])
 		}
+	}
+}
+
+func TestWriteLoadJobChunksReturnsFailedChunkOnCloseError(t *testing.T) {
+	dest := &BigQueryDestination{}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: makeTestRecordBatch(t, 1)}
+	close(records)
+
+	writer := &closeErrorWriteCloser{}
+	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatJSONL, 0, nil, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+		return stagedLoadChunk{
+			index:     part,
+			gcsBucket: "bucket",
+			gcsObject: "prefix/part-000001.jsonl",
+			gcsURI:    "gs://bucket/prefix/part-000001.jsonl",
+		}, writer, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "close failed") {
+		t.Fatalf("expected close error, got %v", err)
+	}
+	if rowsWritten != 1 {
+		t.Fatalf("rowsWritten = %d, want 1", rowsWritten)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("len(chunks) = %d, want 1", len(chunks))
+	}
+	if chunks[0].gcsURI != "gs://bucket/prefix/part-000001.jsonl" {
+		t.Fatalf("chunk gcsURI = %q", chunks[0].gcsURI)
+	}
+	if writer.closeCount != 1 {
+		t.Fatalf("writer closeCount = %d, want 1", writer.closeCount)
 	}
 }
 
