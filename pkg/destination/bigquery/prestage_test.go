@@ -227,8 +227,21 @@ func TestWritePreStagedRejectsUnexpectedBatches(t *testing.T) {
 
 func TestWritePreStagedDetectsRowCountMismatch(t *testing.T) {
 	d := &BigQueryDestination{loadMethod: loadMethodLoadJob}
+	tempDir := t.TempDir()
+	leftoverPath := filepath.Join(tempDir, "part-000001.jsonl")
+	if err := os.WriteFile(leftoverPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Zero staged chunks load zero rows; the writer expected 5.
-	ps := &preStagedLoadSet{dest: d, staged: &stagedLoadSet{format: loadJobFormatJSONL}, rows: 5}
+	ps := &preStagedLoadSet{
+		dest: d,
+		staged: &stagedLoadSet{
+			tempDir: tempDir,
+			format:  loadJobFormatJSONL,
+		},
+		rows: 5,
+	}
 
 	ch := make(chan source.RecordBatchResult)
 	close(ch)
@@ -236,6 +249,9 @@ func TestWritePreStagedDetectsRowCountMismatch(t *testing.T) {
 	err := d.writePreStaged(context.Background(), "p", "ds", "t", ch, ps, destination.WriteOptions{})
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("expected row count mismatch error, got %v", err)
+	}
+	if _, statErr := os.Stat(tempDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected temp dir %s to be removed after mismatch", tempDir)
 	}
 }
 
