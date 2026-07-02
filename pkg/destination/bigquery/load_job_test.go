@@ -424,7 +424,7 @@ func TestBuildCombinedGCSLoadSourceUsesAllChunkURIs(t *testing.T) {
 		{index: 1, gcsURI: "gs://bucket/prefix/part-000002.parquet"},
 	}
 
-	src, err := dest.buildCombinedGCSLoadSource(loadJobFormatParquet, chunks)
+	src, err := dest.buildCombinedGCSLoadSource(loadJobFormatParquet, chunks, false)
 	if err != nil {
 		t.Fatalf("buildCombinedGCSLoadSource returned error: %v", err)
 	}

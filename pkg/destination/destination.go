@@ -32,6 +32,11 @@ type WriteOptions struct {
 	StagingBucket    string
 	LoaderFileSize   int
 	LoaderFileFormat string
+
+	// PreStaged holds load files written during extract by a PreStager
+	// destination. When set, the destination loads these files instead of
+	// consuming the records channel (which will be empty).
+	PreStaged PreStagedData
 }
 
 type Transaction interface {

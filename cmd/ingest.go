@@ -132,6 +132,12 @@ func IngestCommand() *cli.Command {
 				Value:   5,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
+			&cli.BoolFlag{
+				Name:    "disable-prestaging",
+				Usage:   "Disable extract-time load-file staging for schema-inferred sources",
+				Hidden:  true,
+				Sources: cli.EnvVars("INGESTR_DISABLE_PRESTAGING"),
+			},
 			&cli.IntFlag{
 				Name:    "sql-limit",
 				Usage:   "The limit to use when fetching data from the source",
@@ -254,6 +260,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
+	cfg.DisablePreStaging = c.Bool("disable-prestaging")
 	cfg.SQLLimit = int(c.Int("sql-limit"))
 	cfg.SQLExcludeColumns = c.StringSlice("sql-exclude-columns")
 	cfg.Columns = c.String("columns")

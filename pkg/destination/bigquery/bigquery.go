@@ -814,6 +814,14 @@ func (d *BigQueryDestination) WriteParallel(ctx context.Context, records <-chan 
 		}
 	}
 
+	if opts.PreStaged != nil {
+		ps, ok := opts.PreStaged.(*preStagedLoadSet)
+		if !ok || d.effectiveLoadMethod() != loadMethodLoadJob {
+			return fmt.Errorf("pre-staged data is not compatible with this BigQuery configuration")
+		}
+		return d.writePreStaged(ctx, project, dataset, table, records, ps, opts)
+	}
+
 	if d.effectiveLoadMethod() == loadMethodLoadJob {
 		if d.loadJobWriter != nil {
 			return d.loadJobWriter(ctx, dataset, table, records, opts)
