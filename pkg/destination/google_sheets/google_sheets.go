@@ -136,7 +136,7 @@ func (d *GoogleSheetsDestination) ensureSheetExists(ctx context.Context) error {
 }
 
 func (d *GoogleSheetsDestination) clearSheet(ctx context.Context) error {
-	_, err := d.client.Spreadsheets.Values.Clear(d.spreadsheetID, d.sheetName, &sheets.ClearValuesRequest{}).Context(ctx).Do()
+	_, err := d.client.Spreadsheets.Values.Clear(d.spreadsheetID, quoteSheetTitle(d.sheetName), &sheets.ClearValuesRequest{}).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("failed to clear sheet %q: %w", d.sheetName, err)
 	}
@@ -144,7 +144,7 @@ func (d *GoogleSheetsDestination) clearSheet(ctx context.Context) error {
 }
 
 func (d *GoogleSheetsDestination) sheetIsEmpty(ctx context.Context) (bool, error) {
-	resp, err := d.client.Spreadsheets.Values.Get(d.spreadsheetID, d.sheetName).Context(ctx).Do()
+	resp, err := d.client.Spreadsheets.Values.Get(d.spreadsheetID, quoteSheetTitle(d.sheetName)).Context(ctx).Do()
 	if err != nil {
 		return false, fmt.Errorf("failed to read sheet %q: %w", d.sheetName, err)
 	}
@@ -165,7 +165,7 @@ func (d *GoogleSheetsDestination) writeHeader(ctx context.Context) error {
 		row[i] = h
 	}
 
-	_, err := d.client.Spreadsheets.Values.Update(d.spreadsheetID, d.sheetName+"!A1", &sheets.ValueRange{
+	_, err := d.client.Spreadsheets.Values.Update(d.spreadsheetID, quoteSheetTitle(d.sheetName)+"!A1", &sheets.ValueRange{
 		Values: [][]interface{}{row},
 	}).ValueInputOption("RAW").Context(ctx).Do()
 	if err != nil {
@@ -235,7 +235,7 @@ func (d *GoogleSheetsDestination) writeRecordBatch(ctx context.Context, record a
 		if end > numRows {
 			end = numRows
 		}
-		_, err := d.client.Spreadsheets.Values.Append(d.spreadsheetID, d.sheetName, &sheets.ValueRange{
+		_, err := d.client.Spreadsheets.Values.Append(d.spreadsheetID, quoteSheetTitle(d.sheetName), &sheets.ValueRange{
 			Values: values[start:end],
 		}).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Context(ctx).Do()
 		if err != nil {
@@ -295,9 +295,45 @@ func (d *GoogleSheetsDestination) DropTable(ctx context.Context, table string) e
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err = d.client.Spreadsheets.Values.Clear(spreadsheetID, sheetName, &sheets.ClearValuesRequest{}).Context(ctx).Do()
+	spreadsheet, err := d.client.Spreadsheets.Get(spreadsheetID).Context(ctx).Do()
 	if err != nil {
-		return fmt.Errorf("failed to clear sheet %q: %w", sheetName, err)
+		return fmt.Errorf("failed to fetch spreadsheet %s: %w", spreadsheetID, err)
+	}
+
+	sheetID := int64(-1)
+	for _, s := range spreadsheet.Sheets {
+		if s.Properties != nil && s.Properties.Title == sheetName {
+			sheetID = s.Properties.SheetId
+			break
+		}
+	}
+	if sheetID < 0 {
+		// Sheet (tab) does not exist; nothing to drop.
+		return nil
+	}
+
+	// The Sheets API refuses to delete the last remaining sheet in a
+	// spreadsheet, so in that case clear its values instead.
+	if len(spreadsheet.Sheets) <= 1 {
+		_, err = d.client.Spreadsheets.Values.Clear(spreadsheetID, quoteSheetTitle(sheetName), &sheets.ClearValuesRequest{}).Context(ctx).Do()
+		if err != nil {
+			return fmt.Errorf("failed to clear sheet %q: %w", sheetName, err)
+		}
+		return nil
+	}
+
+	_, err = d.client.Spreadsheets.BatchUpdate(spreadsheetID, &sheets.BatchUpdateSpreadsheetRequest{
+		Requests: []*sheets.Request{
+			{
+				DeleteSheet: &sheets.DeleteSheetRequest{
+					SheetId:         sheetID,
+					ForceSendFields: []string{"SheetId"},
+				},
+			},
+		},
+	}).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("failed to delete sheet %q: %w", sheetName, err)
 	}
 	return nil
 }
@@ -326,6 +362,10 @@ func parseTableName(table string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid table name %q: expected format spreadsheet_id.sheet_name (e.g. fkdUQ2bjdNfUq2CA.Sheet1)", table)
 	}
 	return parts[0], parts[1], nil
+}
+
+func quoteSheetTitle(title string) string {
+	return "'" + strings.ReplaceAll(title, "'", "''") + "'"
 }
 
 func parseURI(uri string) ([]byte, error) {

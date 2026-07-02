@@ -54,6 +54,19 @@ func TestParseTableName(t *testing.T) {
 	}
 }
 
+func TestQuoteSheetTitle(t *testing.T) {
+	cases := map[string]string{
+		"Sheet1":        "'Sheet1'",
+		"My Data Sheet": "'My Data Sheet'",
+		"O'Brien":       "'O''Brien'",
+	}
+	for in, want := range cases {
+		if got := quoteSheetTitle(in); got != want {
+			t.Fatalf("quoteSheetTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestValueToCell(t *testing.T) {
 	pool := memory.NewGoAllocator()
 
