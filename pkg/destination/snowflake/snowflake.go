@@ -241,14 +241,6 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 		go func(workerID int) {
 			defer uploadWg.Done()
 
-			// Each worker gets its own connection for parallel uploads
-			conn, err := d.db.Conn(ctx)
-			if err != nil {
-				uploadResults <- uploadResult{err: fmt.Errorf("failed to get connection: %w", err)}
-				return
-			}
-			defer func() { _ = conn.Close() }()
-
 			for result := range records {
 				myBatch := int(atomic.AddInt64(&batchNum, 1))
 
@@ -296,14 +288,18 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 				fileName := fmt.Sprintf("batch_%d_%d.parquet", workerID, myBatch)
 
-				// Upload to stage using dedicated connection
+				// Acquire a connection from the shared pool for just this PUT, so
+				// it's released back to the pool immediately afterward instead of
+				// being held for the worker's entire lifetime. This lets the pool
+				// (bounded by SetMaxOpenConns) be shared safely across all tables
+				// in a multi-table write, regardless of numTables * parallelism.
 				uploadCtx := sf.WithFileStream(ctx, buf)
 				uploadCtx = sf.WithFileTransferOptions(uploadCtx, &sf.SnowflakeFileTransferOptions{
 					RaisePutGetError: true,
 				})
 
 				putSQL := fmt.Sprintf("PUT file://data.parquet @%s/%s/%s AUTO_COMPRESS=FALSE SOURCE_COMPRESSION=NONE OVERWRITE=TRUE", stageName, loadID, fileName)
-				_, err = conn.ExecContext(uploadCtx, putSQL)
+				_, err = d.db.ExecContext(uploadCtx, putSQL)
 				if err != nil {
 					config.LogFailedQuery(putSQL, err)
 					uploadResults <- uploadResult{batchNum: myBatch, err: fmt.Errorf("failed to PUT file to stage: %w", err)}

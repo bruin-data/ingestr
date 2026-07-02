@@ -2,9 +2,12 @@ package snowflake
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -12,7 +15,10 @@ import (
 	pqfile "github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	pqschema "github.com/apache/arrow-go/v18/parquet/schema"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/multitable"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -302,4 +308,89 @@ func TestMapDataTypeToSnowflake(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func newSingleRowRecordBatch() arrow.RecordBatch {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).(*array.Int64Builder).Append(1)
+	return builder.NewRecordBatch()
+}
+
+// TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure reproduces the
+// exact multi-table merge deadlock reported in production: several tables
+// are written concurrently (via multitable.Write, using the real Router)
+// through the same *SnowflakeDestination/*sql.DB, with combined worker
+// parallelism (numTables * Parallelism) exceeding the connection pool size,
+// and records interleaved across tables the way a real multi-table CDC
+// source would emit them.
+//
+// With the old behavior (one connection pinned per worker for its entire
+// lifetime, acquired before the worker ever looks at its channel), this
+// deadlocks: a minority of workers monopolize the pool and then idle waiting
+// for more data, while the Router's single goroutine blocks forever trying
+// to deliver to a starved table whose workers can never acquire a
+// connection. Acquiring a connection only for the duration of each PUT (this
+// fix) lets the shared pool be time-shared safely regardless of numTables *
+// Parallelism, so the write completes instead of hanging.
+func TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.MatchExpectationsInOrder(false)
+
+	const maxOpenConns = 2
+	db.SetMaxOpenConns(maxOpenConns)
+
+	const numTables = 3
+	const parallelismPerTable = 3 // numTables * parallelismPerTable (9) > maxOpenConns (2)
+	const batchesPerTable = 12    // > router's per-table channel buffer (8), forces backpressure
+
+	tableConfigs := make(map[string]destination.TableWriteConfig, numTables)
+	tableNames := make([]string, 0, numTables)
+	for i := 0; i < numTables; i++ {
+		name := fmt.Sprintf("table_%d", i)
+		tableNames = append(tableNames, name)
+		tableConfigs[name] = destination.TableWriteConfig{DestTable: fmt.Sprintf("public.%s", name)}
+
+		for j := 0; j < batchesPerTable; j++ {
+			mock.ExpectExec("PUT file://data.parquet").WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+		mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+
+	dest := &SnowflakeDestination{db: db}
+
+	// Feed batches interleaved round-robin across tables through a single,
+	// unbuffered shared channel, mimicking how a real multi-table source
+	// streams records for many tables through one channel.
+	records := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(records)
+		for j := 0; j < batchesPerTable; j++ {
+			for _, name := range tableNames {
+				records <- source.RecordBatchResult{TableName: name, Batch: newSingleRowRecordBatch()}
+			}
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- multitable.Write(context.Background(), dest, records, destination.MultiTableWriteOptions{
+			TableConfigs: tableConfigs,
+			Parallelism:  parallelismPerTable,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("multitable.Write deadlocked: workers likely held pooled connections beyond a single batch's upload")
+	}
+
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
