@@ -65,6 +65,7 @@ type IngestConfig struct {
 	LoaderFileSize     int
 	LoaderFileFormat   string
 	ExtractParallelism int
+	DisablePreStaging  bool // Skip extract-time load-file staging for schema-inferred sources
 
 	SQLLimit          int
 	SQLExcludeColumns []string
