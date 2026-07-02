@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -259,6 +262,9 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		createOpts = append(createOpts, icebergcatalog.WithPartitionSpec(&spec))
 	}
 
+	if err := d.ensureLocalTableDirs(ident); err != nil {
+		return err
+	}
 	if _, err := d.catalog.CreateTable(ctx, ident, iceSchema, createOpts...); err != nil {
 		if errors.Is(err, icebergcatalog.ErrTableAlreadyExists) {
 			return nil
@@ -446,6 +452,45 @@ func renderTableLocation(template string, ident icebergtable.Identifier) string 
 		"{identifier_dot}", strings.Join(ident, "."),
 	)
 	return replacer.Replace(template)
+}
+
+func (d *Destination) ensureLocalTableDirs(ident icebergtable.Identifier) error {
+	location, ok := d.localTableLocation(ident)
+	if !ok {
+		return nil
+	}
+	for _, dir := range []string{location, filepath.Join(location, "data"), filepath.Join(location, "metadata")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("iceberg: failed to create local table directory %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+func (d *Destination) localTableLocation(ident icebergtable.Identifier) (string, bool) {
+	if d.cfg.TableLocation != "" {
+		return localFilesystemPath(renderTableLocation(d.cfg.TableLocation, ident))
+	}
+	warehouse, ok := localFilesystemPath(d.cfg.Properties.Get("warehouse", ""))
+	if !ok || warehouse == "" {
+		return "", false
+	}
+	parts := append([]string{warehouse}, ident...)
+	return filepath.Join(parts...), true
+}
+
+func localFilesystemPath(location string) (string, bool) {
+	if location == "" {
+		return "", false
+	}
+	if !strings.Contains(location, "://") {
+		return location, true
+	}
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme != "file" {
+		return "", false
+	}
+	return parsed.Path, parsed.Path != ""
 }
 
 func tableSchemaWithPrimaryKeys(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
