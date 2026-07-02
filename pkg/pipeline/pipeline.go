@@ -224,7 +224,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		preStage, preStageKeyTransform = p.maybeStartPreStage(ctx, preFetchStrategy, preFetchConfig.PrimaryKeys, loadTimestamp)
 		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage)
 		defer func() {
-			if preStagedData != nil && preStagedForJob == nil {
+			if preStagedData != nil {
 				preStagedData.Close()
 			}
 		}()
