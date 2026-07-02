@@ -4,7 +4,7 @@
 Vitess speaks the MySQL wire protocol, but it is selected with its own `vitess://` scheme (not `mysql://`) so ingestr uses the Vitess-aware read, write, and CDC paths. Pointing a `mysql://` URI at a Vitess server fails fast with a message telling you to use `vitess://`.
 
 > [!NOTE]
-> [PlanetScale](/supported-sources/planetscale.md) is managed Vitess, but it has its own hosted CDC path and is documented separately under the `planetscale://` scheme.
+> [PlanetScale](/supported-sources/planetscale.md) is managed Vitess, but it has its own hosted CDC path and is documented separately under the `ps_mysql://` scheme.
 
 ## URI format
 ```plaintext

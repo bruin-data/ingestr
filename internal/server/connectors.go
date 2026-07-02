@@ -81,9 +81,9 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		{
-			ID:            "planetscale",
-			Name:          "PlanetScale",
-			Schemes:       []string{"planetscale"},
+			ID:            "ps_mysql",
+			Name:          "PlanetScale MySQL",
+			Schemes:       []string{"ps_mysql"},
 			IsSource:      true,
 			IsDestination: true,
 			Fields: []ConnectorField{
@@ -111,7 +111,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("postgres-cdc", "PostgreSQL CDC", []string{"postgres+cdc", "postgresql+cdc"}, true, false),
 		genericURIConnector("mysql-cdc", "MySQL CDC", []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}, true, false),
 		genericURIConnector("vitess-cdc", "Vitess CDC", []string{"vitess+cdc"}, true, false),
-		genericURIConnector("planetscale-cdc", "PlanetScale CDC", []string{"planetscale+cdc"}, true, false),
+		genericURIConnector("ps_mysql-cdc", "PlanetScale MySQL CDC", []string{"ps_mysql+cdc"}, true, false),
 		genericURIConnector("mssql-cdc", "SQL Server CDC", []string{"mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc"}, true, false),
 		genericURIConnector("mssql-ct", "SQL Server Change Tracking", []string{"mssql+ct", "sqlserver+ct", "azuresql+ct", "azure-sql+ct"}, true, false),
 		genericURIConnector("mongodb-cdc", "MongoDB CDC", []string{"mongodb+cdc", "mongodb+srv+cdc"}, true, false),
@@ -447,8 +447,8 @@ func BuildURI(connectorID string, fields map[string]string) string {
 		return buildStandardURI("mysql", fields, "3306")
 	case "vitess":
 		return buildStandardURI("vitess", fields, "3306")
-	case "planetscale":
-		return buildStandardURI("planetscale", fields, "3306")
+	case "ps_mysql":
+		return buildStandardURI("ps_mysql", fields, "3306")
 	case "mssql":
 		return buildStandardURI("mssql", fields, "1433")
 	case "azuresql":

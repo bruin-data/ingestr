@@ -14,7 +14,7 @@ import (
 )
 
 func TestParseMySQLCDCURIPlanetScaleParams(t *testing.T) {
-	uri := "planetscale+cdc://user:pscale_pw_secret@abc.connect.psdb.cloud:3306/mydb"
+	uri := "ps_mysql+cdc://user:pscale_pw_secret@abc.connect.psdb.cloud:3306/mydb"
 
 	_, normalized, connInfo, err := parseMySQLCDCURI(uri)
 	if err != nil {
@@ -32,10 +32,10 @@ func TestParseMySQLCDCURIPlanetScaleParams(t *testing.T) {
 		t.Errorf("credentials: got %q:%q", connInfo.User, connInfo.Password)
 	}
 
-	// The +cdc suffix is stripped, leaving the planetscale scheme so uriToDSN can
+	// The +cdc suffix is stripped, leaving the ps_mysql scheme so uriToDSN can
 	// auto-enable TLS for the underlying MySQL connection.
-	if !strings.HasPrefix(normalized, "planetscale://") {
-		t.Errorf("normalized URI must keep the planetscale scheme: %s", normalized)
+	if !strings.HasPrefix(normalized, "ps_mysql://") {
+		t.Errorf("normalized URI must keep the ps_mysql scheme: %s", normalized)
 	}
 }
 
@@ -48,10 +48,10 @@ func TestCDCSchemeRouting(t *testing.T) {
 	}{
 		{"mysql", (*MySQLSource)(nil)},
 		{"vitess", (*VitessSource)(nil)},
-		{"planetscale", (*VitessSource)(nil)},
+		{"ps_mysql", (*VitessSource)(nil)},
 		{"mysql+cdc", (*MySQLCDCSource)(nil)},
 		{"vitess+cdc", (*VitessCDCSource)(nil)},
-		{"planetscale+cdc", (*PlanetScaleCDCSource)(nil)},
+		{"ps_mysql+cdc", (*PlanetScaleCDCSource)(nil)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.scheme, func(t *testing.T) {
@@ -257,8 +257,8 @@ func TestPsdbAtLeast(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := psdbAtLeast(tc.pos, tc.stop); got != tc.want {
-				t.Errorf("psdbAtLeast(%q, %q) = %v, want %v", tc.pos, tc.stop, got, tc.want)
+			if got := gtidAtLeast(tc.pos, tc.stop); got != tc.want {
+				t.Errorf("gtidAtLeast(%q, %q) = %v, want %v", tc.pos, tc.stop, got, tc.want)
 			}
 		})
 	}

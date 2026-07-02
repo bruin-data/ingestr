@@ -17,12 +17,14 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
+	vreplication "vitess.io/vitess/go/mysql/replication"
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/vt/grpcclient"
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
@@ -303,23 +305,26 @@ type vitessTxnRow struct {
 	deleted  bool
 }
 
-// runVStream opens a single VStream covering all target tables and drives the
-// copy + streaming phases, emitting CDC batches via the shared change buffers.
-// In batch mode it stops once caught up: heartbeats are only emitted when the
-// stream is idle, so the first heartbeat after the copy phase completes (or
-// immediately, when resuming) signals that everything up to "now" was streamed.
+// vitessPeekTimeout bounds the short-lived "current position" VStream used to
+// establish the batch-capture stop boundary.
+const vitessPeekTimeout = 30 * time.Second
+
+// runVStream captures all selected tables in batch mode. A single VStream has a
+// single start position, so tables with a stored resume cursor and tables
+// without one cannot share a stream. Targets are therefore partitioned: tables
+// without a cursor (new tables) get a fresh stream with a consistent copy phase,
+// and tables with cursors resume from the oldest stored VGTID (re-delivery to
+// tables whose cursor is newer is idempotent via merge). Discarding the stored
+// cursors and re-copying everything instead would silently miss deletes that
+// happened since those cursors were written.
 func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTarget, resumeByBare map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if len(targets) == 0 {
 		return nil
 	}
 
-	schemaByTable := make(map[string]*schema.TableSchema, len(targets))
-	resultByTable := make(map[string]string, len(targets))
-	rules := make([]*binlogdatapb.Rule, 0, len(targets))
-	for _, t := range targets {
-		schemaByTable[t.bareName] = t.schema
-		resultByTable[t.bareName] = t.resultName
-		rules = append(rules, &binlogdatapb.Rule{Match: t.bareName, Filter: "select * from " + t.bareName})
+	plan, err := planVitessStart(targets, resumeByBare)
+	if err != nil {
+		return err
 	}
 
 	shards, err := s.listShards(ctx)
@@ -329,13 +334,6 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 	if len(shards) == 0 {
 		return fmt.Errorf("no shards found for keyspace %s", s.keyspace)
 	}
-
-	startVGtid, ordinal, fromResume, err := s.resolveVitessStart(targets, resumeByBare, shards)
-	if err != nil {
-		return err
-	}
-
-	flags := &vtgatepb.VStreamFlags{HeartbeatInterval: 1, StopOnReshard: false}
 
 	// vtgateconn.Dial is unusable for TLS: its registered gRPC dialer appends an
 	// insecure transport credential that overrides whatever we pass, so a TLS-only
@@ -349,11 +347,65 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 	}
 	defer func() { _ = cc.Close() }()
 
+	if len(plan.fresh) > 0 && len(plan.resume) > 0 {
+		names := make([]string, 0, len(plan.fresh))
+		for _, t := range plan.fresh {
+			names = append(names, t.bareName)
+		}
+		output.Warnf("[WARNING] tables without a stored CDC cursor will be copied fresh: %s; previously synced tables resume from their cursors\n", strings.Join(names, ", "))
+	}
+
+	ordinal := plan.ordinal
+	if len(plan.fresh) > 0 {
+		if err := s.streamVGroup(ctx, cc, plan.fresh, freshVitessVGtid(s.keyspace, shards), false, &ordinal, shards, opts, results); err != nil {
+			return err
+		}
+	}
+	if len(plan.resume) > 0 {
+		if err := s.streamVGroup(ctx, cc, plan.resume, plan.resumeVGtid, true, &ordinal, shards, opts, results); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// streamVGroup opens one VStream for a group of tables sharing a start position
+// and drives the copy + streaming phases, emitting CDC batches via the shared
+// change buffers. Batch semantics: the current per-shard positions are captured
+// up front as the stop boundary, and the stream ends at the first transaction
+// boundary at which the copy phase (if any) has completed and every shard has
+// reached that boundary — so a run processes everything up to its start moment
+// and then stops, even under sustained write traffic (microbatches).
+func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn, targets []vitessCDCTarget, startVGtid *binlogdatapb.VGtid, fromResume bool, ordinal *uint64, shards []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	schemaByTable := make(map[string]*schema.TableSchema, len(targets))
+	resultByTable := make(map[string]string, len(targets))
+	rules := make([]*binlogdatapb.Rule, 0, len(targets))
+	for _, t := range targets {
+		schemaByTable[t.bareName] = t.schema
+		resultByTable[t.bareName] = t.resultName
+		rules = append(rules, &binlogdatapb.Rule{Match: t.bareName, Filter: "select * from " + t.bareName})
+	}
+
+	stopByShard, err := s.peekVitessPositions(ctx, cc, rules, shards)
+	if err != nil {
+		return err
+	}
+	copyPending := vitessPendingCopyShards(startVGtid, fromResume, shards)
+	config.Debug("[SOURCE] Vitess CDC: group tables=%d fromResume=%v stop=%v copyPending=%d", len(targets), fromResume, stopByShard, len(copyPending))
+
+	// A resumed group with no interrupted copy that already sits at or beyond the
+	// stop boundary has nothing to stream; skip it rather than wait out an idle
+	// heartbeat interval.
+	if fromResume && len(copyPending) == 0 && vitessCaughtUp(startVGtid, stopByShard, s.keyspace) {
+		config.Debug("[SOURCE] Vitess CDC: resume group already caught up; skipping")
+		return nil
+	}
+
 	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(ctx, &vtgatepb.VStreamRequest{
 		TabletType: topodatapb.TabletType_PRIMARY,
 		Vgtid:      startVGtid,
 		Filter:     &binlogdatapb.Filter{Rules: rules},
-		Flags:      flags,
+		Flags:      &vtgatepb.VStreamFlags{HeartbeatInterval: 1, StopOnReshard: false},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to start Vitess VStream: %w", err)
@@ -362,13 +414,16 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 	batchSize := mysqlCDCStreamBatchSize(opts)
 	buffers := make(map[string]*mysqlCDCChangeBuffer, len(targets))
 	fieldsByTable := make(map[string]*vitessFieldInfo)
-	var latestVGtid *binlogdatapb.VGtid
+	latestVGtid := startVGtid
 	var txnRows []vitessTxnRow
-	readyToStop := fromResume // resume runs have no copy phase to wait for
+	idleHeartbeat := false
 
 	flushTxn := func() error {
-		if len(txnRows) == 0 || latestVGtid == nil {
+		if len(txnRows) == 0 {
 			return nil
+		}
+		if latestVGtid == nil {
+			return fmt.Errorf("vstream delivered %d rows before any VGTID; cannot assign resume positions", len(txnRows))
 		}
 		payload, err := encodeVitessVGtid(latestVGtid)
 		if err != nil {
@@ -377,14 +432,14 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 		for i, r := range txnRows {
 			change := mysqlCDCChange{
 				values:  r.values,
-				lsn:     formatVitessLSN(ordinal, i, payload),
+				lsn:     formatVitessLSN(*ordinal, i, payload),
 				deleted: r.deleted,
 			}
 			if err := appendMySQLCDCBufferedChanges(buffers, r.bareName, schemaByTable[r.bareName], resultByTable[r.bareName], []mysqlCDCChange{change}, batchSize, results); err != nil {
 				return err
 			}
 		}
-		ordinal++
+		(*ordinal)++
 		txnRows = txnRows[:0]
 		return nil
 	}
@@ -460,82 +515,207 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 				}
 
 			case binlogdatapb.VEventType_COPY_COMPLETED:
-				readyToStop = true
+				// vtgate emits one COPY_COMPLETED per shard (Keyspace/Shard set)
+				// and a final keyspace-level event with both empty once every
+				// shard finished. Stopping on the first per-shard event would end
+				// the run while other shards are still copying.
+				if ev.Keyspace == "" && ev.Shard == "" {
+					copyPending = map[string]bool{}
+				} else {
+					delete(copyPending, ev.Shard)
+				}
 
 			case binlogdatapb.VEventType_HEARTBEAT:
 				if ev.Vgtid != nil {
 					latestVGtid = ev.Vgtid
 				}
-				if readyToStop {
-					if err := flushTxn(); err != nil {
-						return err
-					}
-					return flushMySQLCDCChangeBuffers(buffers, results)
-				}
+				idleHeartbeat = true
 			}
 		}
+
+		// Stop at a transaction boundary once the copy phase has completed on
+		// every shard and the stream has caught up to the stop boundary. Under
+		// sustained write traffic the position check is what terminates the run
+		// (heartbeats are suppressed while events flow). The heartbeat is the
+		// fallback for streams that never surface a comparable position (e.g. a
+		// fresh copy of an empty table on an idle keyspace emits no VGTID):
+		// vtgate sends it only when nothing was delivered for a full interval,
+		// which after a completed copy means the stream is fully caught up.
+		if len(copyPending) == 0 && len(txnRows) == 0 && (idleHeartbeat || vitessCaughtUp(latestVGtid, stopByShard, s.keyspace)) {
+			config.Debug("[SOURCE] Vitess CDC: caught up to stop boundary; finishing batch")
+			return flushMySQLCDCChangeBuffers(buffers, results)
+		}
+		idleHeartbeat = false
 	}
 }
 
-// resolveVitessStart determines the VStream start position and seeds the LSN
-// ordinal from stored resume cursors. VStream's VGTID is cumulative (every
-// commit carries the latest GTID for all shards), so persisting and resuming the
-// whole VGTID handles both unsharded and sharded keyspaces with one cursor.
-func (s *VitessCDCSource) resolveVitessStart(targets []vitessCDCTarget, resumeByBare map[string]string, shards []string) (*binlogdatapb.VGtid, uint64, bool, error) {
-	haveAll := true
-	anyResume := false
+// vitessStartPlan partitions targets by resume-cursor availability and carries
+// the resume start position and the seed for the LSN ordinal.
+type vitessStartPlan struct {
+	fresh       []vitessCDCTarget
+	resume      []vitessCDCTarget
+	resumeVGtid *binlogdatapb.VGtid // oldest stored VGTID among resume targets
+	ordinal     uint64              // max stored ordinal + 1 (0 when nothing resumes)
+}
+
+// planVitessStart validates stored cursors and splits targets into a fresh-copy
+// group and a resume group. VStream's VGTID is cumulative (every commit carries
+// the latest GTID for all shards), so resuming the resume group from the oldest
+// stored VGTID handles both unsharded and sharded keyspaces with one cursor;
+// merge makes re-delivery to tables with newer cursors idempotent.
+func planVitessStart(targets []vitessCDCTarget, resumeByBare map[string]string) (vitessStartPlan, error) {
+	var plan vitessStartPlan
 	var minOrdinal uint64 = math.MaxUint64
 	var maxOrdinal uint64
-	var oldest *binlogdatapb.VGtid
 
 	for _, t := range targets {
 		lsn := strings.TrimSpace(resumeByBare[t.bareName])
 		if lsn == "" {
-			haveAll = false
+			plan.fresh = append(plan.fresh, t)
 			continue
 		}
 		ord, payload, ok := parseVitessLSN(lsn)
 		if !ok {
-			return nil, 0, false, fmt.Errorf("resume position %q for %s is invalid; run with --full-refresh to rebuild the destination safely", lsn, t.bareName)
+			return plan, fmt.Errorf("resume position %q for %s is invalid; run with --full-refresh to rebuild the destination safely", lsn, t.bareName)
 		}
 		vgtid, err := decodeVitessVGtid(payload)
 		if err != nil {
-			return nil, 0, false, fmt.Errorf("resume position for %s is invalid: %w; run with --full-refresh to rebuild the destination safely", t.bareName, err)
+			return plan, fmt.Errorf("resume position for %s is invalid: %w; run with --full-refresh to rebuild the destination safely", t.bareName, err)
 		}
-		anyResume = true
+		plan.resume = append(plan.resume, t)
 		if ord < minOrdinal {
 			minOrdinal = ord
-			oldest = vgtid
+			plan.resumeVGtid = vgtid
 		}
 		if ord > maxOrdinal {
 			maxOrdinal = ord
 		}
 	}
-
-	ordinal := uint64(0)
-	if anyResume {
-		ordinal = maxOrdinal + 1
+	if len(plan.resume) > 0 {
+		plan.ordinal = maxOrdinal + 1
 	}
+	return plan, nil
+}
 
-	// Resume the whole stream only when every selected table has a cursor; merge
-	// makes any re-delivery to already-advanced tables idempotent.
-	if anyResume && haveAll {
-		return oldest, ordinal, true, nil
-	}
-	if anyResume && !haveAll {
-		config.Debug("[SOURCE] Vitess CDC: some selected tables lack a resume cursor; performing a fresh copy for all selected tables")
-	}
-
-	// Fresh (or mixed) run: empty Gtid triggers VStream's consistent copy phase.
-	// Shards are listed explicitly (one ShardGtid each) rather than relying on the
-	// empty-Shard "all shards" expansion, which vtcombo resolves unreliably. An
-	// unsharded keyspace has a single shard named "-".
+// freshVitessVGtid builds the start position for a fresh run: empty Gtid
+// triggers VStream's consistent copy phase. Shards are listed explicitly (one
+// ShardGtid each) rather than relying on the empty-Shard "all shards" expansion,
+// which vtcombo resolves unreliably. An unsharded keyspace has a single shard
+// named "-".
+func freshVitessVGtid(keyspace string, shards []string) *binlogdatapb.VGtid {
 	shardGtids := make([]*binlogdatapb.ShardGtid, 0, len(shards))
 	for _, sh := range shards {
-		shardGtids = append(shardGtids, &binlogdatapb.ShardGtid{Keyspace: s.keyspace, Shard: sh, Gtid: ""})
+		shardGtids = append(shardGtids, &binlogdatapb.ShardGtid{Keyspace: keyspace, Shard: sh, Gtid: ""})
 	}
-	fresh := &binlogdatapb.VGtid{ShardGtids: shardGtids}
-	return fresh, ordinal, false, nil
+	return &binlogdatapb.VGtid{ShardGtids: shardGtids}
+}
+
+// vitessPendingCopyShards reports which shards still owe a copy phase. A fresh
+// run copies on every shard. A resumed run normally has none — unless the stored
+// VGTID carries TablePKs, i.e. the previous run was interrupted mid-copy, in
+// which case VStream continues that shard's copy and the run must not stop until
+// it completes.
+func vitessPendingCopyShards(start *binlogdatapb.VGtid, fromResume bool, shards []string) map[string]bool {
+	pending := make(map[string]bool, len(shards))
+	if !fromResume {
+		for _, sh := range shards {
+			pending[sh] = true
+		}
+		return pending
+	}
+	for _, sg := range start.GetShardGtids() {
+		if len(sg.GetTablePKs()) > 0 {
+			pending[sg.GetShard()] = true
+		}
+	}
+	return pending
+}
+
+// gtidAtLeast reports whether position pos is at or beyond stop, comparing as
+// Vitess GTID sets and falling back to string equality when unparseable. Shared
+// by the Vitess VStream and PlanetScale psdbconnect stop-boundary checks.
+func gtidAtLeast(pos, stop string) bool {
+	if pos == "" || stop == "" {
+		return false
+	}
+	if pos == stop {
+		return true
+	}
+	posSet, err := vreplication.DecodePosition(pos)
+	if err != nil {
+		return false
+	}
+	stopSet, err := vreplication.DecodePosition(stop)
+	if err != nil {
+		return false
+	}
+	return posSet.AtLeast(stopSet)
+}
+
+// vitessCaughtUp reports whether the latest VGTID has reached or passed the stop
+// boundary on every shard.
+func vitessCaughtUp(latest *binlogdatapb.VGtid, stopByShard map[string]string, keyspace string) bool {
+	if latest == nil || len(stopByShard) == 0 {
+		return false
+	}
+	posByShard := make(map[string]string, len(latest.GetShardGtids()))
+	for _, sg := range latest.GetShardGtids() {
+		if sg.GetKeyspace() == keyspace {
+			posByShard[sg.GetShard()] = sg.GetGtid()
+		}
+	}
+	for shard, stop := range stopByShard {
+		if !gtidAtLeast(posByShard[shard], stop) {
+			return false
+		}
+	}
+	return true
+}
+
+// peekVitessPositions opens a short-lived VStream at the special "current"
+// position and reads events until every shard's GTID is resolved, returning the
+// per-shard stop boundary for batch capture.
+func (s *VitessCDCSource) peekVitessPositions(ctx context.Context, cc *grpc.ClientConn, rules []*binlogdatapb.Rule, shards []string) (map[string]string, error) {
+	pctx, cancel := context.WithTimeout(ctx, vitessPeekTimeout)
+	defer cancel()
+
+	shardGtids := make([]*binlogdatapb.ShardGtid, 0, len(shards))
+	for _, sh := range shards {
+		shardGtids = append(shardGtids, &binlogdatapb.ShardGtid{Keyspace: s.keyspace, Shard: sh, Gtid: "current"})
+	}
+	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(pctx, &vtgatepb.VStreamRequest{
+		TabletType: topodatapb.TabletType_PRIMARY,
+		Vgtid:      &binlogdatapb.VGtid{ShardGtids: shardGtids},
+		Filter:     &binlogdatapb.Filter{Rules: rules},
+		Flags:      &vtgatepb.VStreamFlags{HeartbeatInterval: 1},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read current Vitess position: %w", err)
+	}
+
+	for {
+		resp, err := reader.Recv()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read current Vitess position: %w", err)
+		}
+		for _, ev := range resp.Events {
+			if ev.Vgtid == nil {
+				continue
+			}
+			out := make(map[string]string, len(shards))
+			for _, sg := range ev.Vgtid.GetShardGtids() {
+				if sg.GetKeyspace() != s.keyspace {
+					continue
+				}
+				if g := sg.GetGtid(); g != "" && g != "current" {
+					out[sg.GetShard()] = g
+				}
+			}
+			if len(out) >= len(shards) {
+				return out, nil
+			}
+		}
+	}
 }
 
 // listShards returns the shard names of the keyspace (e.g. ["-"] when unsharded,
@@ -700,9 +880,12 @@ func vitessGRPCTarget(rawURI string, defaultHost string) (string, error) {
 // vitessGRPCTLSCredentials resolves the transport credentials for the VStream
 // gRPC connection. grpc_tls, when set, takes precedence; otherwise the gRPC side
 // inherits the MySQL-protocol tls parameter so a single tls=true secures both
-// connections. Only true and skip-verify enable TLS (skip-verify skips
-// certificate verification); false, preferred, a custom go-sql-driver TLS config
-// name, or an unset value leave the gRPC connection plaintext.
+// connections. true and skip-verify enable TLS (skip-verify skips certificate
+// verification); false or an unset value leave the gRPC connection plaintext. A
+// tls value that only makes sense to the MySQL driver (preferred, or a custom
+// registered TLS config name) cannot be mapped to a gRPC transport, so it is an
+// error unless grpc_tls says explicitly what the gRPC side should do — silently
+// falling back to plaintext would betray a user who asked for TLS.
 func vitessGRPCTLSCredentials(rawURI string) (credentials.TransportCredentials, error) {
 	u, err := url.Parse(rawURI)
 	if err != nil {
@@ -711,8 +894,10 @@ func vitessGRPCTLSCredentials(rawURI string) (credentials.TransportCredentials, 
 	q := u.Query()
 
 	mode := strings.TrimSpace(strings.ToLower(q.Get("grpc_tls")))
+	inherited := false
 	if mode == "" {
 		mode = strings.TrimSpace(strings.ToLower(q.Get("tls")))
+		inherited = mode != ""
 	}
 
 	switch mode {
@@ -722,8 +907,13 @@ func vitessGRPCTLSCredentials(rawURI string) (credentials.TransportCredentials, 
 			cfg.InsecureSkipVerify = true
 		}
 		return credentials.NewTLS(cfg), nil
-	default:
+	case "", "false":
 		return insecure.NewCredentials(), nil
+	default:
+		if inherited {
+			return nil, fmt.Errorf("cannot infer gRPC transport security from tls=%q; set grpc_tls=true, grpc_tls=skip-verify, or grpc_tls=false explicitly on the source URI", mode)
+		}
+		return nil, fmt.Errorf("invalid grpc_tls=%q; use true, skip-verify, or false", mode)
 	}
 }
 

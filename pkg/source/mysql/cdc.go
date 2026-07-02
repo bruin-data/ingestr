@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -22,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/mysqluri"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -138,7 +138,7 @@ func (s *MySQLCDCSource) Connect(ctx context.Context, rawURI string) error {
 
 	if isVitess, _ := isVitessServer(ctx, db); isVitess {
 		_ = db.Close()
-		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale, which has no MySQL binlog; use the vitess+cdc:// or planetscale+cdc:// scheme instead", database)
+		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale, which has no MySQL binlog; use the vitess+cdc:// or ps_mysql+cdc:// scheme instead", database)
 	}
 
 	if err := checkMySQLBinlogSettings(ctx, db); err != nil {
@@ -350,7 +350,7 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		Flavor:   gomysql.MySQLFlavor,
 	}
 
-	parsed, err := url.Parse(rawURI)
+	parsed, err := mysqluri.ParseURL(rawURI)
 	if err != nil {
 		return cfg, "", mysqlCDCConnInfo{}, err
 	}
@@ -360,7 +360,7 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 		return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("unsupported MySQL CDC scheme: %s", parsed.Scheme)
 	}
 	switch baseScheme {
-	case "mysql", "mysql+pymysql", "vitess", "planetscale":
+	case "mysql", "mysql+pymysql", "vitess", "ps_mysql":
 		parsed.Scheme = baseScheme
 	case "mariadb":
 		parsed.Scheme = "mariadb"
@@ -426,7 +426,7 @@ func mysqlCDCConnInfoFromURI(normalizedURI string) (mysqlCDCConnInfo, error) {
 	if err != nil {
 		return mysqlCDCConnInfo{}, fmt.Errorf("failed to parse MySQL CDC connection parameters: %w", err)
 	}
-	parsed, err := url.Parse(normalizedURI)
+	parsed, err := mysqluri.ParseURL(normalizedURI)
 	if err != nil {
 		return mysqlCDCConnInfo{}, err
 	}
