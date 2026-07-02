@@ -5,6 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -175,18 +179,6 @@ func (d *Destination) SwapTable(ctx context.Context, opts destination.SwapOption
 	return nil
 }
 
-func (d *Destination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	return errors.New("delete+insert strategy is not supported for iceberg destination")
-}
-
-func (d *Destination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	return errors.New("merge strategy is not supported for iceberg destination")
-}
-
-func (d *Destination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
-	return errors.New("scd2 strategy is not supported for iceberg destination")
-}
-
 func (d *Destination) DropTable(ctx context.Context, table string) error {
 	if d.catalog == nil {
 		return errors.New("iceberg destination not connected")
@@ -241,10 +233,12 @@ func (d *Destination) GetScheme() string {
 
 func (d *Destination) SupportsReplaceStrategy() bool      { return true }
 func (d *Destination) SupportsAppendStrategy() bool       { return true }
-func (d *Destination) SupportsMergeStrategy() bool        { return false }
-func (d *Destination) SupportsDeleteInsertStrategy() bool { return false }
-func (d *Destination) SupportsSCD2Strategy() bool         { return false }
+func (d *Destination) SupportsMergeStrategy() bool        { return true }
+func (d *Destination) SupportsDeleteInsertStrategy() bool { return true }
+func (d *Destination) SupportsSCD2Strategy() bool         { return true }
 func (d *Destination) SupportsAtomicSwap() bool           { return false }
+func (d *Destination) SupportsCDCMerge() bool             { return true }
+func (d *Destination) SupportsCDCUnchangedCols() bool     { return true }
 
 func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identifier, opts destination.PrepareOptions) error {
 	iceSchema, err := icebergSchemaFromTableSchema(opts.Schema)
@@ -269,6 +263,9 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		createOpts = append(createOpts, icebergcatalog.WithPartitionSpec(&spec))
 	}
 
+	if err := d.ensureLocalTableDirs(ident); err != nil {
+		return err
+	}
 	if _, err := d.catalog.CreateTable(ctx, ident, iceSchema, createOpts...); err != nil {
 		if errors.Is(err, icebergcatalog.ErrTableAlreadyExists) {
 			return nil
@@ -456,6 +453,58 @@ func renderTableLocation(template string, ident icebergtable.Identifier) string 
 		"{identifier_dot}", strings.Join(ident, "."),
 	)
 	return replacer.Replace(template)
+}
+
+func (d *Destination) ensureLocalTableDirs(ident icebergtable.Identifier) error {
+	location, ok := d.localTableLocation(ident)
+	if !ok {
+		return nil
+	}
+	mode := fs.FileMode(0o755)
+	forceMode := false
+	if d.cfg.Properties.Get("type", "") == "rest" {
+		// A local REST warehouse is shared by the catalog server and this process,
+		// which may run as different UIDs.
+		mode = 0o777
+		forceMode = true
+	}
+	for _, dir := range []string{location, filepath.Join(location, "data"), filepath.Join(location, "metadata")} {
+		if err := os.MkdirAll(dir, mode); err != nil {
+			return fmt.Errorf("iceberg: failed to create local table directory %s: %w", dir, err)
+		}
+		if forceMode {
+			if err := os.Chmod(dir, mode); err != nil {
+				return fmt.Errorf("iceberg: failed to set local table directory permissions %s: %w", dir, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (d *Destination) localTableLocation(ident icebergtable.Identifier) (string, bool) {
+	if d.cfg.TableLocation != "" {
+		return localFilesystemPath(renderTableLocation(d.cfg.TableLocation, ident))
+	}
+	warehouse, ok := localFilesystemPath(d.cfg.Properties.Get("warehouse", ""))
+	if !ok || warehouse == "" {
+		return "", false
+	}
+	parts := append([]string{warehouse}, ident...)
+	return filepath.Join(parts...), true
+}
+
+func localFilesystemPath(location string) (string, bool) {
+	if location == "" {
+		return "", false
+	}
+	if !strings.Contains(location, "://") {
+		return location, true
+	}
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme != "file" {
+		return "", false
+	}
+	return parsed.Path, parsed.Path != ""
 }
 
 func tableSchemaWithPrimaryKeys(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
