@@ -439,6 +439,37 @@ func TestDeleteInsertTableDedupesStagingByPK(t *testing.T) {
 	require.Equal(t, "second", rows[int64(1)][1], "duplicate PKs must collapse, highest incremental key wins (arrival order on ties)")
 }
 
+func TestDeleteInsertTableRequiresStagingIncrementalKeyWhenDeduping(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.di.missing_key_target"
+	staging := "lake.di.missing_key_staging"
+	stagingSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "score", DataType: schema.TypeFloat64, Nullable: true},
+		},
+	}
+
+	writeTableRows(t, dest, target, mergeTestSchema(), false, nil)
+	writeTableRows(t, dest, staging, stagingSchema, true, [][]any{
+		{int64(1), "first", 0.0},
+		{int64(1), "second", 0.0},
+	})
+
+	err := dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+		StagingTable:   staging,
+		TargetTable:    target,
+		IncrementalKey: "updated_at",
+		IntervalStart:  int64(1),
+		IntervalEnd:    int64(2),
+		Columns:        []string{"id", "name", "score"},
+		PrimaryKeys:    []string{"id"},
+	})
+	require.ErrorContains(t, err, `iceberg: incremental key column "updated_at" not found in staging table lake.di.missing_key_staging`)
+}
+
 func scd2TestSchema() *schema.TableSchema {
 	return &schema.TableSchema{
 		Columns: []schema.Column{

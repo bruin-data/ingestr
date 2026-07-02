@@ -203,6 +203,9 @@ func (d *Destination) DeleteInsertTable(ctx context.Context, opts destination.De
 				break
 			}
 		}
+		if incrementalIdx < 0 {
+			return fmt.Errorf("iceberg: incremental key column %q not found in staging table %s", opts.IncrementalKey, opts.StagingTable)
+		}
 
 		produce = func(sink func(arrow.RecordBatch) error) error {
 			it, err := sorter.Iter()
