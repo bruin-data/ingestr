@@ -42,13 +42,12 @@ func Parse(rawURI string) (*ParsedURI, error) {
 		}, nil
 	}
 
+	// The scheme was already extracted above, so parse the rest under a
+	// placeholder: url.Parse rejects scheme characters ingestr allows, such as
+	// the underscore in ps_mysql.
 	normalizedURI := rawURI
-	if strings.Contains(scheme, "+") {
-		parts := strings.SplitN(rawURI, "://", 2)
-		if len(parts) == 2 {
-			baseScheme := strings.Split(scheme, "+")[0]
-			normalizedURI = baseScheme + "://" + parts[1]
-		}
+	if parts := strings.SplitN(rawURI, "://", 2); len(parts) == 2 {
+		normalizedURI = "scheme://" + parts[1]
 	}
 
 	parsed, err := url.Parse(normalizedURI)

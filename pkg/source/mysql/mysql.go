@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/pkg/mysqluri"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/go-sql-driver/mysql"
@@ -64,7 +64,7 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 		s.sessionInit = []string{"SET workload = 'OLAP'"}
 	} else if isVitess, _ := isVitessServer(ctx, db); isVitess {
 		_ = db.Close()
-		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead", database)
+		return fmt.Errorf("server for database %q identifies as Vitess/PlanetScale; use the vitess:// or ps_mysql:// scheme instead", database)
 	}
 
 	s.db = db
@@ -73,72 +73,11 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-// uriToDSN converts a MySQL URI to the DSN format expected by go-sql-driver/mysql
-// URI format: mysql://user:pass@host:port/database?params
-// DSN format: user:pass@tcp(host:port)/database?params
-// Returns: dsn, database name, error
+// uriToDSN converts a MySQL-family URI to the DSN format expected by
+// go-sql-driver/mysql, returning the DSN and the database name. The conversion
+// lives in pkg/mysqluri, shared with the MySQL destination.
 func uriToDSN(uri string) (string, string, error) {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return "", "", err
-	}
-
-	// Normalize scheme
-	scheme := strings.ToLower(u.Scheme)
-	if !isMySQLFamilyScheme(scheme) {
-		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
-	}
-
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		port = "3306"
-	}
-
-	var user, password string
-	if u.User != nil {
-		user = u.User.Username()
-		password, _ = u.User.Password()
-	}
-
-	database := strings.TrimPrefix(u.Path, "/")
-
-	// Build DSN
-	dsn := ""
-	if user != "" {
-		dsn = user
-		if password != "" {
-			dsn += ":" + password
-		}
-		dsn += "@"
-	}
-	dsn += fmt.Sprintf("tcp(%s:%s)/%s", host, port, database)
-
-	// Add query parameters
-	query := u.Query()
-	query.Set("parseTime", "true") // Always parse time
-	// PlanetScale requires TLS on MySQL-wire connections; enable it automatically for
-	// the planetscale scheme and *.psdb.cloud hosts unless the caller already set a
-	// tls value, so tls=skip-verify or a custom config still wins.
-	if !query.Has("tls") && (scheme == "planetscale" || strings.HasSuffix(strings.ToLower(host), ".psdb.cloud")) {
-		query.Set("tls", "true")
-	}
-	if len(query) > 0 {
-		dsn += "?" + query.Encode()
-	}
-
-	return dsn, database, nil
-}
-
-// isMySQLFamilyScheme reports whether scheme names a MySQL-wire connector handled
-// by this package: MySQL/MariaDB, Vitess, or PlanetScale.
-func isMySQLFamilyScheme(scheme string) bool {
-	switch {
-	case strings.HasPrefix(scheme, "mysql"), scheme == "mariadb", scheme == "vitess", scheme == "planetscale":
-		return true
-	default:
-		return false
-	}
+	return mysqluri.ToDSN(uri)
 }
 
 func isVitessServer(ctx context.Context, db *sql.DB) (bool, error) {

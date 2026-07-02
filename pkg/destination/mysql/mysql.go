@@ -3,9 +3,9 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"hash/fnv"
-	"net/url"
 	"strings"
 	"time"
 
@@ -14,10 +14,11 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/mysqluri"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 type MySQLDestination struct {
@@ -32,7 +33,7 @@ func NewMySQLDestination() *MySQLDestination {
 }
 
 func (d *MySQLDestination) Schemes() []string {
-	return []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "planetscale"}
+	return []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "ps_mysql"}
 }
 
 func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
@@ -55,15 +56,15 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
-	// Routing is by scheme: vitess:// and planetscale:// select the Vitess-aware
+	// Routing is by scheme: vitess:// and ps_mysql:// select the Vitess-aware
 	// write paths (CREATE DATABASE is unsupported via vtgate, and sharded keyspaces
 	// cannot be written to safely). A mysql:// URI pointed at a Vitess server is a
 	// mistake, so fail fast with a clear message rather than misbehaving mid-load.
 	scheme := ""
-	if u, err := url.Parse(uri); err == nil {
-		scheme = strings.ToLower(u.Scheme)
+	if u, err := mysqluri.ParseURL(uri); err == nil {
+		scheme = u.Scheme
 	}
-	isVitess := scheme == "vitess" || scheme == "planetscale"
+	isVitess := scheme == "vitess" || scheme == "ps_mysql"
 	if isVitess {
 		config.Debug("[MYSQL] Vitess/PlanetScale destination (scheme=%s)", scheme)
 		if sharded, err := isShardedKeyspace(ctx, db, database); err != nil {
@@ -74,7 +75,7 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		}
 	} else if detectVitess(ctx, db) {
 		_ = db.Close()
-		return fmt.Errorf("server for keyspace %q identifies as Vitess/PlanetScale; use the vitess:// or planetscale:// scheme instead", database)
+		return fmt.Errorf("server for keyspace %q identifies as Vitess/PlanetScale; use the vitess:// or ps_mysql:// scheme instead", database)
 	}
 
 	d.db = db
@@ -127,54 +128,11 @@ func isShardedKeyspace(ctx context.Context, db *sql.DB, keyspace string) (bool, 
 	return count > 1, nil
 }
 
+// uriToDSN converts a MySQL-family URI to the DSN format expected by
+// go-sql-driver/mysql, returning the DSN and the database name. The conversion
+// lives in pkg/mysqluri, shared with the MySQL source.
 func uriToDSN(uri string) (string, string, error) {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return "", "", err
-	}
-
-	scheme := strings.ToLower(u.Scheme)
-	if !strings.HasPrefix(scheme, "mysql") && scheme != "mariadb" && scheme != "vitess" && scheme != "planetscale" {
-		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
-	}
-
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		port = "3306"
-	}
-
-	var user, password string
-	if u.User != nil {
-		user = u.User.Username()
-		password, _ = u.User.Password()
-	}
-
-	database := strings.TrimPrefix(u.Path, "/")
-
-	dsn := ""
-	if user != "" {
-		dsn = user
-		if password != "" {
-			dsn += ":" + password
-		}
-		dsn += "@"
-	}
-	dsn += fmt.Sprintf("tcp(%s:%s)/%s", host, port, database)
-
-	query := u.Query()
-	query.Set("parseTime", "true")
-	query.Set("allowNativePasswords", "true")
-	// PlanetScale requires TLS on MySQL-wire connections and rejects plaintext with
-	// "client must use SSL/TLS". Enable it automatically for the planetscale scheme
-	// and *.psdb.cloud hosts unless the caller already set a tls value, so
-	// tls=skip-verify or a custom config still wins.
-	if !query.Has("tls") && (scheme == "planetscale" || strings.HasSuffix(strings.ToLower(host), ".psdb.cloud")) {
-		query.Set("tls", "true")
-	}
-	dsn += "?" + query.Encode()
-
-	return dsn, database, nil
+	return mysqluri.ToDSN(uri)
 }
 
 func (d *MySQLDestination) Close(ctx context.Context) error {
@@ -797,7 +755,7 @@ func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (stri
 	query := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s", quoteTable(table))
 	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)
 	if err != nil {
-		if strings.Contains(err.Error(), "doesn't exist") {
+		if isMySQLMissingTableError(err) {
 			return "", nil
 		}
 		return "", err
@@ -808,20 +766,35 @@ func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (stri
 	return maxLSN.String, nil
 }
 
+// isMySQLMissingTableError reports whether err means the queried table does not
+// exist. Plain MySQL raises errno 1146 ("... doesn't exist"); vtgate raises
+// errno 1146 or 1051 with "table ... does not exist" (VT05004/VT05005).
+func isMySQLMissingTableError(err error) bool {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1146 || myErr.Number == 1051
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist")
+}
+
 func (d *MySQLDestination) GetScheme() string { return "mysql" }
 
 func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	tableName := extractTableName(table)
+	database, tableName := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
 
 	query := `
 		SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE,
 		       NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH,
 		       COLUMN_TYPE
 		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		WHERE TABLE_SCHEMA = ` + mysqlSchemaFilterExpr(database) + ` AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION`
 
-	rows, err := d.db.QueryContext(ctx, query, tableName)
+	rows, err := d.db.QueryContext(ctx, query, mysqlSchemaFilterArgs(database, tableName)...)
 	if err != nil {
 		config.LogFailedQuery(query, err)
 		return nil, fmt.Errorf("failed to query table schema: %w", err)
@@ -866,9 +839,27 @@ func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 
 	return &schema.TableSchema{
 		Name:    tableName,
-		Schema:  d.database,
+		Schema:  database,
 		Columns: columns,
 	}, nil
+}
+
+// mysqlSchemaFilterExpr and mysqlSchemaFilterArgs build the TABLE_SCHEMA filter
+// for information_schema lookups. Destination tables can be qualified with a
+// database other than the connection default (e.g. multi-table CDC with
+// dest_schema), so the qualifier must win over DATABASE().
+func mysqlSchemaFilterExpr(database string) string {
+	if database == "" {
+		return "DATABASE()"
+	}
+	return "?"
+}
+
+func mysqlSchemaFilterArgs(database, tableName string) []interface{} {
+	if database == "" {
+		return []interface{}{tableName}
+	}
+	return []interface{}{database, tableName}
 }
 
 // isMySQLTextFamily reports whether dataType is a TEXT-family column.

@@ -17,7 +17,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	psdbconnect "github.com/bruin-data/ingestr/pkg/source/mysql/internal/psdbconnect"
 	"google.golang.org/protobuf/proto"
-	vreplication "vitess.io/vitess/go/mysql/replication"
 	"vitess.io/vitess/go/sqltypes"
 	querypb "vitess.io/vitess/go/vt/proto/query"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
@@ -46,7 +45,7 @@ func NewPlanetScaleCDCSource() *PlanetScaleCDCSource {
 }
 
 func (s *PlanetScaleCDCSource) Schemes() []string {
-	return []string{"planetscale+cdc"}
+	return []string{"ps_mysql+cdc"}
 }
 
 func (s *PlanetScaleCDCSource) Connect(ctx context.Context, uri string) error {
@@ -273,6 +272,27 @@ func (t *PlanetScaleCDCTable) Read(ctx context.Context, opts source.ReadOptions)
 	return results, nil
 }
 
+const (
+	// psdbRecvStallTimeout bounds how long a Sync stream may go without any
+	// response before the run fails with a diagnosable error instead of hanging.
+	// PlanetScale's vttablet heartbeat writes advance every shard's GTID about
+	// once a second, so a healthy stream always produces cursor updates well
+	// within this window even when the captured table itself is idle.
+	psdbRecvStallTimeout = 2 * time.Minute
+	// psdbPeekTimeout bounds the short-lived "current position" Sync used to
+	// establish the batch-capture stop boundary.
+	psdbPeekTimeout = 30 * time.Second
+)
+
+// psdbResumeHint suggests --full-refresh on stream errors for resumed cursors,
+// which is how a purged/expired GTID position typically surfaces.
+func psdbResumeHint(start *psdbconnect.TableCursor) string {
+	if start.GetPosition() == "" && start.GetLastKnownPk() == nil {
+		return ""
+	}
+	return "; if the stored resume position is no longer available on the server, run with --full-refresh to rebuild the destination safely"
+}
+
 type psdbCDCTarget struct {
 	bareName   string              // table name as passed to the psdbconnect Sync RPC
 	resultName string              // RecordBatchResult.TableName tag ("" for single-table)
@@ -414,7 +434,7 @@ func (s *PlanetScaleCDCSource) streamTable(ctx context.Context, client *psdbconn
 		// A resumed shard with no pending snapshot that has already reached the
 		// current position has nothing to stream; skip it (and avoid blocking on
 		// an idle stream that would never return).
-		if start.GetLastKnownPk() == nil && start.GetPosition() != "" && psdbAtLeast(start.GetPosition(), stopPos) {
+		if start.GetLastKnownPk() == nil && start.GetPosition() != "" && gtidAtLeast(start.GetPosition(), stopPos) {
 			config.Debug("[SOURCE] PlanetScale CDC: %s shard=%q already caught up; skipping", t.bareName, shard)
 			continue
 		}
@@ -427,7 +447,10 @@ func (s *PlanetScaleCDCSource) streamTable(ctx context.Context, client *psdbconn
 }
 
 func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconnect.Client, t psdbCDCTarget, shard string, start *psdbconnect.TableCursor, stopPos string, sourceCols []schema.Column, pkPositions []int, ordinal *uint64, state *psdbCursorState, batchSize int, buffers map[string]*mysqlCDCChangeBuffer, results chan<- source.RecordBatchResult) error {
-	stream, err := client.Sync(ctx, &psdbconnect.SyncRequest{
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := client.Sync(sctx, &psdbconnect.SyncRequest{
 		TableName:      t.bareName,
 		Cursor:         start,
 		TabletType:     psdbconnect.TabletType_primary,
@@ -436,8 +459,35 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 		IncludeDeletes: true,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to start psdbconnect Sync for %s/%s: %w", t.bareName, shard, err)
+		return fmt.Errorf("failed to start psdbconnect Sync for %s/%s: %w%s", t.bareName, shard, err, psdbResumeHint(start))
 	}
+
+	// Recv runs in its own goroutine so the loop can bound how long it waits: the
+	// server never half-closes an idle stream, so a shard whose GTID stops
+	// advancing (e.g. no heartbeat writes on a non-PlanetScale psdbconnect
+	// endpoint) would otherwise block Recv forever. Canceling sctx unblocks and
+	// ends the reader goroutine.
+	type recvResult struct {
+		resp *psdbconnect.SyncResponse
+		err  error
+	}
+	recvCh := make(chan recvResult)
+	go func() {
+		for {
+			resp, err := stream.Recv()
+			select {
+			case recvCh <- recvResult{resp: resp, err: err}:
+			case <-sctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	stall := time.NewTimer(psdbRecvStallTimeout)
+	defer stall.Stop()
 
 	cursor := start
 	// A fresh stream (empty position) or a resumed pending snapshot must run the
@@ -448,23 +498,32 @@ func (s *PlanetScaleCDCSource) streamShard(ctx context.Context, client *psdbconn
 	pendingCopyStart := -1
 	var copyCheckpoint *mysqlCDCChange
 	for {
+		var resp *psdbconnect.SyncResponse
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-		}
-
-		resp, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				config.Debug("[SOURCE] PlanetScale CDC: %s/%s stream EOF", t.bareName, shard)
-				return nil
+		case <-stall.C:
+			return fmt.Errorf("psdbconnect Sync for %s/%s made no progress for %v (position %q, stop %q, copy done: %v); the shard may be idle without heartbeat writes to advance its GTID — retry, or run with --full-refresh to rebuild the destination safely", t.bareName, shard, psdbRecvStallTimeout, cursor.GetPosition(), stopPos, copyDone)
+		case rr := <-recvCh:
+			if rr.err != nil {
+				if errors.Is(rr.err, io.EOF) {
+					config.Debug("[SOURCE] PlanetScale CDC: %s/%s stream EOF", t.bareName, shard)
+					return nil
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("psdbconnect Sync receive failed for %s/%s: %w%s", t.bareName, shard, rr.err, psdbResumeHint(start))
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("psdbconnect Sync receive failed for %s/%s: %w", t.bareName, shard, err)
+			resp = rr.resp
 		}
+		if !stall.Stop() {
+			select {
+			case <-stall.C:
+			default:
+			}
+		}
+		stall.Reset(psdbRecvStallTimeout)
 		if rpcErr := resp.GetError(); rpcErr != nil && rpcErr.GetCode() != vtrpcpb.Code_OK {
 			return fmt.Errorf("psdbconnect Sync error for %s/%s: %s", t.bareName, shard, rpcErr.GetMessage())
 		}
@@ -579,7 +638,7 @@ func psdbCopyFinished(sawLastPk bool, pos, anchor string, hasLastPk bool) bool {
 // every later shard). Callers emit the current response's changes before
 // checking this, so stopping here loses nothing.
 func psdbReachedStop(copyDone, hasLastPk bool, pos, stopPos string) bool {
-	return copyDone && !hasLastPk && psdbAtLeast(pos, stopPos)
+	return copyDone && !hasLastPk && gtidAtLeast(pos, stopPos)
 }
 
 func psdbRewriteBufferedLSNs(buffers map[string]*mysqlCDCChangeBuffer, key string, start int, ordinal uint64, payload string) bool {
@@ -599,7 +658,7 @@ func psdbRewriteBufferedLSNs(buffers map[string]*mysqlCDCChangeBuffer, key strin
 // peekPosition opens a short-lived Sync at the special "current" position to read
 // the shard's latest VGTID, used as the stop boundary for batch capture.
 func (s *PlanetScaleCDCSource) peekPosition(ctx context.Context, client *psdbconnect.Client, table, shard string) (string, error) {
-	pctx, cancel := context.WithCancel(ctx)
+	pctx, cancel := context.WithTimeout(ctx, psdbPeekTimeout)
 	defer cancel()
 
 	stream, err := client.Sync(pctx, &psdbconnect.SyncRequest{
@@ -729,26 +788,6 @@ func psdbPKChanged(before, after []interface{}, pkPositions []int) bool {
 		}
 	}
 	return false
-}
-
-// psdbAtLeast reports whether position pos is at or beyond stop, comparing as
-// Vitess GTID sets and falling back to string equality when unparseable.
-func psdbAtLeast(pos, stop string) bool {
-	if pos == "" || stop == "" {
-		return false
-	}
-	if pos == stop {
-		return true
-	}
-	posSet, err := vreplication.DecodePosition(pos)
-	if err != nil {
-		return false
-	}
-	stopSet, err := vreplication.DecodePosition(stop)
-	if err != nil {
-		return false
-	}
-	return posSet.AtLeast(stopSet)
 }
 
 var (

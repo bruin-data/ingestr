@@ -1,9 +1,11 @@
 package mysql
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,43 +20,57 @@ func TestUriToDSN(t *testing.T) {
 		{
 			name:         "basic mysql uri",
 			uri:          "mysql://user:pass@localhost:3306/testdb",
-			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?allowNativePasswords=true&parseTime=true",
+			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?parseTime=true",
 			wantDatabase: "testdb",
 			wantErr:      false,
 		},
 		{
 			name:         "mysql uri with default port",
 			uri:          "mysql://user:pass@localhost/testdb",
-			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?allowNativePasswords=true&parseTime=true",
+			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?parseTime=true",
 			wantDatabase: "testdb",
 			wantErr:      false,
 		},
 		{
 			name:         "mysql uri without password",
 			uri:          "mysql://user@localhost:3306/testdb",
-			wantDSN:      "user@tcp(localhost:3306)/testdb?allowNativePasswords=true&parseTime=true",
+			wantDSN:      "user@tcp(localhost:3306)/testdb?parseTime=true",
 			wantDatabase: "testdb",
 			wantErr:      false,
 		},
 		{
 			name:         "mariadb scheme",
 			uri:          "mariadb://user:pass@localhost:3306/testdb",
-			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?allowNativePasswords=true&parseTime=true",
+			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?parseTime=true",
 			wantDatabase: "testdb",
 			wantErr:      false,
 		},
 		{
 			name:         "mysql+pymysql scheme",
 			uri:          "mysql+pymysql://user:pass@localhost:3306/testdb",
-			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?allowNativePasswords=true&parseTime=true",
+			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?parseTime=true",
 			wantDatabase: "testdb",
 			wantErr:      false,
 		},
 		{
 			name:         "uri with query parameters",
 			uri:          "mysql://user:pass@localhost:3306/testdb?charset=utf8mb4",
-			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?allowNativePasswords=true&charset=utf8mb4&parseTime=true",
+			wantDSN:      "user:pass@tcp(localhost:3306)/testdb?charset=utf8mb4&parseTime=true",
 			wantDatabase: "testdb",
+			wantErr:      false,
+		},
+		{
+			name:         "ps_mysql scheme enables tls",
+			uri:          "ps_mysql://user:pass@aws.connect.psdb.cloud/mydb",
+			wantDSN:      "user:pass@tcp(aws.connect.psdb.cloud:3306)/mydb?parseTime=true&tls=true",
+			wantDatabase: "mydb",
+			wantErr:      false,
+		},
+		{
+			name:         "ps_mysql tls override wins",
+			uri:          "ps_mysql://user:pass@localhost:3306/mydb?tls=skip-verify",
+			wantDSN:      "user:pass@tcp(localhost:3306)/mydb?parseTime=true&tls=skip-verify",
+			wantDatabase: "mydb",
 			wantErr:      false,
 		},
 		{
@@ -275,6 +291,41 @@ func TestBuildUpdateSet(t *testing.T) {
 	}
 }
 
+// isMySQLMissingTableError must recognize both plain MySQL ("doesn't exist",
+// errno 1146) and vtgate (VT05004/VT05005 "does not exist", errno 1146/1051)
+// forms, so a first CDC run against a Vitess/PlanetScale destination is treated
+// as "no cursor yet" rather than an error.
+func TestIsMySQLMissingTableError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"mysql errno 1146", &mysqldriver.MySQLError{Number: 1146, Message: "Table 'db.t' doesn't exist"}, true},
+		{"vtgate errno 1051", &mysqldriver.MySQLError{Number: 1051, Message: "VT05004: table 't' does not exist"}, true},
+		{"vtgate text without errno", errors.New("target: db.0.primary: vttablet: table 't' does not exist in keyspace 'db'"), true},
+		{"plain mysql text without errno", errors.New("Error 1146: Table 'db.t' doesn't exist"), true},
+		{"other mysql error", &mysqldriver.MySQLError{Number: 1045, Message: "Access denied"}, false},
+		{"unrelated error", errors.New("connection refused"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isMySQLMissingTableError(tt.err))
+		})
+	}
+}
+
+// The information_schema filter must honor the table's database qualifier:
+// destination tables can live outside the connection's default database (e.g.
+// multi-table CDC with dest_schema).
+func TestMySQLSchemaFilter(t *testing.T) {
+	assert.Equal(t, "?", mysqlSchemaFilterExpr("otherdb"))
+	assert.Equal(t, []interface{}{"otherdb", "users"}, mysqlSchemaFilterArgs("otherdb", "users"))
+
+	assert.Equal(t, "DATABASE()", mysqlSchemaFilterExpr(""))
+	assert.Equal(t, []interface{}{"users"}, mysqlSchemaFilterArgs("", "users"))
+}
+
 func TestExtractTableName(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -381,7 +432,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 func TestMySQLDestination_Schemes(t *testing.T) {
 	dest := NewMySQLDestination()
 	schemes := dest.Schemes()
-	expected := []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "planetscale"}
+	expected := []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "ps_mysql"}
 	assert.Equal(t, expected, schemes)
 }
 

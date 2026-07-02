@@ -12,7 +12,7 @@ func init() {
 		func() interface{} { return NewMySQLSource() },
 	)
 	registry.RegisterSource(
-		[]string{"vitess", "planetscale"},
+		[]string{"vitess", "ps_mysql"},
 		func() interface{} { return NewVitessSource() },
 	)
 	registry.RegisterSource(
@@ -24,7 +24,7 @@ func init() {
 		func() interface{} { return NewVitessCDCSource() },
 	)
 	registry.RegisterSource(
-		[]string{"planetscale+cdc"},
+		[]string{"ps_mysql+cdc"},
 		func() interface{} { return NewPlanetScaleCDCSource() },
 	)
 }

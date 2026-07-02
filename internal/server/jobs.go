@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bruin-data/ingestr/pkg/mysqluri"
 	"github.com/google/uuid"
 )
 
@@ -686,7 +687,9 @@ func (jm *JobManager) GetRun(ctx context.Context, id string) (*RunRecord, error)
 }
 
 func maskURI(uri string) string {
-	parsed, err := url.Parse(uri)
+	// mysqluri.ParseURL tolerates scheme characters url.Parse rejects (e.g. the
+	// underscore in ps_mysql) so those URIs are masked instead of fully redacted.
+	parsed, err := mysqluri.ParseURL(uri)
 	if err != nil {
 		return "<redacted-uri>"
 	}
