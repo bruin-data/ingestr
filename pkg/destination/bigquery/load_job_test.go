@@ -338,6 +338,40 @@ func TestWriteLoadJobChunksReturnsFailedChunkOnCloseError(t *testing.T) {
 	}
 }
 
+func TestWriteLoadJobChunksReturnsActiveChunkOnSourceError(t *testing.T) {
+	dest := &BigQueryDestination{}
+	sourceErr := errors.New("source failed")
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: makeTestRecordBatch(t, 1)}
+	records <- source.RecordBatchResult{Err: sourceErr}
+	close(records)
+
+	writer := &trackingWriteCloser{}
+	chunks, rowsWritten, err := dest.writeLoadJobChunks(context.Background(), records, loadJobFormatJSONL, 0, nil, func(part int) (stagedLoadChunk, io.WriteCloser, error) {
+		return stagedLoadChunk{
+			index:     part,
+			gcsBucket: "bucket",
+			gcsObject: "prefix/part-000001.jsonl",
+			gcsURI:    "gs://bucket/prefix/part-000001.jsonl",
+		}, writer, nil
+	})
+	if !errors.Is(err, sourceErr) {
+		t.Fatalf("error = %v, want %v", err, sourceErr)
+	}
+	if rowsWritten != 1 {
+		t.Fatalf("rowsWritten = %d, want 1", rowsWritten)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("len(chunks) = %d, want 1", len(chunks))
+	}
+	if chunks[0].gcsURI != "gs://bucket/prefix/part-000001.jsonl" {
+		t.Fatalf("chunk gcsURI = %q", chunks[0].gcsURI)
+	}
+	if writer.closeCount != 1 {
+		t.Fatalf("writer closeCount = %d, want 1", writer.closeCount)
+	}
+}
+
 func TestWriteLoadJobChunksSplitsParquetByLoaderFileSize(t *testing.T) {
 	dest := &BigQueryDestination{}
 	records := make(chan source.RecordBatchResult, 1)
