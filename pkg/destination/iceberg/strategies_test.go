@@ -516,6 +516,37 @@ func scd2Row(id int64, status string, score float64, validFrom int64) []any {
 	return []any{id, status, score, validFrom, nil, true}
 }
 
+func scd2IncrementalTestSchema() *schema.TableSchema {
+	return &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "status", DataType: schema.TypeString, Nullable: true},
+			{Name: "score", DataType: schema.TypeFloat64, Nullable: true},
+			{Name: "updated_at", DataType: schema.TypeTimestampTZ, Nullable: false},
+			{Name: destination.SCD2ValidFromColumn, DataType: schema.TypeTimestampTZ, Nullable: false},
+			{Name: destination.SCD2ValidToColumn, DataType: schema.TypeTimestampTZ, Nullable: true},
+			{Name: destination.SCD2IsCurrentColumn, DataType: schema.TypeBoolean, Nullable: false},
+		},
+	}
+}
+
+func scd2IncrementalRow(id int64, status string, score float64, updatedAt, validFrom int64) []any {
+	return []any{id, status, score, updatedAt, validFrom, nil, true}
+}
+
+func currentSCD2Row(t *testing.T, rows *scannedTable, id int64) []any {
+	t.Helper()
+	var current []any
+	for _, row := range rowsByKey(t, rows, "id")[id] {
+		if rows.Value(row, destination.SCD2IsCurrentColumn) == true {
+			require.Nil(t, current, "expected one current row for id=%d", id)
+			current = row
+		}
+	}
+	require.NotNil(t, current, "expected current row for id=%d", id)
+	return current
+}
+
 func runSCD2(t *testing.T, dest *Destination, target, staging string, ts time.Time, incrementalKey string) {
 	t.Helper()
 	require.NoError(t, dest.SCD2Table(context.Background(), destination.SCD2Options{
@@ -618,6 +649,52 @@ func TestSCD2TableIncrementalKeySkipsSoftDelete(t *testing.T) {
 	require.Len(t, byID[int64(2)], 1)
 	require.Equal(t, true, got.Value(byID[int64(2)][0], destination.SCD2IsCurrentColumn), "incremental SCD2 must not soft-delete missing keys")
 	require.Nil(t, got.Value(byID[int64(2)][0], destination.SCD2ValidToColumn))
+}
+
+func TestSCD2TableCopyOnWriteDedupesByIncrementalKey(t *testing.T) {
+	dest := NewDestination()
+	uri := "iceberg+hadoop://?warehouse=" + url.QueryEscape(t.TempDir()) + "&table.write.merge.mode=copy-on-write"
+	require.NoError(t, dest.Connect(context.Background(), uri))
+	t.Cleanup(func() { require.NoError(t, dest.Close(context.Background())) })
+
+	target := "lake.scd2.inc_cow_target"
+	staging := "lake.scd2.inc_cow_staging"
+	schema := scd2IncrementalTestSchema()
+	t1 := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC)
+
+	writeTableRows(t, dest, target, schema, false, nil)
+	writeTableRows(t, dest, staging, schema, true, [][]any{
+		scd2IncrementalRow(1, "active", 1.0, micros(t1), micros(t1)),
+	})
+	require.NoError(t, dest.SCD2Table(context.Background(), destination.SCD2Options{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "status", "score", "updated_at"},
+		IncrementalKey: "updated_at",
+		Timestamp:      t1,
+	}))
+
+	writeTableRows(t, dest, staging, schema, true, [][]any{
+		scd2IncrementalRow(1, "newer", 3.0, micros(t3), micros(t3)),
+		scd2IncrementalRow(1, "older", 2.0, micros(t2), micros(t2)),
+	})
+	require.NoError(t, dest.SCD2Table(context.Background(), destination.SCD2Options{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "status", "score", "updated_at"},
+		IncrementalKey: "updated_at",
+		Timestamp:      t3,
+	}))
+
+	got := readTableRows(t, dest, target)
+	current := currentSCD2Row(t, got, 1)
+	require.Equal(t, "newer", got.Value(current, "status"))
+	require.Equal(t, micros(t3), got.Value(current, "updated_at"))
+	requireNoEqualityDeletes(t, dest, target)
 }
 
 func TestTruncateTable(t *testing.T) {

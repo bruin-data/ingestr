@@ -372,12 +372,13 @@ func (e scd2Emitters) emitDelete(keyVals []any) error {
 }
 
 type scd2Join struct {
-	opts         destination.SCD2Options
-	keyIdxTarget []int
-	validFromIdx int
-	validToIdx   int
-	isCurrentIdx int
-	changePairs  [][2]int // staging column index, target column index
+	opts           destination.SCD2Options
+	keyIdxTarget   []int
+	validFromIdx   int
+	validToIdx     int
+	isCurrentIdx   int
+	incrementalIdx int
+	changePairs    [][2]int // staging column index, target column index
 }
 
 func newSCD2Join(opts destination.SCD2Options, stagingCols, targetCols []string) (*scd2Join, error) {
@@ -390,11 +391,16 @@ func newSCD2Join(opts destination.SCD2Options, stagingCols, targetCols []string)
 		targetIdx[col] = i
 	}
 
-	j := &scd2Join{opts: opts, validFromIdx: -1, validToIdx: -1, isCurrentIdx: -1}
+	j := &scd2Join{opts: opts, validFromIdx: -1, validToIdx: -1, isCurrentIdx: -1, incrementalIdx: -1}
 	if idx, ok := stagingIdx[destination.SCD2ValidFromColumn]; ok {
 		j.validFromIdx = idx
 	} else {
 		return nil, fmt.Errorf("iceberg: column %q not found in staging table", destination.SCD2ValidFromColumn)
+	}
+	if opts.IncrementalKey != "" {
+		if idx, ok := stagingIdx[opts.IncrementalKey]; ok {
+			j.incrementalIdx = idx
+		}
 	}
 	if idx, ok := targetIdx[destination.SCD2ValidToColumn]; ok {
 		j.validToIdx = idx
@@ -452,7 +458,7 @@ func (j *scd2Join) run(stagingSorter, currentSorter *spillSorter, emitters scd2E
 		switch {
 		case stagingOK && (!currentOK || stagingIt.Key() < currentIt.Key()):
 			// Net-new key: insert the staged version as current.
-			if err := emitters.emitNew(lastGroupRow(stagingIt)); err != nil {
+			if err := emitters.emitNew(selectGroupWinner(stagingIt, j.incrementalIdx)); err != nil {
 				return err
 			}
 			stagingOK = stagingIt.NextGroup()
@@ -500,7 +506,7 @@ func (j *scd2Join) softDelete(currentIt *spillIter, emitters scd2Emitters) error
 }
 
 func (j *scd2Join) matchKey(stagingIt, currentIt *spillIter, emitters scd2Emitters) error {
-	stagingRow := lastGroupRow(stagingIt)
+	stagingRow := selectGroupWinner(stagingIt, j.incrementalIdx)
 	currentRows := collectGroupRows(currentIt)
 	if len(currentRows) == 0 {
 		return emitters.emitNew(stagingRow)
@@ -543,14 +549,6 @@ func (j *scd2Join) closeRow(row []any, validTo any) []any {
 	closed[j.validToIdx] = validTo
 	closed[j.isCurrentIdx] = false
 	return closed
-}
-
-func lastGroupRow(it *spillIter) []any {
-	var last []any
-	for it.NextRow() {
-		last = it.Row()
-	}
-	return last
 }
 
 func collectGroupRows(it *spillIter) [][]any {

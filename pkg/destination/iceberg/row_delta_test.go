@@ -240,6 +240,48 @@ func TestSCD2TableUsesRowDeltaByDefault(t *testing.T) {
 	requireEqualityDeletes(t, dest, target)
 }
 
+func TestSCD2TableRowDeltaDedupesByIncrementalKey(t *testing.T) {
+	dest := newHadoopDestination(t)
+	target := "lake.mor.scd2_inc_target"
+	staging := "lake.mor.scd2_inc_staging"
+	schema := scd2IncrementalTestSchema()
+	t1 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+
+	writeTableRows(t, dest, target, schema, false, nil)
+	writeTableRows(t, dest, staging, schema, true, [][]any{
+		scd2IncrementalRow(1, "active", 1.0, micros(t1), micros(t1)),
+	})
+	require.NoError(t, dest.SCD2Table(context.Background(), destination.SCD2Options{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "status", "score", "updated_at"},
+		IncrementalKey: "updated_at",
+		Timestamp:      t1,
+	}))
+
+	writeTableRows(t, dest, staging, schema, true, [][]any{
+		scd2IncrementalRow(1, "newer", 3.0, micros(t3), micros(t3)),
+		scd2IncrementalRow(1, "older", 2.0, micros(t2), micros(t2)),
+	})
+	require.NoError(t, dest.SCD2Table(context.Background(), destination.SCD2Options{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "status", "score", "updated_at"},
+		IncrementalKey: "updated_at",
+		Timestamp:      t3,
+	}))
+
+	got := readTableRows(t, dest, target)
+	current := currentSCD2Row(t, got, 1)
+	require.Equal(t, "newer", got.Value(current, "status"))
+	require.Equal(t, micros(t3), got.Value(current, "updated_at"))
+	requireEqualityDeletes(t, dest, target)
+}
+
 func TestDeleteInsertSpilledRuns(t *testing.T) {
 	withSpillRunRows(t, 4)
 
