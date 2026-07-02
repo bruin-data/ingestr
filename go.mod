@@ -92,7 +92,7 @@ require (
 	go.mongodb.org/mongo-driver v1.17.7
 	golang.org/x/crypto v0.52.0
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
-	golang.org/x/net v0.54.0
+	golang.org/x/net v0.55.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.43.0
 	golang.org/x/text v0.37.0
