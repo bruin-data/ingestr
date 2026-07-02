@@ -144,6 +144,12 @@ func IngestCommand() *cli.Command {
 				Usage:   "The width for each extract partition window: duration (1h, 7d), integer step (10000), or auto. Defaults to auto when extract-partition-by is set",
 				Sources: cli.EnvVars("EXTRACT_PARTITION_INTERVAL", "INGESTR_EXTRACT_PARTITION_INTERVAL"),
 			},
+			&cli.BoolFlag{
+				Name:    "disable-prestaging",
+				Usage:   "Disable extract-time load-file staging for schema-inferred sources",
+				Hidden:  true,
+				Sources: cli.EnvVars("INGESTR_DISABLE_PRESTAGING"),
+			},
 			&cli.IntFlag{
 				Name:    "sql-limit",
 				Usage:   "The limit to use when fetching data from the source",
@@ -267,6 +273,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")
+	cfg.DisablePreStaging = c.Bool("disable-prestaging")
 	cfg.SQLLimit = int(c.Int("sql-limit"))
 	cfg.SQLExcludeColumns = c.StringSlice("sql-exclude-columns")
 	cfg.Columns = c.String("columns")

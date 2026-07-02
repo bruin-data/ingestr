@@ -180,6 +180,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		PreStaged:        job.PreStaged,
 	}); err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}

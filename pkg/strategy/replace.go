@@ -287,6 +287,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		PreStaged:        job.PreStaged,
 	}
 	if useStaging {
 		if atomicWriter, ok := job.Destination.(destination.AtomicCommitWriter); ok && atomicWriter.SupportsAtomicCommitWrites() {
@@ -295,7 +296,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 
 	var countedRows atomic.Int64
-	if !writeOpts.AtomicCommit {
+	if !writeOpts.AtomicCommit && writeOpts.PreStaged == nil {
 		records = wrapWithRowCount(records, &countedRows)
 	}
 
@@ -313,6 +314,9 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		if !writeOpts.AtomicCommit {
 			if verifier, ok := job.Destination.(destination.ExactRowCountWaiter); ok {
 				expectedRows := countedRows.Load()
+				if writeOpts.PreStaged != nil {
+					expectedRows = writeOpts.PreStaged.RowCount()
+				}
 				if expectedRows > 0 {
 					if err := verifier.WaitForExactRowCount(ctx, writeTable, expectedRows); err != nil {
 						if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
