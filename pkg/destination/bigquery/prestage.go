@@ -173,6 +173,8 @@ func (d *BigQueryDestination) writePreStaged(
 	ps *preStagedLoadSet,
 	opts destination.WriteOptions,
 ) error {
+	defer ps.Close()
+
 	for result := range records {
 		if result.Batch != nil {
 			result.Batch.Release()
@@ -196,7 +198,6 @@ func (d *BigQueryDestination) writePreStaged(
 		return fmt.Errorf("pre-staged load mismatch: BigQuery loaded %d rows but %d rows were staged", outputRows, ps.rows)
 	}
 
-	ps.Close()
 	config.Debug("[DEST] Pre-staged load completed for %s.%s", dataset, table)
 	return nil
 }
