@@ -398,9 +398,11 @@ func newSCD2Join(opts destination.SCD2Options, stagingCols, targetCols []string)
 		return nil, fmt.Errorf("iceberg: column %q not found in staging table", destination.SCD2ValidFromColumn)
 	}
 	if opts.IncrementalKey != "" {
-		if idx, ok := stagingIdx[opts.IncrementalKey]; ok {
-			j.incrementalIdx = idx
+		idx, err := incrementalKeyIndex(stagingCols, opts.IncrementalKey, opts.StagingTable)
+		if err != nil {
+			return nil, err
 		}
+		j.incrementalIdx = idx
 	}
 	if idx, ok := targetIdx[destination.SCD2ValidToColumn]; ok {
 		j.validToIdx = idx

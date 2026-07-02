@@ -316,7 +316,7 @@ func (d *Destination) scd2CopyOnWrite(ctx context.Context, target, staging *iceb
 		return fmt.Errorf("iceberg: target table %s: %w", opts.TargetTable, err)
 	}
 
-	deduped, err := dedupeStagingRows(stagingRows, opts.PrimaryKeys, opts.IncrementalKey, opts.StagingTable, false)
+	deduped, err := dedupeStagingRows(stagingRows, opts.PrimaryKeys, opts.IncrementalKey, opts.StagingTable, true)
 	if err != nil {
 		return err
 	}

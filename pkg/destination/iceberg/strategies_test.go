@@ -627,19 +627,20 @@ func TestSCD2TableIncrementalKeySkipsSoftDelete(t *testing.T) {
 	dest := newHadoopDestination(t)
 	target := "lake.scd2.inc_target"
 	staging := "lake.scd2.inc_staging"
+	schema := scd2IncrementalTestSchema()
 	t1 := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	t2 := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
 
-	writeTableRows(t, dest, target, scd2TestSchema(), false, nil)
-	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{
-		scd2Row(1, "active", 1.0, micros(t1)),
-		scd2Row(2, "active", 2.0, micros(t1)),
+	writeTableRows(t, dest, target, schema, false, nil)
+	writeTableRows(t, dest, staging, schema, true, [][]any{
+		scd2IncrementalRow(1, "active", 1.0, micros(t1), micros(t1)),
+		scd2IncrementalRow(2, "active", 2.0, micros(t1), micros(t1)),
 	})
 	runSCD2(t, dest, target, staging, t1, "updated_at")
 
 	// Incremental update containing only id=1; id=2 must stay current.
-	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{
-		scd2Row(1, "inactive", 1.0, micros(t2)),
+	writeTableRows(t, dest, staging, schema, true, [][]any{
+		scd2IncrementalRow(1, "inactive", 1.0, micros(t2), micros(t2)),
 	})
 	runSCD2(t, dest, target, staging, t2, "updated_at")
 
@@ -695,6 +696,32 @@ func TestSCD2TableCopyOnWriteDedupesByIncrementalKey(t *testing.T) {
 	require.Equal(t, "newer", got.Value(current, "status"))
 	require.Equal(t, micros(t3), got.Value(current, "updated_at"))
 	requireNoEqualityDeletes(t, dest, target)
+}
+
+func TestSCD2TableCopyOnWriteRequiresStagingIncrementalKey(t *testing.T) {
+	dest := NewDestination()
+	uri := "iceberg+hadoop://?warehouse=" + url.QueryEscape(t.TempDir()) + "&table.write.merge.mode=copy-on-write"
+	require.NoError(t, dest.Connect(context.Background(), uri))
+	t.Cleanup(func() { require.NoError(t, dest.Close(context.Background())) })
+
+	target := "lake.scd2.missing_key_cow_target"
+	staging := "lake.scd2.missing_key_cow_staging"
+	t1 := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+
+	writeTableRows(t, dest, target, scd2TestSchema(), false, nil)
+	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{
+		scd2Row(1, "active", 1.0, micros(t1)),
+	})
+
+	err := dest.SCD2Table(context.Background(), destination.SCD2Options{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "status", "score"},
+		IncrementalKey: "updated_at",
+		Timestamp:      t1,
+	})
+	require.ErrorContains(t, err, `iceberg: incremental key column "updated_at" not found in staging table lake.scd2.missing_key_cow_staging`)
 }
 
 func TestTruncateTable(t *testing.T) {

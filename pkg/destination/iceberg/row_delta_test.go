@@ -282,6 +282,28 @@ func TestSCD2TableRowDeltaDedupesByIncrementalKey(t *testing.T) {
 	requireEqualityDeletes(t, dest, target)
 }
 
+func TestSCD2TableRowDeltaRequiresStagingIncrementalKey(t *testing.T) {
+	dest := newHadoopDestination(t)
+	target := "lake.mor.scd2_missing_key_target"
+	staging := "lake.mor.scd2_missing_key_staging"
+	t1 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	writeTableRows(t, dest, target, scd2TestSchema(), false, nil)
+	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{
+		scd2Row(1, "active", 1.0, micros(t1)),
+	})
+
+	err := dest.SCD2Table(context.Background(), destination.SCD2Options{
+		StagingTable:   staging,
+		TargetTable:    target,
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "status", "score"},
+		IncrementalKey: "updated_at",
+		Timestamp:      t1,
+	})
+	require.ErrorContains(t, err, `iceberg: incremental key column "updated_at" not found in staging table lake.mor.scd2_missing_key_staging`)
+}
+
 func TestDeleteInsertSpilledRuns(t *testing.T) {
 	withSpillRunRows(t, 4)
 
