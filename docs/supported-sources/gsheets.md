@@ -2,7 +2,7 @@
 
 [Google Sheets](https://www.google.com/sheets/about/) is a web-based spreadsheet program that is part of Google's free, web-based Google Docs Editors suite.
 
-ingestr supports Google Sheets as a source.
+ingestr supports Google Sheets as both a source and a destination.
 
 ## URI format
 
@@ -20,7 +20,7 @@ gsheets://?credentials_base64=<base64_encoded_credentials>
 
 URI parameters:
 
-- `credentials_path`: **Optional**. The path to the service account JSON file. If omitted, the source uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (the `GOOGLE_APPLICATION_CREDENTIALS` env var, or the `gcloud auth application-default login` token on your machine).
+- `credentials_path`: **Optional**. The path to the service account JSON file. If omitted, ingestr uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (the `GOOGLE_APPLICATION_CREDENTIALS` env var, or the `gcloud auth application-default login` token on your machine).
 - `credentials_base64`: **Optional**. The base64-encoded service account JSON (alternative to `credentials_path`).
 
 The URI is used to connect to the Google Sheets API for extracting data.
@@ -86,3 +86,52 @@ The result of this command will be a table in the `gsheets.duckdb` database.
 
 > [!CAUTION]
 > Google Sheets does not support incremental loading, which means every time you run the command, it will copy the entire spreadsheet from Google Sheets to the destination. This can be slow for large spreadsheets.
+
+## Google Sheets as a destination
+
+ingestr can also write data into a Google Sheets spreadsheet. The URI format is identical to the source, but the credentials must grant **write** access — share the target spreadsheet with the service account's `client_email` as an **Editor** (rather than Viewer).
+
+The `--dest-table` uses the same `spreadsheet_id.sheet_name` format as the source. If the target sheet (tab) does not exist yet, ingestr creates it. The first row is written as a header row using the source column names.
+
+Here's a sample command that copies a Postgres table into a Google Sheets tab:
+
+```sh
+ingestr ingest \
+  --source-uri 'postgres://user:pass@host:5432/db' \
+  --source-table 'public.users' \
+  --dest-uri 'gsheets://?credentials_path=/path/to/file.json' \
+  --dest-table 'fkdUQ2bjdNfUq2CA.users'
+```
+
+You can also omit the credentials and rely on [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials). Because writing requires the read-write scope, log in with it first:
+
+```sh
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform
+```
+
+Then use the bare `gsheets://` URI as the destination:
+
+```sh
+ingestr ingest \
+  --source-uri 'postgres://user:pass@host:5432/db' \
+  --source-table 'public.users' \
+  --dest-uri 'gsheets://' \
+  --dest-table 'fkdUQ2bjdNfUq2CA.users'
+```
+
+Supported strategies:
+
+- `replace` (default): clears the target sheet and rewrites the header and data on every run.
+- `append`: adds rows after the existing data, writing the header only when the sheet is empty.
+
+### Cell values
+
+Values are written with the `RAW` input option:
+
+- **Numbers and booleans** become native number/boolean cells (usable in formulas, charts, and sorting).
+- **Dates, times, and timestamps** are written as text — dates as `YYYY-MM-DD`, timestamps as `YYYY-MM-DD HH:MM:SS`, and times as `HH:MM:SS`. (Google Sheets has no timestamp type in its values API, so text keeps them predictable; you can apply a date format to those columns in the sheet afterward if you want them treated as dates.)
+- **Strings** are preserved verbatim, so values like `=SUM(1,2)` stay literal text (not evaluated as formulas) and `007` keeps its leading zeros.
+
+> [!NOTE]
+> The Google Sheets destination does not support `merge`, `delete+insert`, or `scd2` strategies.
