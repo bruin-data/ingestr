@@ -36,7 +36,6 @@ const (
 const (
 	defaultLayout          = "{load_id}.{file_id}.{ext}"
 	maxDeltaCommitAttempts = 5
-	managedPrefixSegments  = 1
 )
 
 var errDeltaCommitConflict = errors.New("delta commit version already exists")
@@ -408,11 +407,11 @@ func (d *OneLakeDestination) newOneLakeFileClient(path string) (*datalakefile.Cl
 }
 
 func (d *OneLakeDestination) uploadBuffer(ctx context.Context, path string, data []byte) error {
-	return d.client.UploadBufferSkippingPrefix(ctx, d.workspace, path, data, managedPrefixSegments)
+	return d.client.UploadBufferSkippingPrefix(ctx, d.workspace, path, data, adlsutil.OneLakeManagedPrefixSegments)
 }
 
 func (d *OneLakeDestination) ensureDirectories(ctx context.Context, path string) error {
-	return d.client.EnsureDirectoriesSkippingPrefix(ctx, d.workspace, path, managedPrefixSegments)
+	return d.client.EnsureDirectoriesSkippingPrefix(ctx, d.workspace, path, adlsutil.OneLakeManagedPrefixSegments)
 }
 
 func deltaCommitRenameOptions() *datalakefile.RenameOptions {

@@ -23,6 +23,10 @@ const OneLakeDNSSuffix = ".dfs.fabric.microsoft.com"
 // OneLakeAccountName is the fixed storage account used by OneLake.
 const OneLakeAccountName = "onelake"
 
+// OneLakeManagedPrefixSegments is the number of path segments Fabric manages
+// before user-created folders begin, e.g. "<item>.Lakehouse/Tables".
+const OneLakeManagedPrefixSegments = 2
+
 // DataLakeClient is an ADLS Gen2 client that can talk to any DFS endpoint
 // (standard Azure storage or OneLake) by varying the DNS suffix. It bundles the
 // file/directory/filesystem client factories together with the upload, directory
