@@ -1080,6 +1080,43 @@ func TestUnsafeCast(t *testing.T) {
 		assert.Contains(t, col.Value(0), "2024")
 	})
 
+	t.Run("sliced timestamp offset is honored when casting", func(t *testing.T) {
+		sourceType := &arrow.TimestampType{Unit: arrow.Nanosecond}
+		targetType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+		sourceSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "val", Type: sourceType, Nullable: true},
+		}, nil)
+		targetSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "val", Type: targetType, Nullable: true},
+		}, nil)
+
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		builder := array.NewTimestampBuilder(mem, sourceType)
+		for i := 0; i < 9; i++ {
+			builder.Append(arrow.Timestamp(base.Add(time.Duration(i) * time.Hour).UnixNano()))
+		}
+		arr := builder.NewArray()
+		builder.Release()
+
+		record := array.NewRecordBatch(sourceSchema, []arrow.Array{arr}, 9)
+		arr.Release()
+		defer record.Release()
+
+		sliced := record.NewSlice(3, 7)
+		defer sliced.Release()
+		require.Equal(t, 3, sliced.Column(0).Data().Offset())
+
+		casted, err := CastRecordToSchema(sliced, targetSchema, false)
+		require.NoError(t, err)
+		defer casted.Release()
+
+		col := casted.Column(0).(*array.Timestamp)
+		for i := 0; i < int(casted.NumRows()); i++ {
+			want := base.Add(time.Duration(i+3) * time.Hour).UnixMicro()
+			assert.EqualValues(t, want, col.Value(i), "row %d", i)
+		}
+	})
+
 	t.Run("float64 to string", func(t *testing.T) {
 		sourceSchema := arrow.NewSchema([]arrow.Field{
 			{Name: "val", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
