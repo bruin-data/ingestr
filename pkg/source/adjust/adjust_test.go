@@ -2,6 +2,7 @@ package adjust
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -354,6 +355,28 @@ func TestBuildTypeHintColumns(t *testing.T) {
 			metrics:    "bar",
 			wantCols:   nil,
 		},
+		{
+			name:       "default campaign dimensions are typed",
+			dimensions: "app,app_token,store_type,channel,country",
+			metrics:    "",
+			wantCols: []schema.Column{
+				{Name: "app", DataType: schema.TypeString},
+				{Name: "app_token", DataType: schema.TypeString},
+				{Name: "store_type", DataType: schema.TypeString},
+				{Name: "channel", DataType: schema.TypeString},
+				{Name: "country", DataType: schema.TypeString},
+			},
+		},
+		{
+			name:       "revenue cohort metrics are decimal by prefix",
+			dimensions: "",
+			metrics:    "all_revenue_total_d0,ad_revenue_total_d21,revenue_total_d90",
+			wantCols: []schema.Column{
+				{Name: "all_revenue_total_d0", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+				{Name: "ad_revenue_total_d21", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+				{Name: "revenue_total_d90", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -361,6 +384,31 @@ func TestBuildTypeHintColumns(t *testing.T) {
 			cols := buildTypeHintColumns(tt.dimensions, tt.metrics)
 			assert.Equal(t, tt.wantCols, cols)
 		})
+	}
+}
+
+func TestBuildDefaultMetrics(t *testing.T) {
+	metrics := buildDefaultMetrics()
+
+	assert.Equal(t, []string{"installs", "network_cost"}, metrics[:2])
+
+	// Every cohort day must have all three revenue variants (D21 used to be
+	// asymmetric — only all_revenue_total_d21 was present).
+	for _, day := range revenueCohortDays {
+		for _, prefix := range revenueMetricPrefixes {
+			assert.Contains(t, metrics, prefix+strconv.Itoa(day))
+		}
+	}
+
+	assert.Contains(t, metrics, "revenue_total_d120")
+	assert.Contains(t, metrics, "ad_revenue_total_d120")
+	assert.Contains(t, metrics, "all_revenue_total_d120")
+
+	// Every metric must resolve to a type hint so no column falls back to
+	// schema inference.
+	for _, m := range metrics {
+		_, ok := lookupTypeHint(m)
+		assert.Truef(t, ok, "metric %q has no type hint", m)
 	}
 }
 

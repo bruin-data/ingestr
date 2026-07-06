@@ -300,25 +300,24 @@ var defaultDimensions = []string{
 	"campaign", "day", "app", "app_token", "store_type", "channel", "country",
 }
 
-var defaultMetrics = []string{
-	"installs",
-	"network_cost",
-	"all_revenue_total_d0",
-	"ad_revenue_total_d0",
-	"revenue_total_d0",
-	"all_revenue_total_d1",
-	"ad_revenue_total_d1",
-	"revenue_total_d1",
-	"all_revenue_total_d3",
-	"ad_revenue_total_d3",
-	"revenue_total_d3",
-	"all_revenue_total_d7",
-	"ad_revenue_total_d7",
-	"revenue_total_d7",
-	"all_revenue_total_d14",
-	"ad_revenue_total_d14",
-	"revenue_total_d14",
-	"all_revenue_total_d21",
+var revenueCohortDays = []int{0, 1, 3, 7, 14, 21, 30, 60, 90, 120}
+
+var revenueMetricPrefixes = []string{
+	"all_revenue_total_d",
+	"ad_revenue_total_d",
+	"revenue_total_d",
+}
+
+var defaultMetrics = buildDefaultMetrics()
+
+func buildDefaultMetrics() []string {
+	metrics := []string{"installs", "network_cost"}
+	for _, day := range revenueCohortDays {
+		for _, prefix := range revenueMetricPrefixes {
+			metrics = append(metrics, fmt.Sprintf("%s%d", prefix, day))
+		}
+	}
+	return metrics
 }
 
 func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens, attributionTypes string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -363,7 +362,8 @@ func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens, attribution
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, nil, opts.ExcludeColumns)
+	cols := buildTypeHintColumns(strings.Join(defaultDimensions, ","), strings.Join(defaultMetrics, ","))
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, cols, opts.ExcludeColumns)
 	if err != nil {
 		return fmt.Errorf("failed to convert campaigns to Arrow: %w", err)
 	}
@@ -419,7 +419,8 @@ func (s *AdjustSource) readCreatives(ctx context.Context, appTokens, attribution
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, nil, opts.ExcludeColumns)
+	cols := buildTypeHintColumns(strings.Join(creativeDimensions, ","), strings.Join(defaultMetrics, ","))
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, cols, opts.ExcludeColumns)
 	if err != nil {
 		return fmt.Errorf("failed to convert creatives to Arrow: %w", err)
 	}
@@ -499,6 +500,11 @@ var knownTypeHints = map[string]schema.DataType{
 	"quarter":      schema.TypeString,
 	"year":         schema.TypeString,
 	"campaign":     schema.TypeString,
+	"app":          schema.TypeString,
+	"app_token":    schema.TypeString,
+	"store_type":   schema.TypeString,
+	"channel":      schema.TypeString,
+	"country":      schema.TypeString,
 	"adgroup":      schema.TypeString,
 	"creative":     schema.TypeString,
 	"installs":     schema.TypeInt64,
@@ -510,25 +516,40 @@ var knownTypeHints = map[string]schema.DataType{
 	"all_revenue":  schema.TypeDecimal,
 }
 
+func lookupTypeHint(name string) (schema.DataType, bool) {
+	if dt, ok := knownTypeHints[name]; ok {
+		return dt, true
+	}
+	for _, prefix := range revenueMetricPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return schema.TypeDecimal, true
+		}
+	}
+	return schema.TypeUnknown, false
+}
+
+func typeHintColumn(name string) (schema.Column, bool) {
+	dt, ok := lookupTypeHint(name)
+	if !ok {
+		return schema.Column{}, false
+	}
+	col := schema.Column{Name: name, DataType: dt}
+	if dt == schema.TypeDecimal {
+		col.Precision = 38
+		col.Scale = 9
+	}
+	return col, true
+}
+
 func buildTypeHintColumns(dimensions, metrics string) []schema.Column {
 	var cols []schema.Column
 	for _, name := range strings.Split(dimensions, ",") {
-		if dt, ok := knownTypeHints[name]; ok {
-			col := schema.Column{Name: name, DataType: dt}
-			if dt == schema.TypeDecimal {
-				col.Precision = 38
-				col.Scale = 9
-			}
+		if col, ok := typeHintColumn(name); ok {
 			cols = append(cols, col)
 		}
 	}
 	for _, name := range strings.Split(metrics, ",") {
-		if dt, ok := knownTypeHints[name]; ok {
-			col := schema.Column{Name: name, DataType: dt}
-			if dt == schema.TypeDecimal {
-				col.Precision = 38
-				col.Scale = 9
-			}
+		if col, ok := typeHintColumn(name); ok {
 			cols = append(cols, col)
 		}
 	}
