@@ -325,10 +325,10 @@ func TestBuildTypeHintColumns(t *testing.T) {
 			dimensions: "day,campaign",
 			metrics:    "installs,cost",
 			wantCols: []schema.Column{
-				{Name: "day", DataType: schema.TypeDate},
-				{Name: "campaign", DataType: schema.TypeString},
-				{Name: "installs", DataType: schema.TypeInt64},
-				{Name: "cost", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+				{Name: "day", DataType: schema.TypeDate, Nullable: true},
+				{Name: "campaign", DataType: schema.TypeString, Nullable: true},
+				{Name: "installs", DataType: schema.TypeInt64, Nullable: true},
+				{Name: "cost", DataType: schema.TypeDecimal, Precision: 38, Scale: 9, Nullable: true},
 			},
 		},
 		{
@@ -336,8 +336,8 @@ func TestBuildTypeHintColumns(t *testing.T) {
 			dimensions: "hour",
 			metrics:    "clicks",
 			wantCols: []schema.Column{
-				{Name: "hour", DataType: schema.TypeTimestampTZ},
-				{Name: "clicks", DataType: schema.TypeInt64},
+				{Name: "hour", DataType: schema.TypeTimestampTZ, Nullable: true},
+				{Name: "clicks", DataType: schema.TypeInt64, Nullable: true},
 			},
 		},
 		{
@@ -345,8 +345,8 @@ func TestBuildTypeHintColumns(t *testing.T) {
 			dimensions: "day,unknown_dim",
 			metrics:    "installs,unknown_metric",
 			wantCols: []schema.Column{
-				{Name: "day", DataType: schema.TypeDate},
-				{Name: "installs", DataType: schema.TypeInt64},
+				{Name: "day", DataType: schema.TypeDate, Nullable: true},
+				{Name: "installs", DataType: schema.TypeInt64, Nullable: true},
 			},
 		},
 		{
@@ -360,22 +360,28 @@ func TestBuildTypeHintColumns(t *testing.T) {
 			dimensions: "app,app_token,store_type,channel,country",
 			metrics:    "",
 			wantCols: []schema.Column{
-				{Name: "app", DataType: schema.TypeString},
-				{Name: "app_token", DataType: schema.TypeString},
-				{Name: "store_type", DataType: schema.TypeString},
-				{Name: "channel", DataType: schema.TypeString},
-				{Name: "country", DataType: schema.TypeString},
+				{Name: "app", DataType: schema.TypeString, Nullable: true},
+				{Name: "app_token", DataType: schema.TypeString, Nullable: true},
+				{Name: "store_type", DataType: schema.TypeString, Nullable: true},
+				{Name: "channel", DataType: schema.TypeString, Nullable: true},
+				{Name: "country", DataType: schema.TypeString, Nullable: true},
 			},
 		},
 		{
 			name:       "revenue cohort metrics are decimal by prefix",
 			dimensions: "",
-			metrics:    "all_revenue_total_d0,ad_revenue_total_d21,revenue_total_d90",
+			metrics:    "all_revenue_total_d0,ad_revenue_total_d21,revenue_total_d120",
 			wantCols: []schema.Column{
-				{Name: "all_revenue_total_d0", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
-				{Name: "ad_revenue_total_d21", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
-				{Name: "revenue_total_d90", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+				{Name: "all_revenue_total_d0", DataType: schema.TypeDecimal, Precision: 38, Scale: 9, Nullable: true},
+				{Name: "ad_revenue_total_d21", DataType: schema.TypeDecimal, Precision: 38, Scale: 9, Nullable: true},
+				{Name: "revenue_total_d120", DataType: schema.TypeDecimal, Precision: 38, Scale: 9, Nullable: true},
 			},
+		},
+		{
+			name:       "prefix match requires a numeric cohort-day suffix",
+			dimensions: "",
+			metrics:    "revenue_total_daily,ad_revenue_total_d,all_revenue_total_d7x",
+			wantCols:   nil,
 		},
 	}
 

@@ -521,11 +521,23 @@ func lookupTypeHint(name string) (schema.DataType, bool) {
 		return dt, true
 	}
 	for _, prefix := range revenueMetricPrefixes {
-		if strings.HasPrefix(name, prefix) {
+		if suffix, ok := strings.CutPrefix(name, prefix); ok && isCohortDaySuffix(suffix) {
 			return schema.TypeDecimal, true
 		}
 	}
 	return schema.TypeUnknown, false
+}
+
+func isCohortDaySuffix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func typeHintColumn(name string) (schema.Column, bool) {
@@ -533,7 +545,7 @@ func typeHintColumn(name string) (schema.Column, bool) {
 	if !ok {
 		return schema.Column{}, false
 	}
-	col := schema.Column{Name: name, DataType: dt}
+	col := schema.Column{Name: name, DataType: dt, Nullable: true}
 	if dt == schema.TypeDecimal {
 		col.Precision = 38
 		col.Scale = 9
