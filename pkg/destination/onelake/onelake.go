@@ -36,7 +36,7 @@ const (
 const (
 	defaultLayout          = "{load_id}.{file_id}.{ext}"
 	maxDeltaCommitAttempts = 5
-	managedPrefixSegments  = 2
+	managedPrefixSegments  = 1
 )
 
 var errDeltaCommitConflict = errors.New("delta commit version already exists")

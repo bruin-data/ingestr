@@ -96,10 +96,11 @@ func TestDirectoryPrefixes(t *testing.T) {
 			},
 		},
 		{
-			name:               "skip onelake managed item and area",
+			name:               "skip onelake managed item",
 			path:               "lakehouse.Lakehouse/Tables/staff/_delta_log",
-			skipPrefixSegments: 2,
+			skipPrefixSegments: 1,
 			want: []string{
+				"lakehouse.Lakehouse/Tables",
 				"lakehouse.Lakehouse/Tables/staff",
 				"lakehouse.Lakehouse/Tables/staff/_delta_log",
 			},
