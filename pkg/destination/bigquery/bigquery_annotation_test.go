@@ -41,6 +41,19 @@ func TestAnnotatedQueryComment(t *testing.T) {
 		}
 	})
 
+	t.Run("cdc resume lookup carries the cdc_resume extract step", func(t *testing.T) {
+		ctx := annotation.WithStep(base, annotation.StepCDCResume)
+		got := annotation.Prepend(ctx, "SELECT MAX(`_cdc_lsn`) FROM `p`.`raw`.`orders`")
+
+		wantComment := `-- @bruin.config: {"asset":"raw.orders","ingestr_step":"cdc_resume","pipeline":"shopify","type":"ingestr_extract"}`
+		if !strings.HasPrefix(got, wantComment+"\n") {
+			t.Fatalf("missing/incorrect annotation comment\n got: %q\nwant prefix: %q", got, wantComment)
+		}
+		if !strings.Contains(got, "SELECT MAX(`_cdc_lsn`)") {
+			t.Fatalf("original query body was dropped: %q", got)
+		}
+	})
+
 	t.Run("no caller annotation still carries ingestr's own keys", func(t *testing.T) {
 		ctx := annotation.WithStep(context.Background(), annotation.StepMerge)
 		const sql = "MERGE INTO `p`.`raw`.`orders` ..."
