@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Source"
+  short_description: "Implement a new ingestr API/SaaS source"
+  default_prompt: "Use $add-source to implement a new ingestr source."
