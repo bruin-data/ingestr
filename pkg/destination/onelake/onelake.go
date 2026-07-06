@@ -36,6 +36,7 @@ const (
 const (
 	defaultLayout          = "{load_id}.{file_id}.{ext}"
 	maxDeltaCommitAttempts = 5
+	managedPrefixSegments  = 2
 )
 
 var errDeltaCommitConflict = errors.New("delta commit version already exists")
@@ -310,7 +311,7 @@ func (d *OneLakeDestination) WriteParallel(ctx context.Context, records <-chan s
 func (d *OneLakeDestination) writeFilesMode(ctx context.Context, data []byte) error {
 	fileName := d.renderLayout(uuid.New().String()[:8], 0)
 	fullPath := d.filesDir() + "/" + fileName
-	if err := d.client.UploadBuffer(ctx, d.workspace, fullPath, data); err != nil {
+	if err := d.uploadBuffer(ctx, fullPath, data); err != nil {
 		return fmt.Errorf("failed to upload %s: %w", fullPath, err)
 	}
 	config.Debug("[ONELAKE] Wrote %d bytes to %s", len(data), fullPath)
@@ -321,7 +322,7 @@ func (d *OneLakeDestination) writeTablesMode(ctx context.Context, data []byte) e
 	tableDir := d.tableDir()
 	dataFile := fmt.Sprintf("part-00000-%s.c000.snappy.parquet", uuid.New().String())
 
-	if err := d.client.UploadBuffer(ctx, d.workspace, tableDir+"/"+dataFile, data); err != nil {
+	if err := d.uploadBuffer(ctx, tableDir+"/"+dataFile, data); err != nil {
 		return fmt.Errorf("failed to upload data file: %w", err)
 	}
 
@@ -366,12 +367,12 @@ func (d *OneLakeDestination) writeTablesMode(ctx context.Context, data []byte) e
 
 func (d *OneLakeDestination) uploadDeltaCommit(ctx context.Context, logDir string, version int64, commit []byte) error {
 	commitPath := logDir + "/" + commitFileName(version)
-	if err := d.client.EnsureDirectories(ctx, d.workspace, logDir); err != nil {
+	if err := d.ensureDirectories(ctx, logDir); err != nil {
 		return fmt.Errorf("failed to prepare delta log directory: %w", err)
 	}
 
 	tempPath := deltaCommitTempPath(logDir)
-	if err := d.client.UploadBuffer(ctx, d.workspace, tempPath, commit); err != nil {
+	if err := d.uploadBuffer(ctx, tempPath, commit); err != nil {
 		return fmt.Errorf("failed to upload temporary delta commit %s: %w", tempPath, err)
 	}
 
@@ -404,6 +405,14 @@ func (d *OneLakeDestination) newOneLakeFileClient(path string) (*datalakefile.Cl
 		return nil, fmt.Errorf("OneLake destination is not connected")
 	}
 	return datalakefile.NewClient(pathURL, d.cred, nil)
+}
+
+func (d *OneLakeDestination) uploadBuffer(ctx context.Context, path string, data []byte) error {
+	return d.client.UploadBufferSkippingPrefix(ctx, d.workspace, path, data, managedPrefixSegments)
+}
+
+func (d *OneLakeDestination) ensureDirectories(ctx context.Context, path string) error {
+	return d.client.EnsureDirectoriesSkippingPrefix(ctx, d.workspace, path, managedPrefixSegments)
 }
 
 func deltaCommitRenameOptions() *datalakefile.RenameOptions {
@@ -607,7 +616,7 @@ func (d *OneLakeDestination) uploadRewriteData(ctx context.Context, tableDir, da
 	if err != nil {
 		return nil, err
 	}
-	if err := d.client.UploadBuffer(ctx, d.workspace, tableDir+"/"+dataFile, data); err != nil {
+	if err := d.uploadBuffer(ctx, tableDir+"/"+dataFile, data); err != nil {
 		return nil, fmt.Errorf("failed to upload data file: %w", err)
 	}
 

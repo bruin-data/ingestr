@@ -76,3 +76,50 @@ func TestPathURL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "https://myaccount.dfs.core.windows.net/filesystem/records/users/file%201.parquet", got)
 }
+
+func TestDirectoryPrefixes(t *testing.T) {
+	tests := []struct {
+		name               string
+		path               string
+		skipPrefixSegments int
+		want               []string
+	}{
+		{
+			name:               "all prefixes",
+			path:               "lakehouse.Lakehouse/Tables/staff/_delta_log",
+			skipPrefixSegments: 0,
+			want: []string{
+				"lakehouse.Lakehouse",
+				"lakehouse.Lakehouse/Tables",
+				"lakehouse.Lakehouse/Tables/staff",
+				"lakehouse.Lakehouse/Tables/staff/_delta_log",
+			},
+		},
+		{
+			name:               "skip onelake managed item and area",
+			path:               "lakehouse.Lakehouse/Tables/staff/_delta_log",
+			skipPrefixSegments: 2,
+			want: []string{
+				"lakehouse.Lakehouse/Tables/staff",
+				"lakehouse.Lakehouse/Tables/staff/_delta_log",
+			},
+		},
+		{
+			name:               "skip more than path length",
+			path:               "lakehouse.Lakehouse/Tables",
+			skipPrefixSegments: 3,
+			want:               []string{},
+		},
+		{
+			name:               "empty path",
+			path:               "",
+			skipPrefixSegments: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, directoryPrefixes(tt.path, tt.skipPrefixSegments))
+		})
+	}
+}
