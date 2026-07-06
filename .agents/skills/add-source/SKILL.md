@@ -122,6 +122,21 @@ dispatcher, and `paginateAndSend`.
 - **Comments:** add them only where the code isn't self-explanatory (a non-obvious API
   quirk, or the "why" behind a choice). Keep each comment to at most 2 lines.
 
+**Query parameters on the table string — use the shared `pkg/tablespec` parser.** When a
+`source_table` carries URL-style query params (e.g. `boards?board_ids=1,2&linked=true`), do
+NOT hand-split the string. Call `tablespec.Parse`, the single shared entry point:
+
+```go
+var p mondayParams // struct with mapstructure tags
+path, hasParams, err := tablespec.Parse(name, &p, tablespec.WithListSeparator(","))
+```
+
+`Parse` returns the base path, decodes the params onto your struct via `mapstructure` tags,
+coerces types (repeated/separator-joined values → `[]string`, bare flag → `bool` true,
+dotted keys → nested), and **rejects unknown keys** so a typo errors instead of being
+silently dropped. When `hasParams` is false, fall back to your legacy table-string parsing.
+See `monday`, `adjust`, and `sharepoint` for reference.
+
 For each table in `supportedTables`, implement a `read<TableName>` function:
 
 ```go
