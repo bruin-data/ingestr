@@ -861,6 +861,7 @@ func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true
 func (d *SnowflakeDestination) GetScheme() string { return "snowflake" }
 
 func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
+	ctx = d.annotate(ctx, annotation.StepCDCResume)
 	fullTable := quoteFQN(sfTable(table))
 	query := fmt.Sprintf("SELECT MAX(%s) FROM %s", quoteIdentifier("_cdc_lsn"), fullTable)
 

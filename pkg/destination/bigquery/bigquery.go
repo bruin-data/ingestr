@@ -2242,7 +2242,9 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 		return "", errors.New("dataset must be specified in table name (dataset.table) or URI path")
 	}
 
-	query := d.client.Query(fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName)))
+	ctx = annotation.WithStep(ctx, annotation.StepCDCResume)
+	sql := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	query := d.client.Query(annotation.Prepend(ctx, sql))
 	if d.location != "" {
 		query.Location = d.location
 	}

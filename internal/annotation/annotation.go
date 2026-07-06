@@ -33,6 +33,7 @@ const ingestrType = "ingestr"
 // ingestr_step values, one per distinct operation.
 const (
 	StepExtract      = "extract"       // source read (SELECT) — only meaningful for warehouse sources
+	StepCDCResume    = "cdc_resume"    // GetMaxCDCLSN: read the destination's max _cdc_lsn to resume a CDC stream
 	StepDDL          = "ddl"           // PrepareTable: create target/staging tables
 	StepEvolve       = "evolve"        // ApplyEvolution: ALTER existing table to match new source schema
 	StepLoad         = "load"          // Write/WriteParallel: bulk-load rows
@@ -46,7 +47,8 @@ const (
 
 // ingestr classifies each query by ETL phase via the "type" value:
 //
-//	ingestr_extract   — read from the source: the SELECT a warehouse source runs
+//	ingestr_extract   — read to drive extraction: the SELECT a warehouse source
+//	                    runs, and the CDC resume-cursor lookup on the destination
 //	ingestr_load      — move data in:   ddl, evolve, load, swap, truncate, cleanup
 //	ingestr_transform — apply strategy: merge, delete_insert, scd2
 const (
@@ -58,7 +60,7 @@ const (
 // typeForStep classifies an ingestr_step into its ETL-phase type.
 func typeForStep(step string) string {
 	switch step {
-	case StepExtract:
+	case StepExtract, StepCDCResume:
 		return typeIngestrExtract
 	case StepMerge, StepDeleteInsert, StepSCD2:
 		return typeIngestrTransform
