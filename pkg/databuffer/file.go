@@ -254,6 +254,14 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 		return arr, nil
 	}
 
+	arr, releaseArr, err := normalizeArrayOffset(arr)
+	if err != nil {
+		return nil, err
+	}
+	if releaseArr {
+		defer arr.Release()
+	}
+
 	if isUnknownType(arr.DataType()) {
 		return castUnknownArray(arr, target)
 	}
@@ -282,7 +290,6 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 	}
 
 	var casted arrow.Array
-	var err error
 	if safe {
 		casted, err = compute.CastArray(ctx, arr, compute.SafeCastOptions(target))
 	} else if (arr.DataType().ID() == arrow.DECIMAL128 || arr.DataType().ID() == arrow.DECIMAL256) && isIntegerType(target) {
@@ -313,6 +320,18 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 	}
 
 	return nil, err
+}
+
+func normalizeArrayOffset(arr arrow.Array) (arrow.Array, bool, error) {
+	if arr == nil || arr.Data().Offset() == 0 {
+		return arr, false, nil
+	}
+
+	normalized, err := array.Concatenate([]arrow.Array{arr}, memory.DefaultAllocator)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to normalize sliced array offset: %w", err)
+	}
+	return normalized, true, nil
 }
 
 func castStringArrayViaAppendValue(arr arrow.Array, target arrow.DataType) (arrow.Array, error) {
