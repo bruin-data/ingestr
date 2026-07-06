@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -415,17 +416,17 @@ func parseExtractPartitionInterval(s string) (time.Duration, int64, bool, error)
 	var duration time.Duration
 	switch {
 	case strings.HasSuffix(value, "d"):
-		days, err := strconv.ParseFloat(strings.TrimSuffix(value, "d"), 64)
+		parsed, err := parseBoundedDurationMultiple(strings.TrimSuffix(value, "d"), 24*time.Hour)
 		if err != nil {
 			return 0, 0, false, err
 		}
-		duration = time.Duration(days * float64(24*time.Hour))
+		duration = parsed
 	case strings.HasSuffix(value, "w"):
-		weeks, err := strconv.ParseFloat(strings.TrimSuffix(value, "w"), 64)
+		parsed, err := parseBoundedDurationMultiple(strings.TrimSuffix(value, "w"), 7*24*time.Hour)
 		if err != nil {
 			return 0, 0, false, err
 		}
-		duration = time.Duration(weeks * float64(7*24*time.Hour))
+		duration = parsed
 	default:
 		parsed, err := time.ParseDuration(value)
 		if err != nil {
@@ -438,6 +439,26 @@ func parseExtractPartitionInterval(s string) (time.Duration, int64, bool, error)
 		return 0, 0, false, fmt.Errorf("must be positive")
 	}
 	return duration, 0, false, nil
+}
+
+func parseBoundedDurationMultiple(raw string, unit time.Duration) (time.Duration, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("must be positive")
+	}
+
+	const maxDuration = time.Duration(1<<63 - 1)
+	if value > float64(maxDuration)/float64(unit) {
+		return 0, fmt.Errorf("duration overflows time.Duration")
+	}
+	duration := time.Duration(value * float64(unit))
+	if duration <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return duration, nil
 }
 
 func applyExtractPartitionInterval(cfg *config.IngestConfig, raw string) error {

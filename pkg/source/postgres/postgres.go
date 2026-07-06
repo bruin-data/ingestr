@@ -269,7 +269,7 @@ func (s *PostgresSource) read(ctx context.Context, table string, tableSchema *sc
 }
 
 func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	results := make(chan source.RecordBatchResult, 8)
+	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 8))
 
 	go func() {
 		defer close(results)
@@ -323,7 +323,7 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 }
 
 func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, quoteIdentifier, quoteTableName, source.DefaultSQLTimeFormat)
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteIdentifier, quoteTableName, source.DefaultSQLTimeFormat)
 
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {

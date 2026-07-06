@@ -52,7 +52,7 @@ func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
 		ExtractPartitionEnd:   &windowEnd,
 	})
 
-	want := `SELECT "id", "created_at" FROM "public"."orders" WHERE "updated_at" >= '2026-01-01 00:00:00' AND "updated_at" <= '2026-01-31 00:00:00' AND "created_at" >= '2026-01-08 00:00:00' AND "created_at" < '2026-01-15 00:00:00'`
+	want := `SELECT "id", "created_at" FROM "public"."orders" WHERE "updated_at" >= '2026-01-01 00:00:00.000000+00:00' AND "updated_at" <= '2026-01-31 00:00:00.000000+00:00' AND "created_at" >= '2026-01-08 00:00:00.000000+00:00' AND "created_at" < '2026-01-15 00:00:00.000000+00:00'`
 	if query != want {
 		t.Fatalf("query = %q, want %q", query, want)
 	}

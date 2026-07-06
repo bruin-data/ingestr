@@ -431,23 +431,6 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 	startTotal := time.Now()
 	config.Debug("[%s] Starting read from %s", s.dialect.Name(), table)
 
-	// Check if dialect supports native storage API reading
-	if storageReader, ok := s.dialect.(StorageReader); ok && !opts.ExtractPartitioningEnabled() {
-		config.Debug("[%s] Using Storage API for data read", s.dialect.Name())
-
-		// Ensure schema is in opts for storage reader
-		optsWithSchema := opts
-		optsWithSchema.Schema = tableSchema
-
-		results, err := storageReader.ReadWithStorageAPI(ctx, table, optsWithSchema)
-		if err != nil {
-			// Fall back to SQL-based reading if Storage API fails
-			config.Debug("[%s] Storage API failed (%v), falling back to SQL-based reading", s.dialect.Name(), err)
-		} else {
-			return results, nil
-		}
-	}
-
 	// Existing SQL-based read path (unchanged)
 	columns := FilterColumns(tableSchema.Columns, opts.ExcludeColumns)
 	arrowSchema := BuildArrowSchema(columns)
@@ -457,7 +440,18 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 		batchSize = 100000
 	}
 
+	storageReader, hasStorageReader := s.dialect.(StorageReader)
 	read := func(ctx context.Context, readOpts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+		if hasStorageReader {
+			config.Debug("[%s] Using Storage API for data read", s.dialect.Name())
+			optsWithSchema := readOpts
+			optsWithSchema.Schema = tableSchema
+			results, err := storageReader.ReadWithStorageAPI(ctx, table, optsWithSchema)
+			if err == nil {
+				return results, nil
+			}
+			config.Debug("[%s] Storage API failed (%v), falling back to SQL-based reading", s.dialect.Name(), err)
+		}
 		return s.readQuery(ctx, table, columns, arrowSchema, batchSize, startTotal, readOpts)
 	}
 	discover := func(ctx context.Context, readOpts source.ReadOptions) (source.ExtractPartitionBounds, error) {
@@ -468,7 +462,7 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 }
 
 func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	results := make(chan source.RecordBatchResult, 8)
+	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 8))
 
 	go func() {
 		defer close(results)
@@ -519,7 +513,7 @@ func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []sche
 }
 
 func (s *ADBCSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, s.dialect.QuoteIdentifier, func(name string) string {
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, s.dialect.QuoteIdentifier, func(name string) string {
 		return name
 	}, source.DefaultSQLTimeFormat)
 	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)

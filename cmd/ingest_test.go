@@ -70,7 +70,7 @@ func TestParseExtractPartitionIntervalAuto(t *testing.T) {
 }
 
 func TestParseExtractPartitionIntervalRejectsInvalidInput(t *testing.T) {
-	for _, input := range []string{"", "0", "-1", "0h", "-1h", "month"} {
+	for _, input := range []string{"", "0", "-1", "0h", "-1h", "month", "100000000000d", "100000000000w"} {
 		t.Run(input, func(t *testing.T) {
 			if _, _, _, err := parseExtractPartitionInterval(input); err == nil {
 				t.Fatal("expected error")

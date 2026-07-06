@@ -49,7 +49,11 @@ type ExtractPartitionBounds struct {
 	HasNulls     bool
 }
 
-const extractAutoPartitionsPerWorker = 4
+const (
+	extractAutoPartitionsPerWorker = 4
+	maxExtractPartitionWindows     = 100000
+	extractPartitionReadBufferSize = 1
+)
 
 type (
 	ExtractPartitionReadFunc   func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error)
@@ -80,6 +84,18 @@ func ValidateExtractPartitionColumn(tableSchema *schema.TableSchema, columnName 
 		return "", err
 	}
 	return col.Name, nil
+}
+
+func tableColumnDataType(tableSchema *schema.TableSchema, columnName string) schema.DataType {
+	if tableSchema == nil || columnName == "" {
+		return schema.TypeUnknown
+	}
+	for _, col := range tableSchema.Columns {
+		if strings.EqualFold(col.Name, columnName) {
+			return col.DataType
+		}
+	}
+	return schema.TypeUnknown
 }
 
 func extractPartitionColumn(tableSchema *schema.TableSchema, columnName string) (schema.Column, ExtractPartitionKind, error) {
@@ -115,6 +131,9 @@ func ExtractPartitionWindows(start, end time.Time, interval time.Duration) ([]Ex
 		if next.After(end) {
 			next = end
 		}
+		if len(windows) >= maxExtractPartitionWindows {
+			return nil, fmt.Errorf("extract partitioning would create more than %d windows; increase extract-partition-interval or use auto", maxExtractPartitionWindows)
+		}
 		windows = append(windows, ExtractPartitionWindow{Start: cur, End: next})
 		cur = next
 	}
@@ -139,8 +158,14 @@ func ExtractNumericPartitionWindows(start, end, interval int64) ([]ExtractNumeri
 			next = cur + interval
 		}
 		if next >= end {
+			if len(windows) >= maxExtractPartitionWindows {
+				return nil, fmt.Errorf("extract partitioning would create more than %d windows; increase extract-partition-interval or use auto", maxExtractPartitionWindows)
+			}
 			windows = append(windows, ExtractNumericPartitionWindow{Start: cur, End: end})
 			break
+		}
+		if len(windows) >= maxExtractPartitionWindows {
+			return nil, fmt.Errorf("extract partitioning would create more than %d windows; increase extract-partition-interval or use auto", maxExtractPartitionWindows)
 		}
 		windows = append(windows, ExtractNumericPartitionWindow{Start: cur, End: next})
 		cur = next
@@ -149,6 +174,9 @@ func ExtractNumericPartitionWindows(start, end, interval int64) ([]ExtractNumeri
 }
 
 func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *schema.TableSchema, read ExtractPartitionReadFunc, discover ExtractPartitionBoundsFunc) (<-chan RecordBatchResult, error) {
+	if opts.IncrementalKeyDataType == schema.TypeUnknown {
+		opts.IncrementalKeyDataType = tableColumnDataType(tableSchema, opts.IncrementalKey)
+	}
 	if !opts.ExtractPartitioningEnabled() {
 		return read(ctx, opts)
 	}
@@ -158,6 +186,7 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	}
 	opts.ExtractPartitionBy = partitionColumn.Name
 	opts.ExtractPartitionKind = kind
+	opts.ExtractPartitionDataType = partitionColumn.DataType
 	if opts.IntervalStart == nil || opts.IntervalEnd == nil {
 		return nil, fmt.Errorf("extract partitioning requires interval start and end")
 	}
@@ -168,6 +197,9 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	} else {
 		if kind == ExtractPartitionKindTime && opts.ExtractPartitionInterval <= 0 {
 			return nil, fmt.Errorf("extract partition interval must be a positive duration for time partition column %q", opts.ExtractPartitionBy)
+		}
+		if kind == ExtractPartitionKindTime && partitionColumn.DataType == schema.TypeDate && opts.ExtractPartitionInterval < 24*time.Hour {
+			return nil, fmt.Errorf("extract partition interval must be at least 24h for date partition column %q", opts.ExtractPartitionBy)
 		}
 		if kind == ExtractPartitionKindNumeric && opts.ExtractPartitionNumericInterval <= 0 {
 			return nil, fmt.Errorf("extract partition interval must be a positive integer for numeric partition column %q", opts.ExtractPartitionBy)
@@ -194,7 +226,7 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	out := make(chan RecordBatchResult, parallelism*4)
+	out := make(chan RecordBatchResult, parallelism)
 	jobs := make(chan extractPartitionJob)
 
 	var wg sync.WaitGroup
@@ -241,6 +273,8 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 					windowOpts.ExtractPartitionEndInclusive = job.EndInclusive
 					windowOpts.ExtractPartitionIsNull = false
 				}
+				windowOpts.RecordBatchBufferSize = extractPartitionReadBufferSize
+				windowOpts.Parallelism = 1
 
 				records, err := read(ctx, windowOpts)
 				if err != nil {
@@ -250,6 +284,7 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 
 				for result := range records {
 					if result.Err != nil {
+						releaseRecordBatchResult(result)
 						sendErr(result.Err)
 						go drainRecordBatchResults(records)
 						return
@@ -257,6 +292,7 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 					select {
 					case out <- result:
 					case <-ctx.Done():
+						releaseRecordBatchResult(result)
 						go drainRecordBatchResults(records)
 						return
 					}
@@ -289,7 +325,7 @@ func extractPartitionJobs(ctx context.Context, opts ReadOptions, discover Extrac
 	bounds := ExtractPartitionBounds{
 		Start:    *opts.IntervalStart,
 		End:      *opts.IntervalEnd,
-		Kind:     ExtractPartitionKindTime,
+		Kind:     opts.ExtractPartitionKind,
 		HasRange: true,
 	}
 	if opts.ExtractPartitionBoundsDiscoveryEnabled() {
@@ -348,6 +384,9 @@ func extractPartitionJobs(ctx context.Context, opts ReadOptions, discover Extrac
 					interval, err = autoExtractPartitionInterval(bounds.Start, bounds.End, opts.Parallelism)
 					if err != nil {
 						return nil, err
+					}
+					if opts.ExtractPartitionDataType == schema.TypeDate && interval < 24*time.Hour {
+						interval = 24 * time.Hour
 					}
 				}
 				windows, err := ExtractPartitionWindows(bounds.Start, bounds.End, interval)
@@ -444,11 +483,22 @@ func closedRecordBatchResults() <-chan RecordBatchResult {
 // full channel and leak its goroutine and DB connection. Draining lets it run
 // to completion and release its connection.
 func drainRecordBatchResults(records <-chan RecordBatchResult) {
-	for range records {
+	for result := range records {
+		releaseRecordBatchResult(result)
+	}
+}
+
+func releaseRecordBatchResult(result RecordBatchResult) {
+	if result.Batch != nil {
+		result.Batch.Release()
 	}
 }
 
 func SQLTimeRangeConditions(column string, start, end *time.Time, endOperator string, quote func(string) string, format func(time.Time) string) []string {
+	return sqlTimeRangeConditions(column, start, end, endOperator, quote, format)
+}
+
+func sqlTimeRangeConditions(column string, start, end *time.Time, endOperator string, quote func(string) string, format func(time.Time) string) []string {
 	if column == "" {
 		return nil
 	}
@@ -461,6 +511,21 @@ func SQLTimeRangeConditions(column string, start, end *time.Time, endOperator st
 		conditions = append(conditions, fmt.Sprintf("%s %s '%s'", quote(column), endOperator, format(*end)))
 	}
 	return conditions
+}
+
+func SQLDateRangeConditions(column string, start, end *time.Time, endOperator string, quote func(string) string) []string {
+	return sqlTimeRangeConditions(column, start, end, endOperator, quote, SQLDateFormat)
+}
+
+func SQLTemporalRangeConditions(column string, dataType schema.DataType, start, end *time.Time, endOperator string, quote func(string) string, format func(time.Time) string) []string {
+	switch dataType {
+	case schema.TypeDate:
+		return SQLDateRangeConditions(column, start, end, endOperator, quote)
+	case schema.TypeTimestamp:
+		return SQLTimeRangeConditions(column, start, end, endOperator, quote, NativeSQLTimeFormat)
+	default:
+		return SQLTimeRangeConditions(column, start, end, endOperator, quote, format)
+	}
 }
 
 func SQLNumericRangeConditions(column string, start, end *int64, endOperator string, quote func(string) string) []string {
@@ -488,13 +553,13 @@ func SQLExtractPartitionConditions(opts ReadOptions, quote func(string) string, 
 	if opts.ExtractPartitionKind == ExtractPartitionKindNumeric {
 		return SQLNumericRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionNumericStart, opts.ExtractPartitionNumericEnd, opts.ExtractPartitionEndOperator(), quote)
 	}
-	return SQLTimeRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionStart, opts.ExtractPartitionEnd, opts.ExtractPartitionEndOperator(), quote, format)
+	return SQLTemporalRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionDataType, opts.ExtractPartitionStart, opts.ExtractPartitionEnd, opts.ExtractPartitionEndOperator(), quote, format)
 }
 
-func SQLExtractPartitionBoundsQuery(table, partitionColumn, incrementalKey string, intervalStart, intervalEnd *time.Time, quoteIdentifier, quoteTable func(string) string, format func(time.Time) string) string {
+func SQLExtractPartitionBoundsQuery(table, partitionColumn, incrementalKey string, incrementalKeyDataType schema.DataType, intervalStart, intervalEnd *time.Time, quoteIdentifier, quoteTable func(string) string, format func(time.Time) string) string {
 	partition := quoteIdentifier(partitionColumn)
 	query := fmt.Sprintf("SELECT MIN(%s), MAX(%s), COUNT(*), COUNT(%s) FROM %s", partition, partition, partition, quoteTable(table))
-	conditions := SQLTimeRangeConditions(incrementalKey, intervalStart, intervalEnd, "<=", quoteIdentifier, format)
+	conditions := SQLTemporalRangeConditions(incrementalKey, incrementalKeyDataType, intervalStart, intervalEnd, "<=", quoteIdentifier, format)
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -644,17 +709,29 @@ func parseSQLTimeString(value string) (time.Time, error) {
 }
 
 func DefaultSQLTimeFormat(t time.Time) string {
-	return t.Format("2006-01-02 15:04:05")
+	return t.Truncate(time.Microsecond).Format("2006-01-02 15:04:05.000000-07:00")
 }
 
-// ceilTimeToSQLGranularity rounds t up to the whole-second granularity of
-// DefaultSQLTimeFormat. A discovered maximum is used as an inclusive `<=` bound
-// on the final partition; without rounding up, the formatter would truncate a
-// sub-second maximum and silently drop every row in that final sub-second
-// interval, including the maximum row itself.
-func ceilTimeToSQLGranularity(t time.Time) time.Time {
+func NativeSQLTimeFormat(t time.Time) string {
+	t = t.Truncate(time.Microsecond)
 	if t.Nanosecond() == 0 {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return t.Format("2006-01-02 15:04:05.000000")
+}
+
+func SQLDateFormat(t time.Time) string {
+	return t.Format("2006-01-02")
+}
+
+// ceilTimeToSQLGranularity rounds t up to the microsecond granularity of
+// DefaultSQLTimeFormat. A discovered maximum is used as an inclusive `<=` bound
+// on the final partition; without rounding up, the formatter could truncate a
+// sub-microsecond maximum and drop rows in that final interval.
+func ceilTimeToSQLGranularity(t time.Time) time.Time {
+	truncated := t.Truncate(time.Microsecond)
+	if truncated.Equal(t) {
 		return t
 	}
-	return t.Add(time.Duration(int64(time.Second) - int64(t.Nanosecond())))
+	return truncated.Add(time.Microsecond)
 }

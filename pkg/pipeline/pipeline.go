@@ -179,6 +179,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
 	preFetchConfig.PrimaryKeys = resolvePrimaryKeys(p.config, table)
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
+	if err := validateExtractPartitionStrategy(&preFetchConfig, preFetchStrategy); err != nil {
+		return err
+	}
 	display.PrintSummary(&preFetchConfig)
 
 	if shouldWarnCDCStrategy(p.config, preFetchStrategy) {
@@ -1716,6 +1719,18 @@ func validateExtractPartitionSupport(cfg *config.IngestConfig, table source.Sour
 		return fmt.Errorf("source table %q does not support extract partitioning; v1 supports normal SQL table scans for postgres, mysql, mssql, sqlite, and ADBC-backed sources", table.Name())
 	}
 	return nil
+}
+
+func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy) error {
+	if cfg.ExtractPartitionBy == "" {
+		return nil
+	}
+	switch resolvedStrategy {
+	case config.StrategyReplace, config.StrategyTruncateInsert:
+		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", resolvedStrategy)}
+	default:
+		return nil
+	}
 }
 
 // rewriteReplaceForPostgres swaps the replace strategy for truncate+insert when

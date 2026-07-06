@@ -214,6 +214,13 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	if c.IsChangeTrackingSource() {
 		return &ValidationError{Field: "source-uri", Message: "change tracking sources do not support extract partitioning"}
 	}
+	if c.FullRefresh {
+		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with extract partitioning"}
+	}
+	switch c.IncrementalStrategy {
+	case StrategyReplace, StrategyTruncateInsert:
+		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", c.IncrementalStrategy)}
+	}
 	if rawQuery, ok := strings.CutPrefix(c.SourceTable, "query:"); ok {
 		if strings.TrimSpace(rawQuery) == "" {
 			return nil

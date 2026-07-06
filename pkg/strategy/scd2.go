@@ -24,6 +24,9 @@ func (s *SCD2Strategy) Validate(cfg *config.IngestConfig) error {
 	if len(cfg.PrimaryKeys) == 0 {
 		return fmt.Errorf("scd2 strategy requires at least one primary_key")
 	}
+	if strings.TrimSpace(cfg.ExtractPartitionBy) != "" && strings.TrimSpace(cfg.IncrementalKey) == "" {
+		return fmt.Errorf("scd2 strategy with extract partitioning requires an incremental_key")
+	}
 	return nil
 }
 

@@ -210,6 +210,21 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 			mutate:  func(c *IngestConfig) { c.SourceTable = "query:select * from orders" },
 			wantErr: "source-table",
 		},
+		{
+			name:    "full refresh rejected",
+			mutate:  func(c *IngestConfig) { c.FullRefresh = true },
+			wantErr: "full-refresh",
+		},
+		{
+			name:    "replace rejected",
+			mutate:  func(c *IngestConfig) { c.IncrementalStrategy = StrategyReplace },
+			wantErr: "incremental-strategy",
+		},
+		{
+			name:    "truncate insert rejected",
+			mutate:  func(c *IngestConfig) { c.IncrementalStrategy = StrategyTruncateInsert },
+			wantErr: "incremental-strategy",
+		},
 	}
 
 	for _, tt := range tests {
@@ -222,6 +237,7 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 			cfg.IntervalEnd = &end
 			cfg.ExtractPartitionBy = "created_at"
 			cfg.ExtractPartitionInterval = 7 * 24 * time.Hour
+			cfg.IncrementalStrategy = StrategyMerge
 			if tt.mutate != nil {
 				tt.mutate(cfg)
 			}

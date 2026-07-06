@@ -368,7 +368,7 @@ func (s *MySQLSource) read(ctx context.Context, table string, tableSchema *schem
 }
 
 func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	results := make(chan source.RecordBatchResult, 8)
+	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 8))
 
 	go func() {
 		defer close(results)
@@ -420,7 +420,7 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 }
 
 func (s *MySQLSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.DefaultSQLTimeFormat)
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.NativeSQLTimeFormat)
 
 	q, cleanup, err := s.querier(ctx)
 	if err != nil {
@@ -549,9 +549,9 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
-		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteColumn, source.DefaultSQLTimeFormat)...)
+		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteColumn, source.NativeSQLTimeFormat)...)
 	}
-	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteColumn, source.DefaultSQLTimeFormat)...)
+	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteColumn, source.NativeSQLTimeFormat)...)
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")

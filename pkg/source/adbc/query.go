@@ -56,7 +56,7 @@ func BuildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	var conditions []string
 	config.Debug("[QUERY] Building query with IncrementalKey=%s, IntervalStart=%v, IntervalEnd=%v", opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd)
 	if opts.IncrementalKey != "" {
-		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteFunc, source.DefaultSQLTimeFormat)...)
+		conditions = append(conditions, source.SQLTemporalRangeConditions(opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, "<=", quoteFunc, source.DefaultSQLTimeFormat)...)
 	}
 	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteFunc, source.DefaultSQLTimeFormat)...)
 

@@ -11,6 +11,7 @@ import (
 
 type ReadOptions struct {
 	IncrementalKey                  string
+	IncrementalKeyDataType          schema.DataType
 	IntervalStart                   *time.Time
 	IntervalEnd                     *time.Time
 	ExtractPartitionBy              string
@@ -24,6 +25,8 @@ type ReadOptions struct {
 	ExtractPartitionEndInclusive    bool
 	ExtractPartitionIsNull          bool
 	ExtractPartitionKind            ExtractPartitionKind
+	ExtractPartitionDataType        schema.DataType
+	RecordBatchBufferSize           int
 	PageSize                        int
 	Limit                           int
 	ExcludeColumns                  []string
@@ -36,6 +39,16 @@ type ReadOptions struct {
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
 	FlushInterval                   time.Duration
 	FlushRecords                    int
+}
+
+func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
+	if opts.RecordBatchBufferSize > 0 {
+		return opts.RecordBatchBufferSize
+	}
+	if defaultSize < 0 {
+		return 0
+	}
+	return defaultSize
 }
 
 type RecordBatchResult struct {

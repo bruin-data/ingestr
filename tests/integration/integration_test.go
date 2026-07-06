@@ -118,7 +118,7 @@ func TestPostgresPartitionedExtraction(t *testing.T) {
 	cfg.SourceTable = sourceSchema + ".orders"
 	cfg.DestURI = destURI
 	cfg.DestTable = destSchema + ".orders"
-	cfg.IncrementalStrategy = config.StrategyReplace
+	cfg.IncrementalStrategy = config.StrategyAppend
 	cfg.IncrementalKey = "updated_at"
 	cfg.IntervalStart = &start
 	cfg.IntervalEnd = &end

@@ -4,9 +4,11 @@ import (
 	"context"
 	"math/big"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -65,6 +67,9 @@ func TestExtractPartitionWindowsRejectsInvalidInput(t *testing.T) {
 	if _, err := ExtractPartitionWindows(start, start, time.Hour); err == nil {
 		t.Fatal("expected error for empty range")
 	}
+	if _, err := ExtractPartitionWindows(start, start.Add(time.Duration(maxExtractPartitionWindows+1)*time.Minute), time.Minute); err == nil {
+		t.Fatal("expected error for too many windows")
+	}
 }
 
 func TestExtractNumericPartitionWindows(t *testing.T) {
@@ -93,6 +98,9 @@ func TestExtractNumericPartitionWindowsRejectsInvalidInput(t *testing.T) {
 	}
 	if _, err := ExtractNumericPartitionWindows(10, 1, 5); err == nil {
 		t.Fatal("expected error for inverted range")
+	}
+	if _, err := ExtractNumericPartitionWindows(1, maxExtractPartitionWindows+2, 1); err == nil {
+		t.Fatal("expected error for too many windows")
 	}
 }
 
@@ -192,6 +200,7 @@ func TestReadExtractPartitionsMarksOnlyFinalWindowInclusive(t *testing.T) {
 	}
 
 	records, err := ReadExtractPartitions(context.Background(), ReadOptions{
+		IncrementalKey:           "created_at",
 		IntervalStart:            &start,
 		IntervalEnd:              &end,
 		ExtractPartitionBy:       "created_at",
@@ -235,6 +244,7 @@ func TestReadExtractPartitionsAutoTime(t *testing.T) {
 	}
 
 	records, err := ReadExtractPartitions(context.Background(), ReadOptions{
+		IncrementalKey:       "created_at",
 		IntervalStart:        &start,
 		IntervalEnd:          &end,
 		ExtractPartitionBy:   "created_at",
@@ -270,6 +280,43 @@ func TestReadExtractPartitionsAutoTime(t *testing.T) {
 	}
 	if !final.ExtractPartitionEndInclusive {
 		t.Fatal("final auto partition end should be inclusive")
+	}
+}
+
+func TestReadExtractPartitionsSetsIncrementalKeyDataType(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "updated_at", DataType: schema.TypeTimestamp},
+		},
+	}
+
+	seen := make(chan ReadOptions, 1)
+	read := func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
+		seen <- opts
+		ch := make(chan RecordBatchResult)
+		close(ch)
+		return ch, nil
+	}
+
+	records, err := ReadExtractPartitions(context.Background(), ReadOptions{
+		IncrementalKey: "updated_at",
+		IntervalStart:  &start,
+		IntervalEnd:    &end,
+	}, tableSchema, read, nil)
+	if err != nil {
+		t.Fatalf("ReadExtractPartitions() error = %v", err)
+	}
+	for result := range records {
+		if result.Err != nil {
+			t.Fatalf("unexpected read error: %v", result.Err)
+		}
+	}
+
+	got := <-seen
+	if got.IncrementalKeyDataType != schema.TypeTimestamp {
+		t.Fatalf("IncrementalKeyDataType = %v, want %v", got.IncrementalKeyDataType, schema.TypeTimestamp)
 	}
 }
 
@@ -382,6 +429,53 @@ func TestReadExtractPartitionsAddsNullPartitionFromDiscoveredBounds(t *testing.T
 	}
 }
 
+func TestReadExtractPartitionsDoesNotAddNullPartitionWithoutIncrementalKey(t *testing.T) {
+	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "created_at", DataType: schema.TypeTimestamp},
+		},
+	}
+
+	seen := make(chan ReadOptions, 5)
+	read := func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
+		seen <- opts
+		ch := make(chan RecordBatchResult)
+		close(ch)
+		return ch, nil
+	}
+
+	records, err := ReadExtractPartitions(context.Background(), ReadOptions{
+		IntervalStart:            &intervalStart,
+		IntervalEnd:              &intervalEnd,
+		ExtractPartitionBy:       "created_at",
+		ExtractPartitionInterval: 10 * 24 * time.Hour,
+		Parallelism:              1,
+	}, tableSchema, read, nil)
+	if err != nil {
+		t.Fatalf("ReadExtractPartitions() error = %v", err)
+	}
+	for result := range records {
+		if result.Err != nil {
+			t.Fatalf("unexpected read error: %v", result.Err)
+		}
+	}
+
+	if len(seen) != 3 {
+		t.Fatalf("partition count = %d, want 3", len(seen))
+	}
+	for len(seen) > 0 {
+		got := <-seen
+		if got.RecordBatchBufferSize != extractPartitionReadBufferSize {
+			t.Fatalf("RecordBatchBufferSize = %d, want %d", got.RecordBatchBufferSize, extractPartitionReadBufferSize)
+		}
+		if got.ExtractPartitionIsNull {
+			t.Fatal("did not expect null partition read without discovered null bounds")
+		}
+	}
+}
+
 func TestExtractPartitionBoundsFromValues(t *testing.T) {
 	minValue := "2025-12-15 00:00:00"
 	maxValue := "2025-12-20 00:00:00"
@@ -418,15 +512,94 @@ func TestExtractPartitionBoundsFromValuesRoundsSubSecondMax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractPartitionBoundsFromValues() error = %v", err)
 	}
-	// The min is the lower `>=` bound, which the formatter truncates downward
-	// (more permissive), so it is kept at full precision.
 	if !got.Start.Equal(time.Date(2025, 12, 15, 0, 0, 0, 250000000, time.UTC)) {
 		t.Fatalf("start = %v, want 2025-12-15 00:00:00.25", got.Start)
 	}
-	// The max is the inclusive `<=` bound; it must round up to the whole second
-	// so the second-precision formatter does not drop the final rows.
-	if !got.End.Equal(time.Date(2025, 12, 20, 10, 30, 46, 0, time.UTC)) {
-		t.Fatalf("end = %v, want 2025-12-20 10:30:46", got.End)
+	if !got.End.Equal(time.Date(2025, 12, 20, 10, 30, 45, 678000000, time.UTC)) {
+		t.Fatalf("end = %v, want 2025-12-20 10:30:45.678", got.End)
+	}
+}
+
+func TestExtractPartitionBoundsFromValuesRoundsSubMicrosecondMax(t *testing.T) {
+	minValue := time.Date(2025, 12, 15, 0, 0, 0, 0, time.UTC)
+	maxValue := time.Date(2025, 12, 20, 10, 30, 45, 678901234, time.UTC)
+	got, err := ExtractPartitionBoundsFromValues(ExtractPartitionKindTime, minValue, maxValue, 2, 2)
+	if err != nil {
+		t.Fatalf("ExtractPartitionBoundsFromValues() error = %v", err)
+	}
+	if !got.End.Equal(time.Date(2025, 12, 20, 10, 30, 45, 678902000, time.UTC)) {
+		t.Fatalf("end = %v, want 2025-12-20 10:30:45.678902", got.End)
+	}
+}
+
+func TestSQLExtractPartitionConditionsFormatsDateBounds(t *testing.T) {
+	start := time.Date(2026, 1, 8, 0, 0, 0, 123456000, time.UTC)
+	end := time.Date(2026, 1, 15, 0, 0, 0, 654321000, time.UTC)
+	got := SQLExtractPartitionConditions(ReadOptions{
+		ExtractPartitionBy:           "event_date",
+		ExtractPartitionStart:        &start,
+		ExtractPartitionEnd:          &end,
+		ExtractPartitionEndInclusive: true,
+		ExtractPartitionDataType:     schema.TypeDate,
+	}, func(s string) string { return `"` + s + `"` }, DefaultSQLTimeFormat)
+
+	want := []string{`"event_date" >= '2026-01-08'`, `"event_date" <= '2026-01-15'`}
+	if len(got) != len(want) {
+		t.Fatalf("conditions = %#v, want %#v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("condition[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSQLExtractPartitionConditionsFormatsTimestampBoundsWithoutTimezone(t *testing.T) {
+	start := time.Date(2026, 1, 8, 0, 0, 0, 123456000, time.UTC)
+	end := time.Date(2026, 1, 15, 0, 0, 0, 654321000, time.UTC)
+	got := SQLExtractPartitionConditions(ReadOptions{
+		ExtractPartitionBy:       "created_at",
+		ExtractPartitionStart:    &start,
+		ExtractPartitionEnd:      &end,
+		ExtractPartitionDataType: schema.TypeTimestamp,
+	}, func(s string) string { return `"` + s + `"` }, DefaultSQLTimeFormat)
+
+	want := []string{`"created_at" >= '2026-01-08 00:00:00.123456'`, `"created_at" < '2026-01-15 00:00:00.654321'`}
+	if len(got) != len(want) {
+		t.Fatalf("conditions = %#v, want %#v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("condition[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSQLExtractPartitionBoundsQueryFormatsTimestampIncrementalKeyWithoutTimezone(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 123456000, time.UTC)
+	end := time.Date(2026, 1, 31, 0, 0, 0, 654321000, time.UTC)
+
+	got := SQLExtractPartitionBoundsQuery("orders", "created_at", "updated_at", schema.TypeTimestamp, &start, &end, func(s string) string {
+		return `"` + s + `"`
+	}, func(s string) string {
+		return s
+	}, DefaultSQLTimeFormat)
+
+	want := `SELECT MIN("created_at"), MAX("created_at"), COUNT(*), COUNT("created_at") FROM orders WHERE "updated_at" >= '2026-01-01 00:00:00.123456' AND "updated_at" <= '2026-01-31 00:00:00.654321'`
+	if got != want {
+		t.Fatalf("query = %q, want %q", got, want)
+	}
+}
+
+func TestNativeSQLTimeFormat(t *testing.T) {
+	exactSecond := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if got := NativeSQLTimeFormat(exactSecond); got != "2026-01-01 00:00:00" {
+		t.Fatalf("exact second = %q, want no fractional seconds", got)
+	}
+
+	subsecond := time.Date(2026, 1, 1, 0, 0, 0, 123456789, time.UTC)
+	if got := NativeSQLTimeFormat(subsecond); got != "2026-01-01 00:00:00.123456" {
+		t.Fatalf("subsecond = %q, want microseconds without timezone", got)
 	}
 }
 
@@ -530,6 +703,146 @@ func TestReadExtractPartitionsRejectsNumericBoundsWithoutIncrementalKey(t *testi
 	if discoverCalled {
 		t.Fatal("bounds discovery should not be called")
 	}
+}
+
+func TestDrainRecordBatchResultsReleasesBatches(t *testing.T) {
+	var releases atomic.Int64
+	ch := make(chan RecordBatchResult, 2)
+	ch <- RecordBatchResult{Batch: &releaseCountingBatch{releases: &releases}}
+	ch <- RecordBatchResult{}
+	close(ch)
+
+	drainRecordBatchResults(ch)
+
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("release count = %d, want 1", got)
+	}
+}
+
+func TestReadExtractPartitionsReleasesCurrentBatchWhenCancelled(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "created_at", DataType: schema.TypeTimestamp},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readStarted := make(chan chan RecordBatchResult, 1)
+	read := func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
+		ch := make(chan RecordBatchResult)
+		readStarted <- ch
+		return ch, nil
+	}
+
+	records, err := ReadExtractPartitions(ctx, ReadOptions{
+		IncrementalKey:           "created_at",
+		IntervalStart:            &start,
+		IntervalEnd:              &end,
+		ExtractPartitionBy:       "created_at",
+		ExtractPartitionInterval: 24 * time.Hour,
+		Parallelism:              1,
+	}, tableSchema, read, nil)
+	if err != nil {
+		t.Fatalf("ReadExtractPartitions() error = %v", err)
+	}
+
+	var sourceRecords chan RecordBatchResult
+	select {
+	case sourceRecords = <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for partition read to start")
+	}
+
+	var firstReleases atomic.Int64
+	var secondReleases atomic.Int64
+	sourceRecords <- RecordBatchResult{Batch: &releaseCountingBatch{releases: &firstReleases}}
+
+	deadline := time.After(time.Second)
+	for len(records) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for output buffer to fill")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	cancel()
+	sourceRecords <- RecordBatchResult{Batch: &releaseCountingBatch{releases: &secondReleases}}
+	close(sourceRecords)
+
+	deadline = time.After(time.Second)
+	for secondReleases.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for cancelled batch release")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	result := <-records
+	releaseRecordBatchResult(result)
+	for result := range records {
+		releaseRecordBatchResult(result)
+	}
+
+	if got := firstReleases.Load(); got != 1 {
+		t.Fatalf("forwarded batch release count = %d, want 1 after test consumer release", got)
+	}
+	if got := secondReleases.Load(); got != 1 {
+		t.Fatalf("cancelled batch release count = %d, want 1", got)
+	}
+}
+
+type releaseCountingBatch struct {
+	releases *atomic.Int64
+}
+
+func (b *releaseCountingBatch) MarshalJSON() ([]byte, error) {
+	return []byte("null"), nil
+}
+
+func (b *releaseCountingBatch) Release() {
+	b.releases.Add(1)
+}
+
+func (b *releaseCountingBatch) Retain() {}
+
+func (b *releaseCountingBatch) Schema() *arrow.Schema {
+	return nil
+}
+
+func (b *releaseCountingBatch) NumRows() int64 {
+	return 0
+}
+
+func (b *releaseCountingBatch) NumCols() int64 {
+	return 0
+}
+
+func (b *releaseCountingBatch) Columns() []arrow.Array {
+	return nil
+}
+
+func (b *releaseCountingBatch) Column(i int) arrow.Array {
+	return nil
+}
+
+func (b *releaseCountingBatch) ColumnName(i int) string {
+	return ""
+}
+
+func (b *releaseCountingBatch) SetColumn(i int, col arrow.Array) (arrow.RecordBatch, error) {
+	return nil, nil
+}
+
+func (b *releaseCountingBatch) NewSlice(i, j int64) arrow.RecordBatch {
+	return b
 }
 
 func TestReadExtractPartitionsAutoNumeric(t *testing.T) {

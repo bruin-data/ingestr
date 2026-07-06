@@ -427,7 +427,7 @@ func (s *MSSQLSource) read(ctx context.Context, table string, tableSchema *schem
 }
 
 func (s *MSSQLSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	results := make(chan source.RecordBatchResult, 8)
+	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 8))
 
 	go func() {
 		defer close(results)
@@ -472,7 +472,7 @@ func (s *MSSQLSource) readQuery(ctx context.Context, table string, columns []sch
 }
 
 func (s *MSSQLSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.DefaultSQLTimeFormat)
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.NativeSQLTimeFormat)
 
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
@@ -641,9 +641,9 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 
 	var conditions []string
 	if opts.IncrementalKey != "" {
-		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteColumn, source.DefaultSQLTimeFormat)...)
+		conditions = append(conditions, source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteColumn, source.NativeSQLTimeFormat)...)
 	}
-	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteColumn, source.DefaultSQLTimeFormat)...)
+	conditions = append(conditions, source.SQLExtractPartitionConditions(opts, quoteColumn, source.NativeSQLTimeFormat)...)
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")

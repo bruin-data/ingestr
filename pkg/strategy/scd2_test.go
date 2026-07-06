@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -28,6 +29,23 @@ func TestSCD2Strategy_Validate_RequiresPrimaryKeys(t *testing.T) {
 	cfg.PrimaryKeys = []string{"id"}
 	err = strategy.Validate(cfg)
 	require.NoError(t, err)
+}
+
+func TestSCD2Strategy_Validate_RequiresIncrementalKeyWithExtractPartitioning(t *testing.T) {
+	strategy := &SCD2Strategy{}
+	cfg := &config.IngestConfig{
+		PrimaryKeys:              []string{"id"},
+		ExtractPartitionBy:       "created_at",
+		ExtractPartitionInterval: 24 * time.Hour,
+		IncrementalStrategy:      config.StrategySCD2,
+	}
+
+	err := strategy.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "incremental_key")
+
+	cfg.IncrementalKey = "updated_at"
+	require.NoError(t, strategy.Validate(cfg))
 }
 
 func TestSCD2Strategy_Execute_BasicFlow(t *testing.T) {
