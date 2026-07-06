@@ -87,7 +87,24 @@ tokens to the repository.**
 
 Create `pkg/source/<source>/` with `register.go` and `<source>.go`.
 
-Using existing sources as reference, implement:
+`register.go` self-registers the source in an `init()` by calling
+`registry.RegisterSource` with its URI scheme(s) and a constructor. Without this the source
+is unreachable from a URI even after `make generate`. Match the existing sources exactly:
+
+```go
+package <source>
+
+import "github.com/bruin-data/ingestr/internal/registry"
+
+func init() {
+	registry.RegisterSource(
+		[]string{"<scheme>"},
+		func() interface{} { return New<Source>Source() },
+	)
+}
+```
+
+In `<source>.go`, using existing sources as reference, implement:
 `constants`, `supportedTables`, the source struct, `New*Source()`, `HandlesIncrementality`,
 `Schemes`, `Connect`, `Close`, `parseURI`, `GetTable`, `isValidTable`, the `read`
 dispatcher, and `paginateAndSend`.
@@ -118,7 +135,7 @@ func (s *XxxSource) readTableName(ctx context.Context, opts source.ReadOptions, 
 Then run:
 
 ```bash
-make generate   # regenerates internal/registry/imports/imports.gen.go to include the new source
+make generate   # adds a blank import of the new package to internal/registry/imports/imports.gen.go so its init() runs
 make format
 ```
 
@@ -179,10 +196,14 @@ sub-types, field normalization). Fix discrepancies before continuing.
   returns IDs/counts that may exceed float64 precision.
 
 ### Parallel mode safety
-- [ ] **Only use `readParallel` for tables that support BOTH start AND end server-side
-  filters.** `readParallel` splits the time range into non-overlapping windows; if the API
-  rejects the end filter, workers fetch overlapping data and produce duplicates. Verify both
-  operators are accepted before wrapping a table; otherwise call the read function directly.
+Parallel reads are a **per-source pattern**, not a shared helper — there is no repo-wide
+`readParallel` to call. If a table benefits from splitting its time range across workers,
+implement a source-local `readParallel` (see `klaviyo`, or `stripe`'s `readParallelAdaptive`,
+for reference); most sources don't need one.
+- [ ] **Only add a parallel read for tables that support BOTH start AND end server-side
+  filters.** It splits the time range into non-overlapping windows; if the API rejects the
+  end filter, workers fetch overlapping data and produce duplicates. Verify both operators
+  are accepted before parallelizing a table; otherwise call the read function directly.
 - [ ] **Test parallel mode with wide date ranges** (1+ year) so the range actually splits
   into multiple workers, and compare row count against a single-worker run to confirm no
   duplicates.
