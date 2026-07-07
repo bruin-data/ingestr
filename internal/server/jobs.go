@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bruin-data/ingestr/pkg/mysqluri"
+	internaluri "github.com/bruin-data/ingestr/internal/uri"
 	"github.com/google/uuid"
 )
 
@@ -687,38 +686,7 @@ func (jm *JobManager) GetRun(ctx context.Context, id string) (*RunRecord, error)
 }
 
 func maskURI(uri string) string {
-	// mysqluri.ParseURL tolerates scheme characters url.Parse rejects (e.g. the
-	// underscore in ps_mysql) so those URIs are masked instead of fully redacted.
-	parsed, err := mysqluri.ParseURL(uri)
-	if err != nil {
-		return "<redacted-uri>"
-	}
-	if parsed.User != nil {
-		username := parsed.User.Username()
-		if _, hasPassword := parsed.User.Password(); hasPassword {
-			parsed.User = url.UserPassword(username, "xxxxx")
-		} else {
-			parsed.User = url.User(username)
-		}
-	}
-
-	query := parsed.Query()
-	for key := range query {
-		lower := strings.ToLower(key)
-		if strings.Contains(lower, "password") ||
-			strings.Contains(lower, "pass") ||
-			strings.Contains(lower, "credential") ||
-			strings.Contains(lower, "secret") ||
-			strings.Contains(lower, "token") ||
-			strings.Contains(lower, "key") ||
-			strings.Contains(lower, "private") ||
-			strings.Contains(lower, "sas") {
-			query.Set(key, "xxxxx")
-		}
-	}
-	parsed.RawQuery = query.Encode()
-
-	return parsed.String()
+	return internaluri.MaskURI(uri)
 }
 
 func omitURIArgs(args []string) []string {

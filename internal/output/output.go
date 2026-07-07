@@ -15,10 +15,12 @@ package output
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -39,6 +41,7 @@ const (
 	eventProgress = "progress"
 	eventEnd      = "end"
 	eventLog      = "log"
+	eventStats    = "stats"
 )
 
 var (
@@ -189,6 +192,38 @@ func EventEnd(status string, rows, batches int64, durationSec float64, err error
 		slog.Any("error", errVal),
 	)
 	terminalEmitted.Store(true)
+}
+
+// EventStats emits a single machine-readable run stats summary. JSON mode
+// writes a stats event to stdout; text mode writes key=value fields to stderr
+// so stdout remains compatible with existing command output.
+func EventStats(runID, source, destination string, durationSec float64, tables any) {
+	if mode == ModeJSON {
+		logger.LogAttrs(
+			context.Background(), slog.LevelInfo, "ingestion stats",
+			slog.String("event", eventStats),
+			slog.String("run_id", runID),
+			slog.String("source", source),
+			slog.String("destination", destination),
+			slog.Float64("duration_seconds", durationSec),
+			slog.Any("tables", tables),
+		)
+		return
+	}
+
+	tablesJSON, err := json.Marshal(tables)
+	if err != nil {
+		tablesJSON = []byte("null")
+	}
+	_, _ = fmt.Fprintf(
+		stderrW,
+		"ingestr_stats run_id=%s source=%s destination=%s duration_seconds=%.3f tables=%s\n",
+		strconv.Quote(runID),
+		strconv.Quote(source),
+		strconv.Quote(destination),
+		durationSec,
+		tablesJSON,
+	)
 }
 
 // EnsureTerminal emits a terminal end event only if none has been emitted yet.
