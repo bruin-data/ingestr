@@ -166,6 +166,9 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		if !job.Config.NoLoadTimestamp {
 			ti.Schema = withLoadTimestampColumn(ti.Schema)
 		}
+		if ti.Schema == nil {
+			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
+		}
 		st := &streamTableState{
 			destTable:      multiTableDestName(job.Destination, ti),
 			schema:         ti.Schema,

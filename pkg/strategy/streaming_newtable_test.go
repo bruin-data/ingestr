@@ -22,6 +22,33 @@ func newTableInfo(name string) source.SourceTableInfo {
 	}
 }
 
+type announcingMultiTableSource struct {
+	tables  []source.SourceTableInfo
+	records <-chan source.RecordBatchResult
+}
+
+func (s *announcingMultiTableSource) Schemes() []string { return nil }
+
+func (s *announcingMultiTableSource) Connect(ctx context.Context, uri string) error { return nil }
+
+func (s *announcingMultiTableSource) Close(ctx context.Context) error { return nil }
+
+func (s *announcingMultiTableSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *announcingMultiTableSource) HandlesIncrementality() bool { return false }
+
+func (s *announcingMultiTableSource) IsMultiTable() bool { return true }
+
+func (s *announcingMultiTableSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
+	return s.tables, nil
+}
+
+func (s *announcingMultiTableSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	return s.records, nil
+}
+
 func TestStreaming_NewTableAnnouncementPreparesAndRoutes(t *testing.T) {
 	dest := &fakeDestination{}
 	loop := newTestLoop(dest, StreamingOptions{
@@ -115,6 +142,35 @@ func TestStreaming_NewTablePrepareFailureAborts(t *testing.T) {
 	err := loop.run(context.Background(), records)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "public.products")
+}
+
+func TestStreaming_NewTableAnnouncementWithoutSchemaReturnsError(t *testing.T) {
+	records := make(chan source.RecordBatchResult, 1)
+	info := source.SourceTableInfo{Name: "public.products"}
+	records <- source.RecordBatchResult{TableName: "public.products", TableInfo: &info}
+	close(records)
+
+	src := &announcingMultiTableSource{
+		tables:  []source.SourceTableInfo{newTableInfo("public.users")},
+		records: records,
+	}
+	exec := NewStreamingExecutor(StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1,
+		Strategy:      config.StrategyMerge,
+	})
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{FlushInterval: time.Hour, FlushRecords: 1},
+		Source:         src,
+		Destination:    &fakeDestination{},
+		Tables:         src.tables,
+		TableDestNames: map[string]string{"public.users": "users"},
+	}
+
+	err := exec.ExecuteMultiTable(context.Background(), job)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public.products")
+	assert.Contains(t, err.Error(), "no schema")
 }
 
 func TestWithLoadTimestampColumn(t *testing.T) {
