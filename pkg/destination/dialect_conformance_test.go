@@ -345,6 +345,30 @@ func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
 	}
 }
 
+// Dialects backed by databases with a sized character type must honor
+// Column.MaxLength (e.g. from a --columns varchar(50) override) instead of
+// falling back to an unbounded string type.
+func TestAllDialects_TypeName_SizedString(t *testing.T) {
+	col := schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50}
+
+	expected := map[string]string{
+		"postgres":  "VARCHAR(50)",
+		"mysql":     "VARCHAR(50)",
+		"mssql":     "NVARCHAR(50)",
+		"synapse":   "NVARCHAR(50)",
+		"snowflake": "VARCHAR(50)",
+		"redshift":  "VARCHAR(50)",
+		"bigquery":  "STRING(50)",
+		"oracle":    "VARCHAR2(50 CHAR)",
+	}
+
+	for scheme, exp := range expected {
+		t.Run(scheme, func(t *testing.T) {
+			assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
+		})
+	}
+}
+
 func TestAllDialects_AddColumnSQL(t *testing.T) {
 	col := schema.Column{Name: "new_column", DataType: schema.TypeString, Nullable: true}
 

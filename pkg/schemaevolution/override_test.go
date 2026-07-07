@@ -1,6 +1,7 @@
 package schemaevolution
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -74,6 +75,69 @@ func TestParseColumnOverrides_DecimalWithPrecisionOnly(t *testing.T) {
 	assert.Equal(t, schema.TypeDecimal, amount.DataType)
 	assert.Equal(t, 18, amount.Precision)
 	assert.Equal(t, 0, amount.Scale)
+}
+
+func TestParseColumnOverrides_SizedString(t *testing.T) {
+	tests := []struct {
+		input     string
+		dataType  schema.DataType
+		maxLength int
+	}{
+		{"name:varchar(50)", schema.TypeString, 50},
+		{"name:string(255)", schema.TypeString, 255},
+		{"name:text(120)", schema.TypeString, 120},
+		// Unsized string types keep MaxLength at zero.
+		{"name:varchar", schema.TypeString, 0},
+		{"name:string", schema.TypeString, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			overrides, err := ParseColumnOverrides(tt.input)
+			require.NoError(t, err)
+			require.Len(t, overrides, 1)
+
+			ov, ok := overrides.Get(strings.SplitN(tt.input, ":", 2)[0])
+			assert.True(t, ok)
+			assert.Equal(t, tt.dataType, ov.DataType)
+			assert.Equal(t, tt.maxLength, ov.MaxLength)
+		})
+	}
+}
+
+func TestParseColumnOverrides_SizedStringInvalidLength(t *testing.T) {
+	_, err := ParseColumnOverrides("name:varchar(abc)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid length")
+}
+
+func TestParseColumnOverrides_SizedStringWithRename(t *testing.T) {
+	overrides, err := ParseColumnOverrides("full_name:varchar(120):name")
+	require.NoError(t, err)
+	require.Len(t, overrides, 1)
+
+	ov, ok := overrides.Get("name")
+	assert.True(t, ok)
+	assert.Equal(t, schema.TypeString, ov.DataType)
+	assert.Equal(t, 120, ov.MaxLength)
+	assert.Equal(t, "full_name", ov.RenameTo)
+}
+
+func TestColumnOverride_ApplyToColumn_WithMaxLength(t *testing.T) {
+	col := schema.Column{
+		Name:     "name",
+		DataType: schema.TypeString,
+	}
+
+	override := ColumnOverride{
+		Name:      "name",
+		DataType:  schema.TypeString,
+		MaxLength: 50,
+	}
+
+	result := override.ApplyToColumn(col)
+	assert.Equal(t, schema.TypeString, result.DataType)
+	assert.Equal(t, 50, result.MaxLength)
 }
 
 func TestParseColumnOverrides_AllTypes(t *testing.T) {
