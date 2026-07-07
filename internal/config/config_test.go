@@ -184,29 +184,27 @@ func TestIngestConfigValidate_DestTableDefault(t *testing.T) {
 		name      string
 		sourceURI string
 		srcTable  string
+		destTable string // pre-set destination; the server path sets this = source table
 		wantDest  string
 	}{
-		{"trello board filter trimmed", "trello://?api_key=k&token=t", "cards:abc,def", "cards"},
-		{"trello no filter unchanged", "trello://?api_key=k&token=t", "cards", "cards"},
-		{"non-trello colon preserved", "monday://?api_token=t", "items:123:linked", "items:123:linked"},
-		{"explicit dest untouched", "trello://?api_key=k&token=t", "cards:abc", ""},
+		{"trello filter, empty dest", "trello://?api_key=k&token=t", "cards:abc,def", "", "cards"},
+		{"trello filter, server-defaulted dest", "trello://?api_key=k&token=t", "cards:abc,def", "cards:abc,def", "cards"},
+		{"trello no filter", "trello://?api_key=k&token=t", "cards", "", "cards"},
+		{"non-trello colon preserved", "monday://?api_token=t", "items:123:linked", "", "items:123:linked"},
+		{"explicit different dest untouched", "trello://?api_key=k&token=t", "cards:abc", "main.custom", "main.custom"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.SourceURI = tt.sourceURI
 			cfg.SourceTable = tt.srcTable
+			cfg.DestTable = tt.destTable
 			cfg.DestURI = "duckdb://out.duckdb"
-			want := tt.wantDest
-			if tt.name == "explicit dest untouched" {
-				cfg.DestTable = "main.custom"
-				want = "main.custom"
-			}
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate() error = %v", err)
 			}
-			if cfg.DestTable != want {
-				t.Errorf("DestTable = %q, want %q", cfg.DestTable, want)
+			if cfg.DestTable != tt.wantDest {
+				t.Errorf("DestTable = %q, want %q", cfg.DestTable, tt.wantDest)
 			}
 		})
 	}
