@@ -172,8 +172,7 @@ func (d *OneLakeDestination) filesDir() string {
 // names cannot contain them.
 func parseTarget(table string) (writeMode, string, error) {
 	t := strings.Trim(table, "/")
-	if strings.HasPrefix(strings.ToLower(t), "files/") {
-		rel := t[len("files/"):]
+	if head, rel, _ := strings.Cut(t, "/"); strings.EqualFold(head, "files") {
 		if rel == "" {
 			return modeFiles, "", fmt.Errorf("dest-table %q is missing a path after \"Files/\"", table)
 		}
