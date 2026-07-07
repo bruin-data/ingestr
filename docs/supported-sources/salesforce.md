@@ -119,22 +119,68 @@ Salesforce source allows ingesting the following objects into separate tables:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 |-------|----|---------|--------------|---------|
+| `account` | id | SystemModstamp | merge | Individual or organization that interacts with your business. |
+| `account_history` | id | CreatedDate | merge | Tracks changes made to fields on Account records. |
+| `agent_work` | id | SystemModstamp | merge | Represents a work item routed to an agent through Omni-Channel. |
+| `campaign` | id | - | replace | Marketing initiative or project designed to achieve specific goals, such as generating leads. |
+| `campaign_history` | id | CreatedDate | merge | Tracks changes made to fields on Campaign records. |
+| `campaign_member` | id | - | replace | Association between a Contact or Lead and a Campaign. |
+| `campaign_member_status` | id | - | replace | Represents the possible member statuses for a Campaign. |
+| `case` | id | SystemModstamp | merge | A customer issue or problem, used for support and service tracking. |
+| `case_feed` | id | SystemModstamp | merge | Feed items (posts, comments, updates) associated with a Case. |
+| `case_history` | id | CreatedDate | merge | Tracks changes made to fields on Case records. |
+| `case_milestone` | id | - | replace | Represents a milestone (required step) in an entitlement process on a Case. |
+| `contact` | id | - | replace | An individual person associated with an account or organization. |
+| `contact_history` | id | CreatedDate | merge | Tracks changes made to fields on Contact records. |
+| `content_document` | id | - | replace | A document uploaded to a library in Salesforce Files or CRM Content. |
+| `content_version` | id | - | replace | A specific version of a document in Salesforce Files or CRM Content. |
+| `conversation` | id | LastModifiedDate | merge | Represents a conversation in messaging channels. |
+| `conversation_entry` | id | SystemModstamp | merge | An individual message or event within a Conversation. |
+| `conversation_participant` | id | LastModifiedDate | merge | A participant in a Conversation. |
+| `dashboard` | id | - | replace | Represents a dashboard, a visual snapshot of source report data. |
+| `dashboard_component` | id | - | replace | An individual component (chart, table, metric) on a Dashboard. |
+| `email_message` | id | SystemModstamp | merge | An email in Salesforce, typically associated with a Case or other record. |
+| `event` | id | SystemModstamp | merge | Used to track and manage calendar-based events, such as meetings, appointments, or calls. |
+| `event_relation` | id | - | replace | Represents people (invitees) or resources related to an Event. |
+| `feed_comment` | id | - | replace | A comment added to a feed item in Chatter. |
+| `folder` | id | - | replace | A folder used to organize documents, dashboards, reports, or email templates. |
+| `forecasting_quota` | id | - | replace | An individual user's or territory's forecast quota for a period. |
+| `group` | id | - | replace | A set of users, such as a public group or queue. |
+| `lead` | id | - | replace | Prospective customer/individual/org. that has shown interest in a company's products/services. |
+| `lead_history` | id | CreatedDate | merge | Tracks changes made to fields on Lead records. |
+| `opportunity` | id | SystemModstamp | merge | Represents a sales opportunity for a specific account or contact. |
+| `opportunity_contact_role` | id | - | replace | Represents the association between an Opportunity and a Contact. |
+| `opportunity_field_history` | id | CreatedDate | merge | Tracks changes made to fields on Opportunity records. |
+| `opportunity_history` | id | CreatedDate | merge | Tracks stage and status changes on Opportunity records. |
+| `opportunity_line_item` | id | SystemModstamp | merge | Represents individual line items or products associated with an Opportunity. |
+| `opportunity_split` | id | - | replace | Represents credit split between team members on an Opportunity. |
+| `opportunity_split_type` | id | - | replace | Represents the type of an Opportunity split, such as revenue or overlay. |
+| `permission_set` | id | - | replace | A set of permissions and settings that can be assigned to users. |
+| `permission_set_assignment` | id | - | replace | The assignment of a Permission Set to a user. |
+| `pricebook` | id | - | replace | Used to manage product pricing and create price books. |
+| `pricebook_entry` | id | - | replace | Represents a specific price for a product in a price book. |
+| `product` | id | - | replace | For managing and organizing your product-related data within the Salesforce ecosystem. |
+| `profile` | id | - | replace | Defines a user's permissions and access settings. |
+| `record_type` | id | - | replace | Represents a record type, which offers different business processes and page layouts per object. |
+| `report` | id | - | replace | Represents a report, a set of data returned in rows and columns. |
+| `service_presence_status` | id | - | replace | A presence status that can be assigned to agents in Omni-Channel. |
+| `survey_invitation` | id | - | replace | An invitation sent to a participant to complete a survey. |
+| `survey_question_score` | id | - | replace | Aggregated score data for a survey question. |
+| `survey_response` | id | - | replace | A participant's response to a survey. |
+| `survey_subject` | id | - | replace | The association between a survey and another record. |
+| `task` | id | SystemModstamp | merge | Used to track and manage various activities and tasks within the Salesforce platform. |
+| `task_relation` | id | SystemModstamp | merge | Represents people or other records related to a Task. |
+| `topic` | id | - | replace | A topic used to organize and discover content in Chatter. |
+| `topic_assignment` | id | - | replace | The assignment of a Topic to a record or feed item. |
+| `upgrades_history` | id | - | replace | Tracks changes made to fields on Upgrades records. |
 | `user` | - | - | replace | Refers to an individual who has access to a Salesforce org or instance. |
-| `user_role` | - | - | replace | A standard object that represents a role within the organization's hierarchy.|
-| `opportunity` | id | last_timestamp | merge | Represents a sales opportunity for a specific account or contact. |
-| `opportunity_line_item` | id | last_timestamp | merge | Represents individual line items or products associated with an Opportunity. |
-| `opportunity_contact_role` | id | last_timestamp | merge | Represents the association between an Opportunity and a Contact. |
-| `account` | id | last_timestamp | merge | Individual or organization that interacts with your business. |
-| `contact`  | id | - | replace | An individual person associated with an account or organization. |
-| `lead`  | id | - | replace | Prospective customer/individual/org. that has shown interest in a company's products/services. |
-| `campaign`  | id | - | replace | Marketing initiative or project designed to achieve specific goals, such as generating leads. |
-| `campaign_member`  | id | last_timestamp | merge  | Association between a Contact or Lead and a Campaign. |
-|  `product`  | id | - | replace  | For managing and organizing your product-related data within the Salesforce ecosystem. |
-|  `pricebook`   | id | - | replace  | Used to manage product pricing and create price books. |
-|  `pricebook_entry`   | id | - | replace  | Represents a specific price for a product in a price book. |
-|  `task`   | id | last_timestamp | merge | Used to track and manage various activities and tasks within the Salesforce platform.  |
-|  `event`   | id | last_timestamp | merge | Used to track and manage calendar-based events, such as meetings, appointments, or calls. |
-|  `custom:<custom_object_name>`   | - | - | replace | Track and store data that’s unique to your organization. For more information about custom objects in Salesforce, read [here](https://developer.salesforce.com/docs/atlas.en-us.object_reference.meta/object_reference/sforce_api_objects_custom_objects.htm)|
+| `user_history` | id | CreatedDate | merge | Tracks changes made to fields on User records. |
+| `user_role` | - | - | replace | A standard object that represents a role within the organization's hierarchy. |
+| `user_service_presence` | id | SystemModstamp | merge | Represents an agent's presence status in Omni-Channel, used for tracking availability. |
+| `voice_call` | id | SystemModstamp | merge | Represents a phone call made or received through Service Cloud Voice. |
+| `voice_call_feed` | id | SystemModstamp | merge | Feed items associated with a Voice Call. |
+| `voice_call_recording` | id | SystemModstamp | merge | Represents the recording of a Voice Call. |
+| `custom:<custom_object_name>` | - | - | replace | Track and store data that's unique to your organization. For more information about custom objects in Salesforce, read [here](https://developer.salesforce.com/docs/atlas.en-us.object_reference.meta/object_reference/sforce_api_objects_custom_objects.htm) |
 
 Use these as `--source-table` parameters in the `ingestr ingest` command.
 
@@ -167,4 +213,4 @@ ingestr ingest \
 ```
 
 > [!WARNING]
-> Salesforce API limits may affect the frequency and volume of data ingestion. Incremental loading is supported for objects with the `SystemModstamp` field, but some objects may require full-refresh loads. This is indicated by `mode` in the tables above. Tables with mode `replace` don't support incremental loads, while the ones with `merge` do.
+> Salesforce API limits may affect the frequency and volume of data ingestion. Incremental loading is supported for objects with a timestamp field such as `SystemModstamp`, `CreatedDate`, or `LastModifiedDate`, but some objects require full-refresh loads. This is indicated by the strategy in the table above: tables with strategy `replace` don't support incremental loads, while the ones with `merge` do.
