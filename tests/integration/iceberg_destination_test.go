@@ -609,3 +609,70 @@ func joinIcebergObjectPrefix(parts ...string) string {
 	}
 	return strings.Join(joined, "/") + "/"
 }
+
+// TestIcebergCommitTableUsesURICredentials guards apache/iceberg-go#1167: the
+// commit-path FileIO must use the catalog's s3.* creds so URI-only S3 writes work.
+// If a future iceberg-go bump regresses this, the write fails with
+// "Invalid region: region was not a valid DNS name" and this test catches it.
+func TestIcebergCommitTableUsesURICredentials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	clearAWSEnvForURIOnlyTest(t)
+
+	ctx := context.Background()
+
+	minio := getMinioEnv(t)
+	client := createMinioClient(t, minio.endpoint)
+	bucket := "iceberg-" + uniqueSuffix()
+	createIcebergBucket(t, ctx, client, bucket)
+
+	destURI := icebergSQLMinioDestinationURI(t, minio.endpoint, bucket)
+	namespace := "it_" + uniqueSuffix()
+	tableName := namespace + ".events"
+
+	rows := writeIcebergJSONL(t, "commit_table_creds.jsonl",
+		`{"id":1,"name":"alpha"}`,
+		`{"id":2,"name":"bravo"}`,
+	)
+	// replace exercises create + the overwrite-commit metadata write (CommitTable).
+	// If CommitTable doesn't get the catalog's s3.* props, this fails with
+	// "Invalid region" because the commit's PutObject has no credentials.
+	runIcebergPipeline(t, ctx, rows, destURI, tableName, ingestconfig.StrategyReplace)
+
+	// The commit produced a valid, queryable snapshot from the URI creds alone.
+	summary := loadIcebergTableSummary(t, ctx, destURI, tableName)
+	assert.EqualValues(t, 2, summary.rows)
+
+	// ...and the committed metadata + data landed in S3.
+	tablePrefix := joinIcebergObjectPrefix("", namespace, "events")
+	assert.Greater(t, countMinioObjects(t, ctx, client, bucket, tablePrefix+"data/"), 0)
+	assert.Greater(t, countMinioObjects(t, ctx, client, bucket, tablePrefix+"metadata/"), 0)
+}
+
+// clearAWSEnvForURIOnlyTest removes ambient AWS credential/region/endpoint inputs
+// and points the SDK config files at nonexistent paths, so the destination URI is
+// the only possible source of S3 credentials. Originals are restored on cleanup.
+func clearAWSEnvForURIOnlyTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN", "AWS_S3_ENDPOINT", "AWS_PROFILE",
+	} {
+		orig, had := os.LookupEnv(key)
+		require.NoError(t, os.Unsetenv(key))
+		t.Cleanup(func() {
+			if had {
+				_ = os.Setenv(key, orig)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	// Block ambient ~/.aws config and disable the IMDS probe so a regression fails
+	// fast with the credential error instead of hanging on 169.254.169.254.
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "no-credentials"))
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "no-config"))
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+}
