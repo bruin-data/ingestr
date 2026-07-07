@@ -25,6 +25,8 @@ The **mode and table** come from `--dest-table`, mirroring OneLake's path layout
 - `Files/<path>` → raw Parquet files
 - a bare name with no prefix defaults to `Tables/`
 
+For Delta tables, `.` and `/` are interchangeable separators and the leading `Tables` segment is optional, so `users`, `schema.name`, `Tables.schema.name` and `Tables/schema/name` are all valid (the last two are equivalent). Period-separated names are convenient because Fabric table and schema names cannot contain a period. Files targets must use the explicit `Files/<path>` form — periods there are left untouched so file extensions are preserved.
+
 The final object path is:
 `https://onelake.dfs.fabric.microsoft.com/<workspace>/<lakehouse>.Lakehouse/<Tables|Files>/<rest>`
 
