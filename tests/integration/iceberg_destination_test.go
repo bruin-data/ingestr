@@ -609,3 +609,61 @@ func joinIcebergObjectPrefix(parts ...string) string {
 	}
 	return strings.Join(joined, "/") + "/"
 }
+
+// TestIcebergDestinationCredentialsFromURIOnly is a regression guard: an S3-backed
+// Iceberg write must succeed with credentials supplied ONLY in the destination URI.
+// The other Iceberg tests set AWS_* via setIcebergMinioEnv, which would mask a
+// regression where the write path ignores the URI's s3.* credentials.
+func TestIcebergDestinationCredentialsFromURIOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	clearAWSEnvForURIOnlyTest(t)
+
+	ctx := context.Background()
+
+	minio := getMinioEnv(t)
+	client := createMinioClient(t, minio.endpoint)
+	bucket := "iceberg-" + uniqueSuffix()
+	createIcebergBucket(t, ctx, client, bucket)
+
+	destURI := icebergSQLMinioDestinationURI(t, minio.endpoint, bucket)
+	namespace := "it_" + uniqueSuffix()
+	tableName := namespace + ".events"
+
+	rows := writeIcebergJSONL(t, "uri_only.jsonl",
+		`{"id":1,"name":"alpha"}`,
+		`{"id":2,"name":"bravo"}`,
+	)
+	runIcebergPipeline(t, ctx, rows, destURI, tableName, ingestconfig.StrategyReplace)
+
+	// Data + metadata landed in S3 using only the URI credentials.
+	tablePrefix := joinIcebergObjectPrefix("", namespace, "events")
+	assert.Greater(t, countMinioObjects(t, ctx, client, bucket, tablePrefix+"data/"), 0)
+	assert.Greater(t, countMinioObjects(t, ctx, client, bucket, tablePrefix+"metadata/"), 0)
+}
+
+// clearAWSEnvForURIOnlyTest removes every AWS_* input and points the SDK's config
+// files at nonexistent paths, so the destination URI is the only possible source
+// of S3 credentials/region. Originals are restored on cleanup.
+func clearAWSEnvForURIOnlyTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN", "AWS_S3_ENDPOINT", "AWS_EC2_METADATA_DISABLED", "AWS_PROFILE",
+		"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+	} {
+		orig, had := os.LookupEnv(key)
+		require.NoError(t, os.Unsetenv(key))
+		t.Cleanup(func() {
+			if had {
+				_ = os.Setenv(key, orig)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	require.NoError(t, os.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "no-credentials")))
+	require.NoError(t, os.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "no-config")))
+}
