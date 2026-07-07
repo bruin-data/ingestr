@@ -126,6 +126,19 @@ func (r *MultiTableReplicator) Close(ctx context.Context) error {
 	return nil
 }
 
+// releasePending drops batches decoded but not yet emitted. Used when a
+// streaming rebuild abandons this replicator: the slot's confirmed position is
+// below these transactions (commit tokens never advance past pending data), so
+// the restarted stream re-decodes them.
+func (r *MultiTableReplicator) releasePending() {
+	for _, b := range r.pendingBatches {
+		if b.Batch != nil {
+			b.Batch.Release()
+		}
+	}
+	r.pendingBatches = nil
+}
+
 func (r *MultiTableReplicator) CurrentLSN() pglogrepl.LSN {
 	return r.clientXLogPos
 }

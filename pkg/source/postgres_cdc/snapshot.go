@@ -26,6 +26,12 @@ type Snapshot struct {
 	tableSchema *schema.TableSchema
 	cdcConfig   CDCConfig
 	slotName    string
+
+	// noCommitToken suppresses CommitTokens on emitted batches. Backfill
+	// snapshots read via a temporary slot must set it: their consistent point is
+	// ahead of the main slot's position, so confirming it on the main slot would
+	// skip WAL that has not been streamed yet.
+	noCommitToken bool
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -189,10 +195,11 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	syncedAt := time.Now().UTC()
 
 	// In streaming mode, snapshot batches carry the snapshot's consistent-point
-	// LSN as a commit token. It is always safe to confirm: streaming begins from
-	// this LSN, so nothing earlier remains to be read.
+	// LSN as a commit token. It is always safe to confirm when the snapshot was
+	// taken on the main slot: streaming begins from this LSN, so nothing earlier
+	// remains to be read. Backfill snapshots (temporary slot) suppress it.
 	var commitToken any
-	if opts.Streaming {
+	if opts.Streaming && !s.noCommitToken {
 		commitToken = lsn
 	}
 

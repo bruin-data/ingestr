@@ -36,6 +36,12 @@ type RecordBatchResult struct {
 	// Committing a token via StreamCommitter acknowledges everything emitted up
 	// to and including the batch that carried it. Nil means no feedback needed.
 	CommitToken any
+
+	// TableInfo announces a table that appeared after the read started (e.g. a
+	// table created on the source mid-stream). Consumers that prepared their
+	// per-table state upfront use it to provision the destination before any
+	// batches for the table arrive. Batch may be nil on an announcement.
+	TableInfo *SourceTableInfo
 }
 
 // TableRequest contains user-provided configuration for table instantiation.
