@@ -10,21 +10,45 @@ import (
 )
 
 type ReadOptions struct {
-	IncrementalKey string
-	IntervalStart  *time.Time
-	IntervalEnd    *time.Time
-	PageSize       int
-	Limit          int
-	ExcludeColumns []string
-	Parallelism    int
-	Schema         *schema.TableSchema // Optional: if provided, Read will skip GetSchema call
-	CDCResumeLSN   string              // Optional: for CDC sources, resume from this LSN (skip snapshot)
-	CDCSlotSuffix  string              // Optional: suffix for auto-generated replication slot names (dest-aware)
-	FullRefresh    bool
-	Columns        string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
-	Streaming      bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
-	FlushInterval  time.Duration
-	FlushRecords   int
+	IncrementalKey                  string
+	IncrementalKeyDataType          schema.DataType
+	IntervalStart                   *time.Time
+	IntervalEnd                     *time.Time
+	ExtractPartitionBy              string
+	ExtractPartitionInterval        time.Duration
+	ExtractPartitionNumericInterval int64
+	ExtractPartitionAuto            bool
+	ExtractPartitionStart           *time.Time
+	ExtractPartitionEnd             *time.Time
+	ExtractPartitionNumericStart    *int64
+	ExtractPartitionNumericEnd      *int64
+	ExtractPartitionEndInclusive    bool
+	ExtractPartitionIsNull          bool
+	ExtractPartitionKind            ExtractPartitionKind
+	ExtractPartitionDataType        schema.DataType
+	RecordBatchBufferSize           int
+	PageSize                        int
+	Limit                           int
+	ExcludeColumns                  []string
+	Parallelism                     int
+	Schema                          *schema.TableSchema // Optional: if provided, Read will skip GetSchema call
+	CDCResumeLSN                    string              // Optional: for CDC sources, resume from this LSN (skip snapshot)
+	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
+	FullRefresh                     bool
+	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
+	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
+	FlushInterval                   time.Duration
+	FlushRecords                    int
+}
+
+func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
+	if opts.RecordBatchBufferSize > 0 {
+		return opts.RecordBatchBufferSize
+	}
+	if defaultSize < 0 {
+		return 0
+	}
+	return defaultSize
 }
 
 type RecordBatchResult struct {
@@ -81,6 +105,10 @@ type PrimaryKeyUniquenessProvider interface {
 // to declare a partition key for the destination table.
 type PartitionedTable interface {
 	PartitionBy() string
+}
+
+type ExtractPartitioningProvider interface {
+	SupportsExtractPartitioning() bool
 }
 
 // SourceTableInfo contains metadata about a table in a multi-table source.

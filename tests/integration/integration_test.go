@@ -65,6 +65,138 @@ func TestPostgresToPostgres(t *testing.T) {
 	validatePostgresResults(t, ctx, destURI, destSchema, "users", 100)
 }
 
+func TestPostgresPartitionedExtraction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	sourceURI := sharedPostgresURI(t, "source")
+	destURI := sharedPostgresURI(t, "dest")
+	sourceSchema := uniqueSchemaName(t, "src")
+	destSchema := uniqueSchemaName(t, "dst")
+	ensurePostgresSchema(t, ctx, sourceURI, sourceSchema)
+	ensurePostgresSchema(t, ctx, destURI, destSchema)
+	t.Cleanup(func() {
+		dropPostgresSchema(t, ctx, sourceURI, sourceSchema)
+		dropPostgresSchema(t, ctx, destURI, destSchema)
+	})
+
+	sourceDB, err := sql.Open("pgx", sourceURI)
+	require.NoError(t, err)
+	defer func() { _ = sourceDB.Close() }()
+
+	_, err = sourceDB.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE %s.orders (
+			id INTEGER PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			amount INTEGER NOT NULL
+		)
+	`, sourceSchema))
+	require.NoError(t, err)
+
+	_, err = sourceDB.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s.orders (id, created_at, updated_at, amount) VALUES
+			(1, '2026-01-01 00:00:00', '2026-01-01 00:00:00', 10),
+			(2, '2026-01-07 23:59:59', '2026-01-07 23:59:59', 20),
+			(3, '2026-01-08 00:00:00', '2026-01-08 00:00:00', 30),
+			(4, '2026-01-14 23:59:59', '2026-01-14 23:59:59', 40),
+			(5, '2026-01-15 00:00:00', '2026-01-15 00:00:00', 50),
+			(6, '2026-01-21 23:59:59', '2026-01-21 23:59:59', 60),
+			(7, '2026-01-22 00:00:00', '2026-01-22 00:00:00', 70),
+			(8, '2025-12-15 00:00:00', '2026-01-05 00:00:00', 80),
+			(9, '2026-01-10 00:00:00', '2026-02-01 00:00:00', 90)
+	`, sourceSchema))
+	require.NoError(t, err)
+
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 22, 0, 0, 0, 0, time.UTC)
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = sourceURI
+	cfg.SourceTable = sourceSchema + ".orders"
+	cfg.DestURI = destURI
+	cfg.DestTable = destSchema + ".orders"
+	cfg.IncrementalStrategy = config.StrategyAppend
+	cfg.IncrementalKey = "updated_at"
+	cfg.IntervalStart = &start
+	cfg.IntervalEnd = &end
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.ExtractPartitionInterval = 7 * 24 * time.Hour
+	cfg.ExtractParallelism = 3
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	destDB, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = destDB.Close() }()
+
+	var count, distinctCount, endRows, oldCreatedRows, excludedRows int
+	err = destDB.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COUNT(DISTINCT id),
+			COUNT(*) FILTER (WHERE id = 7),
+			COUNT(*) FILTER (WHERE id = 8),
+			COUNT(*) FILTER (WHERE id = 9)
+		FROM %s.orders
+	`, destSchema)).Scan(&count, &distinctCount, &endRows, &oldCreatedRows, &excludedRows)
+	require.NoError(t, err)
+	assert.Equal(t, 8, count)
+	assert.Equal(t, 8, distinctCount)
+	assert.Equal(t, 1, endRows)
+	assert.Equal(t, 1, oldCreatedRows)
+	assert.Equal(t, 0, excludedRows)
+
+	numericCfg := *cfg
+	numericCfg.DestTable = destSchema + ".orders_by_id"
+	numericCfg.ExtractPartitionBy = "id"
+	numericCfg.ExtractPartitionInterval = 0
+	numericCfg.ExtractPartitionNumericInterval = 3
+	require.NoError(t, pipeline.New(&numericCfg).Run(ctx))
+
+	err = destDB.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COUNT(DISTINCT id),
+			COUNT(*) FILTER (WHERE id = 7),
+			COUNT(*) FILTER (WHERE id = 8),
+			COUNT(*) FILTER (WHERE id = 9)
+		FROM %s.orders_by_id
+	`, destSchema)).Scan(&count, &distinctCount, &endRows, &oldCreatedRows, &excludedRows)
+	require.NoError(t, err)
+	assert.Equal(t, 8, count)
+	assert.Equal(t, 8, distinctCount)
+	assert.Equal(t, 1, endRows)
+	assert.Equal(t, 1, oldCreatedRows)
+	assert.Equal(t, 0, excludedRows)
+
+	autoCfg := *cfg
+	autoCfg.DestTable = destSchema + ".orders_by_id_auto"
+	autoCfg.ExtractPartitionBy = "id"
+	autoCfg.ExtractPartitionInterval = 0
+	autoCfg.ExtractPartitionNumericInterval = 0
+	autoCfg.ExtractPartitionAuto = true
+	require.NoError(t, pipeline.New(&autoCfg).Run(ctx))
+
+	err = destDB.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COUNT(DISTINCT id),
+			COUNT(*) FILTER (WHERE id = 7),
+			COUNT(*) FILTER (WHERE id = 8),
+			COUNT(*) FILTER (WHERE id = 9)
+		FROM %s.orders_by_id_auto
+	`, destSchema)).Scan(&count, &distinctCount, &endRows, &oldCreatedRows, &excludedRows)
+	require.NoError(t, err)
+	assert.Equal(t, 8, count)
+	assert.Equal(t, 8, distinctCount)
+	assert.Equal(t, 1, endRows)
+	assert.Equal(t, 1, oldCreatedRows)
+	assert.Equal(t, 0, excludedRows)
+}
+
 // TestPostgresToPostgresWithMerge tests merge strategy
 func TestPostgresToPostgresWithMerge(t *testing.T) {
 	if testing.Short() {

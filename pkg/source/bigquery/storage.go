@@ -110,38 +110,67 @@ func createReadSession(ctx context.Context, client *storage.BigQueryReadClient,
 
 // buildRowFilter translates ReadOptions into BigQuery Storage API row filter syntax.
 func buildRowFilter(opts source.ReadOptions, tableSchema *schema.TableSchema) string {
-	if opts.IncrementalKey == "" {
-		return ""
-	}
-
-	// Find the column type for proper value formatting
-	var columnType schema.DataType
-	for _, col := range tableSchema.Columns {
-		if col.Name == opts.IncrementalKey {
-			columnType = col.DataType
-			break
-		}
-	}
-
 	var filters []string
 
 	// Add start filter
-	if opts.IntervalStart != nil {
-		startValue := formatFilterValue(opts.IntervalStart, columnType)
+	if opts.IncrementalKey != "" && opts.IntervalStart != nil {
+		startValue := formatFilterValue(*opts.IntervalStart, lookupColumnType(tableSchema, opts.IncrementalKey))
 		filters = append(filters, fmt.Sprintf("%s >= %s", quoteFilterIdentifier(opts.IncrementalKey), startValue))
 	}
 
 	// Add end filter
-	if opts.IntervalEnd != nil {
-		endValue := formatFilterValue(opts.IntervalEnd, columnType)
+	if opts.IncrementalKey != "" && opts.IntervalEnd != nil {
+		endValue := formatFilterValue(*opts.IntervalEnd, lookupColumnType(tableSchema, opts.IncrementalKey))
 		filters = append(filters, fmt.Sprintf("%s <= %s", quoteFilterIdentifier(opts.IncrementalKey), endValue))
 	}
+
+	filters = append(filters, buildExtractPartitionRowFilters(opts, tableSchema)...)
 
 	if len(filters) == 0 {
 		return ""
 	}
 
 	return strings.Join(filters, " AND ")
+}
+
+func buildExtractPartitionRowFilters(opts source.ReadOptions, tableSchema *schema.TableSchema) []string {
+	if opts.ExtractPartitionBy == "" {
+		return nil
+	}
+
+	partition := quoteFilterIdentifier(opts.ExtractPartitionBy)
+	if opts.ExtractPartitionIsNull {
+		return []string{fmt.Sprintf("%s IS NULL", partition)}
+	}
+	if opts.ExtractPartitionKind == source.ExtractPartitionKindNumeric {
+		return source.SQLNumericRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionNumericStart, opts.ExtractPartitionNumericEnd, opts.ExtractPartitionEndOperator(), quoteFilterIdentifier)
+	}
+
+	columnType := opts.ExtractPartitionDataType
+	if columnType == schema.TypeUnknown {
+		columnType = lookupColumnType(tableSchema, opts.ExtractPartitionBy)
+	}
+
+	var filters []string
+	if opts.ExtractPartitionStart != nil {
+		filters = append(filters, fmt.Sprintf("%s >= %s", partition, formatFilterValue(*opts.ExtractPartitionStart, columnType)))
+	}
+	if opts.ExtractPartitionEnd != nil {
+		filters = append(filters, fmt.Sprintf("%s %s %s", partition, opts.ExtractPartitionEndOperator(), formatFilterValue(*opts.ExtractPartitionEnd, columnType)))
+	}
+	return filters
+}
+
+func lookupColumnType(tableSchema *schema.TableSchema, columnName string) schema.DataType {
+	if tableSchema == nil {
+		return schema.TypeUnknown
+	}
+	for _, col := range tableSchema.Columns {
+		if strings.EqualFold(col.Name, columnName) {
+			return col.DataType
+		}
+	}
+	return schema.TypeUnknown
 }
 
 func quoteFilterIdentifier(name string) string {
@@ -151,19 +180,30 @@ func quoteFilterIdentifier(name string) string {
 // formatFilterValue formats a value for use in BigQuery Storage API row filters.
 func formatFilterValue(value interface{}, dataType schema.DataType) string {
 	switch dataType {
-	case schema.TypeTimestamp, schema.TypeTimestampTZ:
-		// Handle timestamp values
+	case schema.TypeTimestamp:
 		switch v := value.(type) {
 		case time.Time:
-			return fmt.Sprintf("\"%s\"", v.Format(time.RFC3339))
+			return fmt.Sprintf("\"%s\"", source.NativeSQLTimeFormat(v))
+		case string:
+			if t, err := source.SQLTimeValue(v); err == nil {
+				return fmt.Sprintf("\"%s\"", source.NativeSQLTimeFormat(t))
+			}
+			return fmt.Sprintf("\"%s\"", escapeFilterString(v))
+		case int64:
+			return fmt.Sprintf("%d", v)
+		}
+
+	case schema.TypeTimestampTZ:
+		switch v := value.(type) {
+		case time.Time:
+			return fmt.Sprintf("\"%s\"", v.Truncate(time.Microsecond).Format(time.RFC3339Nano))
 		case string:
 			// Try to parse as time, otherwise use as-is
-			if t, err := time.Parse(time.RFC3339, v); err == nil {
-				return fmt.Sprintf("\"%s\"", t.Format(time.RFC3339))
+			if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+				return fmt.Sprintf("\"%s\"", t.Truncate(time.Microsecond).Format(time.RFC3339Nano))
 			}
-			return fmt.Sprintf("\"%s\"", v)
+			return fmt.Sprintf("\"%s\"", escapeFilterString(v))
 		case int64:
-			// Unix timestamp
 			return fmt.Sprintf("%d", v)
 		}
 

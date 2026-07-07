@@ -13,6 +13,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
@@ -89,6 +90,36 @@ func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resume cursors") {
 		t.Fatalf("expected resume cursor error, got %v", err)
+	}
+}
+
+func TestValidateExtractPartitionSupportAllowsDifferentIncrementalKey(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.IncrementalKey = "updated_at"
+
+	table := &source.DynamicSourceTable{
+		TableName:                        "orders",
+		TableSupportsExtractPartitioning: true,
+	}
+
+	if err := validateExtractPartitionSupport(cfg, table); err != nil {
+		t.Fatalf("expected different keys to pass validation, got %v", err)
+	}
+}
+
+func TestValidateExtractPartitionSupportAllowsMatchingIncrementalKey(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.IncrementalKey = "CREATED_AT"
+
+	table := &source.DynamicSourceTable{
+		TableName:                        "orders",
+		TableSupportsExtractPartitioning: true,
+	}
+
+	if err := validateExtractPartitionSupport(cfg, table); err != nil {
+		t.Fatalf("expected matching keys to pass validation, got %v", err)
 	}
 }
 

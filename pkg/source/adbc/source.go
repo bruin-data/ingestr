@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -120,11 +121,12 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 
 	tableName := req.Name
 	return &source.DynamicSourceTable{
-		TableName:           tableName,
-		TablePrimaryKeys:    pks,
-		TableIncrementalKey: req.IncrementalKey,
-		TableStrategy:       strategy,
-		KnownSchema:         true,
+		TableName:                        tableName,
+		TablePrimaryKeys:                 pks,
+		TableIncrementalKey:              req.IncrementalKey,
+		TableStrategy:                    strategy,
+		TableSupportsExtractPartitioning: true,
+		KnownSchema:                      true,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil
 		},
@@ -429,23 +431,6 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 	startTotal := time.Now()
 	config.Debug("[%s] Starting read from %s", s.dialect.Name(), table)
 
-	// Check if dialect supports native storage API reading
-	if storageReader, ok := s.dialect.(StorageReader); ok {
-		config.Debug("[%s] Using Storage API for data read", s.dialect.Name())
-
-		// Ensure schema is in opts for storage reader
-		optsWithSchema := opts
-		optsWithSchema.Schema = tableSchema
-
-		results, err := storageReader.ReadWithStorageAPI(ctx, table, optsWithSchema)
-		if err != nil {
-			// Fall back to SQL-based reading if Storage API fails
-			config.Debug("[%s] Storage API failed (%v), falling back to SQL-based reading", s.dialect.Name(), err)
-		} else {
-			return results, nil
-		}
-	}
-
 	// Existing SQL-based read path (unchanged)
 	columns := FilterColumns(tableSchema.Columns, opts.ExcludeColumns)
 	arrowSchema := BuildArrowSchema(columns)
@@ -455,7 +440,29 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 		batchSize = 100000
 	}
 
-	results := make(chan source.RecordBatchResult, 8)
+	storageReader, hasStorageReader := s.dialect.(StorageReader)
+	read := func(ctx context.Context, readOpts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+		if hasStorageReader {
+			config.Debug("[%s] Using Storage API for data read", s.dialect.Name())
+			optsWithSchema := readOpts
+			optsWithSchema.Schema = tableSchema
+			results, err := storageReader.ReadWithStorageAPI(ctx, table, optsWithSchema)
+			if err == nil {
+				return results, nil
+			}
+			config.Debug("[%s] Storage API failed (%v), falling back to SQL-based reading", s.dialect.Name(), err)
+		}
+		return s.readQuery(ctx, table, columns, arrowSchema, batchSize, startTotal, readOpts)
+	}
+	discover := func(ctx context.Context, readOpts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+		return s.discoverExtractPartitionBounds(ctx, table, readOpts)
+	}
+
+	return source.ReadExtractPartitions(ctx, opts, tableSchema, read, discover)
+}
+
+func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 8))
 
 	go func() {
 		defer close(results)
@@ -503,4 +510,18 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 	}()
 
 	return results, nil
+}
+
+func (s *ADBCSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, s.dialect.QuoteIdentifier, func(name string) string {
+		return name
+	}, source.DefaultSQLTimeFormat)
+	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
+
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }

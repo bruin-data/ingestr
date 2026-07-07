@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,6 +134,16 @@ func IngestCommand() *cli.Command {
 				Value:   5,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
+			&cli.StringFlag{
+				Name:    "extract-partition-by",
+				Usage:   "The source date/time or integer column used to split bounded extraction into parallel windows",
+				Sources: cli.EnvVars("EXTRACT_PARTITION_BY", "INGESTR_EXTRACT_PARTITION_BY"),
+			},
+			&cli.StringFlag{
+				Name:    "extract-partition-interval",
+				Usage:   "The width for each extract partition window: duration (1h, 7d), integer step (10000), or auto. Defaults to auto when extract-partition-by is set",
+				Sources: cli.EnvVars("EXTRACT_PARTITION_INTERVAL", "INGESTR_EXTRACT_PARTITION_INTERVAL"),
+			},
 			&cli.IntFlag{
 				Name:    "sql-limit",
 				Usage:   "The limit to use when fetching data from the source",
@@ -254,6 +266,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
+	cfg.ExtractPartitionBy = c.String("extract-partition-by")
 	cfg.SQLLimit = int(c.Int("sql-limit"))
 	cfg.SQLExcludeColumns = c.StringSlice("sql-exclude-columns")
 	cfg.Columns = c.String("columns")
@@ -306,6 +319,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 			return fmt.Errorf("invalid interval-end: %w", err)
 		}
 		cfg.IntervalEnd = &t
+	}
+
+	if err := applyExtractPartitionInterval(cfg, c.String("extract-partition-interval")); err != nil {
+		return err
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -378,4 +395,86 @@ func parseDateTime(s string) (time.Time, error) {
 	}
 
 	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
+}
+
+func parseExtractPartitionInterval(s string) (time.Duration, int64, bool, error) {
+	value := strings.TrimSpace(strings.ToLower(s))
+	if value == "" {
+		return 0, 0, false, fmt.Errorf("cannot be empty")
+	}
+	if value == "auto" {
+		return 0, 0, true, nil
+	}
+
+	if numericInterval, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if numericInterval <= 0 {
+			return 0, 0, false, fmt.Errorf("must be positive")
+		}
+		return 0, numericInterval, false, nil
+	}
+
+	var duration time.Duration
+	switch {
+	case strings.HasSuffix(value, "d"):
+		parsed, err := parseBoundedDurationMultiple(strings.TrimSuffix(value, "d"), 24*time.Hour)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		duration = parsed
+	case strings.HasSuffix(value, "w"):
+		parsed, err := parseBoundedDurationMultiple(strings.TrimSuffix(value, "w"), 7*24*time.Hour)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		duration = parsed
+	default:
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		duration = parsed
+	}
+
+	if duration <= 0 {
+		return 0, 0, false, fmt.Errorf("must be positive")
+	}
+	return duration, 0, false, nil
+}
+
+func parseBoundedDurationMultiple(raw string, unit time.Duration) (time.Duration, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("must be positive")
+	}
+
+	const maxDuration = time.Duration(1<<63 - 1)
+	if value > float64(maxDuration)/float64(unit) {
+		return 0, fmt.Errorf("duration overflows time.Duration")
+	}
+	duration := time.Duration(value * float64(unit))
+	if duration <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return duration, nil
+}
+
+func applyExtractPartitionInterval(cfg *config.IngestConfig, raw string) error {
+	if raw == "" {
+		if strings.TrimSpace(cfg.ExtractPartitionBy) != "" {
+			cfg.ExtractPartitionAuto = true
+		}
+		return nil
+	}
+
+	duration, numericInterval, auto, err := parseExtractPartitionInterval(raw)
+	if err != nil {
+		return fmt.Errorf("invalid extract-partition-interval: %w", err)
+	}
+	cfg.ExtractPartitionInterval = duration
+	cfg.ExtractPartitionNumericInterval = numericInterval
+	cfg.ExtractPartitionAuto = auto
+	return nil
 }

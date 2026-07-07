@@ -91,15 +91,19 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		IntervalEnd:    job.Config.IntervalEnd,
-		PageSize:       job.Config.PageSize,
-		Limit:          job.Config.SQLLimit,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		FullRefresh:    job.Config.FullRefresh,
+		IncrementalKey:                  job.Config.IncrementalKey,
+		IntervalStart:                   job.Config.IntervalStart,
+		IntervalEnd:                     job.Config.IntervalEnd,
+		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
+		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
+		PageSize:                        job.Config.PageSize,
+		Limit:                           job.Config.SQLLimit,
+		ExcludeColumns:                  job.Config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		Schema:                          job.SourceSchema,
+		FullRefresh:                     job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)
@@ -163,15 +167,19 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		IntervalEnd:    job.Config.IntervalEnd,
-		PageSize:       job.Config.PageSize,
-		Limit:          job.Config.SQLLimit,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		FullRefresh:    job.Config.FullRefresh,
+		IncrementalKey:                  job.Config.IncrementalKey,
+		IntervalStart:                   job.Config.IntervalStart,
+		IntervalEnd:                     job.Config.IntervalEnd,
+		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
+		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
+		PageSize:                        job.Config.PageSize,
+		Limit:                           job.Config.SQLLimit,
+		ExcludeColumns:                  job.Config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		Schema:                          job.SourceSchema,
+		FullRefresh:                     job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)
