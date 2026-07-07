@@ -85,8 +85,12 @@ func TestParseTarget(t *testing.T) {
 		{"tables/schema/users", modeTables, "schema/users"},
 		{"Files/exports/users", modeFiles, "exports/users"},
 		{"FILES/raw", modeFiles, "raw"},
+		{"Files/data.parquet", modeFiles, "data.parquet"},
 		{"users", modeTables, "users"},
 		{"/Tables/users/", modeTables, "users"},
+		{"schema.name", modeTables, "schema/name"},
+		{"Tables.schema.name", modeTables, "schema/name"},
+		{"Tables.users", modeTables, "users"},
 	}
 	for _, c := range cases {
 		mode, path := parseTarget(c.table)

@@ -162,19 +162,24 @@ func (d *OneLakeDestination) filesDir() string {
 	return d.itemPath() + "/Files/" + strings.Trim(d.relPath, "/")
 }
 
-// parseTarget splits a dest-table into a write mode and relative path. A leading
-// "Tables/" or "Files/" segment selects the mode; anything else defaults to a
-// Delta table.
+// parseTarget splits a dest-table into a write mode and relative path. A "Files/"
+// prefix selects Files mode and takes the remainder verbatim (periods intact, so
+// file extensions survive). Everything else is a Delta table, where "." and "/"
+// are interchangeable separators and a leading "Tables" segment is optional — so
+// "schema.name", "Tables.schema.name" and "Tables/schema/name" all map to
+// "schema/name". Periods are unambiguous here because Fabric table and schema
+// names cannot contain them.
 func parseTarget(table string) (writeMode, string) {
 	t := strings.Trim(table, "/")
-	switch {
-	case strings.HasPrefix(strings.ToLower(t), "tables/"):
-		return modeTables, t[len("tables/"):]
-	case strings.HasPrefix(strings.ToLower(t), "files/"):
+	if strings.HasPrefix(strings.ToLower(t), "files/") {
 		return modeFiles, t[len("files/"):]
-	default:
-		return modeTables, t
 	}
+
+	parts := strings.FieldsFunc(t, func(r rune) bool { return r == '.' || r == '/' })
+	if len(parts) > 0 && strings.EqualFold(parts[0], "tables") {
+		parts = parts[1:]
+	}
+	return modeTables, strings.Join(parts, "/")
 }
 
 func (d *OneLakeDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
