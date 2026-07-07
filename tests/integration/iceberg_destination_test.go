@@ -640,7 +640,8 @@ func TestIcebergCommitTableUsesURICredentials(t *testing.T) {
 	namespace := "it_" + uniqueSuffix()
 	tableName := namespace + ".events"
 
-	rows := writeIcebergJSONL(t, "commit_table_creds.jsonl",
+	rows := writeIcebergJSONL(
+		t, "commit_table_creds.jsonl",
 		`{"id":1,"name":"alpha"}`,
 		`{"id":2,"name":"bravo"}`,
 	)
