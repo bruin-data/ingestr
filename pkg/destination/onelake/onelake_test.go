@@ -93,9 +93,15 @@ func TestParseTarget(t *testing.T) {
 		{"Tables.users", modeTables, "users"},
 	}
 	for _, c := range cases {
-		mode, path := parseTarget(c.table)
+		mode, path, err := parseTarget(c.table)
+		require.NoError(t, err, c.table)
 		assert.Equal(t, c.wantMode, mode, c.table)
 		assert.Equal(t, c.wantPath, path, c.table)
+	}
+
+	for _, bad := range []string{"", "Tables", "tables", "schema..users", ".users", "Files/"} {
+		_, _, err := parseTarget(bad)
+		assert.Error(t, err, bad)
 	}
 }
 
