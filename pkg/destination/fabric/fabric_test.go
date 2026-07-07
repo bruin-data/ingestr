@@ -336,7 +336,7 @@ func TestColumnsForRecordMapsByCaseInsensitiveName(t *testing.T) {
 	defer strArray.Release()
 	strBuilder.Release()
 
-	record := array.NewRecord(arrowSchema, []arrow.Array{idArray, strArray}, 1)
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{idArray, strArray}, 1)
 	defer record.Release()
 
 	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
