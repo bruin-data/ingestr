@@ -176,10 +176,13 @@ The tool accepts various URI schemes:
 ### Adding New Sources
 1. Implement the `Source` interface or create an ADBC Dialect
 2. Register in `internal/uri/registry.go` `init()` with URI schemes
-3. If using ADBC: implement Dialect with SQL templates and type mapper
-4. If native driver: handle connection, schema fetching, and batch reading directly
+3. Add the scheme to the server connector catalog in `internal/server/connectors.go` (`GetConnectors()`). This is a **separate, hand-maintained** list from the URI registry, and the test `TestConnectorCatalogCoversRegisteredSchemes` fails with `scheme "<x>" is missing from connector catalog` if you skip it. For a simple API source, add one line alphabetically, e.g. `genericURIConnector("trello", "Trello", []string{"trello"}, true, false)` (id, name, schemes, isSource, isDestination). Run `go test ./internal/server/...` to confirm.
+4. If using ADBC: implement Dialect with SQL templates and type mapper
+5. If native driver: handle connection, schema fetching, and batch reading directly
 
 **Schema-less sources** (like MongoDB): Implement `HasKnownSchema() bool` returning `false`. The pipeline will automatically use schema inference (`pkg/schemainfer/`) to derive the schema from the first batch of data. The source should still emit proper Arrow types — use `pkg/schema.JSONArrowType` for nested documents and arrays.
+
+**API sources — check "return everything" query params.** Many vendor endpoints default to returning only active/open/visible items (and sometimes a limited subset of types), silently dropping archived, closed, deleted, or non-default records. For every endpoint, check the API docs for a scope/filter param and pass the value that returns the full set — e.g. Trello `filter=all` (includes archived lists/cards *and* all action types; the default omits both), or others like `include_archived=true`, `state=all`, `status=all`, `deleted=true`. Verify empirically (archive/delete a record and confirm it still shows up); do not assume the default response is complete.
 
 ### Adding New Strategies
 1. Implement `WriteStrategy` interface in `pkg/strategy/`
