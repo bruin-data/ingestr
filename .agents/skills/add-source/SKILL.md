@@ -154,13 +154,9 @@ make generate   # adds a blank import of the new package to internal/registry/im
 make format
 ```
 
-**Also register the scheme in the server connector catalog.** `register.go` + `make generate`
-only wire up URI resolution. There is a *second, hand-maintained* catalog in
-`internal/server/connectors.go` (`GetConnectors()`) that the test
-`TestConnectorCatalogCoversRegisteredSchemes` enforces — skip it and that test fails with
-`scheme "<x>" is missing from connector catalog`. For a simple API source add one line
-alphabetically, e.g. `genericURIConnector("trello", "Trello", []string{"trello"}, true, false)`
-(id, name, schemes, isSource, isDestination). Run `go test ./internal/server/...` to confirm.
+Also add the scheme to the hand-maintained catalog in `internal/server/connectors.go`
+(`GetConnectors()`) — e.g. `genericURIConnector("trello", "Trello", []string{"trello"}, true, false)`.
+`register.go` alone only wires URI resolution; `TestConnectorCatalogCoversRegisteredSchemes` fails without it.
 
 ## 5. Post-implementation review checklist
 
@@ -171,16 +167,10 @@ sub-types, field normalization). Fix discrepancies before continuing.
 ### Correctness
 - [ ] **Matches the vendor API**: table names, endpoints, primary keys, incremental keys,
   strategies are correct per the docs.
-- [ ] **Registered in the server connector catalog**: the scheme is in
-  `internal/server/connectors.go` (`GetConnectors()`), not just `register.go`.
-  `go test ./internal/server/...` fails otherwise (`TestConnectorCatalogCoversRegisteredSchemes`).
-- [ ] **Checked "return everything" params (archived / deleted / all types)**: many endpoints
-  default to only active/open/visible items and a limited subset, silently dropping archived,
-  closed, deleted, or non-default records. For EVERY endpoint check the docs for a scope/filter
-  param and pass the value that returns the full set — e.g. Trello `filter=all` (includes
-  archived lists/cards AND all action types; the default omits both), or `include_archived=true`,
-  `state=all`, `status=all`, `deleted=true` elsewhere. Verify empirically (archive/delete a
-  record and confirm it still appears); do not assume the default response is complete.
+- [ ] **Return-everything params (archived / deleted / all types)**: many endpoints default to
+  only active/open items and a limited subset. For each endpoint pass the param that returns the
+  full set — e.g. Trello `filter=all` (default omits archived cards/lists and most action types),
+  or `include_archived` / `state=all` / `deleted=true` elsewhere — and verify by archiving a record.
 - [ ] **Every parsed URI param is actually used**: trace each param `parseURI` →
   credentials struct → source struct → API request. Parsed-but-never-sent is a bug.
 - [ ] **Optional param validation**: constrained optional params (e.g. environment must be
