@@ -120,6 +120,15 @@ func (c *IngestConfig) Validate() error {
 	}
 	if c.DestTable == "" {
 		c.DestTable = c.SourceTable
+		// Trello's board filter ("cards:boardId,...") scopes the same logical
+		// table, so default the destination to the base table name instead of
+		// the raw filtered string (which would be an invalid identifier). Other
+		// sources use ":" to select distinct sub-tables, so this is Trello-only.
+		if strings.HasPrefix(c.SourceURI, "trello://") {
+			if idx := strings.IndexByte(c.DestTable, ':'); idx >= 0 {
+				c.DestTable = c.DestTable[:idx]
+			}
+		}
 	}
 	if c.IntervalStart != nil && c.IntervalEnd != nil && !c.IntervalStart.Before(*c.IntervalEnd) {
 		return &ValidationError{

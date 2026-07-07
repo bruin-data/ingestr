@@ -52,7 +52,7 @@ ingestr ingest \
   --dest-table "public.cards"
 ```
 
-Pass an explicit `--dest-table` when using a board filter, otherwise the destination table name defaults to the full `cards:5f2a1c,60b1d2` string.
+When `--dest-table` is omitted, the destination defaults to the base table name (e.g. `cards`), dropping the board filter.
 
 The `boards` and `organizations` tables don't accept a board filter.
 
