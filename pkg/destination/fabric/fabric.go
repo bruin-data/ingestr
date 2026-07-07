@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	_ "github.com/microsoft/go-mssqldb"         // registers the "sqlserver" driver
+	mssqldb "github.com/microsoft/go-mssqldb"   // also registers the "sqlserver" driver
 	_ "github.com/microsoft/go-mssqldb/azuread" // registers the "azuresql" driver (Microsoft Entra auth)
 )
 
@@ -23,10 +24,20 @@ import (
 // at exactly 2100, so we batch to stay strictly below it.
 const maxParamLimit = 2100
 
+// Write modes selected via the fabric:// URI's write_strategy query parameter.
+// copy (the default) streams rows through the TDS bulk-copy path (mssqldb.CopyIn)
+// and is faster for wide or high-row tables; insert builds parameterised
+// INSERT ... VALUES batches.
+const (
+	writeModeInsert = "insert"
+	writeModeCopy   = "copy"
+)
+
 type FabricDestination struct {
-	db       *sql.DB
-	uri      string
-	database string
+	db        *sql.DB
+	uri       string
+	database  string
+	writeMode string
 }
 
 func NewFabricDestination() *FabricDestination {
@@ -38,7 +49,7 @@ func (d *FabricDestination) Schemes() []string {
 }
 
 func (d *FabricDestination) Connect(ctx context.Context, uri string) error {
-	connStr, database, err := uriToConnString(uri)
+	connStr, database, writeMode, err := uriToConnString(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse Fabric URI: %w", err)
 	}
@@ -63,7 +74,8 @@ func (d *FabricDestination) Connect(ctx context.Context, uri string) error {
 	d.db = db
 	d.uri = uri
 	d.database = database
-	config.Debug("[Fabric] Connected to warehouse: %s", database)
+	d.writeMode = writeMode
+	config.Debug("[Fabric] Connected to warehouse: %s (write mode: %s)", database, writeMode)
 	return nil
 }
 
@@ -76,14 +88,14 @@ func (d *FabricDestination) Connect(ctx context.Context, uri string) error {
 // id is supplied, otherwise ActiveDirectoryDefault; an explicit ?fedauth= always
 // wins (so e.g. ActiveDirectoryManagedIdentity or
 // ActiveDirectoryServicePrincipalAccessToken work without code changes).
-func uriToConnString(uri string) (string, string, error) {
+func uriToConnString(uri string) (string, string, string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	if scheme := strings.ToLower(u.Scheme); scheme != "fabric" {
-		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
+		return "", "", "", fmt.Errorf("unsupported scheme: %s", scheme)
 	}
 
 	host := u.Hostname()
@@ -105,6 +117,21 @@ func uriToConnString(uri string) (string, string, error) {
 
 	tenantID := query.Get("tenant_id")
 	query.Del("tenant_id")
+
+	// write_strategy selects the write path; it is ingestr-specific and must not
+	// leak into the SQL Server DSN handed to the driver.
+	writeMode := writeModeCopy
+	if ws := query.Get("write_strategy"); ws != "" {
+		switch strings.ToLower(ws) {
+		case writeModeInsert:
+			writeMode = writeModeInsert
+		case writeModeCopy:
+			writeMode = writeModeCopy
+		default:
+			return "", "", "", fmt.Errorf("invalid write_strategy %q: must be %q or %q", ws, writeModeInsert, writeModeCopy)
+		}
+	}
+	query.Del("write_strategy")
 
 	if query.Get("fedauth") == "" {
 		if clientID != "" {
@@ -147,7 +174,7 @@ func uriToConnString(uri string) (string, string, error) {
 
 	connURL.RawQuery = query.Encode()
 
-	return connURL.String(), database, nil
+	return connURL.String(), database, writeMode, nil
 }
 
 func (d *FabricDestination) Close(ctx context.Context) error {
@@ -249,7 +276,13 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 		batchNum++
 		startBatch := time.Now()
 
-		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+		var rows int64
+		var err error
+		if d.writeMode == writeModeCopy {
+			rows, err = d.writeRecordBatchCopy(ctx, result.Batch, opts.Table, opts.Schema)
+		} else {
+			rows, err = d.writeRecordBatchInsert(ctx, result.Batch, opts.Table)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -267,7 +300,7 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 	return nil
 }
 
-func (d *FabricDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
@@ -329,6 +362,99 @@ func (d *FabricDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	}
 
 	return numRows, nil
+}
+
+// writeRecordBatchCopy streams the batch through Fabric's TDS bulk-copy path
+// (mssqldb.CopyIn) instead of parameterised INSERT ... VALUES. It keeps the same
+// one-transaction-per-Arrow-batch boundary as the insert path.
+func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
+	numRows := record.NumRows()
+	numCols := int(record.NumCols())
+
+	if numRows == 0 || numCols == 0 {
+		return 0, nil
+	}
+
+	colNames := make([]string, numCols)
+	for i := 0; i < numCols; i++ {
+		colNames[i] = record.Schema().Field(i).Name
+	}
+	columnTypes := columnsForRecord(record, tableSchema)
+
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, mssqldb.CopyIn(quoteTable(table), mssqldb.BulkOptions{
+		RowsPerBatch: int(numRows),
+		Tablock:      true,
+	}, colNames...))
+	if err != nil {
+		return 0, fmt.Errorf("failed to prepare bulk copy: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	values := make([]interface{}, numCols)
+	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
+		for colIdx := 0; colIdx < numCols; colIdx++ {
+			value, err := extractCopyValue(record.Column(colIdx), int(rowIdx), columnTypes[colIdx])
+			if err != nil {
+				return rowIdx, fmt.Errorf("failed to convert column %s row %d: %w", colNames[colIdx], rowIdx, err)
+			}
+			values[colIdx] = value
+		}
+
+		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+			return rowIdx, fmt.Errorf("failed to bulk copy row %d: %w", rowIdx, err)
+		}
+	}
+
+	result, err := stmt.ExecContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to flush bulk copy: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = numRows
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	committed = true
+
+	return rowsAffected, nil
+}
+
+// columnsForRecord aligns the record's fields with the destination table schema
+// by case-insensitive name, so extractCopyValue can consult per-column metadata
+// (chiefly to convert UUID strings into mssqldb.UniqueIdentifier). Fields with no
+// matching schema column map to nil.
+func columnsForRecord(record arrow.RecordBatch, tableSchema *schema.TableSchema) []*schema.Column {
+	columns := make([]*schema.Column, int(record.NumCols()))
+	if tableSchema == nil {
+		return columns
+	}
+
+	byName := make(map[string]int, len(tableSchema.Columns))
+	for i, col := range tableSchema.Columns {
+		byName[strings.ToLower(col.Name)] = i
+	}
+
+	for i, field := range record.Schema().Fields() {
+		if idx, ok := byName[strings.ToLower(field.Name)]; ok {
+			columns[i] = &tableSchema.Columns[idx]
+		}
+	}
+	return columns
 }
 
 // SwapTable is intentionally unsupported for Fabric. SupportsAtomicSwap returns
@@ -829,4 +955,109 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 	default:
 		return arr.ValueStr(idx)
 	}
+}
+
+// extractCopyValue converts an Arrow value into the driver-native shape the TDS
+// bulk-copy path expects: booleans as bool, dates/timestamps/times as time.Time,
+// UUID strings (per the destination schema) as mssqldb.UniqueIdentifier, decimals
+// and nested arrays/structs as strings. This mirrors the SQL Server destination's
+// bulk-copy conversion and is deliberately separate from extractValue, which the
+// parameterised insert path still uses unchanged.
+func extractCopyValue(arr arrow.Array, idx int, col *schema.Column) (interface{}, error) {
+	if arr.IsNull(idx) {
+		return nil, nil
+	}
+
+	switch a := arr.(type) {
+	case *array.Boolean:
+		return a.Value(idx), nil
+	case *array.Int8:
+		return int32(a.Value(idx)), nil
+	case *array.Int16:
+		return int32(a.Value(idx)), nil
+	case *array.Int32:
+		return a.Value(idx), nil
+	case *array.Int64:
+		return a.Value(idx), nil
+	case *array.Uint8:
+		return int32(a.Value(idx)), nil
+	case *array.Uint16:
+		return int32(a.Value(idx)), nil
+	case *array.Uint32:
+		return int64(a.Value(idx)), nil
+	case *array.Uint64:
+		value := a.Value(idx)
+		if value > math.MaxInt64 {
+			return nil, fmt.Errorf("uint64 value %d overflows BIGINT", value)
+		}
+		return int64(value), nil
+	case *array.Float16:
+		return a.Value(idx).Float32(), nil
+	case *array.Float32:
+		return a.Value(idx), nil
+	case *array.Float64:
+		return a.Value(idx), nil
+	case *array.String:
+		return convertCopyStringValue(a.Value(idx), col)
+	case *array.LargeString:
+		return convertCopyStringValue(a.Value(idx), col)
+	case *array.Binary:
+		return a.Value(idx), nil
+	case *array.LargeBinary:
+		return a.Value(idx), nil
+	case *array.FixedSizeBinary:
+		return a.Value(idx), nil
+	case *array.Date32:
+		return a.Value(idx).ToTime(), nil
+	case *array.Date64:
+		return a.Value(idx).ToTime(), nil
+	case *array.Time32:
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time32Type).Unit), nil
+	case *array.Time64:
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time64Type).Unit), nil
+	case *array.Timestamp:
+		ts := a.Value(idx)
+		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit), nil
+	case *array.Decimal128:
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale)), nil
+	case *array.Decimal256:
+		return a.ValueStr(idx), nil
+	case array.ListLike:
+		return a.ValueStr(idx), nil
+	case *array.Struct:
+		return a.ValueStr(idx), nil
+	case array.ExtensionArray:
+		return extractCopyValue(a.Storage(), idx, col)
+	default:
+		return arr.ValueStr(idx), nil
+	}
+}
+
+func convertCopyStringValue(value string, col *schema.Column) (interface{}, error) {
+	if col == nil || col.DataType != schema.TypeUUID {
+		return value, nil
+	}
+
+	var uuid mssqldb.UniqueIdentifier
+	if err := uuid.Scan(value); err != nil {
+		return nil, fmt.Errorf("invalid UUID %q: %w", value, err)
+	}
+	return uuid, nil
+}
+
+// timeFromArrowTime renders an Arrow time-of-day value as a time.Time anchored at
+// the zero date, which the driver encodes as SQL Server's TIME type.
+func timeFromArrowTime(value int64, unit arrow.TimeUnit) time.Time {
+	var duration time.Duration
+	switch unit {
+	case arrow.Second:
+		duration = time.Duration(value) * time.Second
+	case arrow.Millisecond:
+		duration = time.Duration(value) * time.Millisecond
+	case arrow.Nanosecond:
+		duration = time.Duration(value) * time.Nanosecond
+	default:
+		duration = time.Duration(value) * time.Microsecond
+	}
+	return time.Date(1, 1, 1, int(duration/time.Hour), int(duration/time.Minute)%60, int(duration/time.Second)%60, int(duration%time.Second), time.UTC)
 }
