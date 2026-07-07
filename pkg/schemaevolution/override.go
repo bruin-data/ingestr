@@ -239,6 +239,9 @@ func parseColumnOverride(pair string) (ColumnOverride, error) {
 				if err != nil {
 					return ColumnOverride{}, fmt.Errorf("invalid length in '%s': %w", typeSpec, err)
 				}
+				if l <= 0 {
+					return ColumnOverride{}, fmt.Errorf("invalid length in '%s': must be positive", typeSpec)
+				}
 				override.MaxLength = l
 			}
 		}

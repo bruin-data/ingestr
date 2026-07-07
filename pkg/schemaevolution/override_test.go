@@ -106,9 +106,13 @@ func TestParseColumnOverrides_SizedString(t *testing.T) {
 }
 
 func TestParseColumnOverrides_SizedStringInvalidLength(t *testing.T) {
-	_, err := ParseColumnOverrides("name:varchar(abc)")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid length")
+	for _, spec := range []string{"name:varchar(abc)", "name:varchar(0)", "name:varchar(-5)"} {
+		t.Run(spec, func(t *testing.T) {
+			_, err := ParseColumnOverrides(spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid length")
+		})
+	}
 }
 
 func TestParseColumnOverrides_SizedStringWithRename(t *testing.T) {
