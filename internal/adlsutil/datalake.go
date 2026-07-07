@@ -23,6 +23,10 @@ const OneLakeDNSSuffix = ".dfs.fabric.microsoft.com"
 // OneLakeAccountName is the fixed storage account used by OneLake.
 const OneLakeAccountName = "onelake"
 
+// OneLakeManagedPrefixSegments is the number of path segments Fabric manages
+// before user-created folders begin, e.g. "<item>.Lakehouse/Tables".
+const OneLakeManagedPrefixSegments = 2
+
 // DataLakeClient is an ADLS Gen2 client that can talk to any DFS endpoint
 // (standard Azure storage or OneLake) by varying the DNS suffix. It bundles the
 // file/directory/filesystem client factories together with the upload, directory
@@ -78,7 +82,13 @@ func (c *DataLakeClient) pathURL(fileSystem, path string) (string, error) {
 // UploadBuffer writes data to fileSystem/path, creating parent directories first
 // and replacing the file if it already exists.
 func (c *DataLakeClient) UploadBuffer(ctx context.Context, fileSystem, path string, data []byte) error {
-	if err := c.EnsureDirectories(ctx, fileSystem, parentDir(path)); err != nil {
+	return c.UploadBufferSkippingPrefix(ctx, fileSystem, path, data, 0)
+}
+
+// UploadBufferSkippingPrefix writes data while treating the first
+// skipPrefixSegments path segments as existing managed directories.
+func (c *DataLakeClient) UploadBufferSkippingPrefix(ctx context.Context, fileSystem, path string, data []byte, skipPrefixSegments int) error {
+	if err := c.EnsureDirectoriesSkippingPrefix(ctx, fileSystem, parentDir(path), skipPrefixSegments); err != nil {
 		return err
 	}
 
@@ -104,22 +114,13 @@ func (c *DataLakeClient) UploadBuffer(ctx context.Context, fileSystem, path stri
 
 // EnsureDirectories creates each directory segment in dirPath if missing.
 func (c *DataLakeClient) EnsureDirectories(ctx context.Context, fileSystem, dirPath string) error {
-	dirPath = strings.Trim(dirPath, "/")
-	if dirPath == "" {
-		return nil
-	}
+	return c.EnsureDirectoriesSkippingPrefix(ctx, fileSystem, dirPath, 0)
+}
 
-	var current string
-	for _, part := range strings.Split(dirPath, "/") {
-		if part == "" {
-			continue
-		}
-		if current == "" {
-			current = part
-		} else {
-			current += "/" + part
-		}
-
+// EnsureDirectoriesSkippingPrefix creates directory segments after the managed
+// prefix. The skipped prefix must already exist.
+func (c *DataLakeClient) EnsureDirectoriesSkippingPrefix(ctx context.Context, fileSystem, dirPath string, skipPrefixSegments int) error {
+	for _, current := range directoryPrefixes(dirPath, skipPrefixSegments) {
 		pathURL, err := c.pathURL(fileSystem, current)
 		if err != nil {
 			return err
@@ -136,6 +137,36 @@ func (c *DataLakeClient) EnsureDirectories(ctx context.Context, fileSystem, dirP
 	}
 
 	return nil
+}
+
+func directoryPrefixes(dirPath string, skipPrefixSegments int) []string {
+	dirPath = strings.Trim(dirPath, "/")
+	if dirPath == "" {
+		return nil
+	}
+	if skipPrefixSegments < 0 {
+		skipPrefixSegments = 0
+	}
+
+	var current string
+	segmentsSeen := 0
+	prefixes := make([]string, 0)
+	for _, part := range strings.Split(dirPath, "/") {
+		if part == "" {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current += "/" + part
+		}
+		segmentsSeen++
+		if segmentsSeen <= skipPrefixSegments {
+			continue
+		}
+		prefixes = append(prefixes, current)
+	}
+	return prefixes
 }
 
 // Download reads the full contents of fileSystem/path into memory.

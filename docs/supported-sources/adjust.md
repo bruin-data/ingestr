@@ -71,6 +71,13 @@ ingestr ingest --source-uri 'adjust://?api_key=nr_123' \
 
 The existing `creatives:abc123` colon form (app token only) continues to work; `attribution_types` can only be set through the query parameter. For custom tables, pass `attribution_types` in the filters section instead.
 
+### Revenue cohort metrics
+
+The `campaigns` and `creatives` tables pull revenue by cohort window from D0 up to D120 (`all_revenue`, `ad_revenue`, and `revenue`, each at day 0, 1, 3, 7, 14, 21, 30, 60, 90, and 120). These are the cumulative (`_total_`) cohort variants defined in Adjust's [Datascape metrics glossary](https://help.adjust.com/en/article/datascape-metrics-glossary) (see also [How cohorts work](https://help.adjust.com/en/article/how-cohorts-work)); D120 is the maximum cohort day the Report Service API supports. These columns always appear in the destination with a fixed `decimal(38, 9)` type, but their values depend on the account and the age of the cohort:
+
+- A `dN` value only fills in once the cohort is at least `N` days old; recent days report `0`/null for the longer windows and fill in over time (this is what `lookback_days` re-fetches).
+- `ad_revenue_*` requires an ad-revenue integration on the account; `revenue_*`/`all_revenue_*` require purchase/revenue events. Accounts without these report `0`/null rather than dropping the column.
+
 ### Lookback days
 
 Adjust data may change going back, which means you'll need to change your start date to get the latest data. The `lookback_days` parameter allows you to specify how many days to go back when calculating the start date, and takes care of automatically updating the start date and getting the past data as well. It defaults to 30 days.
@@ -81,8 +88,8 @@ Adjust source allows ingesting data from various sources:
 | Table           | PK/Merge Key | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Events](https://dev.adjust.com/en/api/rs-api/events)        | id | –  |        replace     | Retrieves data for [events](https://dev.adjust.com/en/api/rs-api/events/) and event slugs.              |                                        |
-| [campaigns](https://dev.adjust.com/en/api/rs-api/reports) | day | –                | merge            | Retrieves data for a campaign, showing the app's revenue and network costs over multiple days. `Columns:` campaign, day, app, app_token, store_type, channel, country, network_cost, all_revenue_total_d0, ad_revenue_total_d0, revenue_total_d0, all_revenue_total_d1, ad_revenue_total_d1, revenue_total_d1, all_revenue_total_d3, ad_revenue_total_d3, revenue_total_d3, all_revenue_total_d7, ad_revenue_total_d7, revenue_total_d7, all_revenue_total_d14, ad_revenue_total_d14, revenue_total_d14, all_revenue_total_d21 |
-| [creatives](https://dev.adjust.com/en/api/rs-api/reports)   | day | -     | merge  | Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple days. `Columns:` campaign, day, app, app_token, store_type, channel, country, adgroup, creative, network_cost, all_revenue_total_d0, ad_revenue_total_d0, revenue_total_d0, all_revenue_total_d1, ad_revenue_total_d1, revenue_total_d1, all_revenue_total_d3, ad_revenue_total_d3, revenue_total_d3, all_revenue_total_d7, ad_revenue_total_d7, revenue_total_d7, all_revenue_total_d14, ad_revenue_total_d14, revenue_total_d14, all_revenue_total_d21 |
+| [campaigns](https://dev.adjust.com/en/api/rs-api/reports) | day | –                | merge            | Retrieves data for a campaign, showing the app's revenue and network costs over multiple cohort windows (D0–D120). `Columns:` campaign, day, app, app_token, store_type, channel, country, installs, network_cost, and `{all_revenue,ad_revenue,revenue}_total_d{0,1,3,7,14,21,30,60,90,120}` |
+| [creatives](https://dev.adjust.com/en/api/rs-api/reports)   | day | -     | merge  | Retrieves data for a creative assets, detailing the app's revenue and network costs across multiple cohort windows (D0–D120). `Columns:` campaign, day, app, app_token, store_type, channel, country, adgroup, creative, installs, network_cost, and `{all_revenue,ad_revenue,revenue}_total_d{0,1,3,7,14,21,30,60,90,120}` |
 | `custom`   | `configurable` | -     | merge  | Retrieves custom data based on the dimensions and metrics specified. Please refer to the `custom reports` section below for more information.
 
 #### Custom reports: `custom:<dimensions>:<metrics>[:<filters>]`

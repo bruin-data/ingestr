@@ -101,6 +101,7 @@ func TestPrepend_noStepOmitsStepKey(t *testing.T) {
 func TestTypeForStep(t *testing.T) {
 	cases := map[string]string{
 		StepExtract:      typeIngestrExtract,
+		StepCDCResume:    typeIngestrExtract,
 		StepLoad:         typeIngestrLoad,
 		StepDDL:          typeIngestrLoad,
 		StepEvolve:       typeIngestrLoad,
