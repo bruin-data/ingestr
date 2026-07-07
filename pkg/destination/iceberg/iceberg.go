@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 
@@ -53,6 +54,8 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 		return err
 	}
 
+	applyS3EnvFromProperties(cfg.Properties)
+
 	cat, err := icebergcatalog.Load(ctx, cfg.CatalogName, cfg.Properties)
 	if err != nil {
 		return fmt.Errorf("iceberg: failed to load catalog: %w", err)
@@ -63,6 +66,27 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 	d.prepared = make(map[string]preparedTable)
 	config.Debug("[ICEBERG] Connected catalog type=%s name=%s", cat.CatalogType(), cfg.CatalogName)
 	return nil
+}
+
+// applyS3EnvFromProperties bridges URI-parsed S3 creds into AWS SDK env, because
+// iceberg-go's write FileIO reads the default AWS chain, not the catalog's s3.* props.
+func applyS3EnvFromProperties(props iceberggo.Properties) {
+	setenvIfEmpty("AWS_REGION", props["s3.region"])
+	setenvIfEmpty("AWS_ACCESS_KEY_ID", props["s3.access-key-id"])
+	setenvIfEmpty("AWS_SECRET_ACCESS_KEY", props["s3.secret-access-key"])
+	setenvIfEmpty("AWS_SESSION_TOKEN", props["s3.session-token"])
+	setenvIfEmpty("AWS_S3_ENDPOINT", props["s3.endpoint"])
+	if props["s3.access-key-id"] != "" {
+		// Explicit keys were supplied; skip the slow EC2 metadata (IMDS) probe.
+		setenvIfEmpty("AWS_EC2_METADATA_DISABLED", "true")
+	}
+}
+
+func setenvIfEmpty(key, value string) {
+	if value == "" || os.Getenv(key) != "" {
+		return
+	}
+	_ = os.Setenv(key, value)
 }
 
 func (d *Destination) Close(ctx context.Context) error {
