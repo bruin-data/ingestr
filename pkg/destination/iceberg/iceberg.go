@@ -76,8 +76,9 @@ func applyS3EnvFromProperties(props iceberggo.Properties) {
 	setenvIfEmpty("AWS_SECRET_ACCESS_KEY", props["s3.secret-access-key"])
 	setenvIfEmpty("AWS_SESSION_TOKEN", props["s3.session-token"])
 	setenvIfEmpty("AWS_S3_ENDPOINT", props["s3.endpoint"])
-	if props["s3.access-key-id"] != "" {
-		// Explicit keys were supplied; skip the slow EC2 metadata (IMDS) probe.
+	if props["s3.access-key-id"] != "" && props["s3.secret-access-key"] != "" {
+		// Complete static keys supplied; skip the slow EC2 metadata (IMDS) probe.
+		// Partial keys must NOT disable IMDS, or instance-role fallback breaks.
 		setenvIfEmpty("AWS_EC2_METADATA_DISABLED", "true")
 	}
 }
