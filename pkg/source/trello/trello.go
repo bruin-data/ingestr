@@ -202,7 +202,8 @@ func (s *TrelloSource) read(ctx context.Context, table string, opts source.ReadO
 				err = s.readOrganizations(ctx, opts, results)
 			}
 		case "lists":
-			err = s.readPerBoard(ctx, boardIDs, "lists", "/boards/%s/lists", nil, opts, results)
+			// filter=all includes archived (closed) lists, not just open ones.
+			err = s.readPerBoard(ctx, boardIDs, "lists", "/boards/%s/lists", map[string]string{"filter": "all"}, opts, results)
 		case "checklists":
 			err = s.readPerBoard(ctx, boardIDs, "checklists", "/boards/%s/checklists", nil, opts, results)
 		case "labels":
@@ -393,7 +394,7 @@ func (s *TrelloSource) readMembers(ctx context.Context, explicit []string, opts 
 		default:
 		}
 
-		items, err := s.getArray(ctx, fmt.Sprintf("/boards/%s/members", boardID), nil)
+		items, err := s.getArray(ctx, fmt.Sprintf("/boards/%s/members", boardID), map[string]string{"filter": "all"})
 		if err != nil {
 			return fmt.Errorf("failed to fetch members for board %s: %w", boardID, err)
 		}
@@ -429,7 +430,8 @@ func (s *TrelloSource) readBoardCards(ctx context.Context, boardID string, opts 
 		default:
 		}
 
-		params := map[string]string{"limit": strconv.Itoa(maxPageSize)}
+		// filter=all includes archived (closed) cards, not just open ones.
+		params := map[string]string{"limit": strconv.Itoa(maxPageSize), "filter": "all"}
 		if before != "" {
 			params["before"] = before
 		}
@@ -480,7 +482,8 @@ func (s *TrelloSource) readBoardActions(ctx context.Context, boardID string, opt
 		default:
 		}
 
-		params := map[string]string{"limit": strconv.Itoa(maxPageSize)}
+		// filter=all captures every action type, not just the default subset.
+		params := map[string]string{"limit": strconv.Itoa(maxPageSize), "filter": "all"}
 		if before != "" {
 			params["before"] = before
 		}

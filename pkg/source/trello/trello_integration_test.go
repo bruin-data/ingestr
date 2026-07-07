@@ -124,9 +124,10 @@ func TestTrelloPipeline(t *testing.T) {
 			},
 		},
 		{
-			SourceTable:      "lists",
-			DestTable:        "main.trello_lists",
-			KeyColumn:        "id",
+			SourceTable: "lists",
+			DestTable:   "main.trello_lists",
+			KeyColumn:   "id",
+			// 3 = 2 open + 1 archived; verifies filter=all captures archived lists.
 			ExpectedRowCount: 3,
 			ExpectedSchema: []schema.Column{
 				{Name: "id", DataType: schema.TypeString},
@@ -216,9 +217,10 @@ func TestTrelloPipeline(t *testing.T) {
 			},
 		},
 		{
-			SourceTable:      "cards",
-			DestTable:        "main.trello_cards",
-			KeyColumn:        "id",
+			SourceTable: "cards",
+			DestTable:   "main.trello_cards",
+			KeyColumn:   "id",
+			// 4 = 3 open + 1 archived; verifies filter=all captures archived cards.
 			ExpectedRowCount: 4,
 			ExpectedSchema: []schema.Column{
 				{Name: "id", DataType: schema.TypeString},
@@ -269,7 +271,7 @@ func TestTrelloPipeline(t *testing.T) {
 			SourceTable:      "actions",
 			DestTable:        "main.trello_actions",
 			KeyColumn:        "id",
-			ExpectedRowCount: 8,
+			ExpectedRowCount: 10,
 			ExpectedSchema: []schema.Column{
 				{Name: "id", DataType: schema.TypeString},
 				{Name: "type", DataType: schema.TypeString},
