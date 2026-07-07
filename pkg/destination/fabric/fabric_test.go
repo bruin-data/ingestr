@@ -244,16 +244,22 @@ func TestExtractCopyValueReturnsDriverNativeTypes(t *testing.T) {
 }
 
 func TestExtractCopyValueRejectsOutOfRangeTime(t *testing.T) {
-	// 25 hours in microseconds — a valid int64 but not a valid time-of-day.
-	time64Type := &arrow.Time64Type{Unit: arrow.Microsecond}
-	builder := array.NewTime64Builder(memory.DefaultAllocator, time64Type)
-	builder.Append(arrow.Time64(25 * 60 * 60 * 1_000_000))
-	arr := builder.NewArray()
-	defer arr.Release()
-	builder.Release()
+	// 25 hours in microseconds — a valid int64 but not a valid time-of-day. A
+	// second case uses the max int64 microsecond value, which would overflow and
+	// wrap into a small in-range duration if the range check ran after the
+	// multiplication by 1000.
+	for _, value := range []arrow.Time64{25 * 60 * 60 * 1_000_000, 9223372036854775807} {
+		time64Type := &arrow.Time64Type{Unit: arrow.Microsecond}
+		builder := array.NewTime64Builder(memory.DefaultAllocator, time64Type)
+		builder.Append(value)
+		arr := builder.NewArray()
 
-	if _, err := extractCopyValue(arr, 0, nil); err == nil {
-		t.Fatal("expected out-of-range time error")
+		if _, err := extractCopyValue(arr, 0, nil); err == nil {
+			t.Fatalf("expected out-of-range time error for value %d", value)
+		}
+
+		arr.Release()
+		builder.Release()
 	}
 }
 

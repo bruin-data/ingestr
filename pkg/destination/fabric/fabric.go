@@ -1050,21 +1050,36 @@ func convertCopyStringValue(value string, col *schema.Column) (interface{}, erro
 // outside [00:00:00, 24:00:00) are rejected so a malformed source value fails the
 // batch instead of silently wrapping the excess hours into the next day (which
 // would store a wrong time-of-day rather than erroring, unlike the insert path
-// where the server rejects the out-of-range literal).
+// where the server rejects the out-of-range literal). The raw value is range
+// checked against the unit-specific limit before the multiplication so a huge
+// value cannot overflow int64 and wrap back into an in-range duration.
 func timeFromArrowTime(value int64, unit arrow.TimeUnit) (time.Time, error) {
+	outOfRange := func() error {
+		return fmt.Errorf("time-of-day value out of range [00:00:00, 24:00:00): %d %s", value, unit)
+	}
+
 	var duration time.Duration
 	switch unit {
 	case arrow.Second:
+		if value < 0 || value >= int64((24*time.Hour)/time.Second) {
+			return time.Time{}, outOfRange()
+		}
 		duration = time.Duration(value) * time.Second
 	case arrow.Millisecond:
+		if value < 0 || value >= int64((24*time.Hour)/time.Millisecond) {
+			return time.Time{}, outOfRange()
+		}
 		duration = time.Duration(value) * time.Millisecond
 	case arrow.Nanosecond:
+		if value < 0 || value >= int64(24*time.Hour) {
+			return time.Time{}, outOfRange()
+		}
 		duration = time.Duration(value) * time.Nanosecond
 	default:
+		if value < 0 || value >= int64((24*time.Hour)/time.Microsecond) {
+			return time.Time{}, outOfRange()
+		}
 		duration = time.Duration(value) * time.Microsecond
-	}
-	if duration < 0 || duration >= 24*time.Hour {
-		return time.Time{}, fmt.Errorf("time-of-day value out of range [00:00:00, 24:00:00): %v", duration)
 	}
 	return time.Date(1, 1, 1, int(duration/time.Hour), int(duration/time.Minute)%60, int(duration/time.Second)%60, int(duration%time.Second), time.UTC), nil
 }
