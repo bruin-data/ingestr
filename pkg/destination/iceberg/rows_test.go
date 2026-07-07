@@ -101,6 +101,16 @@ func TestNormalizeBoundValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, at.UnixMicro(), got)
 
+	// The strategy layer passes interval bounds as *time.Time; ensure the
+	// pointer is dereferenced rather than rejected as an unsupported type.
+	got, err = normalizeBoundValue(tsField, &at)
+	require.NoError(t, err)
+	require.Equal(t, at.UnixMicro(), got)
+
+	var nilTime *time.Time
+	_, err = normalizeBoundValue(tsField, nilTime)
+	require.ErrorContains(t, err, "nil")
+
 	_, err = normalizeBoundValue(intField, nil)
 	require.ErrorContains(t, err, "nil")
 }

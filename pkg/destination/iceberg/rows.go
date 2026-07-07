@@ -701,6 +701,11 @@ func normalizeBoundValue(field iceberggo.NestedField, v any) (any, error) {
 	switch val := v.(type) {
 	case nil:
 		return nil, fmt.Errorf("iceberg: interval bound for column %q is nil", field.Name)
+	case *time.Time:
+		if val == nil {
+			return nil, fmt.Errorf("iceberg: interval bound for column %q is nil", field.Name)
+		}
+		return normalizeBoundValue(field, *val)
 	case time.Time:
 		if _, isDate := field.Type.(iceberggo.DateType); isDate {
 			return val.UTC().Truncate(24*time.Hour).Unix() / 86400, nil
