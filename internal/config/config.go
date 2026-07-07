@@ -121,17 +121,6 @@ func (c *IngestConfig) Validate() error {
 	if c.DestTable == "" {
 		c.DestTable = c.SourceTable
 	}
-	// When the destination table was defaulted from the source table (here, or
-	// by the server which pre-fills DestTable=SourceTable before validation),
-	// trim a Trello board filter ("cards:boardId,...") down to the base table
-	// name — the raw filtered string is an invalid identifier. The board filter
-	// scopes the same logical table; other sources use ":" to select distinct
-	// sub-tables, so this is Trello-only.
-	if strings.HasPrefix(c.SourceURI, "trello://") && c.DestTable == c.SourceTable {
-		if idx := strings.IndexByte(c.DestTable, ':'); idx >= 0 {
-			c.DestTable = c.DestTable[:idx]
-		}
-	}
 	if c.IntervalStart != nil && c.IntervalEnd != nil && !c.IntervalStart.Before(*c.IntervalEnd) {
 		return &ValidationError{
 			Field:   "interval-start",

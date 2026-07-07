@@ -395,6 +395,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("surveymonkey", "SurveyMonkey", []string{"surveymonkey"}, true, false),
 		genericURIConnector("synapse", "Azure Synapse", []string{"synapse"}, false, true),
 		genericURIConnector("tiktok", "TikTok Ads", []string{"tiktok"}, true, false),
+		genericURIConnector("trello", "Trello", []string{"trello"}, true, false),
 		genericURIConnector("trino", "Trino", []string{"trino"}, true, true),
 		genericURIConnector("trustpilot", "Trustpilot", []string{"trustpilot"}, true, false),
 		genericURIConnector("twilio", "Twilio", []string{"twilio"}, true, false),
