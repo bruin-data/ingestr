@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ import (
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	ingestconfig "github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	dockercontainer "github.com/moby/moby/api/types/container"
@@ -259,10 +261,16 @@ func createIcebergBucket(t *testing.T, ctx context.Context, client *s3.Client, b
 	bucketCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// Idempotent: an existing bucket (e.g. a same-nanosecond uniqueSuffix collision)
+	// is fine; HeadBucket below confirms it exists.
 	_, err := client.CreateBucket(bucketCtx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucket),
 	})
-	require.NoError(t, err)
+	var owned *s3types.BucketAlreadyOwnedByYou
+	var exists *s3types.BucketAlreadyExists
+	if err != nil && !errors.As(err, &owned) && !errors.As(err, &exists) {
+		require.NoError(t, err)
+	}
 
 	_, err = client.HeadBucket(bucketCtx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
