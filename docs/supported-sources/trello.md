@@ -45,9 +45,14 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 By default the board-scoped tables (`lists`, `members`, `labels`, `checklists`, `cards`, `actions`) fetch data from **every board the account can access**. To scope a run to specific boards, append a comma-separated list of board IDs after the table name with a colon:
 
 ```sh
-# only these two boards
---source-table "cards:5f2a…,60b1…"
+ingestr ingest \
+  --source-uri "trello://?api_key=key_123&token=token_123" \
+  --source-table "cards:5f2a1c,60b1d2" \
+  --dest-uri duckdb:///trello.duckdb \
+  --dest-table "public.cards"
 ```
+
+Pass an explicit `--dest-table` when using a board filter, otherwise the destination table name defaults to the full `cards:5f2a1c,60b1d2` string.
 
 The `boards` and `organizations` tables don't accept a board filter.
 
