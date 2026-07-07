@@ -1012,9 +1012,9 @@ func extractCopyValue(arr arrow.Array, idx int, col *schema.Column) (interface{}
 	case *array.Date64:
 		return a.Value(idx).ToTime(), nil
 	case *array.Time32:
-		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time32Type).Unit), nil
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time32Type).Unit)
 	case *array.Time64:
-		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time64Type).Unit), nil
+		return timeFromArrowTime(int64(a.Value(idx)), a.DataType().(*arrow.Time64Type).Unit)
 	case *array.Timestamp:
 		ts := a.Value(idx)
 		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit), nil
@@ -1046,8 +1046,12 @@ func convertCopyStringValue(value string, col *schema.Column) (interface{}, erro
 }
 
 // timeFromArrowTime renders an Arrow time-of-day value as a time.Time anchored at
-// the zero date, which the driver encodes as SQL Server's TIME type.
-func timeFromArrowTime(value int64, unit arrow.TimeUnit) time.Time {
+// the zero date, which the driver encodes as SQL Server's TIME type. Values
+// outside [00:00:00, 24:00:00) are rejected so a malformed source value fails the
+// batch instead of silently wrapping the excess hours into the next day (which
+// would store a wrong time-of-day rather than erroring, unlike the insert path
+// where the server rejects the out-of-range literal).
+func timeFromArrowTime(value int64, unit arrow.TimeUnit) (time.Time, error) {
 	var duration time.Duration
 	switch unit {
 	case arrow.Second:
@@ -1059,5 +1063,8 @@ func timeFromArrowTime(value int64, unit arrow.TimeUnit) time.Time {
 	default:
 		duration = time.Duration(value) * time.Microsecond
 	}
-	return time.Date(1, 1, 1, int(duration/time.Hour), int(duration/time.Minute)%60, int(duration/time.Second)%60, int(duration%time.Second), time.UTC)
+	if duration < 0 || duration >= 24*time.Hour {
+		return time.Time{}, fmt.Errorf("time-of-day value out of range [00:00:00, 24:00:00): %v", duration)
+	}
+	return time.Date(1, 1, 1, int(duration/time.Hour), int(duration/time.Minute)%60, int(duration/time.Second)%60, int(duration%time.Second), time.UTC), nil
 }

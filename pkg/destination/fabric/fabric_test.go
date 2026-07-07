@@ -243,6 +243,20 @@ func TestExtractCopyValueReturnsDriverNativeTypes(t *testing.T) {
 	}
 }
 
+func TestExtractCopyValueRejectsOutOfRangeTime(t *testing.T) {
+	// 25 hours in microseconds — a valid int64 but not a valid time-of-day.
+	time64Type := &arrow.Time64Type{Unit: arrow.Microsecond}
+	builder := array.NewTime64Builder(memory.DefaultAllocator, time64Type)
+	builder.Append(arrow.Time64(25 * 60 * 60 * 1_000_000))
+	arr := builder.NewArray()
+	defer arr.Release()
+	builder.Release()
+
+	if _, err := extractCopyValue(arr, 0, nil); err == nil {
+		t.Fatal("expected out-of-range time error")
+	}
+}
+
 func TestExtractCopyValueConvertsUUIDStrings(t *testing.T) {
 	builder := array.NewStringBuilder(memory.DefaultAllocator)
 	builder.Append("01234567-89ab-cdef-0123-456789abcdef")
