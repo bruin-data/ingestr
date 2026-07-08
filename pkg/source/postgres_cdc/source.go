@@ -36,19 +36,33 @@ const (
 // URI does not specify one.
 const defaultPublicationName = "ingestr_publication"
 
+// defaultDiscoverInterval is how often a streaming run re-checks the source for
+// tables that appeared after the stream started.
+const defaultDiscoverInterval = 30 * time.Second
+
 type CDCConfig struct {
 	Publication   string
 	SlotName      string
 	Mode          CDCMode
 	ResumeFromLSN string // If set, skip snapshot and resume streaming from this LSN
 	DestSchema    string // If set, prepend this schema to destination table names (e.g. "dataset" for BigQuery)
+
+	// DiscoverInterval is how often streaming mode checks for new tables on the
+	// source. Zero disables mid-stream discovery.
+	DiscoverInterval time.Duration
 }
 
 type PostgresCDCSource struct {
 	queryPool *pgxpool.Pool  // Regular connection pool for queries
 	replConn  *pgconn.PgConn // Replication connection
 	uri       string
-	cdcConfig CDCConfig
+	// normalizedURI is the URI with the +cdc scheme suffix and CDC-specific query
+	// params stripped; extra replication connections are derived from it.
+	normalizedURI string
+	// managedPublication is true when ingestr owns the publication (none was
+	// supplied in the URI) and may reconcile its table set.
+	managedPublication bool
+	cdcConfig          CDCConfig
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
@@ -103,7 +117,8 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	// When no publication is specified in the URI, ingestr manages a default
 	// publication. Reconcile it on every run so it tracks the current set of
 	// logged tables; unlogged tables cannot be replicated and are skipped.
-	if cdcConfig.Publication == "" {
+	managedPublication := cdcConfig.Publication == ""
+	if managedPublication {
 		cdcConfig.Publication = defaultPublicationName
 		if err := ensureManagedPublication(ctx, queryPool, cdcConfig.Publication); err != nil {
 			queryPool.Close()
@@ -122,8 +137,37 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.queryPool = queryPool
 	s.replConn = replConn
 	s.uri = uri
+	s.normalizedURI = normalizedURI
+	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
 
+	return nil
+}
+
+// openReplicationConn opens an additional replication connection, e.g. for a
+// temporary snapshot slot that must not disturb the main replication stream.
+func (s *PostgresCDCSource) openReplicationConn(ctx context.Context) (*pgconn.PgConn, error) {
+	conn, err := pgconn.Connect(ctx, buildReplicationConnString(s.normalizedURI))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open replication connection: %w", err)
+	}
+	return conn, nil
+}
+
+// reconnectReplication replaces the main replication connection with a fresh
+// one. Needed after a streaming rebuild: once StartReplication has put a
+// connection into CopyBoth mode there is no clean way back, so a new
+// StartReplication requires a new connection. The persistent slot is untouched.
+func (s *PostgresCDCSource) reconnectReplication(ctx context.Context) error {
+	if s.replConn != nil {
+		_ = s.replConn.Close(ctx)
+		s.replConn = nil
+	}
+	conn, err := s.openReplicationConn(ctx)
+	if err != nil {
+		return err
+	}
+	s.replConn = conn
 	return nil
 }
 
@@ -353,11 +397,26 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 		}
 	}
 
+	cfg.DiscoverInterval = defaultDiscoverInterval
+	if raw := query.Get("discover_interval"); raw != "" {
+		switch raw {
+		case "0", "off":
+			cfg.DiscoverInterval = 0
+		default:
+			d, err := time.ParseDuration(raw)
+			if err != nil || d < 0 {
+				return cfg, "", fmt.Errorf("invalid discover_interval: %s (must be a duration like '30s', or '0'/'off' to disable)", raw)
+			}
+			cfg.DiscoverInterval = d
+		}
+	}
+
 	// Remove CDC-specific params from connection string
 	query.Del("publication")
 	query.Del("slot")
 	query.Del("mode")
 	query.Del("dest_schema")
+	query.Del("discover_interval")
 	parsed.RawQuery = query.Encode()
 
 	return cfg, parsed.String(), nil
@@ -623,10 +682,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
-		fullName := tableName
-		if schemaName != "public" {
-			fullName = schemaName + "." + tableName
-		}
+		fullName := publicationTableFullName(schemaName, tableName)
 
 		// Get schema for this table
 		tableSchema, err := getTableSchema(ctx, s.queryPool, fullName)
@@ -658,6 +714,86 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	config.Debug("[CDC] Found %d tables in publication %s", len(tables), s.cdcConfig.Publication)
 	return tables, nil
+}
+
+// publicationTableFullName renders a table name the way GetTables and the WAL
+// decoder key tables: bare name for public, schema-qualified otherwise.
+func publicationTableFullName(schemaName, tableName string) string {
+	if schemaName == "public" {
+		return tableName
+	}
+	return schemaName + "." + tableName
+}
+
+// listEligibleTableNames returns the names of the tables the CDC stream should
+// currently cover, without fetching schemas. For the ingestr-managed
+// publication this is the set of publishable tables (the publication is
+// reconciled to it); for a user-supplied publication it is the publication's
+// membership (or all eligible tables for FOR ALL TABLES publications).
+func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[string]struct{}, error) {
+	names := make(map[string]struct{})
+
+	if s.managedPublication {
+		included, _, err := selectPublishableTables(ctx, s.queryPool)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range included {
+			names[publicationTableFullName(t.schema, t.name)] = struct{}{}
+		}
+		return names, nil
+	}
+
+	var pubAllTables bool
+	err := s.queryPool.QueryRow(ctx, "SELECT puballtables FROM pg_publication WHERE pubname = $1", s.cdcConfig.Publication).Scan(&pubAllTables)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check publication type: %w", err)
+	}
+
+	var rows pgx.Rows
+	if pubAllTables {
+		rows, err = s.queryPool.Query(ctx, `
+			SELECT n.nspname, c.relname
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind = 'r'
+			  AND c.relpersistence = 'p'
+			  AND `+replicaIdentityClause+`
+			  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		`)
+	} else {
+		rows, err = s.queryPool.Query(ctx, `
+			SELECT schemaname, tablename
+			FROM pg_publication_tables
+			WHERE pubname = $1
+		`, s.cdcConfig.Publication)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to list publication tables: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var schemaName, tableName string
+		if err := rows.Scan(&schemaName, &tableName); err != nil {
+			return nil, fmt.Errorf("failed to scan table name: %w", err)
+		}
+		names[publicationTableFullName(schemaName, tableName)] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating table names: %w", err)
+	}
+	return names, nil
+}
+
+// reconcilePublication refreshes the managed publication's table set so tables
+// created after the stream started become part of it. No-op for user-supplied
+// publications, whose membership the user controls.
+func (s *PostgresCDCSource) reconcilePublication(ctx context.Context) error {
+	if !s.managedPublication {
+		return nil
+	}
+	return ensureManagedPublication(ctx, s.queryPool, s.cdcConfig.Publication)
 }
 
 // ReadAll reads CDC changes from all tables in the publication.

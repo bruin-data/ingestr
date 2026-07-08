@@ -18,6 +18,16 @@ import (
 // spinning forever on a 100ms read timeout that masks the dead socket.
 const deadConnectionTimeout = 2 * time.Minute
 
+// silenceProbeAfter is how long the server may stay silent before the next
+// standby status update requests an explicit reply. The server only sends
+// keepalives on its own when the standby has been quiet for
+// wal_sender_timeout/2, and we send status every 10s — so a healthy connection
+// to a quiet database receives nothing at all, indefinitely. Probing
+// distinguishes quiet from dead: a live server answers immediately (resetting
+// the silence clock), so deadConnectionTimeout only fires on connections that
+// stay silent even when asked to reply.
+const silenceProbeAfter = 30 * time.Second
+
 // receiveTimeout bounds a single ReceiveMessage call. It governs how quickly the
 // loop reacts to context cancellation and flushes idle batches. It must not be
 // too small: churning the replication connection's read deadline every few

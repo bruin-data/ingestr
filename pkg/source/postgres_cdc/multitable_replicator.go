@@ -126,6 +126,19 @@ func (r *MultiTableReplicator) Close(ctx context.Context) error {
 	return nil
 }
 
+// releasePending drops batches decoded but not yet emitted. Used when a
+// streaming rebuild abandons this replicator: the slot's confirmed position is
+// below these transactions (commit tokens never advance past pending data), so
+// the restarted stream re-decodes them.
+func (r *MultiTableReplicator) releasePending() {
+	for _, b := range r.pendingBatches {
+		if b.Batch != nil {
+			b.Batch.Release()
+		}
+	}
+	r.pendingBatches = nil
+}
+
 func (r *MultiTableReplicator) CurrentLSN() pglogrepl.LSN {
 	return r.clientXLogPos
 }
@@ -158,10 +171,12 @@ func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (ar
 	// Send standby status periodically. A send failure means the replication
 	// connection is broken, so surface it rather than spinning on dead reads.
 	if time.Since(r.standbyTimer) > 10*time.Second {
+		status := r.standbyStatus()
+		status.ReplyRequested = time.Since(r.lastMessageAt) > silenceProbeAfter
 		err := pglogrepl.SendStandbyStatusUpdate(
 			ctx,
 			r.source.replConn,
-			r.standbyStatus(),
+			status,
 		)
 		if err != nil {
 			return nil, "", 0, false, fmt.Errorf("failed to send standby status (replication connection lost): %w", err)

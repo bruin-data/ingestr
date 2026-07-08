@@ -89,7 +89,7 @@ func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) (arrow.RecordBatch, err
 	case msgTypeRelation:
 		return nil, d.handleRelation(data)
 	case msgTypeBegin:
-		return nil, d.handleBegin(data, lsn)
+		return nil, d.handleBegin(data)
 	case msgTypeCommit:
 		return d.handleCommit()
 	case msgTypeInsert:
@@ -187,9 +187,15 @@ func (d *Decoder) handleRelation(data []byte) error {
 	return nil
 }
 
-func (d *Decoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
+// handleBegin stamps the transaction with the commit ("final") LSN from the
+// Begin payload; see MultiTableDecoder.handleBegin for why the Begin record's
+// own WAL position must not be used.
+func (d *Decoder) handleBegin(data []byte) error {
 	d.pendingChanges = nil
-	d.currentTxLSN = lsn
+	if len(data) < 8 {
+		return fmt.Errorf("begin message too short")
+	}
+	d.currentTxLSN = pglogrepl.LSN(binary.BigEndian.Uint64(data[:8]))
 	return nil
 }
 

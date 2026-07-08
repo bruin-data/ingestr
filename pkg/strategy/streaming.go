@@ -159,8 +159,65 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	}
 
 	loop := newFlushLoop(job.Destination, job.Config, e.opts, tables)
+	// CDC sources can discover tables created on the source mid-stream; they
+	// announce each one (with schema) before emitting its batches so the
+	// destination can be provisioned on the fly.
+	loop.prepareNewTable = func(ctx context.Context, ti source.SourceTableInfo) (*streamTableState, error) {
+		if !job.Config.NoLoadTimestamp {
+			ti.Schema = withLoadTimestampColumn(ti.Schema)
+		}
+		if ti.Schema == nil {
+			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
+		}
+		st := &streamTableState{
+			destTable:      multiTableDestName(job.Destination, ti),
+			schema:         ti.Schema,
+			primaryKeys:    ti.PrimaryKeys,
+			incrementalKey: ti.Schema.IncrementalKey,
+			isCDC:          hasCDCColumns(ti.Schema),
+		}
+		if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
+			return nil, err
+		}
+		if job.TableDestNames == nil {
+			job.TableDestNames = make(map[string]string)
+		}
+		job.TableDestNames[ti.Name] = st.destTable
+		return st, nil
+	}
 	defer loop.cleanup(ctx)
 	return loop.run(ctx, records)
+}
+
+// multiTableDestName computes the destination table name for a source table
+// discovered mid-stream, matching the pipeline's upfront naming.
+func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo) string {
+	if namer, ok := dest.(destination.MultiTableNamer); ok {
+		return namer.DestTableName(ti.DestSchema, ti.Name)
+	}
+	return destination.DefaultMultiTableName(ti.DestSchema, ti.Name)
+}
+
+// withLoadTimestampColumn mirrors the pipeline's schema decoration for tables
+// discovered mid-stream: startup tables get _ingestr_loaded_at added by the
+// pipeline before the executor sees them, so late arrivals must match or their
+// destination tables would be created without the column the flush fills.
+func withLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			return s
+		}
+	}
+	out := *s
+	out.Columns = append(append([]schema.Column{}, s.Columns...), schema.Column{
+		Name:     naming.IngestrLoadedAtColumn,
+		DataType: schema.TypeTimestampTZ,
+		Nullable: true,
+	})
+	return &out
 }
 
 // prepareTable sets up the destination (and staging, for merge) tables for one
@@ -223,6 +280,11 @@ type flushLoop struct {
 	opts   StreamingOptions
 	tables map[string]*streamTableState // key = RecordBatchResult.TableName ("" for single-table)
 
+	// prepareNewTable provisions state for a table announced by the source
+	// after the stream started (RecordBatchResult.TableInfo). Nil means dynamic
+	// tables are unsupported and announcements are ignored.
+	prepareNewTable func(ctx context.Context, ti source.SourceTableInfo) (*streamTableState, error)
+
 	buffered int64 // rows buffered across all tables
 
 	// lastToken is the newest CommitToken seen; tokenDirty marks that it has
@@ -263,6 +325,11 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 				}
 				return fmt.Errorf("source error: %w", res.Err)
 			}
+			if res.TableInfo != nil {
+				if err := l.ensureTable(ctx, *res.TableInfo); err != nil {
+					return err
+				}
+			}
 			l.buffer(res)
 			if l.buffered >= l.opts.FlushRecords {
 				if err := l.flush(ctx); err != nil {
@@ -283,6 +350,26 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 			return l.shutdown(ctx, records)
 		}
 	}
+}
+
+// ensureTable provisions per-table state for a table announced mid-stream.
+// Announcements for tables already known (e.g. re-sent by a source-side
+// rebuild) are ignored.
+func (l *flushLoop) ensureTable(ctx context.Context, ti source.SourceTableInfo) error {
+	if _, ok := l.tables[ti.Name]; ok {
+		return nil
+	}
+	if l.prepareNewTable == nil {
+		config.Debug("[STREAM] Ignoring new-table announcement for %q (dynamic tables unsupported here)", ti.Name)
+		return nil
+	}
+	st, err := l.prepareNewTable(ctx, ti)
+	if err != nil {
+		return fmt.Errorf("failed to prepare newly discovered table %s: %w", ti.Name, err)
+	}
+	l.tables[ti.Name] = st
+	output.Statusf("[STREAM] %s | New table %s added to stream (dest: %s)\n", time.Now().Format("15:04:05"), ti.Name, st.destTable)
+	return nil
 }
 
 func (l *flushLoop) buffer(res source.RecordBatchResult) {
