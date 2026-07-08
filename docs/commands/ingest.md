@@ -205,5 +205,7 @@ ingestr ingest \
    --columns 'name:varchar(100),email:varchar(255)'
 ```
 
+The types that accept a length are `varchar(n)`, `string(n)`, and `text(n)` — all equivalent. A string type given without a length (`varchar`, `string`, or `text`) creates an unbounded column.
+
 > [!INFO]
 > For more examples, please refer to the specific platforms' documentation on the sidebar.
