@@ -764,6 +764,9 @@ func (d *BigQueryDestination) addMissingColumns(ctx context.Context, tableRef *b
 			Type: MapDataTypeToBigQuery(col),
 		}
 		applyBigQueryDecimalPrecisionScale(field, col)
+		if col.DataType == schema.TypeString && col.MaxLength > 0 {
+			field.MaxLength = int64(col.MaxLength)
+		}
 		if col.DataType == schema.TypeArray && col.ArrayType != schema.TypeUnknown {
 			elemField := schema.Column{
 				DataType:  col.ArrayType,
