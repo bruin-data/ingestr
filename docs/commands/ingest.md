@@ -180,5 +180,35 @@ ingestr ingest \
 
 This trims leading and trailing whitespace from string values as data streams through ingestr. For example, `"  Alice  "` becomes `"Alice"` and `"\tA-123\n"` becomes `"A-123"`. Interior whitespace, such as `"ACME  Inc"`, is preserved.
 
+### Overriding column types
+
+Use `--columns` to set the type of one or more columns on the destination. Each entry is `name:type`, and multiple entries are comma-separated:
+
+```bash
+ingestr ingest \
+   --source-uri 'postgresql://user:pass@localhost/app?sslmode=disable' \
+   --source-table 'public.customers' \
+   --dest-uri 'snowflake://user:password@account/dbname?warehouse=COMPUTE_WH' \
+   --dest-table 'raw.customers' \
+   --columns 'id:bigint,signup_date:date,balance:decimal(18,2)'
+```
+
+Supported types include `bigint`, `int`, `smallint`, `tinyint`, `float`, `double`, `decimal(p,s)`, `string`, `text`, `varchar(n)`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `json`, `uuid`, and `binary`.
+
+#### Sized string types
+
+String types accept an optional length, so you can create a bounded column such as `varchar(50)` instead of an unbounded text column:
+
+```bash
+ingestr ingest \
+   --source-uri 'postgresql://user:pass@localhost/app?sslmode=disable' \
+   --source-table 'public.customers' \
+   --dest-uri 'postgresql://user:pass@localhost/warehouse?sslmode=disable' \
+   --dest-table 'raw.customers' \
+   --columns 'name:varchar(100),email:varchar(255)'
+```
+
+The types that accept a length are `varchar(n)`, `string(n)`, and `text(n)` — all equivalent. A string type given without a length (`varchar`, `string`, or `text`) creates an unbounded column.
+
 > [!INFO]
 > For more examples, please refer to the specific platforms' documentation on the sidebar.

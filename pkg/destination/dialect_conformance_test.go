@@ -345,6 +345,53 @@ func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
 	}
 }
 
+// Dialects backed by a database with a sized character type must honor
+// Column.MaxLength instead of falling back to an unbounded string type.
+func TestAllDialects_TypeName_SizedString(t *testing.T) {
+	col := schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50}
+
+	expected := map[string]string{
+		"postgres":   "VARCHAR(50)",
+		"mysql":      "VARCHAR(50)",
+		"mssql":      "NVARCHAR(50)",
+		"synapse":    "NVARCHAR(50)",
+		"snowflake":  "VARCHAR(50)",
+		"redshift":   "VARCHAR(50)",
+		"bigquery":   "STRING(50)",
+		"oracle":     "VARCHAR2(50 CHAR)",
+		"duckdb":     "VARCHAR(50)",
+		"trino":      "VARCHAR(50)",
+		"cratedb":    "VARCHAR(50)",
+		"sqlite":     "VARCHAR(50)",
+		"maxcompute": "VARCHAR(50)",
+	}
+
+	for scheme, exp := range expected {
+		t.Run(scheme, func(t *testing.T) {
+			assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
+		})
+	}
+}
+
+// ClickHouse and Cassandra have no sized character type, so a MaxLength must
+// be ignored rather than producing invalid DDL.
+func TestAllDialects_TypeName_SizedString_Unsupported(t *testing.T) {
+	col := schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50}
+
+	expected := map[string]string{
+		"clickhouse": "String",
+		"cassandra":  "text",
+		// Athena tables are Iceberg-backed; Iceberg has no sized string type.
+		"athena": "VARCHAR",
+	}
+
+	for scheme, exp := range expected {
+		t.Run(scheme, func(t *testing.T) {
+			assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
+		})
+	}
+}
+
 func TestAllDialects_AddColumnSQL(t *testing.T) {
 	col := schema.Column{Name: "new_column", DataType: schema.TypeString, Nullable: true}
 

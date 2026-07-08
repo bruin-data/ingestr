@@ -76,6 +76,10 @@ func BuildBigQuerySchema(tableSchema *schema.TableSchema) bigquery.Schema {
 
 		applyBigQueryDecimalPrecisionScale(field, col)
 
+		if col.DataType == schema.TypeString && col.MaxLength > 0 {
+			field.MaxLength = int64(col.MaxLength)
+		}
+
 		if col.DataType == schema.TypeArray && col.ArrayType != schema.TypeUnknown {
 			elemField := schema.Column{
 				DataType:  col.ArrayType,

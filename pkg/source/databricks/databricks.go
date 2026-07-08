@@ -184,14 +184,18 @@ func (s *DatabricksSource) getSchema(ctx context.Context, table string) (*schema
 
 			dt, precision, scale, arrayType := MapDatabricksToDataType(dataType)
 
-			columns = append(columns, schema.Column{
+			col := schema.Column{
 				Name:      colName,
 				DataType:  dt,
 				Nullable:  true,
 				Precision: precision,
 				Scale:     scale,
 				ArrayType: arrayType,
-			})
+			}
+			if dt == schema.TypeString {
+				col.MaxLength = source.ParseSizedStringLength(dataType)
+			}
+			columns = append(columns, col)
 		}
 	}
 

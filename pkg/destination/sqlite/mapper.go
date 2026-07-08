@@ -1,6 +1,8 @@
 package sqlite
 
 import (
+	"fmt"
+
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -16,6 +18,9 @@ func MapDataTypeToSQLite(col schema.Column) string {
 	case schema.TypeDecimal:
 		return "REAL" // SQLite doesn't have native decimal, use REAL
 	case schema.TypeString, schema.TypeUUID:
+		if col.DataType == schema.TypeString && col.MaxLength > 0 {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
 		return "TEXT"
 	case schema.TypeJSON:
 		return "JSON"

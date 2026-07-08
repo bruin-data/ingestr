@@ -1558,9 +1558,9 @@ func mergeSchemaColumns(existing, next schema.Column) schema.Column {
 	merged := existing
 	merged.Nullable = existing.Nullable || next.Nullable
 	merged.IsPrimaryKey = existing.IsPrimaryKey || next.IsPrimaryKey
-	if next.MaxLength > merged.MaxLength {
-		merged.MaxLength = next.MaxLength
-	}
+	// MaxLength of 0 means unbounded (the widest), so it wins over any bounded
+	// length rather than being treated as the smallest.
+	merged.MaxLength = schemaevolution.WidenedStringLength(existing.MaxLength, next.MaxLength)
 
 	switch {
 	case existing.DataType == schema.TypeUnknown:
@@ -1627,9 +1627,9 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 
 		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
-			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale {
-				output.Infof("Column override: %q type changed from %s(p=%v,s=%v) to %s(p=%v,s=%v)\n",
-					col.Name, col.DataType, col.Precision, col.Scale, newCol.DataType, newCol.Precision, newCol.Scale)
+			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale || col.MaxLength != newCol.MaxLength {
+				output.Infof("Column override: %q type changed from %s(p=%v,s=%v,len=%v) to %s(p=%v,s=%v,len=%v)\n",
+					col.Name, col.DataType, col.Precision, col.Scale, col.MaxLength, newCol.DataType, newCol.Precision, newCol.Scale, newCol.MaxLength)
 			}
 			sourceSchema.Columns[i] = newCol
 			config.Debug("[PIPELINE] Column override applied: %s -> %v", col.Name, override.DataType)
