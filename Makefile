@@ -124,6 +124,7 @@ format: generate
 # Just run linters on changed lines without formatting
 lint: generate
 	@echo "$(OK_COLOR)==> Running linters on changed lines since $(LINT_MERGE_BASE)$(NO_COLOR)"
+	@go vet ./...
 	@golangci-lint run --timeout 10m $(LINT_CHANGED_FLAGS) ./...
 
 # CI: Check formatting without modifying files (fails if changes needed)
