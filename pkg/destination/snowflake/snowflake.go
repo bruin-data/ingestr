@@ -938,7 +938,7 @@ func mapSnowflakeTypeToColumn(dataType string) schema.Column {
 	dataType = strings.ToUpper(strings.TrimSpace(dataType))
 
 	if strings.HasPrefix(dataType, "NUMBER") || strings.HasPrefix(dataType, "DECIMAL") || strings.HasPrefix(dataType, "NUMERIC") {
-		col := schema.Column{DataType: schema.TypeDecimal}
+		col := schema.Column{DataType: schema.TypeDecimal, Precision: 38}
 		params := parseSnowflakeTypeParams(dataType)
 		if len(params) > 0 {
 			col.Precision = params[0]

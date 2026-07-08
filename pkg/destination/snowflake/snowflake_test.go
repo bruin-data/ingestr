@@ -318,6 +318,7 @@ func TestMapSnowflakeTypeToColumn(t *testing.T) {
 		scale     int
 		maxLength int
 	}{
+		{name: "bare_number", input: "NUMBER", wantType: schema.TypeDecimal, precision: 38},
 		{name: "number_with_precision_scale", input: "NUMBER(20,2)", wantType: schema.TypeDecimal, precision: 20, scale: 2},
 		{name: "decimal_with_precision_only", input: "DECIMAL(18)", wantType: schema.TypeDecimal, precision: 18},
 		{name: "numeric_with_spaces", input: "NUMERIC( 12, 4 )", wantType: schema.TypeDecimal, precision: 12, scale: 4},
