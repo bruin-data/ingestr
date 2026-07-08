@@ -499,13 +499,6 @@ func TestMySQLDestination_Schemes(t *testing.T) {
 	assert.Equal(t, expected, schemes)
 }
 
-func TestVitessDestination_Schemes(t *testing.T) {
-	dest := NewVitessDestination()
-	schemes := dest.Schemes()
-	expected := []string{"vitess", "ps_mysql"}
-	assert.Equal(t, expected, schemes)
-}
-
 func TestMySQLDestination_StrategySupport(t *testing.T) {
 	dest := NewMySQLDestination()
 

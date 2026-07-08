@@ -36,10 +36,6 @@ type MySQLDestination struct {
 	scheme        string
 }
 
-type VitessDestination struct {
-	*MySQLDestination
-}
-
 const (
 	mysqlInsertRowsPerStatement  = 1000
 	mysqlDefaultWriteParallelism = 4
@@ -55,22 +51,16 @@ func NewMySQLDestination() *MySQLDestination {
 	}
 }
 
-func NewVitessDestination() *VitessDestination {
-	return &VitessDestination{
-		MySQLDestination: &MySQLDestination{
-			isVitess:      true,
-			vitessBackend: true,
-			scheme:        "vitess",
-		},
+func NewVitessCompatibleDestination(defaultScheme string) *MySQLDestination {
+	return &MySQLDestination{
+		isVitess:      true,
+		vitessBackend: true,
+		scheme:        defaultScheme,
 	}
 }
 
 func (d *MySQLDestination) Schemes() []string {
 	return []string{"mysql", "mysql+pymysql", "mariadb"}
-}
-
-func (d *VitessDestination) Schemes() []string {
-	return []string{"vitess", "ps_mysql"}
 }
 
 func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
