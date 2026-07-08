@@ -231,6 +231,25 @@ func TestBuildBigQuerySchema_DefaultNumericOmitsPrecisionScale(t *testing.T) {
 	}
 }
 
+func TestBuildBigQuerySchema_SizedString(t *testing.T) {
+	result := BuildBigQuerySchema(&schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50, Nullable: true},
+			{Name: "bio", DataType: schema.TypeString, Nullable: true},
+		},
+	})
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 fields, got %d", len(result))
+	}
+	if result[0].Type != bigquery.StringFieldType || result[0].MaxLength != 50 {
+		t.Fatalf("name field = %v(max=%d), want STRING(50)", result[0].Type, result[0].MaxLength)
+	}
+	if result[1].MaxLength != 0 {
+		t.Fatalf("unsized field max_length = %d, want 0", result[1].MaxLength)
+	}
+}
+
 func TestBuildBigQuerySchema_LoadTimestampIsNullable(t *testing.T) {
 	result := BuildBigQuerySchema(&schema.TableSchema{
 		Columns: []schema.Column{
