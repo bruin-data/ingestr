@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
@@ -352,6 +353,12 @@ func TestMySQLWriteParallelism(t *testing.T) {
 	assert.Equal(t, mysqlDefaultWriteParallelism, mysqlWriteParallelism(-1))
 	assert.Equal(t, 2, mysqlWriteParallelism(2))
 	assert.Equal(t, mysqlMaxWriteParallelism, mysqlWriteParallelism(mysqlMaxWriteParallelism+1))
+}
+
+func TestMySQLWriteParallelismForOptions(t *testing.T) {
+	assert.Equal(t, 1, mysqlWriteParallelismForOptions(destination.WriteOptions{}))
+	assert.Equal(t, mysqlDefaultWriteParallelism, mysqlWriteParallelismForOptions(destination.WriteOptions{StagingTable: true}))
+	assert.Equal(t, 2, mysqlWriteParallelismForOptions(destination.WriteOptions{StagingTable: true, Parallelism: 2}))
 }
 
 // isMySQLMissingTableError must recognize both plain MySQL ("doesn't exist",

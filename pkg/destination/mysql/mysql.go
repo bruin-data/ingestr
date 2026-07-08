@@ -280,7 +280,7 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 	writeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	parallelism := mysqlWriteParallelism(opts.Parallelism)
+	parallelism := mysqlWriteParallelismForOptions(opts)
 	startTime := time.Now()
 
 	config.Debug("[MYSQL] Starting parallel write to %s with %d workers", opts.Table, parallelism)
@@ -379,6 +379,13 @@ func mysqlWriteParallelism(requested int) int {
 	return requested
 }
 
+func mysqlWriteParallelismForOptions(opts destination.WriteOptions) int {
+	if !opts.StagingTable {
+		return 1
+	}
+	return mysqlWriteParallelism(opts.Parallelism)
+}
+
 func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
 	if d.useLoadData {
 		rows, err := d.writeRecordBatchLoadData(ctx, record, table)
@@ -414,6 +421,11 @@ func (d *MySQLDestination) writeRecordBatchInsert(ctx context.Context, record ar
 
 	rowsWritten := int64(0)
 	for start := int64(0); start < numRows; start += mysqlInsertRowsPerStatement {
+		if err := ctx.Err(); err != nil {
+			_ = tx.Rollback()
+			return rowsWritten, fmt.Errorf("write canceled before insert: %w", err)
+		}
+
 		end := min(start+mysqlInsertRowsPerStatement, numRows)
 		chunkRows := int(end - start)
 		insertSQL := buildMultiRowInsertSQL(table, colNames, chunkRows)
@@ -431,6 +443,11 @@ func (d *MySQLDestination) writeRecordBatchInsert(ctx context.Context, record ar
 			return rowsWritten, fmt.Errorf("failed to insert rows %d-%d: %w", start, end-1, err)
 		}
 		rowsWritten += int64(chunkRows)
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = tx.Rollback()
+		return rowsWritten, fmt.Errorf("write canceled before commit: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
