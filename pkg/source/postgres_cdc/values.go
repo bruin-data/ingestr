@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -121,6 +122,67 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 		}
 		state[storeKey] = next
 	}
+}
+
+// compactChanges keeps, per primary key, only the latest non-deleted and the
+// latest deleted change of the window, preserving original order. This is
+// exactly the set the destination merge reads — it upserts the latest active
+// row per PK and marks a delete only when the latest change overall is a
+// delete (DISTINCT ON ... ORDER BY lsn DESC, deleted DESC) — so dropping the
+// superseded rows cannot alter the merge outcome. Under update-heavy load
+// where many changes in a flush window hit the same rows, this shrinks the
+// staging volume to the surviving row versions.
+//
+// Must run after the unchanged-TOAST fill over the same window: the fill pulls
+// omitted column values out of the rows compaction is about to drop.
+func compactChanges(changes []Change, tableSchema *schema.TableSchema) []Change {
+	if len(changes) < 2 || tableSchema == nil {
+		return changes
+	}
+
+	pkIndices := pkColumnIndices(tableSchema.Columns, tableSchema.PrimaryKeys)
+	if len(pkIndices) == 0 {
+		return changes
+	}
+
+	type entry struct {
+		change Change
+		index  int
+	}
+
+	latestNonDeleted := make(map[string]entry)
+	latestDeleted := make(map[string]entry)
+
+	for i, change := range changes {
+		key := pkKeyFromRow(change.Values, change.OldValues, pkIndices, i)
+		if change.Operation == "DELETE" {
+			latestDeleted[key] = entry{change: change, index: i}
+		} else {
+			latestNonDeleted[key] = entry{change: change, index: i}
+		}
+	}
+
+	if len(latestNonDeleted)+len(latestDeleted) == len(changes) {
+		return changes
+	}
+
+	combined := make([]entry, 0, len(latestNonDeleted)+len(latestDeleted))
+	for _, e := range latestNonDeleted {
+		combined = append(combined, e)
+	}
+	for _, e := range latestDeleted {
+		combined = append(combined, e)
+	}
+
+	sort.Slice(combined, func(i, j int) bool {
+		return combined[i].index < combined[j].index
+	})
+
+	out := make([]Change, len(combined))
+	for i, e := range combined {
+		out[i] = e.change
+	}
+	return out
 }
 
 // setColumnValue overwrites a column's value in place, replacing an unchanged

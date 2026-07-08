@@ -108,6 +108,12 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 	// yet).
 	applyIntraBatchFill(changes, tableSchema)
 
+	// Last-write-wins compaction: only the latest change per primary key can
+	// affect the merge outcome, so superseded row versions are dropped before
+	// materialization.
+	buffered := len(changes)
+	changes = compactChanges(changes, tableSchema)
+
 	var commitToken any
 	if token != nil {
 		commitToken = token()
@@ -118,7 +124,7 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 		return fmt.Errorf("failed to materialize batch for table %s: %w", tableName, err)
 	}
 
-	config.Debug("[CDC] Flushed %d buffered changes for table %s", len(changes), tableName)
+	config.Debug("[CDC] Flushed %d buffered changes (%d rows after compaction) for table %s", buffered, len(changes), tableName)
 
 	results <- source.RecordBatchResult{
 		Batch:       batch,

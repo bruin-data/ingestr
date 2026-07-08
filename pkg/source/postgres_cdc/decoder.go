@@ -3,7 +3,6 @@ package postgres_cdc
 import (
 	"encoding/binary"
 	"fmt"
-	"sort"
 	"strconv"
 	"time"
 
@@ -74,8 +73,9 @@ func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *
 }
 
 // Decode decodes a WAL message and, on commit, returns the transaction's
-// decoded changes (filled and compacted). Arrow materialization happens once
-// per flush window in the accumulator, not per transaction.
+// decoded changes. Unchanged-TOAST fill, per-key compaction, and Arrow
+// materialization all happen once per flush window in the accumulator, not
+// per transaction.
 func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 	if len(data) == 0 {
 		return nil, nil
@@ -215,13 +215,14 @@ func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 	return d.currentTxLSN, true
 }
 
+// handleCommit hands the transaction's raw changes to the caller.
+// Unchanged-TOAST fill and per-key compaction run once over the accumulator's
+// whole flush window (batchAccumulator.flushTable), which subsumes the
+// per-commit passes.
 func (d *Decoder) handleCommit() ([]Change, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
 	}
-
-	d.applyIntraBatchFill()
-	d.compactPendingChanges()
 
 	changes := d.pendingChanges
 	d.pendingChanges = nil
@@ -353,73 +354,6 @@ func (d *Decoder) handleDelete(data []byte) error {
 	})
 
 	return nil
-}
-
-func (d *Decoder) applyIntraBatchFill() {
-	applyIntraBatchFill(d.pendingChanges, d.tableSchema)
-}
-
-func (d *Decoder) compactPendingChanges() {
-	if len(d.pendingChanges) < 2 {
-		return
-	}
-
-	if len(d.tableSchema.PrimaryKeys) == 0 {
-		return
-	}
-
-	pkIndices := make([]int, len(d.tableSchema.PrimaryKeys))
-	for i, pk := range d.tableSchema.PrimaryKeys {
-		idx := -1
-		for colIdx, col := range d.tableSchema.Columns {
-			if col.Name == pk {
-				idx = colIdx
-				break
-			}
-		}
-		if idx < 0 {
-			return
-		}
-		pkIndices[i] = idx
-	}
-
-	type entry struct {
-		change Change
-		index  int
-	}
-
-	latestNonDeleted := make(map[string]entry)
-	latestDeleted := make(map[string]entry)
-
-	for i, change := range d.pendingChanges {
-		key := d.pkKey(change, pkIndices, i)
-		if change.Operation == "DELETE" {
-			latestDeleted[key] = entry{change: change, index: i}
-		} else {
-			latestNonDeleted[key] = entry{change: change, index: i}
-		}
-	}
-
-	combined := make([]entry, 0, len(latestNonDeleted)+len(latestDeleted))
-	for _, e := range latestNonDeleted {
-		combined = append(combined, e)
-	}
-	for _, e := range latestDeleted {
-		combined = append(combined, e)
-	}
-
-	sort.Slice(combined, func(i, j int) bool {
-		return combined[i].index < combined[j].index
-	})
-
-	d.pendingChanges = make([]Change, len(combined))
-	for i, e := range combined {
-		d.pendingChanges[i] = e.change
-	}
-}
-
-func (d *Decoder) pkKey(change Change, pkIndices []int, changeIndex int) string {
-	return pkKeyFromRow(change.Values, change.OldValues, pkIndices, changeIndex)
 }
 
 func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{}, error) {
