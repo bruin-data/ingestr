@@ -326,6 +326,27 @@ func TestWriteLoadDataFieldEscaping(t *testing.T) {
 	}
 }
 
+func TestIsLoadDataLocalDisabledError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"mysql 3948", &mysqldriver.MySQLError{Number: 3948, Message: "Loading local data is disabled"}, true},
+		{"mysql 1148", &mysqldriver.MySQLError{Number: 1148, Message: "The used command is not allowed with this MySQL version"}, true},
+		{"text disabled", errors.New("loading local data is disabled; enable local_infile"), true},
+		{"text not allowed", errors.New("The used command is not allowed with this MySQL version"), true},
+		{"other mysql error", &mysqldriver.MySQLError{Number: 1062, Message: "Duplicate entry"}, false},
+		{"unrelated error", errors.New("connection refused"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isLoadDataLocalDisabledError(tt.err))
+		})
+	}
+}
+
 func TestMySQLWriteParallelism(t *testing.T) {
 	assert.Equal(t, mysqlDefaultWriteParallelism, mysqlWriteParallelism(0))
 	assert.Equal(t, mysqlDefaultWriteParallelism, mysqlWriteParallelism(-1))

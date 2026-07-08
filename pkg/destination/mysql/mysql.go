@@ -287,6 +287,9 @@ func (d *MySQLDestination) Write(ctx context.Context, records <-chan source.Reco
 }
 
 func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	writeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	parallelism := mysqlWriteParallelism(opts.Parallelism)
 	startTime := time.Now()
 
@@ -302,6 +305,7 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 	results := make(chan writeResult, parallelism*2)
 	var wg sync.WaitGroup
 	var batchNum int64
+	var stopWrites atomic.Bool
 
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
@@ -311,18 +315,28 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 			for result := range records {
 				myBatch := int(atomic.AddInt64(&batchNum, 1))
 				if result.Err != nil {
+					stopWrites.Store(true)
+					cancel()
 					results <- writeResult{batchNum: myBatch, err: result.Err}
-					return
+					continue
 				}
 
 				record := result.Batch
 				if record == nil {
 					continue
 				}
+				if stopWrites.Load() {
+					record.Release()
+					continue
+				}
 
 				startBatch := time.Now()
-				rows, err := d.writeRecordBatch(ctx, record, opts.Table)
+				rows, err := d.writeRecordBatch(writeCtx, record, opts.Table)
 				record.Release()
+				if err != nil {
+					stopWrites.Store(true)
+					cancel()
+				}
 
 				results <- writeResult{
 					batchNum: myBatch,
@@ -619,12 +633,17 @@ func writeEscapedLoadDataBytes(w io.Writer, value []byte) error {
 
 func isLoadDataLocalDisabledError(err error) bool {
 	var myErr *mysqldriver.MySQLError
-	if errors.As(err, &myErr) && myErr.Number == 3948 {
-		return true
+	if errors.As(err, &myErr) {
+		switch myErr.Number {
+		case 3948, 1148:
+			return true
+		}
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "loading local data is disabled") ||
-		strings.Contains(msg, "local infile") && strings.Contains(msg, "disabled")
+		strings.Contains(msg, "used command is not allowed") ||
+		strings.Contains(msg, "local infile") &&
+			(strings.Contains(msg, "disabled") || strings.Contains(msg, "not allowed"))
 }
 
 func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
