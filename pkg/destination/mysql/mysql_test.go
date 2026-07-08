@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -291,6 +292,47 @@ func TestBuildUpdateSet(t *testing.T) {
 	}
 }
 
+func TestBuildMultiRowInsertSQL(t *testing.T) {
+	got := buildMultiRowInsertSQL("analytics.users", []string{"`id`", "`name`"}, 3)
+	want := "INSERT INTO `analytics`.`users` (`id`, `name`) VALUES (?, ?), (?, ?), (?, ?)"
+	assert.Equal(t, want, got)
+}
+
+func TestBuildLoadDataSQL(t *testing.T) {
+	got := buildLoadDataSQL("analytics.users", []string{"`id`", "`name`"}, "ingestr_load_1")
+	want := "LOAD DATA LOCAL INFILE 'Reader::ingestr_load_1' INTO TABLE `analytics`.`users` FIELDS TERMINATED BY '\\t' ESCAPED BY '\\\\' LINES TERMINATED BY '\\n' (`id`, `name`)"
+	assert.Equal(t, want, got)
+}
+
+func TestWriteLoadDataFieldEscaping(t *testing.T) {
+	tests := []struct {
+		name  string
+		value interface{}
+		want  string
+	}{
+		{name: "null", value: nil, want: `\N`},
+		{name: "string escapes", value: "a\tb\nc\rd\\e\x00\x1a", want: `a\tb\nc\rd\\e\0\Z`},
+		{name: "bytes escapes", value: []byte("bytes\tvalue"), want: `bytes\tvalue`},
+		{name: "integer", value: int64(42), want: "42"},
+		{name: "float", value: 12.5, want: "12.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got strings.Builder
+			assert.NoError(t, writeLoadDataField(&got, tt.value))
+			assert.Equal(t, tt.want, got.String())
+		})
+	}
+}
+
+func TestMySQLWriteParallelism(t *testing.T) {
+	assert.Equal(t, mysqlDefaultWriteParallelism, mysqlWriteParallelism(0))
+	assert.Equal(t, mysqlDefaultWriteParallelism, mysqlWriteParallelism(-1))
+	assert.Equal(t, 2, mysqlWriteParallelism(2))
+	assert.Equal(t, mysqlMaxWriteParallelism, mysqlWriteParallelism(mysqlMaxWriteParallelism+1))
+}
+
 // isMySQLMissingTableError must recognize both plain MySQL ("doesn't exist",
 // errno 1146) and vtgate (VT05004/VT05005 "does not exist", errno 1146/1051)
 // forms, so a first CDC run against a Vitess/PlanetScale destination is treated
@@ -432,7 +474,14 @@ func TestBuildCreateTableSQL(t *testing.T) {
 func TestMySQLDestination_Schemes(t *testing.T) {
 	dest := NewMySQLDestination()
 	schemes := dest.Schemes()
-	expected := []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "ps_mysql"}
+	expected := []string{"mysql", "mysql+pymysql", "mariadb"}
+	assert.Equal(t, expected, schemes)
+}
+
+func TestVitessDestination_Schemes(t *testing.T) {
+	dest := NewVitessDestination()
+	schemes := dest.Schemes()
+	expected := []string{"vitess", "ps_mysql"}
 	assert.Equal(t, expected, schemes)
 }
 
