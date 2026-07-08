@@ -47,6 +47,7 @@ type MergeOptions struct {
 	PrimaryKeys    []string
 	Columns        []string
 	IncrementalKey string
+	Schema         *schema.TableSchema
 }
 
 // DeleteInsertOptions contains parameters for delete+insert operations.

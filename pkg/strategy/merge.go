@@ -68,6 +68,7 @@ func mergeStagingInto(ctx context.Context, dest destination.Destination, staging
 		PrimaryKeys:    primaryKeys,
 		Columns:        destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
 		IncrementalKey: mergeIncrementalKeyForSchema(tableSchema, incrementalKey),
+		Schema:         tableSchema,
 	})
 }
 

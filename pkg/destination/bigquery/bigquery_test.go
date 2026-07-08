@@ -1447,6 +1447,42 @@ func TestBuildMergePartitionPruning(t *testing.T) {
 	}
 }
 
+func TestNonNullablePKColumns(t *testing.T) {
+	targetMeta := &bigquery.TableMetadata{Schema: bigquery.Schema{
+		{Name: "ID", Type: bigquery.IntegerFieldType, Required: true},
+		{Name: "tenant_id", Type: bigquery.StringFieldType, Required: true},
+		{Name: "region", Type: bigquery.StringFieldType},
+	}}
+
+	got := nonNullablePKColumns(targetMeta, nil, []string{"id", "tenant_id", "region"})
+	if !got["id"] || !got["tenant_id"] {
+		t.Fatalf("expected required PK columns id and tenant_id, got %v", got)
+	}
+	if got["region"] {
+		t.Fatalf("nullable PK column must not be reported as non-nullable, got %v", got)
+	}
+
+	if got := nonNullablePKColumns(targetMeta, nil, []string{"region"}); got != nil {
+		t.Fatalf("expected nil when no PK column is required, got %v", got)
+	}
+	if got := nonNullablePKColumns(nil, nil, []string{"id"}); got != nil {
+		t.Fatalf("expected nil for missing schema, got %v", got)
+	}
+
+	// A relaxed (all-NULLABLE) target must still qualify when the ingestion
+	// schema declares the key NOT NULL — staging then holds no NULL keys.
+	relaxedMeta := &bigquery.TableMetadata{Schema: bigquery.Schema{
+		{Name: "id", Type: bigquery.IntegerFieldType},
+	}}
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64, Nullable: false},
+	}}
+	got = nonNullablePKColumns(relaxedMeta, tableSchema, []string{"id"})
+	if !got["id"] {
+		t.Fatalf("expected NOT NULL ingestion schema column to qualify, got %v", got)
+	}
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.projectID = "my-project"
@@ -1510,6 +1546,46 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 		if contains(sql, "ON t.`tenant_id` = s.`tenant_id` AND t.`user_id` = s.`user_id`\n") {
 			t.Fatalf("sql should not use bare equality composite ON clause:\n%s", sql)
+		}
+	})
+
+	t.Run("bare_equality_for_required_pk", func(t *testing.T) {
+		sql := dest.buildMergeSQLWithPartitionPruning(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, []string{"id", "name"}, nil, "",
+			map[string]bool{"id": true}, nil,
+		)
+
+		if !contains(sql, "ON t.`id` = s.`id`\n") {
+			t.Fatalf("sql missing bare equality on clause for required pk:\n%s", sql)
+		}
+		if contains(sql, "IS NULL") {
+			t.Fatalf("sql should not include null-safe join for required pk:\n%s", sql)
+		}
+	})
+
+	t.Run("mixed_required_and_nullable_pks", func(t *testing.T) {
+		sql := dest.buildMergeSQLWithPartitionPruning(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"tenant_id", "user_id"}, []string{"tenant_id", "user_id", "value"}, nil, "",
+			map[string]bool{"tenant_id": true}, nil,
+		)
+
+		expected := "ON t.`tenant_id` = s.`tenant_id` AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
+		if !contains(sql, expected) {
+			t.Fatalf("sql missing mixed on clause:\n%s", sql)
+		}
+	})
+
+	t.Run("required_pk_lookup_is_case_insensitive", func(t *testing.T) {
+		sql := dest.buildMergeSQLWithPartitionPruning(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"ID"}, []string{"ID", "name"}, nil, "",
+			map[string]bool{"id": true}, nil,
+		)
+
+		if !contains(sql, "ON t.`ID` = s.`ID`\n") {
+			t.Fatalf("sql missing bare equality on clause for cased required pk:\n%s", sql)
 		}
 	})
 
@@ -1593,7 +1669,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	t.Run("date_partition_pruning_when_partition_column_is_pk", func(t *testing.T) {
 		sql := dest.buildMergeSQLWithPartitionPruning(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
-			[]string{"id", "day"}, []string{"id", "day", "name"}, nil, "",
+			[]string{"id", "day"}, []string{"id", "day", "name"}, nil, "", nil,
 			&mergePartitionPruning{Column: "day", IsDate: true},
 		)
 
@@ -1614,7 +1690,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	t.Run("timestamp_partition_pruning_uses_date_expression", func(t *testing.T) {
 		sql := dest.buildMergeSQLWithPartitionPruning(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
-			[]string{"id", "created_at"}, []string{"id", "created_at", "name"}, nil, "",
+			[]string{"id", "created_at"}, []string{"id", "created_at", "name"}, nil, "", nil,
 			&mergePartitionPruning{Column: "created_at"},
 		)
 

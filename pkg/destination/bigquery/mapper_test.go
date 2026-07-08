@@ -360,6 +360,85 @@ func TestBuildTableMetadata(t *testing.T) {
 	})
 }
 
+func TestBuildTableMetadataDefaultClustering(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "score", DataType: schema.TypeFloat64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+	}
+
+	t.Run("defaults_to_primary_keys", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, []string{"id"}, "", "", nil, 0)
+
+		if metadata.Clustering == nil {
+			t.Fatal("expected default clustering from primary keys")
+		}
+		if len(metadata.Clustering.Fields) != 1 || metadata.Clustering.Fields[0] != "id" {
+			t.Fatalf("clustering fields = %v, want [id]", metadata.Clustering.Fields)
+		}
+	})
+
+	t.Run("explicit_cluster_by_wins", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, []string{"id"}, "", "", []string{"name"}, 0)
+
+		if metadata.Clustering == nil || len(metadata.Clustering.Fields) != 1 || metadata.Clustering.Fields[0] != "name" {
+			t.Fatalf("clustering fields = %+v, want [name]", metadata.Clustering)
+		}
+	})
+
+	t.Run("no_primary_keys_no_clustering", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, nil, "", "", nil, 0)
+
+		if metadata.Clustering != nil {
+			t.Fatalf("expected no clustering, got %+v", metadata.Clustering)
+		}
+	})
+
+	t.Run("unclusterable_pk_columns_are_skipped", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, []string{"score", "id"}, "", "", nil, 0)
+
+		if metadata.Clustering == nil || len(metadata.Clustering.Fields) != 1 || metadata.Clustering.Fields[0] != "id" {
+			t.Fatalf("clustering fields = %+v, want [id] (FLOAT pk skipped)", metadata.Clustering)
+		}
+	})
+
+	t.Run("caps_at_four_columns", func(t *testing.T) {
+		cols := make([]schema.Column, 6)
+		pks := make([]string, 6)
+		for i := range cols {
+			name := fmt.Sprintf("pk_%d", i)
+			cols[i] = schema.Column{Name: name, DataType: schema.TypeString}
+			pks[i] = name
+		}
+		metadata := BuildTableMetadata(&schema.TableSchema{Columns: cols}, pks, "", "", nil, 0)
+
+		if metadata.Clustering == nil || len(metadata.Clustering.Fields) != bigQueryMaxClusteringColumns {
+			t.Fatalf("clustering fields = %+v, want first %d PKs", metadata.Clustering, bigQueryMaxClusteringColumns)
+		}
+		if metadata.Clustering.Fields[3] != "pk_3" {
+			t.Fatalf("clustering fields = %v, want PK order preserved", metadata.Clustering.Fields)
+		}
+	})
+
+	t.Run("pk_name_matches_schema_case_insensitively", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, []string{"ID"}, "", "", nil, 0)
+
+		if metadata.Clustering == nil || len(metadata.Clustering.Fields) != 1 || metadata.Clustering.Fields[0] != "id" {
+			t.Fatalf("clustering fields = %+v, want schema-cased [id]", metadata.Clustering)
+		}
+	})
+
+	t.Run("pk_missing_from_schema_no_clustering", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, []string{"unknown_col"}, "", "", nil, 0)
+
+		if metadata.Clustering != nil {
+			t.Fatalf("expected no clustering for unknown PK column, got %+v", metadata.Clustering)
+		}
+	})
+}
+
 func TestParseTableName(t *testing.T) {
 	tests := []struct {
 		name        string
