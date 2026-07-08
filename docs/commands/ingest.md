@@ -205,15 +205,5 @@ ingestr ingest \
    --columns 'name:varchar(100),email:varchar(255)'
 ```
 
-`varchar(n)`, `string(n)`, and `text(n)` all set the column's maximum length to `n`. A string type without a length (e.g. `string` or `varchar`) creates an unbounded column.
-
-The destination maps a sized string to its native bounded type — for example `VARCHAR(100)` on PostgreSQL, MySQL, Snowflake, Redshift and DuckDB, `NVARCHAR(100)` on SQL Server and Synapse, and `STRING(100)` on BigQuery.
-
-#### Automatic length handling
-
-When copying between databases, ingestr preserves a source column's declared length automatically — copying a `VARCHAR(50)` column produces a `VARCHAR(50)` column on the destination without any `--columns` override.
-
-Column lengths are also widened as needed. If you later raise the length (for example changing `--columns` from `varchar(50)` to `varchar(100)`), or the source column grows wider, ingestr widens the destination column on the next run. Widening only ever grows a column's length; it never shrinks an existing column.
-
 > [!INFO]
 > For more examples, please refer to the specific platforms' documentation on the sidebar.
