@@ -11,6 +11,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/stats"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
@@ -59,6 +60,9 @@ type IngestionJob struct {
 
 	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
 	EvolutionPlan *schemaevolution.EvolutionPlan
+
+	// StatsCollector records best-effort per-table row counts when --stats is enabled.
+	StatsCollector *stats.Collector
 }
 
 // GetRecords returns the transformed record stream for this job.
@@ -73,7 +77,14 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 			return nil, err
 		}
 	}
-	return j.ApplyBatchTransformation(ctx, records)
+	records, err := j.ApplyBatchTransformation(ctx, records)
+	if err != nil {
+		return nil, err
+	}
+	if j.StatsCollector != nil {
+		records = j.StatsCollector.Wrap(j.Table.Name(), records)
+	}
+	return records, nil
 }
 
 // ApplyEvolution applies the pending schema evolution plan to the destination.
@@ -108,6 +119,9 @@ type MultiTableIngestionJob struct {
 
 	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
 	LoadTimestamp *transformer.LoadTimestamp
+
+	// StatsCollector records best-effort per-table row counts when --stats is enabled.
+	StatsCollector *stats.Collector
 }
 
 // ApplyEvolutionFor applies the pending schema evolution plan for a source table.
@@ -154,7 +168,11 @@ func (j *MultiTableIngestionJob) ReadAll(ctx context.Context, opts source.MultiT
 	if err != nil {
 		return nil, err
 	}
-	return j.ApplyBatchTransformation(records), nil
+	records = j.ApplyBatchTransformation(records)
+	if j.StatsCollector != nil {
+		records = j.StatsCollector.Wrap("", records)
+	}
+	return records, nil
 }
 
 func (j *MultiTableIngestionJob) ApplyBatchTransformation(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {

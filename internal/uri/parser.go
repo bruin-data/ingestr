@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/bruin-data/ingestr/pkg/mysqluri"
 )
 
 type ParsedURI struct {
@@ -103,6 +105,43 @@ func NormalizeScheme(scheme string) string {
 		return canonical
 	}
 	return scheme
+}
+
+// MaskURI redacts credentials and sensitive query parameters from a connector
+// URI while preserving enough shape for logs and stats to identify endpoints.
+func MaskURI(uri string) string {
+	// mysqluri.ParseURL tolerates scheme characters url.Parse rejects (e.g. the
+	// underscore in ps_mysql) so those URIs are masked instead of fully redacted.
+	parsed, err := mysqluri.ParseURL(uri)
+	if err != nil {
+		return "<redacted-uri>"
+	}
+	if parsed.User != nil {
+		username := parsed.User.Username()
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			parsed.User = url.UserPassword(username, "xxxxx")
+		} else {
+			parsed.User = url.User(username)
+		}
+	}
+
+	query := parsed.Query()
+	for key := range query {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "password") ||
+			strings.Contains(lower, "pass") ||
+			strings.Contains(lower, "credential") ||
+			strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "token") ||
+			strings.Contains(lower, "key") ||
+			strings.Contains(lower, "private") ||
+			strings.Contains(lower, "sas") {
+			query.Set(key, "xxxxx")
+		}
+	}
+	parsed.RawQuery = query.Encode()
+
+	return parsed.String()
 }
 
 func (p *ParsedURI) ToConnectionString() string {

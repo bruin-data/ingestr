@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/stats"
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
@@ -109,6 +110,11 @@ func IngestCommand() *cli.Command {
 				Usage:   "The progress display type (interactive, log, json)",
 				Value:   "interactive",
 				Sources: cli.EnvVars("PROGRESS", "INGESTR_PROGRESS"),
+			},
+			&cli.BoolFlag{
+				Name:    "stats",
+				Usage:   "Emit one machine-readable run stats summary line",
+				Sources: cli.EnvVars("INGESTR_STATS"),
 			},
 			&cli.IntFlag{
 				Name:    "page-size",
@@ -262,6 +268,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.SchemaContract = c.String("schema-contract")
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.Progress = config.ProgressMode(c.String("progress"))
+	cfg.Stats = c.Bool("stats")
 	cfg.PageSize = int(c.Int("page-size"))
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
@@ -335,10 +342,26 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		}
 	}
 
+	var statsCollector *stats.Collector
+	if cfg.Stats {
+		startedAt := time.Now().UTC()
+		statsCollector = stats.NewCollector(
+			stats.NewRunID(startedAt),
+			uri.MaskURI(cfg.SourceURI),
+			uri.MaskURI(cfg.DestURI),
+			startedAt,
+		)
+	}
+
 	p := pipeline.New(cfg)
+	if statsCollector != nil {
+		p.SetStatsCollector(statsCollector)
+	}
 	if err := p.Run(ctx); err != nil {
+		emitStatsSummary(statsCollector)
 		return err
 	}
+	emitStatsSummary(statsCollector)
 
 	if ctx.Err() != nil {
 		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
@@ -356,6 +379,14 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		color.Green("Ingestion completed successfully!")
 	}
 	return nil
+}
+
+func emitStatsSummary(c *stats.Collector) {
+	if c == nil {
+		return
+	}
+	summary := c.Summary(time.Now().UTC())
+	output.EventStats(summary.RunID, summary.Source, summary.Destination, summary.DurationSeconds, summary.Tables)
 }
 
 func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {

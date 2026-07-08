@@ -1,6 +1,9 @@
 package uri
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // url.Parse rejects scheme characters ingestr allows (the underscore in
 // ps_mysql), so Parse extracts the scheme itself and must handle compound and
@@ -66,5 +69,23 @@ func TestParseSchemeVariants(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMaskURI(t *testing.T) {
+	got := MaskURI("postgres://user:secret@localhost/db?api_key=abc&credentials_base64=private-json&credentials_path=/tmp/key.json&sslmode=require")
+	if strings.Contains(got, "secret") || strings.Contains(got, "abc") || strings.Contains(got, "private-json") || strings.Contains(got, "/tmp/key.json") {
+		t.Fatalf("MaskURI leaked secret data: %s", got)
+	}
+	if !strings.Contains(got, "xxxxx") {
+		t.Fatalf("MaskURI did not redact sensitive fields: %s", got)
+	}
+
+	if got := MaskURI("ps_mysql+cdc://user:secret@aws.connect.psdb.cloud:3306/db?sslmode=require"); strings.Contains(got, "secret") {
+		t.Fatalf("MaskURI leaked ps_mysql password: %s", got)
+	}
+
+	if got := MaskURI("http://[::1"); got != "<redacted-uri>" {
+		t.Fatalf("invalid URI mask = %q, want redacted placeholder", got)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/stats"
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"golang.org/x/term"
@@ -43,6 +44,7 @@ type Pipeline struct {
 	ingestrColumnFiller      *schemaevolution.IngestrColumnFiller
 	droppedColumns           map[string]bool // columns dropped during schema inference (all-null nullable)
 	logWriter                io.Writer
+	statsCollector           *stats.Collector
 }
 
 func New(cfg *config.IngestConfig) *Pipeline {
@@ -53,6 +55,10 @@ func New(cfg *config.IngestConfig) *Pipeline {
 
 func (p *Pipeline) SetLogWriter(w io.Writer) {
 	p.logWriter = w
+}
+
+func (p *Pipeline) SetStatsCollector(c *stats.Collector) {
+	p.statsCollector = c
 }
 
 func (p *Pipeline) Run(ctx context.Context) (retErr error) {
@@ -181,6 +187,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
 	if err := validateExtractPartitionStrategy(&preFetchConfig, preFetchStrategy); err != nil {
 		return err
+	}
+	if p.statsCollector != nil {
+		p.statsCollector.StartTable(table.Name(), string(preFetchStrategy))
+		defer p.statsCollector.FinishTable(table.Name())
 	}
 	display.PrintSummary(&preFetchConfig)
 
@@ -489,6 +499,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		LoadTimestamp:       loadTimestampTransformer,
 		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()),
 		EvolutionPlan:       evolutionPlan,
+		StatsCollector:      p.statsCollector,
 	}
 
 	// For --no-inference, enforce the user-provided source schema even when
@@ -920,6 +931,17 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", resolvedStrategy, config.StrategyMerge)
 	}
 
+	if p.statsCollector != nil {
+		for _, table := range tables {
+			p.statsCollector.StartTable(table.Name, string(resolvedStrategy))
+		}
+		defer func() {
+			for _, table := range tables {
+				p.statsCollector.FinishTable(table.Name)
+			}
+		}()
+	}
+
 	strat, err := strategy.Get(resolvedStrategy)
 	if err != nil {
 		return fmt.Errorf("failed to get strategy: %w", err)
@@ -1028,6 +1050,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		EvolutionPlans:    evolutionPlans,
 		WhitespaceTrimmer: whitespaceTrimmer,
 		LoadTimestamp:     loadTimestampTransformer,
+		StatsCollector:    p.statsCollector,
 	}
 
 	if p.config.Stream {

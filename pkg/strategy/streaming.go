@@ -154,6 +154,10 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
 	}
 
+	if job.StatsCollector != nil {
+		records = job.StatsCollector.Wrap("", records)
+	}
+
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}

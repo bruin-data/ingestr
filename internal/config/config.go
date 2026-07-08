@@ -60,6 +60,7 @@ type IngestConfig struct {
 	Yes            bool
 	Progress       ProgressMode
 	Debug          bool
+	Stats          bool
 
 	PageSize                        int
 	LoaderFileSize                  int

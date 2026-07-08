@@ -179,6 +179,52 @@ func TestEventEndError(t *testing.T) {
 	assert.Equal(t, "boom", r["error"])
 }
 
+func TestEventStatsJSON(t *testing.T) {
+	out, _ := initJSON(t)
+	rowsSkipped := int64(0)
+	tables := []struct {
+		Name            string  `json:"name"`
+		RowsLoaded      *int64  `json:"rows_loaded"`
+		RowsSkipped     *int64  `json:"rows_skipped"`
+		DurationSeconds float64 `json:"duration_seconds"`
+		Mode            string  `json:"mode"`
+	}{
+		{Name: "public.users", RowsLoaded: int64Ptr(3), RowsSkipped: &rowsSkipped, DurationSeconds: 1.25, Mode: "replace"},
+	}
+
+	EventStats("run-1", "postgres://user:xxxxx@localhost/db", "duckdb:///tmp/out.duckdb", 1.5, tables)
+
+	recs := parseLines(t, out)
+	require.Len(t, recs, 1)
+	r := recs[0]
+	assert.Equal(t, "stats", r["event"])
+	assert.Equal(t, "run-1", r["run_id"])
+	assert.Equal(t, "postgres://user:xxxxx@localhost/db", r["source"])
+	assert.EqualValues(t, 1.5, r["duration_seconds"])
+	require.Len(t, r["tables"], 1)
+	table := r["tables"].([]any)[0].(map[string]any)
+	assert.Equal(t, "public.users", table["name"])
+	assert.EqualValues(t, 3, table["rows_loaded"])
+	assert.EqualValues(t, 0, table["rows_skipped"])
+	assert.Equal(t, "replace", table["mode"])
+}
+
+func TestEventStatsTextWritesStderr(t *testing.T) {
+	var out, errb bytes.Buffer
+	Init(&out, &errb, ModeText)
+
+	EventStats("run-1", "csv:///tmp/users.csv", "duckdb:///tmp/out.duckdb", 1.5, []map[string]any{
+		{"name": "users", "rows_loaded": 3, "rows_skipped": nil, "duration_seconds": 1.25, "mode": "replace"},
+	})
+
+	assert.Empty(t, out.String())
+	line := strings.TrimSpace(errb.String())
+	assert.Contains(t, line, `ingestr_stats run_id="run-1"`)
+	assert.Contains(t, line, `source="csv:///tmp/users.csv"`)
+	assert.Contains(t, line, `duration_seconds=1.500`)
+	assert.Contains(t, line, `"rows_loaded":3`)
+}
+
 func TestEnsureTerminalIdempotent(t *testing.T) {
 	out, _ := initJSON(t)
 	EventEnd("success", 10, 1, 1.0, nil)
@@ -192,6 +238,10 @@ func TestEnsureTerminalIdempotent(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, ends, "EnsureTerminal must not emit a second end event")
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
 }
 
 func TestEnsureTerminalEmitsWhenNone(t *testing.T) {
