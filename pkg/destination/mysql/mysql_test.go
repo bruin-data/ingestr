@@ -304,6 +304,12 @@ func TestBuildLoadDataSQL(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestMapDataTypeToMySQLStringLength(t *testing.T) {
+	assert.Equal(t, "VARCHAR(16383)", MapDataTypeToMySQL(schema.Column{DataType: schema.TypeString, MaxLength: 16383}))
+	assert.Equal(t, "TEXT", MapDataTypeToMySQL(schema.Column{DataType: schema.TypeString, MaxLength: 16384}))
+	assert.Equal(t, "TEXT", MapDataTypeToMySQL(schema.Column{DataType: schema.TypeString, MaxLength: 65535}))
+}
+
 func TestWriteLoadDataFieldEscaping(t *testing.T) {
 	tests := []struct {
 		name  string
