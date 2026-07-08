@@ -11,7 +11,24 @@ import (
 var (
 	numberPrecisionRegex  = regexp.MustCompile(`(?i)number\((\d+)(?:,\s*(\d+))?\)`)
 	decimalPrecisionRegex = regexp.MustCompile(`(?i)(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
+	stringLengthRegex     = regexp.MustCompile(`(?i)(?:varchar|nvarchar|nchar|character|char|string|text)\((\d+)\)`)
 )
+
+// parseSnowflakeStringLength extracts the declared length from a Snowflake
+// string type (e.g. "VARCHAR(50)" -> 50). It returns 0 for unsized types and
+// for lengths at or above Snowflake's bare-VARCHAR maximum (16777216), which
+// Snowflake reports for columns declared without an explicit size.
+func parseSnowflakeStringLength(sfType string) int {
+	matches := stringLengthRegex.FindStringSubmatch(strings.TrimSpace(sfType))
+	if len(matches) < 2 {
+		return 0
+	}
+	length, err := strconv.Atoi(matches[1])
+	if err != nil || length <= 0 || length >= snowflakeMaxVarcharLength {
+		return 0
+	}
+	return length
+}
 
 // MapSnowflakeToDataType maps Snowflake type names to internal DataType.
 func MapSnowflakeToDataType(sfType string) (schema.DataType, int, int, schema.DataType) {
