@@ -233,17 +233,18 @@ func parseColumnOverride(pair string) (ColumnOverride, error) {
 				override.Scale = s
 			}
 		case schema.TypeString:
-			// Handle length for sized string types like varchar(50)
-			if len(params) >= 1 {
-				l, err := strconv.Atoi(strings.TrimSpace(params[0]))
-				if err != nil {
-					return ColumnOverride{}, fmt.Errorf("invalid length in '%s': %w", typeSpec, err)
-				}
-				if l <= 0 {
-					return ColumnOverride{}, fmt.Errorf("invalid length in '%s': must be positive", typeSpec)
-				}
-				override.MaxLength = l
+			// Sized string types take exactly one length parameter, e.g. varchar(50).
+			if len(params) != 1 {
+				return ColumnOverride{}, fmt.Errorf("invalid length in '%s': expected a single length, e.g. varchar(50)", typeSpec)
 			}
+			l, err := strconv.Atoi(strings.TrimSpace(params[0]))
+			if err != nil {
+				return ColumnOverride{}, fmt.Errorf("invalid length in '%s': %w", typeSpec, err)
+			}
+			if l <= 0 {
+				return ColumnOverride{}, fmt.Errorf("invalid length in '%s': must be positive", typeSpec)
+			}
+			override.MaxLength = l
 		}
 	} else {
 		// Simple type name
