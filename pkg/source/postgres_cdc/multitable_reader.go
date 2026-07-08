@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
+	"golang.org/x/sync/errgroup"
 )
 
 // MultiTableCDCReader handles reading CDC changes from multiple tables.
@@ -211,20 +212,40 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 	config.Debug("[CDC] Backfill slot %s created at LSN %s (snapshot %s) for %d table(s)",
 		tempSlot, created.ConsistentPoint, created.SnapshotName, len(tables))
 
+	// The exported snapshot supports concurrent readers: each table imports it
+	// into its own repeatable-read transaction while this replication
+	// connection keeps it alive.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(snapshotParallelism(opts))
 	for i := range tables {
 		table := tables[i]
-		fmt.Printf("Backfilling new table %s before streaming its changes\n", table.Name)
-		if opts.Streaming {
-			// Announce the table so a consumer that prepared its per-table state
-			// upfront can provision the destination before data arrives.
-			results <- source.RecordBatchResult{TableName: table.Name, TableInfo: &tables[i]}
-		}
-		if err := r.snapshotTable(ctx, table, created.SnapshotName, snapshotLSN, true, results, opts); err != nil {
-			return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
-		}
-		r.updateProcessedLSN(table.Name, snapshotLSN)
+		tableInfo := &tables[i]
+		g.Go(func() error {
+			fmt.Printf("Backfilling new table %s before streaming its changes\n", table.Name)
+			if opts.Streaming {
+				// Announce the table so a consumer that prepared its per-table
+				// state upfront can provision the destination before data
+				// arrives. Per-table ordering (announcement before that
+				// table's batches) is preserved inside this goroutine.
+				results <- source.RecordBatchResult{TableName: table.Name, TableInfo: tableInfo}
+			}
+			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, true, results, opts); err != nil {
+				return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
+			}
+			r.updateProcessedLSN(table.Name, snapshotLSN)
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
+}
+
+// snapshotParallelism bounds how many tables are snapshotted concurrently
+// from the same exported snapshot.
+func snapshotParallelism(opts source.MultiTableReadOptions) int {
+	if opts.Parallelism > 0 {
+		return opts.Parallelism
+	}
+	return 4
 }
 
 // backfillSlotName derives a temporary-slot name that cannot collide with the
@@ -415,17 +436,25 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	config.Debug("[CDC] Replication slot created: %s, LSN: %s, Snapshot: %s",
 		slotName, result.ConsistentPoint, result.SnapshotName)
 
-	// Snapshot each table using the exported snapshot
+	// Snapshot the tables concurrently using the same exported snapshot: each
+	// reader imports it into its own repeatable-read transaction, so all see
+	// the identical consistent point while the idle replication connection
+	// keeps the snapshot alive.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(snapshotParallelism(opts))
 	for _, table := range r.tables {
-		config.Debug("[CDC] Snapshotting table: %s", table.Name)
-		if err := r.snapshotTable(ctx, table, result.SnapshotName, snapshotLSN, false, results, opts); err != nil {
-			return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
-		}
-		// Initialize processed LSN for this table
-		r.updateProcessedLSN(table.Name, snapshotLSN)
+		g.Go(func() error {
+			config.Debug("[CDC] Snapshotting table: %s", table.Name)
+			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, false, results, opts); err != nil {
+				return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
+			}
+			// Initialize processed LSN for this table
+			r.updateProcessedLSN(table.Name, snapshotLSN)
+			return nil
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 // snapshotTable reads all data from a single table using the snapshot.
