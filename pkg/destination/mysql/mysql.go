@@ -1,12 +1,16 @@
 package mysql
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -22,18 +26,38 @@ import (
 )
 
 type MySQLDestination struct {
-	db       *sql.DB
-	uri      string
-	database string
-	isVitess bool
+	db            *sql.DB
+	uri           string
+	database      string
+	isVitess      bool
+	vitessBackend bool
+	useLoadData   bool
+	scheme        string
 }
 
+const (
+	mysqlInsertRowsPerStatement = 1000
+)
+
+var mysqlLoadDataReaderID uint64
+
 func NewMySQLDestination() *MySQLDestination {
-	return &MySQLDestination{}
+	return &MySQLDestination{
+		useLoadData: true,
+		scheme:      "mysql",
+	}
+}
+
+func NewVitessCompatibleDestination(defaultScheme string) *MySQLDestination {
+	return &MySQLDestination{
+		isVitess:      true,
+		vitessBackend: true,
+		scheme:        defaultScheme,
+	}
 }
 
 func (d *MySQLDestination) Schemes() []string {
-	return []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "ps_mysql"}
+	return []string{"mysql", "mysql+pymysql", "mariadb"}
 }
 
 func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
@@ -56,16 +80,21 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
-	// Routing is by scheme: vitess:// and ps_mysql:// select the Vitess-aware
-	// write paths (CREATE DATABASE is unsupported via vtgate, and sharded keyspaces
-	// cannot be written to safely). A mysql:// URI pointed at a Vitess server is a
-	// mistake, so fail fast with a clear message rather than misbehaving mid-load.
 	scheme := ""
 	if u, err := mysqluri.ParseURL(uri); err == nil {
 		scheme = u.Scheme
 	}
-	isVitess := scheme == "vitess" || scheme == "ps_mysql"
-	if isVitess {
+	isVitessScheme := scheme == "vitess" || scheme == "ps_mysql"
+	if d.vitessBackend && !isVitessScheme {
+		_ = db.Close()
+		return fmt.Errorf("Vitess/PlanetScale destination requires the vitess:// or ps_mysql:// scheme")
+	}
+	if !d.vitessBackend && isVitessScheme {
+		_ = db.Close()
+		return fmt.Errorf("regular MySQL destination does not accept the %s:// scheme", scheme)
+	}
+
+	if d.vitessBackend {
 		config.Debug("[MYSQL] Vitess/PlanetScale destination (scheme=%s)", scheme)
 		if sharded, err := isShardedKeyspace(ctx, db, database); err != nil {
 			output.Warnf("[WARNING] could not verify whether Vitess/PlanetScale keyspace %q is sharded (%v); proceeding as unsharded, but a sharded keyspace will fail mid-load — ingestr supports only unsharded keyspaces as a destination\n", database, err)
@@ -81,7 +110,11 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 	d.db = db
 	d.uri = uri
 	d.database = database
-	d.isVitess = isVitess
+	d.isVitess = d.vitessBackend
+	d.useLoadData = !d.vitessBackend
+	if scheme != "" {
+		d.scheme = scheme
+	}
 	config.Debug("[MYSQL] Connected to database: %s", database)
 	return nil
 }
@@ -241,21 +274,30 @@ func (d *MySQLDestination) Write(ctx context.Context, records <-chan source.Reco
 }
 
 func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.writeSequential(ctx, records, opts)
+}
+
+func (d *MySQLDestination) writeSequential(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	startTime := time.Now()
 	var totalRows int64
 	var batchNum int
 
-	config.Debug("[MYSQL] Starting write to %s", opts.Table)
+	config.Debug("[MYSQL] Starting sequential write to %s", opts.Table)
 
 	for result := range records {
 		if result.Err != nil {
 			return result.Err
 		}
 
+		record := result.Batch
+		if record == nil {
+			continue
+		}
+
 		batchNum++
 		startBatch := time.Now()
-
-		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+		rows, err := d.writeRecordBatch(ctx, record, opts.Table)
+		record.Release()
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -264,8 +306,6 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 		rate := float64(rows) / time.Since(startBatch).Seconds()
 		config.Debug("[MYSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
 			batchNum, rows, time.Since(startBatch), rate, totalRows)
-
-		result.Batch.Release()
 	}
 
 	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
@@ -274,6 +314,21 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 }
 
 func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+	if d.useLoadData {
+		rows, err := d.writeRecordBatchLoadData(ctx, record, table)
+		if err == nil {
+			return rows, nil
+		}
+		if isLoadDataLocalDisabledError(err) {
+			output.Warnf("[WARNING] MySQL LOAD DATA LOCAL INFILE is unavailable (%v); falling back to multi-row INSERT for this batch\n", err)
+			return d.writeRecordBatchInsert(ctx, record, table)
+		}
+		return rows, err
+	}
+	return d.writeRecordBatchInsert(ctx, record, table)
+}
+
+func (d *MySQLDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
@@ -282,42 +337,44 @@ func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	}
 
 	colNames := make([]string, numCols)
-	placeholders := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
 		colNames[i] = quoteColumn(record.Schema().Field(i).Name)
-		placeholders[i] = "?"
 	}
-
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
-		quoteTable(table),
-		strings.Join(colNames, ", "),
-		strings.Join(placeholders, ", "),
-	)
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
-	stmt, err := tx.PrepareContext(ctx, insertSQL)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
-		values := make([]interface{}, numCols)
-		for colIdx := 0; colIdx < numCols; colIdx++ {
-			values[colIdx] = extractValue(record.Column(colIdx), int(rowIdx))
+	rowsWritten := int64(0)
+	for start := int64(0); start < numRows; start += mysqlInsertRowsPerStatement {
+		if err := ctx.Err(); err != nil {
+			_ = tx.Rollback()
+			return rowsWritten, fmt.Errorf("write canceled before insert: %w", err)
 		}
 
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+		end := min(start+mysqlInsertRowsPerStatement, numRows)
+		chunkRows := int(end - start)
+		insertSQL := buildMultiRowInsertSQL(table, colNames, chunkRows)
+
+		values := make([]interface{}, 0, chunkRows*numCols)
+		for rowIdx := start; rowIdx < end; rowIdx++ {
+			for colIdx := 0; colIdx < numCols; colIdx++ {
+				values = append(values, extractValue(record.Column(colIdx), int(rowIdx)))
+			}
+		}
+
+		if _, err := tx.ExecContext(ctx, insertSQL, values...); err != nil {
 			config.LogFailedQuery(insertSQL, err)
 			_ = tx.Rollback()
-			return rowIdx, fmt.Errorf("failed to insert row %d: %w", rowIdx, err)
+			return rowsWritten, fmt.Errorf("failed to insert rows %d-%d: %w", start, end-1, err)
 		}
+		rowsWritten += int64(chunkRows)
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = tx.Rollback()
+		return rowsWritten, fmt.Errorf("write canceled before commit: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -325,6 +382,215 @@ func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 	}
 
 	return numRows, nil
+}
+
+func (d *MySQLDestination) writeRecordBatchLoadData(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+	numRows := record.NumRows()
+	numCols := int(record.NumCols())
+
+	if numRows == 0 {
+		return 0, nil
+	}
+
+	colNames := make([]string, numCols)
+	for i := 0; i < numCols; i++ {
+		colNames[i] = quoteColumn(record.Schema().Field(i).Name)
+	}
+
+	handlerName := fmt.Sprintf("ingestr_load_%d", atomic.AddUint64(&mysqlLoadDataReaderID, 1))
+	mysqldriver.RegisterReaderHandler(handlerName, func() io.Reader {
+		return newLoadDataRecordReader(record)
+	})
+	defer mysqldriver.DeregisterReaderHandler(handlerName)
+
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	loadSQL := buildLoadDataSQL(table, colNames, handlerName)
+	if _, err := tx.ExecContext(ctx, loadSQL); err != nil {
+		config.LogFailedQuery(loadSQL, err)
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("failed to load rows with LOAD DATA LOCAL INFILE: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("write canceled before commit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return numRows, nil
+}
+
+func buildMultiRowInsertSQL(table string, colNames []string, rows int) string {
+	placeholders := make([]string, len(colNames))
+	for i := range colNames {
+		placeholders[i] = "?"
+	}
+	rowPlaceholder := "(" + strings.Join(placeholders, ", ") + ")"
+
+	rowPlaceholders := make([]string, rows)
+	for i := range rowPlaceholders {
+		rowPlaceholders[i] = rowPlaceholder
+	}
+
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES %s",
+		quoteTable(table),
+		strings.Join(colNames, ", "),
+		strings.Join(rowPlaceholders, ", "),
+	)
+}
+
+func buildLoadDataSQL(table string, colNames []string, handlerName string) string {
+	return fmt.Sprintf(
+		"LOAD DATA LOCAL INFILE %s INTO TABLE %s FIELDS TERMINATED BY '\\t' ESCAPED BY '\\\\' LINES TERMINATED BY '\\n' (%s)",
+		quoteStringLiteral("Reader::"+handlerName),
+		quoteTable(table),
+		strings.Join(colNames, ", "),
+	)
+}
+
+func quoteStringLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func newLoadDataRecordReader(record arrow.RecordBatch) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		buf := bufio.NewWriter(writer)
+		err := writeRecordBatchTSV(buf, record)
+		if flushErr := buf.Flush(); err == nil {
+			err = flushErr
+		}
+		_ = writer.CloseWithError(err)
+	}()
+	return reader
+}
+
+func writeRecordBatchTSV(w io.Writer, record arrow.RecordBatch) error {
+	numRows := record.NumRows()
+	numCols := int(record.NumCols())
+
+	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
+		for colIdx := 0; colIdx < numCols; colIdx++ {
+			if colIdx > 0 {
+				if _, err := io.WriteString(w, "\t"); err != nil {
+					return err
+				}
+			}
+			if err := writeLoadDataField(w, extractValue(record.Column(colIdx), int(rowIdx))); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeLoadDataField(w io.Writer, value interface{}) error {
+	switch v := value.(type) {
+	case nil:
+		_, err := io.WriteString(w, `\N`)
+		return err
+	case []byte:
+		return writeEscapedLoadDataBytes(w, v)
+	case string:
+		return writeEscapedLoadDataString(w, v)
+	case int:
+		_, err := io.WriteString(w, strconv.Itoa(v))
+		return err
+	case int8:
+		_, err := io.WriteString(w, strconv.FormatInt(int64(v), 10))
+		return err
+	case int16:
+		_, err := io.WriteString(w, strconv.FormatInt(int64(v), 10))
+		return err
+	case int32:
+		_, err := io.WriteString(w, strconv.FormatInt(int64(v), 10))
+		return err
+	case int64:
+		_, err := io.WriteString(w, strconv.FormatInt(v, 10))
+		return err
+	case uint:
+		_, err := io.WriteString(w, strconv.FormatUint(uint64(v), 10))
+		return err
+	case uint8:
+		_, err := io.WriteString(w, strconv.FormatUint(uint64(v), 10))
+		return err
+	case uint16:
+		_, err := io.WriteString(w, strconv.FormatUint(uint64(v), 10))
+		return err
+	case uint32:
+		_, err := io.WriteString(w, strconv.FormatUint(uint64(v), 10))
+		return err
+	case uint64:
+		_, err := io.WriteString(w, strconv.FormatUint(v, 10))
+		return err
+	case float32:
+		_, err := io.WriteString(w, strconv.FormatFloat(float64(v), 'g', -1, 32))
+		return err
+	case float64:
+		_, err := io.WriteString(w, strconv.FormatFloat(v, 'g', -1, 64))
+		return err
+	case time.Time:
+		return writeEscapedLoadDataString(w, v.Format("2006-01-02 15:04:05.000000"))
+	default:
+		return writeEscapedLoadDataString(w, fmt.Sprintf("%v", v))
+	}
+}
+
+func writeEscapedLoadDataString(w io.Writer, value string) error {
+	return writeEscapedLoadDataBytes(w, []byte(value))
+}
+
+func writeEscapedLoadDataBytes(w io.Writer, value []byte) error {
+	for _, b := range value {
+		var s string
+		switch b {
+		case 0:
+			s = `\0`
+		case '\t':
+			s = `\t`
+		case '\n':
+			s = `\n`
+		case '\r':
+			s = `\r`
+		case '\\':
+			s = `\\`
+		case 26:
+			s = `\Z`
+		default:
+			if _, err := w.Write([]byte{b}); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := io.WriteString(w, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isLoadDataLocalDisabledError(err error) bool {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		switch myErr.Number {
+		case 3948, 1148:
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "loading local data is disabled") ||
+		strings.Contains(msg, "used command is not allowed") ||
+		strings.Contains(msg, "local infile") &&
+			(strings.Contains(msg, "disabled") || strings.Contains(msg, "not allowed"))
 }
 
 func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
@@ -778,7 +1044,12 @@ func isMySQLMissingTableError(err error) bool {
 	return strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist")
 }
 
-func (d *MySQLDestination) GetScheme() string { return "mysql" }
+func (d *MySQLDestination) GetScheme() string {
+	if d.scheme != "" {
+		return d.scheme
+	}
+	return "mysql"
+}
 
 func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	database, tableName := splitDatabaseTable(table)
