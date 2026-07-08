@@ -2,13 +2,16 @@ package postgres_cdc
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // pgoutput message types
@@ -22,6 +25,12 @@ const (
 	msgTypeTruncate = 'T'
 	msgTypeOrigin   = 'O'
 	msgTypeType     = 'Y'
+
+	// Protocol v2 streaming of large in-progress transactions.
+	msgTypeStreamStart  = 'S'
+	msgTypeStreamStop   = 'E'
+	msgTypeStreamCommit = 'c'
+	msgTypeStreamAbort  = 'A'
 )
 
 // Tuple data format
@@ -61,6 +70,7 @@ type Decoder struct {
 	targetRelID    uint32
 	pendingChanges []Change
 	currentTxLSN   pglogrepl.LSN
+	typeMap        *pgtype.Map
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
@@ -69,6 +79,7 @@ func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *
 		targetSchema: schemaName,
 		targetTable:  tableName,
 		relations:    make(map[uint32]*RelationInfo),
+		typeMap:      pgtype.NewMap(),
 	}
 }
 
@@ -409,9 +420,17 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 			if len(data) < int(length) {
 				return nil, fmt.Errorf("binary data truncated")
 			}
-			// Copy: decoded changes are buffered across the flush window and
-			// must not alias the WAL message buffer.
-			values[i] = append([]byte(nil), data[:length]...)
+			if int(i) < sourceColumnCount(d.tableSchema) && int(i) < len(rel.Columns) {
+				v, err := convertBinaryValue(data[:length], d.tableSchema.Columns[i], rel.Columns[i].DataType, d.typeMap)
+				if err != nil {
+					return nil, err
+				}
+				values[i] = v
+			} else {
+				// Copy: decoded changes are buffered across the flush window
+				// and must not alias the WAL message buffer.
+				values[i] = append([]byte(nil), data[:length]...)
+			}
 			data = data[length:]
 		default:
 			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
@@ -530,6 +549,16 @@ func convertTextValue(text string, col schema.Column) interface{} {
 		return nil
 	case schema.TypeDecimal:
 		return text // Keep as string for decimal handling
+	case schema.TypeBinary:
+		// bytea arrives as a hex literal ("\x48...") in text mode; decode it so
+		// the destination stores the raw bytes, matching the snapshot path and
+		// binary-mode decoding.
+		if strings.HasPrefix(text, `\x`) {
+			if b, err := hex.DecodeString(text[2:]); err == nil {
+				return b
+			}
+		}
+		return []byte(text)
 	case schema.TypeArray:
 		// Logical replication delivers arrays as Postgres array literals
 		// ({a,b}), not JSON arrays, so parse the literal and convert each

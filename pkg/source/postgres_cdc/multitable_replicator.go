@@ -61,9 +61,39 @@ func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTable
 // PendingLowWater reports the lowest LSN of any change received but not yet
 // emitted. Every committed transaction's changes are handed to the caller in
 // full, so only an in-flight transaction (BEGIN seen, COMMIT not yet
-// processed) can be pending inside the replicator.
+// processed) or a buffered in-progress streamed transaction (protocol v2)
+// can be pending inside the replicator.
 func (r *MultiTableReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
-	return r.decoder.InFlightTxLSN()
+	low, found := r.decoder.InFlightTxLSN()
+	if slow, ok := r.decoder.StreamedLowWater(); ok && (!found || slow < low) {
+		low = slow
+		found = true
+	}
+	return low, found
+}
+
+// buildPluginArgs assembles the pgoutput options. Protocol v2 with
+// `streaming 'true'` lets the server ship large in-flight transactions before
+// they commit instead of spilling them server-side; `binary 'true'` skips the
+// text encode/parse round-trip for column values. Both options exist since
+// PostgreSQL 14; older servers get the plain v1 arguments.
+func buildPluginArgs(cfg CDCConfig, serverVersion int, allowStreaming bool) []string {
+	protoVersion := 1
+	var extra []string
+	if serverVersion >= 140000 {
+		if allowStreaming {
+			protoVersion = 2
+			extra = append(extra, "streaming 'true'")
+		}
+		if cfg.Binary {
+			extra = append(extra, "binary 'true'")
+		}
+	}
+	args := []string{
+		fmt.Sprintf("proto_version '%d'", protoVersion),
+		fmt.Sprintf("publication_names '%s'", cfg.Publication),
+	}
+	return append(args, extra...)
 }
 
 func (r *MultiTableReplicator) Start(ctx context.Context) error {
@@ -73,10 +103,8 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 
 	config.Debug("[CDC] Starting multi-table replication from LSN: %s", r.startLSN)
 
-	pluginArgs := []string{
-		"proto_version '1'",
-		fmt.Sprintf("publication_names '%s'", r.cdcConfig.Publication),
-	}
+	pluginArgs := buildPluginArgs(r.cdcConfig, r.source.serverVersion, true)
+	config.Debug("[CDC] pgoutput options: %v", pluginArgs)
 
 	config.Debug("[CDC] Starting replication for slot %s from LSN %s", r.cdcConfig.SlotName, r.startLSN)
 

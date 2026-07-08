@@ -117,6 +117,178 @@ func pgoCommitMsg(commitLSN uint64) []byte {
 	return data
 }
 
+// Protocol v2 streamed-transaction message builders.
+
+func pgoStreamStartMsg(xid uint32, firstSegment bool) []byte {
+	data := []byte{'S'}
+	data = binary.BigEndian.AppendUint32(data, xid)
+	if firstSegment {
+		data = append(data, 1)
+	} else {
+		data = append(data, 0)
+	}
+	return data
+}
+
+func pgoStreamStopMsg() []byte { return []byte{'E'} }
+
+// pgoStreamedInsertMsg is an Insert message inside a stream segment: the
+// subtransaction xid follows the type byte.
+func pgoStreamedInsertMsg(xid, relID uint32, idText string) []byte {
+	data := []byte{'I'}
+	data = binary.BigEndian.AppendUint32(data, xid)
+	data = binary.BigEndian.AppendUint32(data, relID)
+	data = append(data, 'N')
+	data = binary.BigEndian.AppendUint16(data, 1)
+	data = append(data, 't')
+	data = binary.BigEndian.AppendUint32(data, uint32(len(idText)))
+	data = append(data, []byte(idText)...)
+	return data
+}
+
+func pgoStreamCommitMsg(xid uint32, commitLSN uint64) []byte {
+	data := []byte{'c'}
+	data = binary.BigEndian.AppendUint32(data, xid)
+	data = append(data, 0) // flags
+	data = binary.BigEndian.AppendUint64(data, commitLSN)
+	data = binary.BigEndian.AppendUint64(data, commitLSN)
+	data = binary.BigEndian.AppendUint64(data, 0) // commit timestamp
+	return data
+}
+
+func pgoStreamAbortMsg(xid, subXid uint32) []byte {
+	data := []byte{'A'}
+	data = binary.BigEndian.AppendUint32(data, xid)
+	data = binary.BigEndian.AppendUint32(data, subXid)
+	return data
+}
+
+func streamTestDecoder(t *testing.T) *MultiTableDecoder {
+	t.Helper()
+	tableSchema := &schema.TableSchema{
+		Name:   "t",
+		Schema: "public",
+		Columns: append([]schema.Column{
+			{Name: "id", DataType: schema.TypeInt32},
+		}, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
+	d := NewMultiTableDecoder([]source.SourceTableInfo{{Name: "t", Schema: tableSchema}})
+	_, err := d.Decode(pgoRelationMsg(1, "public", "t"), 10)
+	require.NoError(t, err)
+	return d
+}
+
+func decodeAll(t *testing.T, d *MultiTableDecoder, msgs [][]byte, startLSN uint64) []DecodedChanges {
+	t.Helper()
+	var out []DecodedChanges
+	for i, m := range msgs {
+		groups, err := d.Decode(m, pglogrepl.LSN(startLSN+uint64(i)))
+		require.NoError(t, err)
+		out = append(out, groups...)
+	}
+	return out
+}
+
+// A protocol v2 streamed transaction: changes buffer across stream segments
+// and are emitted at Stream Commit, stamped with the commit LSN.
+func TestMultiTableDecoderStreamedTransaction(t *testing.T) {
+	d := streamTestDecoder(t)
+
+	groups := decodeAll(t, d, [][]byte{
+		pgoStreamStartMsg(700, true),
+		pgoStreamedInsertMsg(700, 1, "1"),
+		pgoStreamedInsertMsg(700, 1, "2"),
+		pgoStreamStopMsg(),
+		// An unrelated small transaction interleaves between segments.
+		pgoBeginMsg(150),
+		pgoInsertMsg(1, "99"),
+	}, 100)
+	assert.Empty(t, groups, "no commit yet")
+
+	// The interleaved transaction commits normally.
+	groups = decodeAll(t, d, [][]byte{pgoCommitMsg(150)}, 150)
+	require.Len(t, groups, 1)
+	assert.Equal(t, pglogrepl.LSN(150), groups[0].LSN)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, int32(99), groups[0].Changes[0].Values[0])
+
+	// Second stream segment, then commit of the streamed transaction.
+	groups = decodeAll(t, d, [][]byte{
+		pgoStreamStartMsg(700, false),
+		pgoStreamedInsertMsg(700, 1, "3"),
+		pgoStreamStopMsg(),
+		pgoStreamCommitMsg(700, 500),
+	}, 200)
+
+	require.Len(t, groups, 1)
+	assert.Equal(t, "t", groups[0].TableName)
+	assert.Equal(t, pglogrepl.LSN(500), groups[0].LSN)
+	require.Len(t, groups[0].Changes, 3)
+	for i, want := range []int32{1, 2, 3} {
+		assert.Equal(t, want, groups[0].Changes[i].Values[0])
+		assert.Equal(t, pglogrepl.LSN(500), groups[0].Changes[i].LSN, "streamed changes carry the commit LSN")
+	}
+
+	_, pending := d.StreamedLowWater()
+	assert.False(t, pending, "commit must clear the streamed buffer")
+}
+
+func TestMultiTableDecoderStreamAbort(t *testing.T) {
+	t.Run("full transaction abort drops everything", func(t *testing.T) {
+		d := streamTestDecoder(t)
+		decodeAll(t, d, [][]byte{
+			pgoStreamStartMsg(700, true),
+			pgoStreamedInsertMsg(700, 1, "1"),
+			pgoStreamStopMsg(),
+			pgoStreamAbortMsg(700, 700),
+		}, 100)
+
+		groups := decodeAll(t, d, [][]byte{pgoStreamCommitMsg(700, 500)}, 200)
+		assert.Empty(t, groups, "aborted transaction must emit nothing")
+		_, pending := d.StreamedLowWater()
+		assert.False(t, pending)
+	})
+
+	t.Run("subtransaction abort drops only its changes", func(t *testing.T) {
+		d := streamTestDecoder(t)
+		groups := decodeAll(t, d, [][]byte{
+			pgoStreamStartMsg(700, true),
+			pgoStreamedInsertMsg(700, 1, "1"),
+			pgoStreamedInsertMsg(701, 1, "2"), // subxact 701
+			pgoStreamedInsertMsg(700, 1, "3"),
+			pgoStreamStopMsg(),
+			pgoStreamAbortMsg(700, 701),
+			pgoStreamCommitMsg(700, 500),
+		}, 100)
+
+		require.Len(t, groups, 1)
+		require.Len(t, groups[0].Changes, 2)
+		assert.Equal(t, int32(1), groups[0].Changes[0].Values[0])
+		assert.Equal(t, int32(3), groups[0].Changes[1].Values[0])
+	})
+}
+
+// While a streamed transaction is buffered, the safe commit position must not
+// advance past its data: the low water reports the WAL position of the first
+// buffered change.
+func TestMultiTableDecoderStreamedLowWater(t *testing.T) {
+	d := streamTestDecoder(t)
+
+	_, pending := d.StreamedLowWater()
+	require.False(t, pending)
+
+	decodeAll(t, d, [][]byte{
+		pgoStreamStartMsg(700, true),
+		pgoStreamedInsertMsg(700, 1, "1"),
+		pgoStreamStopMsg(),
+	}, 100)
+
+	low, pending := d.StreamedLowWater()
+	require.True(t, pending)
+	assert.Equal(t, pglogrepl.LSN(101), low, "low water is the first buffered change's WAL position")
+}
+
 // Transactions are delivered in commit order, but their Begin records'
 // positions interleave under concurrent writers: a transaction that began
 // earlier can commit later. Batches must be stamped with the Begin payload's

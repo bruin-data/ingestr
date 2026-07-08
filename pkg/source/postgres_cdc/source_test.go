@@ -24,6 +24,7 @@ func TestParseURIConfig(t *testing.T) {
 		wantSlot        string
 		wantMode        CDCMode
 		wantDestSchema  string
+		wantBinary      bool
 		wantErr         bool
 	}{
 		{
@@ -75,6 +76,25 @@ func TestParseURIConfig(t *testing.T) {
 			wantMode:        "",
 			wantErr:         true,
 		},
+		{
+			name:            "binary opt-in",
+			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&binary=true",
+			wantPublication: "my_pub",
+			wantMode:        ModeBatch,
+			wantBinary:      true,
+		},
+		{
+			name:            "binary explicit off",
+			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&binary=false",
+			wantPublication: "my_pub",
+			wantMode:        ModeBatch,
+			wantBinary:      false,
+		},
+		{
+			name:    "binary invalid value",
+			uri:     "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&binary=maybe",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -91,12 +111,14 @@ func TestParseURIConfig(t *testing.T) {
 			assert.Equal(t, tt.wantSlot, cfg.SlotName)
 			assert.Equal(t, tt.wantMode, cfg.Mode)
 			assert.Equal(t, tt.wantDestSchema, cfg.DestSchema)
+			assert.Equal(t, tt.wantBinary, cfg.Binary)
 
 			// Verify normalized URI doesn't contain CDC params
 			assert.NotContains(t, normalizedURI, "publication=")
 			assert.NotContains(t, normalizedURI, "slot=")
 			assert.NotContains(t, normalizedURI, "mode=")
 			assert.NotContains(t, normalizedURI, "dest_schema=")
+			assert.NotContains(t, normalizedURI, "binary=")
 			assert.NotContains(t, normalizedURI, "+cdc")
 		})
 	}

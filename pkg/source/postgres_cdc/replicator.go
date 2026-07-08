@@ -60,10 +60,9 @@ func (r *Replicator) Start(ctx context.Context) error {
 
 	config.Debug("[CDC] Starting replication from LSN: %s", r.startLSN)
 
-	pluginArgs := []string{
-		"proto_version '1'",
-		fmt.Sprintf("publication_names '%s'", r.cdcConfig.Publication),
-	}
+	// The single-table replicator stays on protocol v1 (no in-progress
+	// transaction streaming); binary tuples are still available when opted in.
+	pluginArgs := buildPluginArgs(r.cdcConfig, r.source.serverVersion, false)
 
 	config.Debug("[CDC] Starting replication for slot %s from LSN %s", r.cdcConfig.SlotName, r.startLSN)
 

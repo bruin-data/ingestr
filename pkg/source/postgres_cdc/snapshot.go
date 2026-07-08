@@ -304,6 +304,13 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 			return nil
 		}
 		return numericToBigInt(v, col.Scale)
+	case [16]byte:
+		// pgx decodes uuid to [16]byte; the Arrow layer stores UUIDs as their
+		// canonical string form (matching the WAL decode paths).
+		if col.DataType == schema.TypeUUID {
+			return formatUUID(v[:])
+		}
+		return val
 	default:
 		return val
 	}
