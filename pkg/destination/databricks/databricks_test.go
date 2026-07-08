@@ -17,7 +17,7 @@ func TestMapDataTypeToDatabricks_SizedString(t *testing.T) {
 	}{
 		{"sized", schema.Column{DataType: schema.TypeString, MaxLength: 50}, "VARCHAR(50)"},
 		{"unsized", schema.Column{DataType: schema.TypeString}, "STRING"},
-		{"over cap falls back to STRING", schema.Column{DataType: schema.TypeString, MaxLength: 70000}, "STRING"},
+		{"over cap clamps to max", schema.Column{DataType: schema.TypeString, MaxLength: 70000}, "VARCHAR(65535)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
