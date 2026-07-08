@@ -277,6 +277,10 @@ func (d *MySQLDestination) Write(ctx context.Context, records <-chan source.Reco
 }
 
 func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if !opts.StagingTable {
+		return d.writeSequential(ctx, records, opts)
+	}
+
 	writeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -362,6 +366,42 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 
 	if firstErr != nil {
 		return fmt.Errorf("parallel write failed: %w", firstErr)
+	}
+
+	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
+	config.Debug("[MYSQL] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTime), totalRate)
+	return nil
+}
+
+func (d *MySQLDestination) writeSequential(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	startTime := time.Now()
+	var totalRows int64
+	var batchNum int
+
+	config.Debug("[MYSQL] Starting sequential write to %s", opts.Table)
+
+	for result := range records {
+		if result.Err != nil {
+			return result.Err
+		}
+
+		record := result.Batch
+		if record == nil {
+			continue
+		}
+
+		batchNum++
+		startBatch := time.Now()
+		rows, err := d.writeRecordBatch(ctx, record, opts.Table)
+		record.Release()
+		if err != nil {
+			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
+		}
+
+		totalRows += rows
+		rate := float64(rows) / time.Since(startBatch).Seconds()
+		config.Debug("[MYSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
+			batchNum, rows, time.Since(startBatch), rate, totalRows)
 	}
 
 	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
@@ -476,10 +516,23 @@ func (d *MySQLDestination) writeRecordBatchLoadData(ctx context.Context, record 
 	})
 	defer mysqldriver.DeregisterReaderHandler(handlerName)
 
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
 	loadSQL := buildLoadDataSQL(table, colNames, handlerName)
-	if _, err := d.db.ExecContext(ctx, loadSQL); err != nil {
+	if _, err := tx.ExecContext(ctx, loadSQL); err != nil {
 		config.LogFailedQuery(loadSQL, err)
+		_ = tx.Rollback()
 		return 0, fmt.Errorf("failed to load rows with LOAD DATA LOCAL INFILE: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("write canceled before commit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return numRows, nil
