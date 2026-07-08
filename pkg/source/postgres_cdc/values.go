@@ -48,13 +48,16 @@ type knownValue struct {
 	known bool
 }
 
-// applyIntraBatchFill coalesces unchanged TOAST columns within a single commit:
-// an INSERT (or full-value row) followed by a partial UPDATE of the same primary
-// key, where the UPDATE omits the unchanged TOAST value. compactPendingChanges
-// later keeps only the latest row per key, so without this the earlier value
-// would be lost. State is local to the commit; cross-commit coalescing is
-// handled later at the staging-batch level (see forwardFillUnchanged), which is
-// where separate transactions are actually merged.
+// applyIntraBatchFill coalesces unchanged TOAST columns across a window of
+// changes: an INSERT (or full-value row) followed by a partial UPDATE of the
+// same primary key, where the UPDATE omits the unchanged TOAST value.
+// Compaction keeps only the latest row per key, so without this the earlier
+// value would be lost. State is local to the window it is called on: a single
+// commit in the single-table decoder (whose compaction runs per commit), and
+// the accumulator's whole flush window at materialization time (see
+// batchAccumulator.flushTable), which is where separate transactions merge —
+// cross-commit coalescing falls out of the same logic applied to the wider
+// window.
 //
 // A filled column's value is written directly into change.Values, replacing the
 // unchanged marker. That makes columnIsUnchanged report false for it, so it is

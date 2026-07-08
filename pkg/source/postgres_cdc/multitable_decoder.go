@@ -3,13 +3,8 @@ package postgres_cdc
 import (
 	"encoding/binary"
 	"fmt"
-	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
@@ -43,15 +38,18 @@ func NewMultiTableDecoder(tables []source.SourceTableInfo) *MultiTableDecoder {
 	}
 }
 
-// DecodedBatch contains a decoded batch with its source table name.
-type DecodedBatch struct {
-	Batch     arrow.RecordBatch
+// DecodedChanges carries one committed transaction's decoded changes for a
+// single table. Changes stay plain Go values; Arrow materialization happens
+// once per flush window in the accumulator, not per transaction.
+type DecodedChanges struct {
 	TableName string
+	Changes   []Change
 	LSN       pglogrepl.LSN
 }
 
-// Decode decodes a WAL message and returns batches for each table that has pending changes.
-func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedBatch, error) {
+// Decode decodes a WAL message and, on commit, returns the transaction's
+// changes grouped per target table.
+func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedChanges, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -199,42 +197,31 @@ func (d *MultiTableDecoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 	return d.currentTxLSN, true
 }
 
-func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
+func (d *MultiTableDecoder) handleCommit() ([]DecodedChanges, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
 	}
 
-	// Group changes by table
-	changesByTable := make(map[string][]Change)
+	// Group changes by table, preserving arrival order within each table.
+	// Unchanged-TOAST fill runs later over the whole flush window (see
+	// batchAccumulator.flushTable), which subsumes the per-commit pass.
+	var groups []DecodedChanges
+	groupIdx := make(map[string]int)
 	for _, tc := range d.pendingChanges {
-		changesByTable[tc.TableName] = append(changesByTable[tc.TableName], tc.Change)
-	}
-
-	// Create a batch for each table that has changes
-	var batches []DecodedBatch
-	for tableName, changes := range changesByTable {
-		tableSchema := d.tableSchemas[tableName]
-		if tableSchema == nil {
+		if d.tableSchemas[tc.TableName] == nil {
 			continue
 		}
-
-		applyIntraBatchFill(changes, tableSchema)
-
-		batch, err := d.changesToBatch(changes, tableSchema)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert changes for table %s: %w", tableName, err)
+		idx, ok := groupIdx[tc.TableName]
+		if !ok {
+			idx = len(groups)
+			groupIdx[tc.TableName] = idx
+			groups = append(groups, DecodedChanges{TableName: tc.TableName, LSN: d.currentTxLSN})
 		}
-		if batch != nil {
-			batches = append(batches, DecodedBatch{
-				Batch:     batch,
-				TableName: tableName,
-				LSN:       d.currentTxLSN,
-			})
-		}
+		groups[idx].Changes = append(groups[idx].Changes, tc.Change)
 	}
 
 	d.pendingChanges = nil
-	return batches, nil
+	return groups, nil
 }
 
 func (d *MultiTableDecoder) handleInsert(data []byte) error {
@@ -443,7 +430,9 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 			if len(data) < int(length) {
 				return nil, fmt.Errorf("binary data truncated")
 			}
-			values[i] = data[:length]
+			// Copy: decoded changes are buffered across the flush window and
+			// must not alias the WAL message buffer.
+			values[i] = append([]byte(nil), data[:length]...)
 			data = data[length:]
 		default:
 			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
@@ -451,46 +440,4 @@ func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, table
 	}
 
 	return values, nil
-}
-
-func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema.TableSchema) (arrow.RecordBatch, error) {
-	if len(changes) == 0 {
-		return nil, nil
-	}
-
-	mem := memory.NewGoAllocator()
-	arrowSchema := buildArrowSchema(tableSchema.Columns)
-
-	builders := make([]array.Builder, len(tableSchema.Columns))
-	for i, field := range arrowSchema.Fields() {
-		builders[i] = array.NewBuilder(mem, field.Type)
-	}
-
-	syncedAt := time.Now().UTC()
-	nSource := sourceColumnCount(tableSchema)
-
-	for i, change := range changes {
-		for colIdx := 0; colIdx < nSource; colIdx++ {
-			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
-		}
-
-		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
-		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
-		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, tableSchema.Columns, nSource))
-	}
-
-	arrays := make([]arrow.Array, len(builders))
-	for i, b := range builders {
-		arrays[i] = b.NewArray()
-	}
-
-	record := array.NewRecordBatch(arrowSchema, arrays, int64(len(changes)))
-
-	for _, arr := range arrays {
-		arr.Release()
-	}
-
-	return record, nil
 }

@@ -7,11 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pglogrepl"
 )
@@ -77,7 +73,10 @@ func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *
 	}
 }
 
-func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) (arrow.RecordBatch, error) {
+// Decode decodes a WAL message and, on commit, returns the transaction's
+// decoded changes (filled and compacted). Arrow materialization happens once
+// per flush window in the accumulator, not per transaction.
+func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -216,7 +215,7 @@ func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 	return d.currentTxLSN, true
 }
 
-func (d *Decoder) handleCommit() (arrow.RecordBatch, error) {
+func (d *Decoder) handleCommit() ([]Change, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
 	}
@@ -224,9 +223,9 @@ func (d *Decoder) handleCommit() (arrow.RecordBatch, error) {
 	d.applyIntraBatchFill()
 	d.compactPendingChanges()
 
-	batch, err := d.changesToBatch()
+	changes := d.pendingChanges
 	d.pendingChanges = nil
-	return batch, err
+	return changes, nil
 }
 
 func (d *Decoder) handleInsert(data []byte) error {
@@ -476,7 +475,9 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 			if len(data) < int(length) {
 				return nil, fmt.Errorf("binary data truncated")
 			}
-			values[i] = data[:length]
+			// Copy: decoded changes are buffered across the flush window and
+			// must not alias the WAL message buffer.
+			values[i] = append([]byte(nil), data[:length]...)
 			data = data[length:]
 		default:
 			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
@@ -484,48 +485,6 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 	}
 
 	return values, nil
-}
-
-func (d *Decoder) changesToBatch() (arrow.RecordBatch, error) {
-	if len(d.pendingChanges) == 0 {
-		return nil, nil
-	}
-
-	mem := memory.NewGoAllocator()
-	arrowSchema := buildArrowSchema(d.tableSchema.Columns)
-
-	builders := make([]array.Builder, len(d.tableSchema.Columns))
-	for i, field := range arrowSchema.Fields() {
-		builders[i] = array.NewBuilder(mem, field.Type)
-	}
-
-	syncedAt := time.Now().UTC()
-	nSource := sourceColumnCount(d.tableSchema)
-
-	for i, change := range d.pendingChanges {
-		for colIdx := 0; colIdx < nSource; colIdx++ {
-			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
-		}
-
-		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
-		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
-		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, d.tableSchema.Columns, nSource))
-	}
-
-	arrays := make([]arrow.Array, len(builders))
-	for i, b := range builders {
-		arrays[i] = b.NewArray()
-	}
-
-	record := array.NewRecordBatch(arrowSchema, arrays, int64(len(d.pendingChanges)))
-
-	for _, arr := range arrays {
-		arr.Release()
-	}
-
-	return record, nil
 }
 
 func readString(data []byte) (string, int) {

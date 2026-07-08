@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 )
@@ -488,18 +488,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		batchSize = 10000
 	}
 
-	accum := newBatchAccumulator(batchSize)
-	pkByTable := make(map[string][]string, len(r.tables))
+	schemas := make(map[string]*schema.TableSchema, len(r.tables))
 	for _, t := range r.tables {
-		pks := t.PrimaryKeys
-		if len(pks) == 0 && t.Schema != nil {
-			pks = t.Schema.PrimaryKeys
-		}
-		pkByTable[t.Name] = pks
+		schemas[t.Name] = t.Schema
 	}
-	accum.transform = func(tableName string, batch arrow.RecordBatch) arrow.RecordBatch {
-		return forwardFillUnchanged(batch, pkByTable[tableName])
-	}
+	accum := newBatchAccumulator(batchSize, schemas)
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
 	// confirms the slot only after the data is durable. targetLSN is 0 in
@@ -524,7 +517,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		select {
 		case <-ctx.Done():
 			config.Debug("[CDC] Context cancelled, stopping stream")
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return nil, err
+			}
 			return nil, ctx.Err()
 		default:
 		}
@@ -538,35 +533,41 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// must not kill the stream.
 				config.Debug("[CDC] New-table discovery failed: %v", derr)
 			case len(newNames) > 0:
-				// Flush emitted work, drop batches still buffered inside the
-				// replicator (the slot cannot have confirmed past them, so the
-				// rebuilt stream re-decodes them), and hand off for a rebuild.
-				accum.flushAll(results, token)
-				repl.releasePending()
+				// Flush emitted work and hand off for a rebuild. An in-flight
+				// transaction still inside the decoder is dropped with the
+				// replicator; the slot cannot have confirmed past it, so the
+				// rebuilt stream re-decodes it.
+				if err := accum.flushAll(results, token); err != nil {
+					return nil, err
+				}
 				return newNames, nil
 			}
 		}
 
-		// Get next batch (may be from any table)
-		batch, tableName, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
+		// Get the next transaction's changes (may span multiple tables)
+		groups, hadActivity, err := repl.NextChanges(ctx)
 		if err != nil {
-			accum.flushAll(results, token)
-			return nil, fmt.Errorf("failed to get next batch: %w", err)
+			_ = accum.flushAll(results, token)
+			return nil, fmt.Errorf("failed to get next changes: %w", err)
 		}
 
-		if batch != nil && batch.NumRows() > 0 {
-			accum.add(tableName, batch, lsn)
+		for _, g := range groups {
+			accum.add(g.TableName, g.Changes, g.LSN)
 		}
 
 		// Flush tables that have accumulated enough rows
-		accum.flushReady(results, token)
+		if err := accum.flushReady(results, token); err != nil {
+			return nil, err
+		}
 
 		// For batch mode, check if we've caught up to the target LSN
 		if targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
-				accum.flushAll(results, token)
+				if err := accum.flushAll(results, token); err != nil {
+					return nil, err
+				}
 				// Record the caught-up position so FinalizeBatch can confirm it
 				// to the slot once the destination write is durable.
 				r.source.recordCaughtUpLSN(currentLSN)
@@ -580,7 +581,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 
 		// When idle (no WAL activity), flush any pending batches
 		if !hadActivity {
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return nil, err
+			}
 			// Confirm the caught-up position so the slot advances over WAL that
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if opts.Streaming {

@@ -34,7 +34,7 @@ func TestNewMultiTableCDCReaderReconcilesPrimaryKeys(t *testing.T) {
 	})
 }
 
-func TestMultiTableDecoderChangesToBatchSequencesSyncedAt(t *testing.T) {
+func TestChangesToBatchSequencesSyncedAt(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Name:   "accounts",
 		Schema: "public",
@@ -48,7 +48,6 @@ func TestMultiTableDecoderChangesToBatchSequencesSyncedAt(t *testing.T) {
 		},
 	}
 
-	decoder := NewMultiTableDecoder(nil)
 	changes := []Change{
 		{
 			Operation: "UPDATE",
@@ -62,7 +61,7 @@ func TestMultiTableDecoderChangesToBatchSequencesSyncedAt(t *testing.T) {
 		},
 	}
 
-	batch, err := decoder.changesToBatch(changes, tableSchema)
+	batch, err := changesToBatch(changes, tableSchema)
 	require.NoError(t, err)
 	defer batch.Release()
 
@@ -147,11 +146,12 @@ func TestMultiTableDecoderStampsCommitLSN(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Decode(pgoInsertMsg(1, "7"), 160)
 	require.NoError(t, err)
-	batches, err := d.Decode(pgoCommitMsg(300), 300)
+	groups, err := d.Decode(pgoCommitMsg(300), 300)
 	require.NoError(t, err)
-	require.Len(t, batches, 1)
-	assert.Equal(t, pglogrepl.LSN(300), batches[0].LSN)
-	batches[0].Batch.Release()
+	require.Len(t, groups, 1)
+	assert.Equal(t, pglogrepl.LSN(300), groups[0].LSN)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, pglogrepl.LSN(300), groups[0].Changes[0].LSN)
 
 	// Transaction A: began EARLIER (WAL position 100) but commits later at 400.
 	// With begin-position stamping its LSN would be 100 < 300 and the filter
@@ -160,9 +160,8 @@ func TestMultiTableDecoderStampsCommitLSN(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Decode(pgoInsertMsg(1, "8"), 110)
 	require.NoError(t, err)
-	batches, err = d.Decode(pgoCommitMsg(400), 400)
+	groups, err = d.Decode(pgoCommitMsg(400), 400)
 	require.NoError(t, err)
-	require.Len(t, batches, 1)
-	assert.Equal(t, pglogrepl.LSN(400), batches[0].LSN)
-	batches[0].Batch.Release()
+	require.Len(t, groups, 1)
+	assert.Equal(t, pglogrepl.LSN(400), groups[0].LSN)
 }
