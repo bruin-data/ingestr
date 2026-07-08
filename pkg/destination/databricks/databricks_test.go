@@ -17,7 +17,6 @@ func TestMapDataTypeToDatabricks_SizedString(t *testing.T) {
 	}{
 		{"sized", schema.Column{DataType: schema.TypeString, MaxLength: 50}, "VARCHAR(50)"},
 		{"unsized", schema.Column{DataType: schema.TypeString}, "STRING"},
-		{"over cap clamps to max", schema.Column{DataType: schema.TypeString, MaxLength: 70000}, "VARCHAR(65535)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -25,6 +24,19 @@ func TestMapDataTypeToDatabricks_SizedString(t *testing.T) {
 				t.Fatalf("MapDataTypeToDatabricks() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestBuildCreateTableSQL_RejectsOversizedString(t *testing.T) {
+	d := &DatabricksDestination{}
+	cols := []schema.Column{{Name: "name", DataType: schema.TypeString, MaxLength: 70000}}
+	if _, err := d.buildCreateTableSQL("`c`.`s`.`t`", cols, nil); err == nil {
+		t.Fatal("expected an error for a string length above the Databricks VARCHAR maximum")
+	}
+
+	ok := []schema.Column{{Name: "name", DataType: schema.TypeString, MaxLength: 65535}}
+	if _, err := d.buildCreateTableSQL("`c`.`s`.`t`", ok, nil); err != nil {
+		t.Fatalf("unexpected error for a length at the maximum: %v", err)
 	}
 }
 

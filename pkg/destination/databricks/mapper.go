@@ -7,7 +7,7 @@ import (
 )
 
 // databricksMaxVarcharLength is the maximum length Databricks allows for a
-// bounded VARCHAR(n). A longer requested length is clamped to this value.
+// bounded VARCHAR(n). A longer requested length is rejected at table creation.
 const databricksMaxVarcharLength = 65535
 
 func MapDataTypeToDatabricks(col schema.Column) string {
@@ -35,7 +35,7 @@ func MapDataTypeToDatabricks(col schema.Column) string {
 		return fmt.Sprintf("DECIMAL(%d,%d)", precision, scale)
 	case schema.TypeString:
 		if col.MaxLength > 0 {
-			return fmt.Sprintf("VARCHAR(%d)", min(col.MaxLength, databricksMaxVarcharLength))
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
 		return "STRING"
 	case schema.TypeBinary:

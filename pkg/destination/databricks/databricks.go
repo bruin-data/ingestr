@@ -136,7 +136,10 @@ func (d *DatabricksDestination) PrepareTable(ctx context.Context, opts destinati
 	})
 
 	p.Go(func(ctx context.Context) error {
-		createSQL := d.buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys)
+		createSQL, err := d.buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys)
+		if err != nil {
+			return err
+		}
 		if err := d.executeStatement(ctx, createSQL); err != nil {
 			config.LogFailedQuery(createSQL, err)
 			// Schema might not exist, try creating it and retry
@@ -600,16 +603,19 @@ func (d *DatabricksDestination) extractWarehouseID() string {
 	return d.httpPath
 }
 
-func (d *DatabricksDestination) buildCreateTableSQL(fullTable string, columns []schema.Column, primaryKeys []string) string {
+func (d *DatabricksDestination) buildCreateTableSQL(fullTable string, columns []schema.Column, primaryKeys []string) (string, error) {
 	var colDefs []string
 	for _, col := range columns {
+		if col.DataType == schema.TypeString && col.MaxLength > databricksMaxVarcharLength {
+			return "", fmt.Errorf("column %q: requested string length %d exceeds Databricks VARCHAR maximum of %d", col.Name, col.MaxLength, databricksMaxVarcharLength)
+		}
 		colType := MapDataTypeToDatabricks(col)
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", fullTable, strings.Join(colDefs, ",\n  "))
 
-	return sql
+	return sql, nil
 }
 
 func (d *DatabricksDestination) formatValue(v interface{}) string {

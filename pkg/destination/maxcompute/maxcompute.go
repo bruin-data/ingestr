@@ -107,7 +107,10 @@ func (d *MaxComputeDestination) PrepareTable(ctx context.Context, opts destinati
 	if opts.Schema == nil {
 		return nil
 	}
-	createSQL := buildCreateTableSQL(opts.Table, opts.Schema.Columns)
+	createSQL, err := buildCreateTableSQL(opts.Table, opts.Schema.Columns)
+	if err != nil {
+		return err
+	}
 	if err := d.executeSQL(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create MaxCompute table: %w", err)
@@ -342,12 +345,15 @@ func (d *MaxComputeDestination) executeSQL(ctx context.Context, sqlText string) 
 	}
 }
 
-func buildCreateTableSQL(table string, columns []schema.Column) string {
+func buildCreateTableSQL(table string, columns []schema.Column) (string, error) {
 	defs := make([]string, len(columns))
 	for i, col := range columns {
+		if col.DataType == schema.TypeString && col.MaxLength > maxcomputeutil.MaxVarcharLength {
+			return "", fmt.Errorf("column %q: requested string length %d exceeds MaxCompute VARCHAR maximum of %d", col.Name, col.MaxLength, maxcomputeutil.MaxVarcharLength)
+		}
 		defs[i] = fmt.Sprintf("%s %s", maxcomputeutil.QuoteIdentifier(col.Name), MapDataTypeToMaxCompute(col))
 	}
-	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", maxcomputeutil.QuoteTable(table), strings.Join(defs, ",\n  "))
+	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", maxcomputeutil.QuoteTable(table), strings.Join(defs, ",\n  ")), nil
 }
 
 func (d *MaxComputeDestination) prepareEmulatorTable(ctx context.Context, opts destination.PrepareOptions) error {

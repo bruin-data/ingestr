@@ -14,7 +14,6 @@ func TestMapDataTypeToMaxCompute_SizedString(t *testing.T) {
 	}{
 		{"sized", schema.Column{DataType: schema.TypeString, MaxLength: 50}, "VARCHAR(50)"},
 		{"unsized", schema.Column{DataType: schema.TypeString}, "STRING"},
-		{"over cap clamps to max", schema.Column{DataType: schema.TypeString, MaxLength: 70000}, "VARCHAR(65535)"},
 		{"uuid ignores length", schema.Column{DataType: schema.TypeUUID, MaxLength: 50}, "STRING"},
 	}
 	for _, tt := range tests {
