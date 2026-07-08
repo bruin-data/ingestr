@@ -283,6 +283,7 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 
 	writeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	commitGate := newMySQLWriteCommitGate(cancel)
 
 	parallelism := mysqlWriteParallelismForOptions(opts)
 	startTime := time.Now()
@@ -310,7 +311,7 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 				myBatch := int(atomic.AddInt64(&batchNum, 1))
 				if result.Err != nil {
 					stopWrites.Store(true)
-					cancel()
+					commitGate.cancel()
 					results <- writeResult{batchNum: myBatch, err: result.Err}
 					continue
 				}
@@ -325,11 +326,11 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 				}
 
 				startBatch := time.Now()
-				rows, err := d.writeRecordBatch(writeCtx, record, opts.Table)
+				rows, err := d.writeRecordBatch(writeCtx, record, opts.Table, commitGate)
 				record.Release()
 				if err != nil {
 					stopWrites.Store(true)
-					cancel()
+					commitGate.cancel()
 				}
 
 				results <- writeResult{
@@ -373,6 +374,61 @@ func (d *MySQLDestination) WriteParallel(ctx context.Context, records <-chan sou
 	return nil
 }
 
+type mysqlWriteCommitGate struct {
+	mu         sync.Mutex
+	cancelFunc context.CancelFunc
+	closed     bool
+}
+
+func newMySQLWriteCommitGate(cancel context.CancelFunc) *mysqlWriteCommitGate {
+	return &mysqlWriteCommitGate{cancelFunc: cancel}
+}
+
+func (g *mysqlWriteCommitGate) cancel() {
+	g.mu.Lock()
+	g.closed = true
+	g.cancelFunc()
+	g.mu.Unlock()
+}
+
+func (g *mysqlWriteCommitGate) commit(ctx context.Context, tx *sql.Tx) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := mysqlWriteCanceledError(ctx, g.closed); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func commitMySQLTransaction(ctx context.Context, tx *sql.Tx, commitGate *mysqlWriteCommitGate) error {
+	if commitGate != nil {
+		return commitGate.commit(ctx, tx)
+	}
+	if err := mysqlWriteCanceledError(ctx, false); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func mysqlWriteCanceledError(ctx context.Context, closed bool) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("write canceled before commit: %w", err)
+	}
+	if closed {
+		return fmt.Errorf("write canceled before commit: %w", context.Canceled)
+	}
+	return nil
+}
+
 func (d *MySQLDestination) writeSequential(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	startTime := time.Now()
 	var totalRows int64
@@ -392,7 +448,7 @@ func (d *MySQLDestination) writeSequential(ctx context.Context, records <-chan s
 
 		batchNum++
 		startBatch := time.Now()
-		rows, err := d.writeRecordBatch(ctx, record, opts.Table)
+		rows, err := d.writeRecordBatch(ctx, record, opts.Table, nil)
 		record.Release()
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
@@ -426,22 +482,22 @@ func mysqlWriteParallelismForOptions(opts destination.WriteOptions) int {
 	return mysqlWriteParallelism(opts.Parallelism)
 }
 
-func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *MySQLDestination) writeRecordBatch(ctx context.Context, record arrow.RecordBatch, table string, commitGate *mysqlWriteCommitGate) (int64, error) {
 	if d.useLoadData {
-		rows, err := d.writeRecordBatchLoadData(ctx, record, table)
+		rows, err := d.writeRecordBatchLoadData(ctx, record, table, commitGate)
 		if err == nil {
 			return rows, nil
 		}
 		if isLoadDataLocalDisabledError(err) {
 			output.Warnf("[WARNING] MySQL LOAD DATA LOCAL INFILE is unavailable (%v); falling back to multi-row INSERT for this batch\n", err)
-			return d.writeRecordBatchInsert(ctx, record, table)
+			return d.writeRecordBatchInsert(ctx, record, table, commitGate)
 		}
 		return rows, err
 	}
-	return d.writeRecordBatchInsert(ctx, record, table)
+	return d.writeRecordBatchInsert(ctx, record, table, commitGate)
 }
 
-func (d *MySQLDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *MySQLDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table string, commitGate *mysqlWriteCommitGate) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
@@ -485,19 +541,14 @@ func (d *MySQLDestination) writeRecordBatchInsert(ctx context.Context, record ar
 		rowsWritten += int64(chunkRows)
 	}
 
-	if err := ctx.Err(); err != nil {
-		_ = tx.Rollback()
-		return rowsWritten, fmt.Errorf("write canceled before commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	if err := commitMySQLTransaction(ctx, tx, commitGate); err != nil {
+		return rowsWritten, err
 	}
 
 	return numRows, nil
 }
 
-func (d *MySQLDestination) writeRecordBatchLoadData(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *MySQLDestination) writeRecordBatchLoadData(ctx context.Context, record arrow.RecordBatch, table string, commitGate *mysqlWriteCommitGate) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
@@ -527,12 +578,8 @@ func (d *MySQLDestination) writeRecordBatchLoadData(ctx context.Context, record 
 		_ = tx.Rollback()
 		return 0, fmt.Errorf("failed to load rows with LOAD DATA LOCAL INFILE: %w", err)
 	}
-	if err := ctx.Err(); err != nil {
-		_ = tx.Rollback()
-		return 0, fmt.Errorf("write canceled before commit: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	if err := commitMySQLTransaction(ctx, tx, commitGate); err != nil {
+		return 0, err
 	}
 
 	return numRows, nil
