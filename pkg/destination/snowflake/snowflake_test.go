@@ -15,6 +15,7 @@ import (
 	pqfile "github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	pqschema "github.com/apache/arrow-go/v18/parquet/schema"
+	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/multitable"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -273,6 +274,97 @@ func TestSnowflakeParquetWriterTimestampLogicalTypes(t *testing.T) {
 	require.True(t, ok, "synced_at logical type = %T", syncedAt.LogicalType())
 	assert.Equal(t, pqschema.TimeUnitMicros, syncedAtLogical.TimeUnit())
 	assert.True(t, syncedAtLogical.IsAdjustedToUTC())
+}
+
+func TestGetTableSchemaPreservesSnowflakeTypeMetadata(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	rows := sqlmock.NewRows([]string{"name", "type", "null?"}).
+		AddRow("ID", "NUMBER(38,0)", "N").
+		AddRow("BUDGET", "NUMBER(20,2)", "Y").
+		AddRow("NAME", "VARCHAR(255)", "Y")
+	mock.ExpectQuery("DESCRIBE TABLE").WillReturnRows(rows)
+
+	dest := &SnowflakeDestination{db: db}
+	got, err := dest.GetTableSchema(context.Background(), "public.campaigns")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.Columns, 3)
+
+	assert.Equal(t, schema.TypeDecimal, got.Columns[0].DataType)
+	assert.Equal(t, 38, got.Columns[0].Precision)
+	assert.Equal(t, 0, got.Columns[0].Scale)
+	assert.False(t, got.Columns[0].Nullable)
+
+	assert.Equal(t, schema.TypeDecimal, got.Columns[1].DataType)
+	assert.Equal(t, 20, got.Columns[1].Precision)
+	assert.Equal(t, 2, got.Columns[1].Scale)
+	assert.True(t, got.Columns[1].Nullable)
+
+	assert.Equal(t, schema.TypeString, got.Columns[2].DataType)
+	assert.Equal(t, 255, got.Columns[2].MaxLength)
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMapSnowflakeTypeToColumn(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantType  schema.DataType
+		precision int
+		scale     int
+		maxLength int
+	}{
+		{name: "bare_number", input: "NUMBER", wantType: schema.TypeDecimal, precision: 38},
+		{name: "number_with_precision_scale", input: "NUMBER(20,2)", wantType: schema.TypeDecimal, precision: 20, scale: 2},
+		{name: "decimal_with_precision_only", input: "DECIMAL(18)", wantType: schema.TypeDecimal, precision: 18},
+		{name: "numeric_with_spaces", input: "NUMERIC( 12, 4 )", wantType: schema.TypeDecimal, precision: 12, scale: 4},
+		{name: "varchar_length", input: "VARCHAR(1024)", wantType: schema.TypeString, maxLength: 1024},
+		{name: "timestamp_precision", input: "TIMESTAMP_NTZ(9)", wantType: schema.TypeTimestamp},
+		{name: "timestamp_tz_precision", input: "TIMESTAMP_TZ(9)", wantType: schema.TypeTimestampTZ},
+		{name: "time_precision", input: "TIME(9)", wantType: schema.TypeTime},
+		{name: "binary_length", input: "BINARY(8388608)", wantType: schema.TypeBinary},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mapSnowflakeTypeToColumn(tt.input)
+			assert.Equal(t, tt.wantType, got.DataType)
+			assert.Equal(t, tt.precision, got.Precision)
+			assert.Equal(t, tt.scale, got.Scale)
+			assert.Equal(t, tt.maxLength, got.MaxLength)
+		})
+	}
+}
+
+func TestEmptyDecimalBatchAlignsToSnowflakeDescribedScale(t *testing.T) {
+	decimalType := &arrow.Decimal128Type{Precision: 20, Scale: 2}
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "BUDGET", Type: decimalType, Nullable: true},
+	}, nil)
+
+	builder := array.NewDecimal128Builder(memory.DefaultAllocator, decimalType)
+	decimalArray := builder.NewArray()
+	builder.Release()
+
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{decimalArray}, 0)
+	decimalArray.Release()
+	defer record.Release()
+
+	targetCol := mapSnowflakeTypeToColumn("NUMBER(20,2)")
+	targetCol.Name = "BUDGET"
+	targetCol.Nullable = true
+	targetSchema := (&schema.TableSchema{Columns: []schema.Column{targetCol}}).ToArrowSchema()
+
+	got, err := databuffer.CastRecordToSchema(record, targetSchema, true)
+	require.NoError(t, err)
+	defer got.Release()
+
+	assert.Equal(t, int64(0), got.NumRows())
+	assert.True(t, got.Schema().Equal(targetSchema))
 }
 
 func TestMapDataTypeToSnowflake(t *testing.T) {

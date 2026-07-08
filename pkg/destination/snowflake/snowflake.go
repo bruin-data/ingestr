@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -911,11 +912,9 @@ func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string)
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
-		col := schema.Column{
-			Name:     colName,
-			DataType: mapSnowflakeTypeToSchema(dataType),
-			Nullable: isNullable == "Y",
-		}
+		col := mapSnowflakeTypeToColumn(dataType)
+		col.Name = colName
+		col.Nullable = isNullable == "Y"
 
 		columns = append(columns, col)
 	}
@@ -935,48 +934,85 @@ func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string)
 	}, nil
 }
 
-func mapSnowflakeTypeToSchema(dataType string) schema.DataType {
-	dataType = strings.ToUpper(dataType)
+func mapSnowflakeTypeToColumn(dataType string) schema.Column {
+	dataType = strings.ToUpper(strings.TrimSpace(dataType))
 
 	if strings.HasPrefix(dataType, "NUMBER") || strings.HasPrefix(dataType, "DECIMAL") || strings.HasPrefix(dataType, "NUMERIC") {
-		return schema.TypeDecimal
+		col := schema.Column{DataType: schema.TypeDecimal, Precision: 38}
+		params := parseSnowflakeTypeParams(dataType)
+		if len(params) > 0 {
+			col.Precision = params[0]
+		}
+		if len(params) > 1 {
+			col.Scale = params[1]
+		}
+		return col
 	}
-	if strings.HasPrefix(dataType, "VARCHAR") || strings.HasPrefix(dataType, "TEXT") {
-		return schema.TypeString
+	if strings.HasPrefix(dataType, "VARCHAR") || strings.HasPrefix(dataType, "TEXT") || strings.HasPrefix(dataType, "STRING") || strings.HasPrefix(dataType, "CHAR") {
+		col := schema.Column{DataType: schema.TypeString}
+		params := parseSnowflakeTypeParams(dataType)
+		if len(params) > 0 {
+			col.MaxLength = params[0]
+		}
+		return col
 	}
 	if strings.HasPrefix(dataType, "TIMESTAMP_NTZ") {
-		return schema.TypeTimestamp
+		return schema.Column{DataType: schema.TypeTimestamp}
 	}
 	if strings.HasPrefix(dataType, "TIMESTAMP_TZ") || strings.HasPrefix(dataType, "TIMESTAMP_LTZ") {
-		return schema.TypeTimestampTZ
+		return schema.Column{DataType: schema.TypeTimestampTZ}
+	}
+	if strings.HasPrefix(dataType, "TIME") {
+		return schema.Column{DataType: schema.TypeTime}
+	}
+	if strings.HasPrefix(dataType, "BINARY") || strings.HasPrefix(dataType, "VARBINARY") {
+		return schema.Column{DataType: schema.TypeBinary}
 	}
 
 	switch dataType {
 	case "BOOLEAN":
-		return schema.TypeBoolean
+		return schema.Column{DataType: schema.TypeBoolean}
 	case "SMALLINT":
-		return schema.TypeInt16
+		return schema.Column{DataType: schema.TypeInt16}
 	case "INTEGER", "INT":
-		return schema.TypeInt32
+		return schema.Column{DataType: schema.TypeInt32}
 	case "BIGINT":
-		return schema.TypeInt64
+		return schema.Column{DataType: schema.TypeInt64}
 	case "FLOAT", "FLOAT4", "FLOAT8":
-		return schema.TypeFloat64
+		return schema.Column{DataType: schema.TypeFloat64}
 	case "DOUBLE", "DOUBLE PRECISION", "REAL":
-		return schema.TypeFloat64
-	case "BINARY", "VARBINARY":
-		return schema.TypeBinary
+		return schema.Column{DataType: schema.TypeFloat64}
 	case "DATE":
-		return schema.TypeDate
-	case "TIME":
-		return schema.TypeTime
+		return schema.Column{DataType: schema.TypeDate}
 	case "VARIANT", "OBJECT":
-		return schema.TypeJSON
+		return schema.Column{DataType: schema.TypeJSON}
 	case "ARRAY":
-		return schema.TypeArray
+		return schema.Column{DataType: schema.TypeArray}
 	default:
-		return schema.TypeString
+		return schema.Column{DataType: schema.TypeString}
 	}
+}
+
+func parseSnowflakeTypeParams(dataType string) []int {
+	start := strings.IndexByte(dataType, '(')
+	if start == -1 {
+		return nil
+	}
+	end := strings.IndexByte(dataType[start+1:], ')')
+	if end == -1 {
+		return nil
+	}
+
+	rawParams := strings.Split(dataType[start+1:start+1+end], ",")
+	params := make([]int, 0, len(rawParams))
+	for _, raw := range rawParams {
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return params
+		}
+		params = append(params, value)
+	}
+	return params
 }
 
 // sfTable parses a possibly database-qualified Snowflake table name
