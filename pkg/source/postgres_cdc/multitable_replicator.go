@@ -8,7 +8,6 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // LSNFilter provides per-table LSN filtering for multi-table CDC.
@@ -23,7 +22,13 @@ type LSNUpdater interface {
 	updateProcessedLSN(tableName string, lsn pglogrepl.LSN)
 }
 
-// MultiTableReplicator streams WAL changes for multiple tables.
+// MultiTableReplicator streams WAL changes for multiple tables. Network
+// receive and decode are pipelined: a walReceiver goroutine owns the
+// replication connection and drains the socket into a bounded channel, while
+// NextChanges consumes and decodes from it. clientXLogPos is the decode-side
+// processed position — it only advances as messages are consumed from the
+// channel, so batch mode's target check and safeCommitLSN never move past WAL
+// that is received but not yet decoded.
 type MultiTableReplicator struct {
 	source        *PostgresCDCSource
 	tables        []source.SourceTableInfo
@@ -32,10 +37,9 @@ type MultiTableReplicator struct {
 	decoder       *MultiTableDecoder
 	lsnFilter     LSNUpdater
 	clientXLogPos pglogrepl.LSN
-	standbyTimer  time.Time
-	lastMessageAt time.Time
 	started       bool
 	streaming     bool
+	recv          *walReceiver
 }
 
 func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater, streaming bool) (*MultiTableReplicator, error) {
@@ -49,8 +53,6 @@ func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTable
 		decoder:       decoder,
 		lsnFilter:     lsnFilter,
 		clientXLogPos: startLSN,
-		standbyTimer:  time.Now(),
-		lastMessageAt: time.Now(),
 		started:       false,
 		streaming:     streaming,
 	}, nil
@@ -62,14 +64,6 @@ func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTable
 // processed) can be pending inside the replicator.
 func (r *MultiTableReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
 	return r.decoder.InFlightTxLSN()
-}
-
-func (r *MultiTableReplicator) standbyStatus() pglogrepl.StandbyStatusUpdate {
-	var committed pglogrepl.LSN
-	if r.streaming && r.source.pos != nil {
-		committed = r.source.pos.Committed()
-	}
-	return standbyUpdate(r.streaming, r.clientXLogPos, committed, r.startLSN)
 }
 
 func (r *MultiTableReplicator) Start(ctx context.Context) error {
@@ -100,12 +94,20 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start replication: %w", err)
 	}
 
+	r.recv = startWALReceiver(ctx, r.source.replConn, r.streaming, r.startLSN, r.source.pos)
 	r.started = true
 	config.Debug("[CDC] Multi-table replication started successfully")
 	return nil
 }
 
+// Close stops the WAL receiver goroutine and waits for it to release the
+// replication connection. Idempotent; must be called before anything else
+// (keepalive goroutine, reconnect) touches the connection.
 func (r *MultiTableReplicator) Close(ctx context.Context) error {
+	if r.recv != nil {
+		r.recv.stop()
+		r.recv = nil
+	}
 	return nil
 }
 
@@ -126,106 +128,75 @@ func (r *MultiTableReplicator) NextChanges(ctx context.Context) ([]DecodedChange
 		}
 	}
 
-	// Send standby status periodically. A send failure means the replication
-	// connection is broken, so surface it rather than spinning on dead reads.
-	if time.Since(r.standbyTimer) > 10*time.Second {
-		status := r.standbyStatus()
-		status.ReplyRequested = time.Since(r.lastMessageAt) > silenceProbeAfter
-		err := pglogrepl.SendStandbyStatusUpdate(
-			ctx,
-			r.source.replConn,
-			status,
-		)
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to send standby status (replication connection lost): %w", err)
-		}
-		r.standbyTimer = time.Now()
+	m, ok, err := r.nextMessage(ctx)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 
-	// Bound a single receive so the loop can react to cancellation and flush
-	// idle batches. See receiveTimeout for why this is not sub-second.
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, receiveTimeout)
-	defer cancel()
+	if m.data == nil {
+		// Keepalive: advance the processed position in stream order.
+		if m.serverWALEnd > r.clientXLogPos {
+			r.clientXLogPos = m.serverWALEnd
+		}
+		return nil, true, nil
+	}
 
-	msg, err := r.source.replConn.ReceiveMessage(ctxWithTimeout)
+	config.Debug("[CDC] Processing XLogData at LSN %s, data len=%d, first byte=%x", m.walStart, len(m.data), m.data[0])
+
+	groups, err := r.decoder.Decode(m.data, m.walStart)
 	if err != nil {
+		return nil, true, fmt.Errorf("failed to decode WAL data: %w", err)
+	}
+
+	if m.walStart > r.clientXLogPos {
+		r.clientXLogPos = m.walStart
+	}
+
+	// Filter change groups based on per-table LSN, and record the surviving
+	// ones as processed: ownership passes to the caller's accumulator in full.
+	var out []DecodedChanges
+	for _, g := range groups {
+		if r.lsnFilter != nil && r.lsnFilter.ShouldFilterChange(g.TableName, g.LSN) {
+			config.Debug("[CDC] Filtering changes for %s at LSN %s (already processed)", g.TableName, g.LSN)
+			continue
+		}
+		if r.lsnFilter != nil {
+			r.lsnFilter.updateProcessedLSN(g.TableName, g.LSN)
+		}
+		out = append(out, g)
+	}
+
+	return out, true, nil
+}
+
+// nextMessage takes the next buffered stream event from the receiver, waiting
+// up to receiveTimeout when none is buffered. ok is false on a quiet stream
+// (idle). Buffered messages are always drained before a receiver failure is
+// surfaced, so decoded-but-undelivered WAL is never dropped ahead of the
+// error.
+func (r *MultiTableReplicator) nextMessage(ctx context.Context) (walMessage, bool, error) {
+	select {
+	case m := <-r.recv.msgs:
+		return m, true, nil
+	default:
+	}
+
+	select {
+	case m := <-r.recv.msgs:
+		return m, true, nil
+	case <-ctx.Done():
+		return walMessage{}, false, ctx.Err()
+	case <-r.recv.done:
+		select {
+		case m := <-r.recv.msgs:
+			return m, true, nil
+		default:
+		}
 		if ctx.Err() != nil {
-			return nil, false, ctx.Err()
+			return walMessage{}, false, ctx.Err()
 		}
-		// Timeout is expected when no data is available. But total silence for
-		// longer than deadConnectionTimeout (no data and no keepalives) means a
-		// dead or half-open connection that the per-call read timeout would mask forever.
-		if ctxWithTimeout.Err() != nil {
-			if time.Since(r.lastMessageAt) > deadConnectionTimeout {
-				return nil, false, fmt.Errorf("no message from server for %s; replication connection appears dead", deadConnectionTimeout)
-			}
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("failed to receive message: %w", err)
+		return walMessage{}, false, r.recv.err()
+	case <-time.After(receiveTimeout):
+		return walMessage{}, false, nil
 	}
-
-	r.lastMessageAt = time.Now()
-
-	if msg == nil {
-		return nil, false, nil
-	}
-
-	switch msg := msg.(type) {
-	case *pgproto3.CopyData:
-		if len(msg.Data) == 0 {
-			return nil, true, nil // Received a message, even if empty
-		}
-
-		switch msg.Data[0] {
-		case pglogrepl.PrimaryKeepaliveMessageByteID:
-			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
-			if err != nil {
-				return nil, true, fmt.Errorf("failed to parse keepalive: %w", err)
-			}
-
-			if pkm.ReplyRequested {
-				r.standbyTimer = time.Time{} // Force status update on next iteration
-			}
-
-			if pkm.ServerWALEnd > r.clientXLogPos {
-				r.clientXLogPos = pkm.ServerWALEnd
-			}
-
-		case pglogrepl.XLogDataByteID:
-			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
-			if err != nil {
-				return nil, true, fmt.Errorf("failed to parse xlog data: %w", err)
-			}
-
-			config.Debug("[CDC] Received XLogData at LSN %s, data len=%d, first byte=%x", xld.WALStart, len(xld.WALData), xld.WALData[0])
-
-			groups, err := r.decoder.Decode(xld.WALData, xld.WALStart)
-			if err != nil {
-				return nil, true, fmt.Errorf("failed to decode WAL data: %w", err)
-			}
-
-			if xld.WALStart > r.clientXLogPos {
-				r.clientXLogPos = xld.WALStart
-			}
-
-			// Filter change groups based on per-table LSN, and record the
-			// surviving ones as processed: ownership passes to the caller's
-			// accumulator in full.
-			var out []DecodedChanges
-			for _, g := range groups {
-				if r.lsnFilter != nil && r.lsnFilter.ShouldFilterChange(g.TableName, g.LSN) {
-					config.Debug("[CDC] Filtering changes for %s at LSN %s (already processed)", g.TableName, g.LSN)
-					continue
-				}
-				if r.lsnFilter != nil {
-					r.lsnFilter.updateProcessedLSN(g.TableName, g.LSN)
-				}
-				out = append(out, g)
-			}
-
-			return out, true, nil
-		}
-	}
-
-	return nil, true, nil // Received some message type we don't handle
 }

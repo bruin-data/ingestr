@@ -571,6 +571,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// Record the caught-up position so FinalizeBatch can confirm it
 				// to the slot once the destination write is durable.
 				r.source.recordCaughtUpLSN(currentLSN)
+				// Stop the WAL receiver before the keepalive goroutine takes
+				// over the replication connection — they must never use it
+				// concurrently. Close is idempotent for the deferred call.
+				_ = repl.Close(ctx)
 				// Keep the walsender alive while the destination drains the
 				// results channel. FinalizeBatch will stop it before sending
 				// the final WALFlush-bearing standby update.
