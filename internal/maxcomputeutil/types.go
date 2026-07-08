@@ -71,10 +71,6 @@ func MapSDKType(t datatype.DataType) (schema.DataType, int, int, schema.DataType
 	}
 }
 
-// MaxVarcharLength is the maximum length MaxCompute allows for a bounded
-// VARCHAR(n). A longer requested length is rejected at table creation.
-const MaxVarcharLength = 65535
-
 func MapDataTypeToMaxCompute(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
@@ -101,7 +97,7 @@ func MapDataTypeToMaxCompute(col schema.Column) string {
 		}
 		return "DECIMAL(38,9)"
 	case schema.TypeString, schema.TypeUUID:
-		if col.DataType == schema.TypeString && col.MaxLength > 0 {
+		if col.DataType == schema.TypeString && col.MaxLength > 0 && col.MaxLength <= 65535 {
 			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
 		return "STRING"
