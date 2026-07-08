@@ -364,11 +364,22 @@ func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	require.Empty(t, icebergPartitionFieldNames(ctx, t, dest, tableName))
 }
 
-func TestDestinationMergeUnsupported(t *testing.T) {
+func TestDestinationStrategySupport(t *testing.T) {
 	dest := NewDestination()
 
-	require.False(t, dest.SupportsMergeStrategy())
-	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{}), "merge strategy is not supported")
+	require.True(t, dest.SupportsReplaceStrategy())
+	require.True(t, dest.SupportsAppendStrategy())
+	require.True(t, dest.SupportsMergeStrategy())
+	require.True(t, dest.SupportsDeleteInsertStrategy())
+	require.True(t, dest.SupportsSCD2Strategy())
+	require.True(t, dest.SupportsCDCMerge())
+	require.True(t, dest.SupportsCDCUnchangedCols())
+	require.False(t, dest.SupportsAtomicSwap())
+
+	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{PrimaryKeys: []string{"id"}}), "not connected")
+	require.ErrorContains(t, dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{IncrementalKey: "id"}), "not connected")
+	require.ErrorContains(t, dest.SCD2Table(context.Background(), destination.SCD2Options{PrimaryKeys: []string{"id"}}), "not connected")
+	require.ErrorContains(t, dest.TruncateTable(context.Background(), "ns.t"), "not connected")
 }
 
 func TestDestinationApplySchemaEvolutionPromotesColumnType(t *testing.T) {

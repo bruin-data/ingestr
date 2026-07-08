@@ -44,3 +44,10 @@ var (
 	_ destination.Destination = (*synapse.SynapseDestination)(nil)
 	_ destination.Destination = (*trino.TrinoDestination)(nil)
 )
+
+// Optional strategy interfaces the Iceberg destination implements natively.
+var (
+	_ destination.TruncateCapable       = (*iceberg.Destination)(nil)
+	_ destination.CDCMergeAware         = (*iceberg.Destination)(nil)
+	_ destination.CDCUnchangedColsAware = (*iceberg.Destination)(nil)
+)

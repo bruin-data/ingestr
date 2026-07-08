@@ -120,9 +120,29 @@ For nested namespaces, use dot-separated identifiers such as `lake.analytics.eve
 
 ## Supported write dispositions
 
-Iceberg supports `append` and `replace`.
+Iceberg supports `append`, `replace`, `merge`, `delete+insert`, `truncate+insert`, and `scd2`.
 
-`replace` writes a new Iceberg overwrite snapshot for the destination table. `merge`, `delete+insert`, and `scd2` are not supported by the generic Iceberg destination.
+`replace` writes a new Iceberg overwrite snapshot for the destination table. The incremental strategies are implemented natively: each run stages the incoming rows in a temporary Iceberg table and then commits a single atomic snapshot with the changes.
+
+- `merge` upserts by primary key: rows with duplicate primary keys are deduplicated (the highest `--incremental-key` value wins when one is set), existing rows are updated in place, and net-new rows are inserted. CDC streams are merged with delete awareness.
+- `delete+insert` deletes the rows whose incremental key falls inside the loaded interval and inserts the staged rows (deduplicated by primary key when one is set).
+- `truncate+insert` empties the table in place (keeping schema, partition spec, and history) and reloads it.
+- `scd2` maintains slowly-changing-dimension history with `_scd_valid_from`, `_scd_valid_to`, and `_scd_is_current` columns.
+
+### Merge modes and memory usage
+
+`merge` and `scd2` default to **merge-on-read** on format v2 tables: the affected keys are superseded by an Iceberg equality delete file and the replacement rows are appended, in one atomic snapshot. Rows stream through disk-backed sorts for primary-key deduplication, so memory usage stays constant regardless of increment size. `delete+insert` streams the staged rows into a copy-on-write overwrite whose delete predicate is just the interval bounds, so it is constant-memory as well.
+
+Merge-on-read requires readers that understand Iceberg v2 equality deletes (Spark, Trino, Flink, and DuckDB all do), and read amplification grows until the table is compacted. Set `table.write.merge.mode=copy-on-write` on the destination URI to force copy-on-write snapshots instead.
+
+Some situations fall back to the copy-on-write join automatically because they must read the matched target rows:
+
+- CDC merges (deletes mark `_cdc_deleted` while preserving the row's data),
+- targets with destination-only columns (columns removed from the source keep their values on updated rows),
+- tables partitioned by a column outside the merge key (equality deletes are partition-routed, so a row that changed partitions would otherwise be missed),
+- format v1 tables and `write.merge.mode=copy-on-write`.
+
+These fallback paths materialize the staged rows and the target rows they affect in memory, so their memory usage grows with the increment size.
 
 ## Data type handling
 
