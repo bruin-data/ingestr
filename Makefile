@@ -19,7 +19,7 @@ NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration
+.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration cdc-postgres-stress-test
 
 all: clean deps test build
 
@@ -94,6 +94,12 @@ test-python:
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
+
+# High-volume PostgreSQL CDC accuracy test (~6 minutes of sustained load and
+# verification). Gated behind the `stress` build tag so CI never runs it.
+cdc-postgres-stress-test: generate
+	@echo "$(OK_COLOR)==> Running PostgreSQL CDC stress test (sustained load, ~6m)$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run TestPostgresCDC_StressHighVolume ./tests/integration/
 
 test-db2-integration: generate
 	@echo "$(OK_COLOR)==> Running Db2 integration tests$(NO_COLOR)"

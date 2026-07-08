@@ -171,10 +171,12 @@ func (r *MultiTableReplicator) NextBatch(ctx context.Context, batchSize int) (ar
 	// Send standby status periodically. A send failure means the replication
 	// connection is broken, so surface it rather than spinning on dead reads.
 	if time.Since(r.standbyTimer) > 10*time.Second {
+		status := r.standbyStatus()
+		status.ReplyRequested = time.Since(r.lastMessageAt) > silenceProbeAfter
 		err := pglogrepl.SendStandbyStatusUpdate(
 			ctx,
 			r.source.replConn,
-			r.standbyStatus(),
+			status,
 		)
 		if err != nil {
 			return nil, "", 0, false, fmt.Errorf("failed to send standby status (replication connection lost): %w", err)

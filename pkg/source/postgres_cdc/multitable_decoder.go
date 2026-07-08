@@ -63,7 +63,7 @@ func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedBat
 	case msgTypeRelation:
 		return nil, d.handleRelation(data)
 	case msgTypeBegin:
-		return nil, d.handleBegin(data, lsn)
+		return nil, d.handleBegin(data)
 	case msgTypeCommit:
 		return d.handleCommit()
 	case msgTypeInsert:
@@ -170,9 +170,22 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 	return nil
 }
 
-func (d *MultiTableDecoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
+// handleBegin stamps the transaction with the commit ("final") LSN carried in
+// the Begin payload, NOT the Begin record's WAL position. The walsender
+// delivers transactions in commit order, but under concurrent writers their
+// Begin positions interleave arbitrarily: a transaction that began earlier can
+// commit — and be delivered — after one that began later. A begin-position
+// stamp is therefore non-monotonic across delivered transactions, and the
+// per-table LSN filter (ShouldFilterChange) would treat such a late-committing
+// transaction as already processed and silently drop it. Commit LSNs are
+// strictly increasing in delivery order, which is exactly what the filter,
+// resume state, and slot-confirmation low-water logic require.
+func (d *MultiTableDecoder) handleBegin(data []byte) error {
 	d.pendingChanges = nil
-	d.currentTxLSN = lsn
+	if len(data) < 8 {
+		return fmt.Errorf("begin message too short")
+	}
+	d.currentTxLSN = pglogrepl.LSN(binary.BigEndian.Uint64(data[:8]))
 	return nil
 }
 

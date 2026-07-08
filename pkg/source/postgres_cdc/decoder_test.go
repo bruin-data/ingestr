@@ -211,9 +211,10 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 
 	decoder := NewDecoder(tableSchema, "public", "test_table")
 
-	// Begin a transaction
-	beginData := make([]byte, 8+8+4) // LSN + timestamp + xid
-	err := decoder.handleBegin(beginData, pglogrepl.LSN(100))
+	// Begin a transaction; the Begin payload carries the commit ("final") LSN.
+	beginData := make([]byte, 8+8+4) // final LSN + timestamp + xid
+	binary.BigEndian.PutUint64(beginData[:8], 100)
+	err := decoder.handleBegin(beginData)
 	require.NoError(t, err)
 	assert.Equal(t, pglogrepl.LSN(100), decoder.currentTxLSN)
 	assert.Nil(t, decoder.pendingChanges)
