@@ -14,10 +14,8 @@ var (
 	stringLengthRegex     = regexp.MustCompile(`(?i)(?:varchar|nvarchar|nchar|character|char|string|text)\((\d+)\)`)
 )
 
-// parseSnowflakeStringLength extracts the declared length from a Snowflake
-// string type (e.g. "VARCHAR(50)" -> 50). It returns 0 for unsized types and
-// for lengths at or above Snowflake's bare-VARCHAR maximum (16777216), which
-// Snowflake reports for columns declared without an explicit size.
+// parseSnowflakeStringLength extracts the length from a Snowflake string type
+// (e.g. "VARCHAR(50)" -> 50); returns 0 when unsized or at the 16777216 max.
 func parseSnowflakeStringLength(sfType string) int {
 	matches := stringLengthRegex.FindStringSubmatch(strings.TrimSpace(sfType))
 	if len(matches) < 2 {

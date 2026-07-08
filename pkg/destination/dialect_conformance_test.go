@@ -345,9 +345,8 @@ func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
 	}
 }
 
-// Dialects backed by databases with a sized character type must honor
-// Column.MaxLength (e.g. from a --columns varchar(50) override) instead of
-// falling back to an unbounded string type.
+// Dialects backed by a database with a sized character type must honor
+// Column.MaxLength instead of falling back to an unbounded string type.
 func TestAllDialects_TypeName_SizedString(t *testing.T) {
 	col := schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50}
 

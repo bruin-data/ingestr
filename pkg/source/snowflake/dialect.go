@@ -30,9 +30,8 @@ const (
 		ORDER BY ORDINAL_POSITION
 	`
 
-	// snowflakeMaxVarcharLength is the length Snowflake reports for a bare
-	// VARCHAR (no explicit size). Treated as "unbounded" so it is not
-	// propagated as a literal VARCHAR(16777216) to the destination.
+	// snowflakeMaxVarcharLength is the length Snowflake reports for a bare VARCHAR;
+	// treated as "unbounded" so it isn't propagated as a literal VARCHAR(16777216).
 	snowflakeMaxVarcharLength = 16777216
 )
 
@@ -229,9 +228,8 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 			ArrayType: arrayType,
 		}
 		if dt == schema.TypeString {
-			// DESCRIBE reports the full type, e.g. VARCHAR(50); preserve the
-			// declared length. Snowflake reports 16777216 for a bare VARCHAR,
-			// which is treated as unbounded.
+			// DESCRIBE reports the full type (e.g. VARCHAR(50)); keep the length.
+			// A bare VARCHAR reports as 16777216, which is treated as unbounded.
 			col.MaxLength = parseSnowflakeStringLength(dataType)
 		}
 		columns = append(columns, col)

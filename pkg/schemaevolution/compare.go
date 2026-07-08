@@ -173,9 +173,8 @@ func needsWidening(src, dest schema.Column) bool {
 	return true
 }
 
-// stringNeedsWidening reports whether a string column must grow from destLen to
-// srcLen. A MaxLength of 0 means unbounded (the widest). Widening only grows the
-// limit: it never narrows a bounded column and never shrinks unbounded to bounded.
+// stringNeedsWidening reports whether a bounded string column must grow to hold
+// srcLen. MaxLength 0 means unbounded (widest); widening only ever grows.
 func stringNeedsWidening(srcLen, destLen int) bool {
 	if destLen <= 0 {
 		return false // destination is already unbounded

@@ -1,11 +1,7 @@
 //go:build integration
 
-// End-to-end tests for sized string columns (VARCHAR(n)) against a real
-// Postgres (which enforces length), covering the three ways a length reaches
-// the destination:
-//   - an explicit --columns varchar(n) override,
-//   - auto-capture from a sized source column (postgres -> postgres), and
-//   - widening an existing column during schema evolution.
+// End-to-end tests for sized string columns against a real Postgres, covering
+// --columns override sizing, source auto-capture, and widening on evolution.
 package integration
 
 import (
