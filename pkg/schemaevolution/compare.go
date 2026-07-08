@@ -64,7 +64,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 					if !stringNeedsWidening(newCol.MaxLength, destCol.MaxLength) {
 						continue
 					}
-					newCol.MaxLength = widenedStringLength(newCol.MaxLength, destCol.MaxLength)
+					newCol.MaxLength = WidenedStringLength(newCol.MaxLength, destCol.MaxLength)
 				default:
 					continue
 				}
@@ -114,7 +114,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			// For string length widening, keep TypeString but grow the length.
 			isStringLengthWidening := widenedType == schema.TypeString && destCol.DataType == schema.TypeString
 			if isStringLengthWidening {
-				newCol.MaxLength = widenedStringLength(srcCol.MaxLength, destCol.MaxLength)
+				newCol.MaxLength = WidenedStringLength(srcCol.MaxLength, destCol.MaxLength)
 			}
 
 			// Only add change if type is different OR precision/length needs widening
@@ -183,9 +183,9 @@ func stringNeedsWidening(srcLen, destLen int) bool {
 	return srcLen <= 0 || srcLen > destLen // source is unbounded or longer
 }
 
-// widenedStringLength returns the wider of two string lengths, treating 0 as
+// WidenedStringLength returns the wider of two string lengths, treating 0 as
 // unbounded (which wins over any bounded length).
-func widenedStringLength(a, b int) int {
+func WidenedStringLength(a, b int) int {
 	if a <= 0 || b <= 0 {
 		return 0
 	}

@@ -1558,9 +1558,9 @@ func mergeSchemaColumns(existing, next schema.Column) schema.Column {
 	merged := existing
 	merged.Nullable = existing.Nullable || next.Nullable
 	merged.IsPrimaryKey = existing.IsPrimaryKey || next.IsPrimaryKey
-	if next.MaxLength > merged.MaxLength {
-		merged.MaxLength = next.MaxLength
-	}
+	// MaxLength of 0 means unbounded (the widest), so it wins over any bounded
+	// length rather than being treated as the smallest.
+	merged.MaxLength = schemaevolution.WidenedStringLength(existing.MaxLength, next.MaxLength)
 
 	switch {
 	case existing.DataType == schema.TypeUnknown:

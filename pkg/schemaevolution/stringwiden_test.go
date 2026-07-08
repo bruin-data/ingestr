@@ -26,10 +26,10 @@ func TestStringNeedsWidening(t *testing.T) {
 }
 
 func TestWidenedStringLength(t *testing.T) {
-	assert.Equal(t, 100, widenedStringLength(100, 50))
-	assert.Equal(t, 100, widenedStringLength(50, 100))
-	assert.Equal(t, 0, widenedStringLength(0, 50)) // unbounded wins
-	assert.Equal(t, 0, widenedStringLength(50, 0))
+	assert.Equal(t, 100, WidenedStringLength(100, 50))
+	assert.Equal(t, 100, WidenedStringLength(50, 100))
+	assert.Equal(t, 0, WidenedStringLength(0, 50)) // unbounded wins
+	assert.Equal(t, 0, WidenedStringLength(50, 0))
 }
 
 func strCol(name string, maxLen int) schema.Column {
