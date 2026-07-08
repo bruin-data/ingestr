@@ -50,13 +50,22 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 
 			// If destination exists and matches override, no change needed
 			if exists && destCol.DataType == newCol.DataType {
-				if newCol.DataType != schema.TypeDecimal {
-					continue
-				}
-				// For decimal, check integer digits and scale separately
-				destIntDigits := destCol.Precision - destCol.Scale
-				newIntDigits := newCol.Precision - newCol.Scale
-				if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
+				switch newCol.DataType {
+				case schema.TypeDecimal:
+					// For decimal, check integer digits and scale separately
+					destIntDigits := destCol.Precision - destCol.Scale
+					newIntDigits := newCol.Precision - newCol.Scale
+					if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
+						continue
+					}
+				case schema.TypeString:
+					// Only evolve when the override widens the length; never
+					// narrow an existing column (that would truncate data).
+					if !stringNeedsWidening(newCol.MaxLength, destCol.MaxLength) {
+						continue
+					}
+					newCol.MaxLength = widenedStringLength(newCol.MaxLength, destCol.MaxLength)
+				default:
 					continue
 				}
 			}
@@ -102,8 +111,14 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 				newCol.Precision, newCol.Scale = MergeDecimalPrecision(srcCol, destCol)
 			}
 
-			// Only add change if type is different OR decimal precision needs widening
-			if widenedType != destCol.DataType || isDecimalPrecisionWidening {
+			// For string length widening, keep TypeString but grow the length.
+			isStringLengthWidening := widenedType == schema.TypeString && destCol.DataType == schema.TypeString
+			if isStringLengthWidening {
+				newCol.MaxLength = widenedStringLength(srcCol.MaxLength, destCol.MaxLength)
+			}
+
+			// Only add change if type is different OR precision/length needs widening
+			if widenedType != destCol.DataType || isDecimalPrecisionWidening || isStringLengthWidening {
 				changes = append(changes, SchemaChange{
 					Type:       ChangeWidenType,
 					ColumnName: srcCol.Name,
@@ -146,10 +161,36 @@ func makeNullable(col schema.Column) schema.Column {
 
 func needsWidening(src, dest schema.Column) bool {
 	if src.DataType == dest.DataType {
-		if src.DataType == schema.TypeDecimal {
+		switch src.DataType {
+		case schema.TypeDecimal:
 			return src.Precision > dest.Precision || src.Scale > dest.Scale
+		case schema.TypeString:
+			return stringNeedsWidening(src.MaxLength, dest.MaxLength)
+		default:
+			return false
 		}
-		return false
 	}
 	return true
+}
+
+// stringNeedsWidening reports whether a string column must grow from destLen to
+// srcLen. A MaxLength of 0 means unbounded (the widest). Widening only grows the
+// limit: it never narrows a bounded column and never shrinks unbounded to bounded.
+func stringNeedsWidening(srcLen, destLen int) bool {
+	if destLen <= 0 {
+		return false // destination is already unbounded
+	}
+	return srcLen <= 0 || srcLen > destLen // source is unbounded or longer
+}
+
+// widenedStringLength returns the wider of two string lengths, treating 0 as
+// unbounded (which wins over any bounded length).
+func widenedStringLength(a, b int) int {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	if a > b {
+		return a
+	}
+	return b
 }
