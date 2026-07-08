@@ -20,6 +20,9 @@ func mapDataTypeToCrateDB(col schema.Column) string {
 		}
 		return "NUMERIC"
 	case schema.TypeString:
+		if col.MaxLength > 0 {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
 		return "TEXT"
 	case schema.TypeBinary:
 		return "TEXT"

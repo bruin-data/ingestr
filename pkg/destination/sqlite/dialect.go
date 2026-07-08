@@ -41,6 +41,9 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeDecimal:
 		return "REAL"
 	case schema.TypeString, schema.TypeJSON, schema.TypeUUID:
+		if col.DataType == schema.TypeString && col.MaxLength > 0 {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
 		return "TEXT"
 	case schema.TypeBinary:
 		return "BLOB"
