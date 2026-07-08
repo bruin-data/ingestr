@@ -361,7 +361,6 @@ func TestAllDialects_TypeName_SizedString(t *testing.T) {
 		"bigquery":   "STRING(50)",
 		"oracle":     "VARCHAR2(50 CHAR)",
 		"duckdb":     "VARCHAR(50)",
-		"athena":     "VARCHAR(50)",
 		"trino":      "VARCHAR(50)",
 		"cratedb":    "VARCHAR(50)",
 		"sqlite":     "VARCHAR(50)",
@@ -383,6 +382,8 @@ func TestAllDialects_TypeName_SizedString_Unsupported(t *testing.T) {
 	expected := map[string]string{
 		"clickhouse": "String",
 		"cassandra":  "text",
+		// Athena tables are Iceberg-backed; Iceberg has no sized string type.
+		"athena": "VARCHAR",
 	}
 
 	for scheme, exp := range expected {

@@ -119,7 +119,9 @@ func athenaCastTypeForColumn(col schema.Column) string {
 	case schema.TypeJSON, schema.TypeUUID, schema.TypeString, schema.TypeUnknown:
 		fallthrough
 	default:
-		// Trino uses varchar as unbounded string type.
+		// Trino uses varchar as unbounded string type. Athena tables are
+		// Iceberg-backed and Iceberg has no sized string type, so a column
+		// length (e.g. from --columns varchar(50)) cannot be preserved.
 		return "varchar"
 	}
 }
