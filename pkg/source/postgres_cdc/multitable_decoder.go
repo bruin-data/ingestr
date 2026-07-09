@@ -123,8 +123,7 @@ func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedCha
 	case msgTypeDelete:
 		return nil, d.handleDelete(data)
 	case msgTypeTruncate:
-		config.Debug("[CDC] Ignoring TRUNCATE message")
-		return nil, nil
+		return nil, d.handleTruncate(data)
 	case msgTypeOrigin:
 		return nil, nil
 	case msgTypeType:
@@ -133,6 +132,24 @@ func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedCha
 		config.Debug("[CDC] Unknown message type: %c", msgType)
 		return nil, nil
 	}
+}
+
+func (d *MultiTableDecoder) handleTruncate(data []byte) error {
+	relationIDs, err := parseTruncateRelationIDs(data)
+	if err != nil {
+		return err
+	}
+	for _, relID := range relationIDs {
+		tableName := d.targetRelIDs[relID]
+		if tableName == "" {
+			continue
+		}
+		d.appendChange(TableChange{TableName: tableName, Change: Change{
+			Operation: "TRUNCATE",
+			LSN:       d.currentTxLSN,
+		}})
+	}
+	return nil
 }
 
 func (d *MultiTableDecoder) handleStreamStart(data []byte) error {

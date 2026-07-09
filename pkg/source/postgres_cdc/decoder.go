@@ -42,7 +42,7 @@ const (
 )
 
 type Change struct {
-	Operation string // "INSERT", "UPDATE", "DELETE"
+	Operation string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
 	LSN       pglogrepl.LSN
 	Values    []interface{}
 	OldValues []interface{} // For UPDATE/DELETE with replica identity
@@ -95,8 +95,7 @@ func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 	case msgTypeDelete:
 		return nil, d.handleDelete(data)
 	case msgTypeTruncate:
-		config.Debug("[CDC] Ignoring TRUNCATE message")
-		return nil, nil
+		return nil, d.handleTruncate(data)
 	case msgTypeOrigin:
 		return nil, nil
 	case msgTypeType:
@@ -105,6 +104,36 @@ func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 		config.Debug("[CDC] Unknown message type: %c", msgType)
 		return nil, nil
 	}
+}
+
+func (d *Decoder) handleTruncate(data []byte) error {
+	relationIDs, err := parseTruncateRelationIDs(data)
+	if err != nil {
+		return err
+	}
+	for _, relID := range relationIDs {
+		if relID == d.targetRelID {
+			d.pendingChanges = append(d.pendingChanges, Change{Operation: "TRUNCATE", LSN: d.currentTxLSN})
+			break
+		}
+	}
+	return nil
+}
+
+func parseTruncateRelationIDs(data []byte) ([]uint32, error) {
+	if len(data) < 5 {
+		return nil, fmt.Errorf("truncate message too short")
+	}
+	count := int(binary.BigEndian.Uint32(data[:4]))
+	data = data[5:] // relation count followed by cascade/restart-identity flags
+	if count < 0 || len(data) < count*4 {
+		return nil, fmt.Errorf("truncate message contains %d relations but only %d bytes", count, len(data))
+	}
+	relationIDs := make([]uint32, count)
+	for i := range relationIDs {
+		relationIDs[i] = binary.BigEndian.Uint32(data[i*4 : i*4+4])
+	}
+	return relationIDs, nil
 }
 
 func (d *Decoder) handleRelation(data []byte) error {

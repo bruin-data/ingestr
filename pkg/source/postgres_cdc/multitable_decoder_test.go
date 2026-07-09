@@ -117,6 +117,30 @@ func pgoCommitMsg(commitLSN uint64) []byte {
 	return data
 }
 
+func pgoTruncateMsg(relationIDs ...uint32) []byte {
+	data := []byte{'T'}
+	data = binary.BigEndian.AppendUint32(data, uint32(len(relationIDs)))
+	data = append(data, 0) // no cascade/restart-identity flags
+	for _, relationID := range relationIDs {
+		data = binary.BigEndian.AppendUint32(data, relationID)
+	}
+	return data
+}
+
+func TestMultiTableDecoderEmitsTruncateAtCommit(t *testing.T) {
+	d := streamTestDecoder(t)
+	groups := decodeAll(t, d, [][]byte{
+		pgoBeginMsg(42),
+		pgoTruncateMsg(1, 999),
+		pgoCommitMsg(42),
+	}, 20)
+	require.Len(t, groups, 1)
+	assert.Equal(t, "t", groups[0].TableName)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, "TRUNCATE", groups[0].Changes[0].Operation)
+	assert.Equal(t, pglogrepl.LSN(42), groups[0].Changes[0].LSN)
+}
+
 // Protocol v2 streamed-transaction message builders.
 
 func pgoStreamStartMsg(xid uint32, firstSegment bool) []byte {

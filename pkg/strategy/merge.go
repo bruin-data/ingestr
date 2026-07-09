@@ -198,8 +198,9 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		records = job.Tracker.Wrap(records)
 	}
 
-	// Write to staging table using parallel writes
-	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
+	// Write to staging table using parallel writes. Source TRUNCATE controls
+	// split the input into ordered segments and clear earlier staged changes.
+	sourceTruncated, err := writeRecordsWithTruncate(ctx, job.Destination, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
 		Parallelism:      parallelism,
@@ -208,7 +209,8 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 
@@ -220,6 +222,11 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
 	config.Debug("[MERGE] Executing merge operation")
+	if isCDC && sourceTruncated {
+		if err := truncateWriteTable(ctx, job.Destination, job.Config.DestTable); err != nil {
+			return err
+		}
+	}
 	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
@@ -343,14 +350,15 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		records = job.Tracker.Wrap(records)
 	}
 
-	if err := multitable.Write(ctx, job.Destination, records, destination.MultiTableWriteOptions{
+	writeResult, err := multitable.WriteWithResult(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
-	}); err != nil {
+	})
+	if err != nil {
 		for _, stagingTable := range stagingTables {
 			_ = job.Destination.DropTable(ctx, stagingTable)
 		}
@@ -370,6 +378,12 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			if !ok {
 				// Append-only change-log table: rows were written directly.
 				return
+			}
+			if hasCDCColumns(ti.Schema) && writeResult.TruncatedTables[ti.Name] {
+				if err := truncateWriteTable(ctx, job.Destination, destTable); err != nil {
+					mergeErrChan <- fmt.Errorf("failed to reset CDC target %s: %w", ti.Name, err)
+					return
+				}
 			}
 
 			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, ""); err != nil {

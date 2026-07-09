@@ -225,6 +225,23 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 	assert.Nil(t, batch)
 }
 
+func TestDecoderEmitsTruncateAtCommit(t *testing.T) {
+	tableSchema := &schema.TableSchema{Columns: cdcMetaColumns()}
+	decoder := NewDecoder(tableSchema, "public", "items")
+	decoder.targetRelID = 7
+
+	_, err := decoder.Decode(pgoBeginMsg(88), 1)
+	require.NoError(t, err)
+	changes, err := decoder.Decode(pgoTruncateMsg(7, 9), 2)
+	require.NoError(t, err)
+	assert.Nil(t, changes)
+	changes, err = decoder.Decode(pgoCommitMsg(88), 3)
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	assert.Equal(t, "TRUNCATE", changes[0].Operation)
+	assert.Equal(t, pglogrepl.LSN(88), changes[0].LSN)
+}
+
 func TestResolveColumnValue(t *testing.T) {
 	t.Run("unchanged uses old tuple on update", func(t *testing.T) {
 		change := Change{

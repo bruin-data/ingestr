@@ -46,6 +46,7 @@ type CDCConfig struct {
 	Mode          CDCMode
 	ResumeFromLSN string // If set, skip snapshot and resume streaming from this LSN
 	DestSchema    string // If set, prepend this schema to destination table names (e.g. "dataset" for BigQuery)
+	StateID       string // Optional explicit identity for destination-managed CDC state
 
 	// DiscoverInterval is how often streaming mode checks for new tables on the
 	// source. Zero disables mid-stream discovery.
@@ -100,13 +101,24 @@ type PostgresCDCSource struct {
 	// more than once per run (pipeline setup, ReadAll, stream rebuilds).
 	keylessWarnedMu sync.Mutex
 	keylessWarned   map[string]bool
+
+	stateMu           sync.Mutex
+	snapshotPositions map[string]string
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
-	return &PostgresCDCSource{pos: newStreamPosition(), caughtUp: newStreamPosition(), lag: newLagState()}
+	return &PostgresCDCSource{
+		pos:               newStreamPosition(),
+		caughtUp:          newStreamPosition(),
+		lag:               newLagState(),
+		snapshotPositions: make(map[string]string),
+	}
 }
 
-var _ source.LagReporter = (*PostgresCDCSource)(nil)
+var (
+	_ source.LagReporter      = (*PostgresCDCSource)(nil)
+	_ source.CDCStateProvider = (*PostgresCDCSource)(nil)
+)
 
 func (s *PostgresCDCSource) Schemes() []string {
 	return []string{"postgres+cdc", "postgresql+cdc"}
@@ -117,6 +129,9 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse CDC config: %w", err)
 	}
+	s.stateMu.Lock()
+	s.snapshotPositions = make(map[string]string)
+	s.stateMu.Unlock()
 
 	// Create query pool for regular SQL operations
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
@@ -334,6 +349,12 @@ func (s *PostgresCDCSource) DefaultStreamingStrategy() config.IncrementalStrateg
 // status updates so the slot's confirmed_flush_lsn only advances past durable
 // data. The token is the pglogrepl.LSN attached to the last flushed batch.
 func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
+	if stateToken, ok := token.(source.CDCStateCommitToken); ok {
+		token = stateToken.SourceCommitToken
+		if token == nil {
+			return nil
+		}
+	}
 	lsn, ok := token.(pglogrepl.LSN)
 	if !ok {
 		return fmt.Errorf("postgres cdc: unexpected commit token type %T", token)
@@ -344,6 +365,30 @@ func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
 	s.pos.Commit(lsn)
 	config.Debug("[CDC] Confirmed durable LSN: %s", lsn)
 	return nil
+}
+
+func (s *PostgresCDCSource) recordSnapshotPosition(table string, lsn pglogrepl.LSN) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.snapshotPositions == nil {
+		s.snapshotPositions = make(map[string]string)
+	}
+	s.snapshotPositions[table] = FormatLSN(lsn)
+}
+
+func (s *PostgresCDCSource) CDCState() source.CDCStateCommitToken {
+	s.stateMu.Lock()
+	snapshots := make(map[string]string, len(s.snapshotPositions))
+	for table, position := range s.snapshotPositions {
+		snapshots[table] = position
+	}
+	s.stateMu.Unlock()
+
+	var position string
+	if s.caughtUp != nil && s.caughtUp.Committed() > 0 {
+		position = FormatLSN(s.caughtUp.Committed())
+	}
+	return source.CDCStateCommitToken{Position: position, SnapshotPositions: snapshots}
 }
 
 // ReplicationLag reports how many WAL bytes the durable destination position
@@ -449,6 +494,7 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 	cfg.Publication = query.Get("publication")
 	cfg.SlotName = query.Get("slot")
 	cfg.DestSchema = query.Get("dest_schema")
+	cfg.StateID = query.Get("state_id")
 
 	if mode := query.Get("mode"); mode != "" {
 		switch mode {
@@ -493,6 +539,7 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 	query.Del("dest_schema")
 	query.Del("discover_interval")
 	query.Del("binary")
+	query.Del("state_id")
 	parsed.RawQuery = query.Encode()
 
 	return cfg, parsed.String(), nil

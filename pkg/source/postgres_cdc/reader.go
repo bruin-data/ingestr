@@ -77,6 +77,12 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		}
 
 		config.Debug("[CDC] Snapshot completed at LSN: %s", snapshotLSN)
+		r.source.recordSnapshotPosition(r.tableName, snapshotLSN)
+		if opts.Streaming {
+			results <- source.RecordBatchResult{CommitToken: snapshotCommitToken(snapshotLSN, map[string]string{
+				r.tableName: FormatLSN(snapshotLSN),
+			})}
+		}
 
 		// Phase 2: Stream changes from snapshot LSN using the same slot
 		if err := r.streamChanges(ctx, snapshotLSN, slotName, results, opts); err != nil {
@@ -241,7 +247,7 @@ type batchReplicator interface {
 func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetLSN pglogrepl.LSN, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
 	var token tokenFunc
 	if streaming {
-		token = func() any { return safeCommitLSN(repl, accum) }
+		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 	}
 
 	// lastIdleToken is the highest LSN already handed to the pipeline via a bare

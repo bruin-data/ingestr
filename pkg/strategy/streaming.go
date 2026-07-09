@@ -34,6 +34,7 @@ type StreamingOptions struct {
 	FlushRecords  int64
 	Strategy      config.IncrementalStrategy // merge or append
 	Committer     source.StreamCommitter     // nil = source needs no durability feedback
+	StateManager  *CDCStateManager           // nil = source does not use destination-managed CDC state
 }
 
 // StreamingExecutor runs continuous ingestion: it buffers record batches from
@@ -67,7 +68,6 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
 		return err
 	}
-
 	parallelism := job.Config.ExtractParallelism
 	if parallelism <= 0 {
 		parallelism = 4
@@ -139,7 +139,6 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
 			return err
 		}
-
 		tables[ti.Name] = st
 	}
 
@@ -192,6 +191,11 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			job.TableDestNames = make(map[string]string)
 		}
 		job.TableDestNames[ti.Name] = st.destTable
+		if e.opts.StateManager != nil {
+			if err := e.opts.StateManager.RegisterTable(ctx, ti.Name, st.destTable); err != nil {
+				return nil, err
+			}
+		}
 		return st, nil
 	}
 	// CDC sources also re-announce a table (with its refreshed schema) after
@@ -327,8 +331,9 @@ type flushLoop struct {
 	// lastToken is the newest CommitToken seen; tokenDirty marks that it has
 	// not been committed yet. Tokens may be uncomparable types (maps), so a
 	// dirty flag is used instead of comparing tokens.
-	lastToken  any
-	tokenDirty bool
+	lastToken    any
+	tokenDirty   bool
+	pendingState source.CDCStateCommitToken
 
 	cycles int64
 }
@@ -367,7 +372,9 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 					return err
 				}
 			}
-			l.buffer(res)
+			if err := l.handleResult(ctx, res); err != nil {
+				return err
+			}
 			if l.buffered >= l.opts.FlushRecords {
 				if err := l.flush(ctx); err != nil {
 					return err
@@ -387,6 +394,32 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 			return l.shutdown(ctx, records)
 		}
 	}
+}
+
+func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResult) error {
+	if !res.Truncate {
+		l.buffer(res)
+		return nil
+	}
+
+	if l.buffered > 0 || l.tokenDirty {
+		if err := l.flush(ctx); err != nil {
+			return fmt.Errorf("failed to flush before source truncate: %w", err)
+		}
+	}
+	st, ok := l.tables[res.TableName]
+	if !ok {
+		return fmt.Errorf("source requested truncate for unknown table %q", res.TableName)
+	}
+	truncater, ok := l.dest.(destination.TruncateCapable)
+	if !ok {
+		return fmt.Errorf("destination scheme %q cannot apply source TRUNCATE events", l.dest.GetScheme())
+	}
+	if err := truncater.TruncateTable(ctx, st.destTable); err != nil {
+		return fmt.Errorf("failed to apply source truncate to %s: %w", st.destTable, err)
+	}
+	l.buffer(res)
+	return nil
 }
 
 // ensureTable provisions per-table state for a table announced mid-stream.
@@ -466,6 +499,19 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 	if res.CommitToken != nil {
 		l.lastToken = res.CommitToken
 		l.tokenDirty = true
+		if token, ok := res.CommitToken.(source.CDCStateCommitToken); ok {
+			if token.Position != "" {
+				l.pendingState.Position = token.Position
+			}
+			if len(token.SnapshotPositions) > 0 {
+				if l.pendingState.SnapshotPositions == nil {
+					l.pendingState.SnapshotPositions = make(map[string]string)
+				}
+				for table, position := range token.SnapshotPositions {
+					l.pendingState.SnapshotPositions[table] = position
+				}
+			}
+		}
 	}
 	if res.Batch == nil {
 		return
@@ -583,12 +629,18 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		flushedRows += w.rows
 	}
 
+	if l.opts.StateManager != nil && l.tokenDirty {
+		if err := l.opts.StateManager.Persist(ctx, l.pendingState); err != nil {
+			return fmt.Errorf("streaming flush: failed to persist destination CDC state: %w", err)
+		}
+	}
 	if l.opts.Committer != nil && l.tokenDirty {
 		if err := l.opts.Committer.CommitStream(ctx, l.lastToken); err != nil {
 			return fmt.Errorf("streaming flush: failed to commit source position: %w", err)
 		}
 	}
 	l.tokenDirty = false
+	l.pendingState = source.CDCStateCommitToken{}
 
 	// Only after the commit: the counters mean "durable in the destination and
 	// acknowledged to the source", not merely "written".
@@ -646,6 +698,8 @@ func (l *flushLoop) resetStaging(ctx context.Context, st *streamTableState) erro
 func (l *flushLoop) shutdown(ctx context.Context, records <-chan source.RecordBatchResult) error {
 	deadline := time.NewTimer(streamDrainTimeout)
 	defer deadline.Stop()
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamFinalFlushTimeout)
+	defer cancel()
 
 drain:
 	for {
@@ -659,7 +713,9 @@ drain:
 				config.Debug("[STREAM] Ignoring source error during shutdown: %v", res.Err)
 				continue
 			}
-			l.buffer(res)
+			if err := l.handleResult(drainCtx, res); err != nil {
+				return err
+			}
 		case <-deadline.C:
 			config.Debug("[STREAM] Drain deadline reached, proceeding to final flush")
 			break drain

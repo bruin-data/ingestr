@@ -26,12 +26,6 @@ type Snapshot struct {
 	tableSchema *schema.TableSchema
 	cdcConfig   CDCConfig
 	slotName    string
-
-	// noCommitToken suppresses CommitTokens on emitted batches. Backfill
-	// snapshots read via a temporary slot must set it: their consistent point is
-	// ahead of the main slot's position, so confirming it on the main slot would
-	// skip WAL that has not been streamed yet.
-	noCommitToken bool
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -205,6 +199,11 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	}
 	defer func() { rows.Close() }()
 
+	// A snapshot is a complete replacement boundary. Consumers must discard
+	// any target rows left by an interrupted snapshot or a resume whose
+	// replication slot disappeared before applying these rows.
+	results <- source.RecordBatchResult{Truncate: true}
+
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
@@ -212,15 +211,6 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 
 	lsnStr := FormatLSN(lsn)
 	syncedAt := time.Now().UTC()
-
-	// In streaming mode, snapshot batches carry the snapshot's consistent-point
-	// LSN as a commit token. It is always safe to confirm when the snapshot was
-	// taken on the main slot: streaming begins from this LSN, so nothing earlier
-	// remains to be read. Backfill snapshots (temporary slot) suppress it.
-	var commitToken any
-	if opts.Streaming && !s.noCommitToken {
-		commitToken = lsn
-	}
 
 	// Build Arrow schema including CDC columns
 	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
@@ -242,7 +232,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		totalRows += count
 		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
 
-		results <- source.RecordBatchResult{Batch: record, CommitToken: commitToken}
+		results <- source.RecordBatchResult{Batch: record}
 	}
 
 	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)

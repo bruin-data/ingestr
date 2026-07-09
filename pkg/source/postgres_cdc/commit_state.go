@@ -147,10 +147,26 @@ func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batc
 		return lastEmitted
 	}
 	select {
-	case results <- source.RecordBatchResult{CommitToken: safe}:
+	case results <- source.RecordBatchResult{CommitToken: checkpointCommitToken(safe)}:
 		return safe
 	case <-ctx.Done():
 		return lastEmitted
+	}
+}
+
+func checkpointCommitToken(lsn pglogrepl.LSN) source.CDCStateCommitToken {
+	position := ""
+	if lsn > 0 {
+		position = FormatLSN(lsn)
+	}
+	return source.CDCStateCommitToken{SourceCommitToken: lsn, Position: position}
+}
+
+func snapshotCommitToken(lsn pglogrepl.LSN, snapshots map[string]string) source.CDCStateCommitToken {
+	return source.CDCStateCommitToken{
+		SourceCommitToken: lsn,
+		Position:          FormatLSN(lsn),
+		SnapshotPositions: snapshots,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,19 @@ import (
 
 type fakeDestination struct {
 	writeFn func(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error
+}
+
+type truncatingFakeDestination struct {
+	*fakeDestination
+	mu        sync.Mutex
+	truncated []string
+}
+
+func (d *truncatingFakeDestination) TruncateTable(_ context.Context, table string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.truncated = append(d.truncated, table)
+	return nil
 }
 
 func (d *fakeDestination) Schemes() []string                             { return nil }
@@ -279,5 +293,47 @@ func TestWriteReturnsParentContextError(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Write error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWriteWithResultSplitsTableAtTruncate(t *testing.T) {
+	var (
+		mu            sync.Mutex
+		segmentCounts []int
+	)
+	base := &fakeDestination{writeFn: func(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+		count := 0
+		for range records {
+			count++
+		}
+		mu.Lock()
+		segmentCounts = append(segmentCounts, count)
+		mu.Unlock()
+		return nil
+	}}
+	dest := &truncatingFakeDestination{fakeDestination: base}
+	records := make(chan source.RecordBatchResult, 4)
+	records <- source.RecordBatchResult{TableName: "items"}
+	records <- source.RecordBatchResult{TableName: "items"}
+	records <- source.RecordBatchResult{TableName: "items", Truncate: true}
+	records <- source.RecordBatchResult{TableName: "items"}
+	close(records)
+
+	result, err := WriteWithResult(context.Background(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{
+			"items": {DestTable: "raw.items"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TruncatedTables["items"] {
+		t.Fatal("truncate was not reported for items")
+	}
+	if got := dest.truncated; len(got) != 1 || got[0] != "raw.items" {
+		t.Fatalf("truncate calls = %v, want [raw.items]", got)
+	}
+	if len(segmentCounts) != 2 || segmentCounts[0] != 2 || segmentCounts[1] != 1 {
+		t.Fatalf("segment counts = %v, want [2 1]", segmentCounts)
 	}
 }

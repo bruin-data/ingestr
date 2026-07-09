@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -104,6 +105,8 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 	defer func() { _ = dest.Close(ctx) }()
 
+	var cdcStateManager *strategy.CDCStateManager
+
 	// For CDC sources, compute a destination-aware slot suffix
 	if isCDCSource(p.config.SourceURI) {
 		p.config.CDCSlotSuffix = cdcSlotSuffix(p.config.DestURI)
@@ -117,6 +120,26 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
+	if isPostgresCDCSource(p.config.SourceURI) {
+		cdcStateManager, err = strategy.NewCDCStateManager(
+			dest,
+			cdcStateConnectorID(p.config),
+			p.config.DestTable,
+			p.config.StagingDataset,
+		)
+		if err != nil {
+			return err
+		}
+		if err := cdcStateManager.RegisterTable(ctx, p.config.SourceTable, p.config.DestTable); err != nil {
+			return err
+		}
+		if p.config.FullRefresh {
+			if err := cdcStateManager.Reset(ctx); err != nil {
+				return err
+			}
+		}
+	}
+
 	if isChangeTrackingSource(p.config.SourceURI) {
 		if err := validateChangeTrackingDestination(dest); err != nil {
 			return err
@@ -124,7 +147,18 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	// For managed change sources, check if we can resume from existing data
-	if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
+	if cdcStateManager != nil && !p.config.FullRefresh {
+		resumeLSN, err := cdcStateManager.ResumePosition(ctx, p.config.SourceTable)
+		if err != nil {
+			return err
+		}
+		if resumeLSN != "" {
+			p.config.CDCResumeLSN = resumeLSN
+			config.Debug("[PIPELINE] Found destination-managed CDC state, resuming from: %s", resumeLSN)
+		} else {
+			config.Debug("[PIPELINE] No completed CDC snapshot state found, will perform full snapshot")
+		}
+	} else if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
 		resumeProvider, ok := dest.(destination.CDCResumeProvider)
 		if !ok {
 			if isChangeTrackingSource(p.config.SourceURI) {
@@ -541,6 +575,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			FlushRecords:  int64(p.config.FlushRecords),
 			Strategy:      resolvedStrategy,
 			Committer:     committer,
+			StateManager:  cdcStateManager,
 		})
 		if err := exec.Execute(ctx, job); err != nil {
 			return fmt.Errorf("streaming ingestion failed: %w", err)
@@ -550,6 +585,15 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	if err := strat.Execute(ctx, job); err != nil {
 		return fmt.Errorf("ingestion failed: %w", err)
+	}
+	if cdcStateManager != nil {
+		stateProvider, ok := src.(source.CDCStateProvider)
+		if !ok {
+			return fmt.Errorf("postgres CDC source does not expose completed batch state")
+		}
+		if err := cdcStateManager.Persist(ctx, stateProvider.CDCState()); err != nil {
+			return fmt.Errorf("failed to persist destination CDC state: %w", err)
+		}
 	}
 
 	// After a successful, durable write, let CDC sources confirm the position
@@ -1059,6 +1103,35 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		tableDestNames[table.Name] = destName
 	}
 
+	var cdcStateManager *strategy.CDCStateManager
+	if isPostgresCDCSource(p.config.SourceURI) {
+		anchorTable := ""
+		for _, destTable := range tableDestNames {
+			if anchorTable == "" || destTable < anchorTable {
+				anchorTable = destTable
+			}
+		}
+		cdcStateManager, err = strategy.NewCDCStateManager(
+			p.dest,
+			cdcStateConnectorID(p.config),
+			anchorTable,
+			p.config.StagingDataset,
+		)
+		if err != nil {
+			return err
+		}
+		for _, table := range tables {
+			if err := cdcStateManager.RegisterTable(ctx, table.Name, tableDestNames[table.Name]); err != nil {
+				return err
+			}
+		}
+		if p.config.FullRefresh {
+			if err := cdcStateManager.Reset(ctx); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Schema contract handling: build a per-table evolution plan so destination
 	// tables gain columns added at the source (skip for replace, which drops and
 	// recreates). Plans are built sequentially because evolveSchemaIfNeeded
@@ -1079,7 +1152,21 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	// For CDC sources, query per-table max LSNs for resume
 	var cdcResumeLSNs map[string]string
-	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh {
+	if cdcStateManager != nil && !p.config.FullRefresh {
+		cdcResumeLSNs = make(map[string]string)
+		for _, table := range tables {
+			resumeLSN, err := cdcStateManager.ResumePosition(ctx, table.Name)
+			if err != nil {
+				return err
+			}
+			if resumeLSN != "" {
+				cdcResumeLSNs[table.Name] = resumeLSN
+				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
+			} else {
+				config.Debug("[PIPELINE] No completed CDC snapshot state for %s, will snapshot", table.Name)
+			}
+		}
+	} else if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh {
 		if resumeProvider, ok := p.dest.(destination.CDCResumeProvider); ok {
 			cdcResumeLSNs = make(map[string]string)
 			for _, table := range tables {
@@ -1129,6 +1216,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			FlushRecords:  int64(p.config.FlushRecords),
 			Strategy:      resolvedStrategy,
 			Committer:     committer,
+			StateManager:  cdcStateManager,
 		})
 		if err := exec.ExecuteMultiTable(ctx, job); err != nil {
 			return fmt.Errorf("streaming ingestion failed: %w", err)
@@ -1138,6 +1226,15 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
 		return fmt.Errorf("multi-table ingestion failed: %w", err)
+	}
+	if cdcStateManager != nil {
+		stateProvider, ok := src.(source.CDCStateProvider)
+		if !ok {
+			return fmt.Errorf("postgres CDC source does not expose completed batch state")
+		}
+		if err := cdcStateManager.Persist(ctx, stateProvider.CDCState()); err != nil {
+			return fmt.Errorf("failed to persist destination CDC state: %w", err)
+		}
 	}
 
 	// After a successful, durable write, let CDC sources confirm the position
@@ -1825,6 +1922,52 @@ func isCDCSource(uri string) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(uri[:schemeEnd]), "+cdc")
+}
+
+func isPostgresCDCSource(rawURI string) bool {
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	scheme := strings.ToLower(rawURI[:schemeEnd])
+	return scheme == "postgres+cdc" || scheme == "postgresql+cdc"
+}
+
+func cdcStateConnectorID(cfg *config.IngestConfig) string {
+	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
+		if stateID := parsed.Query().Get("state_id"); stateID != "" {
+			sum := sha256.Sum256([]byte("explicit:" + stateID))
+			return fmt.Sprintf("%x", sum[:8])
+		}
+	}
+
+	identity := strings.Join([]string{
+		canonicalCDCStateURI(cfg.SourceURI),
+		canonicalCDCStateURI(cfg.DestURI),
+		cfg.SourceTable,
+		cfg.DestTable,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func canonicalCDCStateURI(rawURI string) string {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return rawURI
+	}
+	if parsed.User != nil {
+		parsed.User = url.User(parsed.User.Username())
+	}
+	query := parsed.Query()
+	for _, key := range []string{
+		"state_id", "mode", "binary", "discover_interval",
+		"password", "pass", "token", "secret", "api_key", "private_key",
+	} {
+		query.Del(key)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func isManagedChangeSource(uri string) bool {

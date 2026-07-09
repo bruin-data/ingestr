@@ -98,11 +98,13 @@ test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
 
-# High-volume PostgreSQL CDC accuracy test (~6 minutes of sustained load and
-# verification). Gated behind the `stress` build tag so CI never runs it.
+# High-volume PostgreSQL CDC accuracy and schema-churn test (~6 minutes with
+# the default profile). Covers late tables, add/drop/rename/type DDL, JSONB,
+# deletes, PK updates, and transactional TRUNCATE. Gated behind the `stress`
+# build tag so CI never runs it.
 cdc-postgres-stress-test: generate
-	@echo "$(OK_COLOR)==> Running PostgreSQL CDC stress test (sustained load, ~6m)$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run TestPostgresCDC_StressHighVolume ./tests/integration/
+	@echo "$(OK_COLOR)==> Running PostgreSQL CDC complex-workload stress test (default profile: ~6m)$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestPostgresCDC_StressComplexWorkload$$' ./tests/integration/
 
 test-db2-integration: generate
 	@echo "$(OK_COLOR)==> Running Db2 integration tests$(NO_COLOR)"

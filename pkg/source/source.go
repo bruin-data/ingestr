@@ -55,6 +55,7 @@ type RecordBatchResult struct {
 	Batch     arrow.RecordBatch
 	Err       error
 	TableName string // Source table name for multi-table sources (empty for single-table)
+	Truncate  bool   // Empty the destination table before applying subsequent results
 
 	// CommitToken is an opaque, cumulative position marker for streaming mode.
 	// Committing a token via StreamCommitter acknowledges everything emitted up
@@ -66,6 +67,22 @@ type RecordBatchResult struct {
 	// per-table state upfront use it to provision the destination before any
 	// batches for the table arrive. Batch may be nil on an announcement.
 	TableInfo *SourceTableInfo
+}
+
+// CDCStateCommitToken carries destination-managed CDC state alongside the
+// source's native acknowledgement token. Position is the latest globally safe
+// source position. SnapshotPositions marks source tables whose full snapshot is
+// included in all preceding results.
+type CDCStateCommitToken struct {
+	SourceCommitToken any
+	Position          string
+	SnapshotPositions map[string]string
+}
+
+// CDCStateProvider exposes the state produced by a completed batch CDC read.
+// The pipeline persists it only after the destination write succeeds.
+type CDCStateProvider interface {
+	CDCState() CDCStateCommitToken
 }
 
 // TableRequest contains user-provided configuration for table instantiation.

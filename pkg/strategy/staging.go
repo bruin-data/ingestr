@@ -41,6 +41,32 @@ func managedStagingTableName(dest destination.Destination, targetTable, suffix, 
 	return GenerateStagingTableName(targetTable, suffix, stagingDataset)
 }
 
+func managedCDCStateTableName(dest destination.Destination, targetTable, stateTable, stagingDataset string) string {
+	policy := defaultReplaceStagingPolicy()
+	if provider, ok := dest.(destination.ManagedStagingPolicyProvider); ok {
+		policy = normaliseReplaceStagingPolicy(provider.ManagedStagingPolicy())
+	}
+
+	catalog, targetSchema, _ := splitCatalogSchemaTable(targetTable)
+	stateSchema := stagingDataset
+	if stateSchema == "" {
+		switch policy.DefaultPlacement {
+		case destination.ReplaceStagingTargetSchema:
+			stateSchema = targetSchema
+			if stateSchema == "" {
+				stateSchema = policy.DefaultTargetSchema
+			}
+		default:
+			stateSchema = policy.DefaultManagedSchema
+		}
+	}
+	if stateSchema == "" {
+		stateSchema = DefaultStagingSchema
+	}
+
+	return qualifyCatalog(catalog, fmt.Sprintf("%s.%s", stateSchema, stateTable))
+}
+
 func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
 	policy = normaliseReplaceStagingPolicy(policy)
 	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)

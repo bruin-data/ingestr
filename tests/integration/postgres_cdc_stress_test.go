@@ -5,11 +5,12 @@
 // never slows down CI; run it with `make cdc-postgres-stress-test`.
 //
 // Scenario: a streaming CDC pipeline replicates from one Postgres container to
-// another while parallel workers apply ~1000 inserts/updates per second for
-// three minutes, and a new table (with pre-existing rows) is created on the
-// source every minute mid-stream. Afterwards the destination must converge to
-// the exact source state, verified first by per-table count/sum aggregates and
-// then by a parallel row-by-row content comparison.
+// another while parallel workers apply ~1000 inserts/updates/deletes per second.
+// During the load, tables with pre-existing rows are discovered and one table
+// goes through column add/drop/rename, a numeric type change, large JSONB
+// updates, primary-key updates, and TRUNCATE followed by inserts in the same
+// transaction. Afterwards the destination must converge to the exact source
+// rows and active schema, verified by aggregates and canonical row comparison.
 package integration
 
 import (
@@ -19,6 +20,7 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +44,7 @@ const (
 	stressCompareChunk    = 20000
 	stressCompareParallel = 8
 	stressConvergeTimeout = 4 * time.Minute
+	stressEvolvingTable   = "stress_evolving"
 )
 
 // Overridable for local iteration and heavier soak runs, e.g.
@@ -50,6 +53,8 @@ var (
 	stressTargetOpsPerSec = envInt("STRESS_OPS_PER_SEC", 1000)
 	stressLoadDuration    = envDuration("STRESS_LOAD_DURATION", 3*time.Minute)
 	stressNewTableEvery   = envDuration("STRESS_NEW_TABLE_EVERY", 1*time.Minute)
+	stressSchemaEvery     = envDuration("STRESS_SCHEMA_CHANGE_EVERY", 20*time.Second)
+	stressLateTables      = envInt("STRESS_LATE_TABLES", 2)
 	stressWorkers         = envInt("STRESS_WORKERS", 12)
 )
 
@@ -76,6 +81,7 @@ type stressTable struct {
 	nextID    atomic.Int64
 	insertSQL string
 	updateSQL string
+	deleteSQL string
 }
 
 func newStressTable(name string, seeded int64) *stressTable {
@@ -83,9 +89,118 @@ func newStressTable(name string, seeded int64) *stressTable {
 		name:      name,
 		insertSQL: fmt.Sprintf(`INSERT INTO public.%s (id, val, payload, updated_at) VALUES ($1, $2, $3, now())`, name),
 		updateSQL: fmt.Sprintf(`UPDATE public.%s SET val = val + 1, payload = $2, updated_at = now() WHERE id = $1`, name),
+		deleteSQL: fmt.Sprintf(`DELETE FROM public.%s WHERE id = $1`, name),
 	}
 	t.nextID.Store(seeded)
 	return t
+}
+
+func stressCreateEvolvingAndSeed(ctx context.Context, pool *pgxpool.Pool, rows int) error {
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE public.%[1]s (
+			id BIGINT PRIMARY KEY,
+			val BIGINT NOT NULL,
+			payload TEXT NOT NULL,
+			legacy TEXT,
+			updated_at TIMESTAMPTZ NOT NULL
+		);
+		INSERT INTO public.%[1]s
+		SELECT g, g, 'seed-' || g, 'legacy-' || g, now() FROM generate_series(1, %[2]d) g;
+	`, stressEvolvingTable, rows))
+	return err
+}
+
+type stressSchemaPhase struct {
+	name string
+	sql  string
+}
+
+func stressSchemaPhases() []stressSchemaPhase {
+	return []stressSchemaPhase{
+		{
+			name: "add populated segment column",
+			sql: fmt.Sprintf(`
+				ALTER TABLE public.%[1]s ADD COLUMN segment TEXT NOT NULL DEFAULT 'segment-default';
+				UPDATE public.%[1]s
+				SET segment = 'segment-' || (id %% 7), updated_at = now()
+				WHERE id %% 2 = 0;
+			`, stressEvolvingTable),
+		},
+		{
+			name: "drop legacy column",
+			sql: fmt.Sprintf(`
+				ALTER TABLE public.%[1]s DROP COLUMN legacy;
+				UPDATE public.%[1]s
+				SET payload = 'post-drop-' || id, updated_at = now()
+				WHERE id %% 13 = 0;
+			`, stressEvolvingTable),
+		},
+		{
+			name: "widen bigint to numeric",
+			sql: fmt.Sprintf(`
+				ALTER TABLE public.%[1]s ALTER COLUMN val TYPE NUMERIC(30,0) USING val::numeric;
+				UPDATE public.%[1]s
+				SET val = val + 1000000000000, updated_at = now()
+				WHERE id %% 17 = 0;
+			`, stressEvolvingTable),
+		},
+		{
+			name: "add and populate large jsonb",
+			sql: fmt.Sprintf(`
+				ALTER TABLE public.%[1]s ADD COLUMN metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+				UPDATE public.%[1]s
+				SET metadata = jsonb_build_object('id', id, 'tags', jsonb_build_array('stress', segment)),
+				    payload = repeat('x', 8192) || id,
+				    updated_at = now()
+				WHERE id %% 19 = 0;
+			`, stressEvolvingTable),
+		},
+		{
+			name: "rename segment column",
+			sql: fmt.Sprintf(`
+				ALTER TABLE public.%[1]s RENAME COLUMN segment TO cohort;
+				UPDATE public.%[1]s
+				SET val = val + 5, updated_at = now()
+				WHERE id %% 19 = 0;
+			`, stressEvolvingTable),
+		},
+		{
+			name: "truncate and repopulate transaction",
+			sql: fmt.Sprintf(`
+				BEGIN;
+				TRUNCATE TABLE public.%[1]s;
+				INSERT INTO public.%[1]s (id, val, payload, updated_at, cohort, metadata)
+				SELECT g, g * 10, 'after-truncate-' || g, now(), 'cohort-' || (g %% 5),
+				       jsonb_build_object('phase', 'truncate', 'id', g)
+				FROM generate_series(1, 500) g;
+				INSERT INTO public.%[1]s (id, val, payload, updated_at, cohort, metadata)
+				VALUES (9000000000000, 42, 'pk-sentinel', now(), 'sentinel', '{"stable":true}'::jsonb);
+				COMMIT;
+			`, stressEvolvingTable),
+		},
+		{
+			name: "primary key and unchanged toast update",
+			sql: fmt.Sprintf(`
+				UPDATE public.%[1]s
+				SET id = 9000000000001, val = val + 1, updated_at = now()
+				WHERE id = 9000000000000;
+				UPDATE public.%[1]s
+				SET val = val + 7, updated_at = now()
+				WHERE id %% 23 = 0;
+			`, stressEvolvingTable),
+		},
+	}
+}
+
+func stressEventDelay(configured, total time.Duration, events int) time.Duration {
+	if events <= 0 {
+		return configured
+	}
+	latestSafe := total / time.Duration(events+1)
+	if latestSafe > 0 && configured > latestSafe {
+		return latestSafe
+	}
+	return configured
 }
 
 type stressTableSet struct {
@@ -194,7 +309,7 @@ func stressDestContainer(t *testing.T, ctx context.Context) (string, *pgxpool.Po
 	return connString, pool
 }
 
-func TestPostgresCDC_StressHighVolume(t *testing.T) {
+func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	ctx := context.Background()
 	if !testutil.DockerProviderHealthy(ctx) {
 		t.Skip("skipping stress test: Docker provider is not available/healthy")
@@ -213,6 +328,8 @@ func TestPostgresCDC_StressHighVolume(t *testing.T) {
 		require.NoError(t, stressCreateAndSeed(ctx, srcPool, name, stressSeedRows))
 		tables.add(newStressTable(name, stressSeedRows))
 	}
+	require.NoError(t, stressCreateEvolvingAndSeed(ctx, srcPool, stressSeedRows))
+	tables.add(newStressTable(stressEvolvingTable, stressSeedRows))
 	_, err = srcPool.Exec(ctx, `ALTER USER testuser REPLICATION`)
 	require.NoError(t, err)
 
@@ -231,13 +348,16 @@ func TestPostgresCDC_StressHighVolume(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
 
-	t.Logf("load phase: %v at ~%d ops/sec across %d workers, new table every %v",
-		stressLoadDuration, stressTargetOpsPerSec, stressWorkers, stressNewTableEvery)
+	ddlPhases := stressSchemaPhases()
+	ddlDelay := stressEventDelay(stressSchemaEvery, stressLoadDuration, len(ddlPhases))
+	lateTableDelay := stressEventDelay(stressNewTableEvery, stressLoadDuration, stressLateTables)
+	t.Logf("load phase: %v at ~%d ops/sec across %d workers, %d late tables every %v, %d schema phases every %v",
+		stressLoadDuration, stressTargetOpsPerSec, stressWorkers, stressLateTables, lateTableDelay, len(ddlPhases), ddlDelay)
 
 	loadCtx, stopLoad := context.WithTimeout(ctx, stressLoadDuration)
 	defer stopLoad()
 
-	var inserts, updates, opErrors atomic.Int64
+	var inserts, updates, deletes, opErrors, completedDDL atomic.Int64
 	var firstOpErr atomic.Value
 	recordOpErr := func(err error) {
 		opErrors.Add(1)
@@ -263,34 +383,45 @@ func TestPostgresCDC_StressHighVolume(t *testing.T) {
 				case <-ticker.C:
 				}
 				tbl := tables.pick(rng)
-				if rng.Intn(2) == 0 {
+				switch roll := rng.Intn(100); {
+				case roll < 45:
 					id := tbl.nextID.Add(1)
 					// ctx, not loadCtx: every issued op runs to completion so
 					// the post-load source state is settled when workers exit.
 					if _, err := srcPool.Exec(ctx, tbl.insertSQL, id, id, fmt.Sprintf("ins-%d-%d", seed, id)); err != nil {
 						recordOpErr(fmt.Errorf("insert %s id=%d: %w", tbl.name, id, err))
+					} else {
+						inserts.Add(1)
 					}
-					inserts.Add(1)
-				} else {
+				case roll < 85:
 					id := rng.Int63n(tbl.nextID.Load()) + 1
-					if _, err := srcPool.Exec(ctx, tbl.updateSQL, id, fmt.Sprintf("upd-%d-%d", seed, id)); err != nil {
+					result, err := srcPool.Exec(ctx, tbl.updateSQL, id, fmt.Sprintf("upd-%d-%d", seed, id))
+					if err != nil {
 						recordOpErr(fmt.Errorf("update %s id=%d: %w", tbl.name, id, err))
+					} else {
+						updates.Add(result.RowsAffected())
 					}
-					updates.Add(1)
+				default:
+					id := rng.Int63n(tbl.nextID.Load()) + 1
+					result, err := srcPool.Exec(ctx, tbl.deleteSQL, id)
+					if err != nil {
+						recordOpErr(fmt.Errorf("delete %s id=%d: %w", tbl.name, id, err))
+					} else {
+						deletes.Add(result.RowsAffected())
+					}
 				}
 			}
 		}(int64(w + 1))
 	}
 
-	lateTables := max(int(stressLoadDuration/stressNewTableEvery)-1, 0)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < lateTables; i++ {
+		for i := 0; i < stressLateTables; i++ {
 			select {
 			case <-loadCtx.Done():
 				return
-			case <-time.After(stressNewTableEvery):
+			case <-time.After(lateTableDelay):
 			}
 			name := stressTableName(stressInitialTables + i)
 			if err := stressCreateAndSeed(ctx, srcPool, name, stressLateSeedRows); err != nil {
@@ -299,6 +430,24 @@ func TestPostgresCDC_StressHighVolume(t *testing.T) {
 			}
 			tables.add(newStressTable(name, stressLateSeedRows))
 			t.Logf("created new table %s mid-stream with %d pre-existing rows", name, stressLateSeedRows)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, phase := range ddlPhases {
+			select {
+			case <-loadCtx.Done():
+				return
+			case <-time.After(ddlDelay):
+			}
+			if _, err := srcPool.Exec(ctx, phase.sql); err != nil {
+				recordOpErr(fmt.Errorf("schema phase %q: %w", phase.name, err))
+				return
+			}
+			completedDDL.Add(1)
+			t.Logf("completed schema phase: %s", phase.name)
 		}
 	}()
 
@@ -316,37 +465,41 @@ func TestPostgresCDC_StressHighVolume(t *testing.T) {
 			<-loadDone
 			t.Fatalf("stream exited during load phase: %v", err)
 		case <-status.C:
-			t.Logf("t=%v: %d inserts, %d updates, %d op errors",
-				time.Since(started).Round(time.Second), inserts.Load(), updates.Load(), opErrors.Load())
+			t.Logf("t=%v: %d inserts, %d updates, %d deletes, %d/%d schema phases, %d op errors",
+				time.Since(started).Round(time.Second), inserts.Load(), updates.Load(), deletes.Load(), completedDDL.Load(), len(ddlPhases), opErrors.Load())
 		}
 	}
 
 	if n := opErrors.Load(); n > 0 {
 		t.Fatalf("%d load operations failed, first error: %v", n, firstOpErr.Load())
 	}
-	totalOps := inserts.Load() + updates.Load()
+	require.Equal(t, int64(len(ddlPhases)), completedDDL.Load(), "all schema phases must complete")
+	totalOps := inserts.Load() + updates.Load() + deletes.Load()
 	achieved := float64(totalOps) / stressLoadDuration.Seconds()
-	t.Logf("load complete: %d ops (%d inserts, %d updates), %.0f ops/sec achieved", totalOps, inserts.Load(), updates.Load(), achieved)
+	t.Logf("load complete: %d effective ops (%d inserts, %d updates, %d deletes), %.0f ops/sec achieved", totalOps, inserts.Load(), updates.Load(), deletes.Load(), achieved)
 	require.GreaterOrEqual(t, achieved, float64(stressTargetOpsPerSec)/2,
 		"load generator could not sustain enough pressure for the test to be meaningful")
 	finalTables := tables.snapshot()
-	require.Len(t, finalTables, stressInitialTables+lateTables, "all late tables should have been created")
+	require.Len(t, finalTables, stressInitialTables+1+stressLateTables, "all initial, evolving, and late tables should exist")
 
 	// The source is now quiescent; capture the ground truth.
-	type truth struct{ count, sum int64 }
+	type truth struct {
+		count int64
+		sum   string
+	}
 	truths := make(map[string]truth, len(finalTables))
 	for _, tbl := range finalTables {
 		var tr truth
 		require.NoError(t, srcPool.QueryRow(ctx,
-			fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0) FROM public.%s`, tbl.name)).Scan(&tr.count, &tr.sum))
+			fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0)::text FROM public.%s`, tbl.name)).Scan(&tr.count, &tr.sum))
 		truths[tbl.name] = tr
-		t.Logf("source truth %s: count=%d sum=%d", tbl.name, tr.count, tr.sum)
+		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
 
 	destAgg := func(table string) (truth, error) {
 		var tr truth
 		err := destPool.QueryRow(ctx,
-			fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0) FROM %s WHERE _cdc_deleted = false`, table)).Scan(&tr.count, &tr.sum)
+			fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0)::text FROM %s WHERE _cdc_deleted = false`, table)).Scan(&tr.count, &tr.sum)
 		return tr, err
 	}
 
@@ -407,12 +560,17 @@ func TestPostgresCDC_StressHighVolume(t *testing.T) {
 	require.NoError(t, compareErr, "row-by-row content comparison failed")
 	t.Log("row-by-row content comparison passed for all tables")
 
+	require.NoError(t, stressValidateSchemas(ctx, srcPool, destPool, finalTables))
+	require.NoError(t, stressValidateDestinationState(ctx, destPool, len(finalTables)))
+	var softDeleted int64
 	for _, tbl := range finalTables {
-		var deleted int
+		var deleted int64
 		require.NoError(t, destPool.QueryRow(ctx,
-			fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, tbl.name)).Scan(&deleted))
-		require.Zero(t, deleted, "no deletes were issued, %s should have no soft-deleted rows", tbl.name)
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(tbl.name))).Scan(&deleted))
+		softDeleted += deleted
 	}
+	require.Positive(t, deletes.Load(), "workload should execute real deletes")
+	require.Positive(t, softDeleted, "destination should retain soft-deleted CDC rows outside truncated tables")
 
 	cancelStream()
 	select {
@@ -478,15 +636,18 @@ func stressDumpContainerLogs(t *testing.T, ctx context.Context, container testco
 
 type stressRow struct {
 	id        int64
-	val       int64
-	payload   string
-	updatedAt time.Time
+	canonical string
 }
 
-func stressFetchChunk(ctx context.Context, pool *pgxpool.Pool, table, extraWhere string, lo, hi int64) ([]stressRow, error) {
+func stressFetchChunk(ctx context.Context, pool *pgxpool.Pool, table, extraWhere string, columns []string, offset, limit int64) ([]stressRow, error) {
+	pairs := make([]string, 0, len(columns)*2)
+	for _, column := range columns {
+		pairs = append(pairs, quoteStressLiteral(column), quoteStressIdentifier(column))
+	}
 	rows, err := pool.Query(ctx, fmt.Sprintf(
-		`SELECT id, val, payload, updated_at FROM %s WHERE id >= $1 AND id < $2%s ORDER BY id`, table, extraWhere,
-	), lo, hi)
+		`SELECT id, jsonb_build_object(%s)::text FROM %s WHERE true%s ORDER BY id LIMIT $1 OFFSET $2`,
+		strings.Join(pairs, ", "), table, extraWhere,
+	), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +655,7 @@ func stressFetchChunk(ctx context.Context, pool *pgxpool.Pool, table, extraWhere
 	var out []stressRow
 	for rows.Next() {
 		var r stressRow
-		if err := rows.Scan(&r.id, &r.val, &r.payload, &r.updatedAt); err != nil {
+		if err := rows.Scan(&r.id, &r.canonical); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -502,23 +663,25 @@ func stressFetchChunk(ctx context.Context, pool *pgxpool.Pool, table, extraWhere
 	return out, rows.Err()
 }
 
-func stressCompareChunkRange(ctx context.Context, src, dst *pgxpool.Pool, table string, lo, hi int64) error {
-	srcRows, err := stressFetchChunk(ctx, src, "public."+table, "", lo, hi)
+func stressCompareChunkRange(ctx context.Context, src, dst *pgxpool.Pool, table string, columns []string, offset, limit int64) error {
+	sourceTable := quoteStressIdentifier("public") + "." + quoteStressIdentifier(table)
+	destTable := quoteStressIdentifier(table)
+	srcRows, err := stressFetchChunk(ctx, src, sourceTable, "", columns, offset, limit)
 	if err != nil {
-		return fmt.Errorf("%s [%d,%d): source fetch: %w", table, lo, hi, err)
+		return fmt.Errorf("%s offset %d: source fetch: %w", table, offset, err)
 	}
-	dstRows, err := stressFetchChunk(ctx, dst, table, " AND _cdc_deleted = false", lo, hi)
+	dstRows, err := stressFetchChunk(ctx, dst, destTable, " AND _cdc_deleted = false", columns, offset, limit)
 	if err != nil {
-		return fmt.Errorf("%s [%d,%d): destination fetch: %w", table, lo, hi, err)
+		return fmt.Errorf("%s offset %d: destination fetch: %w", table, offset, err)
 	}
 	if len(srcRows) != len(dstRows) {
-		return fmt.Errorf("%s [%d,%d): row count mismatch: source=%d destination=%d", table, lo, hi, len(srcRows), len(dstRows))
+		return fmt.Errorf("%s offset %d: row count mismatch: source=%d destination=%d", table, offset, len(srcRows), len(dstRows))
 	}
 	for i := range srcRows {
 		s, d := srcRows[i], dstRows[i]
-		if s.id != d.id || s.val != d.val || s.payload != d.payload || !s.updatedAt.Equal(d.updatedAt) {
-			return fmt.Errorf("%s: content mismatch at id=%d: source={val:%d payload:%q updated_at:%v} destination={id:%d val:%d payload:%q updated_at:%v}",
-				table, s.id, s.val, s.payload, s.updatedAt, d.id, d.val, d.payload, d.updatedAt)
+		if s.id != d.id || s.canonical != d.canonical {
+			return fmt.Errorf("%s: content mismatch at id=%d: source=%s destination={id:%d row:%s}",
+				table, s.id, s.canonical, d.id, d.canonical)
 		}
 	}
 	return nil
@@ -528,14 +691,22 @@ func stressCompareChunkRange(ctx context.Context, src, dst *pgxpool.Pool, table 
 // primary-key range so large tables are verified by concurrent scans.
 func stressCompareAll(ctx context.Context, src, dst *pgxpool.Pool, tables []*stressTable) error {
 	type chunk struct {
-		table  string
-		lo, hi int64
+		table   string
+		columns []string
+		offset  int64
 	}
 	var chunks []chunk
 	for _, tbl := range tables {
-		maxID := tbl.nextID.Load()
-		for lo := int64(1); lo <= maxID; lo += stressCompareChunk {
-			chunks = append(chunks, chunk{table: tbl.name, lo: lo, hi: min(lo+stressCompareChunk, maxID+1)})
+		columns, err := stressSourceColumns(ctx, src, tbl.name)
+		if err != nil {
+			return err
+		}
+		var count int64
+		if err := src.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM public.%s`, quoteStressIdentifier(tbl.name))).Scan(&count); err != nil {
+			return fmt.Errorf("count source table %s: %w", tbl.name, err)
+		}
+		for offset := int64(0); offset < count; offset += stressCompareChunk {
+			chunks = append(chunks, chunk{table: tbl.name, columns: columns, offset: offset})
 		}
 	}
 
@@ -548,7 +719,7 @@ func stressCompareAll(ctx context.Context, src, dst *pgxpool.Pool, tables []*str
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if err := stressCompareChunkRange(ctx, src, dst, c.table, c.lo, c.hi); err != nil {
+			if err := stressCompareChunkRange(ctx, src, dst, c.table, c.columns, c.offset, stressCompareChunk); err != nil {
 				errCh <- err
 			}
 		}(c)
@@ -556,4 +727,140 @@ func stressCompareAll(ctx context.Context, src, dst *pgxpool.Pool, tables []*str
 	wg.Wait()
 	close(errCh)
 	return <-errCh
+}
+
+func stressSourceColumns(ctx context.Context, pool *pgxpool.Pool, table string) ([]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = $1
+		ORDER BY ordinal_position`, table)
+	if err != nil {
+		return nil, fmt.Errorf("list source columns for %s: %w", table, err)
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("source table %s has no columns", table)
+	}
+	return columns, nil
+}
+
+type stressColumn struct {
+	udt       string
+	precision int
+	scale     int
+}
+
+func stressColumns(ctx context.Context, pool *pgxpool.Pool, table string) (map[string]stressColumn, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT column_name, udt_name, COALESCE(numeric_precision, -1), COALESCE(numeric_scale, -1)
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = $1`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := make(map[string]stressColumn)
+	for rows.Next() {
+		var name string
+		var column stressColumn
+		if err := rows.Scan(&name, &column.udt, &column.precision, &column.scale); err != nil {
+			return nil, err
+		}
+		columns[name] = column
+	}
+	return columns, rows.Err()
+}
+
+func stressValidateSchemas(ctx context.Context, src, dst *pgxpool.Pool, tables []*stressTable) error {
+	for _, table := range tables {
+		sourceColumns, err := stressColumns(ctx, src, table.name)
+		if err != nil {
+			return fmt.Errorf("source schema %s: %w", table.name, err)
+		}
+		destColumns, err := stressColumns(ctx, dst, table.name)
+		if err != nil {
+			return fmt.Errorf("destination schema %s: %w", table.name, err)
+		}
+		for name, want := range sourceColumns {
+			got, ok := destColumns[name]
+			if !ok {
+				return fmt.Errorf("destination table %s is missing active source column %s", table.name, name)
+			}
+			if got != want {
+				return fmt.Errorf("destination table %s column %s type mismatch: source=%+v destination=%+v", table.name, name, want, got)
+			}
+		}
+		if table.name == stressEvolvingTable {
+			for _, removed := range []string{"legacy", "segment"} {
+				if _, exists := sourceColumns[removed]; exists {
+					return fmt.Errorf("removed source column %s still exists on %s", removed, table.name)
+				}
+				if _, retained := destColumns[removed]; !retained {
+					return fmt.Errorf("soft-removed destination column %s is missing on %s", removed, table.name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func stressValidateDestinationState(ctx context.Context, dst *pgxpool.Pool, tableCount int) error {
+	rows, err := dst.Query(ctx, `
+		SELECT table_name
+		FROM information_schema.tables
+		WHERE table_schema = '_bruin_staging'
+		  AND (table_name LIKE 'cdc_checkpoint_%' OR table_name LIKE 'cdc_snapshot_%')
+		ORDER BY table_name`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var checkpointTables, snapshotTables int
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return err
+		}
+		switch {
+		case strings.HasPrefix(table, "cdc_checkpoint_"):
+			checkpointTables++
+		case strings.HasPrefix(table, "cdc_snapshot_"):
+			snapshotTables++
+		}
+		var stateRows int64
+		stateTable := quoteStressIdentifier("_bruin_staging") + "." + quoteStressIdentifier(table)
+		if err := dst.QueryRow(ctx, "SELECT count(*) FROM "+stateTable).Scan(&stateRows); err != nil {
+			return err
+		}
+		if stateRows == 0 {
+			return fmt.Errorf("CDC state table %s is empty", stateTable)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if checkpointTables != 1 || snapshotTables != tableCount {
+		return fmt.Errorf("unexpected CDC state table counts: checkpoints=%d snapshots=%d want checkpoints=1 snapshots=%d", checkpointTables, snapshotTables, tableCount)
+	}
+	return nil
+}
+
+func quoteStressIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func quoteStressLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
 }

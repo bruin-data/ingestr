@@ -18,6 +18,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
 	"github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -587,6 +588,130 @@ func TestPostgresCDC_IncrementalResume(t *testing.T) {
 	err = destPool.QueryRow(ctx, `SELECT MAX("_cdc_lsn") FROM public.test_cdc_dest`).Scan(&secondMaxLSN)
 	require.NoError(t, err)
 	assert.NotEqual(t, firstMaxLSN, secondMaxLSN, "LSN should have advanced after incremental sync")
+}
+
+func TestPostgresCDC_DestinationStateTruncateAndSnapshotRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	setupCDCSource(t, ctx, sourceConnString)
+
+	destContainer, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("destdb"),
+		postgres.WithUsername("destuser"),
+		postgres.WithPassword("destpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(30*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	defer func() { _ = destContainer.Terminate(ctx) }()
+	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&publication=test_pub&slot=state_truncate_recovery&mode=batch&state_id=state-truncate-recovery",
+		DestURI:             destConnString,
+		SourceTable:         "public.test_cdc",
+		DestTable:           "public.test_cdc_dest",
+		PrimaryKeys:         []string{"id"},
+		IncrementalStrategy: config.StrategyMerge,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	destPool, err := pgxpool.New(ctx, destConnString)
+	require.NoError(t, err)
+	defer destPool.Close()
+	stateTables := postgresCDCStateTables(t, ctx, destPool)
+	require.Len(t, stateTables, 2, "checkpoint and per-table snapshot marker must be destination-managed")
+	for _, table := range stateTables {
+		var count int
+		err := destPool.QueryRow(ctx, "SELECT COUNT(*) FROM "+pgx.Identifier{"_bruin_staging", table}.Sanitize()).Scan(&count)
+		require.NoError(t, err)
+		assert.Greater(t, count, 0, "state table %s should contain durable state", table)
+	}
+
+	sourcePool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer sourcePool.Close()
+	_, err = sourcePool.Exec(ctx, `
+		BEGIN;
+		TRUNCATE TABLE public.test_cdc;
+		INSERT INTO public.test_cdc (name, value) VALUES ('after-truncate', 900);
+		COMMIT;
+	`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	var names []string
+	rows, err := destPool.Query(ctx, `SELECT name FROM public.test_cdc_dest ORDER BY name`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		names = append(names, name)
+	}
+	rows.Close()
+	assert.Equal(t, []string{"after-truncate"}, names, "source truncate must remove all prior destination rows")
+
+	// Destination state can outlive a lost source slot. The source must signal
+	// that its fallback snapshot replaces the target even though the pipeline
+	// initially selected the resume path from valid destination state.
+	_, err = sourcePool.Exec(ctx, `TRUNCATE TABLE public.test_cdc`)
+	require.NoError(t, err)
+	_, err = sourcePool.Exec(ctx, `SELECT pg_drop_replication_slot('state_truncate_recovery')`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	var count int
+	require.NoError(t, destPool.QueryRow(ctx, `SELECT COUNT(*) FROM public.test_cdc_dest`).Scan(&count))
+	assert.Zero(t, count, "fallback snapshot after slot loss must replace stale target rows")
+
+	_, err = sourcePool.Exec(ctx, `INSERT INTO public.test_cdc (name, value) VALUES ('partial', 901)`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	// Simulate a run that wrote target rows but never committed its snapshot
+	// marker. The next run must ignore target _cdc_lsn values, take a fresh
+	// snapshot, and clear rows no longer present at the source.
+	for _, table := range stateTables {
+		_, err := destPool.Exec(ctx, "TRUNCATE TABLE "+pgx.Identifier{"_bruin_staging", table}.Sanitize())
+		require.NoError(t, err)
+	}
+	_, err = sourcePool.Exec(ctx, `TRUNCATE TABLE public.test_cdc`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	require.NoError(t, destPool.QueryRow(ctx, `SELECT COUNT(*) FROM public.test_cdc_dest`).Scan(&count))
+	assert.Zero(t, count, "fresh empty snapshot must clear stale rows after missing state")
+}
+
+func postgresCDCStateTables(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx, `
+		SELECT table_name
+		FROM information_schema.tables
+		WHERE table_schema = '_bruin_staging'
+		  AND (table_name LIKE 'cdc_checkpoint_%' OR table_name LIKE 'cdc_snapshot_%')
+		ORDER BY table_name
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var table string
+		require.NoError(t, rows.Scan(&table))
+		tables = append(tables, table)
+	}
+	return tables
 }
 
 func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {

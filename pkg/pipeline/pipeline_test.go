@@ -1271,6 +1271,36 @@ func TestCDCSlotSuffix(t *testing.T) {
 	}
 }
 
+func TestCDCStateConnectorID(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI:   "postgres+cdc://user:old@db.example/app?publication=pub&mode=batch",
+		DestURI:     "postgres://loader:old@warehouse.example/analytics",
+		SourceTable: "public.orders",
+		DestTable:   "raw.orders",
+	}
+
+	rotated := *base
+	rotated.SourceURI = "postgres+cdc://user:new@db.example/app?mode=stream&publication=pub&binary=true"
+	rotated.DestURI = "postgres://loader:new@warehouse.example/analytics"
+	if got, want := cdcStateConnectorID(&rotated), cdcStateConnectorID(base); got != want {
+		t.Fatalf("credential/runtime option changes changed connector ID: got %s want %s", got, want)
+	}
+
+	otherSlot := *base
+	otherSlot.SourceURI += "&slot=another_slot"
+	if cdcStateConnectorID(&otherSlot) == cdcStateConnectorID(base) {
+		t.Fatal("different replication slots must not share CDC state")
+	}
+
+	explicitA := *base
+	explicitA.SourceURI += "&state_id=connector-a"
+	explicitB := explicitA
+	explicitB.SourceURI = "postgres+cdc://different@other/db?state_id=connector-a"
+	if got, want := cdcStateConnectorID(&explicitB), cdcStateConnectorID(&explicitA); got != want {
+		t.Fatalf("matching explicit state_id values must share identity: got %s want %s", got, want)
+	}
+}
+
 func TestDroppedColumnsPKFiltering(t *testing.T) {
 	tests := []struct {
 		name           string

@@ -66,7 +66,7 @@ type tokenFunc func() any
 // flushReady sends merged batches for tables that have accumulated enough rows.
 func (a *batchAccumulator) flushReady(results chan<- source.RecordBatchResult, token tokenFunc) error {
 	for tableName, changes := range a.changes {
-		if len(changes) >= a.threshold {
+		if len(changes) >= a.threshold || lastTruncateIndex(changes) >= 0 {
 			if err := a.flushTable(tableName, results, token); err != nil {
 				return err
 			}
@@ -94,6 +94,11 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 	delete(a.changes, tableName)
 	delete(a.minLSN, tableName)
 
+	truncateIndex := lastTruncateIndex(changes)
+	if truncateIndex >= 0 {
+		changes = changes[truncateIndex+1:]
+	}
+
 	tableSchema := a.schemas[tableName]
 	if tableSchema == nil {
 		return fmt.Errorf("no schema registered for table %q", tableName)
@@ -106,18 +111,33 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 	// INSERT + partial UPDATE landing in the same window would lose the
 	// omitted column (the merge falls back to a target row that doesn't exist
 	// yet).
-	applyIntraBatchFill(changes, tableSchema)
-	changes = expandUpdates(changes, tableSchema)
+	if len(changes) > 0 {
+		applyIntraBatchFill(changes, tableSchema)
+		changes = expandUpdates(changes, tableSchema)
+	}
 
 	// Last-write-wins compaction: only the latest change per primary key can
 	// affect the merge outcome, so superseded row versions are dropped before
 	// materialization.
 	buffered := len(changes)
-	changes = compactChanges(changes, tableSchema)
+	if len(changes) > 0 {
+		changes = compactChanges(changes, tableSchema)
+	}
 
 	var commitToken any
 	if token != nil {
 		commitToken = token()
+	}
+
+	if truncateIndex >= 0 {
+		truncateToken := any(nil)
+		if len(changes) == 0 {
+			truncateToken = commitToken
+		}
+		results <- source.RecordBatchResult{TableName: tableName, Truncate: true, CommitToken: truncateToken}
+	}
+	if len(changes) == 0 {
+		return nil
 	}
 
 	batch, err := changesToBatch(changes, tableSchema)
@@ -133,4 +153,13 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 		CommitToken: commitToken,
 	}
 	return nil
+}
+
+func lastTruncateIndex(changes []Change) int {
+	for i := len(changes) - 1; i >= 0; i-- {
+		if changes[i].Operation == "TRUNCATE" {
+			return i
+		}
+	}
+	return -1
 }

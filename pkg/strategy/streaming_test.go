@@ -70,6 +70,42 @@ func (d *truncatingDest) TruncateTable(_ context.Context, table string) error {
 	return nil
 }
 
+func TestStreamingAppliesTruncateBeforeAcknowledgingLaterRows(t *testing.T) {
+	base := &fakeDestination{}
+	dest := &truncatingDest{fakeDestination: base}
+	committer := &fakeCommitter{}
+	cfg := config.DefaultConfig()
+	cfg.DestTable = "raw.items"
+	records := make(chan source.RecordBatchResult, 3)
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1}, nil), CommitToken: "before"}
+	records <- source.RecordBatchResult{Truncate: true, CommitToken: "truncate"}
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{2}, nil), CommitToken: "after"}
+	close(records)
+
+	loop := newFlushLoop(dest, cfg, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  100,
+		Strategy:      config.StrategyAppend,
+		Committer:     committer,
+	}, map[string]*streamTableState{"": {
+		destTable: "raw.items",
+		schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	}})
+	if err := loop.run(context.Background(), records); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := dest.truncateCalls; len(got) != 1 || got[0] != "raw.items" {
+		t.Fatalf("truncate calls = %v, want [raw.items]", got)
+	}
+	if got := committer.committed(); len(got) != 2 || got[0] != "before" || got[1] != "after" {
+		t.Fatalf("commit tokens = %v, want [before after]", got)
+	}
+	if len(base.writeCalls) != 2 {
+		t.Fatalf("write calls = %d, want pre- and post-truncate segments", len(base.writeCalls))
+	}
+}
+
 type capturingDestination struct {
 	*fakeDestination
 	valuesMu sync.Mutex

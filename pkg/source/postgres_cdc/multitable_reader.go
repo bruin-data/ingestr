@@ -232,14 +232,25 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 				// table's batches) is preserved inside this goroutine.
 				results <- source.RecordBatchResult{TableName: table.Name, TableInfo: tableInfo}
 			}
-			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, true, results, opts); err != nil {
+			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, results, opts); err != nil {
 				return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
 			}
 			r.updateProcessedLSN(table.Name, snapshotLSN)
+			r.source.recordSnapshotPosition(table.Name, snapshotLSN)
 			return nil
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	if opts.Streaming {
+		positions := make(map[string]string, len(tables))
+		for _, table := range tables {
+			positions[table.Name] = FormatLSN(snapshotLSN)
+		}
+		results <- source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{SnapshotPositions: positions}}
+	}
+	return nil
 }
 
 // snapshotParallelism bounds how many tables are snapshotted concurrently
@@ -471,26 +482,36 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	for _, table := range r.tables {
 		g.Go(func() error {
 			config.Debug("[CDC] Snapshotting table: %s", table.Name)
-			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, false, results, opts); err != nil {
+			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, results, opts); err != nil {
 				return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
 			}
 			// Initialize processed LSN for this table
 			r.updateProcessedLSN(table.Name, snapshotLSN)
+			r.source.recordSnapshotPosition(table.Name, snapshotLSN)
 			return nil
 		})
 	}
 
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	if opts.Streaming {
+		positions := make(map[string]string, len(r.tables))
+		for _, table := range r.tables {
+			positions[table.Name] = FormatLSN(snapshotLSN)
+		}
+		results <- source.RecordBatchResult{CommitToken: snapshotCommitToken(snapshotLSN, positions)}
+	}
+	return nil
 }
 
 // snapshotTable reads all data from a single table using the snapshot.
-func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, noCommitToken bool, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
 	snapshot := &Snapshot{
-		source:        r.source,
-		tableName:     table.Name,
-		tableSchema:   table.Schema,
-		cdcConfig:     r.cdcConfig,
-		noCommitToken: noCommitToken,
+		source:      r.source,
+		tableName:   table.Name,
+		tableSchema: table.Schema,
+		cdcConfig:   r.cdcConfig,
 	}
 
 	// Create a wrapper channel that adds TableName to results
@@ -554,7 +575,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	// streaming mode, so the catch-up exit below never triggers.
 	var token tokenFunc
 	if opts.Streaming {
-		token = func() any { return safeCommitLSN(repl, accum) }
+		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 	}
 
 	// lastIdleToken is the highest LSN already handed to the pipeline via a bare

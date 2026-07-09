@@ -172,8 +172,10 @@ loop:
 			require.NoError(t, res.Err)
 			// A bare commit token has no batch but carries the caught-up LSN.
 			if res.Batch == nil && res.CommitToken != nil {
-				lsn, ok := res.CommitToken.(pglogrepl.LSN)
-				require.True(t, ok, "expected an LSN commit token")
+				stateToken, ok := res.CommitToken.(source.CDCStateCommitToken)
+				require.True(t, ok, "expected a CDC state commit token")
+				lsn, ok := stateToken.SourceCommitToken.(pglogrepl.LSN)
+				require.True(t, ok, "expected an LSN source commit token")
 				idleToken = lsn
 				sawIdleToken = true
 				break loop
