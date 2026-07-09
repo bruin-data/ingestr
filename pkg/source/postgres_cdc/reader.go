@@ -106,7 +106,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	}
 
 	for {
-		err := r.runStream(ctx, startLSN, slotName, mode, targetLSN, results, opts)
+		err := r.runStream(ctx, startLSN, slotName, targetLSN, results, opts)
 		var schemaErr *SchemaChangedError
 		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) {
 			return err
@@ -126,9 +126,9 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	}
 }
 
-// runStream runs one replication stream until it terminates: batch mode caught
+// runStream runs one replication stream until it terminates: a batch run caught
 // up, the context was cancelled, or the replicator failed.
-func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, mode CDCMode, targetLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, targetLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
