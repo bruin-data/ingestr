@@ -90,6 +90,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				config.Debug("[CDC] Multi-table: replication slot %s not found, falling back to full snapshot", slotName)
 				needsSnapshot = true
 			} else {
+				waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				config.Debug("[CDC] Multi-table: resuming from LSN %s with per-table filtering", minResumeLSN)
 			}
 		}
@@ -325,31 +326,8 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 	if err := r.source.reconnectReplication(ctx); err != nil {
 		return 0, err
 	}
-	r.waitSlotReleased(ctx, slotName)
+	waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 	return r.getSlotLSN(ctx, slotName)
-}
-
-// waitSlotReleased waits for the server to mark the slot inactive after the
-// previous replication connection was closed; claiming a still-active slot
-// makes StartReplication fail. Best-effort with a bounded wait — if the slot
-// stays active the subsequent StartReplication surfaces the real error.
-func (r *MultiTableCDCReader) waitSlotReleased(ctx context.Context, slotName string) {
-	waitSlotReleased(ctx, r.source.queryPool, slotName)
-}
-
-func waitSlotReleased(ctx context.Context, pool *pgxpool.Pool, slotName string) {
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var active bool
-		err := pool.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&active)
-		if err != nil || !active {
-			return
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
 
 // shapeChangedTables returns the indices of refreshed tables whose column
