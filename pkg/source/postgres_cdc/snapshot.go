@@ -140,6 +140,25 @@ func checkSlotExists(ctx context.Context, pool *pgxpool.Pool, slotName string) (
 	return *confirmedLSN, true, nil
 }
 
+// waitReplicationSlotReleased waits for PostgreSQL to mark a slot inactive
+// after the previous replication connection was closed. Claiming a still-active
+// slot makes StartReplication fail. This is best-effort with a bounded wait; if
+// the slot stays active, the subsequent StartReplication returns the real error.
+func waitReplicationSlotReleased(ctx context.Context, pool *pgxpool.Pool, slotName string) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var active bool
+		err := pool.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&active)
+		if err != nil || !active {
+			return
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // dropSlot drops the replication slot
 func (s *Snapshot) dropSlot(ctx context.Context) error {
 	_, err := s.source.queryPool.Exec(ctx, "SELECT pg_drop_replication_slot($1)", s.slotName)

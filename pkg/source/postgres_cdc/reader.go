@@ -43,6 +43,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 			// Verify the slot still exists before trying to resume
 			if _, exists, _ := checkSlotExists(ctx, r.source.queryPool, slotName); exists {
+				waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				config.Debug("[CDC] Resuming from LSN: %s (skipping snapshot)", opts.CDCResumeLSN)
 				resumeLSN, err := parseStoredPostgresLSN(opts.CDCResumeLSN)
 				if err != nil {
