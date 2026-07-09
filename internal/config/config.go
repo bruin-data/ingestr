@@ -266,7 +266,7 @@ func (c *IngestConfig) validateCDCMode() error {
 		if !c.Stream {
 			return &ValidationError{
 				Field:   "source-uri",
-				Message: "mode=stream is no longer supported; pass --stream to ingest continuously",
+				Message: "mode=stream is no longer supported; remove it and use --stream on sources that support continuous ingestion",
 			}
 		}
 	default:
