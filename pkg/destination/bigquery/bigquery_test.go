@@ -1885,3 +1885,240 @@ func TestIsNotFoundError_Wrapped(t *testing.T) {
 		t.Fatalf("expected isNotFoundError to return true for wrapped error: %v", wrapped)
 	}
 }
+
+func TestPartitionOrClusterMismatch(t *testing.T) {
+	tp := func(field string) *bigquery.TimePartitioning { return &bigquery.TimePartitioning{Field: field} }
+	cl := func(fields ...string) *bigquery.Clustering { return &bigquery.Clustering{Fields: fields} }
+
+	tests := []struct {
+		name        string
+		partitionBy string
+		clusterBy   []string
+		meta        *bigquery.TableMetadata
+		want        bool
+	}{
+		// --- partition: neither side partitioned ---
+		{
+			name: "no partition either side",
+			meta: &bigquery.TableMetadata{},
+			want: false,
+		},
+		{
+			name: "no partition, empty TimePartitioning pointer is nil",
+			meta: &bigquery.TableMetadata{TimePartitioning: nil},
+			want: false,
+		},
+
+		// --- partition: field name matching ---
+		{
+			name:        "same partition field",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        false,
+		},
+		{
+			name:        "same partition field, config uppercase",
+			partitionBy: "D1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        false,
+		},
+		{
+			name:        "same partition field, table uppercase",
+			partitionBy: "created_at",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("CREATED_AT")},
+			want:        false,
+		},
+		{
+			name:        "same partition field, mixed case",
+			partitionBy: "EventDate",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("eventdate")},
+			want:        false,
+		},
+		{
+			name:        "partition field changed",
+			partitionBy: "d2",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        true,
+		},
+		{
+			name:        "partition field differs only by underscore",
+			partitionBy: "created_at",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("createdat")},
+			want:        true,
+		},
+		{
+			name:        "partition field is prefix of other",
+			partitionBy: "date",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("date2")},
+			want:        true,
+		},
+
+		// --- partition: presence vs absence ---
+		{
+			name:        "want partition but table has none",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{},
+			want:        true,
+		},
+		{
+			name:        "want no partition but table is column-partitioned",
+			partitionBy: "",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        true,
+		},
+		{
+			name:        "want no partition but table is ingestion-time partitioned",
+			partitionBy: "",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("")},
+			want:        true,
+		},
+		{
+			name:        "want column partition but table is ingestion-time partitioned",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("")},
+			want:        true,
+		},
+
+		// --- partition: type/granularity is ignored (ingestr only emits DAY column partitioning) ---
+		{
+			name:        "same field, table has explicit DAY type",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "d1", Type: bigquery.DayPartitioningType}},
+			want:        false,
+		},
+		{
+			name:        "same field, table has HOUR type",
+			partitionBy: "ts",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.HourPartitioningType}},
+			want:        false,
+		},
+
+		// --- partition: range partitioning always mismatches ---
+		{
+			name: "range partitioning, want none",
+			meta: &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n"}},
+			want: true,
+		},
+		{
+			name:        "range partitioning, want column partition",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n"}},
+			want:        true,
+		},
+		{
+			name:        "range partitioning wins even if time field would match",
+			partitionBy: "d1",
+			meta: &bigquery.TableMetadata{
+				TimePartitioning:  tp("d1"),
+				RangePartitioning: &bigquery.RangePartitioning{Field: "n"},
+			},
+			want: true,
+		},
+
+		// --- clustering only (partition matched on both sides as none) ---
+		{
+			name:      "cluster: neither side clustered",
+			clusterBy: nil,
+			meta:      &bigquery.TableMetadata{},
+			want:      false,
+		},
+		{
+			name:      "cluster: table has empty Clustering, config none",
+			clusterBy: nil,
+			meta:      &bigquery.TableMetadata{Clustering: &bigquery.Clustering{}},
+			want:      false,
+		},
+		{
+			name:      "cluster: same single field",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a")},
+			want:      false,
+		},
+		{
+			name:      "cluster: same multi field same order",
+			clusterBy: []string{"a", "b", "c"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "b", "c")},
+			want:      false,
+		},
+		{
+			name:      "cluster: case-insensitive match",
+			clusterBy: []string{"Country", "REGION"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("country", "region")},
+			want:      false,
+		},
+		{
+			name:      "cluster: order changed",
+			clusterBy: []string{"a", "b"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("b", "a")},
+			want:      true,
+		},
+		{
+			name:      "cluster: added (config has, table none)",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{},
+			want:      true,
+		},
+		{
+			name:      "cluster: removed (table has, config none)",
+			clusterBy: nil,
+			meta:      &bigquery.TableMetadata{Clustering: cl("a")},
+			want:      true,
+		},
+		{
+			name:      "cluster: subset fewer fields",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "b")},
+			want:      true,
+		},
+		{
+			name:      "cluster: same fields but extra config field",
+			clusterBy: []string{"a", "b", "c"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "b")},
+			want:      true,
+		},
+		{
+			name:      "cluster: one field differs",
+			clusterBy: []string{"a", "b"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "x")},
+			want:      true,
+		},
+
+		// --- combined partition + clustering ---
+		{
+			name:        "combined: partition and cluster both match",
+			partitionBy: "d1",
+			clusterBy:   []string{"a", "b"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("a", "b")},
+			want:        false,
+		},
+		{
+			name:        "combined: partition matches, cluster differs",
+			partitionBy: "d1",
+			clusterBy:   []string{"a", "b"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("a")},
+			want:        true,
+		},
+		{
+			name:        "combined: partition differs, cluster matches",
+			partitionBy: "d2",
+			clusterBy:   []string{"a"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("a")},
+			want:        true,
+		},
+		{
+			name:        "combined: both differ",
+			partitionBy: "d2",
+			clusterBy:   []string{"a"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("b")},
+			want:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &BigQueryDestination{partitionBy: tt.partitionBy, clusterBy: tt.clusterBy}
+			if got := d.partitionOrClusterMismatch(tt.meta); got != tt.want {
+				t.Fatalf("partitionOrClusterMismatch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

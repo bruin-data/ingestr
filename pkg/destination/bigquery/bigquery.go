@@ -405,6 +405,35 @@ func partitionByClause(column string, isDateColumn bool) string {
 	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
 }
 
+// partitionOrClusterMismatch reports whether the table's partition/cluster spec
+// differs from the configured partitionBy/clusterBy (range partitioning always mismatches).
+func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata) bool {
+	if meta.RangePartitioning != nil {
+		return true
+	}
+	if d.partitionBy != "" {
+		if meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, d.partitionBy) {
+			return true
+		}
+	} else if meta.TimePartitioning != nil {
+		return true
+	}
+
+	var existingCluster []string
+	if meta.Clustering != nil {
+		existingCluster = meta.Clustering.Fields
+	}
+	if len(existingCluster) != len(d.clusterBy) {
+		return true
+	}
+	for i := range existingCluster {
+		if !strings.EqualFold(existingCluster[i], d.clusterBy[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 type mergePartitionPruning struct {
 	Column string
 	IsDate bool
@@ -1023,6 +1052,20 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	// auto-create the dataset — they fail with "Not found: Dataset ...".
 	if err := d.ensureDatasetExists(ctx, targetProject, targetDataset); err != nil {
 		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
+	}
+
+	// BigQuery can't ALTER partitioning/clustering, so drop a target whose spec
+	// differs; safe here because replace (SwapTable's only caller) overwrites it.
+	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTableName)
+	if meta, err := targetRef.Metadata(ctx); err == nil {
+		if d.partitionOrClusterMismatch(meta) {
+			config.Debug("[DEST] Target %s partition/cluster spec changed; dropping to recreate", targetTable)
+			if err := targetRef.Delete(ctx); err != nil && !isNotFoundError(err) {
+				return fmt.Errorf("failed to drop target table for repartitioning: %w", err)
+			}
+		}
+	} else if !isNotFoundError(err) {
+		return fmt.Errorf("failed to check target table metadata: %w", err)
 	}
 
 	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTableName)
