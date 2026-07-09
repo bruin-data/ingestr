@@ -3,6 +3,7 @@ package bigquery
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/bigquery"
@@ -12,6 +13,46 @@ import (
 
 // bigQueryMaxPKColumns is BigQuery's hard limit on PRIMARY KEY column count.
 const bigQueryMaxPKColumns = 16
+
+// bigQueryMaxClusteringColumns is BigQuery's hard limit on clustering column count.
+const bigQueryMaxClusteringColumns = 4
+
+// clusterableFieldTypes lists the BigQuery types allowed as clustering columns;
+// notably FLOAT, BYTES, TIME and JSON are not.
+var clusterableFieldTypes = map[bigquery.FieldType]bool{
+	bigquery.StringFieldType:     true,
+	bigquery.IntegerFieldType:    true,
+	bigquery.NumericFieldType:    true,
+	bigquery.BigNumericFieldType: true,
+	bigquery.DateFieldType:       true,
+	bigquery.DateTimeFieldType:   true,
+	bigquery.TimestampFieldType:  true,
+	bigquery.BooleanFieldType:    true,
+	bigquery.GeographyFieldType:  true,
+	bigquery.RangeFieldType:      true,
+}
+
+// defaultClusteringFromPrimaryKeys picks up to 4 clusterable primary key columns
+// so MERGE joins on the PK can prune clustered blocks instead of scanning the table.
+func defaultClusteringFromPrimaryKeys(bqSchema bigquery.Schema, primaryKeys []string) []string {
+	fieldsByName := make(map[string]*bigquery.FieldSchema, len(bqSchema))
+	for _, f := range bqSchema {
+		fieldsByName[strings.ToLower(f.Name)] = f
+	}
+
+	var fields []string
+	for _, pk := range primaryKeys {
+		f, ok := fieldsByName[strings.ToLower(pk)]
+		if !ok || f.Repeated || !clusterableFieldTypes[f.Type] {
+			continue
+		}
+		fields = append(fields, f.Name)
+		if len(fields) == bigQueryMaxClusteringColumns {
+			break
+		}
+	}
+	return fields
+}
 
 // MapDataTypeToBigQuery maps internal DataType to BigQuery FieldType.
 func MapDataTypeToBigQuery(col schema.Column) bigquery.FieldType {
@@ -128,6 +169,9 @@ func BuildTableMetadata(tableSchema *schema.TableSchema, primaryKeys []string, l
 		}
 	}
 
+	if len(clusterBy) == 0 {
+		clusterBy = defaultClusteringFromPrimaryKeys(metadata.Schema, primaryKeys)
+	}
 	if len(clusterBy) > 0 {
 		metadata.Clustering = &bigquery.Clustering{
 			Fields: clusterBy,

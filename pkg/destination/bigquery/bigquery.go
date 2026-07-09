@@ -486,6 +486,39 @@ func mergePartitionPruningDeclarations(stagingRef string, pruning *mergePartitio
 	)
 }
 
+// nonNullablePKColumns returns the lower-cased primary key columns guaranteed
+// non-NULL on at least one side of the merge join — REQUIRED in the target
+// table, or NOT NULL in the ingestion schema (so staging holds no NULL keys).
+// For these a bare equality join is equivalent to the null-safe one.
+func nonNullablePKColumns(targetMeta *bigquery.TableMetadata, tableSchema *schema.TableSchema, primaryKeys []string) map[string]bool {
+	nonNullable := make(map[string]bool)
+	if targetMeta != nil {
+		for _, f := range targetMeta.Schema {
+			if f.Required {
+				nonNullable[strings.ToLower(f.Name)] = true
+			}
+		}
+	}
+	if tableSchema != nil {
+		for _, col := range tableSchema.Columns {
+			if !col.Nullable {
+				nonNullable[strings.ToLower(col.Name)] = true
+			}
+		}
+	}
+
+	result := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		if nonNullable[strings.ToLower(pk)] {
+			result[strings.ToLower(pk)] = true
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func mergePartitionTargetPredicate(pruning *mergePartitionPruning) string {
 	if pruning == nil {
 		return ""
@@ -1465,6 +1498,8 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	// Fetch target and staging table schemas to detect type mismatches
 	castMap := d.buildCastMap(ctx, project, targetDataset, targetTableName, stagingDataset, stagingTableName)
 
+	nonNullablePKs := nonNullablePKColumns(targetMeta, opts.Schema, opts.PrimaryKeys)
+
 	pruning := buildMergePartitionPruning(targetMeta, opts.PrimaryKeys)
 	pruningSkipReason := ""
 	if pruning != nil && hasCastForColumn(castMap, pruning.Column) {
@@ -1485,7 +1520,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	}
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, pruning)
+	mergeSQL := d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning)
 
 	config.Debug("[MERGE] Executing MERGE statement")
 	config.Debug("[MERGE] SQL: %s", mergeSQL)
@@ -1811,15 +1846,21 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 
 // buildMergeSQL constructs a BigQuery MERGE statement
 func (d *BigQueryDestination) buildMergeSQL(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
-	return d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil)
+	return d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil, nil)
 }
 
-func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, pruning *mergePartitionPruning) string {
+func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
-		onConditions[i] = fmt.Sprintf("(t.%s = %s OR (t.%s IS NULL AND %s IS NULL))", quoteIdentifier(pk), sourceCol, quoteIdentifier(pk), sourceCol)
+		// The null-safe OR disables clustered block pruning, so use bare
+		// equality when either join side is provably never NULL.
+		if nonNullablePKs[strings.ToLower(pk)] {
+			onConditions[i] = fmt.Sprintf("t.%s = %s", quoteIdentifier(pk), sourceCol)
+		} else {
+			onConditions[i] = fmt.Sprintf("(t.%s = %s OR (t.%s IS NULL AND %s IS NULL))", quoteIdentifier(pk), sourceCol, quoteIdentifier(pk), sourceCol)
+		}
 	}
 	if partitionPredicate := mergePartitionTargetPredicate(pruning); partitionPredicate != "" {
 		onConditions = append(onConditions, partitionPredicate)

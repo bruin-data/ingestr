@@ -168,6 +168,7 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 		PrimaryKeys:    primaryKeys,
 		Columns:        tableSchema.ColumnNames(),
 		IncrementalKey: incrementalKey,
+		Schema:         tableSchema,
 	}); err != nil {
 		for _, t := range []string{rawTable, normalised} {
 			if dropErr := dest.DropTable(ctx, t); dropErr != nil {
