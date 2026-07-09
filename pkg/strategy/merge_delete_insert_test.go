@@ -91,6 +91,41 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+func TestMergeStrategy_EnablesSnapshotReplacementOnlyForCapableCDCDestination(t *testing.T) {
+	job, src, _ := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	src.readCh = mustClosedRecords()
+
+	if err := (&MergeStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute without truncate capability returned error: %v", err)
+	}
+	if src.readOpts.CDCSnapshotReplace {
+		t.Fatal("snapshot replacement enabled for destination without truncate capability")
+	}
+
+	job, src, dest := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords()
+
+	if err := (&MergeStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute with truncate capability returned error: %v", err)
+	}
+	if !src.readOpts.CDCSnapshotReplace {
+		t.Fatal("snapshot replacement not enabled for truncate-capable CDC destination")
+	}
+}
+
 func TestMergeStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyMerge

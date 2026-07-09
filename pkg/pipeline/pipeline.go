@@ -120,7 +120,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
-	if isPostgresCDCSource(p.config.SourceURI) {
+	if isPostgresCDCSource(p.config.SourceURI) && supportsDestinationManagedCDCState(dest) {
 		cdcStateManager, err = strategy.NewCDCStateManager(
 			dest,
 			cdcStateConnectorID(p.config),
@@ -138,6 +138,8 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 				return err
 			}
 		}
+	} else if isPostgresCDCSource(p.config.SourceURI) {
+		config.Debug("[PIPELINE] Destination %s does not support managed PostgreSQL CDC state; using legacy resume behavior", dest.GetScheme())
 	}
 
 	if isChangeTrackingSource(p.config.SourceURI) {
@@ -1104,7 +1106,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	var cdcStateManager *strategy.CDCStateManager
-	if isPostgresCDCSource(p.config.SourceURI) {
+	if isPostgresCDCSource(p.config.SourceURI) && supportsDestinationManagedCDCState(p.dest) {
 		anchorTable := ""
 		for _, destTable := range tableDestNames {
 			if anchorTable == "" || destTable < anchorTable {
@@ -1130,6 +1132,8 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				return err
 			}
 		}
+	} else if isPostgresCDCSource(p.config.SourceURI) {
+		config.Debug("[PIPELINE] Destination %s does not support managed PostgreSQL CDC state; using legacy resume behavior", p.dest.GetScheme())
 	}
 
 	// Schema contract handling: build a per-table evolution plan so destination
@@ -1996,6 +2000,14 @@ func validateChangeTrackingDestination(dest destination.Destination) error {
 		return fmt.Errorf("destination scheme %q does not support resume cursors required by SQL Server Change Tracking", dest.GetScheme())
 	}
 	return nil
+}
+
+func supportsDestinationManagedCDCState(dest destination.Destination) bool {
+	if _, ok := dest.(destination.CDCResumeProvider); !ok {
+		return false
+	}
+	_, ok := dest.(destination.TruncateCapable)
+	return ok
 }
 
 func isChangeTrackingSource(uri string) bool {

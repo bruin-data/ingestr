@@ -34,6 +34,7 @@ type ReadOptions struct {
 	Schema                          *schema.TableSchema // Optional: if provided, Read will skip GetSchema call
 	CDCResumeLSN                    string              // Optional: for CDC sources, resume from this LSN (skip snapshot)
 	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
+	CDCSnapshotReplace              bool                // Consumer can apply a full-snapshot replacement boundary
 	FullRefresh                     bool
 	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens

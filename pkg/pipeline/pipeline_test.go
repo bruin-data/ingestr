@@ -42,6 +42,14 @@ func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (st
 	return "", nil
 }
 
+type mockManagedCDCStateDestination struct {
+	mockCDCResumeDestination
+}
+
+func (m *mockManagedCDCStateDestination) TruncateTable(_ context.Context, _ string) error {
+	return nil
+}
+
 type mockSchemaEvolutionDestination struct {
 	mockDestination
 }
@@ -79,6 +87,18 @@ func TestValidateChangeTrackingDestinationAcceptsResumeProvider(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected resume provider to pass validation, got %v", err)
+	}
+}
+
+func TestManagedCDCStateDestinationRequiresResumeAndTruncate(t *testing.T) {
+	if supportsDestinationManagedCDCState(&mockDestination{}) {
+		t.Fatal("destination without CDC capabilities must not use managed CDC state")
+	}
+	if supportsDestinationManagedCDCState(&mockCDCResumeDestination{}) {
+		t.Fatal("resume-only destination must not use managed CDC state")
+	}
+	if !supportsDestinationManagedCDCState(&mockManagedCDCStateDestination{}) {
+		t.Fatal("destination with resume and truncate capabilities must use managed CDC state")
 	}
 }
 

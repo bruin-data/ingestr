@@ -124,6 +124,11 @@ func warnIfCDCMergeUnsupported(dest destination.Destination) {
 	}
 }
 
+func supportsCDCSnapshotReplace(dest destination.Destination) bool {
+	_, ok := dest.(destination.TruncateCapable)
+	return ok
+}
+
 func (s *MergeStrategy) Name() config.IncrementalStrategy {
 	return config.StrategyMerge
 }
@@ -185,6 +190,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		Schema:                          job.SourceSchema,
 		CDCResumeLSN:                    job.Config.CDCResumeLSN,  // For CDC incremental resume
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix, // Destination-aware slot suffix
+		CDCSnapshotReplace:              isCDC && supportsCDCSnapshotReplace(job.Destination),
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
@@ -331,11 +337,12 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:   parallelism,
-			PageSize:      job.Config.PageSize,
-			Limit:         job.Config.SQLLimit,
-			CDCSlotSuffix: job.Config.CDCSlotSuffix,
-			FullRefresh:   job.Config.FullRefresh,
+			Parallelism:        parallelism,
+			PageSize:           job.Config.PageSize,
+			Limit:              job.Config.SQLLimit,
+			CDCSlotSuffix:      job.Config.CDCSlotSuffix,
+			CDCSnapshotReplace: anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			FullRefresh:        job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

@@ -74,17 +74,18 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	}
 
 	records, err := job.GetRecords(ctx, source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		PageSize:       job.Config.PageSize,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		CDCResumeLSN:   job.Config.CDCResumeLSN,
-		CDCSlotSuffix:  job.Config.CDCSlotSuffix,
-		Streaming:      true,
-		FlushInterval:  job.Config.FlushInterval,
-		FlushRecords:   job.Config.FlushRecords,
+		IncrementalKey:     job.Config.IncrementalKey,
+		IntervalStart:      job.Config.IntervalStart,
+		PageSize:           job.Config.PageSize,
+		ExcludeColumns:     job.Config.SQLExcludeColumns,
+		Parallelism:        parallelism,
+		Schema:             job.SourceSchema,
+		CDCResumeLSN:       job.Config.CDCResumeLSN,
+		CDCSlotSuffix:      job.Config.CDCSlotSuffix,
+		CDCSnapshotReplace: st.isCDC && supportsCDCSnapshotReplace(job.Destination),
+		Streaming:          true,
+		FlushInterval:      job.Config.FlushInterval,
+		FlushRecords:       job.Config.FlushRecords,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
@@ -149,12 +150,13 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 
 	records, err := job.Source.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:   parallelism,
-			PageSize:      job.Config.PageSize,
-			CDCSlotSuffix: job.Config.CDCSlotSuffix,
-			Streaming:     true,
-			FlushInterval: job.Config.FlushInterval,
-			FlushRecords:  job.Config.FlushRecords,
+			Parallelism:        parallelism,
+			PageSize:           job.Config.PageSize,
+			CDCSlotSuffix:      job.Config.CDCSlotSuffix,
+			CDCSnapshotReplace: anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			Streaming:          true,
+			FlushInterval:      job.Config.FlushInterval,
+			FlushRecords:       job.Config.FlushRecords,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

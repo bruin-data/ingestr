@@ -75,6 +75,9 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
+		CDCResumeLSN:                    job.Config.CDCResumeLSN,
+		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
+		CDCSnapshotReplace:              isCDC && supportsCDCSnapshotReplace(job.Destination),
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
@@ -87,7 +90,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		records = job.Tracker.Wrap(records)
 	}
 
-	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
+	writeOpts := destination.WriteOptions{
 		Table:            job.Config.DestTable,
 		Schema:           job.Schema,
 		Parallelism:      parallelism,
@@ -95,8 +98,15 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
-	}); err != nil {
-		return fmt.Errorf("failed to write data: %w", err)
+	}
+	var writeErr error
+	if isCDC {
+		_, writeErr = destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, writeOpts)
+	} else {
+		writeErr = job.Destination.WriteParallel(ctx, records, writeOpts)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("failed to write data: %w", writeErr)
 	}
 
 	return nil
@@ -169,12 +179,22 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 		parallelism = 4
 	}
 
+	anyTableHasCDC := false
+	for _, table := range job.Tables {
+		if hasCDCColumns(table.Schema) {
+			anyTableHasCDC = true
+			break
+		}
+	}
+
 	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism: parallelism,
-			PageSize:    job.Config.PageSize,
-			Limit:       job.Config.SQLLimit,
-			FullRefresh: job.Config.FullRefresh,
+			Parallelism:        parallelism,
+			PageSize:           job.Config.PageSize,
+			Limit:              job.Config.SQLLimit,
+			CDCSlotSuffix:      job.Config.CDCSlotSuffix,
+			CDCSnapshotReplace: anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			FullRefresh:        job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

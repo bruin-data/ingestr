@@ -170,6 +170,36 @@ func TestAppendStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+func TestAppendStrategy_CDCForwardsResumeAndAppliesSnapshotBoundary(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	job.Config.CDCResumeLSN = "00000000/0000002A"
+	job.Config.CDCSlotSuffix = "abc123"
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Truncate: true})
+
+	if err := (&AppendStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if src.readOpts.CDCResumeLSN != job.Config.CDCResumeLSN {
+		t.Fatalf("CDCResumeLSN = %q, want %q", src.readOpts.CDCResumeLSN, job.Config.CDCResumeLSN)
+	}
+	if src.readOpts.CDCSlotSuffix != job.Config.CDCSlotSuffix {
+		t.Fatalf("CDCSlotSuffix = %q, want %q", src.readOpts.CDCSlotSuffix, job.Config.CDCSlotSuffix)
+	}
+	if !src.readOpts.CDCSnapshotReplace {
+		t.Fatal("snapshot replacement not enabled for truncate-capable CDC destination")
+	}
+	if len(dest.truncateCalls) != 1 || dest.truncateCalls[0] != job.Config.DestTable {
+		t.Fatalf("truncate calls = %v, want [%s]", dest.truncateCalls, job.Config.DestTable)
+	}
+}
+
 func TestAppendStrategy_Execute_DefaultParallelism(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.ExtractParallelism = 0

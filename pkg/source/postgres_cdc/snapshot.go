@@ -199,10 +199,11 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	}
 	defer func() { rows.Close() }()
 
-	// A snapshot is a complete replacement boundary. Consumers must discard
-	// any target rows left by an interrupted snapshot or a resume whose
-	// replication slot disappeared before applying these rows.
-	results <- source.RecordBatchResult{Truncate: true}
+	if opts.CDCSnapshotReplace {
+		// A snapshot is a complete replacement boundary. Consumers that opt in
+		// discard target rows left by an interrupted snapshot or a lost slot.
+		results <- source.RecordBatchResult{Truncate: true}
+	}
 
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
