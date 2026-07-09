@@ -88,6 +88,33 @@ func mergeIncrementalKeyForSchema(tableSchema *schema.TableSchema, incrementalKe
 	return ""
 }
 
+// isAppendOnlyCDCTable reports whether a CDC table must be ingested as an
+// append-only change log: it has no usable row identity (no primary key and no
+// replica identity index on the source), so a merge has nothing to match on.
+// The source emits its updates as delete+insert pairs (see postgres_cdc
+// expandUpdates), making the landed log a self-contained retract stream the
+// user applies downstream.
+func isAppendOnlyCDCTable(ti source.SourceTableInfo) bool {
+	return len(ti.PrimaryKeys) == 0 && hasCDCColumns(ti.Schema)
+}
+
+// prepareAppendOnlyCDCTable creates the destination table a keyless CDC table's
+// change log lands in directly (no staging, no merge). The full schema is kept
+// — including the otherwise staging-only _cdc_unchanged_cols — because raw
+// change batches carry it, and CDCMode relaxes NOT NULL since rows are change
+// events rather than complete entities.
+func prepareAppendOnlyCDCTable(ctx context.Context, dest destination.Destination, table string, tableSchema *schema.TableSchema) error {
+	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:     table,
+		Schema:    tableSchema,
+		DropFirst: false,
+		CDCMode:   true,
+	}); err != nil {
+		return fmt.Errorf("failed to prepare append-only change-log table %s: %w", table, err)
+	}
+	return nil
+}
+
 // warnIfCDCMergeUnsupported prints a warning when CDC data is headed at a
 // destination that can't process deletes during merge.
 func warnIfCDCMergeUnsupported(dest destination.Destination) {
@@ -237,12 +264,27 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			defer wg.Done()
 
 			destTable := job.GetDestTableName(ti.Name)
-			stagingTable := managedStagingTableName(job.Destination, destTable, "merge", job.Config.StagingDataset)
 
 			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
 				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
 				return
 			}
+
+			if isAppendOnlyCDCTable(ti) {
+				if err := prepareAppendOnlyCDCTable(ctx, job.Destination, destTable, ti.Schema); err != nil {
+					errChan <- err
+					return
+				}
+				mu.Lock()
+				tableConfigs[ti.Name] = destination.TableWriteConfig{
+					DestTable: destTable,
+					Schema:    ti.Schema,
+				}
+				mu.Unlock()
+				return
+			}
+
+			stagingTable := managedStagingTableName(job.Destination, destTable, "merge", job.Config.StagingDataset)
 
 			if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
 				DestTable:    destTable,
@@ -322,7 +364,11 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			defer mergeWg.Done()
 
 			destTable := job.GetDestTableName(ti.Name)
-			stagingTable := stagingTables[ti.Name]
+			stagingTable, ok := stagingTables[ti.Name]
+			if !ok {
+				// Append-only change-log table: rows were written directly.
+				return
+			}
 
 			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, ""); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)

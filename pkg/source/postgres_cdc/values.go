@@ -120,6 +120,75 @@ func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
 	}
 }
 
+// expandUpdates rewrites UPDATE changes whose row identity moved or is absent,
+// so the emitted stream stays applicable at the destination. It runs after
+// applyIntraBatchFill (which may still need the original UPDATE shape) and
+// before compaction.
+//
+// Keyed tables: an UPDATE that changes a key column would merge under the new
+// key and leave the old-key row behind in the destination forever. The old
+// tuple (sent by Postgres precisely because the identity changed) becomes a
+// DELETE for the old key, followed by the original UPDATE.
+//
+// Keyless tables (append-only change log, REPLICA IDENTITY FULL): an UPDATE's
+// new image alone cannot identify which row changed. It becomes a
+// DELETE(old image) + INSERT(new image) pair, making the log a self-contained
+// retract stream; unchanged-TOAST markers in the new image resolve from the
+// full old tuple.
+func expandUpdates(changes []Change, tableSchema *schema.TableSchema) []Change {
+	if len(changes) == 0 || tableSchema == nil {
+		return changes
+	}
+	pkIndices := pkColumnIndices(tableSchema.Columns, tableSchema.PrimaryKeys)
+	keyless := len(pkIndices) == 0
+
+	needsExpand := false
+	for i := range changes {
+		if updateNeedsExpansion(changes[i], pkIndices, keyless) {
+			needsExpand = true
+			break
+		}
+	}
+	if !needsExpand {
+		return changes
+	}
+
+	out := make([]Change, 0, len(changes)+1)
+	for _, c := range changes {
+		if !updateNeedsExpansion(c, pkIndices, keyless) {
+			out = append(out, c)
+			continue
+		}
+		out = append(out, Change{Operation: "DELETE", LSN: c.LSN, Values: c.OldValues})
+		if keyless {
+			out = append(out, Change{Operation: "INSERT", LSN: c.LSN, Values: resolvedNewImage(c)})
+		} else {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func updateNeedsExpansion(c Change, pkIndices []int, keyless bool) bool {
+	if c.Operation != "UPDATE" || c.OldValues == nil {
+		return false
+	}
+	if keyless {
+		return true
+	}
+	return pkValueChanged(c, pkIndices)
+}
+
+// resolvedNewImage materializes an UPDATE's new tuple with unchanged-TOAST
+// markers resolved from the old tuple, so it can be emitted as a plain INSERT.
+func resolvedNewImage(c Change) []interface{} {
+	vals := make([]interface{}, len(c.Values))
+	for i := range c.Values {
+		vals[i] = resolveColumnValueBase(c, i)
+	}
+	return vals
+}
+
 // setColumnValue overwrites a column's value in place, replacing an unchanged
 // marker once we have resolved the value it stood for.
 func setColumnValue(change *Change, colIdx int, val interface{}) {

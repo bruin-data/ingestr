@@ -2,6 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,8 +11,10 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // MultiTableCDCReader handles reading CDC changes from multiple tables.
@@ -131,17 +134,17 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 		}
 
 		for {
-			newTables, err := r.streamChanges(ctx, startLSN, targetLSN, slotName, results, opts)
+			signal, err := r.streamChanges(ctx, startLSN, targetLSN, slotName, results, opts)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)}
 				return
 			}
-			if len(newTables) == 0 {
+			if signal == nil {
 				return
 			}
-			startLSN, err = r.rebuildForNewTables(ctx, slotName, newTables, results, opts)
+			startLSN, err = r.rebuildStream(ctx, slotName, signal, results, opts)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to add new tables to stream: %w", err)}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to rebuild stream: %w", err)}
 				return
 			}
 		}
@@ -237,17 +240,31 @@ func backfillSlotName(slotName string) string {
 	return slotName + suffix
 }
 
-// rebuildForNewTables incorporates tables that appeared mid-stream: reconcile
-// the managed publication so Postgres starts publishing them, refresh the
-// table set, backfill the newcomers, and reopen the replication connection for
-// a fresh StartReplication on the same persistent slot. Returns the LSN to
-// resume streaming from — the slot's confirmed position; transactions above it
-// that were already emitted are filtered per table by ShouldFilterChange.
-func (r *MultiTableCDCReader) rebuildForNewTables(ctx context.Context, slotName string, newNames []string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (pglogrepl.LSN, error) {
-	fmt.Printf("New table(s) detected on source: %s; adding to CDC stream\n", strings.Join(newNames, ", "))
+// streamSignal tells Read why streamChanges returned without error: tables
+// that appeared on the source mid-stream, or tables whose source schema
+// changed mid-stream (DDL). A nil signal means normal termination.
+type streamSignal struct {
+	newTables     []string
+	changedTables []string
+}
 
-	if err := r.source.reconcilePublication(ctx); err != nil {
-		return 0, fmt.Errorf("failed to reconcile publication: %w", err)
+// rebuildStream incorporates mid-stream source changes: tables that appeared
+// (reconcile the managed publication so Postgres starts publishing them, then
+// backfill them) and tables whose schema changed (announce the refreshed
+// schema so the consumer evolves the destination before their rows arrive).
+// The table set is refreshed from the source either way, and the replication
+// connection is reopened for a fresh StartReplication on the same persistent
+// slot. Returns the LSN to resume streaming from — the slot's confirmed
+// position; transactions above it that were already emitted are filtered per
+// table by ShouldFilterChange. The transaction that tripped a schema change
+// was never emitted, so the rebuilt stream re-decodes it against the
+// refreshed schema and none of its data is lost.
+func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string, signal *streamSignal, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (pglogrepl.LSN, error) {
+	if len(signal.newTables) > 0 {
+		fmt.Printf("New table(s) detected on source: %s; adding to CDC stream\n", strings.Join(signal.newTables, ", "))
+		if err := r.source.reconcilePublication(ctx); err != nil {
+			return 0, fmt.Errorf("failed to reconcile publication: %w", err)
+		}
 	}
 
 	tables, err := r.source.GetTables(ctx)
@@ -256,13 +273,13 @@ func (r *MultiTableCDCReader) rebuildForNewTables(ctx context.Context, slotName 
 	}
 	reconcileTableKeys(tables)
 
-	known := make(map[string]struct{}, len(r.tables))
+	prevSchemas := make(map[string]*schema.TableSchema, len(r.tables))
 	for _, t := range r.tables {
-		known[t.Name] = struct{}{}
+		prevSchemas[t.Name] = t.Schema
 	}
 	var added []source.SourceTableInfo
 	for _, t := range tables {
-		if _, ok := known[t.Name]; !ok {
+		if _, ok := prevSchemas[t.Name]; !ok {
 			added = append(added, t)
 		}
 	}
@@ -272,6 +289,17 @@ func (r *MultiTableCDCReader) rebuildForNewTables(ctx context.Context, slotName 
 		if err := r.backfillTables(ctx, slotName, added, results, opts); err != nil {
 			return 0, err
 		}
+	}
+
+	// Announce every previously known table whose refreshed schema no longer
+	// matches the shape the consumer prepared — not just the table that
+	// tripped the rebuild. GetTables refreshed ALL schemas, so the rebuilt
+	// decoders emit the new shape for every table that had DDL, whether or not
+	// its Relation message has been seen yet. (Tables added above were
+	// announced by backfillTables.)
+	for _, idx := range shapeChangedTables(prevSchemas, r.tables) {
+		t := &r.tables[idx]
+		results <- source.RecordBatchResult{TableName: t.Name, TableInfo: t}
 	}
 
 	if err := r.source.reconnectReplication(ctx); err != nil {
@@ -286,10 +314,14 @@ func (r *MultiTableCDCReader) rebuildForNewTables(ctx context.Context, slotName 
 // makes StartReplication fail. Best-effort with a bounded wait — if the slot
 // stays active the subsequent StartReplication surfaces the real error.
 func (r *MultiTableCDCReader) waitSlotReleased(ctx context.Context, slotName string) {
+	waitSlotReleased(ctx, r.source.queryPool, slotName)
+}
+
+func waitSlotReleased(ctx context.Context, pool *pgxpool.Pool, slotName string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var active bool
-		err := r.source.queryPool.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&active)
+		err := pool.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&active)
 		if err != nil || !active {
 			return
 		}
@@ -298,6 +330,23 @@ func (r *MultiTableCDCReader) waitSlotReleased(ctx context.Context, slotName str
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// shapeChangedTables returns the indices of refreshed tables whose column
+// shape differs from the schema previously tracked for them. Tables not in
+// prev (newly added) are excluded — the backfill path announces those.
+func shapeChangedTables(prev map[string]*schema.TableSchema, refreshed []source.SourceTableInfo) []int {
+	var out []int
+	for i := range refreshed {
+		old, ok := prev[refreshed[i].Name]
+		if !ok {
+			continue
+		}
+		if !old.SameColumnShape(refreshed[i].Schema) {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // detectNewTables lists the tables the stream should currently cover and
@@ -467,10 +516,10 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 // single-row writes.
 //
 // In streaming mode it periodically re-checks the source for tables the stream
-// should cover but doesn't. When new tables appear it flushes what it has and
-// returns their names so the caller can rebuild the stream around the enlarged
-// table set; a nil slice means normal termination.
-func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, targetLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) ([]string, error) {
+// should cover but doesn't, and watches for mid-stream schema changes surfaced
+// by the decoder. Either way it flushes what it has and returns a signal so
+// the caller can rebuild the stream; a nil signal means normal termination.
+func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, targetLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (*streamSignal, error) {
 	config.Debug("[CDC] Multi-table streaming from LSN: %s", startLSN)
 
 	cdcConfigWithSlot := r.cdcConfig
@@ -543,13 +592,26 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// rebuilt stream re-decodes them), and hand off for a rebuild.
 				accum.flushAll(results, token)
 				repl.releasePending()
-				return newNames, nil
+				return &streamSignal{newTables: newNames}, nil
 			}
 		}
 
 		// Get next batch (may be from any table)
 		batch, tableName, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
 		if err != nil {
+			var schemaErr *SchemaChangedError
+			if opts.Streaming && errors.As(err, &schemaErr) {
+				// Mid-stream DDL: flush emitted work, drop batches still buffered
+				// inside the replicator (the slot cannot have confirmed past
+				// them), and hand off for a rebuild around the refreshed schema.
+				// The transaction that tripped this was never emitted, so the
+				// rebuilt stream re-decodes it in full. Batch runs skip this and
+				// surface the error instead — a restart heals them the same way.
+				fmt.Printf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+				accum.flushAll(results, token)
+				repl.releasePending()
+				return &streamSignal{changedTables: []string{schemaErr.Table}}, nil
+			}
 			accum.flushAll(results, token)
 			return nil, fmt.Errorf("failed to get next batch: %w", err)
 		}
@@ -597,8 +659,12 @@ func (r *MultiTableCDCReader) dropSlot(ctx context.Context, slotName string) err
 }
 
 func (r *MultiTableCDCReader) getSlotLSN(ctx context.Context, slotName string) (pglogrepl.LSN, error) {
+	return getSlotConfirmedLSN(ctx, r.source.queryPool, slotName)
+}
+
+func getSlotConfirmedLSN(ctx context.Context, pool *pgxpool.Pool, slotName string) (pglogrepl.LSN, error) {
 	var lsnStr string
-	err := r.source.queryPool.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT confirmed_flush_lsn::text
 		FROM pg_replication_slots
 		WHERE slot_name = $1

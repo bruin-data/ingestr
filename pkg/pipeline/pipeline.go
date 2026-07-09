@@ -393,7 +393,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	// Staging mirrors the destination schema, with staging-only CDC columns retained.
 	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
-	ingestSchema = preserveSourceCDCColumnTypes(ingestSchema, fullSchema)
+	ingestSchema = destination.PreserveSourceCDCColumnTypes(ingestSchema, fullSchema)
 	if strategyUsesLogicalPrimaryKeys(resolvedStrategy) {
 		ingestSchema = preserveLogicalPrimaryKeys(ingestSchema, fullSchema)
 	}
@@ -487,7 +487,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		ColumnMasker:        columnMasker,
 		WhitespaceTrimmer:   whitespaceTrimmer,
 		LoadTimestamp:       loadTimestampTransformer,
-		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()),
+		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
 		EvolutionPlan:       evolutionPlan,
 	}
 
@@ -1078,7 +1078,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if strategy == config.StrategySCD2 {
 		comparisonDestSchema = removeSCD2MetadataColumns(destSchema)
 	}
-	comparisonDestSchema = preserveSourceCDCColumnTypes(comparisonDestSchema, sourceSchema)
+	comparisonDestSchema = destination.PreserveSourceCDCColumnTypes(comparisonDestSchema, sourceSchema)
 
 	// Store destination schema for use by strategies.
 	p.destinationSchema = comparisonDestSchema
@@ -1322,36 +1322,6 @@ func removeSCD2MetadataColumns(s *schema.TableSchema) *schema.TableSchema {
 			continue
 		}
 		result.Columns = append(result.Columns, col)
-	}
-	return &result
-}
-
-func preserveSourceCDCColumnTypes(ingestSchema, sourceSchema *schema.TableSchema) *schema.TableSchema {
-	if ingestSchema == nil || sourceSchema == nil {
-		return ingestSchema
-	}
-
-	sourceColumns := make(map[string]schema.Column, len(sourceSchema.Columns))
-	for _, col := range sourceSchema.Columns {
-		if destination.IsCDCColumn(col.Name) || destination.IsCDCStagingOnlyColumn(col.Name) {
-			sourceColumns[strings.ToLower(col.Name)] = col
-		}
-	}
-	if len(sourceColumns) == 0 {
-		return ingestSchema
-	}
-
-	result := *ingestSchema
-	result.Columns = append([]schema.Column{}, ingestSchema.Columns...)
-	for i, col := range result.Columns {
-		sourceCol, ok := sourceColumns[strings.ToLower(col.Name)]
-		if !ok {
-			continue
-		}
-		result.Columns[i].DataType = sourceCol.DataType
-		result.Columns[i].Precision = sourceCol.Precision
-		result.Columns[i].Scale = sourceCol.Scale
-		result.Columns[i].ArrayType = sourceCol.ArrayType
 	}
 	return &result
 }
@@ -1673,6 +1643,11 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	}
 	if isManagedChangeSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
 		s = config.StrategyMerge
+		if len(resolvePrimaryKeys(cfg, table)) == 0 {
+			// Keyless CDC table (no primary key, no replica identity index):
+			// there is nothing to merge on, so land the change log append-only.
+			s = config.StrategyAppend
+		}
 	}
 	if cfg.FullRefresh {
 		s = config.StrategyReplace

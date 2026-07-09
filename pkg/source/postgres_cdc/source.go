@@ -82,6 +82,11 @@ type PostgresCDCSource struct {
 	keepaliveMu   sync.Mutex
 	keepaliveStop chan struct{}
 	keepaliveDone chan struct{}
+
+	// keylessWarned dedupes the append-only notice per table: GetTables runs
+	// more than once per run (pipeline setup, ReadAll, stream rebuilds).
+	keylessWarnedMu sync.Mutex
+	keylessWarned   map[string]bool
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
@@ -693,6 +698,10 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 		// Add CDC metadata columns
 		tableSchema = addCDCColumns(tableSchema)
 
+		if len(tableSchema.PrimaryKeys) == 0 {
+			s.warnKeylessTable(fullName)
+		}
+
 		tables = append(tables, source.SourceTableInfo{
 			Name:        fullName,
 			Schema:      tableSchema,
@@ -714,6 +723,22 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	config.Debug("[CDC] Found %d tables in publication %s", len(tables), s.cdcConfig.Publication)
 	return tables, nil
+}
+
+// warnKeylessTable tells the user (once per table) that a table with no
+// primary key and no replica identity index is ingested as an append-only
+// change log instead of a merged mirror.
+func (s *PostgresCDCSource) warnKeylessTable(name string) {
+	s.keylessWarnedMu.Lock()
+	defer s.keylessWarnedMu.Unlock()
+	if s.keylessWarned == nil {
+		s.keylessWarned = make(map[string]bool)
+	}
+	if s.keylessWarned[name] {
+		return
+	}
+	s.keylessWarned[name] = true
+	fmt.Printf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
 // publicationTableFullName renders a table name the way GetTables and the WAL
