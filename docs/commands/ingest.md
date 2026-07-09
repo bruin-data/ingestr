@@ -22,11 +22,11 @@ ingestr ingest \
 ## Optional flags
 
 - `--dest-table TEXT`: Designates the destination table to save the data. If not specified, defaults to the value of `--source-table`.
-- `--incremental-key TEXT`: Identifies the key used for incremental data strategies. Defaults to `None`.
-- `--incremental-strategy TEXT`: Defines the strategy for incremental updates. Options include `replace`, `append`, `delete+insert`, or `merge`. The default strategy is `replace`.
-- `--interval-start`: Sets the start of the interval for the incremental key. Defaults to `None`.
-- `--interval-end`: Sets the end of the interval for the incremental key. Defaults to `None`.
-- `--primary-key TEXT`: Specifies the primary key for the merge operation. Defaults to `None`.
+- `--incremental-key TEXT`: Identifies the column used for incremental reads or replacement. For `append` and `merge`, ingestr passes it to the source read for interval filtering when the source supports it; `append` does not compare it with the destination table. For `delete+insert`, this is the interval column used to decide which destination rows to replace, and should normally be a date, timestamp, or numeric batch column rather than a row primary key. Numeric `delete+insert` keys work when bounds are inferred from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values. Defaults to `None`.
+- `--incremental-strategy TEXT`: Defines the strategy for incremental updates. Options include `replace`, `truncate+insert`, `append`, `delete+insert`, `merge`, or `scd2`. The default strategy is `replace`. Not every source and destination supports every strategy; unsupported combinations fail at runtime.
+- `--interval-start`: Sets the inclusive start of the interval for the incremental key. For `delete+insert`, this becomes the lower delete bound. If omitted, ingestr can infer the lower bound from staged rows. Defaults to `None`.
+- `--interval-end`: Sets the inclusive end of the interval for the incremental key. For `delete+insert`, this becomes the upper delete bound. If omitted, ingestr can infer the upper bound from staged rows. Defaults to `None`.
+- `--primary-key TEXT`: Specifies a column used to identify one logical row for `merge`, `scd2`, and optional staging deduplication in `delete+insert`. Use the flag multiple times for composite keys. Primary key values should be non-null: some destinations match null keys as equal during merge, while others reject or duplicate them. This is ingestr strategy configuration; do not rely only on a primary key constraint already existing in the destination database. Defaults to `None`.
 - `--columns <name>:<type>:<source>`: Specifies the columns to be ingested. Use `name:type` to override a column's type, `name:type:source` to rename `source` to `name` with a type, or `name::source` to rename only. Multiple entries are comma-separated. Defaults to `None`.
 - `--no-inference`: Skips schema inference for schema-less sources and uses `--columns` as the source schema. Requires `--columns`.
 - `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
@@ -36,6 +36,7 @@ ingestr ingest \
 - `--flush-interval`: In streaming mode, flush buffered records to the destination at least this often. Defaults to `30s`. Only valid with `--stream`.
 - `--flush-records`: In streaming mode, flush when this many records have been buffered. Defaults to `50000`. Only valid with `--stream`.
 - `--metrics-addr`: In streaming mode, serve replication lag and throughput metrics over HTTP on this address (e.g. `127.0.0.1:6060`). Disabled unless set. Only valid with `--stream`. See [Monitoring a stream](#monitoring-a-stream) below.
+- `--debug`: Enables debug logging. Some destinations print generated SQL in debug logs; parameterized queries may show placeholders such as `$1`, `?`, `@p1`, or `@p2` for values bound separately by the database driver.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
 - `%Y-%m-%d`: `2023-01-31`
@@ -143,7 +144,7 @@ ingestr ingest \
 ### Incrementally ingest a table from Postgres to BigQuery
 
 ```bash
-ingestr ingest 
+ingestr ingest \
    --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
    --source-table 'public.users' \
    --dest-uri 'bigquery://my_project?credentials_path=/path/to/service/account.json&location=EU' \
@@ -155,7 +156,7 @@ ingestr ingest
 ### Load an interval of data from Postgres to BigQuery using a date column
 
 ```bash
-ingestr ingest 
+ingestr ingest \
    --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
    --source-table 'public.users' \
    --dest-uri 'bigquery://my_project?credentials_path=/path/to/service/account.json&location=EU' \
@@ -170,7 +171,7 @@ ingestr ingest
 ### Load a specific query from Postgres to Snowflake
 
 ```bash
-ingestr ingest 
+ingestr ingest \
    --source-uri 'postgresql://myuser:mypassword@localhost:5432/mydatabase?sslmode=disable' \
    --dest-uri 'snowflake://user:password@account/dbname?warehouse=COMPUTE_WH&role=my_role' \
    --source-table 'query:SELECT * FROM public.users as pu JOIN public.orders as o ON pu.id = o.user_id WHERE pu.dt BETWEEN :interval_start AND :interval_end' \
