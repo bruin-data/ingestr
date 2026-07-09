@@ -5,25 +5,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// replStep is one NextBatch result in a scripted WAL stream.
+// replStep is one NextChanges result in a scripted WAL stream.
 type replStep struct {
-	batch       arrow.RecordBatch
+	changes     []Change
 	hadActivity bool
 	lsn         pglogrepl.LSN
 }
 
-// fakeReplicator replays a scripted sequence of NextBatch results, mimicking
+// fakeReplicator replays a scripted sequence of NextChanges results, mimicking
 // the WAL message stream a real Replicator produces (Begin/Insert/Relation
-// messages return no batch but are still activity; only Commit yields a batch).
+// messages return no changes but are still activity; only Commit yields the
+// transaction's changes).
 type fakeReplicator struct {
 	steps []replStep
 	idx   int
@@ -33,7 +32,7 @@ type fakeReplicator struct {
 	pendingLowWater func() (pglogrepl.LSN, bool)
 }
 
-func (f *fakeReplicator) NextBatch(_ context.Context, _ int) (arrow.RecordBatch, pglogrepl.LSN, bool, error) {
+func (f *fakeReplicator) NextChanges(_ context.Context) ([]Change, pglogrepl.LSN, bool, error) {
 	if f.idx >= len(f.steps) {
 		// Stream exhausted: report idle with no further LSN progress.
 		return nil, 0, false, nil
@@ -43,7 +42,7 @@ func (f *fakeReplicator) NextBatch(_ context.Context, _ int) (arrow.RecordBatch,
 	if s.lsn > f.lsn {
 		f.lsn = s.lsn
 	}
-	return s.batch, s.lsn, s.hadActivity, nil
+	return s.changes, s.lsn, s.hadActivity, nil
 }
 
 func (f *fakeReplicator) CurrentLSN() pglogrepl.LSN { return f.lsn }
@@ -55,45 +54,56 @@ func (f *fakeReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
 	return 0, false
 }
 
-func makeRowBatch(id int64) arrow.RecordBatch {
-	return makeNRowBatch(1)
+// testStreamSchema is the minimal CDC table schema used by the accumulator
+// tests: one source column (id) plus the four CDC meta columns.
+func testStreamSchema() *schema.TableSchema {
+	return &schema.TableSchema{
+		Name:        "t",
+		Schema:      "public",
+		Columns:     append([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
 }
 
-func makeNRowBatch(n int) arrow.RecordBatch {
-	mem := memory.NewGoAllocator()
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-	}, nil)
-
-	b := array.NewInt64Builder(mem)
-	defer b.Release()
-	for i := range n {
-		b.Append(int64(i))
+func testAccumulator(threshold int, tables ...string) *batchAccumulator {
+	schemas := map[string]*schema.TableSchema{"": testStreamSchema()}
+	for _, tbl := range tables {
+		schemas[tbl] = testStreamSchema()
 	}
-	col := b.NewArray()
-	defer col.Release()
+	return newBatchAccumulator(threshold, schemas)
+}
 
-	return array.NewRecordBatch(arrowSchema, []arrow.Array{col}, int64(n))
+// makeInsertChanges builds n INSERT changes with distinct ids starting at base.
+func makeInsertChanges(n int, base int64, lsn pglogrepl.LSN) []Change {
+	changes := make([]Change, n)
+	for i := range n {
+		changes[i] = Change{
+			Operation: "INSERT",
+			LSN:       lsn,
+			Values:    []interface{}{base + int64(i)},
+		}
+	}
+	return changes
 }
 
 // buildSingleRowTxnStream models n single-row transactions and returns the
 // scripted steps plus the target LSN (the LSN of the final commit). Each
 // transaction in the pgoutput protocol is Begin -> Insert -> Commit; Begin and
-// Insert produce no batch but ARE activity, and only Commit emits the 1-row
-// batch. LSNs increase monotonically across every step so batch mode only
+// Insert produce no changes but ARE activity, and only Commit emits the 1-row
+// change set. LSNs increase monotonically across every step so batch mode only
 // catches up after the very last commit is read.
 func buildSingleRowTxnStream(n int) (steps []replStep, targetLSN pglogrepl.LSN) {
 	var lsn pglogrepl.LSN
-	next := func(batch arrow.RecordBatch) replStep {
+	next := func(changes []Change) replStep {
 		lsn++
-		return replStep{batch: batch, hadActivity: true, lsn: lsn}
+		return replStep{changes: changes, hadActivity: true, lsn: lsn}
 	}
 	for i := range n {
 		steps = append(
 			steps,
-			next(nil),                    // Begin
-			next(nil),                    // Insert
-			next(makeRowBatch(int64(i))), // Commit
+			next(nil), // Begin
+			next(nil), // Insert
+			next(makeInsertChanges(1, int64(i), lsn+1)), // Commit
 		)
 	}
 	return steps, lsn
@@ -104,7 +114,7 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 
 	repl := &fakeReplicator{steps: steps}
 	results := make(chan source.RecordBatchResult, len(steps)+1)
-	accum := newBatchAccumulator(10000)
+	accum := testAccumulator(10000)
 
 	err := streamLoop(context.Background(), repl, ModeBatch, targetLSN, 10000, accum, results, false)
 	require.NoError(t, err)
@@ -114,6 +124,7 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 		require.NoError(t, res.Err)
 		batchCount++
 		totalRows += res.Batch.NumRows()
+		res.Batch.Release()
 	}
 	return batchCount, totalRows
 }
@@ -121,7 +132,7 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 // TestStreamLoopAccumulatesSingleRowTransactions is a regression test for the
 // bug where each single-row WAL transaction was emitted as its own batch
 // (batches == rows). With activity-aware idle detection, the per-transaction
-// 1-row batches accumulate and flush as a single merged batch.
+// 1-row change sets accumulate and flush as a single merged batch.
 func TestStreamLoopAccumulatesSingleRowTransactions(t *testing.T) {
 	const numTxns = 50
 	steps, targetLSN := buildSingleRowTxnStream(numTxns)
@@ -142,7 +153,7 @@ func TestStreamLoopEmitsIdleCommitToken(t *testing.T) {
 	steps, targetLSN := buildSingleRowTxnStream(3)
 	repl := &fakeReplicator{steps: steps}
 	results := make(chan source.RecordBatchResult, 64)
-	accum := newBatchAccumulator(10000)
+	accum := testAccumulator(10000)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -203,20 +214,20 @@ func TestStreamModeIdleSlotAdvances_Repro(t *testing.T) {
 	)
 
 	steps := []replStep{
-		{batch: nil, hadActivity: true, lsn: 10},                    // BEGIN
-		{batch: nil, hadActivity: true, lsn: 11},                    // INSERT
-		{batch: makeRowBatch(1), hadActivity: true, lsn: dataTxLSN}, // COMMIT -> 1 row at LSN 12
-		{batch: nil, hadActivity: false, lsn: 0},                    // idle: flush the row, confirm LSN 12
-		{batch: nil, hadActivity: true, lsn: 500},                   // keepalive: other tables' WAL
-		{batch: nil, hadActivity: false, lsn: 0},                    // idle: nothing for us at LSN 500
-		{batch: nil, hadActivity: true, lsn: receivedFinal},         // keepalive: more unrelated WAL
-		{batch: nil, hadActivity: false, lsn: 0},                    // idle: nothing for us at LSN 600
+		{changes: nil, hadActivity: true, lsn: 10},                                       // BEGIN
+		{changes: nil, hadActivity: true, lsn: 11},                                       // INSERT
+		{changes: makeInsertChanges(1, 1, dataTxLSN), hadActivity: true, lsn: dataTxLSN}, // COMMIT -> 1 row at LSN 12
+		{changes: nil, hadActivity: false, lsn: 0},                                       // idle: flush the row, confirm LSN 12
+		{changes: nil, hadActivity: true, lsn: 500},                                      // keepalive: other tables' WAL
+		{changes: nil, hadActivity: false, lsn: 0},                                       // idle: nothing for us at LSN 500
+		{changes: nil, hadActivity: true, lsn: receivedFinal},                            // keepalive: more unrelated WAL
+		{changes: nil, hadActivity: false, lsn: 0},                                       // idle: nothing for us at LSN 600
 	}
 
 	src := NewPostgresCDCSource()
 	repl := &fakeReplicator{steps: steps}
 	results := make(chan source.RecordBatchResult, 64)
-	accum := newBatchAccumulator(10000) // high threshold: only the idle path flushes
+	accum := testAccumulator(10000) // high threshold: only the idle path flushes
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

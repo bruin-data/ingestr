@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -400,22 +401,37 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 // ordering write → merge → reset staging → commit is what makes delivery
 // at-least-once: a crash before commit re-delivers from the last committed
 // position and the merge is idempotent by primary key.
+//
+// Tables flush concurrently when the destination declares its cross-table
+// cycles independent (destination.ConcurrentFlusher); the position is
+// confirmed only after every table's cycle succeeded, so a partial failure
+// re-delivers all tables from the last committed position.
 func (l *flushLoop) flush(ctx context.Context) error {
 	start := time.Now()
 	loadTimestamp := start.UTC().Truncate(time.Microsecond)
-	var flushedRows int64
 
+	type flushWork struct {
+		name string
+		st   *streamTableState
+
+		batches []arrow.RecordBatch
+		rows    int64
+	}
+
+	var work []flushWork
 	for name, st := range l.tables {
 		if st.pendingRows == 0 {
 			continue
 		}
-		batches := st.pending
-		rows := st.pendingRows
+		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows})
+		l.buffered -= st.pendingRows
 		st.pending = nil
 		st.pendingRows = 0
-		l.buffered -= rows
+	}
 
-		displayName := name
+	flushOne := func(ctx context.Context, w flushWork) error {
+		st := w.st
+		displayName := w.name
 		if displayName == "" {
 			displayName = st.destTable
 		}
@@ -433,13 +449,13 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			writeOpts.StagingTable = true
 		}
 
-		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(batches))
+		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
 		}
 		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
 			drainAndRelease(records)
-			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", rows, displayName, err)
+			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
 		}
 
 		if st.stagingTable != "" {
@@ -450,8 +466,32 @@ func (l *flushLoop) flush(ctx context.Context) error {
 				return fmt.Errorf("streaming flush: failed to reset staging table %s: %w", st.stagingTable, err)
 			}
 		}
+		return nil
+	}
 
-		flushedRows += rows
+	var flushErr error
+	if limit := l.flushConcurrency(); limit > 1 && len(work) > 1 {
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(limit)
+		for _, w := range work {
+			g.Go(func() error { return flushOne(gctx, w) })
+		}
+		flushErr = g.Wait()
+	} else {
+		for _, w := range work {
+			if err := flushOne(ctx, w); err != nil {
+				flushErr = err
+				break
+			}
+		}
+	}
+	if flushErr != nil {
+		return flushErr
+	}
+
+	var flushedRows int64
+	for _, w := range work {
+		flushedRows += w.rows
 	}
 
 	if l.opts.Committer != nil && l.tokenDirty {
@@ -466,6 +506,19 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		output.Statusf("[STREAM] %s | cycle %d: flushed %d rows in %s\n", time.Now().Format("15:04:05"), l.cycles, flushedRows, time.Since(start).Round(time.Millisecond))
 	}
 	return nil
+}
+
+// flushConcurrency returns how many tables may flush at once: destinations
+// opt in via destination.ConcurrentFlusher; everything else stays sequential.
+func (l *flushLoop) flushConcurrency() int {
+	cf, ok := l.dest.(destination.ConcurrentFlusher)
+	if !ok {
+		return 1
+	}
+	if n := cf.MaxConcurrentFlushes(); n > 1 {
+		return n
+	}
+	return 1
 }
 
 // resetStaging empties the staging table for the next cycle, preferring an

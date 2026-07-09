@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
+	"golang.org/x/sync/errgroup"
 )
 
 // MultiTableCDCReader handles reading CDC changes from multiple tables.
@@ -211,20 +212,40 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 	config.Debug("[CDC] Backfill slot %s created at LSN %s (snapshot %s) for %d table(s)",
 		tempSlot, created.ConsistentPoint, created.SnapshotName, len(tables))
 
+	// The exported snapshot supports concurrent readers: each table imports it
+	// into its own repeatable-read transaction while this replication
+	// connection keeps it alive.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(snapshotParallelism(opts))
 	for i := range tables {
 		table := tables[i]
-		fmt.Printf("Backfilling new table %s before streaming its changes\n", table.Name)
-		if opts.Streaming {
-			// Announce the table so a consumer that prepared its per-table state
-			// upfront can provision the destination before data arrives.
-			results <- source.RecordBatchResult{TableName: table.Name, TableInfo: &tables[i]}
-		}
-		if err := r.snapshotTable(ctx, table, created.SnapshotName, snapshotLSN, true, results, opts); err != nil {
-			return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
-		}
-		r.updateProcessedLSN(table.Name, snapshotLSN)
+		tableInfo := &tables[i]
+		g.Go(func() error {
+			fmt.Printf("Backfilling new table %s before streaming its changes\n", table.Name)
+			if opts.Streaming {
+				// Announce the table so a consumer that prepared its per-table
+				// state upfront can provision the destination before data
+				// arrives. Per-table ordering (announcement before that
+				// table's batches) is preserved inside this goroutine.
+				results <- source.RecordBatchResult{TableName: table.Name, TableInfo: tableInfo}
+			}
+			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, true, results, opts); err != nil {
+				return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
+			}
+			r.updateProcessedLSN(table.Name, snapshotLSN)
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
+}
+
+// snapshotParallelism bounds how many tables are snapshotted concurrently
+// from the same exported snapshot.
+func snapshotParallelism(opts source.MultiTableReadOptions) int {
+	if opts.Parallelism > 0 {
+		return opts.Parallelism
+	}
+	return 4
 }
 
 // backfillSlotName derives a temporary-slot name that cannot collide with the
@@ -415,17 +436,25 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	config.Debug("[CDC] Replication slot created: %s, LSN: %s, Snapshot: %s",
 		slotName, result.ConsistentPoint, result.SnapshotName)
 
-	// Snapshot each table using the exported snapshot
+	// Snapshot the tables concurrently using the same exported snapshot: each
+	// reader imports it into its own repeatable-read transaction, so all see
+	// the identical consistent point while the idle replication connection
+	// keeps the snapshot alive.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(snapshotParallelism(opts))
 	for _, table := range r.tables {
-		config.Debug("[CDC] Snapshotting table: %s", table.Name)
-		if err := r.snapshotTable(ctx, table, result.SnapshotName, snapshotLSN, false, results, opts); err != nil {
-			return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
-		}
-		// Initialize processed LSN for this table
-		r.updateProcessedLSN(table.Name, snapshotLSN)
+		g.Go(func() error {
+			config.Debug("[CDC] Snapshotting table: %s", table.Name)
+			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, false, results, opts); err != nil {
+				return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
+			}
+			// Initialize processed LSN for this table
+			r.updateProcessedLSN(table.Name, snapshotLSN)
+			return nil
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 // snapshotTable reads all data from a single table using the snapshot.
@@ -488,18 +517,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		batchSize = 10000
 	}
 
-	accum := newBatchAccumulator(batchSize)
-	pkByTable := make(map[string][]string, len(r.tables))
+	schemas := make(map[string]*schema.TableSchema, len(r.tables))
 	for _, t := range r.tables {
-		pks := t.PrimaryKeys
-		if len(pks) == 0 && t.Schema != nil {
-			pks = t.Schema.PrimaryKeys
-		}
-		pkByTable[t.Name] = pks
+		schemas[t.Name] = t.Schema
 	}
-	accum.transform = func(tableName string, batch arrow.RecordBatch) arrow.RecordBatch {
-		return forwardFillUnchanged(batch, pkByTable[tableName])
-	}
+	accum := newBatchAccumulator(batchSize, schemas)
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
 	// confirms the slot only after the data is durable. targetLSN is 0 in
@@ -524,7 +546,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		select {
 		case <-ctx.Done():
 			config.Debug("[CDC] Context cancelled, stopping stream")
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return nil, err
+			}
 			return nil, ctx.Err()
 		default:
 		}
@@ -538,38 +562,48 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// must not kill the stream.
 				config.Debug("[CDC] New-table discovery failed: %v", derr)
 			case len(newNames) > 0:
-				// Flush emitted work, drop batches still buffered inside the
-				// replicator (the slot cannot have confirmed past them, so the
-				// rebuilt stream re-decodes them), and hand off for a rebuild.
-				accum.flushAll(results, token)
-				repl.releasePending()
+				// Flush emitted work and hand off for a rebuild. An in-flight
+				// transaction still inside the decoder is dropped with the
+				// replicator; the slot cannot have confirmed past it, so the
+				// rebuilt stream re-decodes it.
+				if err := accum.flushAll(results, token); err != nil {
+					return nil, err
+				}
 				return newNames, nil
 			}
 		}
 
-		// Get next batch (may be from any table)
-		batch, tableName, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
+		// Get the next transaction's changes (may span multiple tables)
+		groups, hadActivity, err := repl.NextChanges(ctx)
 		if err != nil {
-			accum.flushAll(results, token)
-			return nil, fmt.Errorf("failed to get next batch: %w", err)
+			_ = accum.flushAll(results, token)
+			return nil, fmt.Errorf("failed to get next changes: %w", err)
 		}
 
-		if batch != nil && batch.NumRows() > 0 {
-			accum.add(tableName, batch, lsn)
+		for _, g := range groups {
+			accum.add(g.TableName, g.Changes, g.LSN)
 		}
 
 		// Flush tables that have accumulated enough rows
-		accum.flushReady(results, token)
+		if err := accum.flushReady(results, token); err != nil {
+			return nil, err
+		}
 
 		// For batch mode, check if we've caught up to the target LSN
 		if targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
-				accum.flushAll(results, token)
+				if err := accum.flushAll(results, token); err != nil {
+					return nil, err
+				}
 				// Record the caught-up position so FinalizeBatch can confirm it
 				// to the slot once the destination write is durable.
 				r.source.recordCaughtUpLSN(currentLSN)
+				// Stop the WAL receiver before the keepalive goroutine takes
+				// over the replication connection — they must never use it
+				// concurrently. Close is idempotent for the deferred call.
+				_ = repl.Close(ctx)
 				// Keep the walsender alive while the destination drains the
 				// results channel. FinalizeBatch will stop it before sending
 				// the final WALFlush-bearing standby update.
@@ -580,7 +614,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 
 		// When idle (no WAL activity), flush any pending batches
 		if !hadActivity {
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return nil, err
+			}
 			// Confirm the caught-up position so the slot advances over WAL that
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if opts.Streaming {

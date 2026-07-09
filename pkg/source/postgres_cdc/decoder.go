@@ -2,18 +2,16 @@ package postgres_cdc
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
-	"sort"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // pgoutput message types
@@ -27,6 +25,12 @@ const (
 	msgTypeTruncate = 'T'
 	msgTypeOrigin   = 'O'
 	msgTypeType     = 'Y'
+
+	// Protocol v2 streaming of large in-progress transactions.
+	msgTypeStreamStart  = 'S'
+	msgTypeStreamStop   = 'E'
+	msgTypeStreamCommit = 'c'
+	msgTypeStreamAbort  = 'A'
 )
 
 // Tuple data format
@@ -66,6 +70,7 @@ type Decoder struct {
 	targetRelID    uint32
 	pendingChanges []Change
 	currentTxLSN   pglogrepl.LSN
+	typeMap        *pgtype.Map
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
@@ -74,10 +79,15 @@ func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *
 		targetSchema: schemaName,
 		targetTable:  tableName,
 		relations:    make(map[uint32]*RelationInfo),
+		typeMap:      pgtype.NewMap(),
 	}
 }
 
-func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) (arrow.RecordBatch, error) {
+// Decode decodes a WAL message and, on commit, returns the transaction's
+// decoded changes. Unchanged-TOAST fill, per-key compaction, and Arrow
+// materialization all happen once per flush window in the accumulator, not
+// per transaction.
+func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -216,17 +226,18 @@ func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 	return d.currentTxLSN, true
 }
 
-func (d *Decoder) handleCommit() (arrow.RecordBatch, error) {
+// handleCommit hands the transaction's raw changes to the caller.
+// Unchanged-TOAST fill and per-key compaction run once over the accumulator's
+// whole flush window (batchAccumulator.flushTable), which subsumes the
+// per-commit passes.
+func (d *Decoder) handleCommit() ([]Change, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
 	}
 
-	d.applyIntraBatchFill()
-	d.compactPendingChanges()
-
-	batch, err := d.changesToBatch()
+	changes := d.pendingChanges
 	d.pendingChanges = nil
-	return batch, err
+	return changes, nil
 }
 
 func (d *Decoder) handleInsert(data []byte) error {
@@ -356,73 +367,6 @@ func (d *Decoder) handleDelete(data []byte) error {
 	return nil
 }
 
-func (d *Decoder) applyIntraBatchFill() {
-	applyIntraBatchFill(d.pendingChanges, d.tableSchema)
-}
-
-func (d *Decoder) compactPendingChanges() {
-	if len(d.pendingChanges) < 2 {
-		return
-	}
-
-	if len(d.tableSchema.PrimaryKeys) == 0 {
-		return
-	}
-
-	pkIndices := make([]int, len(d.tableSchema.PrimaryKeys))
-	for i, pk := range d.tableSchema.PrimaryKeys {
-		idx := -1
-		for colIdx, col := range d.tableSchema.Columns {
-			if col.Name == pk {
-				idx = colIdx
-				break
-			}
-		}
-		if idx < 0 {
-			return
-		}
-		pkIndices[i] = idx
-	}
-
-	type entry struct {
-		change Change
-		index  int
-	}
-
-	latestNonDeleted := make(map[string]entry)
-	latestDeleted := make(map[string]entry)
-
-	for i, change := range d.pendingChanges {
-		key := d.pkKey(change, pkIndices, i)
-		if change.Operation == "DELETE" {
-			latestDeleted[key] = entry{change: change, index: i}
-		} else {
-			latestNonDeleted[key] = entry{change: change, index: i}
-		}
-	}
-
-	combined := make([]entry, 0, len(latestNonDeleted)+len(latestDeleted))
-	for _, e := range latestNonDeleted {
-		combined = append(combined, e)
-	}
-	for _, e := range latestDeleted {
-		combined = append(combined, e)
-	}
-
-	sort.Slice(combined, func(i, j int) bool {
-		return combined[i].index < combined[j].index
-	})
-
-	d.pendingChanges = make([]Change, len(combined))
-	for i, e := range combined {
-		d.pendingChanges[i] = e.change
-	}
-}
-
-func (d *Decoder) pkKey(change Change, pkIndices []int, changeIndex int) string {
-	return pkKeyFromRow(change.Values, change.OldValues, pkIndices, changeIndex)
-}
-
 func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{}, error) {
 	if len(data) < 2 {
 		return nil, fmt.Errorf("tuple data too short")
@@ -476,7 +420,17 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 			if len(data) < int(length) {
 				return nil, fmt.Errorf("binary data truncated")
 			}
-			values[i] = data[:length]
+			if int(i) < sourceColumnCount(d.tableSchema) && int(i) < len(rel.Columns) {
+				v, err := convertBinaryValue(data[:length], d.tableSchema.Columns[i], rel.Columns[i].DataType, d.typeMap)
+				if err != nil {
+					return nil, err
+				}
+				values[i] = v
+			} else {
+				// Copy: decoded changes are buffered across the flush window
+				// and must not alias the WAL message buffer.
+				values[i] = append([]byte(nil), data[:length]...)
+			}
 			data = data[length:]
 		default:
 			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
@@ -484,48 +438,6 @@ func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{},
 	}
 
 	return values, nil
-}
-
-func (d *Decoder) changesToBatch() (arrow.RecordBatch, error) {
-	if len(d.pendingChanges) == 0 {
-		return nil, nil
-	}
-
-	mem := memory.NewGoAllocator()
-	arrowSchema := buildArrowSchema(d.tableSchema.Columns)
-
-	builders := make([]array.Builder, len(d.tableSchema.Columns))
-	for i, field := range arrowSchema.Fields() {
-		builders[i] = array.NewBuilder(mem, field.Type)
-	}
-
-	syncedAt := time.Now().UTC()
-	nSource := sourceColumnCount(d.tableSchema)
-
-	for i, change := range d.pendingChanges {
-		for colIdx := 0; colIdx < nSource; colIdx++ {
-			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
-		}
-
-		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
-		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
-		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, d.tableSchema.Columns, nSource))
-	}
-
-	arrays := make([]arrow.Array, len(builders))
-	for i, b := range builders {
-		arrays[i] = b.NewArray()
-	}
-
-	record := array.NewRecordBatch(arrowSchema, arrays, int64(len(d.pendingChanges)))
-
-	for _, arr := range arrays {
-		arr.Release()
-	}
-
-	return record, nil
 }
 
 func readString(data []byte) (string, int) {
@@ -637,6 +549,16 @@ func convertTextValue(text string, col schema.Column) interface{} {
 		return nil
 	case schema.TypeDecimal:
 		return text // Keep as string for decimal handling
+	case schema.TypeBinary:
+		// bytea arrives as a hex literal ("\x48...") in text mode; decode it so
+		// the destination stores the raw bytes, matching the snapshot path and
+		// binary-mode decoding.
+		if strings.HasPrefix(text, `\x`) {
+			if b, err := hex.DecodeString(text[2:]); err == nil {
+				return b
+			}
+		}
+		return []byte(text)
 	case schema.TypeArray:
 		// Logical replication delivers arrays as Postgres array literals
 		// ({a,b}), not JSON arrays, so parse the literal and convert each

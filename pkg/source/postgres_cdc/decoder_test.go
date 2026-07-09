@@ -437,9 +437,10 @@ func TestApplyIntraBatchFill(t *testing.T) {
 	})
 
 	t.Run("does not fill across separate commits", func(t *testing.T) {
-		// Cross-commit coalescing is handled at the staging-batch level
-		// (forwardFillUnchanged), not by the decoder. A partial UPDATE arriving
-		// in its own commit has no prior state and stays unchanged.
+		// Cross-commit coalescing is handled over the accumulator's flush
+		// window (batchAccumulator.flushTable), not by the decoder. A partial
+		// UPDATE arriving in its own commit has no prior state and stays
+		// unchanged here.
 		insert := []Change{{
 			Operation: "INSERT",
 			Values:    []interface{}{int32(1), `{"big":true}`, "pending"},
