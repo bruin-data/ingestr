@@ -1461,7 +1461,7 @@ func TestPreserveSourceCDCColumnTypes(t *testing.T) {
 		tcol("value", schema.TypeInt64),
 	)
 
-	got := preserveSourceCDCColumnTypes(ingest, source)
+	got := destination.PreserveSourceCDCColumnTypes(ingest, source)
 
 	types := map[string]schema.DataType{}
 	for _, col := range got.Columns {

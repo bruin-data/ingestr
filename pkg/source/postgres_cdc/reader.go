@@ -2,6 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 			// Verify the slot still exists before trying to resume
 			if _, exists, _ := checkSlotExists(ctx, r.source.queryPool, slotName); exists {
+				waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				config.Debug("[CDC] Resuming from LSN: %s (skipping snapshot)", opts.CDCResumeLSN)
 				resumeLSN, err := parseStoredPostgresLSN(opts.CDCResumeLSN)
 				if err != nil {
@@ -103,6 +105,30 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		config.Debug("[CDC] Batch mode: will stream until LSN %s", targetLSN)
 	}
 
+	for {
+		err := r.runStream(ctx, startLSN, slotName, mode, targetLSN, results, opts)
+		var schemaErr *SchemaChangedError
+		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) {
+			return err
+		}
+
+		// Mid-stream DDL: refresh the schema, announce it so the consumer can
+		// evolve the destination, and resume from the slot's confirmed
+		// position. The transaction that tripped this was never emitted, so
+		// the rebuilt stream re-decodes it against the refreshed schema and
+		// none of its data is lost. Batch runs skip this and surface the
+		// error instead — a restart heals them the same way.
+		fmt.Printf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+		startLSN, err = r.rebuildForSchemaChange(ctx, slotName, results)
+		if err != nil {
+			return fmt.Errorf("failed to rebuild stream after schema change: %w", err)
+		}
+	}
+}
+
+// runStream runs one replication stream until it terminates: batch mode caught
+// up, the context was cancelled, or the replicator failed.
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, mode CDCMode, targetLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
@@ -134,6 +160,38 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		r.source.startKeepalive(ctx, caughtUp)
 	}
 	return err
+}
+
+// rebuildForSchemaChange re-fetches the table's schema after mid-stream DDL,
+// announces it (RecordBatchResult.TableInfo) so the streaming consumer can
+// evolve the destination before new-shape batches arrive, and reopens the
+// replication connection for a fresh StartReplication on the same slot.
+// Returns the LSN to resume from — the slot's confirmed position, so the
+// transaction that surfaced the change is re-decoded in full.
+func (r *CDCReader) rebuildForSchemaChange(ctx context.Context, slotName string, results chan<- source.RecordBatchResult) (pglogrepl.LSN, error) {
+	tableSchema, err := getTableSchema(ctx, r.source.queryPool, r.tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to refresh schema for table %s: %w", r.tableName, err)
+	}
+	tableSchema = addCDCColumns(tableSchema)
+	// Keep the merge keys the run started with: they may carry user-provided
+	// keys that re-detection would drop, and the decoder, compaction, and
+	// unchanged-TOAST fill must keep keying off the same columns.
+	if len(r.tableSchema.PrimaryKeys) > 0 {
+		tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+	}
+	r.tableSchema = tableSchema
+
+	results <- source.RecordBatchResult{
+		TableName: r.tableName,
+		TableInfo: &source.SourceTableInfo{Name: r.tableName, Schema: tableSchema, PrimaryKeys: tableSchema.PrimaryKeys},
+	}
+
+	if err := r.source.reconnectReplication(ctx); err != nil {
+		return 0, err
+	}
+	waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
+	return getSlotConfirmedLSN(ctx, r.source.queryPool, slotName)
 }
 
 func parseStoredPostgresLSN(raw string) (pglogrepl.LSN, error) {

@@ -112,6 +112,8 @@ type fakeDestination struct {
 	noDeleteInsert    bool
 	evolutionWarnings []string
 	evolutionErr      error
+
+	tableSchemas map[string]*schema.TableSchema
 }
 
 func (d *fakeDestination) Schemes() []string                             { return nil }
@@ -155,6 +157,9 @@ func (d *fakeDestination) SupportsAtomicSwap() bool           { return true }
 func (d *fakeDestination) GetScheme() string                  { return "fake" }
 
 func (d *fakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
+	if d.tableSchemas != nil {
+		return d.tableSchemas[table], nil
+	}
 	return nil, nil
 }
 

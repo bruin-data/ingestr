@@ -201,10 +201,21 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		defer func() { tracker.Stop(retErr) }()
 	}
 
+	// The load timestamp is chosen before extract so that pre-staged load
+	// files (written during extract) and the replay path stamp the same value.
+	var loadTimestamp time.Time
+	if !p.config.NoLoadTimestamp && !p.config.Stream {
+		loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
+	}
+
 	// Check if source has known schema or needs inference
 	var tableSchema *schema.TableSchema
 	var bufferedRecords <-chan source.RecordBatchResult
 	var inferBuffer *databuffer.FileBuffer
+	var preStagedData destination.PreStagedData
+	var preStageRpt *preStageReport
+	var preStageKeyTransform func(string) string
+	var preStagedForJob destination.PreStagedData
 
 	if table.HasKnownSchema() {
 		tableSchema, err = table.GetSchema(ctx)
@@ -220,7 +231,14 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	} else {
 		// Schema inference path: read all data first. Buffer is opened later
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
-		tableSchema, inferBuffer, err = p.inferSchemaFromData(ctx, table, tracker)
+		var preStage destination.PreStageWriter
+		preStage, preStageKeyTransform = p.maybeStartPreStage(ctx, preFetchStrategy, preFetchConfig.PrimaryKeys, loadTimestamp)
+		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage)
+		defer func() {
+			if preStagedData != nil {
+				preStagedData.Close()
+			}
+		}()
 		if err != nil {
 			return fmt.Errorf("failed to infer schema: %w", err)
 		}
@@ -361,11 +379,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 	p.applyDestinationSchemaConstraints(destSchema)
 
-	var loadTimestamp time.Time
 	if !p.config.NoLoadTimestamp {
-		if !p.config.Stream {
-			loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
-		}
 		destSchema = addLoadTimestampColumn(destSchema)
 	}
 
@@ -398,18 +412,31 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	// Staging mirrors the destination schema, with staging-only CDC columns retained.
 	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
-	ingestSchema = preserveSourceCDCColumnTypes(ingestSchema, fullSchema)
+	ingestSchema = destination.PreserveSourceCDCColumnTypes(ingestSchema, fullSchema)
 	if strategyUsesLogicalPrimaryKeys(resolvedStrategy) {
 		ingestSchema = preserveLogicalPrimaryKeys(ingestSchema, fullSchema)
 	}
 
 	if inferBuffer != nil {
-		bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
-		bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget)
-		if err != nil {
-			return fmt.Errorf("failed to open buffer reader: %w", err)
+		if preStagedData != nil && p.preStagedUsable(preStageRpt, preStageKeyTransform, originalSourceSchema, ingestSchema) {
+			config.Debug("[PIPELINE] Using %d rows of pre-staged load files; skipping buffer replay", preStagedData.RowCount())
+			bufferedRecords = emptyRecordChannel()
+			preStagedForJob = preStagedData
+			_ = inferBuffer.Close()
+			inferBuffer = nil
+		} else {
+			if preStagedData != nil {
+				config.Debug("[PIPELINE] Discarding pre-staged load files; replaying from buffer")
+				preStagedData.Close()
+				preStagedData = nil
+			}
+			bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
+			bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget)
+			if err != nil {
+				return fmt.Errorf("failed to open buffer reader: %w", err)
+			}
+			inferBuffer = nil
 		}
-		inferBuffer = nil
 	}
 
 	strat, err := strategy.Get(resolvedStrategy)
@@ -485,6 +512,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		SourceSchema:        originalSourceSchema,
 		Tracker:             jobTracker,
 		BufferedRecords:     bufferedRecords,
+		PreStaged:           preStagedForJob,
 		SchemaComparison:    p.schemaComparison,
 		DestinationSchema:   p.destinationSchema,
 		ColumnRenamer:       p.columnRenamer,
@@ -492,7 +520,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		ColumnMasker:        columnMasker,
 		WhitespaceTrimmer:   whitespaceTrimmer,
 		LoadTimestamp:       loadTimestampTransformer,
-		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()),
+		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
 		EvolutionPlan:       evolutionPlan,
 	}
 
@@ -647,12 +675,20 @@ func (p *Pipeline) createTracker(ctx context.Context) (progress.Tracker, error) 
 	return tracker, nil
 }
 
-func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceTable, tracker progress.Tracker) (*schema.TableSchema, *databuffer.FileBuffer, error) {
+func (p *Pipeline) inferSchemaFromData(
+	ctx context.Context,
+	table source.SourceTable,
+	tracker progress.Tracker,
+	preStage destination.PreStageWriter,
+) (*schema.TableSchema, *databuffer.FileBuffer, destination.PreStagedData, *preStageReport, error) {
 	// Create schema inferrer and file-backed data buffer
 	inferrer := schemainfer.NewSchemaInferrer()
 	buffer, err := databuffer.NewFileBuffer()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create buffer: %w", err)
+		if preStage != nil {
+			preStage.Discard()
+		}
+		return nil, nil, nil, nil, fmt.Errorf("failed to create buffer: %w", err)
 	}
 
 	// Read all data from source
@@ -680,7 +716,10 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 	records, err := table.Read(ctx, readOpts)
 	if err != nil {
 		_ = buffer.Close()
-		return nil, nil, fmt.Errorf("failed to read from source: %w", err)
+		if preStage != nil {
+			preStage.Discard()
+		}
+		return nil, nil, nil, nil, fmt.Errorf("failed to read from source: %w", err)
 	}
 
 	// Wrap records with progress tracker for Extract logging
@@ -688,15 +727,19 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 		records = tracker.Wrap(records)
 	}
 
-	// Feed all records to inferrer and buffer in parallel
+	// Feed all records to the inferrer, the replay buffer, and (when active)
+	// the destination's pre-stage writer in parallel.
 	for result := range records {
 		if result.Err != nil {
 			_ = buffer.Close()
-			return nil, nil, fmt.Errorf("error reading batch: %w", result.Err)
+			if preStage != nil {
+				preStage.Discard()
+			}
+			return nil, nil, nil, nil, fmt.Errorf("error reading batch: %w", result.Err)
 		}
 
 		var wg sync.WaitGroup
-		var inferErr, bufErr error
+		var inferErr, bufErr, preErr error
 
 		wg.Add(2)
 		go func() {
@@ -707,24 +750,68 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 			defer wg.Done()
 			bufErr = buffer.Append(ctx, result.Batch)
 		}()
+		if preStage != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				preErr = preStage.Append(ctx, result.Batch)
+			}()
+		}
 		wg.Wait()
 
 		result.Batch.Release()
 
 		if inferErr != nil {
 			_ = buffer.Close()
-			return nil, nil, fmt.Errorf("failed to infer schema from batch: %w", inferErr)
+			if preStage != nil {
+				preStage.Discard()
+			}
+			return nil, nil, nil, nil, fmt.Errorf("failed to infer schema from batch: %w", inferErr)
 		}
 		if bufErr != nil {
 			_ = buffer.Close()
-			return nil, nil, fmt.Errorf("failed to buffer batch: %w", bufErr)
+			if preStage != nil {
+				preStage.Discard()
+			}
+			return nil, nil, nil, nil, fmt.Errorf("failed to buffer batch: %w", bufErr)
+		}
+		if preErr != nil {
+			// Pre-staging is an optimization: a write failure (e.g. a value JSON
+			// cannot encode) only cancels it, the extract continues.
+			config.Debug("[PIPELINE] Pre-staging disabled after write error: %v", preErr)
+			preStage.Discard()
+			preStage = nil
+		}
+	}
+
+	// Finalize pre-staged files and capture the inference facts needed to
+	// judge them once the final schema and column names are resolved.
+	var preStaged destination.PreStagedData
+	var report *preStageReport
+	if preStage != nil {
+		data, finishErr := preStage.Finish()
+		if finishErr != nil {
+			config.Debug("[PIPELINE] Pre-staging finalize failed: %v", finishErr)
+		} else if data != nil {
+			preStaged = data
+			report = &preStageReport{
+				typeUnstableColumns:   inferrer.TypeUnstableColumns(),
+				unknownStorageColumns: inferrer.UnknownStorageColumns(),
+			}
+		}
+	}
+
+	cleanup := func() {
+		_ = buffer.Close()
+		if preStaged != nil {
+			preStaged.Close()
 		}
 	}
 
 	// Protect columns specified via --columns from being dropped as all-null
 	if err := inferrer.ProtectColumnOverrides(p.config.Columns); err != nil {
-		_ = buffer.Close()
-		return nil, nil, err
+		cleanup()
+		return nil, nil, nil, nil, err
 	}
 
 	if partitionCol := resolvePartitionBy(p.config, table); partitionCol != "" {
@@ -734,13 +821,13 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 	// Infer schema
 	tableSchema, err := inferrer.ToTableSchema(table.Name())
 	if err != nil {
-		_ = buffer.Close()
-		return nil, nil, fmt.Errorf("failed to build schema: %w", err)
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("failed to build schema: %w", err)
 	}
 
 	if tableSchema == nil {
-		_ = buffer.Close()
-		return nil, nil, nil
+		cleanup()
+		return nil, nil, nil, nil, nil
 	}
 
 	p.droppedColumns = inferrer.DroppedColumns()
@@ -751,18 +838,18 @@ func (p *Pipeline) inferSchemaFromData(ctx context.Context, table source.SourceT
 	// Apply column type overrides before creating the buffer reader,
 	// so the reader casts data to match the overridden types.
 	if err := p.applyColumnOverrides(tableSchema); err != nil {
-		_ = buffer.Close()
-		return nil, nil, fmt.Errorf("failed to apply column overrides: %w", err)
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("failed to apply column overrides: %w", err)
 	}
 
 	// For schema-less sources, also append override columns that were never seen
 	// in the data — the buffer reader will fill them with nulls.
 	if err := schemainfer.AppendMissingOverrideColumns(tableSchema, p.config.Columns, p.config.SchemaNaming); err != nil {
-		_ = buffer.Close()
-		return nil, nil, fmt.Errorf("failed to append missing override columns: %w", err)
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("failed to append missing override columns: %w", err)
 	}
 
-	return tableSchema, buffer, nil
+	return tableSchema, buffer, preStaged, report, nil
 }
 
 // buildBufferReaderTarget builds the Arrow schema for buffer.Reader:
@@ -1083,7 +1170,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if strategy == config.StrategySCD2 {
 		comparisonDestSchema = removeSCD2MetadataColumns(destSchema)
 	}
-	comparisonDestSchema = preserveSourceCDCColumnTypes(comparisonDestSchema, sourceSchema)
+	comparisonDestSchema = destination.PreserveSourceCDCColumnTypes(comparisonDestSchema, sourceSchema)
 
 	// Store destination schema for use by strategies.
 	p.destinationSchema = comparisonDestSchema
@@ -1327,36 +1414,6 @@ func removeSCD2MetadataColumns(s *schema.TableSchema) *schema.TableSchema {
 			continue
 		}
 		result.Columns = append(result.Columns, col)
-	}
-	return &result
-}
-
-func preserveSourceCDCColumnTypes(ingestSchema, sourceSchema *schema.TableSchema) *schema.TableSchema {
-	if ingestSchema == nil || sourceSchema == nil {
-		return ingestSchema
-	}
-
-	sourceColumns := make(map[string]schema.Column, len(sourceSchema.Columns))
-	for _, col := range sourceSchema.Columns {
-		if destination.IsCDCColumn(col.Name) || destination.IsCDCStagingOnlyColumn(col.Name) {
-			sourceColumns[strings.ToLower(col.Name)] = col
-		}
-	}
-	if len(sourceColumns) == 0 {
-		return ingestSchema
-	}
-
-	result := *ingestSchema
-	result.Columns = append([]schema.Column{}, ingestSchema.Columns...)
-	for i, col := range result.Columns {
-		sourceCol, ok := sourceColumns[strings.ToLower(col.Name)]
-		if !ok {
-			continue
-		}
-		result.Columns[i].DataType = sourceCol.DataType
-		result.Columns[i].Precision = sourceCol.Precision
-		result.Columns[i].Scale = sourceCol.Scale
-		result.Columns[i].ArrayType = sourceCol.ArrayType
 	}
 	return &result
 }
@@ -1678,6 +1735,11 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	}
 	if isManagedChangeSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
 		s = config.StrategyMerge
+		if len(resolvePrimaryKeys(cfg, table)) == 0 {
+			// Keyless CDC table (no primary key, no replica identity index):
+			// there is nothing to merge on, so land the change log append-only.
+			s = config.StrategyAppend
+		}
 	}
 	if cfg.FullRefresh {
 		s = config.StrategyReplace
