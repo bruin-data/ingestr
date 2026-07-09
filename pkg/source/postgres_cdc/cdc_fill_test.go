@@ -320,7 +320,7 @@ func TestFlushWindowCompaction(t *testing.T) {
 		require.EqualValues(t, 3, out.NumRows())
 	})
 
-	t.Run("no primary key disables compaction", func(t *testing.T) {
+	t.Run("no primary key expands updates and disables compaction", func(t *testing.T) {
 		sc := fillTestSchema()
 		sc.PrimaryKeys = nil
 		accum := newBatchAccumulator(10000, map[string]*schema.TableSchema{"t": sc})
@@ -335,7 +335,10 @@ func TestFlushWindowCompaction(t *testing.T) {
 		res := <-results
 		require.NotNil(t, res.Batch)
 		defer res.Batch.Release()
-		assert.EqualValues(t, 2, res.Batch.NumRows())
+		assert.EqualValues(t, 3, res.Batch.NumRows())
+		assert.False(t, deletedValueAt(t, res.Batch, 0))
+		assert.True(t, deletedValueAt(t, res.Batch, 1))
+		assert.False(t, deletedValueAt(t, res.Batch, 2))
 	})
 
 	t.Run("pk-changing update keeps old-key history and new-key row", func(t *testing.T) {

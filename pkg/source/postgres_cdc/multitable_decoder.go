@@ -244,87 +244,41 @@ func (d *MultiTableDecoder) StreamedLowWater() (pglogrepl.LSN, bool) {
 }
 
 func (d *MultiTableDecoder) handleRelation(data []byte) error {
-	if len(data) < 4 {
-		return fmt.Errorf("relation message too short")
+	rel, err := parseRelationMessage(data)
+	if err != nil {
+		return err
 	}
-
-	relID := binary.BigEndian.Uint32(data[:4])
-	data = data[4:]
-
-	namespace, n := readString(data)
-	data = data[n:]
-
-	name, n := readString(data)
-	data = data[n:]
-
-	// Skip replica identity
-	if len(data) < 1 {
-		return fmt.Errorf("relation message missing replica identity")
-	}
-	data = data[1:]
-
-	// Number of columns
-	if len(data) < 2 {
-		return fmt.Errorf("relation message missing column count")
-	}
-	numCols := binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-
-	columns := make([]RelationColumn, numCols)
-	for i := uint16(0); i < numCols; i++ {
-		if len(data) < 1 {
-			return fmt.Errorf("relation message column flags truncated")
-		}
-		flags := data[0]
-		data = data[1:]
-
-		colName, n := readString(data)
-		data = data[n:]
-
-		if len(data) < 4 {
-			return fmt.Errorf("relation message column type truncated")
-		}
-		dataType := binary.BigEndian.Uint32(data[:4])
-		data = data[4:]
-
-		if len(data) < 4 {
-			return fmt.Errorf("relation message column typemod truncated")
-		}
-		typeMod := int32(binary.BigEndian.Uint32(data[:4]))
-		data = data[4:]
-
-		columns[i] = RelationColumn{
-			Flags:    flags,
-			Name:     colName,
-			DataType: dataType,
-			TypeMod:  typeMod,
-		}
-	}
-
-	rel := &RelationInfo{
-		RelationID: relID,
-		Namespace:  namespace,
-		Name:       name,
-		Columns:    columns,
-	}
-
-	d.relations[relID] = rel
 
 	// Check if this is one of our target tables
-	fullName := fmt.Sprintf("%s.%s", namespace, name)
-	if _, ok := d.tableSchemas[fullName]; ok {
-		d.targetRelIDs[relID] = fullName
-		config.Debug("[CDC] Found target relation: %s (ID: %d)", fullName, relID)
-	} else {
+	tableName := fmt.Sprintf("%s.%s", rel.Namespace, rel.Name)
+	if _, ok := d.tableSchemas[tableName]; !ok {
+		tableName = ""
 		// Also try without schema prefix for public schema
-		if namespace == "public" {
-			if _, ok := d.tableSchemas[name]; ok {
-				d.targetRelIDs[relID] = name
-				config.Debug("[CDC] Found target relation: %s (ID: %d)", name, relID)
+		if rel.Namespace == "public" {
+			if _, ok := d.tableSchemas[rel.Name]; ok {
+				tableName = rel.Name
+			}
+		}
+	}
+	if tableName == "" {
+		// Table renamed mid-stream; keep decoding it by relation ID.
+		tableName = d.targetRelIDs[rel.RelationID]
+	}
+
+	if tableName != "" {
+		d.targetRelIDs[rel.RelationID] = tableName
+		config.Debug("[CDC] Found target relation: %s (ID: %d)", tableName, rel.RelationID)
+		if tableSchema := d.tableSchemas[tableName]; tableSchema != nil {
+			prev := d.relations[rel.RelationID]
+			if err := mapRelationToSchema(rel, prev, tableSchema, tableName); err != nil {
+				// Do not store rel on error: a rebuilt stream must retry against the
+				// last accepted relation so schema-change detection remains stable.
+				return err
 			}
 		}
 	}
 
+	d.relations[rel.RelationID] = rel
 	return nil
 }
 
@@ -414,7 +368,7 @@ func (d *MultiTableDecoder) handleInsert(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel, tableSchema)
+	values, err := parseTupleData(data, rel, tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
@@ -460,7 +414,7 @@ func (d *MultiTableDecoder) handleUpdate(data []byte) error {
 	if len(data) > 0 && (data[0] == 'K' || data[0] == 'O') {
 		data = data[1:]
 		var err error
-		oldValues, err = d.parseTupleData(data, rel, tableSchema)
+		oldValues, err = parseTupleData(data, rel, tableSchema, d.typeMap)
 		if err != nil {
 			return fmt.Errorf("failed to parse old tuple: %w", err)
 		}
@@ -473,7 +427,7 @@ func (d *MultiTableDecoder) handleUpdate(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel, tableSchema)
+	values, err := parseTupleData(data, rel, tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse new tuple: %w", err)
 	}
@@ -520,7 +474,7 @@ func (d *MultiTableDecoder) handleDelete(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel, tableSchema)
+	values, err := parseTupleData(data, rel, tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
@@ -535,77 +489,4 @@ func (d *MultiTableDecoder) handleDelete(data []byte) error {
 	})
 
 	return nil
-}
-
-func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, tableSchema *schema.TableSchema) ([]interface{}, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("tuple data too short")
-	}
-
-	numCols := binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-
-	values := make([]interface{}, numCols)
-
-	for i := uint16(0); i < numCols; i++ {
-		if len(data) < 1 {
-			return nil, fmt.Errorf("tuple data truncated at column %d", i)
-		}
-
-		colType := data[0]
-		data = data[1:]
-
-		switch colType {
-		case tupleDataNull:
-			values[i] = nil
-		case tupleDataUnchanged:
-			values[i] = tupleUnchangedMarker
-		case tupleDataText:
-			if len(data) < 4 {
-				return nil, fmt.Errorf("text length truncated")
-			}
-			length := binary.BigEndian.Uint32(data[:4])
-			data = data[4:]
-
-			if len(data) < int(length) {
-				return nil, fmt.Errorf("text data truncated")
-			}
-			textVal := string(data[:length])
-			data = data[length:]
-
-			// Convert text to appropriate type based on schema column
-			if int(i) < sourceColumnCount(tableSchema) {
-				col := tableSchema.Columns[i]
-				values[i] = convertTextValue(textVal, col)
-			} else {
-				values[i] = textVal
-			}
-		case tupleDataBinary:
-			if len(data) < 4 {
-				return nil, fmt.Errorf("binary length truncated")
-			}
-			length := binary.BigEndian.Uint32(data[:4])
-			data = data[4:]
-
-			if len(data) < int(length) {
-				return nil, fmt.Errorf("binary data truncated")
-			}
-			if int(i) < sourceColumnCount(tableSchema) && int(i) < len(rel.Columns) {
-				v, err := convertBinaryValue(data[:length], tableSchema.Columns[i], rel.Columns[i].DataType, d.typeMap)
-				if err != nil {
-					return nil, err
-				}
-				values[i] = v
-			} else {
-				// Copy: decoded changes are buffered across the flush window
-				// and must not alias the WAL message buffer.
-				values[i] = append([]byte(nil), data[:length]...)
-			}
-			data = data[length:]
-		default:
-			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
-		}
-	}
-
-	return values, nil
 }

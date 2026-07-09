@@ -41,20 +41,6 @@ const (
 	tupleDataBinary    = 'b'
 )
 
-type RelationInfo struct {
-	RelationID uint32
-	Namespace  string
-	Name       string
-	Columns    []RelationColumn
-}
-
-type RelationColumn struct {
-	Flags    uint8
-	Name     string
-	DataType uint32
-	TypeMod  int32
-}
-
 type Change struct {
 	Operation string // "INSERT", "UPDATE", "DELETE"
 	LSN       pglogrepl.LSN
@@ -122,78 +108,29 @@ func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 }
 
 func (d *Decoder) handleRelation(data []byte) error {
-	if len(data) < 4 {
-		return fmt.Errorf("relation message too short")
+	rel, err := parseRelationMessage(data)
+	if err != nil {
+		return err
 	}
 
-	relID := binary.BigEndian.Uint32(data[:4])
-	data = data[4:]
-
-	namespace, n := readString(data)
-	data = data[n:]
-
-	name, n := readString(data)
-	data = data[n:]
-
-	// Skip replica identity
-	if len(data) < 1 {
-		return fmt.Errorf("relation message missing replica identity")
+	isTarget := rel.Namespace == d.targetSchema && rel.Name == d.targetTable
+	if isTarget {
+		d.targetRelID = rel.RelationID
+		config.Debug("[CDC] Found target relation: %s.%s (ID: %d)", rel.Namespace, rel.Name, rel.RelationID)
+	} else if d.targetRelID != 0 && rel.RelationID == d.targetRelID {
+		// Table renamed mid-stream; keep decoding it by relation ID.
+		isTarget = true
 	}
-	data = data[1:]
-
-	// Number of columns
-	if len(data) < 2 {
-		return fmt.Errorf("relation message missing column count")
-	}
-	numCols := binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-
-	columns := make([]RelationColumn, numCols)
-	for i := uint16(0); i < numCols; i++ {
-		if len(data) < 1 {
-			return fmt.Errorf("relation message column flags truncated")
-		}
-		flags := data[0]
-		data = data[1:]
-
-		colName, n := readString(data)
-		data = data[n:]
-
-		if len(data) < 4 {
-			return fmt.Errorf("relation message column type truncated")
-		}
-		dataType := binary.BigEndian.Uint32(data[:4])
-		data = data[4:]
-
-		if len(data) < 4 {
-			return fmt.Errorf("relation message column typemod truncated")
-		}
-		typeMod := int32(binary.BigEndian.Uint32(data[:4]))
-		data = data[4:]
-
-		columns[i] = RelationColumn{
-			Flags:    flags,
-			Name:     colName,
-			DataType: dataType,
-			TypeMod:  typeMod,
+	if isTarget {
+		prev := d.relations[rel.RelationID]
+		if err := mapRelationToSchema(rel, prev, d.tableSchema, d.targetSchema+"."+d.targetTable); err != nil {
+			// Do not store rel on error: a rebuilt stream must retry against the
+			// last accepted relation so schema-change detection remains stable.
+			return err
 		}
 	}
 
-	rel := &RelationInfo{
-		RelationID: relID,
-		Namespace:  namespace,
-		Name:       name,
-		Columns:    columns,
-	}
-
-	d.relations[relID] = rel
-
-	// Check if this is our target table
-	if namespace == d.targetSchema && name == d.targetTable {
-		d.targetRelID = relID
-		config.Debug("[CDC] Found target relation: %s.%s (ID: %d)", namespace, name, relID)
-	}
-
+	d.relations[rel.RelationID] = rel
 	return nil
 }
 
@@ -264,7 +201,7 @@ func (d *Decoder) handleInsert(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel)
+	values, err := parseTupleData(data, rel, d.tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
@@ -301,7 +238,7 @@ func (d *Decoder) handleUpdate(data []byte) error {
 	if len(data) > 0 && (data[0] == 'K' || data[0] == 'O') {
 		data = data[1:]
 		var err error
-		oldValues, err = d.parseTupleData(data, rel)
+		oldValues, err = parseTupleData(data, rel, d.tableSchema, d.typeMap)
 		if err != nil {
 			return fmt.Errorf("failed to parse old tuple: %w", err)
 		}
@@ -315,7 +252,7 @@ func (d *Decoder) handleUpdate(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel)
+	values, err := parseTupleData(data, rel, d.tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse new tuple: %w", err)
 	}
@@ -353,7 +290,7 @@ func (d *Decoder) handleDelete(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel)
+	values, err := parseTupleData(data, rel, d.tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
@@ -365,79 +302,6 @@ func (d *Decoder) handleDelete(data []byte) error {
 	})
 
 	return nil
-}
-
-func (d *Decoder) parseTupleData(data []byte, rel *RelationInfo) ([]interface{}, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("tuple data too short")
-	}
-
-	numCols := binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-
-	values := make([]interface{}, numCols)
-
-	for i := uint16(0); i < numCols; i++ {
-		if len(data) < 1 {
-			return nil, fmt.Errorf("tuple data truncated at column %d", i)
-		}
-
-		colType := data[0]
-		data = data[1:]
-
-		switch colType {
-		case tupleDataNull:
-			values[i] = nil
-		case tupleDataUnchanged:
-			values[i] = tupleUnchangedMarker
-		case tupleDataText:
-			if len(data) < 4 {
-				return nil, fmt.Errorf("text length truncated")
-			}
-			length := binary.BigEndian.Uint32(data[:4])
-			data = data[4:]
-
-			if len(data) < int(length) {
-				return nil, fmt.Errorf("text data truncated")
-			}
-			textVal := string(data[:length])
-			data = data[length:]
-
-			// Convert text to appropriate type based on schema column
-			if int(i) < sourceColumnCount(d.tableSchema) {
-				col := d.tableSchema.Columns[i]
-				values[i] = convertTextValue(textVal, col)
-			} else {
-				values[i] = textVal
-			}
-		case tupleDataBinary:
-			if len(data) < 4 {
-				return nil, fmt.Errorf("binary length truncated")
-			}
-			length := binary.BigEndian.Uint32(data[:4])
-			data = data[4:]
-
-			if len(data) < int(length) {
-				return nil, fmt.Errorf("binary data truncated")
-			}
-			if int(i) < sourceColumnCount(d.tableSchema) && int(i) < len(rel.Columns) {
-				v, err := convertBinaryValue(data[:length], d.tableSchema.Columns[i], rel.Columns[i].DataType, d.typeMap)
-				if err != nil {
-					return nil, err
-				}
-				values[i] = v
-			} else {
-				// Copy: decoded changes are buffered across the flush window
-				// and must not alias the WAL message buffer.
-				values[i] = append([]byte(nil), data[:length]...)
-			}
-			data = data[length:]
-		default:
-			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
-		}
-	}
-
-	return values, nil
 }
 
 func readString(data []byte) (string, int) {
