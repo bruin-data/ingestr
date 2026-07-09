@@ -120,9 +120,13 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 				return
 			}
 
-			batchNum++
-			totalRows += batch.Batch.NumRows()
-			config.Debug("[CDC] Batch %d: %d rows (total: %d)", batchNum, batch.Batch.NumRows(), totalRows)
+			// Streaming results without a batch still matter: bare commit
+			// tokens and schema-change announcements (TableInfo).
+			if batch.Batch != nil {
+				batchNum++
+				totalRows += batch.Batch.NumRows()
+				config.Debug("[CDC] Batch %d: %d rows (total: %d)", batchNum, batch.Batch.NumRows(), totalRows)
+			}
 
 			results <- batch
 		}
@@ -241,6 +245,16 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		return nil, fmt.Errorf("error iterating primary key rows: %w", err)
 	}
 
+	// A table without a primary key can still declare row identity via
+	// REPLICA IDENTITY USING INDEX. Those columns are what pgoutput keys old
+	// tuples by, so they serve as merge keys exactly like a primary key would.
+	if len(primaryKeys) == 0 {
+		primaryKeys, err = replicaIdentityIndexColumns(ctx, pool, schemaName, tableName)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	for i := range columns {
 		for _, pk := range primaryKeys {
 			if columns[i].Name == pk {
@@ -256,6 +270,41 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
 	}, nil
+}
+
+// replicaIdentityIndexColumns returns the columns of the table's replica
+// identity index (REPLICA IDENTITY USING INDEX), in index column order, or nil
+// when the table has none.
+func replicaIdentityIndexColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]string, error) {
+	const q = `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+		WHERE n.nspname = $1 AND c.relname = $2
+		  AND i.indisreplident AND i.indisvalid
+		ORDER BY k.ord
+	`
+	rows, err := pool.Query(ctx, q, schemaName, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query replica identity index: %w", err)
+	}
+	defer func() { rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan replica identity column: %w", err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating replica identity columns: %w", err)
+	}
+	return columns, nil
 }
 
 func addCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {

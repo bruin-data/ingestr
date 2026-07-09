@@ -97,6 +97,40 @@ func StagingIngestSchema(fullSchema, destSchema *schema.TableSchema) *schema.Tab
 	return &result
 }
 
+// PreserveSourceCDCColumnTypes overrides the CDC metadata column types in
+// ingestSchema with the types the source schema declares for them, so schema
+// comparison does not flag spurious type changes on columns the CDC layer
+// owns.
+func PreserveSourceCDCColumnTypes(ingestSchema, sourceSchema *schema.TableSchema) *schema.TableSchema {
+	if ingestSchema == nil || sourceSchema == nil {
+		return ingestSchema
+	}
+
+	sourceColumns := make(map[string]schema.Column, len(sourceSchema.Columns))
+	for _, col := range sourceSchema.Columns {
+		if IsCDCColumn(col.Name) || IsCDCStagingOnlyColumn(col.Name) {
+			sourceColumns[strings.ToLower(col.Name)] = col
+		}
+	}
+	if len(sourceColumns) == 0 {
+		return ingestSchema
+	}
+
+	result := *ingestSchema
+	result.Columns = append([]schema.Column{}, ingestSchema.Columns...)
+	for i, col := range result.Columns {
+		sourceCol, ok := sourceColumns[strings.ToLower(col.Name)]
+		if !ok {
+			continue
+		}
+		result.Columns[i].DataType = sourceCol.DataType
+		result.Columns[i].Precision = sourceCol.Precision
+		result.Columns[i].Scale = sourceCol.Scale
+		result.Columns[i].ArrayType = sourceCol.ArrayType
+	}
+	return &result
+}
+
 // DestinationTableSchema returns a copy of the schema without staging-only CDC columns.
 func DestinationTableSchema(s *schema.TableSchema) *schema.TableSchema {
 	if s == nil {

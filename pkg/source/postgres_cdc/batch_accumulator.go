@@ -107,6 +107,7 @@ func (a *batchAccumulator) flushTable(tableName string, results chan<- source.Re
 	// omitted column (the merge falls back to a target row that doesn't exist
 	// yet).
 	applyIntraBatchFill(changes, tableSchema)
+	changes = expandUpdates(changes, tableSchema)
 
 	// Last-write-wins compaction: only the latest change per primary key can
 	// affect the merge outcome, so superseded row versions are dropped before
