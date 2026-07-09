@@ -1,20 +1,29 @@
-## Summary
+## What
+<!-- What does this PR change and why? Keep it concise. -->
 
+## Changes
+<!-- List the files/areas affected and what was done in each. -->
+-
 
+## How to test
+<!-- Steps a reviewer can follow to verify the change. -->
+1.
 
-## Risk
+## Risk & rollback
+- **Risk:** <!-- low / medium / high — and why -->
+- **Rollback:** Revert the merge commit. <!-- Note any extra steps if applicable. -->
 
-- [ ] Security-relevant (credentials, connection strings, secrets)
-- [ ] Data impact (how data is read, written, or transformed)
-- [ ] Breaking change
-- [ ] None of the above
+## Checklist
+- [ ] Unit tests added or updated (`make test`)
+- [ ] Format and lint pass (`make format`, `make lint`)
+- [ ] Integration tests pass if affected (`make test-integration`)
+- [ ] No unrelated changes included
+- [ ] Tested locally
 
-## Tests
+## Security
+- [ ] No secrets, credentials, or PII in this change
+- [ ] No new dependencies with known vulnerabilities
+- [ ] Security implications considered (if applicable)
 
-- [ ] `make format`
-- [ ] `make lint`
-- [ ] `make test`
-
-## Rollback
-
-Revert the merge commit.
+## Related issues
+<!-- Link the issue(s) this PR closes, e.g. Closes #1234 -->
