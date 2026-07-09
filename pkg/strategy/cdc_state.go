@@ -35,6 +35,7 @@ var cdcStateSchema = &schema.TableSchema{Columns: []schema.Column{
 type CDCStateManager struct {
 	dest           destination.Destination
 	resumeProvider destination.CDCResumeProvider
+	truncater      destination.TruncateCapable
 	connectorID    string
 	stagingDataset string
 	anchorTable    string
@@ -51,12 +52,17 @@ func NewCDCStateManager(dest destination.Destination, connectorID, anchorTable, 
 	if !ok {
 		return nil, fmt.Errorf("destination scheme %q does not support destination-managed CDC state", dest.GetScheme())
 	}
+	truncater, ok := dest.(destination.TruncateCapable)
+	if !ok {
+		return nil, fmt.Errorf("destination scheme %q cannot invalidate destination-managed CDC state", dest.GetScheme())
+	}
 	if connectorID == "" {
 		return nil, fmt.Errorf("CDC state connector ID is empty")
 	}
 	return &CDCStateManager{
 		dest:           dest,
 		resumeProvider: resumeProvider,
+		truncater:      truncater,
 		connectorID:    connectorID,
 		stagingDataset: stagingDataset,
 		anchorTable:    anchorTable,
@@ -115,11 +121,8 @@ func (m *CDCStateManager) BeginRun(ctx context.Context) error {
 	}
 	sort.Strings(tables)
 	for _, table := range tables {
-		if err := m.dest.DropTable(ctx, table); err != nil {
+		if err := m.truncater.TruncateTable(ctx, table); err != nil {
 			return fmt.Errorf("failed to invalidate CDC snapshot state table %s: %w", table, err)
-		}
-		if err := m.prepareTable(ctx, table); err != nil {
-			return err
 		}
 	}
 	return nil

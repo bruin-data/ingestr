@@ -54,6 +54,13 @@ func (d *cdcStateDestination) DropTable(ctx context.Context, table string) error
 	return d.fakeDestination.DropTable(ctx, table)
 }
 
+func (d *cdcStateDestination) TruncateTable(_ context.Context, table string) error {
+	d.stateMu.Lock()
+	delete(d.maxLSN, table)
+	d.stateMu.Unlock()
+	return nil
+}
+
 func TestCDCStateRequiresCompletedSnapshotBeforeResume(t *testing.T) {
 	ctx := context.Background()
 	dest := newCDCStateDestination()
