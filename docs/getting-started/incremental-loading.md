@@ -7,7 +7,7 @@ ingestr supports several write strategies for loading or refreshing destination 
 
 Before you use incremental loading, you should understand 3 important keys:
 - `primary_key`: the column or columns ingestr should use to identify one logical row. This is strategy configuration, not just a database constraint on the destination table. On the CLI, pass it with `--primary-key` once per key column. Primary key values should be non-null: some destinations match null keys as equal during merge, while others reject or duplicate them. If you run ingestr through an asset/orchestrator, make sure the asset passes primary keys to ingestr instead of relying only on the database table definition.
-- `incremental_key`: the column ingestr should use to find or replace a bounded slice of rows. For most incremental loads this should be a comparable cursor such as a date, timestamp, or monotonically increasing number, for example `created_at`, `updated_at`, `dt`, or `batch_id`.
+- `incremental_key`: the column ingestr should use to find or replace a bounded slice of rows. For source-side filtering with `--interval-start` and `--interval-end`, this is usually a date or timestamp column such as `created_at`, `updated_at`, or `dt`. Numeric keys such as `batch_id` are supported for `delete+insert` when bounds are inferred from staged rows; numeric extract-partition columns are configured separately with `--extract-partition-by`.
 - `strategy`: the strategy to use for loading, the available strategies are:
   - `replace`: replace the existing destination table with the source directly, this is the default strategy and the simplest one.
     - This strategy isn't recommended for large tables, as it will replace the entire table and can be slow.
@@ -192,16 +192,15 @@ Delete+Insert replaces a slice of the destination table. It stages the rows read
 
 The `incremental_key` is required and should be a date, timestamp, or numeric column that defines the slice to replace, such as a partition date or batch ID. A primary key such as `id` is usually the wrong choice for `delete+insert`; use `primary_key` separately if you also want ingestr to collapse duplicate staged rows before inserting. Numeric incremental keys are supported when ingestr infers the replacement bounds from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values, so explicit CLI bounds are intended for date and timestamp keys.
 
-The following example replaces the `dt = 2021-01-02` slice in the `my_schema.some_data` table in BigQuery with rows read from the same slice in Postgres.
+The following example stages only rows with `dt = 2021-01-02` and lets ingestr infer that replacement interval from the staged rows.
 ```bash
 ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
-    --source-table 'my_schema.some_data' \
+    --source-table "query:SELECT * FROM my_schema.some_data WHERE dt = '2021-01-02'" \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \
+    --dest-table 'my_schema.some_data' \
     --incremental-strategy delete+insert \
     --incremental-key dt \
-    --interval-start '2021-01-02' \
-    --interval-end '2021-01-02' \
     --columns 'dt:date'
 ```
 
