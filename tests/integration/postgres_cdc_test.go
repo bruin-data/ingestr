@@ -1713,8 +1713,8 @@ func lsnGreater(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a, b stri
 // assertBatchRunsAdvanceSlot drives an initial snapshot run plus several resume
 // runs, each catching up a small delta well under the replicator's 10s
 // standby-status interval. Without a final standby status update on a successful
-// run the slot's confirmed_flush_lsn stays frozen and lag grows without bound;
-// this asserts the slot advances and lag shrinks after each run instead.
+// run the slot's confirmed_flush_lsn stays frozen. This asserts the slot advances
+// through the WAL position captured immediately before each run.
 func assertBatchRunsAdvanceSlot(t *testing.T, ctx context.Context, sourceConnString string, makeCfg func() *config.IngestConfig) {
 	t.Helper()
 
@@ -1736,6 +1736,8 @@ func assertBatchRunsAdvanceSlot(t *testing.T, ctx context.Context, sourceConnStr
 
 		_, lagBefore := cdcReplicationSlotState(t, ctx, sourcePool)
 		require.Positive(t, lagBefore, "run %d: expected positive lag before catch-up", i)
+		var catchUpTarget string
+		require.NoError(t, sourcePool.QueryRow(ctx, `SELECT pg_current_wal_lsn()::text`).Scan(&catchUpTarget))
 
 		require.NoError(t, pipeline.New(makeCfg()).Run(ctx))
 
@@ -1743,8 +1745,9 @@ func assertBatchRunsAdvanceSlot(t *testing.T, ctx context.Context, sourceConnStr
 		assert.Truef(t, lsnGreater(t, ctx, sourcePool, confAfter, prevConf),
 			"run %d: confirmed_flush_lsn must advance (%s -> %s); the slot stays frozen without the final standby update",
 			i, prevConf, confAfter)
-		assert.Lessf(t, lagAfter, lagBefore,
-			"run %d: lag should shrink after catching up (before=%d after=%d)", i, lagBefore, lagAfter)
+		assert.Falsef(t, lsnGreater(t, ctx, sourcePool, catchUpTarget, confAfter),
+			"run %d: confirmed_flush_lsn %s did not reach pre-run WAL position %s", i, confAfter, catchUpTarget)
+		t.Logf("run %d: slot advanced %s -> %s (lag before=%d after=%d)", i, prevConf, confAfter, lagBefore, lagAfter)
 		prevConf = confAfter
 	}
 }
