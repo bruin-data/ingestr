@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
@@ -223,6 +224,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INGESTR_FLUSH_RECORDS"),
 			},
 			&cli.StringFlag{
+				Name:    "metrics-addr",
+				Usage:   "Serve streaming metrics (expvar at /debug/vars) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
+			},
+			&cli.StringFlag{
 				Name:    "query-annotations",
 				Usage:   "JSON object of caller annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) merged into the '-- @bruin.config' comment on destination queries (QUERY_TAG on Snowflake) for cost attribution. ingestr always annotates with its own keys (type, ingestr_step); this flag adds the caller's keys on top.",
 				Sources: cli.EnvVars("INGESTR_QUERY_ANNOTATIONS"),
@@ -286,6 +292,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
 	}
+	metricsAddr := c.String("metrics-addr")
+	if !cfg.Stream && metricsAddr != "" {
+		return fmt.Errorf("--metrics-addr is only valid together with --stream")
+	}
 	// In streaming mode the source decides the default strategy (merge for CDC,
 	// append for brokers); only treat the strategy as a user override when the
 	// flag was explicitly set, since it defaults to "replace".
@@ -332,6 +342,17 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	if cfg.IncrementalStrategy != "" {
 		if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
 			return err
+		}
+	}
+
+	if metricsAddr != "" {
+		boundAddr, stop, err := metrics.Serve(metricsAddr)
+		if err != nil {
+			return fmt.Errorf("failed to start metrics server: %w", err)
+		}
+		defer stop()
+		if !output.IsJSON() {
+			color.Green("Serving metrics on http://%s/debug/vars", boundAddr)
 		}
 	}
 

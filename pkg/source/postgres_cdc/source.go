@@ -83,6 +83,9 @@ type PostgresCDCSource struct {
 	// replicator's 10s standby timer fires. Stays zero in streaming mode.
 	caughtUp *streamPosition
 
+	// lag tracks the server's WAL head for replication-lag reporting.
+	lag *lagState
+
 	// keepalive coordinates a goroutine that periodically pings the
 	// walsender with a WALWritePosition-only standby update during the
 	// destination-write phase. Without it, a write that outlasts
@@ -95,8 +98,10 @@ type PostgresCDCSource struct {
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
-	return &PostgresCDCSource{pos: newStreamPosition(), caughtUp: newStreamPosition()}
+	return &PostgresCDCSource{pos: newStreamPosition(), caughtUp: newStreamPosition(), lag: newLagState()}
 }
+
+var _ source.LagReporter = (*PostgresCDCSource)(nil)
 
 func (s *PostgresCDCSource) Schemes() []string {
 	return []string{"postgres+cdc", "postgresql+cdc"}
@@ -334,6 +339,37 @@ func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
 	s.pos.Commit(lsn)
 	config.Debug("[CDC] Confirmed durable LSN: %s", lsn)
 	return nil
+}
+
+// ReplicationLag reports how many WAL bytes the durable destination position
+// trails the server's WAL head. It is only meaningful while streaming: batch
+// runs never call CommitStream, so pos stays zero and the difference would
+// report the entire WAL as lag.
+func (s *PostgresCDCSource) ReplicationLag() (source.LagSnapshot, bool) {
+	if s.lag == nil || s.pos == nil || !s.lag.streaming.Load() {
+		return source.LagSnapshot{}, false
+	}
+	head := s.lag.serverHead.Load()
+	if head == 0 {
+		return source.LagSnapshot{}, false
+	}
+	committed := uint64(s.pos.Committed())
+
+	// Saturating: LSN is a uint64, and committed briefly exceeding head after a
+	// reconnect would otherwise wrap to ~1.8e19.
+	var behind uint64
+	if head > committed {
+		behind = head - committed
+	}
+
+	return source.LagSnapshot{
+		Source:          "postgres_cdc",
+		BytesBehind:     &behind,
+		ServerPosition:  pglogrepl.LSN(head).String(),
+		DurablePosition: pglogrepl.LSN(committed).String(),
+		CaughtUp:        behind == 0,
+		UpdatedAt:       time.Now(),
+	}, true
 }
 
 // recordCaughtUpLSN records the LSN a batch run has streamed up to. It is sent

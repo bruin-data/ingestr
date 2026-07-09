@@ -8,6 +8,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
@@ -500,6 +501,18 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		}
 	}
 	l.tokenDirty = false
+
+	// Only after the commit: the counters mean "durable in the destination and
+	// acknowledged to the source", not merely "written".
+	perTable := make(map[string]int64, len(work))
+	for _, w := range work {
+		name := w.name
+		if name == "" {
+			name = w.st.destTable // single-table streams key l.tables on ""
+		}
+		perTable[name] = w.rows
+	}
+	metrics.RecordSync(perTable, time.Now())
 
 	l.cycles++
 	if flushedRows > 0 {

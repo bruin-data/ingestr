@@ -35,6 +35,7 @@ ingestr ingest \
 - `--stream`: Runs continuous (streaming) ingestion instead of a one-shot load. Supported by CDC sources (`postgres+cdc`, `mssql+cdc`) and message brokers (`kafka`, `amqp`). The process runs until interrupted (SIGINT/SIGTERM), flushing buffered records to the destination on an interval or record-count trigger. See [Streaming ingestion](#streaming-ingestion) below.
 - `--flush-interval`: In streaming mode, flush buffered records to the destination at least this often. Defaults to `30s`. Only valid with `--stream`.
 - `--flush-records`: In streaming mode, flush when this many records have been buffered. Defaults to `50000`. Only valid with `--stream`.
+- `--metrics-addr`: In streaming mode, serve replication lag and throughput metrics over HTTP on this address (e.g. `127.0.0.1:6060`). Disabled unless set. Only valid with `--stream`. See [Monitoring a stream](#monitoring-a-stream) below.
 
 The `interval-start` and `interval-end` options support various datetime formats, here are some examples:
 - `%Y-%m-%d`: `2023-01-31`
@@ -79,6 +80,40 @@ ingestr ingest \
 
 > [!INFO]
 > Column-level schema changes are picked up at startup. If a table's columns change while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
+
+### Monitoring a stream
+
+Passing `--metrics-addr` starts a small HTTP server for the lifetime of the stream that exposes Go [expvar](https://pkg.go.dev/expvar) metrics at `/debug/vars`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run.
+
+```bash
+ingestr ingest \
+   --source-uri 'postgres+cdc://user:pass@localhost:5432/mydb' \
+   --dest-uri 'bigquery://my_project?credentials_path=/path/to/sa.json' \
+   --stream \
+   --metrics-addr 127.0.0.1:6060
+
+curl -s localhost:6060/debug/vars | jq '.ingestr_replication, .ingestr_stream_tables'
+```
+
+Alongside Go's standard `cmdline` and `memstats`, ingestr publishes:
+
+| Key | Meaning |
+|---|---|
+| `ingestr_replication` | Replication lag for the current source (see below). `{"streaming": false}` when the source cannot report lag. |
+| `ingestr_stream_rows_synced` | Cumulative rows written **and** confirmed durable since the process started. |
+| `ingestr_stream_flush_cycles` | Number of completed flush cycles. |
+| `ingestr_stream_last_synced_unix` | Unix time of the last successful commit. |
+| `ingestr_stream_tables` | The same row counts and timestamp, broken out per destination table. |
+
+The row counters advance only after a flush's destination write **and** its source-position commit have both succeeded, so they count durable rows rather than merely written ones. `ingestr_stream_last_synced_unix` also advances on cycles that commit a position without writing rows, which is what makes it usable as a staleness alarm: if it stops moving, the stream is stuck.
+
+What `ingestr_replication` contains depends on the engine, because "lag" is not the same quantity everywhere:
+
+- **Postgres** (`postgres+cdc`) reports `bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This is the same number as `pg_current_wal_lsn() - confirmed_flush_lsn` for the replication slot, so it is what predicts unbounded WAL growth on the source. It is the value to alert on.
+- **MongoDB** (`mongodb+cdc`) reports `seconds_behind`: the gap between the server's `operationTime` and the cluster time of the last processed change event. Both clocks are server-side, so an idle collection converges to zero instead of drifting upward.
+- **SQL Server** (`mssql+cdc`) reports `seconds_behind`: the change time between the processed LSN and the capture watermark, via `sys.fn_cdc_map_lsn_to_time`. SQL Server's `binary(10)` LSNs are ordered but their difference is not a log distance, so no `bytes_behind` is published.
+
+Fields that an engine cannot express are omitted rather than reported as a misleading zero. Postgres, for instance, has no per-LSN timestamp, so it publishes no `seconds_behind`. Message-broker sources report no lag block at all.
 
 ## General flags
 

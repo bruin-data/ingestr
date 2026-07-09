@@ -82,7 +82,7 @@ func (c *scriptedConn) statusUpdates() []pglogrepl.StandbyStatusUpdate {
 
 func startTestReceiver(t *testing.T, conn *scriptedConn, streaming bool, startLSN pglogrepl.LSN) *walReceiver {
 	t.Helper()
-	recv := startWALReceiverFuncs(context.Background(), conn.receive, conn.sendStatus, streaming, startLSN, newStreamPosition())
+	recv := startWALReceiverFuncs(context.Background(), conn.receive, conn.sendStatus, streaming, startLSN, newStreamPosition(), newLagState())
 	t.Cleanup(recv.stop)
 	return recv
 }

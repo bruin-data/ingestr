@@ -30,6 +30,8 @@ func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema
 
 	decoder := NewDecoder(tableSchema, schemaName, tblName)
 
+	src.lag.streaming.Store(streaming)
+
 	return &Replicator{
 		source:        src,
 		tableName:     tableName,
@@ -179,6 +181,7 @@ func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, 
 			if pkm.ServerWALEnd > r.clientXLogPos {
 				r.clientXLogPos = pkm.ServerWALEnd
 			}
+			r.source.lag.observe(pkm.ServerWALEnd, r.clientXLogPos)
 
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
@@ -194,6 +197,9 @@ func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, 
 			if xld.WALStart > r.clientXLogPos {
 				r.clientXLogPos = xld.WALStart
 			}
+			// ServerWALEnd, not WALStart: during a long burst with no
+			// interleaved keepalive it is the only fresh view of the head.
+			r.source.lag.observe(xld.ServerWALEnd, r.clientXLogPos)
 
 			return changes, r.decoder.CurrentTxLSN(), true, nil
 		}
