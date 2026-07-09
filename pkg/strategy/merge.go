@@ -200,7 +200,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	// Write to staging table using parallel writes. Source TRUNCATE controls
 	// split the input into ordered segments and clear earlier staged changes.
-	sourceTruncated, err := writeRecordsWithTruncate(ctx, job.Destination, records, destination.WriteOptions{
+	sourceTruncated, err := destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
 		Parallelism:      parallelism,
@@ -223,7 +223,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
 	config.Debug("[MERGE] Executing merge operation")
 	if isCDC && sourceTruncated {
-		if err := truncateWriteTable(ctx, job.Destination, job.Config.DestTable); err != nil {
+		if err := destination.ApplyTruncate(ctx, job.Destination, job.Config.DestTable); err != nil {
 			return err
 		}
 	}
@@ -380,7 +380,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				return
 			}
 			if hasCDCColumns(ti.Schema) && writeResult.TruncatedTables[ti.Name] {
-				if err := truncateWriteTable(ctx, job.Destination, destTable); err != nil {
+				if err := destination.ApplyTruncate(ctx, job.Destination, destTable); err != nil {
 					mergeErrChan <- fmt.Errorf("failed to reset CDC target %s: %w", ti.Name, err)
 					return
 				}

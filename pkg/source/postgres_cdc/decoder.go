@@ -124,12 +124,12 @@ func parseTruncateRelationIDs(data []byte) ([]uint32, error) {
 	if len(data) < 5 {
 		return nil, fmt.Errorf("truncate message too short")
 	}
-	count := int(binary.BigEndian.Uint32(data[:4]))
+	count := binary.BigEndian.Uint32(data[:4])
 	data = data[5:] // relation count followed by cascade/restart-identity flags
-	if count < 0 || len(data) < count*4 {
+	if uint64(len(data)) < uint64(count)*4 {
 		return nil, fmt.Errorf("truncate message contains %d relations but only %d bytes", count, len(data))
 	}
-	relationIDs := make([]uint32, count)
+	relationIDs := make([]uint32, int(count))
 	for i := range relationIDs {
 		relationIDs[i] = binary.BigEndian.Uint32(data[i*4 : i*4+4])
 	}

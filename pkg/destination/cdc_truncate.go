@@ -1,10 +1,9 @@
-package strategy
+package destination
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -13,15 +12,14 @@ type truncateBoundary struct {
 	err      error
 }
 
-// writeRecordsWithTruncate splits a CDC input stream at TRUNCATE controls.
-// Each completed segment is durable before the write table is emptied, so a
-// parallel destination writer can never race writes from opposite sides of a
-// truncate boundary.
-func writeRecordsWithTruncate(
+// WriteWithTruncateBoundaries splits a CDC input stream into ordered write
+// segments. Each segment is durable before the target is emptied, so parallel
+// destination writers cannot race rows from opposite sides of a TRUNCATE.
+func WriteWithTruncateBoundaries(
 	ctx context.Context,
-	dest destination.Destination,
+	dest Destination,
 	records <-chan source.RecordBatchResult,
-	opts destination.WriteOptions,
+	opts WriteOptions,
 ) (bool, error) {
 	truncated := false
 	wroteSegment := false
@@ -51,7 +49,7 @@ func writeRecordsWithTruncate(
 				}
 				wroteSegment = true
 			}
-			if err := truncateWriteTable(ctx, dest, opts.Table); err != nil {
+			if err := ApplyTruncate(ctx, dest, opts.Table); err != nil {
 				return truncated, err
 			}
 			truncated = true
@@ -78,7 +76,7 @@ func writeRecordsWithTruncate(
 		if !end.truncate {
 			return truncated, nil
 		}
-		if err := truncateWriteTable(ctx, dest, opts.Table); err != nil {
+		if err := ApplyTruncate(ctx, dest, opts.Table); err != nil {
 			return truncated, err
 		}
 		truncated = true
@@ -131,8 +129,8 @@ func forwardUntilTruncate(
 	}
 }
 
-func truncateWriteTable(ctx context.Context, dest destination.Destination, table string) error {
-	truncater, ok := dest.(destination.TruncateCapable)
+func ApplyTruncate(ctx context.Context, dest Destination, table string) error {
+	truncater, ok := dest.(TruncateCapable)
 	if !ok {
 		return fmt.Errorf("destination scheme %q cannot apply source TRUNCATE events", dest.GetScheme())
 	}
