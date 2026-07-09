@@ -89,6 +89,24 @@ func TestCDCStateRequiresCompletedSnapshotBeforeResume(t *testing.T) {
 		t.Fatalf("resume position = %s, want latest checkpoint %s", position, want)
 	}
 
+	if err := manager.BeginRun(ctx); err != nil {
+		t.Fatal(err)
+	}
+	marker := manager.markerTables["public.orders"]
+	if position, err := dest.GetMaxCDCLSN(ctx, marker); err != nil || position != "" {
+		t.Fatalf("snapshot marker was not invalidated: position=%s err=%v", position, err)
+	}
+	if err := manager.Persist(ctx, source.CDCStateCommitToken{Position: "00000000/00000030"}); err != nil {
+		t.Fatal(err)
+	}
+	position, err = manager.ResumePosition(ctx, "public.orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "00000000/00000030"; position != want {
+		t.Fatalf("restored resume position = %s, want %s", position, want)
+	}
+
 	if manager.checkpoint != "_bruin_staging.cdc_checkpoint_0123456789abcdef" {
 		t.Fatalf("unexpected checkpoint table: %s", manager.checkpoint)
 	}

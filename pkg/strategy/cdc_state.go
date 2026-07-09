@@ -40,9 +40,10 @@ type CDCStateManager struct {
 	anchorTable    string
 	checkpoint     string
 
-	mu           sync.Mutex
-	destTables   map[string]string
-	markerTables map[string]string
+	mu            sync.Mutex
+	destTables    map[string]string
+	markerTables  map[string]string
+	knownComplete map[string]string
 }
 
 func NewCDCStateManager(dest destination.Destination, connectorID, anchorTable, stagingDataset string) (*CDCStateManager, error) {
@@ -62,6 +63,7 @@ func NewCDCStateManager(dest destination.Destination, connectorID, anchorTable, 
 		checkpoint:     managedCDCStateTableName(dest, anchorTable, "cdc_checkpoint_"+connectorID, stagingDataset),
 		destTables:     make(map[string]string),
 		markerTables:   make(map[string]string),
+		knownComplete:  make(map[string]string),
 	}, nil
 }
 
@@ -96,6 +98,30 @@ func (m *CDCStateManager) Reset(ctx context.Context) error {
 			return err
 		}
 	}
+	m.knownComplete = make(map[string]string)
+	return nil
+}
+
+// BeginRun invalidates prior snapshot completion markers before destination
+// writes start. Persist restores them only after the run is durable, so a
+// failed recovery snapshot cannot resume into a partially replaced target.
+func (m *CDCStateManager) BeginRun(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tables := make([]string, 0, len(m.markerTables))
+	for _, table := range m.markerTables {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	for _, table := range tables {
+		if err := m.dest.DropTable(ctx, table); err != nil {
+			return fmt.Errorf("failed to invalidate CDC snapshot state table %s: %w", table, err)
+		}
+		if err := m.prepareTable(ctx, table); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -117,6 +143,9 @@ func (m *CDCStateManager) ResumePosition(ctx context.Context, sourceTable string
 	if snapshotPosition == "" {
 		return "", nil
 	}
+	m.mu.Lock()
+	m.knownComplete[sourceTable] = snapshotPosition
+	m.mu.Unlock()
 	checkpoint, err := m.resumeProvider.GetMaxCDCLSN(ctx, m.checkpoint)
 	if err != nil {
 		return "", fmt.Errorf("failed to read CDC checkpoint: %w", err)
@@ -137,13 +166,27 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		}
 	}
 
-	tables := make([]string, 0, len(token.SnapshotPositions))
-	for table := range token.SnapshotPositions {
+	positions := make(map[string]string, len(token.SnapshotPositions)+len(m.knownComplete))
+	for table, position := range token.SnapshotPositions {
+		positions[table] = position
+	}
+	for table, position := range m.knownComplete {
+		if _, snapshotted := positions[table]; snapshotted {
+			continue
+		}
+		if token.Position != "" {
+			position = token.Position
+		}
+		positions[table] = position
+	}
+
+	tables := make([]string, 0, len(positions))
+	for table := range positions {
 		tables = append(tables, table)
 	}
 	sort.Strings(tables)
 	for _, sourceTable := range tables {
-		position := token.SnapshotPositions[sourceTable]
+		position := positions[sourceTable]
 		marker := m.markerTables[sourceTable]
 		if marker == "" {
 			return fmt.Errorf("CDC state table is not registered for source table %q", sourceTable)

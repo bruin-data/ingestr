@@ -181,6 +181,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			}
 		}
 	}
+	if cdcStateManager != nil && !p.config.FullRefresh {
+		if err := cdcStateManager.BeginRun(ctx); err != nil {
+			return err
+		}
+	}
 
 	// Get the source table with user configuration
 	// Resolution of PKs, strategy, and incremental key happens inside GetTable
@@ -1187,6 +1192,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 					config.Debug("[PIPELINE] No existing CDC data for %s, will perform snapshot", table.Name)
 				}
 			}
+		}
+	}
+	if cdcStateManager != nil && !p.config.FullRefresh {
+		if err := cdcStateManager.BeginRun(ctx); err != nil {
+			return err
 		}
 	}
 
