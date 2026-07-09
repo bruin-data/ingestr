@@ -22,7 +22,7 @@ ingestr ingest \
 ## Optional flags
 
 - `--dest-table TEXT`: Designates the destination table to save the data. If not specified, defaults to the value of `--source-table`.
-- `--incremental-key TEXT`: Identifies the column used for incremental reads or replacement. For `append` and `merge`, ingestr passes it to the source read for interval filtering when the source supports it; `append` does not compare it with the destination table. For `delete+insert`, this is the interval column used to decide which destination rows to replace, and should normally be a date, timestamp, or numeric batch column rather than a row primary key. Numeric `delete+insert` keys work when bounds are inferred from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values. Defaults to `None`.
+- `--incremental-key TEXT`: Identifies the column used for incremental reads or replacement. For `append` and `merge`, ingestr passes it to the source read for interval filtering when the source supports it; `append` does not compare it with the destination table. For `delete+insert`, this is the interval column used to decide which destination rows to replace, and should normally be a date, timestamp, partition column, or numeric batch column rather than a row primary key. Numeric `delete+insert` keys work when bounds are inferred from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values. Defaults to `None`.
 - `--incremental-strategy TEXT`: Defines the strategy for incremental updates. Options include `replace`, `truncate+insert`, `append`, `delete+insert`, `merge`, or `scd2`. The default strategy is `replace`. Not every source and destination supports every strategy; unsupported combinations fail at runtime.
 - `--interval-start`: Sets the inclusive start of the interval for the incremental key. For `delete+insert`, this becomes the lower delete bound. If omitted, ingestr can infer the lower bound from staged rows. Defaults to `None`.
 - `--interval-end`: Sets the inclusive end of the interval for the incremental key. For `delete+insert`, this becomes the upper delete bound. If omitted, ingestr can infer the upper bound from staged rows. Defaults to `None`.
@@ -141,7 +141,7 @@ ingestr ingest \
    --dest-table 'public.output_table'
 ```
 
-### Incrementally ingest a table from Postgres to BigQuery
+### Replace a staged interval from Postgres to BigQuery
 
 ```bash
 ingestr ingest \
@@ -149,8 +149,9 @@ ingestr ingest \
    --source-table 'public.users' \
    --dest-uri 'bigquery://my_project?credentials_path=/path/to/service/account.json&location=EU' \
    --dest-table 'raw.users' \
-   --incremental-key 'updated_at' \
-   --incremental-strategy 'delete+insert'
+   --incremental-key 'dt' \
+   --incremental-strategy 'delete+insert' \
+   --columns 'dt:date'
 ```
 
 ### Load an interval of data from Postgres to BigQuery using a date column

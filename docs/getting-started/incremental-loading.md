@@ -14,7 +14,7 @@ Before you use incremental loading, you should understand 3 important keys:
   - `truncate+insert`: empty the existing destination table in place, then insert the rows read from the source.
   - `append`: simply append the new rows to the destination table.
   - `merge`: merge the new rows with the existing rows in the destination table, insert the new ones and update the existing ones with the new values.
-  - `delete+insert`: delete the existing rows in the destination table that match the incremental key and then insert the new rows.
+  - `delete+insert`: delete existing destination rows inside the incremental-key interval and then insert the staged rows.
   - `scd2`: keep historical versions of rows using Slowly Changing Dimension Type 2 columns.
 
 Not every strategy is available for every source and destination. Some sources handle incrementality internally and may choose their own strategy or incremental key, and destinations only support the strategies they can execute safely.
@@ -77,7 +77,7 @@ First, assume you loaded the existing rows into the destination table. Here's ho
 When the source-side filter returns no rows, the destination table remains the same.
 
 #### Third Ingestion, new data
-Let's say John changed his name to Johnny, and John's `updated_at` was updated to `2021-01-02`, e.g. your source:
+Let's say John changed his name to Johnny, and that row's `updated_at` was updated to `2021-01-02`, e.g. your source:
 | id | name   | updated_at |
 |----|--------|------------|
 | 1  | Johnny | 2021-01-02 |
@@ -153,8 +153,8 @@ Let's assume you had the following source table:
 | 1  | John | 2021-01-01 |
 | 2  | Jane | 2021-01-01 |
 
-#### First Ingestion
-The first time you run the command, it will ingest all the rows into the destination table. Here's how your destination looks like now:
+#### Initial full ingestion
+First, assume you loaded the existing rows into the destination table. Here's how your destination looks:
 
 | id | name | updated_at |
 |----|------|------------|
@@ -162,7 +162,7 @@ The first time you run the command, it will ingest all the rows into the destina
 | 2  | Jane | 2021-01-01 |
 
 #### Second Ingestion, no new data
-When there's no new data in the source table, the destination table will remain the same.
+When the source-side filter returns no rows, the destination table remains the same.
 
 #### Third Ingestion, new data
 Let's say John changed his name to Johnny, e.g. your source:
@@ -171,7 +171,7 @@ Let's say John changed his name to Johnny, e.g. your source:
 | 1  | Johnny | 2021-01-02 |
 | 2  | Jane   | 2021-01-01 |
     
-When you run the command again, it will merge the new rows into the destination table. Here's how your destination looks like now:
+When you run merge with a source-side filter such as `--interval-start '2021-01-02'`, ingestr stages the rows returned by that source read and merges them into the destination table. Here's how your destination looks like now:
 | id | name   | updated_at |
 |----|--------|------------|
 | 1  | Johnny | 2021-01-02 |
@@ -188,26 +188,28 @@ The behavior is the same for any rows matching the source-side filter. ingestr d
 > For the cases where there's a primary key match, the `merge` strategy will **update** the existing rows in the destination table with the new values from the source table. Use with caution, as it can lead to data loss if not used properly, as well as data processing charges if your data warehouse charges for updates.
 
 ## Delete+Insert
-Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination.
+Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination.
 
-The `incremental_key` is required and should be a date, timestamp, or numeric column that defines a meaningful interval. A primary key such as `id` is usually the wrong choice for `delete+insert`; use `primary_key` separately if you also want ingestr to collapse duplicate staged rows before inserting. Numeric incremental keys are supported when ingestr infers the replacement bounds from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values, so explicit CLI bounds are intended for date and timestamp keys.
+The `incremental_key` is required and should be a date, timestamp, or numeric column that defines the slice to replace, such as a partition date or batch ID. A primary key such as `id` is usually the wrong choice for `delete+insert`; use `primary_key` separately if you also want ingestr to collapse duplicate staged rows before inserting. Numeric incremental keys are supported when ingestr infers the replacement bounds from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values, so explicit CLI bounds are intended for date and timestamp keys.
 
-The following example deletes existing rows in the `my_schema.some_data` table in BigQuery for the staged `updated_at` interval and then inserts rows read from the `my_schema.some_data` table in Postgres.
+The following example replaces the `dt = 2021-01-02` slice in the `my_schema.some_data` table in BigQuery with rows read from the same slice in Postgres.
 ```bash
 ingestr ingest \
     --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
     --source-table 'my_schema.some_data' \
     --dest-uri 'bigquery://<your-project-name>?credentials_path=/path/to/service/account.json' \
     --incremental-strategy delete+insert \
-    --incremental-key updated_at \
-    --interval-start '2021-01-02'
+    --incremental-key dt \
+    --interval-start '2021-01-02' \
+    --interval-end '2021-01-02' \
+    --columns 'dt:date'
 ```
 
 Here's how the delete+insert strategy works:
 - The new rows from the source table will be inserted into a staging table in the destination database.
 - ingestr determines the interval to replace:
-  - If you provide `--interval-start` and `--interval-end`, those values are used.
-  - Otherwise, ingestr uses the minimum and maximum `incremental_key` values found in the staging table.
+  - Each bound can be supplied explicitly with `--interval-start` or `--interval-end`.
+  - Any omitted bound is inferred from the minimum or maximum `incremental_key` value found in the staging table.
 - The existing rows in the destination table whose `incremental_key` is between the interval start and end are deleted.
 - The staged rows are inserted into the destination table.
 
@@ -245,44 +247,44 @@ A few important notes about the `delete+insert` strategy:
 > **Breaking change:** `delete+insert` is no longer supported for **CrateDB** and **Trino** destinations. ingestr previously ran them as two non-atomic statements that could leave the table in a partially-updated state on failure or under concurrent runs. ingestr now fails this strategy up front for these destinations instead of loading data unsafely. Use `merge` or `replace` instead. See the [CrateDB](/supported-sources/cratedb) and [Trino](/supported-sources/trino) destination notes for details.
 
 ### Example
-Let's assume you had the following source table:
-| id | name | updated_at |
+Let's assume you had the following source table slice:
+| id | name | dt         |
 |----|------|------------|
-| 1  | John | 2021-01-01 |
-| 2  | Jane | 2021-01-01 |
+| 1  | John | 2021-01-02 |
+| 2  | Jane | 2021-01-02 |
 
-#### First Ingestion
-The first time you run the command, it will ingest all the rows into the destination table. Here's how your destination looks like now:
-| id | name | updated_at |
+#### Initial full ingestion
+First, assume you loaded the existing rows into the destination table. Here's how your destination looks:
+| id | name | dt         |
 |----|------|------------|
-| 1  | John | 2021-01-01 |
-| 2  | Jane | 2021-01-01 |
+| 1  | John | 2021-01-02 |
+| 2  | Jane | 2021-01-02 |
 
-#### Second Ingestion, no new data
-When there are no staged rows and no interval can be detected, ingestr skips the delete and insert operation. If you provide an explicit interval, ingestr replaces that interval: destination rows inside the interval are deleted and the staged rows are inserted.
+#### Second Ingestion, no changed data
+When the same source rows are returned for the interval, ingestr deletes and reinserts the interval and the destination table ends up the same. If there are no staged rows and a bound cannot be inferred, ingestr skips the delete and insert operation.
 
 > [!CAUTION]
 > If the source read does not include every row that should exist for the interval, the missing rows will be deleted from the destination table for that interval. This is why `delete+insert` is usually used with date, timestamp, or batch intervals.
 
 #### Third Ingestion, new data
 Let's say John changed his name to Johnny, e.g. your source:
-| id | name   | updated_at |
+| id | name   | dt         |
 |----|--------|------------|
 | 1  | Johnny | 2021-01-02 |
-| 2  | Jane   | 2021-01-01 |
+| 2  | Jane   | 2021-01-02 |
 
-When you run the command again, it will delete the existing rows in the destination table that match the `incremental_key` and then insert the new rows from the source table. Here's how your destination looks like now:
-| id | name   | updated_at |
+When you run the command again for `dt = 2021-01-02`, it deletes the existing rows in that interval and then inserts the staged rows from the source table. Here's how your destination looks like now:
+| id | name   | dt         |
 |----|--------|------------|
 | 1  | Johnny | 2021-01-02 |
-| 2  | Jane   | 2021-01-01 |
+| 2  | Jane   | 2021-01-02 |
 
 **Notice the first row in the table:** it's the updated row that was ingested from the source table.
 
-The behavior is the same for any rows matching the source-side filter. ingestr replaces the interval covered by staged rows or explicit bounds; it does not inspect destination state to choose a high-watermark.
+The behavior is the same for any replacement interval. ingestr replaces the interval covered by staged rows or explicit bounds; it does not inspect destination state to choose a high-watermark.
 
 > [!TIP]
-> The `delete+insert` strategy is useful when you want to keep the destination table clean, as it will delete the existing rows in the destination table that match the `incremental_key` and then insert the new rows from the source table. `delete+insert` strategy also allows you to backfill the data, e.g. going back to a past date and ingesting the data again.
+> The `delete+insert` strategy is useful when you want to replace complete slices of the destination table. It deletes destination rows inside the `incremental_key` interval and then inserts the staged source rows, which also makes it useful for backfills.
 
 ## SCD2
 SCD2 keeps historical versions of rows instead of overwriting them in place. It requires `primary_key` and adds `_scd_valid_from`, `_scd_valid_to`, and `_scd_is_current` columns to track which version of each row is current.
@@ -298,7 +300,7 @@ Incremental loading allows you to ingest a bounded source slice into the destina
 - If you need to preserve the existing destination table object, and your destination supports it, use `truncate+insert`.
 - If you want to keep a version history of your data, use the `append` strategy, as it will keep appending the new rows to the destination table, which will give you a version history of your data.
 - If you want to keep the latest version of your data in the destination table and your table has a natural primary key, such as a user ID, use the `merge` strategy, as it will update the existing rows in the destination table with the new values from the source table.
-- If you want to keep the destination table clean and you want to backfill the data, use the `delete+insert` strategy, as it will delete the existing rows in the destination table that match the `incremental_key` and then insert the new rows from the source table.
+- If you want to replace complete slices of the destination table or backfill data, use the `delete+insert` strategy with a date, timestamp, or batch interval.
 - If you want a managed version history with current-row markers, use `scd2` on a destination that supports it.
 
 > [!TIP]
