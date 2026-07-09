@@ -153,7 +153,8 @@ func (s *MSSQLCDCSource) noteLag(ctx context.Context, processed, target string) 
 	}
 
 	var secs sql.NullFloat64
-	err := s.db.QueryRowContext(ctx,
+	err := s.db.QueryRowContext(
+		ctx,
 		`SELECT DATEDIFF(second,
 			sys.fn_cdc_map_lsn_to_time(CONVERT(binary(10), @p1, 2)),
 			sys.fn_cdc_map_lsn_to_time(CONVERT(binary(10), @p2, 2)))`,
