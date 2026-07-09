@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -151,11 +150,7 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 		batchSize = 10000
 	}
 
-	accum := newBatchAccumulator(batchSize)
-	pkNames := r.tableSchema.PrimaryKeys
-	accum.transform = func(_ string, batch arrow.RecordBatch) arrow.RecordBatch {
-		return forwardFillUnchanged(batch, pkNames)
-	}
+	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
 
 	err = streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
 	if err == nil && mode == ModeBatch {
@@ -229,15 +224,16 @@ func isHexLSN(value string) bool {
 // batchReplicator is the subset of *Replicator that streamLoop depends on,
 // allowing the accumulation loop to be tested without a live connection.
 type batchReplicator interface {
-	NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, pglogrepl.LSN, bool, error)
+	NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, bool, error)
 	CurrentLSN() pglogrepl.LSN
 	PendingLowWater() (pglogrepl.LSN, bool)
 }
 
-// streamLoop pulls batches from repl and feeds them through the accumulator,
-// flushing only when the replicator reports a genuine idle period. Treating
-// every batch-less call as idle would flush after every transaction and defeat
-// accumulation entirely (see hadActivity in Replicator.NextBatch).
+// streamLoop pulls decoded changes from repl and feeds them through the
+// accumulator, flushing only when the replicator reports a genuine idle
+// period. Treating every change-less call as idle would flush after every
+// transaction and defeat accumulation entirely (see hadActivity in
+// Replicator.NextChanges).
 //
 // When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
 // pipeline can confirm the replication slot only after the data is durable.
@@ -256,29 +252,33 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		select {
 		case <-ctx.Done():
 			config.Debug("[CDC] Context cancelled, stopping stream")
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return err
+			}
 			return ctx.Err()
 		default:
 		}
 
-		batch, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
+		changes, lsn, hadActivity, err := repl.NextChanges(ctx)
 		if err != nil {
-			accum.flushAll(results, token)
-			return fmt.Errorf("failed to get next batch: %w", err)
+			_ = accum.flushAll(results, token)
+			return fmt.Errorf("failed to get next changes: %w", err)
 		}
 
-		if batch != nil && batch.NumRows() > 0 {
-			accum.add("", batch, lsn)
-		}
+		accum.add("", changes, lsn)
 
-		accum.flushReady(results, token)
+		if err := accum.flushReady(results, token); err != nil {
+			return err
+		}
 
 		// For batch mode, check if we've caught up to the target LSN
 		if mode == ModeBatch && targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
-				accum.flushAll(results, token)
+				if err := accum.flushAll(results, token); err != nil {
+					return err
+				}
 				return nil
 			}
 		}
@@ -287,7 +287,9 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		// non-commit messages and keepalives count as activity, so we keep
 		// accumulating across transactions instead of flushing each one.
 		if !hadActivity {
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return err
+			}
 			// Confirm the caught-up position so the slot advances over WAL that
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if streaming {

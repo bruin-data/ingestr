@@ -214,7 +214,7 @@ func oidMatchesColumn(oid uint32, col schema.Column) (bool, bool) {
 // relation's name-resolved SchemaIndex rather than its ordinal position. Values
 // for relation columns with no schema counterpart are discarded; schema columns
 // absent from the relation stay nil (NULL).
-func parseTupleData(data []byte, rel *RelationInfo, tableSchema *schema.TableSchema) ([]interface{}, error) {
+func parseTupleData(data []byte, rel *RelationInfo, tableSchema *schema.TableSchema, typeMap *pgtype.Map) ([]interface{}, error) {
 	if len(data) < 2 {
 		return nil, fmt.Errorf("tuple data too short")
 	}
@@ -277,7 +277,15 @@ func parseTupleData(data []byte, rel *RelationInfo, tableSchema *schema.TableSch
 				return nil, fmt.Errorf("binary data truncated")
 			}
 			if schemaIdx >= 0 {
-				values[schemaIdx] = data[:length]
+				if int(i) < len(rel.Columns) {
+					v, err := convertBinaryValue(data[:length], tableSchema.Columns[schemaIdx], rel.Columns[i].DataType, typeMap)
+					if err != nil {
+						return nil, err
+					}
+					values[schemaIdx] = v
+				} else {
+					values[schemaIdx] = append([]byte(nil), data[:length]...)
+				}
 			}
 			data = data[length:]
 		default:

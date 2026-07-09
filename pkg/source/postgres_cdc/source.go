@@ -50,6 +50,13 @@ type CDCConfig struct {
 	// DiscoverInterval is how often streaming mode checks for new tables on the
 	// source. Zero disables mid-stream discovery.
 	DiscoverInterval time.Duration
+
+	// Binary opts into pgoutput's `binary 'true'` option (PostgreSQL 14+):
+	// the server sends column values in binary send format, skipping the
+	// text encode/parse round-trip for most types. Off by default because
+	// only the standard scalar/array types have a binary decoder; exotic
+	// column types fail fast with a descriptive error when enabled.
+	Binary bool
 }
 
 type PostgresCDCSource struct {
@@ -63,6 +70,9 @@ type PostgresCDCSource struct {
 	// supplied in the URI) and may reconcile its table set.
 	managedPublication bool
 	cdcConfig          CDCConfig
+	// serverVersion is the source's server_version_num, used to gate pgoutput
+	// options added in newer PostgreSQL releases.
+	serverVersion int
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
@@ -131,6 +141,18 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 		}
 	}
 
+	// Server version gates the pgoutput options added in PostgreSQL 14
+	// (protocol v2 streaming, binary tuple format).
+	var serverVersion int
+	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion); err != nil {
+		queryPool.Close()
+		return fmt.Errorf("failed to determine server version: %w", err)
+	}
+	if cdcConfig.Binary && serverVersion < 140000 {
+		queryPool.Close()
+		return fmt.Errorf("the binary=true option requires PostgreSQL 14 or newer (server reports %d)", serverVersion)
+	}
+
 	// Create replication connection
 	replConnStr := buildReplicationConnString(normalizedURI)
 	replConn, err := pgconn.Connect(ctx, replConnStr)
@@ -145,6 +167,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.normalizedURI = normalizedURI
 	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
+	s.serverVersion = serverVersion
 
 	return nil
 }
@@ -402,6 +425,17 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 		}
 	}
 
+	if raw := query.Get("binary"); raw != "" {
+		switch raw {
+		case "true", "1", "on":
+			cfg.Binary = true
+		case "false", "0", "off":
+			cfg.Binary = false
+		default:
+			return cfg, "", fmt.Errorf("invalid binary option: %s (must be 'true' or 'false')", raw)
+		}
+	}
+
 	cfg.DiscoverInterval = defaultDiscoverInterval
 	if raw := query.Get("discover_interval"); raw != "" {
 		switch raw {
@@ -422,6 +456,7 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 	query.Del("mode")
 	query.Del("dest_schema")
 	query.Del("discover_interval")
+	query.Del("binary")
 	parsed.RawQuery = query.Encode()
 
 	return cfg, parsed.String(), nil

@@ -668,6 +668,98 @@ func TestStreaming_MergePassesIncrementalKeyForOrdering(t *testing.T) {
 	assert.Equal(t, "_ingestr_order", dest.mergeCalls[0].IncrementalKey, "merge must order dedup by the incremental key")
 }
 
+// rendezvousDest blocks each WriteParallel until `expected` calls are in
+// flight simultaneously, proving the flush cycles overlap.
+type rendezvousDest struct {
+	*fakeDestination
+	limit    int
+	expected int
+
+	mu      sync.Mutex
+	arrived int
+	release chan struct{}
+}
+
+func (d *rendezvousDest) MaxConcurrentFlushes() int { return d.limit }
+
+func (d *rendezvousDest) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	d.mu.Lock()
+	d.arrived++
+	if d.arrived == d.expected {
+		close(d.release)
+	}
+	d.mu.Unlock()
+
+	select {
+	case <-d.release:
+	case <-time.After(5 * time.Second):
+		drainAndRelease(records)
+		return fmt.Errorf("flushes did not overlap: table %s waited alone", opts.Table)
+	}
+	return d.fakeDestination.WriteParallel(ctx, records, opts)
+}
+
+func TestStreaming_ParallelFlushMergesTablesConcurrently(t *testing.T) {
+	dest := &rendezvousDest{
+		fakeDestination: &fakeDestination{},
+		limit:           4,
+		expected:        2,
+		release:         make(chan struct{}),
+	}
+	committer := &fakeCommitter{}
+	loop := newTestLoop(dest, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1 << 30,
+		Strategy:      config.StrategyMerge,
+		Committer:     committer,
+	}, map[string]*streamTableState{
+		"public.users":  mergeTableState("ds.users"),
+		"public.orders": mergeTableState("ds.orders"),
+	})
+
+	loop.buffer(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil), TableName: "public.users", CommitToken: "t1"})
+	loop.buffer(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3}, nil), TableName: "public.orders", CommitToken: "t2"})
+
+	require.NoError(t, loop.flush(context.Background()))
+
+	dest.fakeDestination.mu.Lock()
+	assert.Len(t, dest.writeCalls, 2)
+	assert.Len(t, dest.mergeCalls, 2)
+	dest.fakeDestination.mu.Unlock()
+	assert.Equal(t, []any{"t2"}, committer.committed(), "token committed once after all tables flushed")
+	assert.Zero(t, loop.buffered)
+}
+
+// A failure in any table's cycle must abort the flush without committing the
+// source position, so all tables re-deliver from the last durable point.
+func TestStreaming_ParallelFlushFailureSkipsCommit(t *testing.T) {
+	base := &fakeDestination{mergeErr: errors.New("merge exploded")}
+	dest := &rendezvousDest{
+		fakeDestination: base,
+		limit:           4,
+		expected:        2,
+		release:         make(chan struct{}),
+	}
+	committer := &fakeCommitter{}
+	loop := newTestLoop(dest, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1 << 30,
+		Strategy:      config.StrategyMerge,
+		Committer:     committer,
+	}, map[string]*streamTableState{
+		"public.users":  mergeTableState("ds.users"),
+		"public.orders": mergeTableState("ds.orders"),
+	})
+
+	loop.buffer(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1}, nil), TableName: "public.users", CommitToken: "t1"})
+	loop.buffer(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{2}, nil), TableName: "public.orders", CommitToken: "t2"})
+
+	err := loop.flush(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "merge exploded")
+	assert.Empty(t, committer.committed(), "failed flush must not confirm the source position")
+}
+
 func TestStreaming_CleanupDropsStagingTables(t *testing.T) {
 	dest := &fakeDestination{}
 	loop := newTestLoop(dest, StreamingOptions{Strategy: config.StrategyMerge}, map[string]*streamTableState{

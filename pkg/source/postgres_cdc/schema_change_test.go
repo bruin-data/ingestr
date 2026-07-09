@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -53,6 +54,17 @@ func schemaChangeTestSchema(cols ...schema.Column) *schema.TableSchema {
 	}
 }
 
+func decodeCommitBatch(t *testing.T, d *Decoder, tableSchema *schema.TableSchema) arrow.RecordBatch {
+	t.Helper()
+	changes, err := d.Decode(pgoCommitMsg(100), 100)
+	require.NoError(t, err)
+	require.NotNil(t, changes)
+	batch, err := changesToBatch(changes, tableSchema)
+	require.NoError(t, err)
+	require.NotNil(t, batch)
+	return batch
+}
+
 // The replicated relation carries a column the connect-time schema does not
 // have (WAL replayed from before a DROP COLUMN that happened while the pipeline
 // was down). Values must be routed by column name, not ordinal position;
@@ -72,9 +84,7 @@ func TestDecoderMapsTupleColumnsByName(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Decode(pgoInsertMsgWithVals(1, "7", "ghost", "alice"), 20)
 	require.NoError(t, err)
-	batch, err := d.Decode(pgoCommitMsg(100), 100)
-	require.NoError(t, err)
-	require.NotNil(t, batch)
+	batch := decodeCommitBatch(t, d, tableSchema)
 	defer batch.Release()
 
 	assert.Equal(t, int32(7), batch.Column(0).(*array.Int32).Value(0))
@@ -101,9 +111,7 @@ func TestDecoderNullsSchemaColumnsMissingFromRelation(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Decode(pgoInsertMsgWithVals(1, "7", "active"), 20)
 	require.NoError(t, err)
-	batch, err := d.Decode(pgoCommitMsg(100), 100)
-	require.NoError(t, err)
-	require.NotNil(t, batch)
+	batch := decodeCommitBatch(t, d, tableSchema)
 	defer batch.Release()
 
 	assert.Equal(t, int32(7), batch.Column(0).(*array.Int32).Value(0))
@@ -150,9 +158,7 @@ func TestDecoderAcceptsAddedColumnPresentInSchema(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Decode(pgoInsertMsgWithVals(1, "7", "hello"), 30)
 	require.NoError(t, err)
-	batch, err := d.Decode(pgoCommitMsg(100), 100)
-	require.NoError(t, err)
-	require.NotNil(t, batch)
+	batch := decodeCommitBatch(t, d, tableSchema)
 	defer batch.Release()
 
 	assert.Equal(t, int32(7), batch.Column(0).(*array.Int32).Value(0))
@@ -211,9 +217,7 @@ func TestDecoderAcceptsTypeTransitionMatchingSchema(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Decode(pgoInsertMsgWithVals(1, "7", "9999999999"), 30)
 	require.NoError(t, err)
-	batch, err := d.Decode(pgoCommitMsg(100), 100)
-	require.NoError(t, err)
-	require.NotNil(t, batch)
+	batch := decodeCommitBatch(t, d, tableSchema)
 	defer batch.Release()
 
 	assert.Equal(t, int64(9999999999), batch.Column(1).(*array.Int64).Value(0))
@@ -237,10 +241,12 @@ func TestMultiTableDecoderMapsTupleColumnsByName(t *testing.T) {
 	batches, err := d.Decode(pgoCommitMsg(100), 100)
 	require.NoError(t, err)
 	require.Len(t, batches, 1)
-	defer batches[0].Batch.Release()
+	batch, err := changesToBatch(batches[0].Changes, tableSchema)
+	require.NoError(t, err)
+	defer batch.Release()
 
-	assert.Equal(t, int32(7), batches[0].Batch.Column(0).(*array.Int32).Value(0))
-	assert.Equal(t, "alice", batches[0].Batch.Column(1).(*array.String).Value(0))
+	assert.Equal(t, int32(7), batch.Column(0).(*array.Int32).Value(0))
+	assert.Equal(t, "alice", batch.Column(1).(*array.String).Value(0))
 }
 
 func TestMultiTableDecoderRejectsColumnAddedMidStream(t *testing.T) {

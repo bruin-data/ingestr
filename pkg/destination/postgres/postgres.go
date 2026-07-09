@@ -973,6 +973,12 @@ func (d *PostgresDestination) TruncateTable(ctx context.Context, table string) e
 }
 
 // SupportsReplaceStrategy returns true as PostgreSQL supports the replace strategy.
+// MaxConcurrentFlushes lets the streaming flush loop merge different tables
+// concurrently. Each write+merge cycle draws its own connections from the
+// pool, so cross-table cycles are independent; the cap keeps enough pool
+// headroom for the per-table write parallelism.
+func (d *PostgresDestination) MaxConcurrentFlushes() int { return 4 }
+
 func (d *PostgresDestination) SupportsReplaceStrategy() bool { return true }
 
 // SupportsAppendStrategy returns true as PostgreSQL supports the append strategy.

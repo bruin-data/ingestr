@@ -143,7 +143,13 @@ func TestDecoderCommitEmitsKeyChangeDelete(t *testing.T) {
 		},
 	}
 
-	batch, err := decoder.handleCommit()
+	changes, err := decoder.handleCommit()
+	require.NoError(t, err)
+	applyIntraBatchFill(changes, tableSchema)
+	changes = expandUpdates(changes, tableSchema)
+	changes = compactChanges(changes, tableSchema)
+
+	batch, err := changesToBatch(changes, tableSchema)
 	require.NoError(t, err)
 	require.NotNil(t, batch)
 	defer batch.Release()
