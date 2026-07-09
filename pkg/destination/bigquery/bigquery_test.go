@@ -1556,11 +1556,18 @@ func TestBuildMergeSQL(t *testing.T) {
 			map[string]bool{"id": true}, nil,
 		)
 
-		if !contains(sql, "ON t.`id` = s.`id`\n") {
-			t.Fatalf("sql missing bare equality on clause for required pk:\n%s", sql)
-		}
-		if contains(sql, "IS NULL") {
-			t.Fatalf("sql should not include null-safe join for required pk:\n%s", sql)
+		want := strings.Join([]string{
+			"MERGE `my-project`.`target_ds`.`target_tbl` AS t",
+			"USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id`) = 1) AS s",
+			"ON t.`id` = s.`id`",
+			"WHEN MATCHED THEN",
+			"  UPDATE SET t.`name` = s.`name`",
+			"WHEN NOT MATCHED THEN",
+			"  INSERT (`id`, `name`)",
+			"  VALUES (s.`id`, s.`name`)",
+		}, "\n")
+		if sql != want {
+			t.Fatalf("unexpected merge SQL:\ngot:\n%s\n\nwant:\n%s", sql, want)
 		}
 	})
 
@@ -1571,9 +1578,18 @@ func TestBuildMergeSQL(t *testing.T) {
 			map[string]bool{"tenant_id": true}, nil,
 		)
 
-		expected := "ON t.`tenant_id` = s.`tenant_id` AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))\n"
-		if !contains(sql, expected) {
-			t.Fatalf("sql missing mixed on clause:\n%s", sql)
+		want := strings.Join([]string{
+			"MERGE `my-project`.`target_ds`.`target_tbl` AS t",
+			"USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `tenant_id`, `user_id`) = 1) AS s",
+			"ON t.`tenant_id` = s.`tenant_id` AND (t.`user_id` = s.`user_id` OR (t.`user_id` IS NULL AND s.`user_id` IS NULL))",
+			"WHEN MATCHED THEN",
+			"  UPDATE SET t.`value` = s.`value`",
+			"WHEN NOT MATCHED THEN",
+			"  INSERT (`tenant_id`, `user_id`, `value`)",
+			"  VALUES (s.`tenant_id`, s.`user_id`, s.`value`)",
+		}, "\n")
+		if sql != want {
+			t.Fatalf("unexpected merge SQL:\ngot:\n%s\n\nwant:\n%s", sql, want)
 		}
 	})
 
@@ -1584,8 +1600,18 @@ func TestBuildMergeSQL(t *testing.T) {
 			map[string]bool{"id": true}, nil,
 		)
 
-		if !contains(sql, "ON t.`ID` = s.`ID`\n") {
-			t.Fatalf("sql missing bare equality on clause for cased required pk:\n%s", sql)
+		want := strings.Join([]string{
+			"MERGE `my-project`.`target_ds`.`target_tbl` AS t",
+			"USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `ID`) = 1) AS s",
+			"ON t.`ID` = s.`ID`",
+			"WHEN MATCHED THEN",
+			"  UPDATE SET t.`name` = s.`name`",
+			"WHEN NOT MATCHED THEN",
+			"  INSERT (`ID`, `name`)",
+			"  VALUES (s.`ID`, s.`name`)",
+		}, "\n")
+		if sql != want {
+			t.Fatalf("unexpected merge SQL:\ngot:\n%s\n\nwant:\n%s", sql, want)
 		}
 	})
 
