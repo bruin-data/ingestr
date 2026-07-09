@@ -188,9 +188,9 @@ The behavior is the same for any rows matching the source-side filter. ingestr d
 > For the cases where there's a primary key match, the `merge` strategy will **update** the existing rows in the destination table with the new values from the source table. Use with caution, as it can lead to data loss if not used properly, as well as data processing charges if your data warehouse charges for updates.
 
 ## Delete+Insert
-Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination.
+Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination. When you provide `--interval-start` or `--interval-end`, ingestr also passes those bounds to the source read, so sources that support interval filtering may return only that slice before the destination replacement happens.
 
-The `incremental_key` is required and should be a date, timestamp, or numeric column that defines the slice to replace, such as a partition date or batch ID. A primary key such as `id` is usually the wrong choice for `delete+insert`; use `primary_key` separately if you also want ingestr to collapse duplicate staged rows before inserting. Numeric incremental keys are supported when ingestr infers the replacement bounds from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values, so explicit CLI bounds are intended for date and timestamp keys.
+The `incremental_key` is required and should be a date, timestamp, or numeric column that defines the slice to replace, such as a partition date or batch ID. A primary key such as `id` is usually the wrong choice for `delete+insert`; provide `primary_key` separately only if you also want destinations that support it to collapse duplicate staged rows during the insert or overwrite step. Numeric incremental keys are supported when ingestr infers the replacement bounds from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values, so explicit CLI bounds are intended for date and timestamp keys.
 
 The following example stages only rows with `dt = 2021-01-02` and lets ingestr infer that replacement interval from the staged rows.
 ```bash
@@ -207,8 +207,10 @@ ingestr ingest \
 Here's how the delete+insert strategy works:
 - The new rows from the source table will be inserted into a staging table in the destination database.
 - ingestr determines the interval to replace:
+  - The start and end bounds are resolved independently.
   - Each bound can be supplied explicitly with `--interval-start` or `--interval-end`.
   - Any omitted bound is inferred from the minimum or maximum `incremental_key` value found in the staging table.
+  - If either bound is omitted and cannot be inferred from staged rows, ingestr skips the delete and insert.
 - The existing rows in the destination table whose `incremental_key` is between the interval start and end are deleted.
 - The staged rows are inserted into the destination table.
 
@@ -238,7 +240,8 @@ Some destinations send the bounds as query parameters instead of literal values.
 A few important notes about the `delete+insert` strategy: 
 - it does not guarantee the order of the rows in the destination table, as it will delete and insert the rows in the destination table.
 - it does not deduplicate by `incremental_key`, which means you may have multiple rows with the same `incremental_key` in the destination table.
-- if you provide `primary_key`, ingestr deduplicates the staging table before insert and keeps the latest row per primary key by `incremental_key`.
+- `primary_key` deduplication is destination-specific. Some destinations collapse duplicate staged rows during the insert or overwrite step and keep the latest row per primary key by `incremental_key`; others insert every staged row.
+- explicit `--interval-start` and `--interval-end` values are parsed as datetimes. For numeric `incremental_key` values, let ingestr infer the bounds from staged rows instead of passing explicit CLI bounds.
 - use `--debug` to print more strategy details and generated SQL where the destination supports it. Parameterized queries may still show placeholders such as `$1`, `?`, `@p1`, or `@p2` instead of the bound values.
 - atomicity is destination-specific. Many SQL destinations wrap the delete and insert in a transaction or atomic script; ClickHouse uses an `ALTER TABLE ... DELETE` mutation followed by an insert.
 
