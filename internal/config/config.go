@@ -69,6 +69,7 @@ type IngestConfig struct {
 	ExtractPartitionInterval        time.Duration
 	ExtractPartitionNumericInterval int64
 	ExtractPartitionAuto            bool
+	DisablePreStaging               bool // Skip extract-time load-file staging for schema-inferred sources
 
 	SQLLimit          int
 	SQLExcludeColumns []string

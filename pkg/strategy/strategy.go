@@ -26,6 +26,11 @@ type IngestionJob struct {
 	// If non-nil, GetRecords() transforms this stream instead of reading from Table.
 	BufferedRecords <-chan source.RecordBatchResult
 
+	// PreStaged holds destination-native load files written during extract.
+	// When set, BufferedRecords is an empty stream and the destination loads
+	// the pre-staged files directly.
+	PreStaged destination.PreStagedData
+
 	// SchemaComparison contains the result of comparing source and destination schemas.
 	// Used for runtime batch transformation in discard_row and discard_value modes.
 	SchemaComparison *schemaevolution.SchemaComparison
