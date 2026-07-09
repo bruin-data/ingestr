@@ -415,6 +415,11 @@ func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMet
 		if meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, d.partitionBy) {
 			return true
 		}
+		// Compare the partition type against what we would create; ingestr builds
+		// only Field, so the desired type is BigQuery's default.
+		if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(&bigquery.TimePartitioning{Field: d.partitionBy}) {
+			return true
+		}
 	} else if meta.TimePartitioning != nil {
 		return true
 	}
@@ -432,6 +437,15 @@ func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMet
 		}
 	}
 	return false
+}
+
+// effectivePartitionType returns the time-partitioning type, resolving the unset
+// value to BigQuery's default (DAY) so a stored type compares equal to an unset one.
+func effectivePartitionType(tp *bigquery.TimePartitioning) bigquery.TimePartitioningType {
+	if tp == nil || tp.Type == "" {
+		return bigquery.DayPartitioningType
+	}
+	return tp.Type
 }
 
 type mergePartitionPruning struct {

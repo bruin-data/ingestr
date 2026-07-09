@@ -1979,7 +1979,7 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			want:        true,
 		},
 
-		// --- partition: type/granularity is ignored (ingestr only emits DAY column partitioning) ---
+		// --- partition: type compared against what ingestr creates (DAY default) ---
 		{
 			name:        "same field, table has explicit DAY type",
 			partitionBy: "d1",
@@ -1990,7 +1990,13 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			name:        "same field, table has HOUR type",
 			partitionBy: "ts",
 			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.HourPartitioningType}},
-			want:        false,
+			want:        true,
+		},
+		{
+			name:        "same field, table has MONTH type",
+			partitionBy: "ts",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.MonthPartitioningType}},
+			want:        true,
 		},
 
 		// --- partition: range partitioning always mismatches ---

@@ -429,7 +429,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	case resolvedConfig.PartitionBy != "":
 		resolvedConfig.PartitionBy = namingConv.Normalize(resolvedConfig.PartitionBy)
 	case tableSchema.PartitionBy != "":
-		resolvedConfig.PartitionBy = tableSchema.PartitionBy
+		resolvedConfig.PartitionBy = namingConv.Normalize(tableSchema.PartitionBy)
 	}
 	if len(resolvedConfig.ClusterBy) > 0 {
 		clusterBy := make([]string, len(resolvedConfig.ClusterBy))
