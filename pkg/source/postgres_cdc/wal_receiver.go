@@ -47,6 +47,7 @@ type walReceiver struct {
 	streaming bool
 	startLSN  pglogrepl.LSN
 	pos       *streamPosition
+	lag       *lagState
 
 	received atomic.Uint64 // highest LSN received from the server
 
@@ -60,14 +61,14 @@ type walReceiver struct {
 	savedErr error
 }
 
-func startWALReceiver(ctx context.Context, conn *pgconn.PgConn, streaming bool, startLSN pglogrepl.LSN, pos *streamPosition) *walReceiver {
+func startWALReceiver(ctx context.Context, conn *pgconn.PgConn, streaming bool, startLSN pglogrepl.LSN, pos *streamPosition, lag *lagState) *walReceiver {
 	return startWALReceiverFuncs(
 		ctx,
 		conn.ReceiveMessage,
 		func(ctx context.Context, ssu pglogrepl.StandbyStatusUpdate) error {
 			return pglogrepl.SendStandbyStatusUpdate(ctx, conn, ssu)
 		},
-		streaming, startLSN, pos,
+		streaming, startLSN, pos, lag,
 	)
 }
 
@@ -78,6 +79,7 @@ func startWALReceiverFuncs(
 	streaming bool,
 	startLSN pglogrepl.LSN,
 	pos *streamPosition,
+	lag *lagState,
 ) *walReceiver {
 	rctx, cancel := context.WithCancel(ctx)
 	r := &walReceiver{
@@ -86,6 +88,7 @@ func startWALReceiverFuncs(
 		streaming:        streaming,
 		startLSN:         startLSN,
 		pos:              pos,
+		lag:              lag,
 		msgs:             make(chan walMessage, walReceiveBuffer),
 		errc:             make(chan error, 1),
 		done:             make(chan struct{}),
@@ -204,6 +207,7 @@ func (r *walReceiver) run(ctx context.Context) {
 				return
 			}
 			r.noteReceived(pkm.ServerWALEnd)
+			r.lag.observe(pkm.ServerWALEnd)
 			if pkm.ReplyRequested {
 				if err := r.sendStatus(ctx, false); err != nil {
 					r.fail(fmt.Errorf("failed to send standby status (replication connection lost): %w", err))
@@ -222,6 +226,9 @@ func (r *walReceiver) run(ctx context.Context) {
 				return
 			}
 			r.noteReceived(xld.WALStart)
+			// ServerWALEnd, not WALStart: during a long burst with no
+			// interleaved keepalive it is the only fresh view of the head.
+			r.lag.observe(xld.ServerWALEnd)
 			// Copy: pgconn's message buffer is only valid until the next
 			// receive, and this payload sits in the channel while the socket
 			// keeps draining.

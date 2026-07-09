@@ -159,6 +159,29 @@ type CDCBatchFinalizer interface {
 	FinalizeBatch(ctx context.Context) error
 }
 
+// LagReporter is an optional capability for streaming sources that can report
+// how far the durable destination position trails the source's latest change.
+// Implementations must answer from lock-free atomics: the metrics layer polls
+// this on every scrape, concurrently with the replication loop.
+type LagReporter interface {
+	// ReplicationLag returns a point-in-time snapshot. ok is false when lag is
+	// not yet meaningful (not streaming, or no server position observed).
+	ReplicationLag() (LagSnapshot, bool)
+}
+
+// LagSnapshot is a self-consistent lag reading. BytesBehind and SecondsBehind
+// are nil when the engine cannot express that dimension: Postgres exposes no
+// per-LSN timestamp, and MongoDB/SQL Server logs have no comparable byte offset.
+type LagSnapshot struct {
+	Source          string
+	BytesBehind     *uint64
+	SecondsBehind   *float64
+	ServerPosition  string
+	DurablePosition string
+	CaughtUp        bool
+	UpdatedAt       time.Time
+}
+
 // MultiTableSource represents a source that emits data from multiple tables.
 // This is used for CDC sources that capture changes across multiple tables.
 type MultiTableSource interface {

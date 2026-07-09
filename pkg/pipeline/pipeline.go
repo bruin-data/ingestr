@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/display"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/databuffer"
@@ -85,6 +86,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		ss, ok := src.(source.StreamingSource)
 		if !ok || !ss.SupportsStreaming() {
 			return fmt.Errorf("--stream is not supported by this source; streaming requires a CDC source (postgres+cdc, mssql+cdc) or a message broker source (kafka, amqp, mqtt, sqs, pubsub, kinesis)")
+		}
+		if lr, ok := src.(source.LagReporter); ok {
+			metrics.SetLagReporter(lr)
+			defer metrics.SetLagReporter(nil)
 		}
 	}
 

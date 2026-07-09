@@ -45,6 +45,8 @@ type MultiTableReplicator struct {
 func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater, streaming bool) (*MultiTableReplicator, error) {
 	decoder := NewMultiTableDecoder(tables)
 
+	src.lag.streaming.Store(streaming)
+
 	return &MultiTableReplicator{
 		source:        src,
 		tables:        tables,
@@ -122,7 +124,7 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start replication: %w", err)
 	}
 
-	r.recv = startWALReceiver(ctx, r.source.replConn, r.streaming, r.startLSN, r.source.pos)
+	r.recv = startWALReceiver(ctx, r.source.replConn, r.streaming, r.startLSN, r.source.pos, r.source.lag)
 	r.started = true
 	config.Debug("[CDC] Multi-table replication started successfully")
 	return nil

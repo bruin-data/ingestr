@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -28,6 +30,11 @@ const (
 	ModeStream CDCMode = "stream"
 
 	defaultPollInterval = 1 * time.Second
+
+	// mssqlLagRefreshInterval throttles the sys.fn_cdc_map_lsn_to_time
+	// round-trip taken while behind, so lag reporting cannot add latency to
+	// each poll cycle of a catch-up.
+	mssqlLagRefreshInterval = 5 * time.Second
 )
 
 var mssqlCDCColumns = []schema.Column{
@@ -47,6 +54,60 @@ type MSSQLCDCSource struct {
 	db        *sql.DB
 	uri       string
 	cdcConfig CDCConfig
+	lag       *mssqlLagState
+}
+
+// mssqlLagState holds the last observed capture watermark and how far behind the
+// processed position is in wall-clock terms. SQL Server LSNs are binary(10)
+// values whose difference is not a log distance, so lag is expressed in seconds
+// via sys.fn_cdc_map_lsn_to_time. The mutex is only ever held to copy small
+// fields, never across a query, so a metrics scrape cannot stall the poll loop.
+type mssqlLagState struct {
+	mu            sync.Mutex
+	processed     string
+	target        string
+	secondsBehind float64
+	hasSeconds    bool
+	updatedAt     time.Time
+	lastQueryAt   time.Time
+
+	streaming atomic.Bool
+}
+
+func newMSSQLLagState() *mssqlLagState {
+	return &mssqlLagState{}
+}
+
+// observePositions records the watermark without touching the seconds reading,
+// for cycles that skip the LSN-to-time query.
+func (l *mssqlLagState) observePositions(processed, target string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.processed = processed
+	l.target = target
+	l.updatedAt = time.Now()
+}
+
+func (l *mssqlLagState) observe(processed, target string, secondsBehind float64, hasSeconds bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.processed = processed
+	l.target = target
+	l.secondsBehind = secondsBehind
+	l.hasSeconds = hasSeconds
+	l.updatedAt = time.Now()
+}
+
+// shouldQuery reports whether enough time has passed to spend another
+// LSN-to-time round-trip, and claims the slot if so.
+func (l *mssqlLagState) shouldQuery(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Sub(l.lastQueryAt) < mssqlLagRefreshInterval {
+		return false
+	}
+	l.lastQueryAt = now
+	return true
 }
 
 type tableMetadata struct {
@@ -67,7 +128,85 @@ type CDCTable struct {
 }
 
 func NewMSSQLCDCSource() *MSSQLCDCSource {
-	return &MSSQLCDCSource{}
+	return &MSSQLCDCSource{lag: newMSSQLLagState()}
+}
+
+var _ source.LagReporter = (*MSSQLCDCSource)(nil)
+
+// ReplicationLag reports how far the processed CDC position trails the capture
+// watermark, in seconds.
+func (s *MSSQLCDCSource) ReplicationLag() (source.LagSnapshot, bool) {
+	if s.lag == nil || !s.lag.streaming.Load() {
+		return source.LagSnapshot{}, false
+	}
+
+	s.lag.mu.Lock()
+	processed, target := s.lag.processed, s.lag.target
+	secs, hasSecs, updatedAt := s.lag.secondsBehind, s.lag.hasSeconds, s.lag.updatedAt
+	s.lag.mu.Unlock()
+
+	if processed == "" || target == "" {
+		return source.LagSnapshot{}, false
+	}
+
+	snap := source.LagSnapshot{
+		Source:          "mssql_cdc",
+		ServerPosition:  target,
+		DurablePosition: processed,
+		CaughtUp:        compareLSNHex(processed, target) >= 0,
+		UpdatedAt:       updatedAt,
+	}
+	if hasSecs {
+		snap.SecondsBehind = &secs
+	}
+	return snap, true
+}
+
+// noteLag records the current watermark and asks the server how much change
+// time separates the processed LSN from it. Lag is measured against the capture
+// watermark rather than wall-clock now: on an idle database the two LSNs are
+// equal and lag is zero, whereas "now minus the time of the last change" would
+// climb forever with nothing actually behind.
+//
+// A mapping failure (an LSN the capture job has aged out, or one never
+// committed) is not an error: lag simply goes unreported for this cycle.
+func (s *MSSQLCDCSource) noteLag(ctx context.Context, processed, target string) {
+	if !s.lag.streaming.Load() || processed == "" || target == "" {
+		return
+	}
+
+	if compareLSNHex(processed, target) >= 0 {
+		s.lag.observe(processed, target, 0, true)
+		return
+	}
+
+	// Behind: mapping LSNs to times costs a round-trip to a server that is
+	// already busy shipping us the backlog, so throttle it. The watermark
+	// itself is free and stays current.
+	if !s.lag.shouldQuery(time.Now()) {
+		s.lag.observePositions(processed, target)
+		return
+	}
+
+	var secs sql.NullFloat64
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT DATEDIFF(second,
+			sys.fn_cdc_map_lsn_to_time(CONVERT(binary(10), @p1, 2)),
+			sys.fn_cdc_map_lsn_to_time(CONVERT(binary(10), @p2, 2)))`,
+		processed, target,
+	).Scan(&secs)
+	if err != nil {
+		config.Debug("[MSSQL CDC] Failed to map LSNs %s..%s to time: %v", processed, target, err)
+		s.lag.observe(processed, target, 0, false)
+		return
+	}
+
+	value := secs.Float64
+	if value < 0 {
+		value = 0
+	}
+	s.lag.observe(processed, target, value, secs.Valid)
 }
 
 func (s *MSSQLCDCSource) Schemes() []string {
@@ -743,7 +882,23 @@ func (s *MSSQLCDCSource) minLSN(ctx context.Context, meta tableMetadata) (string
 	return normalizeLSNHex(lsn.String), nil
 }
 
+// lowestLSN returns the least-advanced position across tables, ignoring tables
+// that have no position yet. Empty when no table has one.
+func lowestLSN(byTable map[string]string) string {
+	lowest := ""
+	for _, lsn := range byTable {
+		if lsn == "" {
+			continue
+		}
+		if lowest == "" || compareLSNHex(lsn, lowest) < 0 {
+			lowest = lsn
+		}
+	}
+	return lowest
+}
+
 func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.SourceTableInfo, metas map[string]tableMetadata, startByTable map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	s.lag.streaming.Store(opts.Streaming)
 	for {
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
@@ -762,6 +917,10 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			}
 		}
 
+		// The laggiest table defines the backlog: sample before processing,
+		// while the gap to the watermark is still open.
+		s.noteLag(ctx, lowestLSN(startByTable), targetLSN)
+
 		for _, table := range tables {
 			start := startByTable[table.Name]
 			if start == "" || compareLSNHex(start, targetLSN) >= 0 {
@@ -779,6 +938,8 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			return nil
 		}
 
+		s.noteLag(ctx, targetLSN, targetLSN)
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -788,12 +949,14 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 }
 
 func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, startLSN string, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
+	s.lag.streaming.Store(opts.Streaming)
 	current := startLSN
 	for {
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
 			return err
 		}
+		s.noteLag(ctx, current, targetLSN)
 		if targetLSN != "" && current != "" && compareLSNHex(current, targetLSN) < 0 {
 			if err := s.readChanges(ctx, meta, tableSchema, current, targetLSN, opts, results, resultTable); err != nil {
 				return err
@@ -804,6 +967,8 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 		if s.cdcConfig.Mode == ModeBatch {
 			return nil
 		}
+
+		s.noteLag(ctx, current, targetLSN)
 
 		select {
 		case <-ctx.Done():

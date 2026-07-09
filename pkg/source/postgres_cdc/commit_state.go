@@ -66,6 +66,34 @@ func (p *streamPosition) Committed() pglogrepl.LSN {
 	return pglogrepl.LSN(p.committed.Load())
 }
 
+// lagState tracks the server's WAL head so replication lag can be reported as
+// serverHead - pos.Committed(), which is what the slot's
+// pg_current_wal_lsn() - confirmed_flush_lsn shows. It lives on the source, not
+// the replicator: replicators are rebuilt on reconnect and on new-table
+// discovery, which would otherwise reset the head. Written by the replication
+// goroutine and read by the metrics scraper, so every field is atomic.
+type lagState struct {
+	serverHead atomic.Uint64
+	streaming  atomic.Bool
+}
+
+func newLagState() *lagState {
+	return &lagState{}
+}
+
+func (l *lagState) observe(serverWALEnd pglogrepl.LSN) {
+	storeMax(&l.serverHead, uint64(serverWALEnd))
+}
+
+func storeMax(dst *atomic.Uint64, v uint64) {
+	for {
+		cur := dst.Load()
+		if v <= cur || dst.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
 // lowWaterReporter exposes the in-flight position state needed to compute a
 // safe commit LSN. Both the single- and multi-table replicators implement it.
 type lowWaterReporter interface {
