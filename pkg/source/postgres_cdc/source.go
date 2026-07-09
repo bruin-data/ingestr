@@ -24,14 +24,6 @@ import (
 // server is configured lower (e.g. 10s) without flooding the connection.
 const keepaliveInterval = 5 * time.Second
 
-// CDCMode represents the CDC operation mode
-type CDCMode string
-
-const (
-	ModeBatch  CDCMode = "batch"  // Run once, exit when caught up
-	ModeStream CDCMode = "stream" // Continuous streaming mode
-)
-
 // defaultPublicationName is the publication ingestr creates and manages when the
 // URI does not specify one.
 const defaultPublicationName = "ingestr_publication"
@@ -43,7 +35,6 @@ const defaultDiscoverInterval = 30 * time.Second
 type CDCConfig struct {
 	Publication   string
 	SlotName      string
-	Mode          CDCMode
 	ResumeFromLSN string // If set, skip snapshot and resume streaming from this LSN
 	DestSchema    string // If set, prepend this schema to destination table names (e.g. "dataset" for BigQuery)
 
@@ -422,9 +413,7 @@ func (s *PostgresCDCSource) GetTable(ctx context.Context, req source.TableReques
 }
 
 func parseURIConfig(uri string) (CDCConfig, string, error) {
-	cfg := CDCConfig{
-		Mode: ModeBatch,
-	}
+	var cfg CDCConfig
 
 	// Remove scheme suffix (+cdc)
 	normalizedURI := uri
@@ -444,17 +433,6 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 	cfg.Publication = query.Get("publication")
 	cfg.SlotName = query.Get("slot")
 	cfg.DestSchema = query.Get("dest_schema")
-
-	if mode := query.Get("mode"); mode != "" {
-		switch mode {
-		case "batch":
-			cfg.Mode = ModeBatch
-		case "stream":
-			cfg.Mode = ModeStream
-		default:
-			return cfg, "", fmt.Errorf("invalid mode: %s (must be 'batch' or 'stream')", mode)
-		}
-	}
 
 	if raw := query.Get("binary"); raw != "" {
 		switch raw {

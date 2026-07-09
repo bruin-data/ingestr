@@ -116,7 +116,7 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 	results := make(chan source.RecordBatchResult, len(steps)+1)
 	accum := testAccumulator(10000)
 
-	err := streamLoop(context.Background(), repl, ModeBatch, targetLSN, 10000, accum, results, false)
+	err := streamLoop(context.Background(), repl, targetLSN, 10000, accum, results, false)
 	require.NoError(t, err)
 	close(results)
 
@@ -158,8 +158,8 @@ func TestStreamLoopEmitsIdleCommitToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		// ModeStream with targetLSN 0 streams forever until ctx is cancelled.
-		done <- streamLoop(ctx, repl, ModeStream, 0, 10000, accum, results, true)
+		// Streaming with targetLSN 0 streams forever until ctx is cancelled.
+		done <- streamLoop(ctx, repl, 0, 10000, accum, results, true)
 	}()
 
 	var idleToken pglogrepl.LSN
@@ -235,7 +235,7 @@ func TestStreamModeIdleSlotAdvances_Repro(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		_ = streamLoop(ctx, repl, ModeStream, 0, 10000, accum, results, true)
+		_ = streamLoop(ctx, repl, 0, 10000, accum, results, true)
 		close(results)
 	}()
 

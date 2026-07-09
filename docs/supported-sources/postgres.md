@@ -25,13 +25,15 @@ The same URI structure can be used both for sources and destinations. You can re
 The `postgres+cdc://` scheme reads changes through PostgreSQL logical replication instead of querying tables: an initial snapshot of each table followed by every insert, update, and delete, applied to the destination with the `merge` strategy. It requires `wal_level=logical` on the source and a user with the `REPLICATION` privilege.
 
 ```plaintext
-postgres+cdc://<username>:<password>@<host>:<port>/<database-name>?publication=<name>&slot=<name>&mode=<batch|stream>&discover_interval=<duration>
+postgres+cdc://<username>:<password>@<host>:<port>/<database-name>?publication=<name>&slot=<name>&discover_interval=<duration>
 ```
+
+By default a CDC run catches up with the current WAL position and exits. Pass the `--stream` CLI flag to ingest continuously instead.
 
 CDC-specific URI parameters (all optional):
 - `publication`: the logical-replication publication to read from. When omitted, ingestr creates and maintains a publication named `ingestr_publication` covering every logged table with a usable replica identity, reconciling it on every run.
 - `slot`: the replication slot name. When omitted, ingestr derives a stable name from the publication.
-- `mode`: `batch` (default) runs until it catches up with the current WAL position and exits; `stream` runs continuously. The `--stream` CLI flag forces continuous mode regardless of this parameter.
+- `mode`: **deprecated and ignored.** Continuous ingestion is controlled by `--stream`. `mode=batch` is accepted as a no-op; `mode=stream` is rejected unless `--stream` is also passed.
 - `dest_schema`: a schema/dataset prefix for destination table names.
 - `discover_interval`: how often a running stream re-checks the source for new tables (default `30s`, e.g. `1m`, `10s`). Set to `0` or `off` to disable mid-stream discovery.
 
@@ -41,8 +43,8 @@ Without `--source-table`, CDC runs in multi-table mode and replicates every tabl
 
 Tables created on the source after CDC has been set up are picked up automatically:
 
-- **Batch mode**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
-- **Stream mode**: the running stream re-checks the source every `discover_interval`. When a new table appears, ingestr adds it to the managed publication, backfills its existing rows, creates the destination table on the fly, and continues streaming — the other tables are not interrupted, and no data is lost while the stream rebuilds (the replication slot retains WAL during the pause).
+- **Without `--stream`**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
+- **With `--stream`**: the running stream re-checks the source every `discover_interval`. When a new table appears, ingestr adds it to the managed publication, backfills its existing rows, creates the destination table on the fly, and continues streaming — the other tables are not interrupted, and no data is lost while the stream rebuilds (the replication slot retains WAL during the pause).
 
 With a user-managed publication (`publication=` supplied), ingestr never alters the publication: a new table is picked up after you run `ALTER PUBLICATION ... ADD TABLE` yourself (or immediately, if the publication was created `FOR ALL TABLES`).
 

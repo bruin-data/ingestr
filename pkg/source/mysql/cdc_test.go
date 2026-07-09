@@ -22,7 +22,6 @@ func TestParseMySQLCDCURI(t *testing.T) {
 	cfg, normalized, connInfo, err := parseMySQLCDCURI("mysql+cdc://user:pass@example:3307/app?charset=utf8mb4&mode=batch&dest_schema=raw&server_id=123&flavor=mysql")
 	require.NoError(t, err)
 
-	assert.Equal(t, MySQLCDCModeBatch, cfg.Mode)
 	assert.Equal(t, "raw", cfg.DestSchema)
 	assert.Equal(t, uint32(123), cfg.ServerID)
 	assert.Equal(t, gomysql.MySQLFlavor, cfg.Flavor)
@@ -43,10 +42,9 @@ func TestParseMySQLCDCURI(t *testing.T) {
 }
 
 func TestParseMySQLCDCURICarriesReplicationConnectionOptions(t *testing.T) {
-	cfg, normalized, connInfo, err := parseMySQLCDCURI("mysql+cdc://user:pass@example:3307/app?charset=utf8mb4,utf8&mode=batch&tls=skip-verify&readTimeout=7s")
+	_, normalized, connInfo, err := parseMySQLCDCURI("mysql+cdc://user:pass@example:3307/app?charset=utf8mb4,utf8&mode=batch&tls=skip-verify&readTimeout=7s")
 	require.NoError(t, err)
 
-	assert.Equal(t, MySQLCDCModeBatch, cfg.Mode)
 	assert.Equal(t, "example", connInfo.Host)
 	assert.Equal(t, uint16(3307), connInfo.Port)
 	assert.Equal(t, "user", connInfo.User)
@@ -61,18 +59,6 @@ func TestParseMySQLCDCURICarriesReplicationConnectionOptions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "skip-verify", u.Query().Get("tls"))
 	assert.Equal(t, "7s", u.Query().Get("readTimeout"))
-}
-
-func TestParseMySQLCDCURIRejectsInvalidMode(t *testing.T) {
-	_, _, _, err := parseMySQLCDCURI("mysql+cdc://user:pass@example/app?mode=once")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid mode")
-}
-
-func TestParseMySQLCDCURIRejectsStreamMode(t *testing.T) {
-	_, _, _, err := parseMySQLCDCURI("mysql+cdc://user:pass@example/app?mode=stream")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stream mode is not supported")
 }
 
 func TestParseMariaDBCDCURIUsesMariaDBFlavor(t *testing.T) {

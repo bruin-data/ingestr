@@ -87,15 +87,10 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 }
 
 func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
-	// --stream forces continuous mode regardless of the URI ?mode= param.
-	mode := r.cdcConfig.Mode
-	if opts.Streaming {
-		mode = ModeStream
-	}
-
-	// For batch mode, get the current WAL LSN as our target before starting
+	// Without --stream, get the current WAL LSN as our target before starting so
+	// the loop exits once it has caught up.
 	var targetLSN pglogrepl.LSN
-	if mode == ModeBatch {
+	if !opts.Streaming {
 		var lsnStr string
 		err := r.source.queryPool.QueryRow(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&lsnStr)
 		if err != nil {
@@ -127,8 +122,8 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
 
-	err = streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
-	if err == nil && mode == ModeBatch {
+	err = streamLoop(ctx, repl, targetLSN, batchSize, accum, results, opts.Streaming)
+	if err == nil && !opts.Streaming {
 		// Record the caught-up position so FinalizeBatch can confirm it to the
 		// slot once the destination write is durable.
 		caughtUp := repl.CurrentLSN()
@@ -180,7 +175,7 @@ type batchReplicator interface {
 //
 // When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
 // pipeline can confirm the replication slot only after the data is durable.
-func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetLSN pglogrepl.LSN, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
+func streamLoop(ctx context.Context, repl batchReplicator, targetLSN pglogrepl.LSN, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
 	var token tokenFunc
 	if streaming {
 		token = func() any { return safeCommitLSN(repl, accum) }
@@ -214,8 +209,8 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 			return err
 		}
 
-		// For batch mode, check if we've caught up to the target LSN
-		if mode == ModeBatch && targetLSN > 0 {
+		// Without --stream, check if we've caught up to the target LSN
+		if !streaming && targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)

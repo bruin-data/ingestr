@@ -331,9 +331,6 @@ func TestParseMongoDBCDCURI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.Mode != MongoDBCDCModeStream {
-			t.Fatalf("mode = %s, want stream", cfg.Mode)
-		}
 		if cfg.DestSchema != "raw" {
 			t.Fatalf("dest schema = %q, want raw", cfg.DestSchema)
 		}
@@ -364,12 +361,6 @@ func TestParseMongoDBCDCURI(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid mode", func(t *testing.T) {
-		_, _, err := parseMongoDBCDCURI("mongodb+cdc://localhost:27017/app?mode=once")
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
 }
 
 func TestParseMongoCDCNamespace(t *testing.T) {

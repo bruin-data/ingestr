@@ -118,10 +118,9 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			}
 		}
 
-		// For batch mode, get the current WAL LSN as our target.
-		// --stream forces continuous mode regardless of the URI ?mode= param.
+		// Without --stream, get the current WAL LSN as our target.
 		var targetLSN pglogrepl.LSN
-		if r.cdcConfig.Mode == ModeBatch && !opts.Streaming {
+		if !opts.Streaming {
 			var err error
 			targetLSN, err = r.getCurrentWALLSN(ctx)
 			if err != nil {

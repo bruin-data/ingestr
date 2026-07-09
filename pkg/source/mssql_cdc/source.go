@@ -23,12 +23,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source/mssql"
 )
 
-type CDCMode string
-
 const (
-	ModeBatch  CDCMode = "batch"
-	ModeStream CDCMode = "stream"
-
 	defaultPollInterval = 1 * time.Second
 
 	// mssqlLagRefreshInterval throttles the sys.fn_cdc_map_lsn_to_time
@@ -44,7 +39,6 @@ var mssqlCDCColumns = []schema.Column{
 }
 
 type CDCConfig struct {
-	Mode            CDCMode
 	DestSchema      string
 	CaptureInstance string
 	PollInterval    time.Duration
@@ -266,6 +260,9 @@ func (s *MSSQLCDCSource) HandlesIncrementality() bool {
 }
 
 // SupportsStreaming reports that SQL Server CDC can run in continuous mode.
+// It reads change tables by polling and has no consumer-side acknowledgement,
+// so there is no StreamCommitter: at-least-once is provided by resuming from
+// the destination's max _cdc_lsn.
 func (s *MSSQLCDCSource) SupportsStreaming() bool {
 	return true
 }
@@ -274,16 +271,6 @@ func (s *MSSQLCDCSource) SupportsStreaming() bool {
 // applied by primary key.
 func (s *MSSQLCDCSource) DefaultStreamingStrategy() config.IncrementalStrategy {
 	return config.StrategyMerge
-}
-
-// applyStreamingMode forces continuous polling when --stream is set, regardless
-// of the URI ?mode= parameter. SQL Server CDC reads change tables via polling
-// and has no consumer-side acknowledgement, so there is no StreamCommitter:
-// at-least-once is provided by resuming from the destination's max _cdc_lsn.
-func (s *MSSQLCDCSource) applyStreamingMode(streaming bool) {
-	if streaming {
-		s.cdcConfig.Mode = ModeStream
-	}
 }
 
 func (s *MSSQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -362,7 +349,6 @@ func (s *MSSQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 }
 
 func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	s.applyStreamingMode(opts.Streaming)
 	allTables, err := s.GetTables(ctx)
 	if err != nil {
 		return nil, err
@@ -428,7 +414,6 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 
 func parseURIConfig(rawURI string) (CDCConfig, string, error) {
 	cfg := CDCConfig{
-		Mode:         ModeBatch,
 		PollInterval: defaultPollInterval,
 	}
 
@@ -453,17 +438,6 @@ func parseURIConfig(rawURI string) (CDCConfig, string, error) {
 	query := parsed.Query()
 	cfg.CaptureInstance = query.Get("capture_instance")
 	cfg.DestSchema = query.Get("dest_schema")
-
-	if mode := query.Get("mode"); mode != "" {
-		switch strings.ToLower(mode) {
-		case string(ModeBatch):
-			cfg.Mode = ModeBatch
-		case string(ModeStream):
-			cfg.Mode = ModeStream
-		default:
-			return cfg, "", fmt.Errorf("invalid mode: %s (must be 'batch' or 'stream')", mode)
-		}
-	}
 
 	if poll := query.Get("poll_interval"); poll != "" {
 		d, err := time.ParseDuration(poll)
@@ -733,7 +707,6 @@ func (t *CDCTable) GetSchema(ctx context.Context) (*schema.TableSchema, error) {
 }
 
 func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	t.source.applyStreamingMode(opts.Streaming)
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -905,7 +878,7 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			return err
 		}
 		if targetLSN == "" || isZeroLSN(targetLSN) {
-			if s.cdcConfig.Mode == ModeBatch {
+			if !opts.Streaming {
 				return nil
 			}
 
@@ -934,7 +907,7 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			startByTable[table.Name] = targetLSN
 		}
 
-		if s.cdcConfig.Mode == ModeBatch {
+		if !opts.Streaming {
 			return nil
 		}
 
@@ -964,7 +937,7 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 			current = targetLSN
 		}
 
-		if s.cdcConfig.Mode == ModeBatch {
+		if !opts.Streaming {
 			return nil
 		}
 

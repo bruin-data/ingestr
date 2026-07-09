@@ -29,13 +29,7 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
-type MySQLCDCMode string
-
 const (
-	MySQLCDCModeBatch MySQLCDCMode = "batch"
-	// mysqlCDCModeStream is defined for completeness but is not yet supported.
-	mysqlCDCModeStream MySQLCDCMode = "stream"
-
 	defaultMySQLCDCHeartbeat       = 1 * time.Second
 	defaultMySQLCDCStreamBatchSize = 10000
 )
@@ -47,7 +41,6 @@ var mysqlCDCColumns = []schema.Column{
 }
 
 type MySQLCDCConfig struct {
-	Mode       MySQLCDCMode
 	DestSchema string
 	ServerID   uint32
 	Flavor     string
@@ -345,7 +338,6 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 
 func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, error) {
 	cfg := MySQLCDCConfig{
-		Mode:     MySQLCDCModeBatch,
 		ServerID: randomMySQLServerID(),
 		Flavor:   gomysql.MySQLFlavor,
 	}
@@ -376,16 +368,6 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("invalid flavor: %w", err)
 		}
 		cfg.Flavor = flavor
-	}
-	if mode := strings.ToLower(strings.TrimSpace(query.Get("mode"))); mode != "" {
-		switch mode {
-		case string(MySQLCDCModeBatch):
-			cfg.Mode = MySQLCDCModeBatch
-		case string(mysqlCDCModeStream):
-			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("MySQL CDC stream mode is not supported; use mode=batch")
-		default:
-			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("invalid mode: %s (must be 'batch')", mode)
-		}
 	}
 	if rawServerID := strings.TrimSpace(query.Get("server_id")); rawServerID != "" {
 		serverID, err := strconv.ParseUint(rawServerID, 10, 32)
@@ -760,7 +742,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	if start.Name == "" {
 		return nil
 	}
-	if s.cdcConfig.Mode == MySQLCDCModeBatch && start.Compare(target) >= 0 {
+	if start.Compare(target) >= 0 {
 		return nil
 	}
 
@@ -791,7 +773,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		default:
 		}
 
-		if s.cdcConfig.Mode == MySQLCDCModeBatch && current.Compare(target) >= 0 {
+		if current.Compare(target) >= 0 {
 			return flushMySQLCDCChangeBuffers(buffers, results)
 		}
 
@@ -816,7 +798,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 
 		eventPos := mysqlEventPosition(event, current, syncer)
 		current = eventPos
-		if s.cdcConfig.Mode == MySQLCDCModeBatch && eventPos.Compare(target) > 0 {
+		if eventPos.Compare(target) > 0 {
 			return flushMySQLCDCChangeBuffers(buffers, results)
 		}
 
