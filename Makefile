@@ -11,6 +11,9 @@ LICENSE_CHECK_INCLUDE_TESTS ?= false
 LICENSE_AUDIT_TARGETS ?= $(LICENSE_CHECK_TARGETS)
 LICENSE_AUDIT_INCLUDE_TESTS ?= $(LICENSE_CHECK_INCLUDE_TESTS)
 LICENSE_AUDIT_NEW_STATUS ?= needs-review
+LINT_MERGE_BASE ?= origin/main
+LINT_BUILD_TAGS ?= no_duckdb_arrow
+LINT_CHANGED_FLAGS := --new-from-merge-base=$(LINT_MERGE_BASE) --build-tags="$(LINT_BUILD_TAGS)"
 export INGESTR_DISABLE_TELEMETRY := true
 export DISABLE_TELEMETRY := true
 TELEMETRY_ENV := INGESTR_DISABLE_TELEMETRY=true DISABLE_TELEMETRY=true
@@ -115,16 +118,14 @@ format: generate
 	@echo "$(OK_COLOR)==> Formatting code$(NO_COLOR)"
 	@gci write cmd pkg internal tests main.go
 	@gofumpt -w cmd pkg internal tests main.go
-	@echo "$(OK_COLOR)==> Running linters$(NO_COLOR)"
-	@go vet ./...
-	@golangci-lint run --timeout 10m ./...
+	@$(MAKE) lint
 	wait
 
-# Just run linters without formatting
+# Just run linters on changed lines without formatting
 lint: generate
-	@echo "$(OK_COLOR)==> Running linters$(NO_COLOR)"
+	@echo "$(OK_COLOR)==> Running linters on changed lines since $(LINT_MERGE_BASE)$(NO_COLOR)"
 	@go vet ./...
-	@golangci-lint run --timeout 10m ./...
+	@golangci-lint run --timeout 10m $(LINT_CHANGED_FLAGS) ./...
 
 # CI: Check formatting without modifying files (fails if changes needed)
 format-ci: generate
