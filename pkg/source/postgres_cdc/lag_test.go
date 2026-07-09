@@ -8,7 +8,7 @@ import (
 
 func TestReplicationLagNotStreaming(t *testing.T) {
 	s := NewPostgresCDCSource()
-	s.lag.observe(pglogrepl.LSN(5000), pglogrepl.LSN(5000))
+	s.lag.observe(pglogrepl.LSN(5000))
 
 	// Batch runs never call CommitStream, so pos stays 0 and reporting
 	// serverHead-0 would claim the whole WAL as lag.
@@ -29,7 +29,7 @@ func TestReplicationLagNoServerPositionYet(t *testing.T) {
 func TestReplicationLagBytesBehind(t *testing.T) {
 	s := NewPostgresCDCSource()
 	s.lag.streaming.Store(true)
-	s.lag.observe(pglogrepl.LSN(9000), pglogrepl.LSN(9000))
+	s.lag.observe(pglogrepl.LSN(9000))
 	s.pos.Commit(pglogrepl.LSN(8000))
 
 	snap, ok := s.ReplicationLag()
@@ -53,7 +53,7 @@ func TestReplicationLagBytesBehind(t *testing.T) {
 func TestReplicationLagCaughtUp(t *testing.T) {
 	s := NewPostgresCDCSource()
 	s.lag.streaming.Store(true)
-	s.lag.observe(pglogrepl.LSN(9000), pglogrepl.LSN(9000))
+	s.lag.observe(pglogrepl.LSN(9000))
 	s.pos.Commit(pglogrepl.LSN(9000))
 
 	snap, ok := s.ReplicationLag()
@@ -70,7 +70,7 @@ func TestReplicationLagCaughtUp(t *testing.T) {
 func TestReplicationLagCommittedAheadOfHeadSaturates(t *testing.T) {
 	s := NewPostgresCDCSource()
 	s.lag.streaming.Store(true)
-	s.lag.observe(pglogrepl.LSN(100), pglogrepl.LSN(100))
+	s.lag.observe(pglogrepl.LSN(100))
 	s.pos.Commit(pglogrepl.LSN(500))
 
 	snap, ok := s.ReplicationLag()
@@ -89,13 +89,10 @@ func TestReplicationLagCommittedAheadOfHeadSaturates(t *testing.T) {
 // must not follow it backwards.
 func TestLagStateObserveIsMonotonic(t *testing.T) {
 	l := newLagState()
-	l.observe(pglogrepl.LSN(9000), pglogrepl.LSN(8000))
-	l.observe(pglogrepl.LSN(500), pglogrepl.LSN(400))
+	l.observe(pglogrepl.LSN(9000))
+	l.observe(pglogrepl.LSN(500))
 
 	if got := l.serverHead.Load(); got != 9000 {
 		t.Fatalf("expected stale server head to be ignored, got %d", got)
-	}
-	if got := l.received.Load(); got != 8000 {
-		t.Fatalf("expected stale received position to be ignored, got %d", got)
 	}
 }

@@ -30,6 +30,11 @@ const (
 	ModeStream CDCMode = "stream"
 
 	defaultPollInterval = 1 * time.Second
+
+	// mssqlLagRefreshInterval throttles the sys.fn_cdc_map_lsn_to_time
+	// round-trip taken while behind, so lag reporting cannot add latency to
+	// each poll cycle of a catch-up.
+	mssqlLagRefreshInterval = 5 * time.Second
 )
 
 var mssqlCDCColumns = []schema.Column{
@@ -64,12 +69,23 @@ type mssqlLagState struct {
 	secondsBehind float64
 	hasSeconds    bool
 	updatedAt     time.Time
+	lastQueryAt   time.Time
 
 	streaming atomic.Bool
 }
 
 func newMSSQLLagState() *mssqlLagState {
 	return &mssqlLagState{}
+}
+
+// observePositions records the watermark without touching the seconds reading,
+// for cycles that skip the LSN-to-time query.
+func (l *mssqlLagState) observePositions(processed, target string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.processed = processed
+	l.target = target
+	l.updatedAt = time.Now()
 }
 
 func (l *mssqlLagState) observe(processed, target string, secondsBehind float64, hasSeconds bool) {
@@ -80,6 +96,18 @@ func (l *mssqlLagState) observe(processed, target string, secondsBehind float64,
 	l.secondsBehind = secondsBehind
 	l.hasSeconds = hasSeconds
 	l.updatedAt = time.Now()
+}
+
+// shouldQuery reports whether enough time has passed to spend another
+// LSN-to-time round-trip, and claims the slot if so.
+func (l *mssqlLagState) shouldQuery(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Sub(l.lastQueryAt) < mssqlLagRefreshInterval {
+		return false
+	}
+	l.lastQueryAt = now
+	return true
 }
 
 type tableMetadata struct {
@@ -149,6 +177,14 @@ func (s *MSSQLCDCSource) noteLag(ctx context.Context, processed, target string) 
 
 	if compareLSNHex(processed, target) >= 0 {
 		s.lag.observe(processed, target, 0, true)
+		return
+	}
+
+	// Behind: mapping LSNs to times costs a round-trip to a server that is
+	// already busy shipping us the backlog, so throttle it. The watermark
+	// itself is free and stays current.
+	if !s.lag.shouldQuery(time.Now()) {
+		s.lag.observePositions(processed, target)
 		return
 	}
 

@@ -207,7 +207,7 @@ func (r *walReceiver) run(ctx context.Context) {
 				return
 			}
 			r.noteReceived(pkm.ServerWALEnd)
-			r.lag.observe(pkm.ServerWALEnd, r.receivedLSN())
+			r.lag.observe(pkm.ServerWALEnd)
 			if pkm.ReplyRequested {
 				if err := r.sendStatus(ctx, false); err != nil {
 					r.fail(fmt.Errorf("failed to send standby status (replication connection lost): %w", err))
@@ -228,7 +228,7 @@ func (r *walReceiver) run(ctx context.Context) {
 			r.noteReceived(xld.WALStart)
 			// ServerWALEnd, not WALStart: during a long burst with no
 			// interleaved keepalive it is the only fresh view of the head.
-			r.lag.observe(xld.ServerWALEnd, r.receivedLSN())
+			r.lag.observe(xld.ServerWALEnd)
 			// Copy: pgconn's message buffer is only valid until the next
 			// receive, and this payload sits in the channel while the socket
 			// keeps draining.

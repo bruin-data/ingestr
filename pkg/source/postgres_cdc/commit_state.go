@@ -74,7 +74,6 @@ func (p *streamPosition) Committed() pglogrepl.LSN {
 // goroutine and read by the metrics scraper, so every field is atomic.
 type lagState struct {
 	serverHead atomic.Uint64
-	received   atomic.Uint64
 	streaming  atomic.Bool
 }
 
@@ -82,9 +81,8 @@ func newLagState() *lagState {
 	return &lagState{}
 }
 
-func (l *lagState) observe(serverWALEnd, received pglogrepl.LSN) {
+func (l *lagState) observe(serverWALEnd pglogrepl.LSN) {
 	storeMax(&l.serverHead, uint64(serverWALEnd))
-	storeMax(&l.received, uint64(received))
 }
 
 func storeMax(dst *atomic.Uint64, v uint64) {
