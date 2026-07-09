@@ -360,7 +360,6 @@ func TestParseMongoDBCDCURI(t *testing.T) {
 			t.Fatalf("normalized URI = %q, want mongodb+srv scheme", normalized)
 		}
 	})
-
 }
 
 func TestParseMongoCDCNamespace(t *testing.T) {
