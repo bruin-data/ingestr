@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
 	"github.com/bruin-data/ingestr/pkg/tablename"
+	"golang.org/x/sync/errgroup"
 )
 
 type DuckDBDestination struct {
@@ -263,6 +265,9 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 		}
 	}
 	if checkpointEvery == 0 {
+		if conns := d.ingestConnections(opts); conns > 1 {
+			return d.writeViaParallelADBCIngest(ctx, records, tableName, ingestOpts, startTotal, conns)
+		}
 		return d.writeViaSingleADBCIngest(ctx, records, tableName, ingestOpts, startTotal)
 	}
 
@@ -312,6 +317,74 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 
 	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
 	config.Debug("[DUCKDB] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
+	return nil
+}
+
+// ingestConnections decides how many connections to spread an ingest over.
+// The single-threaded Arrow-stream push through the driver is the bottleneck
+// for wide tables, and DuckDB handles concurrent appends to the same table
+// transactionally. Kept at 1 for MotherDuck (remote sessions) and for tables
+// with primary keys, where concurrent index appends can raise transaction
+// conflicts.
+func (d *DuckDBDestination) ingestConnections(opts destination.WriteOptions) int {
+	if strings.HasPrefix(d.filePath, "md:") || len(opts.PrimaryKeys) > 0 {
+		return 1
+	}
+	if v := os.Getenv("INGESTR_DUCKDB_INGEST_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+		config.Debug("[DUCKDB] Ignoring invalid INGESTR_DUCKDB_INGEST_CONNS=%q", v)
+	}
+	return min(4, runtime.GOMAXPROCS(0))
+}
+
+// writeViaParallelADBCIngest runs several IngestStream appenders against the
+// same table, each on its own connection, all pulling batches from the shared
+// channel. Row order across workers is not preserved, which append semantics
+// do not require.
+func (d *DuckDBDestination) writeViaParallelADBCIngest(ctx context.Context, records <-chan source.RecordBatchResult, tableName string, ingestOpts adbc.IngestStreamOptions, startTotal time.Time, conns int) error {
+	g, gctx := errgroup.WithContext(ctx)
+	var totalRows atomic.Int64
+
+	for range conns {
+		g.Go(func() error {
+			first, err := nextNonEmptyRecord(gctx, records)
+			if err != nil {
+				return err
+			}
+			if first == nil {
+				return nil
+			}
+
+			conn, err := d.db.Open(gctx)
+			if err != nil {
+				first.Release()
+				return fmt.Errorf("failed to open ingest connection: %w", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			reader := newChannelRecordReader(gctx, records, first)
+			_, ingestErr := adbc.IngestStream(gctx, conn, reader, tableName, adbc.OptionValueIngestModeAppend, ingestOpts)
+			totalRows.Add(reader.rowsWritten())
+			readerErr := reader.Err()
+			reader.Release()
+
+			if ingestErr != nil {
+				config.Debug("[DUCKDB] IngestStream error: %v", ingestErr)
+				return fmt.Errorf("failed to ingest batch: %w", ingestErr)
+			}
+			return readerErr
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	rows := totalRows.Load()
+	totalRate := float64(rows) / time.Since(startTotal).Seconds()
+	config.Debug("[DUCKDB] Total: %d rows written in %v across %d connections (%.0f rows/sec)", rows, time.Since(startTotal), conns, totalRate)
 	return nil
 }
 
