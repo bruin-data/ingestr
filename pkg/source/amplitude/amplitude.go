@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -429,51 +431,41 @@ func (s *AmplitudeSource) readEventsRange(ctx context.Context, start, end time.T
 		startParam := winStart.Format("20060102T15")
 		endParam := winEnd.Format("20060102T15")
 
+		// Stream the archive to a temp file: an export window can be multi-GB
+		// and zip.Reader needs an io.ReaderAt, so buffering it all in memory
+		// (× parallel workers) would risk OOM.
+		tmp, err := os.CreateTemp("", "amplitude-export-*.zip")
+		if err != nil {
+			return fmt.Errorf("failed to create temp file for %s: %w", startParam, err)
+		}
+		tmpName := tmp.Name()
+		_ = tmp.Close()
+
 		resp, err := s.exportClient.R(ctx).
 			SetQueryParam("start", startParam).
 			SetQueryParam("end", endParam).
+			SetOutputFileName(tmpName).
 			Get("/api/2/export")
 		if err != nil {
+			_ = os.Remove(tmpName)
 			return fmt.Errorf("failed to fetch events for %s: %w", startParam, err)
 		}
 		// 404 means no data was recorded in this window; skip it.
 		if resp.StatusCode() == 404 {
+			_ = os.Remove(tmpName)
 			config.Debug("[AMPLITUDE] no events for %s-%s", startParam, endParam)
 			winStart = winEnd.Add(time.Hour)
 			continue
 		}
 		if !resp.IsSuccess() {
-			return fmt.Errorf("amplitude events for %s returned status %d: %s", startParam, resp.StatusCode(), resp.String())
+			errBody, _ := os.ReadFile(tmpName)
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("amplitude events for %s returned status %d: %s", startParam, resp.StatusCode(), string(errBody))
 		}
 
-		body := resp.Body()
-		zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+		err = s.readExportArchive(ctx, tmpName, startParam, opts, results)
+		_ = os.Remove(tmpName)
 		if err != nil {
-			return fmt.Errorf("failed to read export archive for %s: %w", startParam, err)
-		}
-
-		batch := make([]map[string]interface{}, 0, batchSize)
-		flush := func() error {
-			if err := emitBatch(ctx, batch, opts, results); err != nil {
-				return err
-			}
-			batch = batch[:0]
-			return nil
-		}
-
-		for _, f := range zr.File {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			if err := s.readEventFile(ctx, f, opts, &batch, flush, results); err != nil {
-				return fmt.Errorf("failed to read %s from export for %s: %w", f.Name, startParam, err)
-			}
-		}
-
-		if err := flush(); err != nil {
 			return err
 		}
 
@@ -482,7 +474,45 @@ func (s *AmplitudeSource) readEventsRange(ctx context.Context, start, end time.T
 	return nil
 }
 
-func (s *AmplitudeSource) readEventFile(ctx context.Context, f *zip.File, opts source.ReadOptions, batch *[]map[string]interface{}, flush func() error, results chan<- source.RecordBatchResult) error {
+func (s *AmplitudeSource) readExportArchive(ctx context.Context, path, label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return fmt.Errorf("failed to read export archive for %s: %w", label, err)
+	}
+	defer func() { _ = zr.Close() }()
+
+	batch := make([]map[string]interface{}, 0, batchSize)
+	skipped := 0
+	flush := func() error {
+		if err := emitBatch(ctx, batch, opts, results); err != nil {
+			return err
+		}
+		batch = batch[:0]
+		return nil
+	}
+
+	for _, f := range zr.File {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if err := s.readEventFile(ctx, f, opts, &batch, flush, &skipped, results); err != nil {
+			return fmt.Errorf("failed to read %s from export for %s: %w", f.Name, label, err)
+		}
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
+	if skipped > 0 {
+		output.Warnf("\nWarning: amplitude skipped %d malformed event line(s) in export window %s\n", skipped, label)
+	}
+	return nil
+}
+
+func (s *AmplitudeSource) readEventFile(ctx context.Context, f *zip.File, opts source.ReadOptions, batch *[]map[string]interface{}, flush func() error, skipped *int, results chan<- source.RecordBatchResult) error {
 	rc, err := f.Open()
 	if err != nil {
 		return err
@@ -511,6 +541,7 @@ func (s *AmplitudeSource) readEventFile(ctx context.Context, f *zip.File, opts s
 		var event map[string]interface{}
 		if err := jsonUseNumber(line, &event); err != nil {
 			config.Debug("[AMPLITUDE] skipping malformed event line: %v", err)
+			*skipped++
 			continue
 		}
 
