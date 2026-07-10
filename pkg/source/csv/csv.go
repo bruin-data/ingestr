@@ -129,6 +129,15 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		return nil, fmt.Errorf("failed to open CSV file: %w", err)
 	}
 
+	if skip, size, ok := parallelEligible(f, s.encoding); ok {
+		ch, err := s.readParallel(ctx, opts, f, skip, size, batchSize)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return ch, nil
+	}
+
 	results := make(chan source.RecordBatchResult, 8)
 
 	decoded, decodeErr := Decode(f, s.encoding)
