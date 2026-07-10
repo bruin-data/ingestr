@@ -247,9 +247,11 @@ func Get(name config.IncrementalStrategy) (WriteStrategy, error) {
 // ApplyBatchTransformation wraps record batches with contract-based transformation if needed.
 // Also applies column renaming if a naming convention is configured.
 func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult) (<-chan source.RecordBatchResult, error) {
-	// Cast column types first (for --columns type overrides on known-schema sources)
+	// Cast column types first (for --columns type overrides on known-schema sources).
+	// Casting parses every value (decimals, dates), so it is the CPU-heaviest
+	// stage of the stream; fan it out across batches.
 	if j.TypeCaster != nil {
-		records = transformer.Wrap(records, j.TypeCaster)
+		records = transformer.WrapParallel(records, j.TypeCaster, transformer.ParallelWorkers())
 	}
 
 	// Apply column renaming (if configured)
