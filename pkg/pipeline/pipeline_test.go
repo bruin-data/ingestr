@@ -50,6 +50,10 @@ func (m *mockManagedCDCStateDestination) TruncateTable(_ context.Context, _ stri
 	return nil
 }
 
+func (m *mockManagedCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
 type mockSchemaEvolutionDestination struct {
 	mockDestination
 }
@@ -90,15 +94,15 @@ func TestValidateChangeTrackingDestinationAcceptsResumeProvider(t *testing.T) {
 	}
 }
 
-func TestManagedCDCStateDestinationRequiresResumeAndTruncate(t *testing.T) {
+func TestManagedCDCStateDestinationRequiresStateReaderAndTruncate(t *testing.T) {
 	if supportsDestinationManagedCDCState(&mockDestination{}) {
 		t.Fatal("destination without CDC capabilities must not use managed CDC state")
 	}
 	if supportsDestinationManagedCDCState(&mockCDCResumeDestination{}) {
-		t.Fatal("resume-only destination must not use managed CDC state")
+		t.Fatal("legacy resume-only destination must not use managed CDC state")
 	}
 	if !supportsDestinationManagedCDCState(&mockManagedCDCStateDestination{}) {
-		t.Fatal("destination with resume and truncate capabilities must use managed CDC state")
+		t.Fatal("destination with state-read and truncate capabilities must use managed CDC state")
 	}
 }
 

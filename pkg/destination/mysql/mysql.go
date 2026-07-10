@@ -1032,6 +1032,28 @@ func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (stri
 	return maxLSN.String, nil
 }
 
+func (d *MySQLDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf("SELECT `source_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s WHERE `connector_id` = ?", quoteTable(table))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if isMySQLMissingTableError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 // isMySQLMissingTableError reports whether err means the queried table does not
 // exist. Plain MySQL raises errno 1146 ("... doesn't exist"); vtgate raises
 // errno 1146 or 1051 with "table ... does not exist" (VT05004/VT05005).

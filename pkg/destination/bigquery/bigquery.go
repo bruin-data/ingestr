@@ -2329,6 +2329,65 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return maxLSN, nil
 }
 
+func (d *BigQueryDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return nil, err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	if dataset == "" {
+		return nil, errors.New("dataset must be specified in state table name or URI path")
+	}
+
+	ctx = annotation.WithStep(ctx, annotation.StepCDCResume)
+	sql := fmt.Sprintf("SELECT `source_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s.%s.%s WHERE `connector_id` = @connector_id",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	query := d.client.Query(annotation.Prepend(ctx, sql))
+	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
+	if d.location != "" {
+		query.Location = d.location
+	}
+	it, err := query.Read(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var entries []destination.CDCStateEntry
+	for {
+		var row []bigquery.Value
+		if err := it.Next(&row); err != nil {
+			if err == iterator.Done {
+				break
+			}
+			return nil, err
+		}
+		if len(row) != 5 {
+			return nil, fmt.Errorf("unexpected BigQuery CDC state row width %d", len(row))
+		}
+		sourceTable, sourceOK := row[0].(string)
+		kind, kindOK := row[1].(string)
+		generation, generationOK := row[2].(int64)
+		status, statusOK := row[3].(string)
+		position, positionOK := row[4].(string)
+		if !sourceOK || !kindOK || !generationOK || !statusOK || !positionOK {
+			return nil, fmt.Errorf("unexpected BigQuery CDC state row types")
+		}
+		entries = append(entries, destination.CDCStateEntry{
+			SourceTable: sourceTable,
+			StateKind:   kind,
+			Generation:  generation,
+			Status:      status,
+			Position:    position,
+		})
+	}
+	return entries, nil
+}
+
 func containsHelper(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {

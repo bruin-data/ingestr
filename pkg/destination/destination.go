@@ -144,6 +144,24 @@ type CDCResumeProvider interface {
 	GetMaxCDCLSN(ctx context.Context, table string) (string, error)
 }
 
+const CDCStateStatusComplete = "complete"
+
+// CDCStateEntry is one append-only event from the shared destination CDC state
+// table. Consumers reduce entries by source table, state kind, and generation.
+type CDCStateEntry struct {
+	SourceTable string
+	StateKind   string
+	Generation  int64
+	Status      string
+	Position    string
+}
+
+// CDCStateReader loads all state events for one logical connector from the
+// destination's shared managed-state table.
+type CDCStateReader interface {
+	LoadCDCState(ctx context.Context, table, connectorID string) ([]CDCStateEntry, error)
+}
+
 // CDCMergeAware is an optional interface that destinations can implement
 // to indicate they handle CDC deletes during merge operations.
 type CDCMergeAware interface {

@@ -882,6 +882,32 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 	return maxLSN.String, nil
 }
 
+func (d *SnowflakeDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	ctx = d.annotate(ctx, annotation.StepCDCResume)
+	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s FROM %s WHERE %s = ?",
+		quoteIdentifier("source_table"), quoteIdentifier("state_kind"), quoteIdentifier("state_generation"),
+		quoteIdentifier("state_status"), quoteIdentifier("_cdc_lsn"), quoteFQN(sfTable(table)), quoteIdentifier("connector_id"))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "invalid identifier") {
+			return nil, nil
+		}
+		config.LogFailedQuery(query, err)
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }

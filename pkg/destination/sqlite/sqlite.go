@@ -742,6 +742,31 @@ func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	return maxLSN.String, nil
 }
 
+func (d *SQLiteDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`SELECT "source_table", "state_kind", "state_generation", "state_status", "_cdc_lsn" FROM %s WHERE "connector_id" = ?`, destination.QuoteTableName(table))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 // GetScheme returns the primary URI scheme for SQLite.
 func (d *SQLiteDestination) GetScheme() string { return "sqlite" }
 

@@ -133,11 +133,6 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err := cdcStateManager.RegisterTable(ctx, p.config.SourceTable, p.config.DestTable); err != nil {
 			return err
 		}
-		if p.config.FullRefresh {
-			if err := cdcStateManager.Reset(ctx); err != nil {
-				return err
-			}
-		}
 	} else if isPostgresCDCSource(p.config.SourceURI) {
 		config.Debug("[PIPELINE] Destination %s does not support managed PostgreSQL CDC state; using legacy resume behavior", dest.GetScheme())
 	}
@@ -181,8 +176,8 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			}
 		}
 	}
-	if cdcStateManager != nil && !p.config.FullRefresh {
-		if err := cdcStateManager.BeginRun(ctx); err != nil {
+	if cdcStateManager != nil {
+		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
 			return err
 		}
 	}
@@ -1132,11 +1127,6 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				return err
 			}
 		}
-		if p.config.FullRefresh {
-			if err := cdcStateManager.Reset(ctx); err != nil {
-				return err
-			}
-		}
 	} else if isPostgresCDCSource(p.config.SourceURI) {
 		config.Debug("[PIPELINE] Destination %s does not support managed PostgreSQL CDC state; using legacy resume behavior", p.dest.GetScheme())
 	}
@@ -1194,8 +1184,8 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			}
 		}
 	}
-	if cdcStateManager != nil && !p.config.FullRefresh {
-		if err := cdcStateManager.BeginRun(ctx); err != nil {
+	if cdcStateManager != nil {
+		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
 			return err
 		}
 	}
@@ -2013,7 +2003,7 @@ func validateChangeTrackingDestination(dest destination.Destination) error {
 }
 
 func supportsDestinationManagedCDCState(dest destination.Destination) bool {
-	if _, ok := dest.(destination.CDCResumeProvider); !ok {
+	if _, ok := dest.(destination.CDCStateReader); !ok {
 		return false
 	}
 	_, ok := dest.(destination.TruncateCapable)

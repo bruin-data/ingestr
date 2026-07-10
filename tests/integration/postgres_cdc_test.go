@@ -632,13 +632,28 @@ func TestPostgresCDC_DestinationStateTruncateAndSnapshotRecovery(t *testing.T) {
 	require.NoError(t, err)
 	defer destPool.Close()
 	stateTables := postgresCDCStateTables(t, ctx, destPool)
-	require.Len(t, stateTables, 2, "checkpoint and per-table snapshot marker must be destination-managed")
+	require.Equal(t, []string{"cdc_state"}, stateTables, "CDC state must use one destination-managed table")
 	for _, table := range stateTables {
 		var count int
 		err := destPool.QueryRow(ctx, "SELECT COUNT(*) FROM "+pgx.Identifier{"_bruin_staging", table}.Sanitize()).Scan(&count)
 		require.NoError(t, err)
 		assert.Greater(t, count, 0, "state table %s should contain durable state", table)
 	}
+	var stateKinds int
+	require.NoError(t, destPool.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT state_kind)
+		FROM _bruin_staging.cdc_state
+		WHERE state_status = 'complete'`).Scan(&stateKinds))
+	assert.Equal(t, 2, stateKinds, "shared state should contain completed checkpoint and snapshot events")
+
+	secondCfg := *cfg
+	secondCfg.SourceURI = "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+		"&publication=test_pub&slot=state_truncate_recovery_second&mode=batch&state_id=state-truncate-recovery-second"
+	secondCfg.DestTable = "public.test_cdc_dest_second"
+	require.NoError(t, pipeline.New(&secondCfg).Run(ctx))
+	var connectors int
+	require.NoError(t, destPool.QueryRow(ctx, `SELECT COUNT(DISTINCT connector_id) FROM _bruin_staging.cdc_state`).Scan(&connectors))
+	assert.Equal(t, 2, connectors, "multiple connectors should share one state table without sharing rows")
 
 	sourcePool, err := pgxpool.New(ctx, sourceConnString)
 	require.NoError(t, err)
@@ -694,13 +709,67 @@ func TestPostgresCDC_DestinationStateTruncateAndSnapshotRecovery(t *testing.T) {
 	assert.Zero(t, count, "fresh empty snapshot must clear stale rows after missing state")
 }
 
+func TestPostgresCDC_SharedStateMySQL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if mysqlDest.uri == "" {
+		t.Skip("shared MySQL destination container not available")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	setupCDCSource(t, ctx, sourceConnString)
+
+	target := "cdc_shared_state_" + uniqueSuffix()
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&publication=test_pub&slot=shared_state_mysql&mode=batch&state_id=shared-state-mysql-" + target,
+		DestURI:             mysqlDest.uri,
+		SourceTable:         "public.test_cdc",
+		DestTable:           target,
+		PrimaryKeys:         []string{"id"},
+		IncrementalStrategy: config.StrategyMerge,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	sourcePool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer sourcePool.Close()
+	_, err = sourcePool.Exec(ctx, `DELETE FROM public.test_cdc WHERE id = 1; INSERT INTO public.test_cdc (name, value) VALUES ('mysql-state', 901)`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	db, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	defer func() { _, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS `"+target+"`") }()
+
+	var stateTables int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = '_bruin_staging' AND table_name = 'cdc_state'`).Scan(&stateTables))
+	assert.Equal(t, 1, stateTables)
+	var generation int64
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT MAX(state_generation) FROM _bruin_staging.cdc_state
+		WHERE destination_table = ? AND state_kind = 'snapshot' AND state_status = 'complete'`, target).Scan(&generation))
+	assert.Equal(t, int64(2), generation)
+	var activeRows, deletedRows int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+target+"` WHERE `_cdc_deleted` = 0").Scan(&activeRows))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+target+"` WHERE `_cdc_deleted` = 1").Scan(&deletedRows))
+	assert.Equal(t, 3, activeRows)
+	assert.Equal(t, 1, deletedRows)
+}
+
 func postgresCDCStateTables(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []string {
 	t.Helper()
 	rows, err := pool.Query(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
 		WHERE table_schema = '_bruin_staging'
-		  AND (table_name LIKE 'cdc_checkpoint_%' OR table_name LIKE 'cdc_snapshot_%')
+		  AND table_name = 'cdc_state'
 		ORDER BY table_name
 	`)
 	require.NoError(t, err)

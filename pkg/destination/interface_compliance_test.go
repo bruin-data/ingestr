@@ -15,12 +15,34 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/mysql"
 	"github.com/bruin-data/ingestr/pkg/destination/onelake"
 	"github.com/bruin-data/ingestr/pkg/destination/oracle"
+	"github.com/bruin-data/ingestr/pkg/destination/planetscale"
 	"github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/destination/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
 	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
 	"github.com/bruin-data/ingestr/pkg/destination/synapse"
 	"github.com/bruin-data/ingestr/pkg/destination/trino"
+	"github.com/bruin-data/ingestr/pkg/destination/vitess"
+)
+
+// Destinations eligible for destination-managed PostgreSQL CDC state must
+// support one connector-scoped read from the shared state table.
+var (
+	_ destination.CDCStateReader = (*bigquery.BigQueryDestination)(nil)
+	_ destination.CDCStateReader = (*cassandra.CassandraDestination)(nil)
+	_ destination.CDCStateReader = (*clickhouse.ClickHouseDestination)(nil)
+	_ destination.CDCStateReader = (*cratedb.CrateDBDestination)(nil)
+	_ destination.CDCStateReader = (*duckdb.DuckDBDestination)(nil)
+	_ destination.CDCStateReader = (*duckdb.DuckLakeDestination)(nil)
+	_ destination.CDCStateReader = (*mssql.MSSQLDestination)(nil)
+	_ destination.CDCStateReader = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCStateReader = (*oracle.OracleDestination)(nil)
+	_ destination.CDCStateReader = (*planetscale.Destination)(nil)
+	_ destination.CDCStateReader = (*postgres.PostgresDestination)(nil)
+	_ destination.CDCStateReader = (*redshift.RedshiftDestination)(nil)
+	_ destination.CDCStateReader = (*snowflake.SnowflakeDestination)(nil)
+	_ destination.CDCStateReader = (*sqlite.SQLiteDestination)(nil)
+	_ destination.CDCStateReader = (*vitess.Destination)(nil)
 )
 
 var (

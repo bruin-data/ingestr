@@ -747,6 +747,30 @@ func (d *OracleDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	return maxLSN, nil
 }
 
+func (d *OracleDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s FROM %s WHERE %s = :1",
+		quoteColumn("source_table"), quoteColumn("state_kind"), quoteColumn("state_generation"),
+		quoteColumn("state_status"), quoteColumn(destination.CDCLSNColumn), quoteTable(table), quoteColumn("connector_id"))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if isOracleError(err, "00942", "00904") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func (d *OracleDestination) queryMaxCDCLSN(ctx context.Context, query string) (string, error) {
 	var maxLSN sql.NullString
 	err := d.db.QueryRowContext(ctx, query).Scan(&maxLSN)

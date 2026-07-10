@@ -1096,6 +1096,28 @@ func (d *MSSQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (stri
 	return maxLSN.String, nil
 }
 
+func (d *MSSQLDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf("SELECT [source_table], [state_kind], [state_generation], [state_status], [_cdc_lsn] FROM %s WHERE [connector_id] = @p1", quoteTable(table))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "Invalid object name") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func (d *MSSQLDestination) GetScheme() string { return "mssql" }
 
 func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {

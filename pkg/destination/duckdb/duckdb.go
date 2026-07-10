@@ -1169,6 +1169,60 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	return "", nil
 }
 
+func (d *DuckDBDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	connectorLiteral := strings.ReplaceAll(connectorID, "'", "''")
+	query := fmt.Sprintf(`SELECT "source_table", "state_kind", "state_generation", "state_status", "_cdc_lsn" FROM %s WHERE "connector_id" = '%s'`,
+		destination.QuoteTableName(table), connectorLiteral)
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery(query); err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") || strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer reader.Release()
+
+	var entries []destination.CDCStateEntry
+	for reader.Next() {
+		batch := reader.RecordBatch()
+		sourceTables, sourceOK := batch.Column(0).(*array.String)
+		kinds, kindOK := batch.Column(1).(*array.String)
+		statuses, statusOK := batch.Column(3).(*array.String)
+		positions, positionOK := batch.Column(4).(*array.String)
+		if !sourceOK || !kindOK || !statusOK || !positionOK {
+			return nil, fmt.Errorf("unexpected DuckDB CDC state column types")
+		}
+		for row := 0; row < int(batch.NumRows()); row++ {
+			generation, ok := int64ValueAt(batch.Column(2), row)
+			if !ok {
+				return nil, fmt.Errorf("unexpected DuckDB CDC state generation type %s", batch.Column(2).DataType())
+			}
+			entries = append(entries, destination.CDCStateEntry{
+				SourceTable: strings.Clone(sourceTables.Value(row)),
+				StateKind:   strings.Clone(kinds.Value(row)),
+				Generation:  generation,
+				Status:      strings.Clone(statuses.Value(row)),
+				Position:    strings.Clone(positions.Value(row)),
+			})
+		}
+	}
+	return entries, reader.Err()
+}
+
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseSchemaTable(table)

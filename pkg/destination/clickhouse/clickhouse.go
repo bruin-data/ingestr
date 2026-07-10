@@ -352,6 +352,30 @@ func (d *ClickHouseDestination) GetMaxCDCLSN(ctx context.Context, table string) 
 	return maxLSN, nil
 }
 
+func (d *ClickHouseDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	db, name := d.parseTableName(table)
+	query := fmt.Sprintf("SELECT `source_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s.%s WHERE `connector_id` = ?",
+		quoteIdentifier(db), quoteIdentifier(name))
+	rows, err := d.conn.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNKNOWN_TABLE") || strings.Contains(err.Error(), "doesn't exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
 

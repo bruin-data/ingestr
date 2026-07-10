@@ -817,42 +817,28 @@ func stressValidateSchemas(ctx context.Context, src, dst *pgxpool.Pool, tables [
 }
 
 func stressValidateDestinationState(ctx context.Context, dst *pgxpool.Pool, tableCount int) error {
-	rows, err := dst.Query(ctx, `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = '_bruin_staging'
-		  AND (table_name LIKE 'cdc_checkpoint_%' OR table_name LIKE 'cdc_snapshot_%')
-		ORDER BY table_name`)
-	if err != nil {
+	var stateTables int
+	if err := dst.QueryRow(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = '_bruin_staging' AND table_name = 'cdc_state'`).Scan(&stateTables); err != nil {
 		return err
 	}
-	defer rows.Close()
-	var checkpointTables, snapshotTables int
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return err
-		}
-		switch {
-		case strings.HasPrefix(table, "cdc_checkpoint_"):
-			checkpointTables++
-		case strings.HasPrefix(table, "cdc_snapshot_"):
-			snapshotTables++
-		}
-		var stateRows int64
-		stateTable := quoteStressIdentifier("_bruin_staging") + "." + quoteStressIdentifier(table)
-		if err := dst.QueryRow(ctx, "SELECT count(*) FROM "+stateTable).Scan(&stateRows); err != nil {
-			return err
-		}
-		if stateRows == 0 {
-			return fmt.Errorf("CDC state table %s is empty", stateTable)
-		}
+	if stateTables != 1 {
+		return fmt.Errorf("unexpected shared CDC state table count: got %d want 1", stateTables)
 	}
-	if err := rows.Err(); err != nil {
+
+	stateTable := quoteStressIdentifier("_bruin_staging") + "." + quoteStressIdentifier("cdc_state")
+	var checkpointRows, completedTables int
+	query := fmt.Sprintf(`
+		SELECT
+			COUNT(*) FILTER (WHERE state_kind = 'checkpoint' AND state_status = 'complete'),
+			COUNT(DISTINCT source_table) FILTER (WHERE state_kind = 'snapshot' AND state_status = 'complete')
+		FROM %s`, stateTable)
+	if err := dst.QueryRow(ctx, query).Scan(&checkpointRows, &completedTables); err != nil {
 		return err
 	}
-	if checkpointTables != 1 || snapshotTables != tableCount {
-		return fmt.Errorf("unexpected CDC state table counts: checkpoints=%d snapshots=%d want checkpoints=1 snapshots=%d", checkpointTables, snapshotTables, tableCount)
+	if checkpointRows == 0 || completedTables != tableCount {
+		return fmt.Errorf("unexpected shared CDC state: checkpoints=%d completed tables=%d want checkpoints>0 tables=%d", checkpointRows, completedTables, tableCount)
 	}
 	return nil
 }

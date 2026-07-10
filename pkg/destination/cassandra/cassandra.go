@@ -493,6 +493,34 @@ func (d *CassandraDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 	return *maxLSN, nil
 }
 
+func (d *CassandraDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	tableRef, err := cassandrautil.QuoteTable(d.keyspace, table)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s FROM %s WHERE %s = ?",
+		cassandrautil.QuoteIdentifier("source_table"), cassandrautil.QuoteIdentifier("state_kind"),
+		cassandrautil.QuoteIdentifier("state_generation"), cassandrautil.QuoteIdentifier("state_status"),
+		cassandrautil.QuoteIdentifier(destination.CDCLSNColumn), tableRef, cassandrautil.QuoteIdentifier("connector_id"))
+	iter := d.session.Query(query, connectorID).IterContext(ctx)
+
+	var entries []destination.CDCStateEntry
+	for {
+		var entry destination.CDCStateEntry
+		if !iter.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position) {
+			break
+		}
+		entries = append(entries, entry)
+	}
+	if err := iter.Close(); err != nil {
+		if strings.Contains(err.Error(), "unconfigured table") || strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "keyspace") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return entries, nil
+}
+
 func (d *CassandraDestination) DeleteInsertTable(_ context.Context, _ destination.DeleteInsertOptions) error {
 	return errors.New("delete+insert strategy is not supported for cassandra destination")
 }

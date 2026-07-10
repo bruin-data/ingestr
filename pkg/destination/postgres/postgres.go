@@ -1018,6 +1018,30 @@ func (d *PostgresDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return *maxLSN, nil
 }
 
+func (d *PostgresDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf(`
+		SELECT "source_table", "state_kind", "state_generation", "state_status", "_cdc_lsn"
+		FROM %s WHERE "connector_id" = $1`, destination.QuoteTableName(table))
+	rows, err := d.pool.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func (d *PostgresDestination) SupportsCDCUnchangedCols() bool { return true }
 
 func (d *PostgresDestination) SupportsCDCMerge() bool {
