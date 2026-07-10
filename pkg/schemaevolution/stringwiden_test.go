@@ -81,3 +81,18 @@ func TestCompare_StringStable_NoSpuriousChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, cmp.HasChanges)
 }
+
+func TestCompare_DecimalToExistingUnboundedString_NoSpuriousChange(t *testing.T) {
+	src := &schema.TableSchema{Columns: []schema.Column{{
+		Name:      "all_revenue_total_d90",
+		DataType:  schema.TypeDecimal,
+		Precision: 38,
+		Scale:     9,
+	}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{strCol("all_revenue_total_d90", 0)}}
+
+	cmp, err := Compare(src, dest, nil)
+	require.NoError(t, err)
+	assert.False(t, cmp.HasChanges)
+	assert.Empty(t, cmp.Changes)
+}

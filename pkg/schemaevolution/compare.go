@@ -112,7 +112,9 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			}
 
 			// For string length widening, keep TypeString but grow the length.
-			isStringLengthWidening := widenedType == schema.TypeString && destCol.DataType == schema.TypeString
+			isStringLengthWidening := widenedType == schema.TypeString &&
+				destCol.DataType == schema.TypeString &&
+				stringNeedsWidening(srcCol.MaxLength, destCol.MaxLength)
 			if isStringLengthWidening {
 				newCol.MaxLength = WidenedStringLength(srcCol.MaxLength, destCol.MaxLength)
 			}
