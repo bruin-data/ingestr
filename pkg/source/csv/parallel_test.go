@@ -2,11 +2,14 @@ package csv
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -141,6 +144,71 @@ func TestReadParallel_ParseErrorSurfaces(t *testing.T) {
 	}
 	if !sawErr {
 		t.Fatal("expected a parse error to surface")
+	}
+}
+
+func TestReadParallel_CancellationClosesResults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cancel.csv")
+
+	var sb strings.Builder
+	sb.WriteString("id,payload\n")
+	for i := 0; i < 10000; i++ {
+		fmt.Fprintf(&sb, "%d,value-%d\n", i, i)
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origBlock, origMin := parallelBlockSize, parallelMinFileSize
+	parallelBlockSize, parallelMinFileSize = 1024, 1
+	defer func() { parallelBlockSize, parallelMinFileSize = origBlock, origMin }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	src := NewCSVSource()
+	if err := src.Connect(ctx, "csv://"+path); err != nil {
+		t.Fatal(err)
+	}
+	table, err := src.GetTable(ctx, source.TableRequest{Name: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := table.Read(ctx, source.ReadOptions{PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	for res := range ch {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+}
+
+func TestSplitSegments_TruncatedFileReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "truncated.csv")
+	if err := os.WriteFile(path, []byte("a,b\n1,2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- splitSegments(context.Background(), f, 0, 1024, func(csvSegment) bool { return true })
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("expected unexpected EOF, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("splitSegments did not return after the file was truncated")
 	}
 }
 

@@ -54,9 +54,7 @@ func (d *DuckDBDestination) recordSchema(table string, sch *schema.TableSchema, 
 		return
 	}
 	clone := *sch
-	if len(pks) > 0 {
-		clone.PrimaryKeys = pks
-	}
+	clone.PrimaryKeys = append([]string(nil), pks...)
 	d.schemasMu.Lock()
 	defer d.schemasMu.Unlock()
 	if d.schemas == nil {
@@ -174,8 +172,6 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 		return fmt.Errorf("schema is required")
 	}
 
-	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -198,6 +194,14 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err := d.exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
+	preparedSchema, err := d.getTableSchemaLocked(ctx, opts.Table)
+	if err != nil {
+		return fmt.Errorf("failed to inspect prepared table: %w", err)
+	}
+	if preparedSchema == nil {
+		return fmt.Errorf("prepared table %s was not found", opts.Table)
+	}
+	d.recordSchema(opts.Table, opts.Schema, preparedSchema.PrimaryKeys)
 	config.Debug("[DUCKDB] CREATE TABLE took %v", time.Since(startCreate))
 
 	return nil
@@ -327,7 +331,9 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 // with primary keys, where concurrent index appends can raise transaction
 // conflicts.
 func (d *DuckDBDestination) ingestConnections(opts destination.WriteOptions) int {
-	if strings.HasPrefix(d.filePath, "md:") || len(opts.PrimaryKeys) > 0 {
+	preparedSchema := d.lookupSchema(opts.Table)
+	if strings.HasPrefix(d.filePath, "md:") || len(opts.PrimaryKeys) > 0 ||
+		(preparedSchema != nil && len(preparedSchema.PrimaryKeys) > 0) {
 		return 1
 	}
 	if v := os.Getenv("INGESTR_DUCKDB_INGEST_CONNS"); v != "" {
@@ -1244,10 +1250,13 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseSchemaTable(table)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.getTableSchemaLocked(ctx, table)
+}
+
+func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table string) (*schema.TableSchema, error) {
+	schemaName, tableName := parseSchemaTable(table)
 
 	query := fmt.Sprintf("DESCRIBE %s", destination.QuoteTableName(table))
 	stmt, err := d.conn.NewStatement()
@@ -1275,21 +1284,32 @@ func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*
 	defer reader.Release()
 
 	var columns []schema.Column
+	var primaryKeys []string
 	for reader.Next() {
 		batch := reader.RecordBatch()
 		for i := int64(0); i < batch.NumRows(); i++ {
-			colName := batch.Column(0).(*array.String).Value(int(i))
+			row := int(i)
+			colName := batch.Column(0).(*array.String).Value(row)
 			colType := batch.Column(1).(*array.String).Value(int(i))
 			nullable := true
 			if batch.NumCols() > 2 {
-				nullStr := batch.Column(2).(*array.String).Value(int(i))
+				nullStr := batch.Column(2).(*array.String).Value(row)
 				nullable = nullStr == "YES"
+			}
+			isPrimaryKey := false
+			if batch.NumCols() > 3 && !batch.Column(3).IsNull(row) {
+				key := batch.Column(3).(*array.String).Value(row)
+				isPrimaryKey = key == "PRI"
+			}
+			if isPrimaryKey {
+				primaryKeys = append(primaryKeys, strings.Clone(colName))
 			}
 
 			columns = append(columns, schema.Column{
-				Name:     strings.Clone(colName),
-				DataType: mapDuckDBTypeToSchema(colType),
-				Nullable: nullable,
+				Name:         strings.Clone(colName),
+				DataType:     mapDuckDBTypeToSchema(colType),
+				Nullable:     nullable,
+				IsPrimaryKey: isPrimaryKey,
 			})
 		}
 	}
@@ -1299,9 +1319,10 @@ func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*
 	}
 
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  schemaName,
-		Columns: columns,
+		Name:        tableName,
+		Schema:      schemaName,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 

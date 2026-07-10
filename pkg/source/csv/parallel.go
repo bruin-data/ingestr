@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/araddon/dateparse"
@@ -89,11 +90,14 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 	jobs := make(chan segmentJob, workers)
 	pending := make(chan chan []source.RecordBatchResult, workers)
 	segCtx, cancel := context.WithCancel(ctx)
+	var workerWG sync.WaitGroup
 
 	// Reader: split the data section into segments cut at record boundaries.
 	go func() {
-		defer close(jobs)
-		defer close(pending)
+		defer func() {
+			close(jobs)
+			close(pending)
+		}()
 		defer func() { _ = f.Close() }()
 		err := splitSegments(segCtx, f, dataStart, size, func(seg csvSegment) bool {
 			slot := make(chan []source.RecordBatchResult, 1)
@@ -102,12 +106,10 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 			case <-segCtx.Done():
 				return false
 			}
-			select {
-			case pending <- slot:
-			case <-segCtx.Done():
-				return false
-			}
-			return true
+			// Once a job is dispatched, always register its slot so the merger can
+			// release its batches even if cancellation races with this handoff.
+			pending <- slot
+			return segCtx.Err() == nil
 		})
 		if err != nil && segCtx.Err() == nil {
 			slot := make(chan []source.RecordBatchResult, 1)
@@ -119,20 +121,13 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 		}
 	}()
 
+	workerWG.Add(workers)
 	for range workers {
 		go func() {
+			defer workerWG.Done()
 			parser := newSegmentParser(headers, opts, batchSize)
-			for {
-				var job segmentJob
-				var ok bool
-				select {
-				case job, ok = <-jobs:
-					if !ok {
-						return
-					}
-				case <-segCtx.Done():
-					return
-				}
+			defer parser.builder.rb.Release()
+			for job := range jobs {
 				job.slot <- parser.parse(job.seg)
 			}
 		}()
@@ -149,15 +144,7 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 		batchNum := 0
 		failed := false
 		for slot := range pending {
-			var segResults []source.RecordBatchResult
-			select {
-			case segResults = <-slot:
-			case <-segCtx.Done():
-				select {
-				case segResults = <-slot:
-				default:
-				}
-			}
+			segResults := <-slot
 			for _, res := range segResults {
 				if failed {
 					if res.Batch != nil {
@@ -186,6 +173,7 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 				cancel()
 			}
 		}
+		workerWG.Wait()
 		config.Debug("[CSV] Total: %d rows in %d batches, read time: %v (parallel)", totalRows, batchNum, time.Since(startTotal))
 	}()
 
@@ -213,7 +201,10 @@ func splitSegments(ctx context.Context, f *os.File, start, size int64, emit func
 		block := make([]byte, len(carry)+int(readLen))
 		copy(block, carry)
 		n, err := io.ReadFull(io.NewSectionReader(f, offset, readLen), block[len(carry):])
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return io.ErrUnexpectedEOF
+		}
+		if err != nil {
 			return err
 		}
 		block = block[:len(carry)+n]
