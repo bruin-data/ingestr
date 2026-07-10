@@ -1,15 +1,21 @@
 package csv
 
 import (
+	"bufio"
 	"context"
 	"encoding/csv"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
@@ -137,6 +143,7 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 		csvReader := csv.NewReader(decoded)
 		csvReader.FieldsPerRecord = -1
+		csvReader.ReuseRecord = true
 
 		headers, err := csvReader.Read()
 		if err != nil {
@@ -148,6 +155,7 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to extract headers from the CSV, are you sure the given file contains a header row?")}
 			return
 		}
+		headers = append([]string(nil), headers...)
 
 		incrementalKey := opts.IncrementalKey
 		if incrementalKey != "" && !containsHeader(headers, incrementalKey) {
@@ -161,10 +169,28 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			startTime = &t
 		}
 
-		rows := make([]map[string]interface{}, 0, batchSize)
+		builder := newBatchBuilder(headers, opts.ExcludeColumns)
+		defer builder.rb.Release()
+		incIdx := headerIndexes(headers, incrementalKey)
+
 		batchNum := 0
 		totalRows := 0
 		lineNum := 1
+
+		flush := func() bool {
+			rec := builder.finish()
+			batchNum++
+			totalRows += int(rec.NumRows())
+			config.Debug("[CSV] Batch %d: %d rows (total: %d)", batchNum, rec.NumRows(), totalRows)
+
+			select {
+			case results <- source.RecordBatchResult{Batch: rec}:
+				return true
+			case <-ctx.Done():
+				rec.Release()
+				return false
+			}
+		}
 
 		for {
 			select {
@@ -187,10 +213,8 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				continue
 			}
 
-			row := removeEmptyValues(headers, record)
-
 			if incrementalKey != "" && startTime != nil {
-				incValue, ok := row[incrementalKey].(string)
+				incValue, ok := lastNonEmptyValue(record, incIdx)
 				if !ok {
 					output.Warnf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
 					continue
@@ -205,42 +229,127 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				}
 			}
 
-			rows = append(rows, row)
+			builder.appendRow(record)
 
-			if len(rows) >= batchSize {
-				rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert CSV to Arrow: %w", err)}
+			if builder.rows >= batchSize {
+				if !flush() {
 					return
 				}
-
-				batchNum++
-				totalRows += len(rows)
-				config.Debug("[CSV] Batch %d: %d rows (total: %d)", batchNum, len(rows), totalRows)
-
-				results <- source.RecordBatchResult{Batch: rec}
-				rows = make([]map[string]interface{}, 0, batchSize)
 			}
 		}
 
-		if len(rows) > 0 {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert CSV to Arrow: %w", err)}
+		if builder.rows > 0 {
+			if !flush() {
 				return
 			}
-
-			batchNum++
-			totalRows += len(rows)
-			config.Debug("[CSV] Batch %d: %d rows (total: %d)", batchNum, len(rows), totalRows)
-
-			results <- source.RecordBatchResult{Batch: rec}
 		}
 
 		config.Debug("[CSV] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
 	}()
 
 	return results, nil
+}
+
+// batchBuilder builds record batches of Unknown-typed columns (one per CSV
+// header) directly from CSV records, bypassing per-row maps. Values are stored
+// JSON-encoded, matching what arrowconv.AppendUnknownValue produces, so schema
+// inference and downstream casting behave identically.
+type batchBuilder struct {
+	schema *arrow.Schema
+	rb     *array.RecordBuilder
+	// srcIdx[i] contains the CSV field indexes feeding output column i.
+	srcIdx [][]int
+	buf    []byte
+	rows   int
+}
+
+func newBatchBuilder(headers []string, excludeColumns []string) *batchBuilder {
+	exclude := make(map[string]bool, len(excludeColumns))
+	for _, col := range excludeColumns {
+		exclude[strings.ToLower(col)] = true
+	}
+
+	fields := make([]arrow.Field, 0, len(headers))
+	srcIdx := make([][]int, 0, len(headers))
+	seen := make(map[string]int, len(headers))
+	for i, h := range headers {
+		if exclude[strings.ToLower(h)] {
+			continue
+		}
+		if pos, ok := seen[h]; ok {
+			srcIdx[pos] = append(srcIdx[pos], i)
+			continue
+		}
+		seen[h] = len(fields)
+		fields = append(fields, arrow.Field{Name: h, Type: schema.UnknownArrowType, Nullable: true})
+		srcIdx = append(srcIdx, []int{i})
+	}
+
+	arrowSchema := arrow.NewSchema(fields, nil)
+	return &batchBuilder{
+		schema: arrowSchema,
+		rb:     array.NewRecordBuilder(memory.NewGoAllocator(), arrowSchema),
+		srcIdx: srcIdx,
+	}
+}
+
+func (b *batchBuilder) appendRow(record []string) {
+	for i, sources := range b.srcIdx {
+		sb := b.rb.Field(i).(*array.ExtensionBuilder).StorageBuilder().(*array.StringBuilder)
+		value, ok := lastNonEmptyValue(record, sources)
+		if !ok {
+			sb.AppendNull()
+			continue
+		}
+		b.appendJSONString(sb, value)
+	}
+	b.rows++
+}
+
+// appendJSONString appends the JSON encoding of s. Values needing escapes take
+// the arrowconv fallback, which produces identical bytes to the old path.
+func (b *batchBuilder) appendJSONString(sb *array.StringBuilder, s string) {
+	if !utf8.ValidString(s) {
+		arrowconv.AppendUnknownValue(sb, s)
+		return
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == '"' || c == '\\' || c < 0x20 {
+			arrowconv.AppendUnknownValue(sb, s)
+			return
+		}
+	}
+	buf := append(b.buf[:0], '"')
+	buf = append(buf, s...)
+	buf = append(buf, '"')
+	b.buf = buf
+	sb.BinaryBuilder.Append(buf)
+}
+
+func (b *batchBuilder) finish() arrow.RecordBatch {
+	rec := b.rb.NewRecordBatch()
+	b.rows = 0
+	return rec
+}
+
+func headerIndexes(headers []string, name string) []int {
+	var indexes []int
+	for i, h := range headers {
+		if h == name {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func lastNonEmptyValue(record []string, indexes []int) (string, bool) {
+	for i := len(indexes) - 1; i >= 0; i-- {
+		idx := indexes[i]
+		if idx < len(record) && strings.TrimSpace(record[idx]) != "" {
+			return record[idx], true
+		}
+	}
+	return "", false
 }
 
 func isAllEmpty(record []string) bool {
@@ -252,27 +361,8 @@ func isAllEmpty(record []string) bool {
 	return true
 }
 
-func removeEmptyValues(headers []string, record []string) map[string]interface{} {
-	row := make(map[string]interface{})
-	for i, h := range headers {
-		if i < len(record) {
-			val := record[i]
-			if strings.TrimSpace(val) == "" {
-				continue
-			}
-			row[h] = val
-		}
-	}
-	return row
-}
-
 func containsHeader(headers []string, key string) bool {
-	for _, h := range headers {
-		if h == key {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(headers, key)
 }
 
 var _ source.Source = (*CSVSource)(nil)
@@ -285,7 +375,38 @@ func Decode(r io.Reader, encName string) (io.Reader, error) {
 		}
 		return transform.NewReader(r, enc.NewDecoder()), nil
 	}
-	return transform.NewReader(r, unicode.BOMOverride(transform.Nop)), nil
+
+	// transform.Reader copies every byte through a small internal buffer; for
+	// the common no-BOM (or UTF-8 BOM) case skip it and read directly.
+	br := bufio.NewReaderSize(r, 256<<10)
+	head, err := br.Peek(4)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if hasUTF16or32BOM(head) {
+		return transform.NewReader(br, unicode.BOMOverride(transform.Nop)), nil
+	}
+	if len(head) >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF {
+		_, _ = br.Discard(3)
+	}
+	return br, nil
+}
+
+func hasUTF16or32BOM(head []byte) bool {
+	if len(head) >= 4 {
+		if head[0] == 0xFF && head[1] == 0xFE && head[2] == 0x00 && head[3] == 0x00 {
+			return true
+		}
+		if head[0] == 0x00 && head[1] == 0x00 && head[2] == 0xFE && head[3] == 0xFF {
+			return true
+		}
+	}
+	if len(head) >= 2 {
+		if (head[0] == 0xFF && head[1] == 0xFE) || (head[0] == 0xFE && head[1] == 0xFF) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveEncoding(name string) (encoding.Encoding, error) {
