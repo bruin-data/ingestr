@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -85,7 +86,12 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 	}
 	dataStart := skip + headerReader.InputOffset()
 
-	workers := min(runtime.GOMAXPROCS(0), 8)
+	workers := min(runtime.GOMAXPROCS(0), 16)
+	if v := os.Getenv("INGESTR_CSV_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			workers = n
+		}
+	}
 	results := make(chan source.RecordBatchResult, 8)
 	jobs := make(chan segmentJob, workers)
 	pending := make(chan chan []source.RecordBatchResult, workers)
@@ -280,7 +286,7 @@ func newSegmentParser(headers []string, opts source.ReadOptions, batchSize int) 
 	p := &segmentParser{
 		opts:      opts,
 		batchSize: batchSize,
-		builder:   newBatchBuilder(headers, opts.ExcludeColumns),
+		builder:   newBatchBuilder(headers, opts.ExcludeColumns, opts.Schema),
 		incIdx:    headerIndexes(headers, opts.IncrementalKey),
 	}
 	if opts.IntervalStart != nil {
