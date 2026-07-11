@@ -42,6 +42,14 @@ func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (st
 	return "", nil
 }
 
+type mockPredicateDestination struct {
+	mockDestination
+}
+
+func (m *mockPredicateDestination) SupportsIncrementalPredicate() bool {
+	return true
+}
+
 type mockSchemaEvolutionDestination struct {
 	mockDestination
 }
@@ -90,6 +98,21 @@ func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resume cursors") {
 		t.Fatalf("expected resume cursor error, got %v", err)
+	}
+}
+
+func TestValidateIncrementalPredicate(t *testing.T) {
+	cfg := &config.IngestConfig{IncrementalPredicate: "t.event_date >= DATE '2026-01-01'"}
+	supported := &mockPredicateDestination{mockDestination: mockDestination{scheme: "bigquery"}}
+
+	if err := validateIncrementalPredicate(cfg, supported, config.StrategyMerge); err != nil {
+		t.Fatalf("expected merge predicate to be accepted, got %v", err)
+	}
+	if err := validateIncrementalPredicate(cfg, supported, config.StrategyAppend); err == nil {
+		t.Fatal("expected non-merge strategy to be rejected")
+	}
+	if err := validateIncrementalPredicate(cfg, &mockDestination{scheme: "mock"}, config.StrategyMerge); err == nil {
+		t.Fatal("expected unsupported destination to be rejected")
 	}
 }
 

@@ -154,6 +154,23 @@ The behavior is the same if there were new rows in the source table, they would 
 > [!CAUTION]
 > For the cases where there's a primary key match, the `merge` strategy will **update** the existing rows in the destination table with the new values from the source table. Use with caution, as it can lead to data loss if not used properly, as well as data processing charges if your data warehouse charges for updates.
 
+### Limiting the destination scan
+
+On BigQuery, `--incremental-predicate` appends a destination-specific SQL condition to the `MERGE` join. The destination table is aliased as `t` and the staging query as `s`. This can prune old partitions that cannot contain matching rows:
+
+```bash
+ingestr ingest \
+    --source-uri 'duckdb:///tmp/source.duckdb' \
+    --source-table 'updates' \
+    --dest-uri 'bigquery://my-project/analytics' \
+    --dest-table 'events' \
+    --incremental-strategy merge \
+    --primary-key id \
+    --incremental-predicate "t.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+```
+
+The predicate does not filter source rows. It only limits which destination rows can match them. Use a predicate only when every destination row that may match the incoming primary keys is inside the selected range; otherwise, the merge can insert a duplicate instead of updating the older row.
+
 ## Delete+Insert
 Delete+Insert will delete the existing rows in the destination table that match the `incremental_key` and then insert the new rows from the source table. By default, it will delete and insert all the rows. If you'd like to use it as an incremental strategy, you should provide an `incremental_key`.
 

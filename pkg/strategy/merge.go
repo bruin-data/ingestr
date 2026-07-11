@@ -61,14 +61,15 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 // mergeStagingInto merges the staging table into the target table by primary
 // key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
 // highest value of that key (latest wins) instead of an arbitrary one.
-func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey string) error {
+func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate string) error {
 	return dest.MergeTable(ctx, destination.MergeOptions{
-		StagingTable:   stagingTable,
-		TargetTable:    targetTable,
-		PrimaryKeys:    primaryKeys,
-		Columns:        destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
-		IncrementalKey: mergeIncrementalKeyForSchema(tableSchema, incrementalKey),
-		Schema:         tableSchema,
+		StagingTable:         stagingTable,
+		TargetTable:          targetTable,
+		PrimaryKeys:          primaryKeys,
+		Columns:              destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
+		IncrementalKey:       mergeIncrementalKeyForSchema(tableSchema, incrementalKey),
+		IncrementalPredicate: incrementalPredicate,
+		Schema:               tableSchema,
 	})
 }
 
@@ -220,7 +221,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
 	config.Debug("[MERGE] Executing merge operation")
-	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey); err != nil {
+	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 
@@ -372,7 +373,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				return
 			}
 
-			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, ""); err != nil {
+			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", ""); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}

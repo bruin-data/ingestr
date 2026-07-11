@@ -53,6 +53,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INCREMENTAL_KEY", "INGESTR_INCREMENTAL_KEY"),
 			},
 			&cli.StringFlag{
+				Name:    "incremental-predicate",
+				Usage:   "Additional destination-specific SQL predicate appended to the merge join condition",
+				Sources: cli.EnvVars("INCREMENTAL_PREDICATE", "INGESTR_INCREMENTAL_PREDICATE"),
+			},
+			&cli.StringFlag{
 				Name:    "incremental-strategy",
 				Usage:   "The incremental strategy to use (replace, truncate+insert, append, delete+insert, merge, scd2, none)",
 				Value:   "replace",
@@ -265,6 +270,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.SourceTable = c.String("source-table")
 	cfg.DestTable = c.String("dest-table")
 	cfg.IncrementalKey = c.String("incremental-key")
+	cfg.IncrementalPredicate = c.String("incremental-predicate")
 	cfg.IncrementalStrategy = config.IncrementalStrategy(c.String("incremental-strategy"))
 	cfg.IncrementalStrategyExplicit = c.IsSet("incremental-strategy")
 	cfg.PrimaryKeys = c.StringSlice("primary-key")

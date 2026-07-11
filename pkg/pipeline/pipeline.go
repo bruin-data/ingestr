@@ -187,6 +187,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := validateExtractPartitionStrategy(&preFetchConfig, preFetchStrategy); err != nil {
 		return err
 	}
+	if err := validateIncrementalPredicate(p.config, dest, preFetchStrategy); err != nil {
+		return err
+	}
 	display.PrintSummary(&preFetchConfig)
 
 	if shouldWarnCDCStrategy(p.config, preFetchStrategy) {
@@ -993,6 +996,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		for i := range tables {
 			tables[i].Schema = addLoadTimestampColumn(tables[i].Schema)
 		}
+	}
+
+	// A single predicate cannot apply across heterogeneous table schemas.
+	if strings.TrimSpace(p.config.IncrementalPredicate) != "" {
+		return fmt.Errorf("incremental-predicate is not supported in multi-table mode")
 	}
 
 	resolvedStrategy := p.config.IncrementalStrategy
@@ -1844,6 +1852,19 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 	}
 	if isChangeTrackingSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
 		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
+	}
+	return nil
+}
+
+func validateIncrementalPredicate(cfg *config.IngestConfig, dest destination.Destination, resolvedStrategy config.IncrementalStrategy) error {
+	if strings.TrimSpace(cfg.IncrementalPredicate) == "" {
+		return nil
+	}
+	if resolvedStrategy != config.StrategyMerge {
+		return fmt.Errorf("incremental-predicate can only be used with the merge incremental strategy, but the resolved strategy is %q", resolvedStrategy)
+	}
+	if sup, ok := dest.(destination.IncrementalPredicateSupport); !ok || !sup.SupportsIncrementalPredicate() {
+		return fmt.Errorf("destination scheme %q does not support --incremental-predicate", dest.GetScheme())
 	}
 	return nil
 }

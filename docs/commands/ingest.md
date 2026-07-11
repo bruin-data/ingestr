@@ -23,6 +23,7 @@ ingestr ingest \
 
 - `--dest-table TEXT`: Designates the destination table to save the data. If not specified, defaults to the value of `--source-table`.
 - `--incremental-key TEXT`: Identifies the key used for incremental data strategies. Defaults to `None`.
+- `--incremental-predicate TEXT`: Appends a destination-specific SQL predicate to the `merge` join condition. Currently only supported for BigQuery destinations with single-table, non-full-refresh merges. Use `t` for the destination and `s` for staging, for example `t.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)`. Use only when every matching destination row is guaranteed to satisfy the predicate; an incorrect predicate can insert duplicates instead of updating existing rows.
 - `--incremental-strategy TEXT`: Defines the strategy for incremental updates. Options include `replace`, `append`, `delete+insert`, or `merge`. The default strategy is `replace`.
 - `--interval-start`: Sets the start of the interval for the incremental key. Defaults to `None`.
 - `--interval-end`: Sets the end of the interval for the incremental key. Defaults to `None`.

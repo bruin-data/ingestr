@@ -47,12 +47,13 @@ type Transaction interface {
 
 // MergeOptions contains parameters for merge operations.
 type MergeOptions struct {
-	StagingTable   string
-	TargetTable    string
-	PrimaryKeys    []string
-	Columns        []string
-	IncrementalKey string
-	Schema         *schema.TableSchema
+	StagingTable         string
+	TargetTable          string
+	PrimaryKeys          []string
+	Columns              []string
+	IncrementalKey       string
+	IncrementalPredicate string
+	Schema               *schema.TableSchema
 }
 
 // DeleteInsertOptions contains parameters for delete+insert operations.
@@ -117,6 +118,13 @@ type Destination interface {
 	// SupportsAtomicSwap returns true if the destination supports atomic table swaps.
 	// If false, the replace strategy will skip staging and write directly to the target.
 	SupportsAtomicSwap() bool
+}
+
+// IncrementalPredicateSupport is implemented by destinations whose MergeTable
+// honors MergeOptions.IncrementalPredicate; others silently ignore it, so the
+// pipeline rejects the flag for them.
+type IncrementalPredicateSupport interface {
+	SupportsIncrementalPredicate() bool
 }
 
 // TableWriteConfig contains per-table write configuration for multi-table writes.
