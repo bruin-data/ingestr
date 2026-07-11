@@ -178,7 +178,7 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			startTime = &t
 		}
 
-		builder := newBatchBuilder(headers, opts.ExcludeColumns)
+		builder := newBatchBuilder(headers, opts.ExcludeColumns, opts.Schema)
 		defer builder.rb.Release()
 		incIdx := headerIndexes(headers, incrementalKey)
 
@@ -259,23 +259,32 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 	return results, nil
 }
 
-// batchBuilder builds record batches of Unknown-typed columns (one per CSV
-// header) directly from CSV records, bypassing per-row maps. Values are stored
-// JSON-encoded, matching what arrowconv.AppendUnknownValue produces, so schema
-// inference and downstream casting behave identically.
+// batchBuilder builds record batches directly from CSV records, bypassing
+// per-row maps. In the default (unknown) mode every column is Unknown-typed
+// with JSON-encoded storage, matching what arrowconv.AppendUnknownValue
+// produces, so schema inference and downstream casting behave identically.
+// When the caller already knows the schema (--columns with inference off),
+// typed mode parses values straight into typed builders with the same
+// arrowconv.AppendValue semantics the downstream caster would apply, skipping
+// the JSON encode/decode round-trip entirely.
 type batchBuilder struct {
 	schema *arrow.Schema
 	rb     *array.RecordBuilder
 	// srcIdx[i] contains the CSV field indexes feeding output column i.
 	srcIdx [][]int
+	typed  bool
 	buf    []byte
 	rows   int
 }
 
-func newBatchBuilder(headers []string, excludeColumns []string) *batchBuilder {
+func newBatchBuilder(headers []string, excludeColumns []string, tableSchema *schema.TableSchema) *batchBuilder {
 	exclude := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
 		exclude[strings.ToLower(col)] = true
+	}
+
+	if tableSchema != nil && len(tableSchema.Columns) > 0 {
+		return newTypedBatchBuilder(headers, exclude, tableSchema)
 	}
 
 	fields := make([]arrow.Field, 0, len(headers))
@@ -302,7 +311,52 @@ func newBatchBuilder(headers []string, excludeColumns []string) *batchBuilder {
 	}
 }
 
+// newTypedBatchBuilder emits batches shaped by the announced schema: one
+// column per schema column (CSV headers matched case-insensitively, duplicate
+// headers resolved to the last non-empty value, columns missing from the CSV
+// all-null, CSV columns absent from the schema dropped) — the same shape the
+// downstream TypeCaster would otherwise produce from Unknown columns.
+func newTypedBatchBuilder(headers []string, exclude map[string]bool, tableSchema *schema.TableSchema) *batchBuilder {
+	headerIdx := make(map[string][]int, len(headers))
+	for i, h := range headers {
+		key := strings.ToLower(h)
+		headerIdx[key] = append(headerIdx[key], i)
+	}
+
+	fields := make([]arrow.Field, 0, len(tableSchema.Columns))
+	srcIdx := make([][]int, 0, len(tableSchema.Columns))
+	for _, col := range tableSchema.Columns {
+		if exclude[strings.ToLower(col.Name)] {
+			continue
+		}
+		fields = append(fields, arrow.Field{Name: col.Name, Type: schema.DataTypeToArrowType(col), Nullable: col.Nullable})
+		srcIdx = append(srcIdx, headerIdx[strings.ToLower(col.Name)])
+	}
+
+	arrowSchema := arrow.NewSchema(fields, nil)
+	return &batchBuilder{
+		schema: arrowSchema,
+		rb:     array.NewRecordBuilder(memory.NewGoAllocator(), arrowSchema),
+		srcIdx: srcIdx,
+		typed:  true,
+	}
+}
+
 func (b *batchBuilder) appendRow(record []string) {
+	if b.typed {
+		for i, sources := range b.srcIdx {
+			fb := b.rb.Field(i)
+			value, ok := lastNonEmptyValue(record, sources)
+			if !ok {
+				fb.AppendNull()
+				continue
+			}
+			arrowconv.AppendValue(fb, value)
+		}
+		b.rows++
+		return
+	}
+
 	for i, sources := range b.srcIdx {
 		sb := b.rb.Field(i).(*array.ExtensionBuilder).StorageBuilder().(*array.StringBuilder)
 		value, ok := lastNonEmptyValue(record, sources)
