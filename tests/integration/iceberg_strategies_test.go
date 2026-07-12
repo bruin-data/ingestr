@@ -12,7 +12,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	icebergcatalog "github.com/apache/iceberg-go/catalog"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	icebergdest "github.com/bruin-data/ingestr/pkg/destination/iceberg"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -246,6 +249,57 @@ func TestIcebergConformance_TruncateInsert(t *testing.T) {
 	rows := readIcebergRows(t, ctx, destURI, destTable)
 	assert.Len(t, rows, replaceFixtureRows, "old rows must be gone, not appended")
 	assert.Equal(t, "juliet", icebergNameByID(t, rows, 10))
+}
+
+func TestIcebergTruncateInsertPipelineSoftensRemovedRequiredColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	destURI := icebergConformanceDestURI(t)
+	destTable := icebergConformanceTable()
+	dest := icebergdest.NewDestination()
+	require.NoError(t, dest.Connect(ctx, destURI))
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: destTable,
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "legacy", DataType: schema.TypeString, Nullable: false},
+		}},
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	cfg := &config.IngestConfig{
+		SourceURI:           jsonlURI(t, "testdata/conformance_append_initial.jsonl"),
+		SourceTable:         "truncate_soft_remove",
+		DestURI:             destURI,
+		DestTable:           destTable,
+		IncrementalStrategy: config.StrategyTruncateInsert,
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	rows := readIcebergRows(t, ctx, destURI, destTable)
+	require.NotEmpty(t, rows)
+	for _, row := range rows {
+		require.Contains(t, row, "legacy")
+		require.Nil(t, row["legacy"])
+	}
+	verify := icebergdest.NewDestination()
+	require.NoError(t, verify.Connect(ctx, destURI))
+	loaded, err := verify.GetTableSchema(ctx, destTable)
+	require.NoError(t, err)
+	require.NoError(t, verify.Close(ctx))
+	var legacyColumn *schema.Column
+	for i := range loaded.Columns {
+		if loaded.Columns[i].Name == "legacy" {
+			legacyColumn = &loaded.Columns[i]
+			break
+		}
+	}
+	require.NotNil(t, legacyColumn)
+	require.True(t, legacyColumn.Nullable)
 }
 
 func TestIcebergConformance_TruncateInsert_Dedup(t *testing.T) {

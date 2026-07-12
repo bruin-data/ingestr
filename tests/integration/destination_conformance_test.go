@@ -22,7 +22,10 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/uri"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/snowflake"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
 	"github.com/bruin-data/ingestr/pkg/strategy"
@@ -76,6 +79,70 @@ type destCase struct {
 	replaceDedupCapable  bool
 	validateNonSQL       func(t *testing.T, destURI, destTable string)
 	validateAppendNonSQL func(t *testing.T, destURI, destTable string)
+}
+
+func TestRequiredColumnDDLConformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	for _, tc := range destinationCases() {
+		if tc.name != "postgres" && tc.name != "mysql" && tc.name != "duckdb" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			destURI, table, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+			dest, err := uri.DefaultRegistry.GetDestination(destURI)
+			require.NoError(t, err)
+			require.NoError(t, dest.Connect(ctx, destURI))
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table: table,
+				Schema: &schema.TableSchema{Columns: []schema.Column{
+					{Name: "required_value", DataType: schema.TypeInt64, Nullable: false},
+					{Name: "optional_value", DataType: schema.TypeString, Nullable: true},
+				}},
+				DropFirst: true,
+			}))
+			if tc.name == "postgres" {
+				evolver := dest.(schemaevolution.SchemaEvolver)
+				_, err = evolver.ApplySchemaEvolution(ctx, table, &schemaevolution.SchemaComparison{
+					HasChanges: true,
+					Changes: []schemaevolution.SchemaChange{{
+						Type: schemaevolution.ChangeAddColumn, ColumnName: "added_required",
+						NewColumn: schema.Column{Name: "added_required", DataType: schema.TypeInt64, Nullable: false},
+					}},
+				})
+				require.NoError(t, err)
+			}
+			require.NoError(t, dest.Close(ctx))
+
+			db, err := tc.sqlBackend.openDB(destURI)
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			assertNullability := func(column, want string) {
+				t.Helper()
+				var got string
+				switch tc.name {
+				case "postgres":
+					schemaName, tableName := splitSchemaTable(table, "public")
+					err = db.QueryRowContext(ctx, `SELECT is_nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3`, schemaName, tableName, column).Scan(&got)
+				case "mysql":
+					err = db.QueryRowContext(ctx, `SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`, table, column).Scan(&got)
+				case "duckdb":
+					schemaName, tableName := splitSchemaTable(table, "main")
+					err = db.QueryRowContext(ctx, `SELECT is_nullable FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_name=?`, schemaName, tableName, column).Scan(&got)
+				}
+				require.NoError(t, err)
+				assert.Equal(t, want, strings.ToUpper(got))
+			}
+			assertNullability("required_value", "NO")
+			assertNullability("optional_value", "YES")
+			if tc.name == "postgres" {
+				assertNullability("added_required", "NO")
+			}
+		})
+	}
 }
 
 func destinationCases() []destCase {

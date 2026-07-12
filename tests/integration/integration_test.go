@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
+	_ "github.com/bruin-data/ingestr/pkg/source/jsonl"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
