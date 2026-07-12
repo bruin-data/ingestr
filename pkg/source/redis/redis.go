@@ -281,7 +281,9 @@ func (s *RedisSource) read(ctx context.Context, stream string, opts source.ReadO
 			}
 			res := source.RecordBatchResult{Batch: record}
 			if opts.Streaming {
-				res.CommitToken = redisCommitToken{Stream: stream, MaxID: maxID}
+				token := redisCommitToken{Stream: stream, MaxID: maxID}
+				res.CommitToken = token
+				res.DurableCommitID = token
 			}
 			results <- res
 			batch = batch[:0]

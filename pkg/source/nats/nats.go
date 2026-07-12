@@ -382,7 +382,9 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 			}
 			res := source.RecordBatchResult{Batch: record}
 			if opts.Streaming {
-				res.CommitToken = natsCommitToken{MaxSeq: maxSeq}
+				token := natsCommitToken{MaxSeq: maxSeq}
+				res.CommitToken = token
+				res.DurableCommitID = token
 			}
 			results <- res
 			for _, msg := range ackNow {

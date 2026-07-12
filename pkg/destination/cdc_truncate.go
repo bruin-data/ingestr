@@ -200,6 +200,9 @@ func applyCDCInputTruncate(ctx context.Context, dest Destination, opts WriteOpti
 	if opts.StagingTable {
 		return ApplyTruncate(ctx, dest, opts.Table)
 	}
+	if opts.CDCExpectedIncarnation != "" {
+		return ApplyCDCTruncateIfIncarnation(ctx, dest, opts.Table, opts.CDCExpectedIncarnation)
+	}
 	return ApplyCDCTruncate(ctx, dest, opts.Table)
 }
 
@@ -222,4 +225,18 @@ func ApplyCDCTruncate(ctx context.Context, dest Destination, table string) error
 		return nil
 	}
 	return ApplyTruncate(ctx, dest, table)
+}
+
+func ApplyCDCTruncateIfIncarnation(ctx context.Context, dest Destination, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return fmt.Errorf("cannot conditionally truncate %s without a bound destination incarnation", table)
+	}
+	truncater, ok := dest.(CDCConditionalTruncater)
+	if !ok {
+		return fmt.Errorf("destination scheme %q cannot conditionally truncate managed CDC targets", dest.GetScheme())
+	}
+	if err := truncater.TruncateCDCTableIfIncarnation(ctx, table, expectedIncarnation); err != nil {
+		return fmt.Errorf("failed to conditionally truncate %s: %w", table, err)
+	}
+	return nil
 }

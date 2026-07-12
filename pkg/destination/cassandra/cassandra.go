@@ -425,7 +425,7 @@ func (d *CassandraDestination) mergeCDC(ctx context.Context, targetRef, selectSQ
 			entry.latestLSN = lsn
 			entry.latestDeleted = deleted
 		}
-		if !deleted && (entry.active == nil || lsn > entry.activeLSN) {
+		if !deleted && (entry.active == nil || destination.CompareCDCPositions(lsn, entry.activeLSN) > 0) {
 			entry.active = row
 			entry.activeLSN = lsn
 		}

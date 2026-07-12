@@ -540,7 +540,7 @@ func (d *DynamoDBDestination) mergeCDC(ctx context.Context, opts destination.Mer
 				entry.latestLSN = lsn
 				entry.latestDeleted = deleted
 			}
-			if !deleted && (entry.active == nil || lsn > entry.activeLSN) {
+			if !deleted && (entry.active == nil || destination.CompareCDCPositions(lsn, entry.activeLSN) > 0) {
 				entry.active = item
 				entry.activeLSN = lsn
 			}

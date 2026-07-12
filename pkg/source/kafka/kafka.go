@@ -265,7 +265,7 @@ func (s *KafkaSource) readStreaming(ctx context.Context, topic string, opts sour
 			for p, m := range latest {
 				token[p] = kafkago.Message{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}
 			}
-			results <- source.RecordBatchResult{Batch: record, CommitToken: token}
+			results <- source.RecordBatchResult{Batch: record, CommitToken: token, DurableCommitID: token}
 			batch = batch[:0]
 			return true
 		}
