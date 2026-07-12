@@ -29,6 +29,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/strategy"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"golang.org/x/term"
 )
@@ -88,6 +89,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := src.Connect(ctx, p.config.SourceURI); err != nil {
 		return fmt.Errorf("failed to connect to source: %w", err)
 	}
+	if isPostgresCDCSource(p.config.SourceURI) && p.config.SourceTable != "" {
+		p.config.SourceTable = canonicalPostgresCDCSourceTable(p.config.SourceTable)
+	}
 	defer func() {
 		closeCtx, cancel := resourceCloseContext(cleanupBaseCtx)
 		defer cancel()
@@ -143,9 +147,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}()
 
 	destinationTarget := ""
+	destinationIdentity := ""
 	if isPostgresCDCSource(p.config.SourceURI) {
 		destinationTarget = managedCDCDestinationTarget(p.config, dest)
-		destinationIdentity, err := managedCDCDestinationIdentity(ctx, dest, destinationTarget)
+		destinationIdentity, err = managedCDCDestinationIdentity(ctx, dest, destinationTarget)
 		if err != nil {
 			return fmt.Errorf("failed to resolve PostgreSQL CDC destination identity: %w", err)
 		}
@@ -158,7 +163,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	// For CDC sources, compute a destination-aware slot suffix
 	if isCDCSource(p.config.SourceURI) {
-		p.config.CDCSlotSuffix = cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI) + "\x00" + p.cdcConnectorID)
+		p.config.CDCSlotSuffix = cdcSlotSuffix(cdcSlotIdentity(p.config.DestURI, destinationIdentity, p.cdcConnectorID))
 		p.config.CDCLegacySlotSuffix = legacyCDCSlotSuffix(p.config.DestURI)
 		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
 	}
@@ -374,9 +379,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	var preStagedForJob destination.PreStagedData
 
 	if table.HasKnownSchema() {
-		tableSchema, err = table.GetSchema(ctx)
+		tableSchema, err = getAndValidateKnownSourceSchema(ctx, table)
 		if err != nil {
-			return fmt.Errorf("failed to get schema: %w", err)
+			return err
 		}
 	} else if p.config.NoInference {
 		tableSchema, err = p.schemaFromColumnOverrides(table)
@@ -408,6 +413,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		} else {
 			config.Debug("[PIPELINE] Inferred schema is nil")
 			if fallback, err := table.GetSchema(ctx); err == nil && fallback != nil && len(fallback.Columns) > 0 {
+				if err := validateKnownSourceSchema(table.Name(), fallback); err != nil {
+					return err
+				}
 				tableSchema = fallback
 				config.Debug("[PIPELINE] Using source-provided schema (%d columns) for empty extract", len(fallback.Columns))
 			} else if synthetic, err := schemainfer.TableSchemaFromColumnOverrides(p.config.Columns, table.Name(), p.config.SchemaNaming); err != nil {
@@ -546,17 +554,16 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	// re-appends them from this snapshot so staging keeps carrying them.
 	fullSchema := destSchema
 
-	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
+	// Schema contract handling applies to replace as well: replacement changes
+	// how the table is published, not whether freeze/discard rules are enforced.
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
-	if resolvedStrategy != config.StrategyReplace {
-		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema, resolvedStrategy)
-		if err != nil {
-			return fmt.Errorf("schema evolution failed: %w", err)
-		}
-		if evolutionPlan != nil && evolutionPlan.FinalSchema != nil {
-			destSchema = evolutionPlan.FinalSchema
-		}
+	evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema, resolvedStrategy)
+	if err != nil {
+		return fmt.Errorf("schema evolution failed: %w", err)
+	}
+	if evolutionPlan != nil && evolutionPlan.FinalSchema != nil {
+		destSchema = evolutionPlan.FinalSchema
 	}
 	if p.config.NoLoadTimestamp {
 		destSchema = removeLoadTimestampColumn(destSchema)
@@ -566,9 +573,15 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		fullSchema = addLoadTimestampColumn(fullSchema)
 	}
 
-	// Staging mirrors the destination schema, with staging-only CDC columns retained.
-	ingestSchema := destination.StagingIngestSchema(fullSchema, destSchema)
-	ingestSchema = destination.PreserveSourceCDCColumnTypes(ingestSchema, fullSchema)
+	// Replace publishes its write table, so staging-only CDC columns must be
+	// removed before buffering/pre-staging as well as at the strategy boundary.
+	var ingestSchema *schema.TableSchema
+	if resolvedStrategy == config.StrategyReplace {
+		ingestSchema = destination.DestinationTableSchema(destSchema)
+	} else {
+		ingestSchema = destination.StagingIngestSchema(fullSchema, destSchema)
+		ingestSchema = destination.PreserveSourceCDCColumnTypes(ingestSchema, fullSchema)
+	}
 	if strategyUsesLogicalPrimaryKeys(resolvedStrategy) {
 		ingestSchema = preserveLogicalPrimaryKeys(ingestSchema, fullSchema)
 	}
@@ -1249,7 +1262,6 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			return nil
 		}
 	}
-
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	namer, _ := p.dest.(destination.MultiTableNamer)
@@ -1401,22 +1413,22 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			}
 		}
 	}
+	if err := validateKnownSourceTables(tables); err != nil {
+		return err
+	}
 
-	// Schema contract handling: build a per-table evolution plan so destination
-	// tables gain columns added at the source (skip for replace, which drops and
-	// recreates). Plans are built sequentially because evolveSchemaIfNeeded
-	// keeps comparison state on the pipeline; strategies apply them per table.
-	var evolutionPlans map[string]*schemaevolution.EvolutionPlan
-	if resolvedStrategy != config.StrategyReplace {
-		evolutionPlans = make(map[string]*schemaevolution.EvolutionPlan)
-		for _, table := range tables {
-			plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema, resolvedStrategy)
-			if err != nil {
-				return fmt.Errorf("schema evolution failed for table %s: %w", table.Name, err)
-			}
-			if plan != nil {
-				evolutionPlans[table.Name] = plan
-			}
+	// Schema contract handling applies to replace as well: replacement changes
+	// how each table is published, not whether freeze/discard rules are enforced.
+	// Plans are built sequentially because evolveSchemaIfNeeded keeps comparison
+	// state on the pipeline; strategies apply them per table.
+	evolutionPlans := make(map[string]*schemaevolution.EvolutionPlan)
+	for _, table := range tables {
+		plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema, resolvedStrategy)
+		if err != nil {
+			return fmt.Errorf("schema evolution failed for table %s: %w", table.Name, err)
+		}
+		if plan != nil {
+			evolutionPlans[table.Name] = plan
 		}
 	}
 	var whitespaceTrimmer *transformer.WhitespaceTrimmer
@@ -1548,6 +1560,33 @@ func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, 
 	return destinations, nil
 }
 
+func getAndValidateKnownSourceSchema(ctx context.Context, table source.SourceTable) (*schema.TableSchema, error) {
+	tableSchema, err := table.GetSchema(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schema for source table %q: %w", table.Name(), err)
+	}
+	if err := validateKnownSourceSchema(table.Name(), tableSchema); err != nil {
+		return nil, err
+	}
+	return tableSchema, nil
+}
+
+func validateKnownSourceSchema(tableName string, tableSchema *schema.TableSchema) error {
+	if err := schemainfer.ValidateSchema(tableSchema); err != nil {
+		return fmt.Errorf("invalid known schema for source table %q: %w", tableName, err)
+	}
+	return nil
+}
+
+func validateKnownSourceTables(tables []source.SourceTableInfo) error {
+	for _, table := range tables {
+		if err := validateKnownSourceSchema(table.Name, table.Schema); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // evolveSchemaIfNeeded inspects the destination's current schema and builds an
 // EvolutionPlan describing how it should change to accommodate sourceSchema.
 func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, sourceSchema *schema.TableSchema, strategy config.IncrementalStrategy) (*schemaevolution.EvolutionPlan, error) {
@@ -1588,7 +1627,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 
 	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
-	opts := &schemaevolution.CompareOptions{Overrides: overrides}
+	opts := &schemaevolution.CompareOptions{Overrides: overrides, PrimaryKeys: sourceSchema.PrimaryKeys}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
@@ -1596,8 +1635,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if !comparison.HasChanges {
 		config.Debug("[SCHEMA EVOLUTION] No schema changes detected")
 		return &schemaevolution.EvolutionPlan{
-			Table:       destTable,
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
+			Table:               destTable,
+			TransformComparison: comparison,
+			FinalSchema:         schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
 		}, nil
 	}
 
@@ -1625,8 +1665,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		}
 		p.filteredSchemaComparison = comparison
 		return &schemaevolution.EvolutionPlan{
-			Table:       destTable,
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
+			Table:               destTable,
+			TransformComparison: comparison,
+			FinalSchema:         schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
 		}, nil
 
 	case schemaevolution.ContractDiscardRow:
@@ -1651,6 +1692,23 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 			// enabling correct INSERT INTO ... SELECT behavior on strict DBs like Postgres
 			for _, change := range comparison.Changes {
 				if change.Type == schemaevolution.ChangeWidenType && change.OldColumn != nil {
+					if len(change.ColumnPath) > 1 {
+						topLevel := change.ColumnPath[0]
+						for _, destCol := range comparisonDestSchema.Columns {
+							if !strings.EqualFold(destCol.Name, topLevel) {
+								continue
+							}
+							for i := range sourceSchema.Columns {
+								if strings.EqualFold(sourceSchema.Columns[i].Name, topLevel) {
+									sourceSchema.Columns[i] = destCol
+									sourceSchema.Columns[i].Nullable = true
+									break
+								}
+							}
+							break
+						}
+						continue
+					}
 					// Find column in sourceSchema and revert it to OldColumn (Dest Type)
 					for i, col := range sourceSchema.Columns {
 						if col.Name == change.ColumnName {
@@ -1670,8 +1728,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 				HasChanges: false,
 			}
 			return &schemaevolution.EvolutionPlan{
-				Table:       destTable,
-				FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
+				Table:               destTable,
+				TransformComparison: comparison,
+				FinalSchema:         schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
 			}, nil
 		}
 		// For migration, only apply allowed changes (new columns) for discard_value mode
@@ -1693,8 +1752,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if !ok {
 		config.Debug("[SCHEMA EVOLUTION] Destination %s does not support schema evolution, skipping", p.dest.GetScheme())
 		return &schemaevolution.EvolutionPlan{
-			Table:       destTable,
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
+			Table:               destTable,
+			TransformComparison: comparison,
+			FinalSchema:         schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
 		}, nil
 	}
 
@@ -1704,9 +1764,10 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	applicable := schemaevolution.ApplicableComparison(p.filteredSchemaComparison, evolver.SupportsColumnTypeChanges())
 
 	plan := &schemaevolution.EvolutionPlan{
-		Table:       destTable,
-		Comparison:  p.filteredSchemaComparison,
-		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, applicable),
+		Table:               destTable,
+		Comparison:          p.filteredSchemaComparison,
+		TransformComparison: comparison,
+		FinalSchema:         schemaevolution.BuildFinalSchema(comparisonDestSchema, applicable),
 	}
 	config.Debug("[SCHEMA EVOLUTION] Built plan with %d changes (deferred apply)", len(p.filteredSchemaComparison.Changes))
 	return plan, nil
@@ -2265,7 +2326,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	if cfg.FullRefresh {
 		s = config.StrategyReplace
 	}
-	return rewriteReplaceForPostgres(s, cfg.DestURI)
+	return rewriteReplaceForPostgres(s, cfg.DestURI, isPostgresCDCSource(cfg.SourceURI) && cfg.FullRefresh)
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {
@@ -2325,8 +2386,11 @@ func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy
 // the destination is Postgres. Replace drops and recreates the table, which
 // breaks dependent views, grants, and foreign keys; truncate+insert preserves
 // the table definition.
-func rewriteReplaceForPostgres(strat config.IncrementalStrategy, destURI string) config.IncrementalStrategy {
+func rewriteReplaceForPostgres(strat config.IncrementalStrategy, destURI string, requireFencedReplace bool) config.IncrementalStrategy {
 	if strat != config.StrategyReplace {
+		return strat
+	}
+	if requireFencedReplace {
 		return strat
 	}
 	scheme, err := uri.ExtractScheme(destURI)
@@ -2357,12 +2421,20 @@ func isPostgresCDCSource(rawURI string) bool {
 	return scheme == "postgres+cdc" || scheme == "postgresql+cdc"
 }
 
+func canonicalPostgresCDCSourceTable(table string) string {
+	table = strings.TrimSpace(table)
+	if table == "" || len(tablename.SplitRaw(table)) != 1 {
+		return table
+	}
+	return "public." + table
+}
+
 func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) string {
 	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
 		if stateID := parsed.Query().Get("state_id"); stateID != "" {
 			seed := "explicit:" + stateID + "\x00" + identity.Database
 			if destinationIdentity != "" {
-				seed += "\x00" + destinationIdentity
+				seed += "\x00" + cdcDestinationLocation(cfg.DestURI, destinationIdentity)
 			}
 			sum := sha256.Sum256([]byte(seed))
 			return fmt.Sprintf("%x", sum[:8])
@@ -2370,18 +2442,52 @@ func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.Conne
 	}
 
 	destinationTarget := cfg.DestTable
+	destinationLocation := cdcDestinationLocation(cfg.DestURI, destinationIdentity)
+	sourceTable := cfg.SourceTable
+	if isPostgresCDCSource(cfg.SourceURI) {
+		sourceTable = canonicalPostgresCDCSourceTable(sourceTable)
+	}
 	if destinationIdentity != "" {
 		destinationTarget = destinationIdentity
 	}
 	identityParts := []string{
 		identity.Connector,
-		canonicalCDCStateURI(cfg.DestURI),
-		cfg.SourceTable,
+		destinationLocation,
+		sourceTable,
 		destinationTarget,
 	}
 	connectorIdentity := strings.Join(identityParts, "\x00")
 	sum := sha256.Sum256([]byte(connectorIdentity))
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+func cdcSlotIdentity(rawDestURI, destinationIdentity, connectorID string) string {
+	return cdcDestinationLocation(rawDestURI, destinationIdentity) + "\x00" + connectorID
+}
+
+func cdcDestinationLocation(rawDestURI, destinationIdentity string) string {
+	if destinationIdentity == "" {
+		return canonicalCDCStateURI(rawDestURI)
+	}
+	parsed, err := url.Parse(rawDestURI)
+	if err == nil && strings.HasPrefix(strings.ToLower(parsed.Scheme), "iceberg") {
+		return "canonical-destination:" + destinationIdentity
+	}
+	return canonicalDestinationRoutingURI(rawDestURI) + "\x00canonical-destination:" + destinationIdentity
+}
+
+func canonicalDestinationRoutingURI(rawURI string) string {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return rawURI
+	}
+	normalizePostgresURI(parsed)
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
 }
 
 func managedCDCDestinationIdentity(ctx context.Context, dest destination.Destination, target string) (string, error) {

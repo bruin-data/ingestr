@@ -894,6 +894,10 @@ func (m *mockManagedCDCStateDestination) TruncateTable(_ context.Context, _ stri
 	return nil
 }
 
+func (m *mockManagedCDCStateDestination) TruncateCDCTableIfIncarnation(context.Context, string, string) error {
+	return nil
+}
+
 func (m *mockManagedCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
 	return nil, nil
 }
@@ -925,6 +929,75 @@ func (m *mockManagedCDCStateDestination) DeleteCDCStateEvents(_ context.Context,
 
 type mockSchemaEvolutionDestination struct {
 	mockDestination
+}
+
+func TestKnownSourceSchemasAreValidatedBeforeUse(t *testing.T) {
+	tests := []struct {
+		name    string
+		column  schema.Column
+		path    string
+		wantErr bool
+	}{
+		{
+			name: "top-level decimal256", path: "amount", wantErr: true,
+			column: schema.Column{Name: "amount", DataType: schema.TypeDecimal, Precision: 50, Scale: 2},
+		},
+		{
+			name: "nested decimal256", path: "payload.amount", wantErr: true,
+			column: schema.Column{Name: "payload", DataType: schema.TypeStruct, StructFields: &schema.TableSchema{Columns: []schema.Column{{
+				Name: "amount", DataType: schema.TypeDecimal, Precision: 50, Scale: 2,
+			}}}},
+		},
+		{
+			name: "decimal256 map key", path: "lookup.key", wantErr: true,
+			column: schema.Column{
+				Name: "lookup", DataType: schema.TypeMap,
+				MapKey:   &schema.Column{Name: "key", DataType: schema.TypeDecimal, Precision: 50, Scale: 2},
+				MapValue: &schema.Column{Name: "value", DataType: schema.TypeString},
+			},
+		},
+		{
+			name: "supported decimal128 precision", column: schema.Column{
+				Name: "lookup", DataType: schema.TypeMap,
+				MapKey: &schema.Column{Name: "key", DataType: schema.TypeDecimal, Precision: 38, Scale: 2},
+				MapValue: &schema.Column{Name: "value", DataType: schema.TypeStruct, StructFields: &schema.TableSchema{Columns: []schema.Column{{
+					Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 2,
+				}}}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			table := &source.DynamicSourceTable{
+				TableName: "payments", KnownSchema: true,
+				SchemaFn: func(context.Context) (*schema.TableSchema, error) {
+					return &schema.TableSchema{Columns: []schema.Column{tt.column}}, nil
+				},
+			}
+			_, err := getAndValidateKnownSourceSchema(context.Background(), table)
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, `invalid known schema for source table "payments"`)
+			require.ErrorContains(t, err, tt.path)
+			require.ErrorContains(t, err, "maximum supported precision is 38")
+		})
+	}
+}
+
+func TestKnownMultiTableSchemasAreValidated(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: "public.valid", Schema: &schema.TableSchema{Columns: []schema.Column{{
+			Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 2,
+		}}}},
+		{Name: "public.invalid", Schema: &schema.TableSchema{Columns: []schema.Column{{
+			Name: "amount", DataType: schema.TypeDecimal, Precision: 50, Scale: 2,
+		}}}},
+	}
+	err := validateKnownSourceTables(tables)
+	require.ErrorContains(t, err, `source table "public.invalid"`)
+	require.ErrorContains(t, err, "decimal precision 50")
 }
 
 func (m *mockSchemaEvolutionDestination) ApplySchemaEvolution(_ context.Context, _ string, _ *schemaevolution.SchemaComparison) ([]string, error) {
@@ -1613,6 +1686,192 @@ func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 
 	gotColumns := plan.FinalSchema.ColumnNames()
 	assertColumns(t, "columns", gotColumns, []string{"id", "age"})
+}
+
+func TestDiscardValuePlanAppliesNullabilityRelaxation(t *testing.T) {
+	destSchema := tschema("events", schema.Column{Name: "payload", DataType: schema.TypeString, Nullable: false})
+	sourceSchema := tschema("events", schema.Column{Name: "payload", DataType: schema.TypeString, Nullable: true})
+	p := &Pipeline{
+		config: &config.IngestConfig{DestTable: "events", SchemaContract: "discard_value"},
+		dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+			tableSchema: destSchema, scheme: "schema_evolver",
+		}},
+	}
+
+	plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyAppend)
+	if err != nil {
+		t.Fatalf("evolveSchemaIfNeeded() error = %v", err)
+	}
+	if plan == nil || !plan.HasChanges() {
+		t.Fatal("expected nullability evolution plan")
+	}
+	if len(plan.Comparison.Changes) != 1 || plan.Comparison.Changes[0].Type != schemaevolution.ChangeRelaxNullability {
+		t.Fatalf("unexpected comparison: %#v", plan.Comparison)
+	}
+	if !plan.FinalSchema.Columns[0].Nullable {
+		t.Fatal("final schema must accept source NULL values")
+	}
+}
+
+func TestDiscardRowPlanAppliesNullabilityRelaxation(t *testing.T) {
+	tests := []struct {
+		name   string
+		source *schema.TableSchema
+		dest   *schema.TableSchema
+		path   []string
+	}{
+		{
+			name:   "top-level",
+			source: tschema("events", schema.Column{Name: "payload", DataType: schema.TypeString, Nullable: true}),
+			dest:   tschema("events", schema.Column{Name: "payload", DataType: schema.TypeString, Nullable: false}),
+			path:   []string{"payload"},
+		},
+		{
+			name: "nested",
+			source: tschema("events", schema.Column{
+				Name: "profile", DataType: schema.TypeStruct, Nullable: true,
+				StructFields: &schema.TableSchema{Columns: []schema.Column{{Name: "name", DataType: schema.TypeString, Nullable: true}}},
+			}),
+			dest: tschema("events", schema.Column{
+				Name: "profile", DataType: schema.TypeStruct, Nullable: true,
+				StructFields: &schema.TableSchema{Columns: []schema.Column{{Name: "name", DataType: schema.TypeString, Nullable: false}}},
+			}),
+			path: []string{"profile", "name"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Pipeline{
+				config: &config.IngestConfig{DestTable: "events", SchemaContract: "discard_row"},
+				dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+					tableSchema: tt.dest, scheme: "schema_evolver",
+				}},
+			}
+			plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", tt.source, config.StrategyAppend)
+			require.NoError(t, err)
+			require.NotNil(t, plan)
+			require.Len(t, plan.Comparison.Changes, 1)
+			require.Equal(t, schemaevolution.ChangeRelaxNullability, plan.Comparison.Changes[0].Type)
+			require.Equal(t, tt.path, plan.Comparison.Changes[0].ColumnPath)
+			if len(tt.path) == 1 {
+				require.True(t, plan.FinalSchema.Columns[0].Nullable)
+			} else {
+				require.True(t, plan.FinalSchema.Columns[0].StructFields.Columns[0].Nullable)
+			}
+		})
+	}
+}
+
+func TestReplaceSchemaContractPlanningRejectsFreezeAndRetainsDiscardTransforms(t *testing.T) {
+	destinationSchema := tschema("events", schema.Column{Name: "value", DataType: schema.TypeInt64, Nullable: true})
+
+	t.Run("freeze", func(t *testing.T) {
+		p := &Pipeline{
+			config: &config.IngestConfig{DestTable: "events", SchemaContract: "freeze"},
+			dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+				tableSchema: destinationSchema, scheme: "schema_evolver",
+			}},
+		}
+		sourceSchema := tschema("events", schema.Column{Name: "value", DataType: schema.TypeString, Nullable: true})
+
+		_, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyReplace)
+		require.ErrorContains(t, err, "schema contract violation")
+	})
+
+	for _, mode := range []string{"discard_value", "discard_row"} {
+		t.Run(mode, func(t *testing.T) {
+			p := &Pipeline{
+				config: &config.IngestConfig{DestTable: "events", SchemaContract: mode},
+				dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+					tableSchema: destinationSchema, scheme: "schema_evolver",
+				}},
+			}
+			sourceSchema := tschema("events", schema.Column{Name: "value", DataType: schema.TypeString, Nullable: true})
+
+			plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyReplace)
+			require.NoError(t, err)
+			require.NotNil(t, plan)
+			require.NotNil(t, plan.TransformComparison)
+			require.True(t, plan.TransformComparison.HasChanges)
+			require.NotNil(t, plan.FinalSchema)
+			if mode == "discard_value" {
+				require.Equal(t, schema.TypeInt64, plan.FinalSchema.Columns[0].DataType)
+			}
+		})
+	}
+}
+
+func TestDiscardValuePlanAppliesNullabilityRelaxationWithOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		columns string
+	}{
+		{name: "matching override", columns: "payload:string"},
+		{name: "type-changing override", columns: "payload:bigint"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			destSchema := tschema("events", schema.Column{Name: "payload", DataType: schema.TypeString, Nullable: false})
+			sourceSchema := tschema("events", schema.Column{Name: "payload", DataType: schema.TypeString, Nullable: true})
+			p := &Pipeline{
+				config: &config.IngestConfig{DestTable: "events", SchemaContract: "discard_value", Columns: tt.columns},
+				dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+					tableSchema: destSchema, scheme: "schema_evolver",
+				}},
+			}
+
+			plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyAppend)
+			require.NoError(t, err)
+			require.NotNil(t, plan)
+			require.Len(t, plan.Comparison.Changes, 1)
+			require.Equal(t, schemaevolution.ChangeRelaxNullability, plan.Comparison.Changes[0].Type)
+			require.True(t, plan.FinalSchema.Columns[0].Nullable)
+		})
+	}
+}
+
+func TestApplyColumnOverridesDecimalValidationAndZeroScale(t *testing.T) {
+	p := &Pipeline{config: &config.IngestConfig{Columns: "amount:decimal(18)"}}
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 10, Scale: 4,
+	}}}
+	require.NoError(t, p.applyColumnOverrides(tableSchema))
+	require.Equal(t, 18, tableSchema.Columns[0].Precision)
+	require.Zero(t, tableSchema.Columns[0].Scale)
+
+	for _, columns := range []string{"amount:decimal(50,2)", "amount:decimal(10,-1)", "amount:decimal(10,11)"} {
+		p.config.Columns = columns
+		require.Error(t, p.applyColumnOverrides(tableSchema), columns)
+	}
+}
+
+func TestEvolutionPlanTypeChangesPreserveRequiredDestinationColumns(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		sourceType schema.DataType
+		destType   schema.DataType
+		columns    string
+	}{
+		{name: "automatic widening", sourceType: schema.TypeInt64, destType: schema.TypeInt32},
+		{name: "type override", sourceType: schema.TypeInt32, destType: schema.TypeInt32, columns: "value:bigint"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sourceSchema := tschema("events", schema.Column{Name: "value", DataType: tt.sourceType, Nullable: false})
+			destSchema := tschema("events", schema.Column{Name: "value", DataType: tt.destType, Nullable: false})
+			p := &Pipeline{
+				config: &config.IngestConfig{DestTable: "events", Columns: tt.columns},
+				dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+					tableSchema: destSchema, scheme: "schema_evolver",
+				}},
+			}
+
+			plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyAppend)
+			require.NoError(t, err)
+			require.NotNil(t, plan)
+			require.Len(t, plan.Comparison.Changes, 1)
+			require.False(t, plan.Comparison.Changes[0].NewColumn.Nullable)
+			require.False(t, plan.FinalSchema.Columns[0].Nullable)
+		})
+	}
 }
 
 func TestNamingConsistency(t *testing.T) {
@@ -2307,6 +2566,95 @@ func TestCDCStateConnectorID(t *testing.T) {
 	if resolvedCDCStateConnectorID(&implicitDestAlice, resolved, "") == resolvedCDCStateConnectorID(&implicitDestBob, resolved, "") {
 		t.Fatal("destination URIs with different implicit PostgreSQL databases share a connector ID")
 	}
+
+	unqualified := *base
+	unqualified.SourceTable = "orders"
+	qualified := unqualified
+	qualified.SourceTable = "public.orders"
+	require.Equal(t, "public.orders", canonicalPostgresCDCSourceTable(unqualified.SourceTable))
+	require.Equal(t,
+		resolvedCDCStateConnectorID(&unqualified, resolved, "canonical-target"),
+		resolvedCDCStateConnectorID(&qualified, resolved, "canonical-target"),
+		"equivalent PostgreSQL source-table spellings must retain connector ownership")
+	require.Equal(t,
+		cdcSlotSuffix(cdcSlotIdentity(unqualified.DestURI, "canonical-target", resolvedCDCStateConnectorID(&unqualified, resolved, "canonical-target"))),
+		cdcSlotSuffix(cdcSlotIdentity(qualified.DestURI, "canonical-target", resolvedCDCStateConnectorID(&qualified, resolved, "canonical-target"))),
+		"equivalent PostgreSQL source-table spellings must retain the automatic slot")
+}
+
+func TestPostgresManagedCDCFullRefreshKeepsFencedReplace(t *testing.T) {
+	require.Equal(t, config.StrategyReplace,
+		rewriteReplaceForPostgres(config.StrategyReplace, "postgres://localhost/app", true))
+	require.Equal(t, config.StrategyTruncateInsert,
+		rewriteReplaceForPostgres(config.StrategyReplace, "postgres://localhost/app", false))
+	require.Equal(t, config.StrategyReplace,
+		rewriteReplaceForPostgres(config.StrategyReplace, "iceberg://catalog/warehouse", false))
+}
+
+func TestManagedCDCConnectorAndSlotIdentityIgnoreDestinationCredentialRotation(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI:   "postgres+cdc://reader@source.example/app?publication=pub",
+		DestURI:     "iceberg+rest://catalog.example/iceberg?warehouse=prod&oauth_client_id=client&oauth_client_secret=old&secret_access_key=old-key&session_token=old-session",
+		SourceTable: "public.orders",
+		DestTable:   "lake.orders",
+	}
+	rotated := *base
+	rotated.DestURI = "iceberg+rest://catalog.example/iceberg?session_token=new-session&secret_access_key=new-key&oauth_client_secret=new&oauth_client_id=client&warehouse=prod"
+	identity := source.ConnectorIdentity{Database: "source-db", Connector: "source-connector"}
+	const destinationIdentity = "canonical-iceberg-target"
+
+	baseID := resolvedCDCStateConnectorID(base, identity, destinationIdentity)
+	rotatedID := resolvedCDCStateConnectorID(&rotated, identity, destinationIdentity)
+	require.Equal(t, baseID, rotatedID)
+	require.Equal(
+		t,
+		cdcSlotSuffix(cdcSlotIdentity(base.DestURI, destinationIdentity, baseID)),
+		cdcSlotSuffix(cdcSlotIdentity(rotated.DestURI, destinationIdentity, rotatedID)),
+	)
+	claims := &caseFoldingManagedDestination{owners: make(map[string]string)}
+	claim := destination.CDCTargetClaim{SourceTable: base.SourceTable, DestinationTable: base.DestTable, ConnectorID: baseID}
+	require.NoError(t, claims.ClaimCDCTarget(t.Context(), "", claim))
+	claim.ConnectorID = rotatedID
+	require.NoError(t, claims.ClaimCDCTarget(t.Context(), "", claim),
+		"credential rotation must retain durable target ownership")
+	require.NotEqual(
+		t,
+		resolvedCDCStateConnectorID(base, identity, ""),
+		resolvedCDCStateConnectorID(&rotated, identity, ""),
+		"destinations without a canonical identity must retain their configuration isolation",
+	)
+}
+
+func TestManagedCDCConnectorAndSlotIdentityRetainDestinationServerIsolation(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI:   "postgres+cdc://reader@source.example/app?publication=pub",
+		DestURI:     "postgres://loader:old@warehouse-a.example/analytics?sslmode=require&application_name=first",
+		SourceTable: "public.orders",
+		DestTable:   "lake.orders",
+	}
+	rotated := *base
+	rotated.DestURI = "postgres://other:new@warehouse-a.example:5432/analytics?sslmode=verify-full&application_name=second"
+	otherServer := *base
+	otherServer.DestURI = "postgres://loader:old@warehouse-b.example/analytics?sslmode=require"
+	identity := source.ConnectorIdentity{Database: "source-db", Connector: "source-connector"}
+	const destinationIdentity = "analytics-schema-orders"
+
+	baseID := resolvedCDCStateConnectorID(base, identity, destinationIdentity)
+	rotatedID := resolvedCDCStateConnectorID(&rotated, identity, destinationIdentity)
+	otherID := resolvedCDCStateConnectorID(&otherServer, identity, destinationIdentity)
+	require.Equal(t, baseID, rotatedID, "credentials and transport settings changed destination ownership")
+	require.NotEqual(t, baseID, otherID, "different destination servers share connector ownership")
+	require.Equal(
+		t,
+		cdcSlotSuffix(cdcSlotIdentity(base.DestURI, destinationIdentity, baseID)),
+		cdcSlotSuffix(cdcSlotIdentity(rotated.DestURI, destinationIdentity, rotatedID)),
+	)
+	require.NotEqual(
+		t,
+		cdcSlotSuffix(cdcSlotIdentity(base.DestURI, destinationIdentity, baseID)),
+		cdcSlotSuffix(cdcSlotIdentity(otherServer.DestURI, destinationIdentity, otherID)),
+		"different destination servers share an automatic PostgreSQL slot",
+	)
 }
 
 func TestCDCStateConnectorIDDistinguishesEffectiveUnqualifiedDestination(t *testing.T) {
@@ -2378,9 +2726,28 @@ func TestMultiTableCDCConnectorIDIncludesNormalizedDestinationNamespace(t *testi
 	idB := resolvedCDCStateConnectorID(&other, identity, canonicalB)
 	require.NotEqual(t, idA, idB, "different dest_schema mappings must not share connector state or slots")
 	require.NotEqual(t,
-		cdcSlotSuffix(canonicalCDCStateURI(base.DestURI)+"\x00"+idA),
-		cdcSlotSuffix(canonicalCDCStateURI(other.DestURI)+"\x00"+idB),
+		cdcSlotSuffix(cdcSlotIdentity(base.DestURI, canonicalA, idA)),
+		cdcSlotSuffix(cdcSlotIdentity(other.DestURI, canonicalB, idB)),
 		"different dest_schema mappings must not share automatic PostgreSQL slots")
+
+	discoveries := [][]source.SourceTableInfo{
+		{{Name: "public.orders"}, {Name: "public.customers"}},
+		{{Name: "public.customers"}, {Name: "public.orders"}},
+		{{Name: "public.orders"}, {Name: "public.customers"}, {Name: "public.invoices"}},
+	}
+	for _, discovered := range discoveries {
+		_, err := multiTableDestinationNames(discovered, dest.GetScheme(), dest)
+		require.NoError(t, err)
+		target := managedCDCDestinationTarget(base, dest)
+		canonical, err := managedCDCDestinationIdentity(t.Context(), dest, target)
+		require.NoError(t, err)
+		require.Equal(t, idA, resolvedCDCStateConnectorID(base, identity, canonical),
+			"discovery order or growth changed the multi-table connector owner")
+		require.Equal(t,
+			cdcSlotSuffix(cdcSlotIdentity(base.DestURI, canonicalA, idA)),
+			cdcSlotSuffix(cdcSlotIdentity(base.DestURI, canonical, resolvedCDCStateConnectorID(base, identity, canonical))),
+			"discovery order or growth changed the multi-table slot")
+	}
 }
 
 func TestDroppedColumnsPKFiltering(t *testing.T) {
