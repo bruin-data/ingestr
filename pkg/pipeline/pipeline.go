@@ -1588,7 +1588,10 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 
 	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
-	opts := &schemaevolution.CompareOptions{Overrides: overrides}
+	opts := &schemaevolution.CompareOptions{Overrides: overrides, PrimaryKeys: sourceSchema.PrimaryKeys}
+	if normalizer, ok := p.dest.(destination.SchemaEvolutionColumnNormalizer); ok {
+		opts.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
+	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
@@ -1983,6 +1986,7 @@ func (p *Pipeline) normalizeMultiTableInfo(ctx context.Context, table source.Sou
 	if len(normalized.PrimaryKeys) == 0 && len(normalized.Schema.PrimaryKeys) > 0 {
 		normalized.PrimaryKeys = append([]string(nil), normalized.Schema.PrimaryKeys...)
 	}
+	normalized.Schema.PrimaryKeys = append([]string(nil), normalized.PrimaryKeys...)
 	markPrimaryKeyColumns(normalized.Schema)
 
 	if len(combined) == 0 {

@@ -1,6 +1,8 @@
 package schemaevolution
 
 import (
+	"fmt"
+
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -110,13 +112,13 @@ func GetWidenedType(src, dest schema.DataType) (schema.DataType, string) {
 }
 
 // MergeDecimalPrecision determines the precision and scale for merged decimal types.
-// Uses the larger precision and scale from both columns.
+// Preserves the maximum integer digits and scale, even when that exceeds the
+// supported precision; callers that need an enforceable schema use the checked variant.
 func MergeDecimalPrecision(src, dest schema.Column) (precision, scale int) {
 	precision = src.Precision
 	if dest.Precision > precision {
 		precision = dest.Precision
 	}
-
 	scale = src.Scale
 	if dest.Scale > scale {
 		scale = dest.Scale
@@ -137,9 +139,17 @@ func MergeDecimalPrecision(src, dest schema.Column) (precision, scale int) {
 	}
 
 	precision = intDigits + scale
+	return precision, scale
+}
+
+func MergeDecimalPrecisionChecked(src, dest schema.Column) (precision, scale int, err error) {
+	precision, scale = MergeDecimalPrecision(src, dest)
 	if precision > 38 {
-		precision = 38
+		return 0, 0, fmt.Errorf(
+			"decimal widening requires precision %d (integer digits %d + scale %d), maximum supported precision is 38",
+			precision, precision-scale, scale,
+		)
 	}
 
-	return precision, scale
+	return precision, scale, nil
 }

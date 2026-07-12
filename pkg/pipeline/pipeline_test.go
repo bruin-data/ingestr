@@ -927,6 +927,17 @@ type mockSchemaEvolutionDestination struct {
 	mockDestination
 }
 
+type normalizingMockSchemaEvolutionDestination struct {
+	*mockSchemaEvolutionDestination
+}
+
+func (m *normalizingMockSchemaEvolutionDestination) NormalizeSchemaEvolutionColumn(col schema.Column) schema.Column {
+	if col.DataType == schema.TypeBoolean {
+		col.DataType = schema.TypeInt64
+	}
+	return col
+}
+
 func (m *mockSchemaEvolutionDestination) ApplySchemaEvolution(_ context.Context, _ string, _ *schemaevolution.SchemaComparison) ([]string, error) {
 	return nil, nil
 }
@@ -1613,6 +1624,42 @@ func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 
 	gotColumns := plan.FinalSchema.ColumnNames()
 	assertColumns(t, "columns", gotColumns, []string{"id", "age"})
+}
+
+func TestEvolveSchemaIfNeededDoesNotRelaxPrimaryKeyNullability(t *testing.T) {
+	destSchema := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "ID", DataType: schema.TypeInt64, Nullable: false,
+	}}}
+	sourceSchema := &schema.TableSchema{
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+		PrimaryKeys: []string{"id"},
+	}
+	p := &Pipeline{
+		config: &config.IngestConfig{DestTable: "events"},
+		dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+			tableSchema: destSchema,
+			scheme:      "schema_evolver_without_dialect",
+		}},
+	}
+
+	plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyMerge)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.False(t, plan.HasChanges())
+}
+
+func TestEvolveSchemaIfNeededUsesDestinationTypeNormalization(t *testing.T) {
+	destSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeInt64}}}
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeBoolean}}}
+	dest := &normalizingMockSchemaEvolutionDestination{mockSchemaEvolutionDestination: &mockSchemaEvolutionDestination{
+		mockDestination: mockDestination{tableSchema: destSchema, scheme: "normalizing"},
+	}}
+	p := &Pipeline{config: &config.IngestConfig{DestTable: "events"}, dest: dest}
+
+	plan, err := p.evolveSchemaIfNeeded(context.Background(), "events", sourceSchema, config.StrategyAppend)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.False(t, plan.HasChanges())
 }
 
 func TestNamingConsistency(t *testing.T) {
@@ -2980,6 +3027,27 @@ func TestNormalizeMultiTableInfoComposesNamingAndShortening(t *testing.T) {
 	require.Equal(t, "config_data", transformed.Schema().Field(0).Name)
 	require.Equal(t, finalLong, transformed.Schema().Field(1).Name)
 	require.Equal(t, fmt.Sprintf(`["config_data","%s"]`, finalLong), transformed.Column(2).(*array.String).Value(0))
+}
+
+func TestNormalizeMultiTableInfoPropagatesRenamedPrimaryKeysToSchema(t *testing.T) {
+	p := &Pipeline{
+		config: &config.IngestConfig{SchemaNaming: "snake_case"},
+		dest:   &mockDestination{scheme: "postgres"},
+	}
+	original := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "eventId", DataType: schema.TypeInt64},
+		{Name: "payload", DataType: schema.TypeString},
+	}}
+
+	normalized, _, err := p.normalizeMultiTableInfo(context.Background(), source.SourceTableInfo{
+		Name: "public.events", Schema: original, PrimaryKeys: []string{"eventId"},
+	}, "public.events")
+	require.NoError(t, err)
+	require.Equal(t, []string{"event_id"}, normalized.PrimaryKeys)
+	require.Equal(t, []string{"event_id"}, normalized.Schema.PrimaryKeys)
+	require.True(t, normalized.Schema.Columns[0].IsPrimaryKey)
+	require.Empty(t, original.PrimaryKeys)
+	require.False(t, original.Columns[0].IsPrimaryKey)
 }
 
 func TestNormalizeMultiTableInfoRejectsCDCMetadataCollision(t *testing.T) {

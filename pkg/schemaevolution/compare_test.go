@@ -176,6 +176,8 @@ func TestCompare_TypeWidening_IntToFloat(t *testing.T) {
 	change := result.Changes[0]
 	assert.Equal(t, ChangeWidenType, change.Type)
 	assert.Equal(t, schema.TypeFloat64, change.NewColumn.DataType)
+	assert.False(t, change.NewColumn.Nullable)
+	assert.False(t, BuildFinalSchema(dest, result).Columns[0].Nullable)
 }
 
 func TestCompare_TypeWidening_ToString(t *testing.T) {
@@ -424,7 +426,26 @@ func TestCompare_SameTypeDifferentNullability(t *testing.T) {
 
 	result, err := Compare(source, dest, nil)
 	require.NoError(t, err)
-	assert.False(t, result.HasChanges, "nullability difference alone should not trigger widening")
+	require.True(t, result.HasChanges)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeRelaxNullability, result.Changes[0].Type)
+}
+
+func TestCompare_IgnoresInferredNullabilityForConfiguredPrimaryKeys(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	dest := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "value", DataType: schema.TypeString, Nullable: false},
+	}}
+
+	result, err := Compare(source, dest, &CompareOptions{PrimaryKeys: []string{"ID"}})
+	require.NoError(t, err)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeRelaxNullability, result.Changes[0].Type)
+	assert.Equal(t, "value", result.Changes[0].ColumnName)
 }
 
 func TestMakeNullable(t *testing.T) {
@@ -639,4 +660,75 @@ func TestCompare_IntegerOverride_WidensInt32(t *testing.T) {
 	require.True(t, result.HasChanges)
 	require.Len(t, result.Changes, 1)
 	assert.Equal(t, schema.TypeInt64, result.Changes[0].NewColumn.DataType)
+}
+
+func TestCompare_NormalizesPhysicalTypeAliases(t *testing.T) {
+	normalize := func(col schema.Column) schema.Column {
+		if col.DataType == schema.TypeBoolean {
+			col.DataType = schema.TypeInt64
+		}
+		return col
+	}
+	source := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeBoolean}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeInt64}}}
+
+	result, err := Compare(source, dest, &CompareOptions{NormalizeColumn: normalize})
+	require.NoError(t, err)
+	assert.False(t, result.HasChanges)
+	assert.Equal(t, schema.TypeBoolean, source.Columns[0].DataType, "comparison must not mutate source schema")
+}
+
+func TestCompare_NormalizesOverrides(t *testing.T) {
+	normalize := func(col schema.Column) schema.Column {
+		if col.DataType == schema.TypeBoolean {
+			col.DataType = schema.TypeInt64
+		}
+		return col
+	}
+	source := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeString}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeInt64}}}
+	overrides, err := ParseColumnOverrides("active:boolean")
+	require.NoError(t, err)
+
+	result, err := Compare(source, dest, &CompareOptions{Overrides: overrides, NormalizeColumn: normalize})
+	require.NoError(t, err)
+	assert.False(t, result.HasChanges)
+}
+
+func TestCompare_NormalizationDoesNotChangeOverrideDDLType(t *testing.T) {
+	normalize := func(col schema.Column) schema.Column {
+		if col.DataType == schema.TypeBoolean {
+			col.DataType = schema.TypeInt64
+		}
+		return col
+	}
+	source := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeString}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeBinary}}}
+	overrides, err := ParseColumnOverrides("active:boolean")
+	require.NoError(t, err)
+
+	result, err := Compare(source, dest, &CompareOptions{Overrides: overrides, NormalizeColumn: normalize})
+	require.NoError(t, err)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeOverrideType, result.Changes[0].Type)
+	assert.Equal(t, schema.TypeBoolean, result.Changes[0].NewColumn.DataType)
+}
+
+func TestCompare_NormalizationDoesNotChangeAddedColumnDDLType(t *testing.T) {
+	normalize := func(col schema.Column) schema.Column {
+		if col.DataType == schema.TypeJSON {
+			col.DataType = schema.TypeString
+			col.MaxLength = 0
+		}
+		return col
+	}
+	source := &schema.TableSchema{Columns: []schema.Column{{Name: "payload", DataType: schema.TypeJSON, MaxLength: 64}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+
+	result, err := Compare(source, dest, &CompareOptions{NormalizeColumn: normalize})
+	require.NoError(t, err)
+	require.Len(t, result.Changes, 2)
+	assert.Equal(t, ChangeAddColumn, result.Changes[0].Type)
+	assert.Equal(t, schema.TypeJSON, result.Changes[0].NewColumn.DataType)
+	assert.Equal(t, 64, result.Changes[0].NewColumn.MaxLength)
 }
