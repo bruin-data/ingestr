@@ -2,11 +2,11 @@ package postgres_cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -44,6 +44,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 			// Verify the slot still exists before trying to resume
 			if _, exists, _ := checkSlotExists(ctx, r.source.queryPool, slotName); exists {
+				waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				config.Debug("[CDC] Resuming from LSN: %s (skipping snapshot)", opts.CDCResumeLSN)
 				resumeLSN, err := parseStoredPostgresLSN(opts.CDCResumeLSN)
 				if err != nil {
@@ -109,6 +110,30 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		config.Debug("[CDC] Batch mode: will stream until LSN %s", targetLSN)
 	}
 
+	for {
+		err := r.runStream(ctx, startLSN, slotName, mode, targetLSN, results, opts)
+		var schemaErr *SchemaChangedError
+		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) {
+			return err
+		}
+
+		// Mid-stream DDL: refresh the schema, announce it so the consumer can
+		// evolve the destination, and resume from the slot's confirmed
+		// position. The transaction that tripped this was never emitted, so
+		// the rebuilt stream re-decodes it against the refreshed schema and
+		// none of its data is lost. Batch runs skip this and surface the
+		// error instead — a restart heals them the same way.
+		fmt.Printf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+		startLSN, err = r.rebuildForSchemaChange(ctx, slotName, results)
+		if err != nil {
+			return fmt.Errorf("failed to rebuild stream after schema change: %w", err)
+		}
+	}
+}
+
+// runStream runs one replication stream until it terminates: batch mode caught
+// up, the context was cancelled, or the replicator failed.
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, mode CDCMode, targetLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
@@ -126,11 +151,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		batchSize = 10000
 	}
 
-	accum := newBatchAccumulator(batchSize)
-	pkNames := r.tableSchema.PrimaryKeys
-	accum.transform = func(_ string, batch arrow.RecordBatch) arrow.RecordBatch {
-		return forwardFillUnchanged(batch, pkNames)
-	}
+	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
 
 	err = streamLoop(ctx, repl, mode, targetLSN, batchSize, accum, results, opts.Streaming)
 	if err == nil && mode == ModeBatch {
@@ -144,6 +165,38 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		r.source.startKeepalive(ctx, caughtUp)
 	}
 	return err
+}
+
+// rebuildForSchemaChange re-fetches the table's schema after mid-stream DDL,
+// announces it (RecordBatchResult.TableInfo) so the streaming consumer can
+// evolve the destination before new-shape batches arrive, and reopens the
+// replication connection for a fresh StartReplication on the same slot.
+// Returns the LSN to resume from — the slot's confirmed position, so the
+// transaction that surfaced the change is re-decoded in full.
+func (r *CDCReader) rebuildForSchemaChange(ctx context.Context, slotName string, results chan<- source.RecordBatchResult) (pglogrepl.LSN, error) {
+	tableSchema, err := getTableSchema(ctx, r.source.queryPool, r.tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to refresh schema for table %s: %w", r.tableName, err)
+	}
+	tableSchema = addCDCColumns(tableSchema)
+	// Keep the merge keys the run started with: they may carry user-provided
+	// keys that re-detection would drop, and the decoder, compaction, and
+	// unchanged-TOAST fill must keep keying off the same columns.
+	if len(r.tableSchema.PrimaryKeys) > 0 {
+		tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+	}
+	r.tableSchema = tableSchema
+
+	results <- source.RecordBatchResult{
+		TableName: r.tableName,
+		TableInfo: &source.SourceTableInfo{Name: r.tableName, Schema: tableSchema, PrimaryKeys: tableSchema.PrimaryKeys},
+	}
+
+	if err := r.source.reconnectReplication(ctx); err != nil {
+		return 0, err
+	}
+	waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
+	return getSlotConfirmedLSN(ctx, r.source.queryPool, slotName)
 }
 
 func parseStoredPostgresLSN(raw string) (pglogrepl.LSN, error) {
@@ -172,15 +225,16 @@ func isHexLSN(value string) bool {
 // batchReplicator is the subset of *Replicator that streamLoop depends on,
 // allowing the accumulation loop to be tested without a live connection.
 type batchReplicator interface {
-	NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, pglogrepl.LSN, bool, error)
+	NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, bool, error)
 	CurrentLSN() pglogrepl.LSN
 	PendingLowWater() (pglogrepl.LSN, bool)
 }
 
-// streamLoop pulls batches from repl and feeds them through the accumulator,
-// flushing only when the replicator reports a genuine idle period. Treating
-// every batch-less call as idle would flush after every transaction and defeat
-// accumulation entirely (see hadActivity in Replicator.NextBatch).
+// streamLoop pulls decoded changes from repl and feeds them through the
+// accumulator, flushing only when the replicator reports a genuine idle
+// period. Treating every change-less call as idle would flush after every
+// transaction and defeat accumulation entirely (see hadActivity in
+// Replicator.NextChanges).
 //
 // When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
 // pipeline can confirm the replication slot only after the data is durable.
@@ -199,29 +253,33 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		select {
 		case <-ctx.Done():
 			config.Debug("[CDC] Context cancelled, stopping stream")
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return err
+			}
 			return ctx.Err()
 		default:
 		}
 
-		batch, lsn, hadActivity, err := repl.NextBatch(ctx, batchSize)
+		changes, lsn, hadActivity, err := repl.NextChanges(ctx)
 		if err != nil {
-			accum.flushAll(results, token)
-			return fmt.Errorf("failed to get next batch: %w", err)
+			_ = accum.flushAll(results, token)
+			return fmt.Errorf("failed to get next changes: %w", err)
 		}
 
-		if batch != nil && batch.NumRows() > 0 {
-			accum.add("", batch, lsn)
-		}
+		accum.add("", changes, lsn)
 
-		accum.flushReady(results, token)
+		if err := accum.flushReady(results, token); err != nil {
+			return err
+		}
 
 		// For batch mode, check if we've caught up to the target LSN
 		if mode == ModeBatch && targetLSN > 0 {
 			currentLSN := repl.CurrentLSN()
 			if currentLSN >= targetLSN {
 				config.Debug("[CDC] Batch mode: reached target LSN %s (current: %s)", targetLSN, currentLSN)
-				accum.flushAll(results, token)
+				if err := accum.flushAll(results, token); err != nil {
+					return err
+				}
 				return nil
 			}
 		}
@@ -230,7 +288,9 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, targetL
 		// non-commit messages and keepalives count as activity, so we keep
 		// accumulating across transactions instead of flushing each one.
 		if !hadActivity {
-			accum.flushAll(results, token)
+			if err := accum.flushAll(results, token); err != nil {
+				return err
+			}
 			// Confirm the caught-up position so the slot advances over WAL that
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if streaming {

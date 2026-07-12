@@ -10,21 +10,45 @@ import (
 )
 
 type ReadOptions struct {
-	IncrementalKey string
-	IntervalStart  *time.Time
-	IntervalEnd    *time.Time
-	PageSize       int
-	Limit          int
-	ExcludeColumns []string
-	Parallelism    int
-	Schema         *schema.TableSchema // Optional: if provided, Read will skip GetSchema call
-	CDCResumeLSN   string              // Optional: for CDC sources, resume from this LSN (skip snapshot)
-	CDCSlotSuffix  string              // Optional: suffix for auto-generated replication slot names (dest-aware)
-	FullRefresh    bool
-	Columns        string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
-	Streaming      bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
-	FlushInterval  time.Duration
-	FlushRecords   int
+	IncrementalKey                  string
+	IncrementalKeyDataType          schema.DataType
+	IntervalStart                   *time.Time
+	IntervalEnd                     *time.Time
+	ExtractPartitionBy              string
+	ExtractPartitionInterval        time.Duration
+	ExtractPartitionNumericInterval int64
+	ExtractPartitionAuto            bool
+	ExtractPartitionStart           *time.Time
+	ExtractPartitionEnd             *time.Time
+	ExtractPartitionNumericStart    *int64
+	ExtractPartitionNumericEnd      *int64
+	ExtractPartitionEndInclusive    bool
+	ExtractPartitionIsNull          bool
+	ExtractPartitionKind            ExtractPartitionKind
+	ExtractPartitionDataType        schema.DataType
+	RecordBatchBufferSize           int
+	PageSize                        int
+	Limit                           int
+	ExcludeColumns                  []string
+	Parallelism                     int
+	Schema                          *schema.TableSchema // Optional: if provided, Read will skip GetSchema call
+	CDCResumeLSN                    string              // Optional: for CDC sources, resume from this LSN (skip snapshot)
+	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
+	FullRefresh                     bool
+	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
+	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
+	FlushInterval                   time.Duration
+	FlushRecords                    int
+}
+
+func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
+	if opts.RecordBatchBufferSize > 0 {
+		return opts.RecordBatchBufferSize
+	}
+	if defaultSize < 0 {
+		return 0
+	}
+	return defaultSize
 }
 
 type RecordBatchResult struct {
@@ -36,6 +60,12 @@ type RecordBatchResult struct {
 	// Committing a token via StreamCommitter acknowledges everything emitted up
 	// to and including the batch that carried it. Nil means no feedback needed.
 	CommitToken any
+
+	// TableInfo announces a table that appeared after the read started (e.g. a
+	// table created on the source mid-stream). Consumers that prepared their
+	// per-table state upfront use it to provision the destination before any
+	// batches for the table arrive. Batch may be nil on an announcement.
+	TableInfo *SourceTableInfo
 }
 
 // TableRequest contains user-provided configuration for table instantiation.
@@ -83,6 +113,10 @@ type PartitionedTable interface {
 	PartitionBy() string
 }
 
+type ExtractPartitioningProvider interface {
+	SupportsExtractPartitioning() bool
+}
+
 // SourceTableInfo contains metadata about a table in a multi-table source.
 type SourceTableInfo struct {
 	Name        string
@@ -123,6 +157,29 @@ type StreamCommitter interface {
 // position it streamed up to.
 type CDCBatchFinalizer interface {
 	FinalizeBatch(ctx context.Context) error
+}
+
+// LagReporter is an optional capability for streaming sources that can report
+// how far the durable destination position trails the source's latest change.
+// Implementations must answer from lock-free atomics: the metrics layer polls
+// this on every scrape, concurrently with the replication loop.
+type LagReporter interface {
+	// ReplicationLag returns a point-in-time snapshot. ok is false when lag is
+	// not yet meaningful (not streaming, or no server position observed).
+	ReplicationLag() (LagSnapshot, bool)
+}
+
+// LagSnapshot is a self-consistent lag reading. BytesBehind and SecondsBehind
+// are nil when the engine cannot express that dimension: Postgres exposes no
+// per-LSN timestamp, and MongoDB/SQL Server logs have no comparable byte offset.
+type LagSnapshot struct {
+	Source          string
+	BytesBehind     *uint64
+	SecondsBehind   *float64
+	ServerPosition  string
+	DurablePosition string
+	CaughtUp        bool
+	UpdatedAt       time.Time
 }
 
 // MultiTableSource represents a source that emits data from multiple tables.

@@ -26,6 +26,11 @@ type IngestionJob struct {
 	// If non-nil, GetRecords() transforms this stream instead of reading from Table.
 	BufferedRecords <-chan source.RecordBatchResult
 
+	// PreStaged holds destination-native load files written during extract.
+	// When set, BufferedRecords is an empty stream and the destination loads
+	// the pre-staged files directly.
+	PreStaged destination.PreStagedData
+
 	// SchemaComparison contains the result of comparing source and destination schemas.
 	// Used for runtime batch transformation in discard_row and discard_value modes.
 	SchemaComparison *schemaevolution.SchemaComparison
@@ -113,6 +118,53 @@ type MultiTableIngestionJob struct {
 // ApplyEvolutionFor applies the pending schema evolution plan for a source table.
 func (j *MultiTableIngestionJob) ApplyEvolutionFor(ctx context.Context, sourceTable string) error {
 	return applyEvolutionPlan(ctx, j.Destination, j.EvolutionPlans[sourceTable])
+}
+
+// evolveDestinationTable builds and applies a fresh schema evolution plan for
+// one table against the destination's current shape, honoring the configured
+// schema contract. It is the mid-stream counterpart of the pipeline's startup
+// evolution, used when a CDC source re-announces a table whose source schema
+// changed while streaming.
+func evolveDestinationTable(ctx context.Context, dest destination.Destination, destTable string, sourceSchema *schema.TableSchema, cfg *config.IngestConfig) error {
+	destSchema, err := dest.GetTableSchema(ctx, destTable)
+	if err != nil {
+		return fmt.Errorf("failed to get destination schema: %w", err)
+	}
+	if destSchema == nil {
+		return nil
+	}
+	destSchema = destination.PreserveSourceCDCColumnTypes(destSchema, sourceSchema)
+
+	contractMode, err := schemaevolution.ParseContractMode(cfg.SchemaContract)
+	if err != nil {
+		return fmt.Errorf("failed to parse schema contract: %w", err)
+	}
+	overrides, err := schemaevolution.ParseColumnOverrides(cfg.Columns)
+	if err != nil {
+		return fmt.Errorf("failed to parse column overrides: %w", err)
+	}
+
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, &schemaevolution.CompareOptions{Overrides: overrides})
+	if err != nil {
+		return fmt.Errorf("failed to compare schemas: %w", err)
+	}
+	if !comparison.HasChanges {
+		return nil
+	}
+
+	contractResult := schemaevolution.ApplyContract(schemaevolution.SchemaContract{Mode: contractMode}, comparison)
+	if contractMode == schemaevolution.ContractFreeze && contractResult.HasViolations() {
+		return contractResult.ViolationError()
+	}
+	filtered := &schemaevolution.SchemaComparison{
+		Changes:    contractResult.Allowed,
+		HasChanges: len(contractResult.Allowed) > 0,
+	}
+	return applyEvolutionPlan(ctx, dest, &schemaevolution.EvolutionPlan{
+		Table:       destTable,
+		Comparison:  filtered,
+		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filtered),
+	})
 }
 
 // applyEvolutionPlan asks the destination to apply an abstract evolution plan.

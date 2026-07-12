@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -291,6 +292,67 @@ func TestBuildUpdateSet(t *testing.T) {
 	}
 }
 
+func TestBuildMultiRowInsertSQL(t *testing.T) {
+	got := buildMultiRowInsertSQL("analytics.users", []string{"`id`", "`name`"}, 3)
+	want := "INSERT INTO `analytics`.`users` (`id`, `name`) VALUES (?, ?), (?, ?), (?, ?)"
+	assert.Equal(t, want, got)
+}
+
+func TestBuildLoadDataSQL(t *testing.T) {
+	got := buildLoadDataSQL("analytics.users", []string{"`id`", "`name`"}, "ingestr_load_1")
+	want := "LOAD DATA LOCAL INFILE 'Reader::ingestr_load_1' INTO TABLE `analytics`.`users` FIELDS TERMINATED BY '\\t' ESCAPED BY '\\\\' LINES TERMINATED BY '\\n' (`id`, `name`)"
+	assert.Equal(t, want, got)
+}
+
+func TestMapDataTypeToMySQLStringLength(t *testing.T) {
+	assert.Equal(t, "VARCHAR(16383)", MapDataTypeToMySQL(schema.Column{DataType: schema.TypeString, MaxLength: 16383}))
+	assert.Equal(t, "TEXT", MapDataTypeToMySQL(schema.Column{DataType: schema.TypeString, MaxLength: 16384}))
+	assert.Equal(t, "TEXT", MapDataTypeToMySQL(schema.Column{DataType: schema.TypeString, MaxLength: 65535}))
+}
+
+func TestWriteLoadDataFieldEscaping(t *testing.T) {
+	tests := []struct {
+		name  string
+		value interface{}
+		want  string
+	}{
+		{name: "null", value: nil, want: `\N`},
+		{name: "string escapes", value: "a\tb\nc\rd\\e\x00\x1a", want: `a\tb\nc\rd\\e\0\Z`},
+		{name: "bytes escapes", value: []byte("bytes\tvalue"), want: `bytes\tvalue`},
+		{name: "integer", value: int64(42), want: "42"},
+		{name: "float", value: 12.5, want: "12.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got strings.Builder
+			assert.NoError(t, writeLoadDataField(&got, tt.value))
+			assert.Equal(t, tt.want, got.String())
+		})
+	}
+}
+
+func TestIsLoadDataLocalDisabledError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"mysql 3948", &mysqldriver.MySQLError{Number: 3948, Message: "Loading local data is disabled"}, true},
+		{"mysql 1148", &mysqldriver.MySQLError{Number: 1148, Message: "The used command is not allowed with this MySQL version"}, true},
+		{"text disabled", errors.New("loading local data is disabled; enable local_infile"), true},
+		{"text not allowed", errors.New("The used command is not allowed with this MySQL version"), true},
+		{"other mysql error", &mysqldriver.MySQLError{Number: 1062, Message: "Duplicate entry"}, false},
+		{"unrelated error", errors.New("connection refused"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isLoadDataLocalDisabledError(tt.err))
+		})
+	}
+}
+
 // isMySQLMissingTableError must recognize both plain MySQL ("doesn't exist",
 // errno 1146) and vtgate (VT05004/VT05005 "does not exist", errno 1146/1051)
 // forms, so a first CDC run against a Vitess/PlanetScale destination is treated
@@ -432,7 +494,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 func TestMySQLDestination_Schemes(t *testing.T) {
 	dest := NewMySQLDestination()
 	schemes := dest.Schemes()
-	expected := []string{"mysql", "mysql+pymysql", "mariadb", "vitess", "ps_mysql"}
+	expected := []string{"mysql", "mysql+pymysql", "mariadb"}
 	assert.Equal(t, expected, schemes)
 }
 

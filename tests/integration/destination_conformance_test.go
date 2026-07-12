@@ -423,10 +423,33 @@ func destinationCases() []destCase {
 			validateNonSQL:       validateAthenaReplace,
 			validateAppendNonSQL: validateAthenaAppend,
 		},
+		{
+			// Merge, delete+insert, truncate+insert and SCD2 cannot be
+			// validated through sqlBackend (no database/sql driver for
+			// Iceberg); they run in iceberg_strategies_test.go against the
+			// same fixtures and expectations.
+			name: "iceberg",
+			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
+				return icebergConformanceDestURI(t), icebergConformanceTable(), func() {}
+			},
+			validateNonSQL:       validateIcebergReplace,
+			validateAppendNonSQL: validateIcebergAppend,
+		},
 		// DynamoDB is tested separately in dynamodb_test.go because it always
 		// requires primary keys in the config, which the generic conformance
 		// tests don't provide.
 	}
+}
+
+func validateIcebergReplace(t *testing.T, destURI, destTable string) {
+	rows := readIcebergRows(t, context.Background(), destURI, destTable)
+	require.Len(t, rows, replaceFixtureRows)
+}
+
+func validateIcebergAppend(t *testing.T, destURI, destTable string) {
+	rows := readIcebergRows(t, context.Background(), destURI, destTable)
+	require.Len(t, rows, appendAfterRows)
+	assert.Equal(t, "kilo", icebergNameByID(t, rows, 11))
 }
 
 // TestDestinations_Replace validates:

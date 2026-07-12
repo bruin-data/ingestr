@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gcbq "cloud.google.com/go/bigquery"
@@ -58,6 +59,10 @@ type stagedLoadSet struct {
 	tempDir string
 	format  loadJobFileFormat
 	chunks  []stagedLoadChunk
+
+	// ignoreUnknownValues is set for pre-staged files, which may carry columns
+	// that schema inference later dropped (all-null unknown columns).
+	ignoreUnknownValues bool
 }
 
 type loadJobChunkWriter interface {
@@ -165,7 +170,7 @@ func (d *BigQueryDestination) writeWithLoadJob(
 			table,
 		)
 	}
-	if err := d.runLoadJobs(ctx, project, dataset, table, staged, loadParallelism); err != nil {
+	if _, err := d.runLoadJobs(ctx, project, dataset, table, staged, loadParallelism); err != nil {
 		return err
 	}
 
@@ -293,6 +298,7 @@ func (d *BigQueryDestination) stageLoadJobFilesToGCS(
 func (d *BigQueryDestination) buildLoadSource(
 	format loadJobFileFormat,
 	chunk stagedLoadChunk,
+	ignoreUnknownValues bool,
 ) (gcbq.LoadSource, func(), error) {
 	if chunk.localPath != "" {
 		file, err := os.Open(chunk.localPath)
@@ -302,6 +308,7 @@ func (d *BigQueryDestination) buildLoadSource(
 
 		src := gcbq.NewReaderSource(file)
 		src.SourceFormat = format.bigQuerySourceFormat()
+		src.IgnoreUnknownValues = ignoreUnknownValues
 		if format == loadJobFormatParquet {
 			src.ParquetOptions = &gcbq.ParquetOptions{EnableListInference: true}
 		}
@@ -310,6 +317,7 @@ func (d *BigQueryDestination) buildLoadSource(
 
 	src := gcbq.NewGCSReference(chunk.gcsURI)
 	src.SourceFormat = format.bigQuerySourceFormat()
+	src.IgnoreUnknownValues = ignoreUnknownValues
 	if format == loadJobFormatParquet {
 		src.ParquetOptions = &gcbq.ParquetOptions{EnableListInference: true}
 	}
@@ -555,6 +563,9 @@ func buildStagingGCSObjectAttrs(format loadJobFileFormat) gcsstorage.ObjectAttrs
 	}
 }
 
+// runLoadJobs executes the load jobs for a staged set and returns the total
+// number of rows BigQuery reported loading, or -1 when the count could not be
+// determined from the job statistics.
 func (d *BigQueryDestination) runLoadJobs(
 	ctx context.Context,
 	project string,
@@ -562,13 +573,13 @@ func (d *BigQueryDestination) runLoadJobs(
 	table string,
 	staged *stagedLoadSet,
 	parallelism int,
-) error {
+) (int64, error) {
 	if staged == nil || len(staged.chunks) == 0 {
-		return nil
+		return 0, nil
 	}
 	if staged.hasOnlyGCSObjects() {
 		config.Debug("[DEST] Loading %d staged %s chunk(s) into %s.%s with a single multi-URI load job", len(staged.chunks), staged.format, dataset, table)
-		return d.runCombinedGCSLoadJob(ctx, project, dataset, table, staged.format, staged.chunks)
+		return d.runCombinedGCSLoadJob(ctx, project, dataset, table, staged, staged.chunks)
 	}
 	if parallelism <= 0 {
 		parallelism = 1
@@ -584,19 +595,28 @@ func (d *BigQueryDestination) runLoadJobs(
 	work := make(chan stagedLoadChunk)
 	errCh := make(chan error, 1)
 
+	var outputRows atomic.Int64
+	var outputRowsUnknown atomic.Bool
+
 	var wg sync.WaitGroup
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for chunk := range work {
-				if err := d.runSingleLoadJob(loadCtx, project, dataset, table, staged.format, chunk); err != nil {
+				rows, err := d.runSingleLoadJob(loadCtx, project, dataset, table, staged, chunk)
+				if err != nil {
 					select {
 					case errCh <- err:
 						cancel()
 					default:
 					}
 					return
+				}
+				if rows < 0 {
+					outputRowsUnknown.Store(true)
+				} else {
+					outputRows.Add(rows)
 				}
 			}
 		}()
@@ -615,12 +635,15 @@ dispatch:
 
 	select {
 	case err := <-errCh:
-		return err
+		return -1, err
 	default:
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return -1, ctx.Err()
 		}
-		return nil
+		if outputRowsUnknown.Load() {
+			return -1, nil
+		}
+		return outputRows.Load(), nil
 	}
 }
 
@@ -629,12 +652,12 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 	project string,
 	dataset string,
 	table string,
-	format loadJobFileFormat,
+	staged *stagedLoadSet,
 	chunks []stagedLoadChunk,
-) error {
-	loadSource, err := d.buildCombinedGCSLoadSource(format, chunks)
+) (int64, error) {
+	loadSource, err := d.buildCombinedGCSLoadSource(staged.format, chunks, staged.ignoreUnknownValues)
 	if err != nil {
-		return err
+		return -1, err
 	}
 
 	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
@@ -645,22 +668,35 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 	config.Debug("[DEST] Starting combined load job for %d GCS chunk(s) into %s.%s", len(chunks), dataset, table)
 	job, err := loader.Run(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to start combined load job: %w", err)
+		return -1, fmt.Errorf("failed to start combined load job: %w", err)
 	}
 
 	status, err := job.Wait(ctx)
 	if err != nil {
-		return fmt.Errorf("combined load job failed (job %s): %w", jobRef(job), err)
+		return -1, fmt.Errorf("combined load job failed (job %s): %w", jobRef(job), err)
 	}
 	if err := status.Err(); err != nil {
 		if details := loadJobErrorDetails(status); details != "" {
-			return fmt.Errorf("combined load job error (job %s): %w; details: %s", jobRef(job), err, details)
+			return -1, fmt.Errorf("combined load job error (job %s): %w; details: %s", jobRef(job), err, details)
 		}
-		return fmt.Errorf("combined load job error (job %s): %w", jobRef(job), err)
+		return -1, fmt.Errorf("combined load job error (job %s): %w", jobRef(job), err)
 	}
 
 	config.Debug("[DEST] Combined load job finished for %s.%s", dataset, table)
-	return nil
+	return loadJobOutputRows(status), nil
+}
+
+// loadJobOutputRows extracts the loaded row count from a completed load job's
+// statistics, returning -1 when unavailable.
+func loadJobOutputRows(status *gcbq.JobStatus) int64 {
+	if status == nil || status.Statistics == nil {
+		return -1
+	}
+	details, ok := status.Statistics.Details.(*gcbq.LoadStatistics)
+	if !ok || details == nil {
+		return -1
+	}
+	return details.OutputRows
 }
 
 func (d *BigQueryDestination) runSingleLoadJob(
@@ -668,9 +704,9 @@ func (d *BigQueryDestination) runSingleLoadJob(
 	project string,
 	dataset string,
 	table string,
-	format loadJobFileFormat,
+	staged *stagedLoadSet,
 	chunk stagedLoadChunk,
-) error {
+) (int64, error) {
 	maxAttempts := loadJobMaxAttempts
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -683,9 +719,9 @@ func (d *BigQueryDestination) runSingleLoadJob(
 			attempt,
 			maxAttempts,
 		)
-		loadSource, cleanup, err := d.buildLoadSource(format, chunk)
+		loadSource, cleanup, err := d.buildLoadSource(staged.format, chunk, staged.ignoreUnknownValues)
 		if err != nil {
-			return err
+			return -1, err
 		}
 
 		tableRef := d.client.DatasetInProject(project, dataset).Table(table)
@@ -700,11 +736,11 @@ func (d *BigQueryDestination) runSingleLoadJob(
 				backoff := time.Duration(attempt) * time.Second
 				config.Debug("[DEST] Retrying load job for chunk %d after start error: %v", chunk.index+1, err)
 				if err := sleepWithContextForLoadJob(ctx, backoff); err != nil {
-					return err
+					return -1, err
 				}
 				continue
 			}
-			return fmt.Errorf("failed to start load job for chunk %d: %w", chunk.index+1, err)
+			return -1, fmt.Errorf("failed to start load job for chunk %d: %w", chunk.index+1, err)
 		}
 
 		status, err := job.Wait(ctx)
@@ -713,32 +749,32 @@ func (d *BigQueryDestination) runSingleLoadJob(
 				backoff := time.Duration(attempt) * time.Second
 				config.Debug("[DEST] Retrying load job for chunk %d after wait error: %v", chunk.index+1, err)
 				if err := sleepWithContextForLoadJob(ctx, backoff); err != nil {
-					return err
+					return -1, err
 				}
 				continue
 			}
-			return fmt.Errorf("load job failed for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
+			return -1, fmt.Errorf("load job failed for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
 		}
 		if err := status.Err(); err != nil {
 			if attempt < maxAttempts && isRetryableLoadJobError(err) {
 				backoff := time.Duration(attempt) * time.Second
 				config.Debug("[DEST] Retrying load job for chunk %d after job error: %v", chunk.index+1, err)
 				if err := sleepWithContextForLoadJob(ctx, backoff); err != nil {
-					return err
+					return -1, err
 				}
 				continue
 			}
 			if details := loadJobErrorDetails(status); details != "" {
-				return fmt.Errorf("load job error for chunk %d (job %s): %w; details: %s", chunk.index+1, jobRef(job), err, details)
+				return -1, fmt.Errorf("load job error for chunk %d (job %s): %w; details: %s", chunk.index+1, jobRef(job), err, details)
 			}
-			return fmt.Errorf("load job error for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
+			return -1, fmt.Errorf("load job error for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
 		}
 
 		config.Debug("[DEST] Load job finished for chunk %d into %s.%s", chunk.index+1, dataset, table)
-		return nil
+		return loadJobOutputRows(status), nil
 	}
 
-	return fmt.Errorf("load job error for chunk %d: exhausted retries", chunk.index+1)
+	return -1, fmt.Errorf("load job error for chunk %d: exhausted retries", chunk.index+1)
 }
 
 // loadJobErrorDetails formats the per-row/per-field errors that BigQuery records
@@ -871,6 +907,7 @@ func sleepWithContextForLoadJob(ctx context.Context, d time.Duration) error {
 func (d *BigQueryDestination) buildCombinedGCSLoadSource(
 	format loadJobFileFormat,
 	chunks []stagedLoadChunk,
+	ignoreUnknownValues bool,
 ) (gcbq.LoadSource, error) {
 	uris := make([]string, 0, len(chunks))
 	for _, chunk := range chunks {
@@ -882,6 +919,7 @@ func (d *BigQueryDestination) buildCombinedGCSLoadSource(
 
 	src := gcbq.NewGCSReference(uris...)
 	src.SourceFormat = format.bigQuerySourceFormat()
+	src.IgnoreUnknownValues = ignoreUnknownValues
 	if format == loadJobFormatParquet {
 		src.ParquetOptions = &gcbq.ParquetOptions{EnableListInference: true}
 	}
@@ -917,6 +955,126 @@ func (d *BigQueryDestination) writeParquetStream(
 	return d.writeLoadJobStream(ctx, records, loadJobFormatParquet, openWriter)
 }
 
+// chunkStager writes record batches into a sequence of load-file chunks,
+// rotating files every maxRowsPerFile rows. It is push-based so that both the
+// channel-consuming write path and the extract-time pre-staging path share
+// the same chunking logic.
+type chunkStager struct {
+	format         loadJobFileFormat
+	maxRowsPerFile int64
+	targetSchema   *arrow.Schema
+	rowOpts        jsonlRowOptions
+	openWriter     func(part int) (stagedLoadChunk, io.WriteCloser, error)
+
+	chunks      []stagedLoadChunk
+	totalRows   int64
+	currentRows int64
+	part        int
+	chunkMeta   stagedLoadChunk
+	chunkWriter loadJobChunkWriter
+}
+
+func (s *chunkStager) closeChunk() error {
+	if s.chunkWriter == nil {
+		return nil
+	}
+
+	chunkWriter := s.chunkWriter
+	s.chunks = append(s.chunks, s.chunkMeta)
+	s.chunkWriter = nil
+	s.currentRows = 0
+	s.part++
+
+	if err := chunkWriter.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *chunkStager) abort(cause error) {
+	if s.chunkWriter == nil {
+		return
+	}
+	s.chunks = append(s.chunks, s.chunkMeta)
+	s.chunkWriter.Abort(cause)
+	s.chunkWriter = nil
+}
+
+func (s *chunkStager) openChunk() error {
+	meta, writer, err := s.openWriter(s.part)
+	if err != nil {
+		return err
+	}
+	s.chunkMeta = meta
+	s.chunkMeta.index = s.part
+	s.chunkWriter = newLoadJobChunkWriter(s.format, writer, s.targetSchema, s.rowOpts)
+	s.currentRows = 0
+	return nil
+}
+
+// writeRecord appends a record batch, rotating chunk files as needed.
+// The caller retains ownership of the record.
+func (s *chunkStager) writeRecord(ctx context.Context, record arrow.RecordBatch) error {
+	for start := int64(0); start < record.NumRows(); {
+		if err := ctx.Err(); err != nil {
+			s.abort(err)
+			return err
+		}
+
+		if s.chunkWriter == nil {
+			if err := s.openChunk(); err != nil {
+				return fmt.Errorf("failed to open %s staging writer: %w", s.format, err)
+			}
+		}
+
+		end := record.NumRows()
+		if s.maxRowsPerFile > 0 {
+			remainingCapacity := s.maxRowsPerFile - s.currentRows
+			if remainingCapacity <= 0 {
+				if err := s.closeChunk(); err != nil {
+					return fmt.Errorf("failed to finalize %s staging writer: %w", s.format, err)
+				}
+				continue
+			}
+			if span := start + remainingCapacity; span < end {
+				end = span
+			}
+		}
+
+		slice := record.NewSlice(start, end)
+		err := s.chunkWriter.WriteRecord(slice)
+		slice.Release()
+		if err != nil {
+			s.abort(err)
+			return fmt.Errorf("failed to write %s staging batch: %w", s.format, err)
+		}
+
+		rowsWritten := end - start
+		s.totalRows += rowsWritten
+		s.currentRows += rowsWritten
+		s.chunkMeta.rows += rowsWritten
+		start = end
+
+		if s.maxRowsPerFile > 0 && s.currentRows >= s.maxRowsPerFile {
+			if err := s.closeChunk(); err != nil {
+				return fmt.Errorf("failed to finalize %s staging writer: %w", s.format, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *chunkStager) finish() ([]stagedLoadChunk, int64, error) {
+	if s.chunkWriter == nil {
+		return s.chunks, s.totalRows, nil
+	}
+	if err := s.closeChunk(); err != nil {
+		return s.chunks, s.totalRows, fmt.Errorf("failed to finalize %s staging writer: %w", s.format, err)
+	}
+	return s.chunks, s.totalRows, nil
+}
+
 func (d *BigQueryDestination) writeLoadJobChunks(
 	ctx context.Context,
 	records <-chan source.RecordBatchResult,
@@ -925,53 +1083,17 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 	targetSchema *arrow.Schema,
 	openWriter func(part int) (stagedLoadChunk, io.WriteCloser, error),
 ) ([]stagedLoadChunk, int64, error) {
-	var (
-		chunks      []stagedLoadChunk
-		totalRows   int64
-		currentRows int64
-		part        int
-		chunkMeta   stagedLoadChunk
-		chunkWriter loadJobChunkWriter
-	)
-
-	closeChunk := func() error {
-		if chunkWriter == nil {
-			return nil
-		}
-		if err := chunkWriter.Close(); err != nil {
-			return err
-		}
-		chunks = append(chunks, chunkMeta)
-		chunkWriter = nil
-		currentRows = 0
-		part++
-		return nil
-	}
-
-	abortChunk := func(cause error) {
-		if chunkWriter == nil {
-			return
-		}
-		chunkWriter.Abort(cause)
-		chunkWriter = nil
-	}
-
-	openChunk := func() error {
-		meta, writer, err := openWriter(part)
-		if err != nil {
-			return err
-		}
-		chunkMeta = meta
-		chunkMeta.index = part
-		chunkWriter = newLoadJobChunkWriter(format, writer, targetSchema)
-		currentRows = 0
-		return nil
+	stager := &chunkStager{
+		format:         format,
+		maxRowsPerFile: maxRowsPerFile,
+		targetSchema:   targetSchema,
+		openWriter:     openWriter,
 	}
 
 	for result := range records {
 		if result.Err != nil {
-			abortChunk(result.Err)
-			return nil, totalRows, result.Err
+			stager.abort(result.Err)
+			return stager.chunks, stager.totalRows, result.Err
 		}
 
 		record := result.Batch
@@ -979,77 +1101,32 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 			continue
 		}
 
-		for start := int64(0); start < record.NumRows(); {
-			if err := ctx.Err(); err != nil {
-				record.Release()
-				abortChunk(err)
-				return nil, totalRows, err
-			}
-
-			if chunkWriter == nil {
-				if err := openChunk(); err != nil {
-					record.Release()
-					return nil, totalRows, fmt.Errorf("failed to open %s staging writer: %w", format, err)
-				}
-			}
-
-			end := record.NumRows()
-			if maxRowsPerFile > 0 {
-				remainingCapacity := maxRowsPerFile - currentRows
-				if remainingCapacity <= 0 {
-					if err := closeChunk(); err != nil {
-						record.Release()
-						return nil, totalRows, fmt.Errorf("failed to finalize %s staging writer: %w", format, err)
-					}
-					continue
-				}
-				if span := start + remainingCapacity; span < end {
-					end = span
-				}
-			}
-
-			slice := record.NewSlice(start, end)
-			err := chunkWriter.WriteRecord(slice)
-			slice.Release()
-			if err != nil {
-				record.Release()
-				abortChunk(err)
-				return nil, totalRows, fmt.Errorf("failed to write %s staging batch: %w", format, err)
-			}
-
-			rowsWritten := end - start
-			totalRows += rowsWritten
-			currentRows += rowsWritten
-			chunkMeta.rows += rowsWritten
-			start = end
-
-			if maxRowsPerFile > 0 && currentRows >= maxRowsPerFile {
-				if err := closeChunk(); err != nil {
-					record.Release()
-					return nil, totalRows, fmt.Errorf("failed to finalize %s staging writer: %w", format, err)
-				}
-			}
-		}
-
+		err := stager.writeRecord(ctx, record)
 		record.Release()
+		if err != nil {
+			return stager.chunks, stager.totalRows, err
+		}
 	}
 
-	if chunkWriter == nil {
-		return chunks, totalRows, nil
-	}
-	if err := closeChunk(); err != nil {
-		return nil, totalRows, fmt.Errorf("failed to finalize %s staging writer: %w", format, err)
-	}
-
-	return chunks, totalRows, nil
+	return stager.finish()
 }
 
-func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser, targetSchema *arrow.Schema) loadJobChunkWriter {
+// jsonlRowOptions customizes JSONL row serialization for extract-time
+// pre-staging: keys are renamed to the destination column names assumed at
+// extract time and the load timestamp column is injected into every row.
+type jsonlRowOptions struct {
+	keyTransform        func(string) string
+	loadTimestampColumn string
+	loadTimestampValue  string
+}
+
+func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser, targetSchema *arrow.Schema, rowOpts jsonlRowOptions) loadJobChunkWriter {
 	switch format {
 	case loadJobFormatJSONL:
 		return &jsonlChunkWriter{
 			stageWriter: writer,
 			bufferedW:   bufio.NewWriterSize(writer, stagedGCSBufferSize),
+			rowOpts:     rowOpts,
 		}
 	default:
 		return &parquetChunkWriter{
@@ -1070,10 +1147,11 @@ func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser, targ
 type jsonlChunkWriter struct {
 	stageWriter io.WriteCloser
 	bufferedW   *bufio.Writer
+	rowOpts     jsonlRowOptions
 }
 
 func (w *jsonlChunkWriter) WriteRecord(record arrow.RecordBatch) error {
-	_, err := writeRecordBatchAsJSONL(w.bufferedW, record)
+	_, err := writeRecordBatchAsJSONLWithOpts(w.bufferedW, record, w.rowOpts)
 	return err
 }
 
@@ -1198,7 +1276,7 @@ func closeParquetFileWriter(writer *pqarrow.FileWriter) (err error) {
 	return writer.Close()
 }
 
-func writeRecordBatchAsJSONL(writer *bufio.Writer, record arrow.RecordBatch) (int64, error) {
+func writeRecordBatchAsJSONLWithOpts(writer *bufio.Writer, record arrow.RecordBatch, opts jsonlRowOptions) (int64, error) {
 	encoder := json.NewEncoder(writer)
 	encoder.SetEscapeHTML(false)
 
@@ -1206,10 +1284,22 @@ func writeRecordBatchAsJSONL(writer *bufio.Writer, record arrow.RecordBatch) (in
 	numCols := int(record.NumCols())
 	arrowSchema := record.Schema()
 
+	keys := make([]string, numCols)
+	for colIdx := 0; colIdx < numCols; colIdx++ {
+		name := arrowSchema.Field(colIdx).Name
+		if opts.keyTransform != nil {
+			name = opts.keyTransform(name)
+		}
+		keys[colIdx] = name
+	}
+
 	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
-		row := make(map[string]any, numCols)
+		row := make(map[string]any, numCols+1)
 		for colIdx := 0; colIdx < numCols; colIdx++ {
-			row[arrowSchema.Field(colIdx).Name] = extractJSONLValue(record.Column(colIdx), int(rowIdx))
+			row[keys[colIdx]] = extractJSONLValue(record.Column(colIdx), int(rowIdx))
+		}
+		if opts.loadTimestampColumn != "" {
+			row[opts.loadTimestampColumn] = opts.loadTimestampValue
 		}
 
 		if err := encoder.Encode(row); err != nil {

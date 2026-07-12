@@ -19,6 +19,7 @@ URI parameters:
 - `warehouse`: the name of the warehouse to connect to
 - `tenant_id`: the Microsoft Entra tenant ID the service principal belongs to
 - `fedauth` (optional): the Microsoft Entra authentication workflow to use (see below)
+- `write_strategy` (optional, destination only): how rows are written to Fabric — `copy` (default) or `insert` (see [Write strategies](#write-strategies))
 
 ## Authentication
 
@@ -53,6 +54,27 @@ ingestr ingest \
     --dest-uri "duckdb:///local.db" \
     --dest-table "main.users"
 ```
+
+## Write strategies
+
+When Fabric is used as a **destination**, the `write_strategy` query parameter controls how rows are sent to the warehouse:
+
+- `copy` (**default**): rows are streamed through the TDS **bulk-copy** path (the same mechanism as SQL Server's `BULK INSERT`). It is the fastest option, especially for **wide tables** (many columns) or **high-row-count** loads where the parameterised insert path is limited by the ~2100 parameter cap per statement.
+- `insert`: rows are written with batched, parameterised `INSERT ... VALUES` statements. Use it if you need to fall back from the bulk-copy path.
+
+Both strategies write directly over the connection — `copy` does **not** stage files in OneLake or blob storage; it uses the bulk-copy path built into the TDS protocol.
+
+Override the default on the destination URI:
+
+```bash
+ingestr ingest \
+    --source-uri "sqlite:///source.db" \
+    --source-table "main.events" \
+    --dest-uri "fabric://$CLIENT_ID:$CLIENT_SECRET@myworkspace.datawarehouse.fabric.microsoft.com/MyWarehouse?tenant_id=$TENANT_ID&write_strategy=insert" \
+    --dest-table "dbo.events"
+```
+
+The `write_strategy` value only affects how data is loaded; it is independent of `--incremental-strategy`, which controls the merge/replace/append semantics of the ingestion.
 
 ## Notes & limitations
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -162,19 +163,36 @@ func (d *OneLakeDestination) filesDir() string {
 	return d.itemPath() + "/Files/" + strings.Trim(d.relPath, "/")
 }
 
-// parseTarget splits a dest-table into a write mode and relative path. A leading
-// "Tables/" or "Files/" segment selects the mode; anything else defaults to a
-// Delta table.
-func parseTarget(table string) (writeMode, string) {
+// parseTarget splits a dest-table into a write mode and relative path. A "Files/"
+// prefix selects Files mode and takes the remainder verbatim (periods intact, so
+// file extensions survive). Everything else is a Delta table, where "." and "/"
+// are interchangeable separators and a leading "Tables" segment is optional — so
+// "schema.name", "Tables.schema.name" and "Tables/schema/name" all map to
+// "schema/name". Periods are unambiguous here because Fabric table and schema
+// names cannot contain them.
+func parseTarget(table string) (writeMode, string, error) {
 	t := strings.Trim(table, "/")
-	switch {
-	case strings.HasPrefix(strings.ToLower(t), "tables/"):
-		return modeTables, t[len("tables/"):]
-	case strings.HasPrefix(strings.ToLower(t), "files/"):
-		return modeFiles, t[len("files/"):]
-	default:
-		return modeTables, t
+	if head, rel, _ := strings.Cut(t, "/"); strings.EqualFold(head, "files") {
+		if rel == "" {
+			return modeFiles, "", fmt.Errorf("dest-table %q is missing a path after \"Files/\"", table)
+		}
+		return modeFiles, rel, nil
 	}
+
+	// Split on "." and "/" keeping empty components, so malformed targets such as
+	// "schema..name" or a bare "Tables" are rejected rather than silently
+	// collapsing to a different (or area-root) path.
+	segs := strings.Split(strings.ReplaceAll(t, ".", "/"), "/")
+	if strings.EqualFold(segs[0], "tables") {
+		segs = segs[1:]
+	}
+	if len(segs) == 0 {
+		return modeTables, "", fmt.Errorf("dest-table %q has no table path", table)
+	}
+	if slices.Contains(segs, "") {
+		return modeTables, "", fmt.Errorf("dest-table %q has an empty path segment", table)
+	}
+	return modeTables, strings.Join(segs, "/"), nil
 }
 
 func (d *OneLakeDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
@@ -186,11 +204,11 @@ func (d *OneLakeDestination) PrepareTable(ctx context.Context, opts destination.
 		d.arrowSchema = opts.Schema.ToArrowSchema()
 	}
 	d.dropFirst = opts.DropFirst
-	d.mode, d.relPath = parseTarget(opts.Table)
-
-	if d.relPath == "" {
-		return fmt.Errorf("dest-table is required for OneLake")
+	mode, relPath, err := parseTarget(opts.Table)
+	if err != nil {
+		return err
 	}
+	d.mode, d.relPath = mode, relPath
 
 	if d.mode == modeTables && opts.PartitionBy != "" {
 		config.Debug("[ONELAKE] partition_by is not supported for Delta tables yet; ignoring %q", opts.PartitionBy)
@@ -507,12 +525,12 @@ func (d *OneLakeDestination) SwapTable(ctx context.Context, opts destination.Swa
 // rejecting Files-mode targets (the copy-on-write strategies only apply to
 // Delta tables).
 func (d *OneLakeDestination) tableDirForTables(table, op string) (string, error) {
-	mode, rel := parseTarget(table)
+	mode, rel, err := parseTarget(table)
+	if err != nil {
+		return "", err
+	}
 	if mode != modeTables {
 		return "", fmt.Errorf("%s strategy requires a Tables/ destination, got %q", op, table)
-	}
-	if rel == "" {
-		return "", fmt.Errorf("invalid table for %s: %q", op, table)
 	}
 	return d.itemPath() + "/Tables/" + strings.Trim(rel, "/"), nil
 }
@@ -727,7 +745,10 @@ func writeBatchesToParquet(batches []arrow.RecordBatch) ([]byte, *arrow.Schema, 
 }
 
 func (d *OneLakeDestination) DropTable(ctx context.Context, table string) error {
-	mode, relPath := parseTarget(table)
+	mode, relPath, err := parseTarget(table)
+	if err != nil {
+		return err
+	}
 	area := "Tables"
 	if mode == modeFiles {
 		area = "Files"

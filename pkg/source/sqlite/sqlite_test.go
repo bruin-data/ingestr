@@ -2,8 +2,10 @@ package sqlite
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +122,30 @@ func TestMapSQLiteToDataType(t *testing.T) {
 			assert.Equal(t, tt.wantPrec, prec, "precision mismatch")
 			assert.Equal(t, tt.wantScale, scale, "scale mismatch")
 		})
+	}
+}
+
+func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
+	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	windowStart := time.Date(2026, 1, 8, 0, 0, 0, 0, time.UTC)
+	windowEnd := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+
+	query := buildSelectQuery("orders", []schema.Column{
+		{Name: "id"},
+		{Name: "created_at"},
+	}, source.ReadOptions{
+		IncrementalKey:        "updated_at",
+		IntervalStart:         &intervalStart,
+		IntervalEnd:           &intervalEnd,
+		ExtractPartitionBy:    "created_at",
+		ExtractPartitionStart: &windowStart,
+		ExtractPartitionEnd:   &windowEnd,
+	})
+
+	want := "SELECT \"id\", \"created_at\" FROM \"orders\" WHERE \"updated_at\" >= '2026-01-01 00:00:00' AND \"updated_at\" <= '2026-01-31 00:00:00' AND \"created_at\" >= '2026-01-08 00:00:00' AND \"created_at\" < '2026-01-15 00:00:00'"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
 	}
 }
 

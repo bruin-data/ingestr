@@ -1,50 +1,47 @@
 package postgres_cdc
 
 import (
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
+	"fmt"
+
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 )
 
-// batchAccumulator collects small per-table Arrow batches and merges them
-// into larger ones before sending downstream. This is critical for CDC
-// workloads where each WAL transaction commit produces a 1-row batch.
+// batchAccumulator buffers decoded changes per table as plain Go values and
+// materializes a single Arrow batch per table at flush time. Building Arrow
+// once per flush window instead of once per WAL transaction is what keeps
+// autocommit workloads (single-row transactions) cheap: no per-transaction
+// builders, schema construction, or batch concatenation.
 type batchAccumulator struct {
-	batches   map[string][]arrow.RecordBatch
-	rowCounts map[string]int64
+	schemas map[string]*schema.TableSchema
+	changes map[string][]Change
 	// minLSN tracks the lowest (oldest) transaction LSN still buffered per
-	// table. Batches are added in non-decreasing LSN order, so the first batch
+	// table. Changes are added in non-decreasing LSN order, so the first group
 	// buffered for a table after a flush carries that table's minimum. Used to
 	// compute a safe commit position for streaming mode.
 	minLSN    map[string]pglogrepl.LSN
-	threshold int64
-
-	// transform, when set, post-processes each merged batch just before it is
-	// sent downstream. It receives the table name and the outgoing batch and
-	// returns the batch to emit. Returning a batch different from the input
-	// transfers ownership (the original is released). The accumulator itself
-	// stays schema-agnostic; CDC-specific logic lives in the supplied function.
-	transform func(tableName string, batch arrow.RecordBatch) arrow.RecordBatch
+	threshold int
 }
 
-func newBatchAccumulator(threshold int) *batchAccumulator {
+func newBatchAccumulator(threshold int, schemas map[string]*schema.TableSchema) *batchAccumulator {
 	return &batchAccumulator{
-		batches:   make(map[string][]arrow.RecordBatch),
-		rowCounts: make(map[string]int64),
+		schemas:   schemas,
+		changes:   make(map[string][]Change),
 		minLSN:    make(map[string]pglogrepl.LSN),
-		threshold: int64(threshold),
+		threshold: threshold,
 	}
 }
 
-func (a *batchAccumulator) add(tableName string, batch arrow.RecordBatch, lsn pglogrepl.LSN) {
+func (a *batchAccumulator) add(tableName string, changes []Change, lsn pglogrepl.LSN) {
+	if len(changes) == 0 {
+		return
+	}
 	if _, ok := a.minLSN[tableName]; !ok {
 		a.minLSN[tableName] = lsn
 	}
-	a.batches[tableName] = append(a.batches[tableName], batch)
-	a.rowCounts[tableName] += batch.NumRows()
+	a.changes[tableName] = append(a.changes[tableName], changes...)
 }
 
 // minPendingLSN returns the lowest transaction LSN still buffered across all
@@ -62,107 +59,78 @@ func (a *batchAccumulator) minPendingLSN() (pglogrepl.LSN, bool) {
 }
 
 // tokenFunc computes the CommitToken to attach to a flushed batch. It is
-// evaluated after the flushed table's batches have been removed from the
+// evaluated after the flushed table's changes have been removed from the
 // accumulator, so it reflects only data that remains un-emitted.
 type tokenFunc func() any
 
 // flushReady sends merged batches for tables that have accumulated enough rows.
-func (a *batchAccumulator) flushReady(results chan<- source.RecordBatchResult, token tokenFunc) {
-	for tableName, count := range a.rowCounts {
-		if count >= a.threshold {
-			a.flushTable(tableName, results, token)
+func (a *batchAccumulator) flushReady(results chan<- source.RecordBatchResult, token tokenFunc) error {
+	for tableName, changes := range a.changes {
+		if len(changes) >= a.threshold {
+			if err := a.flushTable(tableName, results, token); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 // flushAll sends merged batches for all tables, regardless of row count.
-func (a *batchAccumulator) flushAll(results chan<- source.RecordBatchResult, token tokenFunc) {
-	for tableName := range a.batches {
-		a.flushTable(tableName, results, token)
+func (a *batchAccumulator) flushAll(results chan<- source.RecordBatchResult, token tokenFunc) error {
+	for tableName := range a.changes {
+		if err := a.flushTable(tableName, results, token); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (a *batchAccumulator) flushTable(tableName string, results chan<- source.RecordBatchResult, token tokenFunc) {
-	batches := a.batches[tableName]
-	if len(batches) == 0 {
-		return
+func (a *batchAccumulator) flushTable(tableName string, results chan<- source.RecordBatchResult, token tokenFunc) error {
+	changes := a.changes[tableName]
+	if len(changes) == 0 {
+		return nil
 	}
 
-	delete(a.batches, tableName)
-	delete(a.rowCounts, tableName)
+	delete(a.changes, tableName)
 	delete(a.minLSN, tableName)
+
+	tableSchema := a.schemas[tableName]
+	if tableSchema == nil {
+		return fmt.Errorf("no schema registered for table %q", tableName)
+	}
+
+	// Resolve unchanged-TOAST markers across the whole flush window: a row
+	// carrying a column's full value fills a later partial UPDATE that omitted
+	// it, including across transaction boundaries. The destination merge only
+	// looks at the latest change per primary key, so without this fill an
+	// INSERT + partial UPDATE landing in the same window would lose the
+	// omitted column (the merge falls back to a target row that doesn't exist
+	// yet).
+	applyIntraBatchFill(changes, tableSchema)
+	changes = expandUpdates(changes, tableSchema)
+
+	// Last-write-wins compaction: only the latest change per primary key can
+	// affect the merge outcome, so superseded row versions are dropped before
+	// materialization.
+	buffered := len(changes)
+	changes = compactChanges(changes, tableSchema)
 
 	var commitToken any
 	if token != nil {
 		commitToken = token()
 	}
 
-	var out arrow.RecordBatch
-	if len(batches) == 1 {
-		out = batches[0]
-	} else {
-		out = concatRecordBatches(batches)
-		config.Debug("[CDC] Flushed %d micro-batches into %d rows for table %s", len(batches), out.NumRows(), tableName)
-
-		// Release the originals now that the merged batch owns the data
-		for _, b := range batches {
-			b.Release()
-		}
+	batch, err := changesToBatch(changes, tableSchema)
+	if err != nil {
+		return fmt.Errorf("failed to materialize batch for table %s: %w", tableName, err)
 	}
 
-	if a.transform != nil {
-		if transformed := a.transform(tableName, out); transformed != out {
-			out.Release()
-			out = transformed
-		}
-	}
+	config.Debug("[CDC] Flushed %d buffered changes (%d rows after compaction) for table %s", buffered, len(changes), tableName)
 
 	results <- source.RecordBatchResult{
-		Batch:       out,
+		Batch:       batch,
 		TableName:   tableName,
 		CommitToken: commitToken,
 	}
-}
-
-// concatRecordBatches merges multiple Arrow record batches (same schema)
-// into a single batch by concatenating each column array.
-func concatRecordBatches(batches []arrow.RecordBatch) arrow.RecordBatch {
-	schema := batches[0].Schema()
-	mem := memory.NewGoAllocator()
-
-	numCols := int(schema.NumFields())
-	cols := make([]arrow.Array, numCols)
-
-	for i := 0; i < numCols; i++ {
-		arrays := make([]arrow.Array, len(batches))
-		for j, b := range batches {
-			arrays[j] = b.Column(i)
-		}
-		concatenated, err := array.Concatenate(arrays, mem)
-		if err != nil {
-			// Same-schema arrays should always concatenate successfully.
-			// Fall back to returning the first batch if this somehow fails.
-			config.Debug("[CDC] Failed to concatenate column %d: %v, falling back to first batch", i, err)
-			for k := 0; k < i; k++ {
-				cols[k].Release()
-			}
-			batches[0].Retain()
-			return batches[0]
-		}
-		cols[i] = concatenated
-	}
-
-	var totalRows int64
-	for _, b := range batches {
-		totalRows += b.NumRows()
-	}
-
-	result := array.NewRecordBatch(schema, cols, totalRows)
-
-	// NewRecordBatch retains the columns, so release our references
-	for _, col := range cols {
-		col.Release()
-	}
-
-	return result
+	return nil
 }

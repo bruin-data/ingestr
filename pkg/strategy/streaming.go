@@ -8,12 +8,14 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -93,6 +95,13 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	}
 
 	loop := newFlushLoop(job.Destination, job.Config, e.opts, map[string]*streamTableState{"": st})
+	// CDC sources re-announce their table (with its refreshed schema) after
+	// rebuilding their stream around mid-stream DDL; evolve the destination
+	// before the new-shape batches arrive. Sources that never announce
+	// (message brokers) leave this callback unused.
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
+		return evolveDestinationTable(ctx, job.Destination, destTable, newSchema, job.Config)
+	}
 	defer loop.cleanup(ctx)
 	return loop.run(ctx, records)
 }
@@ -159,8 +168,72 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	}
 
 	loop := newFlushLoop(job.Destination, job.Config, e.opts, tables)
+	// CDC sources can discover tables created on the source mid-stream; they
+	// announce each one (with schema) before emitting its batches so the
+	// destination can be provisioned on the fly.
+	loop.prepareNewTable = func(ctx context.Context, ti source.SourceTableInfo) (*streamTableState, error) {
+		if !job.Config.NoLoadTimestamp {
+			ti.Schema = withLoadTimestampColumn(ti.Schema)
+		}
+		if ti.Schema == nil {
+			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
+		}
+		st := &streamTableState{
+			destTable:      multiTableDestName(job.Destination, ti),
+			schema:         ti.Schema,
+			primaryKeys:    ti.PrimaryKeys,
+			incrementalKey: ti.Schema.IncrementalKey,
+			isCDC:          hasCDCColumns(ti.Schema),
+		}
+		if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
+			return nil, err
+		}
+		if job.TableDestNames == nil {
+			job.TableDestNames = make(map[string]string)
+		}
+		job.TableDestNames[ti.Name] = st.destTable
+		return st, nil
+	}
+	// CDC sources also re-announce a table (with its refreshed schema) after
+	// rebuilding their stream around mid-stream DDL — a column added or a type
+	// changed on the source while streaming. The destination is evolved before
+	// the new-shape batches arrive.
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
+		return evolveDestinationTable(ctx, job.Destination, destTable, newSchema, job.Config)
+	}
 	defer loop.cleanup(ctx)
 	return loop.run(ctx, records)
+}
+
+// multiTableDestName computes the destination table name for a source table
+// discovered mid-stream, matching the pipeline's upfront naming.
+func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo) string {
+	if namer, ok := dest.(destination.MultiTableNamer); ok {
+		return namer.DestTableName(ti.DestSchema, ti.Name)
+	}
+	return destination.DefaultMultiTableName(ti.DestSchema, ti.Name)
+}
+
+// withLoadTimestampColumn mirrors the pipeline's schema decoration for tables
+// discovered mid-stream: startup tables get _ingestr_loaded_at added by the
+// pipeline before the executor sees them, so late arrivals must match or their
+// destination tables would be created without the column the flush fills.
+func withLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			return s
+		}
+	}
+	out := *s
+	out.Columns = append(append([]schema.Column{}, s.Columns...), schema.Column{
+		Name:     naming.IngestrLoadedAtColumn,
+		DataType: schema.TypeTimestampTZ,
+		Nullable: true,
+	})
+	return &out
 }
 
 // prepareTable sets up the destination (and staging, for merge) tables for one
@@ -168,6 +241,12 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.Destination, cfg *config.IngestConfig, st *streamTableState) error {
 	switch e.opts.Strategy {
 	case config.StrategyMerge:
+		if st.isCDC && len(st.primaryKeys) == 0 {
+			// Keyless CDC table: no key to merge on, so its change log lands
+			// directly in the destination table and flush skips the merge
+			// (stagingTable stays empty). See isAppendOnlyCDCTable in merge.go.
+			return prepareAppendOnlyCDCTable(ctx, dest, st.destTable, st.schema)
+		}
 		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
 		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		return prepareMergeTables(ctx, dest, mergeTableParams{
@@ -185,13 +264,22 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 		// can be redelivered, and an enforced PK would turn that into a
 		// duplicate-key error that aborts the stream. The key stays a regular
 		// column (available for downstream dedup or a later merge).
+		//
+		// CDC change batches carry the otherwise staging-only
+		// _cdc_unchanged_cols column; append lands batches directly, so the
+		// destination table must keep it.
+		prepSchema := destination.DestinationTableSchema(st.schema)
+		if st.isCDC {
+			prepSchema = st.schema
+		}
 		if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 			Table:       st.destTable,
-			Schema:      destination.DestinationTableSchema(st.schema),
+			Schema:      prepSchema,
 			DropFirst:   false,
 			PrimaryKeys: nil,
 			PartitionBy: st.partitionBy,
 			ClusterBy:   st.clusterBy,
+			CDCMode:     st.isCDC,
 		}); err != nil {
 			return fmt.Errorf("failed to prepare destination table %s: %w", st.destTable, err)
 		}
@@ -222,6 +310,17 @@ type flushLoop struct {
 	cfg    *config.IngestConfig
 	opts   StreamingOptions
 	tables map[string]*streamTableState // key = RecordBatchResult.TableName ("" for single-table)
+
+	// prepareNewTable provisions state for a table announced by the source
+	// after the stream started (RecordBatchResult.TableInfo). Nil means dynamic
+	// tables are unsupported and announcements are ignored.
+	prepareNewTable func(ctx context.Context, ti source.SourceTableInfo) (*streamTableState, error)
+
+	// evolveTable applies destination schema evolution for a known table whose
+	// source schema changed mid-stream (the source re-announces it with the
+	// refreshed schema after rebuilding its stream). Nil means mid-stream
+	// schema changes are unsupported and re-announcements are ignored.
+	evolveTable func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error
 
 	buffered int64 // rows buffered across all tables
 
@@ -263,6 +362,11 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 				}
 				return fmt.Errorf("source error: %w", res.Err)
 			}
+			if res.TableInfo != nil {
+				if err := l.ensureTable(ctx, *res.TableInfo); err != nil {
+					return err
+				}
+			}
 			l.buffer(res)
 			if l.buffered >= l.opts.FlushRecords {
 				if err := l.flush(ctx); err != nil {
@@ -283,6 +387,79 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 			return l.shutdown(ctx, records)
 		}
 	}
+}
+
+// ensureTable provisions per-table state for a table announced mid-stream.
+// An announcement for a table already known is a schema refresh: the source
+// rebuilt its stream around new DDL and re-announces the table so the
+// destination can evolve before the new-shape batches arrive. Announcements
+// that carry no schema change are ignored.
+func (l *flushLoop) ensureTable(ctx context.Context, ti source.SourceTableInfo) error {
+	if st, ok := l.tables[ti.Name]; ok {
+		return l.refreshTableSchema(ctx, ti, st)
+	}
+	// Single-table streams key their state under "" but announce with the real
+	// source table name; route the refresh to that state.
+	if st, ok := l.tables[""]; ok && len(l.tables) == 1 {
+		return l.refreshTableSchema(ctx, ti, st)
+	}
+	if l.prepareNewTable == nil {
+		config.Debug("[STREAM] Ignoring new-table announcement for %q (dynamic tables unsupported here)", ti.Name)
+		return nil
+	}
+	st, err := l.prepareNewTable(ctx, ti)
+	if err != nil {
+		return fmt.Errorf("failed to prepare newly discovered table %s: %w", ti.Name, err)
+	}
+	l.tables[ti.Name] = st
+	output.Statusf("[STREAM] %s | New table %s added to stream (dest: %s)\n", time.Now().Format("15:04:05"), ti.Name, st.destTable)
+	return nil
+}
+
+// refreshTableSchema handles a re-announcement of a known table after a
+// mid-stream schema change: batches buffered in the old shape are flushed
+// first, then the destination table is evolved and the staging table
+// recreated so the new-shape batches following the announcement land cleanly.
+func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTableInfo, st *streamTableState) error {
+	if l.evolveTable == nil || ti.Schema == nil {
+		return nil
+	}
+	newSchema := ti.Schema
+	if !l.cfg.NoLoadTimestamp {
+		newSchema = withLoadTimestampColumn(newSchema)
+	}
+	if st.schema.SameColumnShape(newSchema) {
+		return nil
+	}
+
+	if err := l.flush(ctx); err != nil {
+		return fmt.Errorf("failed to flush before schema change for table %s: %w", ti.Name, err)
+	}
+	if err := l.evolveTable(ctx, st.destTable, newSchema); err != nil {
+		return fmt.Errorf("failed to evolve destination table %s: %w", st.destTable, err)
+	}
+
+	st.schema = newSchema
+	st.isCDC = hasCDCColumns(newSchema)
+	if len(ti.PrimaryKeys) > 0 {
+		st.primaryKeys = ti.PrimaryKeys
+	}
+	if st.stagingTable != "" {
+		if err := l.dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:        st.stagingTable,
+			Schema:       st.schema,
+			DropFirst:    true,
+			PrimaryKeys:  nil,
+			CDCMode:      st.isCDC,
+			PartitionBy:  st.partitionBy,
+			ClusterBy:    st.clusterBy,
+			ExpiresAfter: destination.ManagedStagingTTL,
+		}); err != nil {
+			return fmt.Errorf("failed to recreate staging table %s after schema change: %w", st.stagingTable, err)
+		}
+	}
+	output.Statusf("[STREAM] %s | Schema change applied for %s (dest: %s)\n", time.Now().Format("15:04:05"), ti.Name, st.destTable)
+	return nil
 }
 
 func (l *flushLoop) buffer(res source.RecordBatchResult) {
@@ -313,22 +490,37 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 // ordering write → merge → reset staging → commit is what makes delivery
 // at-least-once: a crash before commit re-delivers from the last committed
 // position and the merge is idempotent by primary key.
+//
+// Tables flush concurrently when the destination declares its cross-table
+// cycles independent (destination.ConcurrentFlusher); the position is
+// confirmed only after every table's cycle succeeded, so a partial failure
+// re-delivers all tables from the last committed position.
 func (l *flushLoop) flush(ctx context.Context) error {
 	start := time.Now()
 	loadTimestamp := start.UTC().Truncate(time.Microsecond)
-	var flushedRows int64
 
+	type flushWork struct {
+		name string
+		st   *streamTableState
+
+		batches []arrow.RecordBatch
+		rows    int64
+	}
+
+	var work []flushWork
 	for name, st := range l.tables {
 		if st.pendingRows == 0 {
 			continue
 		}
-		batches := st.pending
-		rows := st.pendingRows
+		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows})
+		l.buffered -= st.pendingRows
 		st.pending = nil
 		st.pendingRows = 0
-		l.buffered -= rows
+	}
 
-		displayName := name
+	flushOne := func(ctx context.Context, w flushWork) error {
+		st := w.st
+		displayName := w.name
 		if displayName == "" {
 			displayName = st.destTable
 		}
@@ -346,13 +538,13 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			writeOpts.StagingTable = true
 		}
 
-		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(batches))
+		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
 		}
 		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
 			drainAndRelease(records)
-			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", rows, displayName, err)
+			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
 		}
 
 		if st.stagingTable != "" {
@@ -363,8 +555,32 @@ func (l *flushLoop) flush(ctx context.Context) error {
 				return fmt.Errorf("streaming flush: failed to reset staging table %s: %w", st.stagingTable, err)
 			}
 		}
+		return nil
+	}
 
-		flushedRows += rows
+	var flushErr error
+	if limit := l.flushConcurrency(); limit > 1 && len(work) > 1 {
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(limit)
+		for _, w := range work {
+			g.Go(func() error { return flushOne(gctx, w) })
+		}
+		flushErr = g.Wait()
+	} else {
+		for _, w := range work {
+			if err := flushOne(ctx, w); err != nil {
+				flushErr = err
+				break
+			}
+		}
+	}
+	if flushErr != nil {
+		return flushErr
+	}
+
+	var flushedRows int64
+	for _, w := range work {
+		flushedRows += w.rows
 	}
 
 	if l.opts.Committer != nil && l.tokenDirty {
@@ -374,11 +590,36 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 	l.tokenDirty = false
 
+	// Only after the commit: the counters mean "durable in the destination and
+	// acknowledged to the source", not merely "written".
+	perTable := make(map[string]int64, len(work))
+	for _, w := range work {
+		name := w.name
+		if name == "" {
+			name = w.st.destTable // single-table streams key l.tables on ""
+		}
+		perTable[name] = w.rows
+	}
+	metrics.RecordSync(perTable, time.Now())
+
 	l.cycles++
 	if flushedRows > 0 {
 		output.Statusf("[STREAM] %s | cycle %d: flushed %d rows in %s\n", time.Now().Format("15:04:05"), l.cycles, flushedRows, time.Since(start).Round(time.Millisecond))
 	}
 	return nil
+}
+
+// flushConcurrency returns how many tables may flush at once: destinations
+// opt in via destination.ConcurrentFlusher; everything else stays sequential.
+func (l *flushLoop) flushConcurrency() int {
+	cf, ok := l.dest.(destination.ConcurrentFlusher)
+	if !ok {
+		return 1
+	}
+	if n := cf.MaxConcurrentFlushes(); n > 1 {
+		return n
+	}
+	return 1
 }
 
 // resetStaging empties the staging table for the next cycle, preferring an

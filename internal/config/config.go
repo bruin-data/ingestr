@@ -61,10 +61,15 @@ type IngestConfig struct {
 	Progress       ProgressMode
 	Debug          bool
 
-	PageSize           int
-	LoaderFileSize     int
-	LoaderFileFormat   string
-	ExtractParallelism int
+	PageSize                        int
+	LoaderFileSize                  int
+	LoaderFileFormat                string
+	ExtractParallelism              int
+	ExtractPartitionBy              string
+	ExtractPartitionInterval        time.Duration
+	ExtractPartitionNumericInterval int64
+	ExtractPartitionAuto            bool
+	DisablePreStaging               bool // Skip extract-time load-file staging for schema-inferred sources
 
 	SQLLimit          int
 	SQLExcludeColumns []string
@@ -127,6 +132,9 @@ func (c *IngestConfig) Validate() error {
 			Message: fmt.Sprintf("must be earlier than interval-end (got start=%s, end=%s)", c.IntervalStart.Format(time.RFC3339), c.IntervalEnd.Format(time.RFC3339)),
 		}
 	}
+	if err := c.validateExtractPartitioning(); err != nil {
+		return err
+	}
 	if c.NoInference && strings.TrimSpace(c.Columns) == "" {
 		return &ValidationError{Field: "columns", Message: "is required when no-inference is enabled"}
 	}
@@ -157,6 +165,68 @@ func (c *IngestConfig) Validate() error {
 	}
 	if c.IsChangeTrackingSource() && !c.FullRefresh && c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge {
 		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless full-refresh is enabled", StrategyMerge)}
+	}
+	return nil
+}
+
+func (c *IngestConfig) validateExtractPartitioning() error {
+	hasColumn := strings.TrimSpace(c.ExtractPartitionBy) != ""
+	hasInterval := c.ExtractPartitionInterval != 0 || c.ExtractPartitionNumericInterval != 0 || c.ExtractPartitionAuto
+	if !hasColumn && !hasInterval {
+		return nil
+	}
+	if !hasColumn {
+		return &ValidationError{Field: "extract-partition-by", Message: "is required when extract-partition-interval is set"}
+	}
+	if !hasInterval {
+		return &ValidationError{Field: "extract-partition-interval", Message: "is required when extract-partition-by is set"}
+	}
+	modeCount := 0
+	if c.ExtractPartitionInterval != 0 {
+		modeCount++
+	}
+	if c.ExtractPartitionNumericInterval != 0 {
+		modeCount++
+	}
+	if c.ExtractPartitionAuto {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return &ValidationError{Field: "extract-partition-interval", Message: "must be one of auto, a duration, or an integer step"}
+	}
+	if c.ExtractPartitionInterval < 0 || c.ExtractPartitionNumericInterval < 0 {
+		return &ValidationError{Field: "extract-partition-interval", Message: "must be positive"}
+	}
+	if c.IntervalStart == nil {
+		return &ValidationError{Field: "interval-start", Message: "is required when extract partitioning is enabled"}
+	}
+	if c.IntervalEnd == nil {
+		return &ValidationError{Field: "interval-end", Message: "is required when extract partitioning is enabled"}
+	}
+	if c.SQLLimit > 0 {
+		return &ValidationError{Field: "sql-limit", Message: "cannot be combined with extract partitioning"}
+	}
+	if c.Stream {
+		return &ValidationError{Field: "stream", Message: "cannot be combined with extract partitioning"}
+	}
+	if c.IsCDCSource() {
+		return &ValidationError{Field: "source-uri", Message: "CDC sources do not support extract partitioning"}
+	}
+	if c.IsChangeTrackingSource() {
+		return &ValidationError{Field: "source-uri", Message: "change tracking sources do not support extract partitioning"}
+	}
+	if c.FullRefresh {
+		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with extract partitioning"}
+	}
+	switch c.IncrementalStrategy {
+	case StrategyReplace, StrategyTruncateInsert:
+		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", c.IncrementalStrategy)}
+	}
+	if rawQuery, ok := strings.CutPrefix(c.SourceTable, "query:"); ok {
+		if strings.TrimSpace(rawQuery) == "" {
+			return nil
+		}
+		return &ValidationError{Field: "source-table", Message: "custom queries do not support extract partitioning"}
 	}
 	return nil
 }

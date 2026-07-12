@@ -36,19 +36,43 @@ const (
 // URI does not specify one.
 const defaultPublicationName = "ingestr_publication"
 
+// defaultDiscoverInterval is how often a streaming run re-checks the source for
+// tables that appeared after the stream started.
+const defaultDiscoverInterval = 30 * time.Second
+
 type CDCConfig struct {
 	Publication   string
 	SlotName      string
 	Mode          CDCMode
 	ResumeFromLSN string // If set, skip snapshot and resume streaming from this LSN
 	DestSchema    string // If set, prepend this schema to destination table names (e.g. "dataset" for BigQuery)
+
+	// DiscoverInterval is how often streaming mode checks for new tables on the
+	// source. Zero disables mid-stream discovery.
+	DiscoverInterval time.Duration
+
+	// Binary opts into pgoutput's `binary 'true'` option (PostgreSQL 14+):
+	// the server sends column values in binary send format, skipping the
+	// text encode/parse round-trip for most types. Off by default because
+	// only the standard scalar/array types have a binary decoder; exotic
+	// column types fail fast with a descriptive error when enabled.
+	Binary bool
 }
 
 type PostgresCDCSource struct {
 	queryPool *pgxpool.Pool  // Regular connection pool for queries
 	replConn  *pgconn.PgConn // Replication connection
 	uri       string
-	cdcConfig CDCConfig
+	// normalizedURI is the URI with the +cdc scheme suffix and CDC-specific query
+	// params stripped; extra replication connections are derived from it.
+	normalizedURI string
+	// managedPublication is true when ingestr owns the publication (none was
+	// supplied in the URI) and may reconcile its table set.
+	managedPublication bool
+	cdcConfig          CDCConfig
+	// serverVersion is the source's server_version_num, used to gate pgoutput
+	// options added in newer PostgreSQL releases.
+	serverVersion int
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
@@ -59,6 +83,9 @@ type PostgresCDCSource struct {
 	// replicator's 10s standby timer fires. Stays zero in streaming mode.
 	caughtUp *streamPosition
 
+	// lag tracks the server's WAL head for replication-lag reporting.
+	lag *lagState
+
 	// keepalive coordinates a goroutine that periodically pings the
 	// walsender with a WALWritePosition-only standby update during the
 	// destination-write phase. Without it, a write that outlasts
@@ -68,11 +95,18 @@ type PostgresCDCSource struct {
 	keepaliveMu   sync.Mutex
 	keepaliveStop chan struct{}
 	keepaliveDone chan struct{}
+
+	// keylessWarned dedupes the append-only notice per table: GetTables runs
+	// more than once per run (pipeline setup, ReadAll, stream rebuilds).
+	keylessWarnedMu sync.Mutex
+	keylessWarned   map[string]bool
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
-	return &PostgresCDCSource{pos: newStreamPosition(), caughtUp: newStreamPosition()}
+	return &PostgresCDCSource{pos: newStreamPosition(), caughtUp: newStreamPosition(), lag: newLagState()}
 }
+
+var _ source.LagReporter = (*PostgresCDCSource)(nil)
 
 func (s *PostgresCDCSource) Schemes() []string {
 	return []string{"postgres+cdc", "postgresql+cdc"}
@@ -103,12 +137,25 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	// When no publication is specified in the URI, ingestr manages a default
 	// publication. Reconcile it on every run so it tracks the current set of
 	// logged tables; unlogged tables cannot be replicated and are skipped.
-	if cdcConfig.Publication == "" {
+	managedPublication := cdcConfig.Publication == ""
+	if managedPublication {
 		cdcConfig.Publication = defaultPublicationName
 		if err := ensureManagedPublication(ctx, queryPool, cdcConfig.Publication); err != nil {
 			queryPool.Close()
 			return fmt.Errorf("failed to ensure publication: %w", err)
 		}
+	}
+
+	// Server version gates the pgoutput options added in PostgreSQL 14
+	// (protocol v2 streaming, binary tuple format).
+	var serverVersion int
+	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion); err != nil {
+		queryPool.Close()
+		return fmt.Errorf("failed to determine server version: %w", err)
+	}
+	if cdcConfig.Binary && serverVersion < 140000 {
+		queryPool.Close()
+		return fmt.Errorf("the binary=true option requires PostgreSQL 14 or newer (server reports %d)", serverVersion)
 	}
 
 	// Create replication connection
@@ -122,8 +169,38 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.queryPool = queryPool
 	s.replConn = replConn
 	s.uri = uri
+	s.normalizedURI = normalizedURI
+	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
+	s.serverVersion = serverVersion
 
+	return nil
+}
+
+// openReplicationConn opens an additional replication connection, e.g. for a
+// temporary snapshot slot that must not disturb the main replication stream.
+func (s *PostgresCDCSource) openReplicationConn(ctx context.Context) (*pgconn.PgConn, error) {
+	conn, err := pgconn.Connect(ctx, buildReplicationConnString(s.normalizedURI))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open replication connection: %w", err)
+	}
+	return conn, nil
+}
+
+// reconnectReplication replaces the main replication connection with a fresh
+// one. Needed after a streaming rebuild: once StartReplication has put a
+// connection into CopyBoth mode there is no clean way back, so a new
+// StartReplication requires a new connection. The persistent slot is untouched.
+func (s *PostgresCDCSource) reconnectReplication(ctx context.Context) error {
+	if s.replConn != nil {
+		_ = s.replConn.Close(ctx)
+		s.replConn = nil
+	}
+	conn, err := s.openReplicationConn(ctx)
+	if err != nil {
+		return err
+	}
+	s.replConn = conn
 	return nil
 }
 
@@ -269,6 +346,37 @@ func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
 	return nil
 }
 
+// ReplicationLag reports how many WAL bytes the durable destination position
+// trails the server's WAL head. It is only meaningful while streaming: batch
+// runs never call CommitStream, so pos stays zero and the difference would
+// report the entire WAL as lag.
+func (s *PostgresCDCSource) ReplicationLag() (source.LagSnapshot, bool) {
+	if s.lag == nil || s.pos == nil || !s.lag.streaming.Load() {
+		return source.LagSnapshot{}, false
+	}
+	head := s.lag.serverHead.Load()
+	if head == 0 {
+		return source.LagSnapshot{}, false
+	}
+	committed := uint64(s.pos.Committed())
+
+	// Saturating: LSN is a uint64, and committed briefly exceeding head after a
+	// reconnect would otherwise wrap to ~1.8e19.
+	var behind uint64
+	if head > committed {
+		behind = head - committed
+	}
+
+	return source.LagSnapshot{
+		Source:          "postgres_cdc",
+		BytesBehind:     &behind,
+		ServerPosition:  pglogrepl.LSN(head).String(),
+		DurablePosition: pglogrepl.LSN(committed).String(),
+		CaughtUp:        behind == 0,
+		UpdatedAt:       time.Now(),
+	}, true
+}
+
 // recordCaughtUpLSN records the LSN a batch run has streamed up to. It is sent
 // to the slot by FinalizeBatch once the destination write is durable.
 func (s *PostgresCDCSource) recordCaughtUpLSN(lsn pglogrepl.LSN) {
@@ -353,11 +461,38 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 		}
 	}
 
+	if raw := query.Get("binary"); raw != "" {
+		switch raw {
+		case "true", "1", "on":
+			cfg.Binary = true
+		case "false", "0", "off":
+			cfg.Binary = false
+		default:
+			return cfg, "", fmt.Errorf("invalid binary option: %s (must be 'true' or 'false')", raw)
+		}
+	}
+
+	cfg.DiscoverInterval = defaultDiscoverInterval
+	if raw := query.Get("discover_interval"); raw != "" {
+		switch raw {
+		case "0", "off":
+			cfg.DiscoverInterval = 0
+		default:
+			d, err := time.ParseDuration(raw)
+			if err != nil || d < 0 {
+				return cfg, "", fmt.Errorf("invalid discover_interval: %s (must be a duration like '30s', or '0'/'off' to disable)", raw)
+			}
+			cfg.DiscoverInterval = d
+		}
+	}
+
 	// Remove CDC-specific params from connection string
 	query.Del("publication")
 	query.Del("slot")
 	query.Del("mode")
 	query.Del("dest_schema")
+	query.Del("discover_interval")
+	query.Del("binary")
 	parsed.RawQuery = query.Encode()
 
 	return cfg, parsed.String(), nil
@@ -623,10 +758,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
-		fullName := tableName
-		if schemaName != "public" {
-			fullName = schemaName + "." + tableName
-		}
+		fullName := publicationTableFullName(schemaName, tableName)
 
 		// Get schema for this table
 		tableSchema, err := getTableSchema(ctx, s.queryPool, fullName)
@@ -636,6 +768,10 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 		// Add CDC metadata columns
 		tableSchema = addCDCColumns(tableSchema)
+
+		if len(tableSchema.PrimaryKeys) == 0 {
+			s.warnKeylessTable(fullName)
+		}
 
 		tables = append(tables, source.SourceTableInfo{
 			Name:        fullName,
@@ -658,6 +794,102 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	config.Debug("[CDC] Found %d tables in publication %s", len(tables), s.cdcConfig.Publication)
 	return tables, nil
+}
+
+// warnKeylessTable tells the user (once per table) that a table with no
+// primary key and no replica identity index is ingested as an append-only
+// change log instead of a merged mirror.
+func (s *PostgresCDCSource) warnKeylessTable(name string) {
+	s.keylessWarnedMu.Lock()
+	defer s.keylessWarnedMu.Unlock()
+	if s.keylessWarned == nil {
+		s.keylessWarned = make(map[string]bool)
+	}
+	if s.keylessWarned[name] {
+		return
+	}
+	s.keylessWarned[name] = true
+	fmt.Printf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
+}
+
+// publicationTableFullName renders a table name the way GetTables and the WAL
+// decoder key tables: bare name for public, schema-qualified otherwise.
+func publicationTableFullName(schemaName, tableName string) string {
+	if schemaName == "public" {
+		return tableName
+	}
+	return schemaName + "." + tableName
+}
+
+// listEligibleTableNames returns the names of the tables the CDC stream should
+// currently cover, without fetching schemas. For the ingestr-managed
+// publication this is the set of publishable tables (the publication is
+// reconciled to it); for a user-supplied publication it is the publication's
+// membership (or all eligible tables for FOR ALL TABLES publications).
+func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[string]struct{}, error) {
+	names := make(map[string]struct{})
+
+	if s.managedPublication {
+		included, _, err := selectPublishableTables(ctx, s.queryPool)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range included {
+			names[publicationTableFullName(t.schema, t.name)] = struct{}{}
+		}
+		return names, nil
+	}
+
+	var pubAllTables bool
+	err := s.queryPool.QueryRow(ctx, "SELECT puballtables FROM pg_publication WHERE pubname = $1", s.cdcConfig.Publication).Scan(&pubAllTables)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check publication type: %w", err)
+	}
+
+	var rows pgx.Rows
+	if pubAllTables {
+		rows, err = s.queryPool.Query(ctx, `
+			SELECT n.nspname, c.relname
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind = 'r'
+			  AND c.relpersistence = 'p'
+			  AND `+replicaIdentityClause+`
+			  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		`)
+	} else {
+		rows, err = s.queryPool.Query(ctx, `
+			SELECT schemaname, tablename
+			FROM pg_publication_tables
+			WHERE pubname = $1
+		`, s.cdcConfig.Publication)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to list publication tables: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var schemaName, tableName string
+		if err := rows.Scan(&schemaName, &tableName); err != nil {
+			return nil, fmt.Errorf("failed to scan table name: %w", err)
+		}
+		names[publicationTableFullName(schemaName, tableName)] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating table names: %w", err)
+	}
+	return names, nil
+}
+
+// reconcilePublication refreshes the managed publication's table set so tables
+// created after the stream started become part of it. No-op for user-supplied
+// publications, whose membership the user controls.
+func (s *PostgresCDCSource) reconcilePublication(ctx context.Context) error {
+	if !s.managedPublication {
+		return nil
+	}
+	return ensureManagedPublication(ctx, s.queryPool, s.cdcConfig.Publication)
 }
 
 // ReadAll reads CDC changes from all tables in the publication.

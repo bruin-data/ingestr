@@ -16,6 +16,7 @@ type ColumnOverride struct {
 	DataType  schema.DataType
 	Precision int
 	Scale     int
+	MaxLength int
 }
 
 // ColumnOverrides is a map of column name (lowercase) to its override.
@@ -62,7 +63,7 @@ var StandardTypeNames = map[string]schema.DataType{
 	"decimal": schema.TypeDecimal,
 	"numeric": schema.TypeDecimal,
 
-	// String types
+	// String types (sized forms like varchar(50) carry the length as MaxLength)
 	"string":  schema.TypeString,
 	"text":    schema.TypeString,
 	"varchar": schema.TypeString,
@@ -214,8 +215,9 @@ func parseColumnOverride(pair string) (ColumnOverride, error) {
 
 		override.DataType = dataType
 
-		// Handle precision/scale for decimal
-		if dataType == schema.TypeDecimal {
+		switch dataType {
+		case schema.TypeDecimal:
+			// Handle precision/scale for decimal
 			if len(params) >= 1 {
 				p, err := strconv.Atoi(strings.TrimSpace(params[0]))
 				if err != nil {
@@ -230,6 +232,19 @@ func parseColumnOverride(pair string) (ColumnOverride, error) {
 				}
 				override.Scale = s
 			}
+		case schema.TypeString:
+			// Sized string types take exactly one length parameter, e.g. varchar(50).
+			if len(params) != 1 {
+				return ColumnOverride{}, fmt.Errorf("invalid length in '%s': expected a single length, e.g. varchar(50)", typeSpec)
+			}
+			l, err := strconv.Atoi(strings.TrimSpace(params[0]))
+			if err != nil {
+				return ColumnOverride{}, fmt.Errorf("invalid length in '%s': %w", typeSpec, err)
+			}
+			if l <= 0 {
+				return ColumnOverride{}, fmt.Errorf("invalid length in '%s': must be positive", typeSpec)
+			}
+			override.MaxLength = l
 		}
 	} else {
 		// Simple type name
@@ -302,6 +317,9 @@ func (o ColumnOverride) ApplyToColumn(col schema.Column) schema.Column {
 	}
 	if o.Scale > 0 {
 		col.Scale = o.Scale
+	}
+	if o.MaxLength > 0 {
+		col.MaxLength = o.MaxLength
 	}
 	return col
 }

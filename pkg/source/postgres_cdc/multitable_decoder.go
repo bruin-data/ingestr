@@ -3,16 +3,12 @@ package postgres_cdc
 import (
 	"encoding/binary"
 	"fmt"
-	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // TableChange represents a decoded change for a specific table.
@@ -21,13 +17,35 @@ type TableChange struct {
 	Change    Change
 }
 
-// MultiTableDecoder decodes pgoutput messages for multiple tables.
+// streamedChange is one buffered change of an in-progress streamed
+// transaction (protocol v2), tagged with the subtransaction xid that produced
+// it so a Stream Abort can discard exactly that subtransaction's changes.
+type streamedChange struct {
+	xid uint32
+	tc  TableChange
+}
+
+// MultiTableDecoder decodes pgoutput messages for multiple tables. It
+// understands protocol v2 streaming of large in-progress transactions
+// (Stream Start/Stop/Commit/Abort) and, when the stream runs with the
+// `binary 'true'` option, binary-format tuple data.
 type MultiTableDecoder struct {
 	tableSchemas   map[string]*schema.TableSchema // schema name.table name -> schema
 	relations      map[uint32]*RelationInfo
 	targetRelIDs   map[uint32]string // relation ID -> full table name
 	pendingChanges []TableChange
 	currentTxLSN   pglogrepl.LSN
+	typeMap        *pgtype.Map
+
+	// Protocol v2 streaming state. Between Stream Start and Stream Stop,
+	// change messages carry a subtransaction xid and are buffered per
+	// top-level transaction until its Stream Commit (or dropped on abort).
+	inStream    bool
+	streamXid   uint32 // top-level xid of the current stream segment
+	msgXid      uint32 // xid carried by the message being decoded
+	walStart    pglogrepl.LSN
+	streamed    map[uint32][]streamedChange
+	streamedLow map[uint32]pglogrepl.LSN // lowest WAL position buffered per top-level xid
 }
 
 func NewMultiTableDecoder(tables []source.SourceTableInfo) *MultiTableDecoder {
@@ -40,30 +58,62 @@ func NewMultiTableDecoder(tables []source.SourceTableInfo) *MultiTableDecoder {
 		tableSchemas: tableSchemas,
 		relations:    make(map[uint32]*RelationInfo),
 		targetRelIDs: make(map[uint32]string),
+		typeMap:      pgtype.NewMap(),
+		streamed:     make(map[uint32][]streamedChange),
+		streamedLow:  make(map[uint32]pglogrepl.LSN),
 	}
 }
 
-// DecodedBatch contains a decoded batch with its source table name.
-type DecodedBatch struct {
-	Batch     arrow.RecordBatch
+// DecodedChanges carries one committed transaction's decoded changes for a
+// single table. Changes stay plain Go values; Arrow materialization happens
+// once per flush window in the accumulator, not per transaction.
+type DecodedChanges struct {
 	TableName string
+	Changes   []Change
 	LSN       pglogrepl.LSN
 }
 
-// Decode decodes a WAL message and returns batches for each table that has pending changes.
-func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedBatch, error) {
+// Decode decodes a WAL message and, on a (stream) commit, returns the
+// transaction's changes grouped per target table.
+func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedChanges, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 
 	msgType := data[0]
 	data = data[1:]
+	d.walStart = lsn
+
+	switch msgType {
+	case msgTypeStreamStart:
+		return nil, d.handleStreamStart(data)
+	case msgTypeStreamStop:
+		d.inStream = false
+		return nil, nil
+	case msgTypeStreamCommit:
+		return d.handleStreamCommit(data)
+	case msgTypeStreamAbort:
+		return nil, d.handleStreamAbort(data)
+	}
+
+	// Inside a stream segment, change messages carry the subtransaction xid
+	// between the type byte and the message body.
+	if d.inStream {
+		switch msgType {
+		case msgTypeRelation, msgTypeType, msgTypeInsert, msgTypeUpdate, msgTypeDelete, msgTypeTruncate:
+			if len(data) < 4 {
+				return nil, fmt.Errorf("streamed message missing xid")
+			}
+			d.msgXid = binary.BigEndian.Uint32(data[:4])
+			data = data[4:]
+		}
+	}
 
 	switch msgType {
 	case msgTypeRelation:
 		return nil, d.handleRelation(data)
 	case msgTypeBegin:
-		return nil, d.handleBegin(data, lsn)
+		return nil, d.handleBegin(data)
 	case msgTypeCommit:
 		return d.handleCommit()
 	case msgTypeInsert:
@@ -85,94 +135,169 @@ func (d *MultiTableDecoder) Decode(data []byte, lsn pglogrepl.LSN) ([]DecodedBat
 	}
 }
 
+func (d *MultiTableDecoder) handleStreamStart(data []byte) error {
+	if len(data) < 5 {
+		return fmt.Errorf("stream start message too short")
+	}
+	d.streamXid = binary.BigEndian.Uint32(data[:4])
+	d.inStream = true
+	return nil
+}
+
+// handleStreamCommit emits the buffered changes of a streamed transaction,
+// stamped with the commit LSN from the message — the same stamp a
+// non-streamed transaction gets from its Begin payload, keeping delivered
+// LSNs monotonic for the per-table filter and resume state.
+func (d *MultiTableDecoder) handleStreamCommit(data []byte) ([]DecodedChanges, error) {
+	if len(data) < 4+1+8 {
+		return nil, fmt.Errorf("stream commit message too short")
+	}
+	xid := binary.BigEndian.Uint32(data[:4])
+	commitLSN := pglogrepl.LSN(binary.BigEndian.Uint64(data[5:13]))
+
+	buffered := d.streamed[xid]
+	delete(d.streamed, xid)
+	delete(d.streamedLow, xid)
+	if len(buffered) == 0 {
+		return nil, nil
+	}
+
+	var groups []DecodedChanges
+	groupIdx := make(map[string]int)
+	for _, sc := range buffered {
+		tc := sc.tc
+		if d.tableSchemas[tc.TableName] == nil {
+			continue
+		}
+		tc.Change.LSN = commitLSN
+		idx, ok := groupIdx[tc.TableName]
+		if !ok {
+			idx = len(groups)
+			groupIdx[tc.TableName] = idx
+			groups = append(groups, DecodedChanges{TableName: tc.TableName, LSN: commitLSN})
+		}
+		groups[idx].Changes = append(groups[idx].Changes, tc.Change)
+	}
+	return groups, nil
+}
+
+// handleStreamAbort discards a streamed transaction's buffered changes: the
+// whole transaction when the aborted xid is the top-level one, otherwise just
+// the aborted subtransaction's changes.
+func (d *MultiTableDecoder) handleStreamAbort(data []byte) error {
+	if len(data) < 8 {
+		return fmt.Errorf("stream abort message too short")
+	}
+	xid := binary.BigEndian.Uint32(data[:4])
+	subXid := binary.BigEndian.Uint32(data[4:8])
+
+	if xid == subXid {
+		delete(d.streamed, xid)
+		delete(d.streamedLow, xid)
+		return nil
+	}
+
+	buffered := d.streamed[xid]
+	kept := buffered[:0]
+	for _, sc := range buffered {
+		if sc.xid != subXid {
+			kept = append(kept, sc)
+		}
+	}
+	if len(kept) == 0 {
+		delete(d.streamed, xid)
+		delete(d.streamedLow, xid)
+		return nil
+	}
+	// The stale (lower) low-water stamp is kept: it can only make the safe
+	// commit position more conservative, never skip data.
+	d.streamed[xid] = kept
+	return nil
+}
+
+// appendChange routes a decoded change either into the current transaction's
+// pending buffer or, inside a protocol v2 stream segment, into the per-xid
+// stream buffer.
+func (d *MultiTableDecoder) appendChange(tc TableChange) {
+	if d.inStream {
+		if _, ok := d.streamedLow[d.streamXid]; !ok {
+			d.streamedLow[d.streamXid] = d.walStart
+		}
+		d.streamed[d.streamXid] = append(d.streamed[d.streamXid], streamedChange{xid: d.msgXid, tc: tc})
+		return
+	}
+	d.pendingChanges = append(d.pendingChanges, tc)
+}
+
+// StreamedLowWater returns the lowest WAL position of any buffered in-progress
+// streamed transaction; false when none are buffered.
+func (d *MultiTableDecoder) StreamedLowWater() (pglogrepl.LSN, bool) {
+	var min pglogrepl.LSN
+	found := false
+	for _, lsn := range d.streamedLow {
+		if !found || lsn < min {
+			min = lsn
+			found = true
+		}
+	}
+	return min, found
+}
+
 func (d *MultiTableDecoder) handleRelation(data []byte) error {
-	if len(data) < 4 {
-		return fmt.Errorf("relation message too short")
+	rel, err := parseRelationMessage(data)
+	if err != nil {
+		return err
 	}
-
-	relID := binary.BigEndian.Uint32(data[:4])
-	data = data[4:]
-
-	namespace, n := readString(data)
-	data = data[n:]
-
-	name, n := readString(data)
-	data = data[n:]
-
-	// Skip replica identity
-	if len(data) < 1 {
-		return fmt.Errorf("relation message missing replica identity")
-	}
-	data = data[1:]
-
-	// Number of columns
-	if len(data) < 2 {
-		return fmt.Errorf("relation message missing column count")
-	}
-	numCols := binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-
-	columns := make([]RelationColumn, numCols)
-	for i := uint16(0); i < numCols; i++ {
-		if len(data) < 1 {
-			return fmt.Errorf("relation message column flags truncated")
-		}
-		flags := data[0]
-		data = data[1:]
-
-		colName, n := readString(data)
-		data = data[n:]
-
-		if len(data) < 4 {
-			return fmt.Errorf("relation message column type truncated")
-		}
-		dataType := binary.BigEndian.Uint32(data[:4])
-		data = data[4:]
-
-		if len(data) < 4 {
-			return fmt.Errorf("relation message column typemod truncated")
-		}
-		typeMod := int32(binary.BigEndian.Uint32(data[:4]))
-		data = data[4:]
-
-		columns[i] = RelationColumn{
-			Flags:    flags,
-			Name:     colName,
-			DataType: dataType,
-			TypeMod:  typeMod,
-		}
-	}
-
-	rel := &RelationInfo{
-		RelationID: relID,
-		Namespace:  namespace,
-		Name:       name,
-		Columns:    columns,
-	}
-
-	d.relations[relID] = rel
 
 	// Check if this is one of our target tables
-	fullName := fmt.Sprintf("%s.%s", namespace, name)
-	if _, ok := d.tableSchemas[fullName]; ok {
-		d.targetRelIDs[relID] = fullName
-		config.Debug("[CDC] Found target relation: %s (ID: %d)", fullName, relID)
-	} else {
+	tableName := fmt.Sprintf("%s.%s", rel.Namespace, rel.Name)
+	if _, ok := d.tableSchemas[tableName]; !ok {
+		tableName = ""
 		// Also try without schema prefix for public schema
-		if namespace == "public" {
-			if _, ok := d.tableSchemas[name]; ok {
-				d.targetRelIDs[relID] = name
-				config.Debug("[CDC] Found target relation: %s (ID: %d)", name, relID)
+		if rel.Namespace == "public" {
+			if _, ok := d.tableSchemas[rel.Name]; ok {
+				tableName = rel.Name
+			}
+		}
+	}
+	if tableName == "" {
+		// Table renamed mid-stream; keep decoding it by relation ID.
+		tableName = d.targetRelIDs[rel.RelationID]
+	}
+
+	if tableName != "" {
+		d.targetRelIDs[rel.RelationID] = tableName
+		config.Debug("[CDC] Found target relation: %s (ID: %d)", tableName, rel.RelationID)
+		if tableSchema := d.tableSchemas[tableName]; tableSchema != nil {
+			prev := d.relations[rel.RelationID]
+			if err := mapRelationToSchema(rel, prev, tableSchema, tableName); err != nil {
+				// Do not store rel on error: a rebuilt stream must retry against the
+				// last accepted relation so schema-change detection remains stable.
+				return err
 			}
 		}
 	}
 
+	d.relations[rel.RelationID] = rel
 	return nil
 }
 
-func (d *MultiTableDecoder) handleBegin(data []byte, lsn pglogrepl.LSN) error {
+// handleBegin stamps the transaction with the commit ("final") LSN carried in
+// the Begin payload, NOT the Begin record's WAL position. The walsender
+// delivers transactions in commit order, but under concurrent writers their
+// Begin positions interleave arbitrarily: a transaction that began earlier can
+// commit — and be delivered — after one that began later. A begin-position
+// stamp is therefore non-monotonic across delivered transactions, and the
+// per-table LSN filter (ShouldFilterChange) would treat such a late-committing
+// transaction as already processed and silently drop it. Commit LSNs are
+// strictly increasing in delivery order, which is exactly what the filter,
+// resume state, and slot-confirmation low-water logic require.
+func (d *MultiTableDecoder) handleBegin(data []byte) error {
 	d.pendingChanges = nil
-	d.currentTxLSN = lsn
+	if len(data) < 8 {
+		return fmt.Errorf("begin message too short")
+	}
+	d.currentTxLSN = pglogrepl.LSN(binary.BigEndian.Uint64(data[:8]))
 	return nil
 }
 
@@ -186,42 +311,31 @@ func (d *MultiTableDecoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 	return d.currentTxLSN, true
 }
 
-func (d *MultiTableDecoder) handleCommit() ([]DecodedBatch, error) {
+func (d *MultiTableDecoder) handleCommit() ([]DecodedChanges, error) {
 	if len(d.pendingChanges) == 0 {
 		return nil, nil
 	}
 
-	// Group changes by table
-	changesByTable := make(map[string][]Change)
+	// Group changes by table, preserving arrival order within each table.
+	// Unchanged-TOAST fill runs later over the whole flush window (see
+	// batchAccumulator.flushTable), which subsumes the per-commit pass.
+	var groups []DecodedChanges
+	groupIdx := make(map[string]int)
 	for _, tc := range d.pendingChanges {
-		changesByTable[tc.TableName] = append(changesByTable[tc.TableName], tc.Change)
-	}
-
-	// Create a batch for each table that has changes
-	var batches []DecodedBatch
-	for tableName, changes := range changesByTable {
-		tableSchema := d.tableSchemas[tableName]
-		if tableSchema == nil {
+		if d.tableSchemas[tc.TableName] == nil {
 			continue
 		}
-
-		applyIntraBatchFill(changes, tableSchema)
-
-		batch, err := d.changesToBatch(changes, tableSchema)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert changes for table %s: %w", tableName, err)
+		idx, ok := groupIdx[tc.TableName]
+		if !ok {
+			idx = len(groups)
+			groupIdx[tc.TableName] = idx
+			groups = append(groups, DecodedChanges{TableName: tc.TableName, LSN: d.currentTxLSN})
 		}
-		if batch != nil {
-			batches = append(batches, DecodedBatch{
-				Batch:     batch,
-				TableName: tableName,
-				LSN:       d.currentTxLSN,
-			})
-		}
+		groups[idx].Changes = append(groups[idx].Changes, tc.Change)
 	}
 
 	d.pendingChanges = nil
-	return batches, nil
+	return groups, nil
 }
 
 func (d *MultiTableDecoder) handleInsert(data []byte) error {
@@ -254,12 +368,12 @@ func (d *MultiTableDecoder) handleInsert(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel, tableSchema)
+	values, err := parseTupleData(data, rel, tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
 
-	d.pendingChanges = append(d.pendingChanges, TableChange{
+	d.appendChange(TableChange{
 		TableName: tableName,
 		Change: Change{
 			Operation: "INSERT",
@@ -300,7 +414,7 @@ func (d *MultiTableDecoder) handleUpdate(data []byte) error {
 	if len(data) > 0 && (data[0] == 'K' || data[0] == 'O') {
 		data = data[1:]
 		var err error
-		oldValues, err = d.parseTupleData(data, rel, tableSchema)
+		oldValues, err = parseTupleData(data, rel, tableSchema, d.typeMap)
 		if err != nil {
 			return fmt.Errorf("failed to parse old tuple: %w", err)
 		}
@@ -313,12 +427,12 @@ func (d *MultiTableDecoder) handleUpdate(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel, tableSchema)
+	values, err := parseTupleData(data, rel, tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse new tuple: %w", err)
 	}
 
-	d.pendingChanges = append(d.pendingChanges, TableChange{
+	d.appendChange(TableChange{
 		TableName: tableName,
 		Change: Change{
 			Operation: "UPDATE",
@@ -360,12 +474,12 @@ func (d *MultiTableDecoder) handleDelete(data []byte) error {
 	}
 	data = data[1:]
 
-	values, err := d.parseTupleData(data, rel, tableSchema)
+	values, err := parseTupleData(data, rel, tableSchema, d.typeMap)
 	if err != nil {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
 
-	d.pendingChanges = append(d.pendingChanges, TableChange{
+	d.appendChange(TableChange{
 		TableName: tableName,
 		Change: Change{
 			Operation: "DELETE",
@@ -375,109 +489,4 @@ func (d *MultiTableDecoder) handleDelete(data []byte) error {
 	})
 
 	return nil
-}
-
-func (d *MultiTableDecoder) parseTupleData(data []byte, rel *RelationInfo, tableSchema *schema.TableSchema) ([]interface{}, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("tuple data too short")
-	}
-
-	numCols := binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-
-	values := make([]interface{}, numCols)
-
-	for i := uint16(0); i < numCols; i++ {
-		if len(data) < 1 {
-			return nil, fmt.Errorf("tuple data truncated at column %d", i)
-		}
-
-		colType := data[0]
-		data = data[1:]
-
-		switch colType {
-		case tupleDataNull:
-			values[i] = nil
-		case tupleDataUnchanged:
-			values[i] = tupleUnchangedMarker
-		case tupleDataText:
-			if len(data) < 4 {
-				return nil, fmt.Errorf("text length truncated")
-			}
-			length := binary.BigEndian.Uint32(data[:4])
-			data = data[4:]
-
-			if len(data) < int(length) {
-				return nil, fmt.Errorf("text data truncated")
-			}
-			textVal := string(data[:length])
-			data = data[length:]
-
-			// Convert text to appropriate type based on schema column
-			if int(i) < sourceColumnCount(tableSchema) {
-				col := tableSchema.Columns[i]
-				values[i] = convertTextValue(textVal, col)
-			} else {
-				values[i] = textVal
-			}
-		case tupleDataBinary:
-			if len(data) < 4 {
-				return nil, fmt.Errorf("binary length truncated")
-			}
-			length := binary.BigEndian.Uint32(data[:4])
-			data = data[4:]
-
-			if len(data) < int(length) {
-				return nil, fmt.Errorf("binary data truncated")
-			}
-			values[i] = data[:length]
-			data = data[length:]
-		default:
-			return nil, fmt.Errorf("unknown tuple data type: %c", colType)
-		}
-	}
-
-	return values, nil
-}
-
-func (d *MultiTableDecoder) changesToBatch(changes []Change, tableSchema *schema.TableSchema) (arrow.RecordBatch, error) {
-	if len(changes) == 0 {
-		return nil, nil
-	}
-
-	mem := memory.NewGoAllocator()
-	arrowSchema := buildArrowSchema(tableSchema.Columns)
-
-	builders := make([]array.Builder, len(tableSchema.Columns))
-	for i, field := range arrowSchema.Fields() {
-		builders[i] = array.NewBuilder(mem, field.Type)
-	}
-
-	syncedAt := time.Now().UTC()
-	nSource := sourceColumnCount(tableSchema)
-
-	for i, change := range changes {
-		for colIdx := 0; colIdx < nSource; colIdx++ {
-			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
-		}
-
-		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
-		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
-		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
-		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))
-		builders[nSource+3].(*array.StringBuilder).Append(unchangedColumnsJSON(change, tableSchema.Columns, nSource))
-	}
-
-	arrays := make([]arrow.Array, len(builders))
-	for i, b := range builders {
-		arrays[i] = b.NewArray()
-	}
-
-	record := array.NewRecordBatch(arrowSchema, arrays, int64(len(changes)))
-
-	for _, arr := range arrays {
-		arr.Release()
-	}
-
-	return record, nil
 }

@@ -6,7 +6,27 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
+
+func TestMapDataTypeToDatabricks_SizedString(t *testing.T) {
+	tests := []struct {
+		name     string
+		col      schema.Column
+		expected string
+	}{
+		{"sized", schema.Column{DataType: schema.TypeString, MaxLength: 50}, "VARCHAR(50)"},
+		{"unsized", schema.Column{DataType: schema.TypeString}, "STRING"},
+		{"over cap falls back to STRING", schema.Column{DataType: schema.TypeString, MaxLength: 70000}, "STRING"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MapDataTypeToDatabricks(tt.col); got != tt.expected {
+				t.Fatalf("MapDataTypeToDatabricks() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
 
 func TestBuildDeleteInsertSQLUsesAtomicBlock(t *testing.T) {
 	t.Parallel()

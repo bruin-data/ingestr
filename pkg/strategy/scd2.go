@@ -24,6 +24,9 @@ func (s *SCD2Strategy) Validate(cfg *config.IngestConfig) error {
 	if len(cfg.PrimaryKeys) == 0 {
 		return fmt.Errorf("scd2 strategy requires at least one primary_key")
 	}
+	if strings.TrimSpace(cfg.ExtractPartitionBy) != "" && strings.TrimSpace(cfg.IncrementalKey) == "" {
+		return fmt.Errorf("scd2 strategy with extract partitioning requires an incremental_key")
+	}
 	return nil
 }
 
@@ -80,15 +83,19 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		IntervalEnd:    job.Config.IntervalEnd,
-		PageSize:       job.Config.PageSize,
-		Limit:          job.Config.SQLLimit,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		FullRefresh:    job.Config.FullRefresh,
+		IncrementalKey:                  job.Config.IncrementalKey,
+		IntervalStart:                   job.Config.IntervalStart,
+		IntervalEnd:                     job.Config.IntervalEnd,
+		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
+		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
+		PageSize:                        job.Config.PageSize,
+		Limit:                           job.Config.SQLLimit,
+		ExcludeColumns:                  job.Config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		Schema:                          job.SourceSchema,
+		FullRefresh:                     job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)

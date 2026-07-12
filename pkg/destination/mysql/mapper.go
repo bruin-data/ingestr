@@ -32,7 +32,7 @@ func MapDataTypeToMySQL(col schema.Column) string {
 		}
 		return "DECIMAL(38,9)"
 	case schema.TypeString:
-		if col.MaxLength > 0 && col.MaxLength <= 65535 {
+		if col.MaxLength > 0 && col.MaxLength <= 16383 {
 			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
 		return "TEXT"

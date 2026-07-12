@@ -18,6 +18,16 @@ import (
 // spinning forever on a 100ms read timeout that masks the dead socket.
 const deadConnectionTimeout = 2 * time.Minute
 
+// silenceProbeAfter is how long the server may stay silent before the next
+// standby status update requests an explicit reply. The server only sends
+// keepalives on its own when the standby has been quiet for
+// wal_sender_timeout/2, and we send status every 10s — so a healthy connection
+// to a quiet database receives nothing at all, indefinitely. Probing
+// distinguishes quiet from dead: a live server answers immediately (resetting
+// the silence clock), so deadConnectionTimeout only fires on connections that
+// stay silent even when asked to reply.
+const silenceProbeAfter = 30 * time.Second
+
 // receiveTimeout bounds a single ReceiveMessage call. It governs how quickly the
 // loop reacts to context cancellation and flushes idle batches. It must not be
 // too small: churning the replication connection's read deadline every few
@@ -54,6 +64,34 @@ func (p *streamPosition) Commit(lsn pglogrepl.LSN) {
 
 func (p *streamPosition) Committed() pglogrepl.LSN {
 	return pglogrepl.LSN(p.committed.Load())
+}
+
+// lagState tracks the server's WAL head so replication lag can be reported as
+// serverHead - pos.Committed(), which is what the slot's
+// pg_current_wal_lsn() - confirmed_flush_lsn shows. It lives on the source, not
+// the replicator: replicators are rebuilt on reconnect and on new-table
+// discovery, which would otherwise reset the head. Written by the replication
+// goroutine and read by the metrics scraper, so every field is atomic.
+type lagState struct {
+	serverHead atomic.Uint64
+	streaming  atomic.Bool
+}
+
+func newLagState() *lagState {
+	return &lagState{}
+}
+
+func (l *lagState) observe(serverWALEnd pglogrepl.LSN) {
+	storeMax(&l.serverHead, uint64(serverWALEnd))
+}
+
+func storeMax(dst *atomic.Uint64, v uint64) {
+	for {
+		cur := dst.Load()
+		if v <= cur || dst.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 // lowWaterReporter exposes the in-flight position state needed to compute a

@@ -26,6 +26,12 @@ type Snapshot struct {
 	tableSchema *schema.TableSchema
 	cdcConfig   CDCConfig
 	slotName    string
+
+	// noCommitToken suppresses CommitTokens on emitted batches. Backfill
+	// snapshots read via a temporary slot must set it: their consistent point is
+	// ahead of the main slot's position, so confirming it on the main slot would
+	// skip WAL that has not been streamed yet.
+	noCommitToken bool
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -134,6 +140,25 @@ func checkSlotExists(ctx context.Context, pool *pgxpool.Pool, slotName string) (
 	return *confirmedLSN, true, nil
 }
 
+// waitReplicationSlotReleased waits for PostgreSQL to mark a slot inactive
+// after the previous replication connection was closed. Claiming a still-active
+// slot makes StartReplication fail. This is best-effort with a bounded wait; if
+// the slot stays active, the subsequent StartReplication returns the real error.
+func waitReplicationSlotReleased(ctx context.Context, pool *pgxpool.Pool, slotName string) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var active bool
+		err := pool.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&active)
+		if err != nil || !active {
+			return
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // dropSlot drops the replication slot
 func (s *Snapshot) dropSlot(ctx context.Context) error {
 	_, err := s.source.queryPool.Exec(ctx, "SELECT pg_drop_replication_slot($1)", s.slotName)
@@ -189,10 +214,11 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	syncedAt := time.Now().UTC()
 
 	// In streaming mode, snapshot batches carry the snapshot's consistent-point
-	// LSN as a commit token. It is always safe to confirm: streaming begins from
-	// this LSN, so nothing earlier remains to be read.
+	// LSN as a commit token. It is always safe to confirm when the snapshot was
+	// taken on the main slot: streaming begins from this LSN, so nothing earlier
+	// remains to be read. Backfill snapshots (temporary slot) suppress it.
 	var commitToken any
-	if opts.Streaming {
+	if opts.Streaming && !s.noCommitToken {
 		commitToken = lsn
 	}
 
@@ -297,6 +323,13 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 			return nil
 		}
 		return numericToBigInt(v, col.Scale)
+	case [16]byte:
+		// pgx decodes uuid to [16]byte; the Arrow layer stores UUIDs as their
+		// canonical string form (matching the WAL decode paths).
+		if col.DataType == schema.TypeUUID {
+			return formatUUID(v[:])
+		}
+		return val
 	default:
 		return val
 	}

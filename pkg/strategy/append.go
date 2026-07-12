@@ -32,13 +32,23 @@ func (s *AppendStrategy) RequiresIncrementalKey() bool {
 func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	config.Debug("[APPEND] Writing to table: %s", job.Config.DestTable)
 
+	// CDC change batches carry the otherwise staging-only _cdc_unchanged_cols
+	// column; append lands batches directly, so the destination table must keep
+	// it, and CDCMode relaxes NOT NULL since rows are change events.
+	isCDC := hasCDCColumns(job.Schema)
+	prepSchema := destination.DestinationTableSchema(job.Schema)
+	if isCDC {
+		prepSchema = job.Schema
+	}
+
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       job.Config.DestTable,
-		Schema:      destination.DestinationTableSchema(job.Schema),
+		Schema:      prepSchema,
 		DropFirst:   false,
 		PrimaryKeys: job.Schema.PrimaryKeys,
 		PartitionBy: job.Config.PartitionBy,
 		ClusterBy:   job.Config.ClusterBy,
+		CDCMode:     isCDC,
 	}); err != nil {
 		return fmt.Errorf("failed to prepare table: %w", err)
 	}
@@ -53,15 +63,19 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		IntervalEnd:    job.Config.IntervalEnd,
-		PageSize:       job.Config.PageSize,
-		Limit:          job.Config.SQLLimit,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		FullRefresh:    job.Config.FullRefresh,
+		IncrementalKey:                  job.Config.IncrementalKey,
+		IntervalStart:                   job.Config.IntervalStart,
+		IntervalEnd:                     job.Config.IntervalEnd,
+		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
+		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
+		PageSize:                        job.Config.PageSize,
+		Limit:                           job.Config.SQLLimit,
+		ExcludeColumns:                  job.Config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		Schema:                          job.SourceSchema,
+		FullRefresh:                     job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)
@@ -80,6 +94,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		PreStaged:        job.PreStaged,
 	}); err != nil {
 		return fmt.Errorf("failed to write data: %w", err)
 	}
@@ -113,11 +128,20 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 				return
 			}
 
+			// See Execute: CDC change batches land directly and carry the
+			// staging-only _cdc_unchanged_cols column.
+			isCDC := hasCDCColumns(ti.Schema)
+			prepSchema := destination.DestinationTableSchema(ti.Schema)
+			if isCDC {
+				prepSchema = ti.Schema
+			}
+
 			if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 				Table:       destTable,
-				Schema:      destination.DestinationTableSchema(ti.Schema),
+				Schema:      prepSchema,
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
+				CDCMode:     isCDC,
 			}); err != nil {
 				errChan <- fmt.Errorf("failed to prepare table %s: %w", ti.Name, err)
 				return

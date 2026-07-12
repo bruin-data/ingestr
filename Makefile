@@ -11,6 +11,9 @@ LICENSE_CHECK_INCLUDE_TESTS ?= false
 LICENSE_AUDIT_TARGETS ?= $(LICENSE_CHECK_TARGETS)
 LICENSE_AUDIT_INCLUDE_TESTS ?= $(LICENSE_CHECK_INCLUDE_TESTS)
 LICENSE_AUDIT_NEW_STATUS ?= needs-review
+LINT_MERGE_BASE ?= origin/main
+LINT_BUILD_TAGS ?= no_duckdb_arrow
+LINT_CHANGED_FLAGS := --new-from-merge-base=$(LINT_MERGE_BASE) --build-tags="$(LINT_BUILD_TAGS)"
 export INGESTR_DISABLE_TELEMETRY := true
 export DISABLE_TELEMETRY := true
 TELEMETRY_ENV := INGESTR_DISABLE_TELEMETRY=true DISABLE_TELEMETRY=true
@@ -19,7 +22,7 @@ NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration
+.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration cdc-postgres-stress-test
 
 all: clean deps test build
 
@@ -95,6 +98,12 @@ test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
 
+# High-volume PostgreSQL CDC accuracy test (~6 minutes of sustained load and
+# verification). Gated behind the `stress` build tag so CI never runs it.
+cdc-postgres-stress-test: generate
+	@echo "$(OK_COLOR)==> Running PostgreSQL CDC stress test (sustained load, ~6m)$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run TestPostgresCDC_StressHighVolume ./tests/integration/
+
 test-db2-integration: generate
 	@echo "$(OK_COLOR)==> Running Db2 integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && INGESTR_TEST_DB2=1 $(TELEMETRY_ENV) go test -tags integration -count=1 -v -timeout 10m ./pkg/source/db2 -run TestDb2SourceWithIBMContainer
@@ -109,16 +118,14 @@ format: generate
 	@echo "$(OK_COLOR)==> Formatting code$(NO_COLOR)"
 	@gci write cmd pkg internal tests main.go
 	@gofumpt -w cmd pkg internal tests main.go
-	@echo "$(OK_COLOR)==> Running linters$(NO_COLOR)"
-	@go vet ./...
-	@golangci-lint run --timeout 10m ./...
+	@$(MAKE) lint
 	wait
 
-# Just run linters without formatting
+# Just run linters on changed lines without formatting
 lint: generate
-	@echo "$(OK_COLOR)==> Running linters$(NO_COLOR)"
+	@echo "$(OK_COLOR)==> Running linters on changed lines since $(LINT_MERGE_BASE)$(NO_COLOR)"
 	@go vet ./...
-	@golangci-lint run --timeout 10m ./...
+	@golangci-lint run --timeout 10m $(LINT_CHANGED_FLAGS) ./...
 
 # CI: Check formatting without modifying files (fails if changes needed)
 format-ci: generate

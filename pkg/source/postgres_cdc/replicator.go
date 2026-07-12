@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pglogrepl"
@@ -30,6 +29,8 @@ func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema
 	schemaName, tblName := parseTableName(tableName)
 
 	decoder := NewDecoder(tableSchema, schemaName, tblName)
+
+	src.lag.streaming.Store(streaming)
 
 	return &Replicator{
 		source:        src,
@@ -61,10 +62,9 @@ func (r *Replicator) Start(ctx context.Context) error {
 
 	config.Debug("[CDC] Starting replication from LSN: %s", r.startLSN)
 
-	pluginArgs := []string{
-		"proto_version '1'",
-		fmt.Sprintf("publication_names '%s'", r.cdcConfig.Publication),
-	}
+	// The single-table replicator stays on protocol v1 (no in-progress
+	// transaction streaming); binary tuples are still available when opted in.
+	pluginArgs := buildPluginArgs(r.cdcConfig, r.source.serverVersion, false)
 
 	config.Debug("[CDC] Starting replication for slot %s from LSN %s", r.cdcConfig.SlotName, r.startLSN)
 
@@ -103,13 +103,13 @@ func (r *Replicator) standbyStatus() pglogrepl.StandbyStatusUpdate {
 	return standbyUpdate(r.streaming, r.clientXLogPos, committed, r.startLSN)
 }
 
-// NextBatch returns the next decoded batch, if any, with the LSN of the
-// transaction that produced it. The hadActivity flag distinguishes a genuine
-// idle period (receive timeout / nil message) from WAL activity that produced
-// no batch yet (keepalives, buffered Begin/Insert/Update/Delete messages
-// awaiting a Commit). Callers use it to avoid flushing the batch accumulator
-// after every transaction.
-func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.RecordBatch, pglogrepl.LSN, bool, error) {
+// NextChanges returns the next committed transaction's decoded changes, if
+// any, with the LSN of the transaction that produced them. The hadActivity
+// flag distinguishes a genuine idle period (receive timeout / nil message)
+// from WAL activity that produced no changes yet (keepalives, buffered
+// Begin/Insert/Update/Delete messages awaiting a Commit). Callers use it to
+// avoid flushing the batch accumulator after every transaction.
+func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, bool, error) {
 	// Start replication if not yet started
 	if !r.started {
 		if err := r.Start(ctx); err != nil {
@@ -120,10 +120,12 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 	// Send standby status periodically. A send failure means the replication
 	// connection is broken, so surface it rather than spinning on dead reads.
 	if time.Since(r.standbyTimer) > 10*time.Second {
+		status := r.standbyStatus()
+		status.ReplyRequested = time.Since(r.lastMessageAt) > silenceProbeAfter
 		err := pglogrepl.SendStandbyStatusUpdate(
 			ctx,
 			r.source.replConn,
-			r.standbyStatus(),
+			status,
 		)
 		if err != nil {
 			return nil, 0, false, fmt.Errorf("failed to send standby status (replication connection lost): %w", err)
@@ -179,6 +181,7 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 			if pkm.ServerWALEnd > r.clientXLogPos {
 				r.clientXLogPos = pkm.ServerWALEnd
 			}
+			r.source.lag.observe(pkm.ServerWALEnd)
 
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
@@ -186,7 +189,7 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 				return nil, 0, true, fmt.Errorf("failed to parse xlog data: %w", err)
 			}
 
-			batch, err := r.decoder.Decode(xld.WALData, xld.WALStart)
+			changes, err := r.decoder.Decode(xld.WALData, xld.WALStart)
 			if err != nil {
 				return nil, 0, true, fmt.Errorf("failed to decode WAL data: %w", err)
 			}
@@ -194,8 +197,11 @@ func (r *Replicator) NextBatch(ctx context.Context, batchSize int) (arrow.Record
 			if xld.WALStart > r.clientXLogPos {
 				r.clientXLogPos = xld.WALStart
 			}
+			// ServerWALEnd, not WALStart: during a long burst with no
+			// interleaved keepalive it is the only fresh view of the head.
+			r.source.lag.observe(xld.ServerWALEnd)
 
-			return batch, r.decoder.CurrentTxLSN(), true, nil
+			return changes, r.decoder.CurrentTxLSN(), true, nil
 		}
 	}
 

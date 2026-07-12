@@ -3,11 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
@@ -132,6 +135,22 @@ func IngestCommand() *cli.Command {
 				Value:   5,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
+			&cli.StringFlag{
+				Name:    "extract-partition-by",
+				Usage:   "The source date/time or integer column used to split bounded extraction into parallel windows",
+				Sources: cli.EnvVars("EXTRACT_PARTITION_BY", "INGESTR_EXTRACT_PARTITION_BY"),
+			},
+			&cli.StringFlag{
+				Name:    "extract-partition-interval",
+				Usage:   "The width for each extract partition window: duration (1h, 7d), integer step (10000), or auto. Defaults to auto when extract-partition-by is set",
+				Sources: cli.EnvVars("EXTRACT_PARTITION_INTERVAL", "INGESTR_EXTRACT_PARTITION_INTERVAL"),
+			},
+			&cli.BoolFlag{
+				Name:    "disable-prestaging",
+				Usage:   "Disable extract-time load-file staging for schema-inferred sources",
+				Hidden:  true,
+				Sources: cli.EnvVars("INGESTR_DISABLE_PRESTAGING"),
+			},
 			&cli.IntFlag{
 				Name:    "sql-limit",
 				Usage:   "The limit to use when fetching data from the source",
@@ -150,7 +169,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "columns",
-				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
+				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:varchar(50):fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p,s), string, text, varchar(n), boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
 			&cli.BoolFlag{
@@ -211,6 +230,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INGESTR_FLUSH_RECORDS"),
 			},
 			&cli.StringFlag{
+				Name:    "metrics-addr",
+				Usage:   "Serve streaming metrics (expvar at /debug/vars) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
+			},
+			&cli.StringFlag{
 				Name:    "query-annotations",
 				Usage:   "JSON object of caller annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) merged into the '-- @bruin.config' comment on destination queries (QUERY_TAG on Snowflake) for cost attribution. ingestr always annotates with its own keys (type, ingestr_step); this flag adds the caller's keys on top.",
 				Sources: cli.EnvVars("INGESTR_QUERY_ANNOTATIONS"),
@@ -254,6 +278,8 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
+	cfg.ExtractPartitionBy = c.String("extract-partition-by")
+	cfg.DisablePreStaging = c.Bool("disable-prestaging")
 	cfg.SQLLimit = int(c.Int("sql-limit"))
 	cfg.SQLExcludeColumns = c.StringSlice("sql-exclude-columns")
 	cfg.Columns = c.String("columns")
@@ -272,6 +298,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
+	}
+	metricsAddr := c.String("metrics-addr")
+	if !cfg.Stream && metricsAddr != "" {
+		return fmt.Errorf("--metrics-addr is only valid together with --stream")
 	}
 	// In streaming mode the source decides the default strategy (merge for CDC,
 	// append for brokers); only treat the strategy as a user override when the
@@ -308,6 +338,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		cfg.IntervalEnd = &t
 	}
 
+	if err := applyExtractPartitionInterval(cfg, c.String("extract-partition-interval")); err != nil {
+		return err
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -315,6 +349,17 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	if cfg.IncrementalStrategy != "" {
 		if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
 			return err
+		}
+	}
+
+	if metricsAddr != "" {
+		boundAddr, stop, err := metrics.Serve(metricsAddr)
+		if err != nil {
+			return fmt.Errorf("failed to start metrics server: %w", err)
+		}
+		defer stop()
+		if !output.IsJSON() {
+			color.Green("Serving metrics on http://%s/debug/vars", boundAddr)
 		}
 	}
 
@@ -378,4 +423,86 @@ func parseDateTime(s string) (time.Time, error) {
 	}
 
 	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
+}
+
+func parseExtractPartitionInterval(s string) (time.Duration, int64, bool, error) {
+	value := strings.TrimSpace(strings.ToLower(s))
+	if value == "" {
+		return 0, 0, false, fmt.Errorf("cannot be empty")
+	}
+	if value == "auto" {
+		return 0, 0, true, nil
+	}
+
+	if numericInterval, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if numericInterval <= 0 {
+			return 0, 0, false, fmt.Errorf("must be positive")
+		}
+		return 0, numericInterval, false, nil
+	}
+
+	var duration time.Duration
+	switch {
+	case strings.HasSuffix(value, "d"):
+		parsed, err := parseBoundedDurationMultiple(strings.TrimSuffix(value, "d"), 24*time.Hour)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		duration = parsed
+	case strings.HasSuffix(value, "w"):
+		parsed, err := parseBoundedDurationMultiple(strings.TrimSuffix(value, "w"), 7*24*time.Hour)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		duration = parsed
+	default:
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		duration = parsed
+	}
+
+	if duration <= 0 {
+		return 0, 0, false, fmt.Errorf("must be positive")
+	}
+	return duration, 0, false, nil
+}
+
+func parseBoundedDurationMultiple(raw string, unit time.Duration) (time.Duration, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("must be positive")
+	}
+
+	const maxDuration = time.Duration(1<<63 - 1)
+	if value > float64(maxDuration)/float64(unit) {
+		return 0, fmt.Errorf("duration overflows time.Duration")
+	}
+	duration := time.Duration(value * float64(unit))
+	if duration <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return duration, nil
+}
+
+func applyExtractPartitionInterval(cfg *config.IngestConfig, raw string) error {
+	if raw == "" {
+		if strings.TrimSpace(cfg.ExtractPartitionBy) != "" {
+			cfg.ExtractPartitionAuto = true
+		}
+		return nil
+	}
+
+	duration, numericInterval, auto, err := parseExtractPartitionInterval(raw)
+	if err != nil {
+		return fmt.Errorf("invalid extract-partition-interval: %w", err)
+	}
+	cfg.ExtractPartitionInterval = duration
+	cfg.ExtractPartitionNumericInterval = numericInterval
+	cfg.ExtractPartitionAuto = auto
+	return nil
 }

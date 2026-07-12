@@ -32,6 +32,11 @@ type WriteOptions struct {
 	StagingBucket    string
 	LoaderFileSize   int
 	LoaderFileFormat string
+
+	// PreStaged holds load files written during extract by a PreStager
+	// destination. When set, the destination loads these files instead of
+	// consuming the records channel (which will be empty).
+	PreStaged PreStagedData
 }
 
 type Transaction interface {
@@ -47,6 +52,7 @@ type MergeOptions struct {
 	PrimaryKeys    []string
 	Columns        []string
 	IncrementalKey string
+	Schema         *schema.TableSchema
 }
 
 // DeleteInsertOptions contains parameters for delete+insert operations.
@@ -185,6 +191,16 @@ type ExactRowCountWaiter interface {
 // dependent objects (views, grants, foreign keys) survive the reload.
 type TruncateCapable interface {
 	TruncateTable(ctx context.Context, table string) error
+}
+
+// ConcurrentFlusher is an optional interface for destinations whose
+// write+merge cycles for *different* tables can safely run concurrently
+// (connection-pool backed databases, where each cycle uses its own
+// connections and transactions). The streaming flush loop uses it to merge
+// multiple tables in parallel instead of sequentially. Destinations without
+// it — or returning a value < 2 — are flushed one table at a time.
+type ConcurrentFlusher interface {
+	MaxConcurrentFlushes() int
 }
 
 // ReplaceStagingPlacement declares the default schema placement for replace

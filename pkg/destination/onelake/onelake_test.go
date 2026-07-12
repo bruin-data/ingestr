@@ -85,13 +85,23 @@ func TestParseTarget(t *testing.T) {
 		{"tables/schema/users", modeTables, "schema/users"},
 		{"Files/exports/users", modeFiles, "exports/users"},
 		{"FILES/raw", modeFiles, "raw"},
+		{"Files/data.parquet", modeFiles, "data.parquet"},
 		{"users", modeTables, "users"},
 		{"/Tables/users/", modeTables, "users"},
+		{"schema.name", modeTables, "schema/name"},
+		{"Tables.schema.name", modeTables, "schema/name"},
+		{"Tables.users", modeTables, "users"},
 	}
 	for _, c := range cases {
-		mode, path := parseTarget(c.table)
+		mode, path, err := parseTarget(c.table)
+		require.NoError(t, err, c.table)
 		assert.Equal(t, c.wantMode, mode, c.table)
 		assert.Equal(t, c.wantPath, path, c.table)
+	}
+
+	for _, bad := range []string{"", "Tables", "tables", "schema..users", ".users", "Files/"} {
+		_, _, err := parseTarget(bad)
+		assert.Error(t, err, bad)
 	}
 }
 

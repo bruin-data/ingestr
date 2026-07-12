@@ -1,98 +1,82 @@
 package postgres_cdc
 
 import (
-	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// fillRow describes one staging row for the forward-fill tests.
-type fillRow struct {
-	id        int64
-	config    *string // nil => null in the config_data column
-	status    string
-	lsn       string
-	deleted   bool
-	unchanged []string
+// The accumulator buffers plain changes across transaction boundaries and runs
+// the unchanged-TOAST fill over the whole flush window when it materializes
+// the Arrow batch. These tests feed changes from *separate commits* (separate
+// add calls with increasing LSNs) and inspect the flushed batch — the
+// cross-commit coalescing that used to happen at the Arrow staging-batch level.
+
+// fillTestSchema: id (pk), config_data (TOASTable), status + CDC meta columns.
+func fillTestSchema() *schema.TableSchema {
+	return &schema.TableSchema{
+		Name:   "t",
+		Schema: "public",
+		Columns: append([]schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "config_data", DataType: schema.TypeString, Nullable: true},
+			{Name: "status", DataType: schema.TypeString},
+		}, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
 }
 
-// buildFillBatch assembles a CDC staging batch with two source columns
-// (id, config_data) plus status and the four CDC meta columns.
-func buildFillBatch(rows []fillRow) arrow.RecordBatch {
-	mem := memory.NewGoAllocator()
-	fields := []arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-		{Name: "config_data", Type: arrow.BinaryTypes.String, Nullable: true},
-		{Name: "status", Type: arrow.BinaryTypes.String},
-		{Name: CDCLSNColumn, Type: arrow.BinaryTypes.String},
-		{Name: CDCDeletedColumn, Type: arrow.FixedWidthTypes.Boolean},
-		{Name: CDCSyncedAtColumn, Type: &arrow.TimestampType{Unit: arrow.Microsecond}},
-		{Name: CDCUnchangedColsColumn, Type: arrow.BinaryTypes.String},
-	}
-	sc := arrow.NewSchema(fields, nil)
+// fillChange builds one change row for the fill tests. config == nil means an
+// explicit NULL; configUnchanged means the column was omitted as unchanged
+// TOAST (marker).
+type fillChange struct {
+	op              string
+	id              int64
+	config          *string
+	configUnchanged bool
+	status          string
+}
 
-	idB := array.NewInt64Builder(mem)
-	configB := array.NewStringBuilder(mem)
-	statusB := array.NewStringBuilder(mem)
-	lsnB := array.NewStringBuilder(mem)
-	delB := array.NewBooleanBuilder(mem)
-	syncedB := array.NewTimestampBuilder(mem, &arrow.TimestampType{Unit: arrow.Microsecond})
-	unchangedB := array.NewStringBuilder(mem)
-	defer func() {
-		idB.Release()
-		configB.Release()
-		statusB.Release()
-		lsnB.Release()
-		delB.Release()
-		syncedB.Release()
-		unchangedB.Release()
-	}()
-
-	now := time.Now().UTC()
-	for i, r := range rows {
-		idB.Append(r.id)
-		if r.config == nil {
-			configB.AppendNull()
-		} else {
-			configB.Append(*r.config)
-		}
-		statusB.Append(r.status)
-		lsnB.Append(r.lsn)
-		delB.Append(r.deleted)
-		syncedB.Append(arrow.Timestamp(now.Add(time.Duration(i) * time.Microsecond).UnixMicro()))
-		b, _ := json.Marshal(r.unchanged)
-		unchangedB.Append(string(b))
+func (c fillChange) toChange(lsn pglogrepl.LSN) Change {
+	var configVal interface{}
+	switch {
+	case c.configUnchanged:
+		configVal = tupleUnchangedMarker
+	case c.config != nil:
+		configVal = *c.config
 	}
-
-	cols := []arrow.Array{
-		idB.NewArray(), configB.NewArray(), statusB.NewArray(),
-		lsnB.NewArray(), delB.NewArray(), syncedB.NewArray(), unchangedB.NewArray(),
+	return Change{
+		Operation: c.op,
+		LSN:       lsn,
+		Values:    []interface{}{c.id, configVal, c.status},
+		OldValues: []interface{}{c.id},
 	}
-	defer func() {
-		for _, c := range cols {
-			c.Release()
-		}
-	}()
-	return array.NewRecordBatch(sc, cols, int64(len(rows)))
 }
 
 func strPtr(s string) *string { return &s }
 
-// releaseFillOutput releases the forward-fill output only when it is a freshly
-// allocated batch. On the no-allocation path forwardFillUnchanged returns the
-// input unchanged without taking an extra reference, so releasing it there
-// would double-free the caller's single reference. This mirrors the ownership
-// contract the accumulator relies on (see batchAccumulator.flushTable).
-func releaseFillOutput(in, out arrow.RecordBatch) {
-	if out != in {
-		out.Release()
+// flushFillWindow adds each change as its own commit (increasing LSNs) and
+// flushes, returning the materialized batch.
+func flushFillWindow(t *testing.T, rows []fillChange) arrow.RecordBatch {
+	t.Helper()
+	accum := newBatchAccumulator(10000, map[string]*schema.TableSchema{"t": fillTestSchema()})
+	for i, r := range rows {
+		lsn := pglogrepl.LSN(i + 1)
+		accum.add("t", []Change{r.toChange(lsn)}, lsn)
 	}
+	results := make(chan source.RecordBatchResult, 4)
+	require.NoError(t, accum.flushAll(results, nil))
+	close(results)
+	res := <-results
+	require.NoError(t, res.Err)
+	require.NotNil(t, res.Batch)
+	return res.Batch
 }
 
 func configValueAt(t *testing.T, batch arrow.RecordBatch, row int) (string, bool) {
@@ -112,129 +96,264 @@ func unchangedValueAt(t *testing.T, batch arrow.RecordBatch, row int) string {
 	return col.Value(row)
 }
 
-func TestForwardFillUnchanged(t *testing.T) {
-	pk := []string{"id"}
+func TestFlushWindowFillsUnchangedAcrossCommits(t *testing.T) {
+	// Compaction keeps only the latest change per PK, so most windows below
+	// materialize as a single (filled) row.
 
 	t.Run("insert then partial update fills omitted toast", func(t *testing.T) {
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: strPtr(`{"big":true}`), status: "pending", lsn: "0/1"},
-			{id: 1, config: nil, status: "done", lsn: "0/2", unchanged: []string{"config_data"}},
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"big":true}`), status: "pending"},
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "done"},
 		})
-		defer in.Release()
+		defer out.Release()
 
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-		require.NotSame(t, in, out, "fill should produce a new batch")
-
-		v, ok := configValueAt(t, out, 1)
+		require.EqualValues(t, 1, out.NumRows(), "superseded insert must be compacted away")
+		v, ok := configValueAt(t, out, 0)
 		assert.True(t, ok, "config_data should be filled on the partial update row")
 		assert.Equal(t, `{"big":true}`, v)
-		assert.Equal(t, `[]`, unchangedValueAt(t, out, 1), "filled column must be dropped from _cdc_unchanged_cols")
+		assert.Equal(t, `[]`, unchangedValueAt(t, out, 0), "filled column must be dropped from _cdc_unchanged_cols")
+		assert.Equal(t, "done", statusValueAt(t, out, 0))
 	})
 
 	t.Run("changed then unchanged overwrites and drops unchanged flag", func(t *testing.T) {
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: strPtr(`{"v":"A"}`), status: "a", lsn: "0/1"},
-			{id: 1, config: nil, status: "b", lsn: "0/2", unchanged: []string{"config_data"}},
+		out := flushFillWindow(t, []fillChange{
+			{op: "UPDATE", id: 1, config: strPtr(`{"v":"A"}`), status: "a"},
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "b"},
 		})
-		defer in.Release()
+		defer out.Release()
 
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-
-		v, ok := configValueAt(t, out, 1)
+		require.EqualValues(t, 1, out.NumRows())
+		v, ok := configValueAt(t, out, 0)
 		assert.True(t, ok)
 		assert.Equal(t, `{"v":"A"}`, v)
-		assert.Equal(t, `[]`, unchangedValueAt(t, out, 1))
+		assert.Equal(t, `[]`, unchangedValueAt(t, out, 0))
 	})
 
-	t.Run("explicit null carries across rows and drops unchanged flag", func(t *testing.T) {
+	t.Run("explicit null carries across commits and drops unchanged flag", func(t *testing.T) {
 		// An authoritative NULL (SET config_data = NULL) in one transaction
 		// followed by an unchanged TOAST update in another. The NULL must be
 		// filled forward and the column dropped from _cdc_unchanged_cols, so the
 		// destination does not fall back to the stale (non-null) target value.
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: nil, status: "a", lsn: "0/1"},
-			{id: 1, config: nil, status: "b", lsn: "0/2", unchanged: []string{"config_data"}},
+		out := flushFillWindow(t, []fillChange{
+			{op: "UPDATE", id: 1, config: nil, status: "a"},
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "b"},
 		})
-		defer in.Release()
+		defer out.Release()
 
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-		require.NotSame(t, in, out, "the unchanged row should be rewritten")
-
-		_, ok := configValueAt(t, out, 1)
+		require.EqualValues(t, 1, out.NumRows())
+		_, ok := configValueAt(t, out, 0)
 		assert.False(t, ok, "filled value should be NULL")
-		assert.Equal(t, `[]`, unchangedValueAt(t, out, 1), "column must be dropped from _cdc_unchanged_cols")
+		assert.Equal(t, `[]`, unchangedValueAt(t, out, 0), "column must be dropped from _cdc_unchanged_cols")
 	})
 
 	t.Run("no prior value keeps column unchanged", func(t *testing.T) {
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: nil, status: "a", lsn: "0/1", unchanged: []string{"config_data"}},
-			{id: 1, config: nil, status: "b", lsn: "0/2", unchanged: []string{"config_data"}},
+		out := flushFillWindow(t, []fillChange{
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "a"},
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "b"},
 		})
-		defer in.Release()
+		defer out.Release()
 
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-		assert.Same(t, in, out, "nothing to fill should return the same batch")
+		require.EqualValues(t, 1, out.NumRows())
+		_, ok := configValueAt(t, out, 0)
+		assert.False(t, ok)
+		assert.Equal(t, `["config_data"]`, unchangedValueAt(t, out, 0))
+	})
 
+	t.Run("does not cross primary keys", func(t *testing.T) {
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"id":1}`), status: "a"},
+			{op: "UPDATE", id: 2, configUnchanged: true, status: "b"},
+		})
+		defer out.Release()
+
+		require.EqualValues(t, 2, out.NumRows(), "distinct PKs must both survive")
 		_, ok := configValueAt(t, out, 1)
 		assert.False(t, ok)
 		assert.Equal(t, `["config_data"]`, unchangedValueAt(t, out, 1))
 	})
 
-	t.Run("does not cross primary keys", func(t *testing.T) {
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: strPtr(`{"id":1}`), status: "a", lsn: "0/1"},
-			{id: 2, config: nil, status: "b", lsn: "0/2", unchanged: []string{"config_data"}},
-		})
-		defer in.Release()
-
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-		assert.Same(t, in, out, "different pk must not be filled")
-
-		_, ok := configValueAt(t, out, 1)
-		assert.False(t, ok)
-	})
-
 	t.Run("delete resets prior state", func(t *testing.T) {
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: strPtr(`{"v":1}`), status: "a", lsn: "0/1"},
-			{id: 1, config: nil, status: "", lsn: "0/2", deleted: true},
-			{id: 1, config: nil, status: "c", lsn: "0/3", unchanged: []string{"config_data"}},
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"v":1}`), status: "a"},
+			{op: "DELETE", id: 1},
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "c"},
 		})
-		defer in.Release()
+		defer out.Release()
 
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-
-		_, ok := configValueAt(t, out, 2)
+		// Compaction keeps the latest deleted and the latest non-deleted row.
+		require.EqualValues(t, 2, out.NumRows())
+		_, ok := configValueAt(t, out, 1)
 		assert.False(t, ok, "value before a delete must not carry past it")
-		assert.Equal(t, `["config_data"]`, unchangedValueAt(t, out, 2))
+		assert.Equal(t, `["config_data"]`, unchangedValueAt(t, out, 1))
 	})
 
 	t.Run("preserves unrelated rows exactly", func(t *testing.T) {
-		in := buildFillBatch([]fillRow{
-			{id: 1, config: strPtr(`{"big":true}`), status: "pending", lsn: "0/1"},
-			{id: 1, config: nil, status: "done", lsn: "0/2", unchanged: []string{"config_data"}},
-			{id: 2, config: strPtr(`{"other":1}`), status: "x", lsn: "0/3"},
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"big":true}`), status: "pending"},
+			{op: "UPDATE", id: 1, configUnchanged: true, status: "done"},
+			{op: "INSERT", id: 2, config: strPtr(`{"other":1}`), status: "x"},
 		})
-		defer in.Release()
+		defer out.Release()
 
-		out := forwardFillUnchanged(in, pk)
-		defer releaseFillOutput(in, out)
-
+		require.EqualValues(t, 2, out.NumRows())
 		v0, ok0 := configValueAt(t, out, 0)
-		assert.True(t, ok0)
+		assert.True(t, ok0, "id=1's filled update survives compaction")
 		assert.Equal(t, `{"big":true}`, v0)
-		v2, ok2 := configValueAt(t, out, 2)
-		assert.True(t, ok2)
-		assert.Equal(t, `{"other":1}`, v2)
+		v1, ok1 := configValueAt(t, out, 1)
+		assert.True(t, ok1)
+		assert.Equal(t, `{"other":1}`, v1)
 
 		idCol, ok := out.Column(0).(*array.Int64)
 		require.True(t, ok)
-		assert.Equal(t, int64(2), idCol.Value(2))
+		assert.Equal(t, int64(1), idCol.Value(0))
+		assert.Equal(t, int64(2), idCol.Value(1))
+	})
+
+	t.Run("fill crosses accumulator adds from multi-row commits", func(t *testing.T) {
+		// One commit inserts two rows, a later commit partially updates one of
+		// them; the fill must resolve within the merged window.
+		accum := newBatchAccumulator(10000, map[string]*schema.TableSchema{"t": fillTestSchema()})
+		accum.add("t", []Change{
+			fillChange{op: "INSERT", id: 1, config: strPtr(`{"a":1}`), status: "a"}.toChange(1),
+			fillChange{op: "INSERT", id: 2, config: strPtr(`{"b":2}`), status: "b"}.toChange(1),
+		}, 1)
+		accum.add("t", []Change{
+			fillChange{op: "UPDATE", id: 2, configUnchanged: true, status: "b2"}.toChange(2),
+		}, 2)
+
+		results := make(chan source.RecordBatchResult, 4)
+		require.NoError(t, accum.flushAll(results, nil))
+		close(results)
+		res := <-results
+		require.NotNil(t, res.Batch)
+		defer res.Batch.Release()
+
+		require.EqualValues(t, 2, res.Batch.NumRows())
+		v, ok := configValueAt(t, res.Batch, 1)
+		assert.True(t, ok)
+		assert.Equal(t, `{"b":2}`, v)
+		assert.Equal(t, `[]`, unchangedValueAt(t, res.Batch, 1))
+	})
+}
+
+func statusValueAt(t *testing.T, batch arrow.RecordBatch, row int) string {
+	t.Helper()
+	col, ok := batch.Column(2).(*array.String)
+	require.True(t, ok)
+	return col.Value(row)
+}
+
+func lsnValueAt(t *testing.T, batch arrow.RecordBatch, row int) string {
+	t.Helper()
+	col, ok := batch.Column(3).(*array.String)
+	require.True(t, ok)
+	return col.Value(row)
+}
+
+func deletedValueAt(t *testing.T, batch arrow.RecordBatch, row int) bool {
+	t.Helper()
+	col, ok := batch.Column(4).(*array.Boolean)
+	require.True(t, ok)
+	return col.Value(row)
+}
+
+// Last-write-wins compaction across the flush window: only the latest
+// non-deleted and latest deleted change per PK survive to the staging batch,
+// mirroring exactly what the destination merge would read anyway.
+func TestFlushWindowCompaction(t *testing.T) {
+	t.Run("update chain keeps only the last version", func(t *testing.T) {
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"v":0}`), status: "s0"},
+			{op: "UPDATE", id: 1, config: strPtr(`{"v":1}`), status: "s1"},
+			{op: "UPDATE", id: 1, config: strPtr(`{"v":2}`), status: "s2"},
+			{op: "UPDATE", id: 1, config: strPtr(`{"v":3}`), status: "s3"},
+		})
+		defer out.Release()
+
+		require.EqualValues(t, 1, out.NumRows())
+		v, _ := configValueAt(t, out, 0)
+		assert.Equal(t, `{"v":3}`, v)
+		assert.Equal(t, "s3", statusValueAt(t, out, 0))
+		// The surviving row keeps its own commit LSN (commit 4 of the window).
+		assert.Equal(t, FormatLSN(4), lsnValueAt(t, out, 0))
+	})
+
+	t.Run("insert then delete keeps both latest versions", func(t *testing.T) {
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"v":0}`), status: "s0"},
+			{op: "UPDATE", id: 1, config: strPtr(`{"v":1}`), status: "s1"},
+			{op: "DELETE", id: 1},
+		})
+		defer out.Release()
+
+		// Latest non-deleted (the update) and latest deleted both survive so
+		// the merge can decide: latest overall is the delete, row ends deleted.
+		require.EqualValues(t, 2, out.NumRows())
+		assert.False(t, deletedValueAt(t, out, 0))
+		assert.Equal(t, FormatLSN(2), lsnValueAt(t, out, 0))
+		assert.True(t, deletedValueAt(t, out, 1))
+		assert.Equal(t, FormatLSN(3), lsnValueAt(t, out, 1))
+	})
+
+	t.Run("delete then reinsert keeps both, insert is latest", func(t *testing.T) {
+		out := flushFillWindow(t, []fillChange{
+			{op: "DELETE", id: 1},
+			{op: "INSERT", id: 1, config: strPtr(`{"v":9}`), status: "back"},
+		})
+		defer out.Release()
+
+		require.EqualValues(t, 2, out.NumRows())
+		assert.True(t, deletedValueAt(t, out, 0))
+		assert.False(t, deletedValueAt(t, out, 1))
+		assert.Greater(t, lsnValueAt(t, out, 1), lsnValueAt(t, out, 0),
+			"reinsert must carry the higher LSN so the merge resurrects the row")
+	})
+
+	t.Run("distinct keys are untouched", func(t *testing.T) {
+		out := flushFillWindow(t, []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"v":1}`), status: "a"},
+			{op: "INSERT", id: 2, config: strPtr(`{"v":2}`), status: "b"},
+			{op: "INSERT", id: 3, config: strPtr(`{"v":3}`), status: "c"},
+		})
+		defer out.Release()
+
+		require.EqualValues(t, 3, out.NumRows())
+	})
+
+	t.Run("no primary key expands updates and disables compaction", func(t *testing.T) {
+		sc := fillTestSchema()
+		sc.PrimaryKeys = nil
+		accum := newBatchAccumulator(10000, map[string]*schema.TableSchema{"t": sc})
+		accum.add("t", []Change{
+			fillChange{op: "INSERT", id: 1, config: strPtr(`{"v":1}`), status: "a"}.toChange(1),
+			fillChange{op: "UPDATE", id: 1, config: strPtr(`{"v":2}`), status: "b"}.toChange(2),
+		}, 1)
+
+		results := make(chan source.RecordBatchResult, 4)
+		require.NoError(t, accum.flushAll(results, nil))
+		close(results)
+		res := <-results
+		require.NotNil(t, res.Batch)
+		defer res.Batch.Release()
+		assert.EqualValues(t, 3, res.Batch.NumRows())
+		assert.False(t, deletedValueAt(t, res.Batch, 0))
+		assert.True(t, deletedValueAt(t, res.Batch, 1))
+		assert.False(t, deletedValueAt(t, res.Batch, 2))
+	})
+
+	t.Run("pk-changing update keeps old-key history and new-key row", func(t *testing.T) {
+		// UPDATE id 1 -> 2: the change is keyed by its new PK, so the insert
+		// of id=1 survives as that key's latest version (matching the merge,
+		// which never deletes the old-key row on a PK change).
+		changes := []fillChange{
+			{op: "INSERT", id: 1, config: strPtr(`{"v":1}`), status: "a"},
+		}
+		out := flushFillWindow(t, append(changes, fillChange{op: "UPDATE", id: 2, config: strPtr(`{"v":2}`), status: "b"}))
+		defer out.Release()
+
+		require.EqualValues(t, 2, out.NumRows())
+		idCol := out.Column(0).(*array.Int64)
+		assert.Equal(t, int64(1), idCol.Value(0))
+		assert.Equal(t, int64(2), idCol.Value(1))
 	})
 }

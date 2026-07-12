@@ -154,6 +154,10 @@ make generate   # adds a blank import of the new package to internal/registry/im
 make format
 ```
 
+Also add the scheme to the hand-maintained catalog in `internal/server/connectors.go`
+(`GetConnectors()`) — e.g. `genericURIConnector("trello", "Trello", []string{"trello"}, true, false)`.
+`register.go` alone only wires URI resolution; `TestConnectorCatalogCoversRegisteredSchemes` fails without it.
+
 ## 5. Post-implementation review checklist
 
 First re-check the whole implementation against the vendor's API docs: verify table names,
@@ -163,6 +167,10 @@ sub-types, field normalization). Fix discrepancies before continuing.
 ### Correctness
 - [ ] **Matches the vendor API**: table names, endpoints, primary keys, incremental keys,
   strategies are correct per the docs.
+- [ ] **Return-everything params (archived / deleted / all types)**: many endpoints default to
+  only active/open items and a limited subset. For each endpoint pass the param that returns the
+  full set — e.g. Trello `filter=all` (default omits archived cards/lists and most action types),
+  or `include_archived` / `state=all` / `deleted=true` elsewhere — and verify by archiving a record.
 - [ ] **Every parsed URI param is actually used**: trace each param `parseURI` →
   credentials struct → source struct → API request. Parsed-but-never-sent is a bug.
 - [ ] **Optional param validation**: constrained optional params (e.g. environment must be

@@ -168,6 +168,7 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 		PrimaryKeys:    primaryKeys,
 		Columns:        tableSchema.ColumnNames(),
 		IncrementalKey: incrementalKey,
+		Schema:         tableSchema,
 	}); err != nil {
 		for _, t := range []string{rawTable, normalised} {
 			if dropErr := dest.DropTable(ctx, t); dropErr != nil {
@@ -253,15 +254,19 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
-		IntervalStart:  job.Config.IntervalStart,
-		IntervalEnd:    job.Config.IntervalEnd,
-		PageSize:       job.Config.PageSize,
-		Limit:          job.Config.SQLLimit,
-		ExcludeColumns: job.Config.SQLExcludeColumns,
-		Parallelism:    parallelism,
-		Schema:         job.SourceSchema,
-		FullRefresh:    job.Config.FullRefresh,
+		IncrementalKey:                  job.Config.IncrementalKey,
+		IntervalStart:                   job.Config.IntervalStart,
+		IntervalEnd:                     job.Config.IntervalEnd,
+		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
+		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
+		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
+		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
+		PageSize:                        job.Config.PageSize,
+		Limit:                           job.Config.SQLLimit,
+		ExcludeColumns:                  job.Config.SQLExcludeColumns,
+		Parallelism:                     parallelism,
+		Schema:                          job.SourceSchema,
+		FullRefresh:                     job.Config.FullRefresh,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)
@@ -282,6 +287,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		PreStaged:        job.PreStaged,
 	}
 	if useStaging {
 		if atomicWriter, ok := job.Destination.(destination.AtomicCommitWriter); ok && atomicWriter.SupportsAtomicCommitWrites() {
@@ -290,7 +296,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 
 	var countedRows atomic.Int64
-	if !writeOpts.AtomicCommit {
+	if !writeOpts.AtomicCommit && writeOpts.PreStaged == nil {
 		records = wrapWithRowCount(records, &countedRows)
 	}
 
@@ -308,6 +314,9 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		if !writeOpts.AtomicCommit {
 			if verifier, ok := job.Destination.(destination.ExactRowCountWaiter); ok {
 				expectedRows := countedRows.Load()
+				if writeOpts.PreStaged != nil {
+					expectedRows = writeOpts.PreStaged.RowCount()
+				}
 				if expectedRows > 0 {
 					if err := verifier.WaitForExactRowCount(ctx, writeTable, expectedRows); err != nil {
 						if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
