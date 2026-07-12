@@ -265,11 +265,6 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: github.com/DataDog/zstd
-      version: v1.5.6
-      licenses:
-        - BSD-3-Clause
-      status: allowed
     - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
       version: v1.6.0
       licenses:
@@ -754,11 +749,6 @@ dependencies:
         - EPL-2.0
       status: manual-review
       note: EPL-2.0 reviewed for the MQTT source dependency.
-    - module: github.com/ebitengine/purego
-      version: v0.10.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/elastic/elastic-transport-go/v8
       version: v8.8.0
       licenses:

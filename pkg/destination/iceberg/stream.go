@@ -105,6 +105,45 @@ func (p *rowProjection) appendRow(builder *array.RecordBuilder, row []any) error
 	return nil
 }
 
+func (p *rowProjection) projectRow(row []any) []any {
+	projected := make([]any, len(p.sourceIdx))
+	for i, sourceIdx := range p.sourceIdx {
+		if sourceIdx >= 0 {
+			projected[i] = row[sourceIdx]
+		}
+	}
+	return projected
+}
+
+func projectRecordReader(input array.RecordReader, target *arrow.Schema) (array.RecordReader, func()) {
+	projection := newRowProjection(target, arrowSchemaColumnNames(input.Schema()))
+	reader := streamingReader(target, func(sink func(arrow.RecordBatch) error) error {
+		emitter := newBatchEmitter(projection, sink)
+		defer emitter.release()
+		for input.Next() {
+			batch := input.RecordBatch()
+			for row := 0; row < int(batch.NumRows()); row++ {
+				values := make([]any, int(batch.NumCols()))
+				for column := range values {
+					value, err := rowValue(batch.Column(column), row)
+					if err != nil {
+						return err
+					}
+					values[column] = value
+				}
+				if err := emitter.add(values); err != nil {
+					return err
+				}
+			}
+		}
+		if err := input.Err(); err != nil {
+			return err
+		}
+		return emitter.flushBatch()
+	})
+	return reader, reader.Release
+}
+
 // batchEmitter accumulates projected rows and emits record batches of bounded
 // size through the sink. Callers must call flush at the end.
 type batchEmitter struct {
@@ -214,6 +253,10 @@ func (r *chanRecordReader) Err() error {
 // returned RecordReader. produce must send batches to the sink it is given
 // and return; the reader's Err() reflects the producer error once drained.
 func streamingReader(schema *arrow.Schema, produce func(sink func(arrow.RecordBatch) error) error) *chanRecordReader {
+	return streamingReaderContext(context.Background(), schema, produce)
+}
+
+func streamingReaderContext(ctx context.Context, schema *arrow.Schema, produce func(sink func(arrow.RecordBatch) error) error) *chanRecordReader {
 	batches := make(chan arrow.RecordBatch, 2)
 	var produceErr error
 	reader := newChanRecordReader(schema, batches, &produceErr)
@@ -221,8 +264,13 @@ func streamingReader(schema *arrow.Schema, produce func(sink func(arrow.RecordBa
 	go func() {
 		defer close(batches)
 		produceErr = produce(func(batch arrow.RecordBatch) error {
-			batches <- batch
-			return nil
+			select {
+			case batches <- batch:
+				return nil
+			case <-ctx.Done():
+				batch.Release()
+				return ctx.Err()
+			}
 		})
 	}()
 	return reader

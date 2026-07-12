@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +41,8 @@ type spillSorter struct {
 	schema   *arrow.Schema
 	runFile  *arrow.Schema
 	keyIdx   []int
+	encode   func([]any) (string, error)
+	allowNil bool
 	tmpDir   string
 	runs     []string
 	buf      []spillRow
@@ -75,21 +78,33 @@ func newSpillSorter(schema *arrow.Schema, keyColumns []string) (*spillSorter, er
 		schema:  schema,
 		runFile: arrow.NewSchema(fields, nil),
 		keyIdx:  keyIdx,
+		encode:  encodeRowKey,
 	}, nil
 }
 
 func (s *spillSorter) Add(vals []any) error {
+	return s.addContext(context.Background(), vals)
+}
+
+func (s *spillSorter) AddContext(ctx context.Context, vals []any) error {
+	return s.addContext(ctx, vals)
+}
+
+func (s *spillSorter) addContext(ctx context.Context, vals []any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.finished {
 		return errors.New("iceberg: spill sorter already finalized")
 	}
 	keyVals := make([]any, len(s.keyIdx))
 	for i, idx := range s.keyIdx {
-		if vals[idx] == nil {
+		if vals[idx] == nil && !s.allowNil {
 			return fmt.Errorf("primary key column %q contains NULL", s.schema.Field(idx).Name)
 		}
 		keyVals[i] = vals[idx]
 	}
-	key, err := encodeRowKey(keyVals)
+	key, err := s.encode(keyVals)
 	if err != nil {
 		return err
 	}
@@ -97,7 +112,7 @@ func (s *spillSorter) Add(vals []any) error {
 	s.buf = append(s.buf, spillRow{key: key, seq: s.seq, vals: vals})
 	s.seq++
 	if len(s.buf) >= spillRunRows {
-		return s.flushRun()
+		return s.flushRunContext(ctx)
 	}
 	return nil
 }
@@ -113,11 +128,17 @@ func sortSpillRows(rows []spillRow) {
 	})
 }
 
-func (s *spillSorter) flushRun() error {
+func (s *spillSorter) flushRunContext(ctx context.Context) error {
 	if len(s.buf) == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	sortSpillRows(s.buf)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if s.tmpDir == "" {
 		dir, err := os.MkdirTemp("", "ingestr-iceberg-spill-")
@@ -135,8 +156,13 @@ func (s *spillSorter) flushRun() error {
 
 	writer := ipc.NewWriter(f, ipc.WithSchema(s.runFile))
 	numFields := len(s.schema.Fields())
-	for start := 0; start < len(s.buf); start += batchBuildRows {
-		end := min(start+batchBuildRows, len(s.buf))
+	batchRows := spillCursorBatchRows()
+	for start := 0; start < len(s.buf); start += batchRows {
+		if err := ctx.Err(); err != nil {
+			_ = writer.Close()
+			return err
+		}
+		end := min(start+batchRows, len(s.buf))
 		builder := array.NewRecordBuilder(memory.DefaultAllocator, s.runFile)
 		for _, row := range s.buf[start:end] {
 			for c := range numFields {
@@ -167,27 +193,31 @@ func (s *spillSorter) flushRun() error {
 	return nil
 }
 
-// finalize seals the sorter for iteration. When runs were spilled, the
+// finalizeContext seals the sorter for iteration. When runs were spilled, the
 // remaining buffer becomes a final run and runs beyond the merge fan-in are
 // compacted into larger sorted runs; otherwise the buffer is sorted in place
 // and iterated from memory.
-func (s *spillSorter) finalize() error {
+func (s *spillSorter) finalizeContext(ctx context.Context) error {
 	if s.finished {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(s.runs) > 0 {
-		if err := s.flushRun(); err != nil {
+		if err := s.flushRunContext(ctx); err != nil {
 			return err
 		}
-		for len(s.runs) > spillMergeFanIn {
-			merged, err := s.mergeRuns(s.runs[:spillMergeFanIn])
+		fanIn := effectiveSpillMergeFanIn()
+		for len(s.runs) > fanIn {
+			merged, err := s.mergeRuns(ctx, s.runs[:fanIn])
 			if err != nil {
 				return err
 			}
-			for _, run := range s.runs[:spillMergeFanIn] {
+			for _, run := range s.runs[:fanIn] {
 				_ = os.Remove(run)
 			}
-			s.runs = append(s.runs[spillMergeFanIn:], merged)
+			s.runs = append(s.runs[fanIn:], merged)
 		}
 	} else {
 		sortSpillRows(s.buf)
@@ -197,7 +227,7 @@ func (s *spillSorter) finalize() error {
 }
 
 // mergeRuns k-way merges the given sorted runs into one larger sorted run.
-func (s *spillSorter) mergeRuns(runs []string) (path string, err error) {
+func (s *spillSorter) mergeRuns(ctx context.Context, runs []string) (path string, err error) {
 	numFields := len(s.schema.Fields())
 
 	var cursors runHeap
@@ -207,6 +237,9 @@ func (s *spillSorter) mergeRuns(runs []string) (path string, err error) {
 		}
 	}()
 	for _, run := range runs {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		cursor, cErr := newRunCursor(run, numFields)
 		if cErr != nil {
 			return "", cErr
@@ -246,6 +279,10 @@ func (s *spillSorter) mergeRuns(runs []string) (path string, err error) {
 	}
 
 	for len(cursors) > 0 {
+		if err := ctx.Err(); err != nil {
+			_ = writer.Close()
+			return "", err
+		}
 		cursor := cursors[0]
 		for c := range numFields {
 			if err := appendValue(builder.Field(c), cursor.vals[c]); err != nil {
@@ -256,7 +293,7 @@ func (s *spillSorter) mergeRuns(runs []string) (path string, err error) {
 		builder.Field(numFields).(*array.StringBuilder).Append(cursor.key)
 		builder.Field(numFields + 1).(*array.Int64Builder).Append(cursor.seq)
 		rows++
-		if rows >= batchBuildRows {
+		if rows >= spillCursorBatchRows() {
 			if err := flush(); err != nil {
 				_ = writer.Close()
 				return "", fmt.Errorf("iceberg: failed to write spill run: %w", err)
@@ -285,6 +322,16 @@ func (s *spillSorter) mergeRuns(runs []string) (path string, err error) {
 	return f.Name(), nil
 }
 
+func effectiveSpillMergeFanIn() int {
+	configured := max(spillMergeFanIn, 2)
+	memoryBound := max(spillRunRows/batchBuildRows, 2)
+	return min(configured, memoryBound)
+}
+
+func spillCursorBatchRows() int {
+	return max(1, min(batchBuildRows, spillRunRows/effectiveSpillMergeFanIn()))
+}
+
 func (s *spillSorter) Close() {
 	s.buf = nil
 	if s.tmpDir != "" {
@@ -297,16 +344,27 @@ func (s *spillSorter) Close() {
 // Iter returns a fresh cursor over all rows grouped by key. It may be called
 // multiple times; each call re-merges the spilled runs.
 func (s *spillSorter) Iter() (*spillIter, error) {
-	if err := s.finalize(); err != nil {
+	return s.IterContext(context.Background())
+}
+
+func (s *spillSorter) IterContext(ctx context.Context) (*spillIter, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	it := &spillIter{}
+	if err := s.finalizeContext(ctx); err != nil {
+		return nil, err
+	}
+	it := &spillIter{ctx: ctx}
 	if len(s.runs) == 0 {
 		it.mem = s.buf
 		return it, nil
 	}
 
 	for _, run := range s.runs {
+		if err := ctx.Err(); err != nil {
+			it.Close()
+			return nil, err
+		}
 		cursor, err := newRunCursor(run, len(s.schema.Fields()))
 		if err != nil {
 			it.Close()
@@ -337,6 +395,7 @@ func (s *spillSorter) Iter() (*spillIter, error) {
 //	}
 //	if err := it.Err(); err != nil { ... }
 type spillIter struct {
+	ctx context.Context
 	// in-memory mode
 	mem []spillRow
 	pos int
@@ -367,6 +426,10 @@ func (it *spillIter) Row() []any { return it.current }
 // NextGroup advances to the next key group, skipping any unconsumed rows of
 // the current group.
 func (it *spillIter) NextGroup() bool {
+	if err := it.ctx.Err(); err != nil {
+		it.err = err
+		return false
+	}
 	if it.err != nil {
 		return false
 	}
@@ -388,6 +451,10 @@ func (it *spillIter) NextGroup() bool {
 
 // NextRow advances within the current group.
 func (it *spillIter) NextRow() bool {
+	if err := it.ctx.Err(); err != nil {
+		it.err = err
+		return false
+	}
 	if it.err != nil {
 		return false
 	}

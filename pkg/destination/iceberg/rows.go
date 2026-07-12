@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -26,7 +27,14 @@ import (
 type (
 	decimalVal string
 	uuidVal    string
+	structVal  []any
+	mapVal     []mapEntryVal
 )
+
+type mapEntryVal struct {
+	key   any
+	value any
+}
 
 // scannedTable holds a fully materialized read of an Iceberg table. Rows are
 // normalized Go values aligned to Columns order.
@@ -41,8 +49,30 @@ func (s *scannedTable) HasColumn(name string) bool {
 	return ok
 }
 
+func (s *scannedTable) foldedColumnIndex(name string) (int, bool) {
+	for column, idx := range s.ColIdx {
+		if strings.EqualFold(column, name) {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func (s *scannedTable) HasColumnFold(name string) bool {
+	_, ok := s.foldedColumnIndex(name)
+	return ok
+}
+
 func (s *scannedTable) Value(row []any, column string) any {
 	idx, ok := s.ColIdx[column]
+	if !ok {
+		return nil
+	}
+	return row[idx]
+}
+
+func (s *scannedTable) ValueFold(row []any, column string) any {
+	idx, ok := s.foldedColumnIndex(column)
 	if !ok {
 		return nil
 	}
@@ -162,6 +192,31 @@ func rowValue(arr arrow.Array, i int) (any, error) {
 		return listValues(a.ListValues(), int(a.Offsets()[i]), int(a.Offsets()[i+1]))
 	case *array.LargeList:
 		return listValues(a.ListValues(), int(a.Offsets()[i]), int(a.Offsets()[i+1]))
+	case *array.Struct:
+		values := make(structVal, a.NumField())
+		for field := range values {
+			value, err := rowValue(a.Field(field), i)
+			if err != nil {
+				return nil, err
+			}
+			values[field] = value
+		}
+		return values, nil
+	case *array.Map:
+		start, end := int(a.Offsets()[i]), int(a.Offsets()[i+1])
+		entries := make(mapVal, 0, end-start)
+		for entry := start; entry < end; entry++ {
+			key, err := rowValue(a.Keys(), entry)
+			if err != nil {
+				return nil, err
+			}
+			value, err := rowValue(a.Items(), entry)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, mapEntryVal{key: key, value: value})
+		}
+		return entries, nil
 	case array.ExtensionArray:
 		return rowValue(a.Storage(), i)
 	case *array.Null:
@@ -231,7 +286,14 @@ func normalizeDecimalString(s string) string {
 
 // appendValue writes a normalized value into a builder for the write schema.
 func appendValue(b array.Builder, v any) error {
+	return appendValueAtPath(b, v, "value", true)
+}
+
+func appendValueAtPath(b array.Builder, v any, valuePath string, nullable bool) error {
 	if v == nil {
+		if !nullable {
+			return fmt.Errorf("required nested value %s is null", valuePath)
+		}
 		b.AppendNull()
 		return nil
 	}
@@ -361,8 +423,37 @@ func appendValue(b array.Builder, v any) error {
 			return typeMismatch(b, v)
 		}
 		bldr.Append(true)
-		for _, elem := range vals {
-			if err := appendValue(bldr.ValueBuilder(), elem); err != nil {
+		elemField := bldr.Type().(*arrow.ListType).ElemField()
+		for index, elem := range vals {
+			if err := appendValueAtPath(bldr.ValueBuilder(), elem, fmt.Sprintf("%s.element[%d]", valuePath, index), elemField.Nullable); err != nil {
+				return err
+			}
+		}
+	case *array.StructBuilder:
+		vals, ok := v.(structVal)
+		if !ok || len(vals) != bldr.NumField() {
+			return typeMismatch(b, v)
+		}
+		bldr.Append(true)
+		structType := bldr.Type().(*arrow.StructType)
+		for field, value := range vals {
+			fieldMeta := structType.Field(field)
+			if err := appendValueAtPath(bldr.FieldBuilder(field), value, valuePath+"."+fieldMeta.Name, fieldMeta.Nullable); err != nil {
+				return err
+			}
+		}
+	case *array.MapBuilder:
+		entries, ok := v.(mapVal)
+		if !ok {
+			return typeMismatch(b, v)
+		}
+		bldr.Append(true)
+		mapType := bldr.Type().(*arrow.MapType)
+		for index, entry := range entries {
+			if err := appendValueAtPath(bldr.KeyBuilder(), entry.key, fmt.Sprintf("%s.key[%d]", valuePath, index), false); err != nil {
+				return err
+			}
+			if err := appendValueAtPath(bldr.ItemBuilder(), entry.value, fmt.Sprintf("%s.value[%d]", valuePath, index), mapType.ItemField().Nullable); err != nil {
 				return err
 			}
 		}
@@ -418,7 +509,8 @@ func buildRecordBatches(writeSchema *arrow.Schema, rows [][]any) ([]arrow.Record
 		builder := array.NewRecordBuilder(memory.DefaultAllocator, writeSchema)
 		for _, row := range rows[start:end] {
 			for c := range writeSchema.Fields() {
-				if err := appendValue(builder.Field(c), row[c]); err != nil {
+				field := writeSchema.Field(c)
+				if err := appendValueAtPath(builder.Field(c), row[c], field.Name, true); err != nil {
 					builder.Release()
 					release()
 					return nil, fmt.Errorf("iceberg: column %q: %w", writeSchema.Field(c).Name, err)
@@ -429,12 +521,6 @@ func buildRecordBatches(writeSchema *arrow.Schema, rows [][]any) ([]arrow.Record
 		builder.Release()
 	}
 	return batches, nil
-}
-
-func releaseBatches(batches []arrow.RecordBatch) {
-	for _, b := range batches {
-		b.Release()
-	}
 }
 
 // valuesEqual compares two normalized values null-safely (both-nil is equal,
@@ -454,6 +540,28 @@ func valuesEqual(a, b any) bool {
 		}
 		for i := range av {
 			if !valuesEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case structVal:
+		bv, ok := b.(structVal)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !valuesEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case mapVal:
+		bv, ok := b.(mapVal)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !valuesEqual(av[i].key, bv[i].key) || !valuesEqual(av[i].value, bv[i].value) {
 				return false
 			}
 		}
@@ -531,7 +639,15 @@ func cmpInt(a, b int64) int {
 }
 
 func cmpFloat(a, b float64) int {
+	aNaN := math.IsNaN(a)
+	bNaN := math.IsNaN(b)
 	switch {
+	case aNaN && bNaN:
+		return 0
+	case aNaN:
+		return 1
+	case bNaN:
+		return -1
 	case a < b:
 		return -1
 	case a > b:
@@ -798,149 +914,4 @@ func decimalLiteral(field iceberggo.NestedField, v any) (iceberggo.Decimal, erro
 		return iceberggo.Decimal{}, fmt.Errorf("iceberg: invalid decimal value %q for column %q: %w", str, field.Name, err)
 	}
 	return iceberggo.Decimal{Val: num, Scale: dt.Scale()}, nil
-}
-
-// keyMatchFilter builds an expression matching rows whose primary key values
-// appear in keys. Single-column keys use an IN set; composite keys expand into
-// OR-of-AND equality chains.
-func keyMatchFilter(iceSchema *iceberggo.Schema, primaryKeys []string, keys [][]any) (iceberggo.BooleanExpression, error) {
-	if len(keys) == 0 {
-		return iceberggo.AlwaysFalse{}, nil
-	}
-	fields := make([]iceberggo.NestedField, len(primaryKeys))
-	for i, pk := range primaryKeys {
-		field, ok := iceSchema.FindFieldByName(pk)
-		if !ok {
-			return nil, fmt.Errorf("iceberg: primary key column %q not found in table schema", pk)
-		}
-		fields[i] = field
-	}
-
-	if len(primaryKeys) == 1 {
-		return singleKeyInFilter(fields[0], keys)
-	}
-
-	keyExprs := make([]iceberggo.BooleanExpression, 0, len(keys))
-	for _, key := range keys {
-		preds := make([]iceberggo.BooleanExpression, 0, len(fields))
-		for i, field := range fields {
-			pred, err := equalityPredicate(field, key[i])
-			if err != nil {
-				return nil, err
-			}
-			preds = append(preds, pred)
-		}
-		keyExprs = append(keyExprs, andAll(preds))
-	}
-	return orAll(keyExprs), nil
-}
-
-// orAll and andAll build balanced expression trees so large key sets don't
-// produce recursion-deep left-leaning chains in binding and evaluation.
-func orAll(exprs []iceberggo.BooleanExpression) iceberggo.BooleanExpression {
-	switch len(exprs) {
-	case 0:
-		return iceberggo.AlwaysFalse{}
-	case 1:
-		return exprs[0]
-	default:
-		mid := len(exprs) / 2
-		return iceberggo.NewOr(orAll(exprs[:mid]), orAll(exprs[mid:]))
-	}
-}
-
-func andAll(exprs []iceberggo.BooleanExpression) iceberggo.BooleanExpression {
-	switch len(exprs) {
-	case 0:
-		return iceberggo.AlwaysTrue{}
-	case 1:
-		return exprs[0]
-	default:
-		mid := len(exprs) / 2
-		return iceberggo.NewAnd(andAll(exprs[:mid]), andAll(exprs[mid:]))
-	}
-}
-
-func singleKeyInFilter(field iceberggo.NestedField, keys [][]any) (iceberggo.BooleanExpression, error) {
-	ref := iceberggo.Reference(field.Name)
-	switch field.Type.(type) {
-	case iceberggo.Int32Type:
-		vals, err := collectKeyValues(field, keys, func(v any) (int32, bool) {
-			i, ok := v.(int64)
-			return int32(i), ok
-		})
-		if err != nil {
-			return nil, err
-		}
-		return iceberggo.IsIn(ref, vals...), nil
-	case iceberggo.Int64Type:
-		vals, err := collectKeyValues(field, keys, func(v any) (int64, bool) {
-			i, ok := v.(int64)
-			return i, ok
-		})
-		if err != nil {
-			return nil, err
-		}
-		return iceberggo.IsIn(ref, vals...), nil
-	case iceberggo.StringType:
-		vals, err := collectKeyValues(field, keys, asString)
-		if err != nil {
-			return nil, err
-		}
-		return iceberggo.IsIn(ref, vals...), nil
-	case iceberggo.DateType:
-		vals, err := collectKeyValues(field, keys, func(v any) (iceberggo.Date, bool) {
-			i, ok := v.(int64)
-			return iceberggo.Date(i), ok
-		})
-		if err != nil {
-			return nil, err
-		}
-		return iceberggo.IsIn(ref, vals...), nil
-	case iceberggo.TimestampType, iceberggo.TimestampTzType:
-		vals, err := collectKeyValues(field, keys, func(v any) (iceberggo.Timestamp, bool) {
-			i, ok := v.(int64)
-			return iceberggo.Timestamp(i), ok
-		})
-		if err != nil {
-			return nil, err
-		}
-		return iceberggo.IsIn(ref, vals...), nil
-	case iceberggo.UUIDType:
-		vals, err := collectKeyValues(field, keys, func(v any) (uuid.UUID, bool) {
-			s, ok := asString(v)
-			if !ok {
-				return uuid.UUID{}, false
-			}
-			parsed, err := uuid.Parse(s)
-			return parsed, err == nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		return iceberggo.IsIn(ref, vals...), nil
-	default:
-		// Fall back to OR-of-equality for less common key types.
-		preds := make([]iceberggo.BooleanExpression, 0, len(keys))
-		for _, key := range keys {
-			pred, err := equalityPredicate(field, key[0])
-			if err != nil {
-				return nil, err
-			}
-			preds = append(preds, pred)
-		}
-		return orAll(preds), nil
-	}
-}
-
-func collectKeyValues[T any](field iceberggo.NestedField, keys [][]any, convert func(any) (T, bool)) ([]T, error) {
-	vals := make([]T, 0, len(keys))
-	for _, key := range keys {
-		v, ok := convert(key[0])
-		if !ok {
-			return nil, predicateTypeErr(field, key[0])
-		}
-		vals = append(vals, v)
-	}
-	return vals, nil
 }
