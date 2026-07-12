@@ -160,6 +160,7 @@ type TableWriteConfig struct {
 	PrimaryKeys            []string
 	DeduplicatePrimaryKeys bool
 	IncrementalKey         string
+	CDCMode                bool
 	SkipCDCResume          bool
 	CDCExpectedIncarnation string
 }
@@ -174,8 +175,9 @@ type MultiTableWriteOptions struct {
 	LoaderFileFormat string
 	// CancelSource stops the producer when a per-table writer fails. The writer
 	// drains records after invoking it so producer-owned resources can unwind.
-	CancelSource context.CancelFunc
-	TableWriter  func(context.Context, string, <-chan source.RecordBatchResult, WriteOptions) (bool, error)
+	CancelSource       context.CancelFunc
+	CancelDrainTimeout time.Duration
+	TableWriter        func(context.Context, string, <-chan source.RecordBatchResult, WriteOptions) (bool, error)
 }
 
 // CDCResumeProvider is an optional interface that destinations can implement

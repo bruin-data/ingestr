@@ -56,6 +56,9 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}); err != nil {
 		return fmt.Errorf("failed to prepare destination table: %w", err)
 	}
+	if !job.Config.KeepStaging {
+		defer dropManagedStagingDetached(ctx, job.Destination, stagingTable, "DELETE+INSERT")
+	}
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        stagingTable,
@@ -120,13 +123,12 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	intervalStart := resolveIntervalBound(job.Config.IntervalStart, intervalTracker.Min)
 	intervalEnd := resolveIntervalBound(job.Config.IntervalEnd, intervalTracker.Max)
 
+	if err := job.ApplyEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+
 	if intervalStart == nil || intervalEnd == nil {
 		config.Debug("[DELETE+INSERT] No interval detected (empty data?), skipping delete+insert")
-		if !job.Config.KeepStaging {
-			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-				config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
-			}
-		}
 		return nil
 	}
 
@@ -140,10 +142,6 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		intervalEnd = toDateOnly(intervalEnd)
 	}
 
-	if err := job.ApplyEvolution(ctx); err != nil {
-		return fmt.Errorf("failed to apply schema evolution: %w", err)
-	}
-
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
 		StagingTable:       stagingTable,
 		TargetTable:        job.Config.DestTable,
@@ -151,16 +149,10 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		IncrementalKeyType: incrementalKeyType,
 		IntervalStart:      intervalStart,
 		IntervalEnd:        intervalEnd,
-		Columns:            job.Schema.ColumnNames(),
+		Columns:            destination.DestinationColumns(job.Schema.ColumnNames()),
 		PrimaryKeys:        job.Config.PrimaryKeys,
 	}); err != nil {
 		return fmt.Errorf("failed to delete+insert data: %w", err)
-	}
-
-	if !job.Config.KeepStaging {
-		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-			config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
-		}
 	}
 
 	return nil

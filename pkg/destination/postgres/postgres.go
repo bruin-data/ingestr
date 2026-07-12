@@ -586,6 +586,35 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if opts.CDCExpectedIncarnation != "" {
+		if opts.CDCExpectedStagingIncarnation == "" {
+			return fmt.Errorf("cannot conditionally swap managed CDC target %s without a bound staging incarnation", targetTable)
+		}
+		lockRefs := []string{targetRef, stagingRef}
+		slices.Sort(lockRefs)
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+strings.Join(lockRefs, ", ")+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+			return fmt.Errorf("failed to lock managed CDC target and staging tables before swap: %w", err)
+		}
+		for _, expected := range []struct {
+			table       string
+			ref         string
+			incarnation string
+			role        string
+		}{
+			{table: targetTable, ref: targetRef, incarnation: opts.CDCExpectedIncarnation, role: "target"},
+			{table: stagingTable, ref: stagingRef, incarnation: opts.CDCExpectedStagingIncarnation, role: "staging table"},
+		} {
+			current, exists, err := d.postgresTargetIncarnation(ctx, tx, expected.ref)
+			if err != nil {
+				return err
+			}
+			if !exists || current != expected.incarnation {
+				return fmt.Errorf("PostgreSQL CDC %s %q physical incarnation changed before swap", expected.role, expected.table)
+			}
+		}
+	} else if opts.CDCExpectedStagingIncarnation != "" {
+		return fmt.Errorf("cannot conditionally swap staging table without a bound target incarnation")
+	}
 
 	// Postgres' ALTER TABLE … RENAME TO … is same-schema only. If staging lives in a
 	// different schema (the new _bruin_staging design), move it into the target's
@@ -740,6 +769,23 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
+	if opts.CDCExpectedIncarnation != "" {
+		targetSchema, targetName, err := d.resolveSchemaTable(ctx, tx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		quotedTargetTable = quotePostgresTable(targetSchema, targetName)
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+quotedTargetTable+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+			return fmt.Errorf("failed to lock managed CDC target %s before merge: %w", opts.TargetTable, err)
+		}
+		current, exists, err := d.postgresTargetIncarnation(ctx, tx, quotedTargetTable)
+		if err != nil {
+			return err
+		}
+		if !exists || current != opts.CDCExpectedIncarnation {
+			return fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed before merge", opts.TargetTable)
+		}
+	}
 
 	if hasCDCDeleted {
 		// CDC mode: dedupe within the staging table and apply changes deterministically.
@@ -1057,6 +1103,10 @@ func (d *PostgresDestination) SupportsSCD2Strategy() bool { return true }
 // SupportsAtomicSwap returns true as PostgreSQL supports atomic table renames.
 func (d *PostgresDestination) SupportsAtomicSwap() bool { return true }
 
+func (d *PostgresDestination) SupportsCDCConditionalSwap() bool {
+	return true
+}
+
 // GetScheme returns the primary URI scheme for PostgreSQL.
 func (d *PostgresDestination) GetScheme() string { return "postgres" }
 
@@ -1124,7 +1174,7 @@ func (d *PostgresDestination) postgresTargetIncarnation(ctx context.Context, que
 	if err != nil {
 		return "", false, err
 	}
-	resolvedTable := destination.QuoteTableName(schemaName + "." + tableName)
+	resolvedTable := quotePostgresTable(schemaName, tableName)
 	var databaseOID, relationOID, relationKind string
 	err = queryer.QueryRow(ctx, `
 		SELECT d.oid::text, c.oid::text, c.relkind::text
@@ -1186,13 +1236,13 @@ func (d *PostgresDestination) ClaimAndPrepareEmptyCDCTarget(
 		return "", fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
 	}
 	createSQL := strings.Replace(
-		buildCreateTableSQL(destination.QuoteTableName(schemaName+"."+tableName), opts.Schema.Columns, opts.PrimaryKeys),
+		buildCreateTableSQL(quotePostgresTable(schemaName, tableName), opts.Schema.Columns, opts.PrimaryKeys),
 		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
 	)
 	if _, err := tx.Exec(ctx, createSQL); err != nil {
 		return "", fmt.Errorf("failed to exclusively create CDC target: %w", err)
 	}
-	incarnation, exists, err := d.postgresTargetIncarnation(ctx, tx, schemaName+"."+tableName)
+	incarnation, exists, err := d.postgresTargetIncarnation(ctx, tx, quotePostgresTable(schemaName, tableName))
 	if err != nil {
 		return "", err
 	}
@@ -1215,18 +1265,18 @@ func (d *PostgresDestination) TruncateCDCTableIfIncarnation(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	resolved := schemaName + "." + tableName
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+destination.QuoteTableName(resolved)+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+	resolvedRef := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+resolvedRef+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return err
 	}
-	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
+	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolvedRef)
 	if err != nil {
 		return err
 	}
 	if !exists || current != expectedIncarnation {
 		return fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed", table)
 	}
-	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
+	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+resolvedRef); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

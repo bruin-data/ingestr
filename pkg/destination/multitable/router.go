@@ -20,6 +20,7 @@ type Router struct {
 	done          chan struct{}
 	err           error
 	errMu         sync.RWMutex
+	drainTimeout  time.Duration
 }
 
 // NewRouter creates a router for the specified tables.
@@ -32,6 +33,7 @@ func NewRouter(tables []string, bufferSize int) *Router {
 		tableChannels: make(map[string]chan source.RecordBatchResult),
 		bufferSize:    bufferSize,
 		done:          make(chan struct{}),
+		drainTimeout:  routerDrainTimeout,
 	}
 
 	for _, table := range tables {
@@ -44,7 +46,7 @@ func NewRouter(tables []string, bufferSize int) *Router {
 // Route starts routing batches from the input channel to per-table channels.
 // This method should be called once and runs asynchronously.
 // It closes all table channels when the input channel is exhausted or an error occurs.
-func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResult, drainOnCancel bool) {
+func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResult, drainOnCancel ...bool) {
 	r.mu.Lock()
 	if r.started {
 		r.mu.Unlock()
@@ -52,6 +54,7 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 	}
 	r.started = true
 	r.mu.Unlock()
+	shouldDrain := len(drainOnCancel) > 0 && drainOnCancel[0]
 
 	go func() {
 		aborted := false
@@ -63,7 +66,7 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 			case <-ctx.Done():
 				aborted = true
 				r.setError(ctx.Err())
-				if drainOnCancel {
+				if shouldDrain {
 					r.drainInput(input)
 				}
 				return
@@ -73,11 +76,10 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 				}
 
 				if result.Err != nil {
-					aborted = true
 					r.setError(result.Err)
-					r.broadcastError(result.Err)
+					r.broadcastError(ctx, result.Err)
 					releaseResult(result)
-					if drainOnCancel {
+					if shouldDrain {
 						r.drainInput(input)
 					}
 					return
@@ -95,7 +97,7 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 					aborted = true
 					r.setError(ctx.Err())
 					releaseResult(result)
-					if drainOnCancel {
+					if shouldDrain {
 						r.drainInput(input)
 					}
 					return
@@ -133,11 +135,12 @@ func (r *Router) setError(err error) {
 	r.errMu.Unlock()
 }
 
-func (r *Router) broadcastError(err error) {
+func (r *Router) broadcastError(ctx context.Context, err error) {
 	for _, ch := range r.tableChannels {
 		select {
 		case ch <- source.RecordBatchResult{Err: err}:
-		default:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -156,7 +159,7 @@ func (r *Router) closeChannels(drain bool) {
 }
 
 func (r *Router) drainInput(input <-chan source.RecordBatchResult) {
-	timer := time.NewTimer(routerDrainTimeout)
+	timer := time.NewTimer(r.drainTimeout)
 	defer timer.Stop()
 	for {
 		select {

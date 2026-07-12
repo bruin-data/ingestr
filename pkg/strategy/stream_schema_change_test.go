@@ -5,9 +5,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +51,7 @@ func TestFlushLoopRefreshEvolvesDestinationOnNewColumn(t *testing.T) {
 		{Name: "status", DataType: schema.TypeString},
 		{Name: "priority", DataType: schema.TypeInt64},
 	}}
-	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: newSchema})
+	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: newSchema, PrimaryKeys: []string{"id"}})
 	require.NoError(t, err)
 
 	require.Len(t, dest.execCalls, 1)
@@ -63,6 +67,78 @@ func TestFlushLoopRefreshEvolvesDestinationOnNewColumn(t *testing.T) {
 	assert.Equal(t, "priority", st.schema.Columns[2].Name)
 }
 
+func TestStreamingRefreshRetainsContractFinalSchemaAndAlignsNewBatches(t *testing.T) {
+	finalSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	newSourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "value", ColumnPath: []string{"value"},
+	}}}
+	dest := &fakeDestination{}
+	st := &streamTableState{destTable: "dest_items", stagingTable: "stg_items", schema: finalSchema, primaryKeys: []string{"id"}}
+	loop := newFlushLoop(dest, &config.IngestConfig{NoLoadTimestamp: true, SchemaContract: "discard_value"}, StreamingOptions{Strategy: config.StrategyMerge}, map[string]*streamTableState{"public.items": st})
+	loop.evolveTablePlan = func(context.Context, string, *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+		return &schemaevolution.EvolutionPlan{TransformComparison: comparison, FinalSchema: finalSchema}, nil
+	}
+
+	require.NoError(t, loop.refreshTableSchema(context.Background(), source.SourceTableInfo{
+		Name: "public.items", Schema: newSourceSchema, PrimaryKeys: []string{"id"},
+	}, st))
+	require.Equal(t, schema.TypeInt64, st.schema.Columns[1].DataType)
+	require.NotNil(t, st.batchTransformer)
+	require.NotNil(t, st.schemaAligner)
+	require.Equal(t, schema.TypeInt64, dest.prepareCalls[0].Schema.Columns[1].DataType)
+
+	ids := array.NewInt64Builder(memory.DefaultAllocator)
+	values := array.NewStringBuilder(memory.DefaultAllocator)
+	ids.Append(1)
+	values.Append("invalid")
+	idArray, valueArray := ids.NewArray(), values.NewArray()
+	ids.Release()
+	values.Release()
+	batch := array.NewRecordBatch(newSourceSchema.ToArrowSchema(), []arrow.Array{idArray, valueArray}, 1)
+	idArray.Release()
+	valueArray.Release()
+	defer batch.Release()
+	contracted, err := st.batchTransformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	defer contracted.Release()
+	aligned, err := st.schemaAligner.Transform(contracted)
+	require.NoError(t, err)
+	defer aligned.Release()
+	require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, aligned.Column(1).DataType()))
+	require.True(t, aligned.Column(1).IsNull(0))
+}
+
+func TestStreamingRefreshRejectsUnsupportedDecimalBeforeMutation(t *testing.T) {
+	current := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 2,
+	}}}
+	dest := &fakeDestination{}
+	st := &streamTableState{destTable: "dest_items", stagingTable: "stg_items", schema: current}
+	loop := newFlushLoop(dest, &config.IngestConfig{NoLoadTimestamp: true}, StreamingOptions{Strategy: config.StrategyMerge}, map[string]*streamTableState{"public.items": st})
+	plannerCalled := false
+	loop.evolveTablePlan = func(context.Context, string, *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+		plannerCalled = true
+		return nil, nil
+	}
+	invalid := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 50, Scale: 2,
+	}}}
+
+	err := loop.refreshTableSchema(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: invalid}, st)
+	require.ErrorContains(t, err, "maximum supported precision is 38")
+	require.ErrorContains(t, err, "public.items")
+	require.False(t, plannerCalled)
+	require.Empty(t, dest.prepareCalls)
+	require.Equal(t, 38, st.schema.Columns[0].Precision)
+}
+
 // A re-announcement with an unchanged schema (e.g. after a new-table rebuild)
 // must stay a no-op.
 func TestFlushLoopRefreshIgnoresUnchangedSchema(t *testing.T) {
@@ -72,7 +148,7 @@ func TestFlushLoopRefreshIgnoresUnchangedSchema(t *testing.T) {
 	}})
 
 	sameSchema := &schema.TableSchema{Columns: append([]schema.Column{}, st.schema.Columns...)}
-	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: sameSchema})
+	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: sameSchema, PrimaryKeys: []string{"id"}})
 	require.NoError(t, err)
 
 	assert.Empty(t, dest.execCalls)
@@ -92,7 +168,7 @@ func TestFlushLoopRefreshHandlesTypeChange(t *testing.T) {
 		{Name: "id", DataType: schema.TypeInt64},
 		{Name: "status", DataType: schema.TypeString},
 	}}
-	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: newSchema})
+	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: newSchema, PrimaryKeys: []string{"id"}})
 	require.NoError(t, err)
 
 	require.Len(t, dest.execCalls, 1)

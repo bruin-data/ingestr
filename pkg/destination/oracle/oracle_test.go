@@ -196,7 +196,7 @@ func TestOracleStagingNamesEncodeQuotedTableDots(t *testing.T) {
 			require.Len(t, parts, 2)
 			require.Equal(t, `"appUser"`, parts[0])
 			require.NotContains(t, parts[1], ".")
-			require.Contains(t, quoteTable(staging), `"appUser"."_INGESTR_HEX_`)
+			require.Contains(t, quoteTable(staging), `"appUser"."INGESTR_HEX_`)
 		})
 	}
 }

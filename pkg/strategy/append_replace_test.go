@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,15 +14,259 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/stretchr/testify/require"
 )
 
+type contractCaptureReplaceDestination struct {
+	*fakeDestination
+	muCapture sync.Mutex
+	types     []arrow.DataType
+	nulls     []int
+	rows      []int64
+	schemas   []*schema.TableSchema
+	fields    [][]string
+}
+
+type directContractCaptureReplaceDestination struct {
+	*contractCaptureReplaceDestination
+}
+
+func (d *directContractCaptureReplaceDestination) SupportsAtomicSwap() bool { return false }
+
+func (d *contractCaptureReplaceDestination) WriteParallel(_ context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	for result := range records {
+		if result.Batch != nil {
+			d.muCapture.Lock()
+			if result.Batch.NumCols() > 1 {
+				d.types = append(d.types, result.Batch.Column(1).DataType())
+				d.nulls = append(d.nulls, result.Batch.Column(1).NullN())
+			}
+			d.rows = append(d.rows, result.Batch.NumRows())
+			d.schemas = append(d.schemas, opts.Schema)
+			fields := make([]string, result.Batch.NumCols())
+			for i, field := range result.Batch.Schema().Fields() {
+				fields[i] = field.Name
+			}
+			d.fields = append(d.fields, fields)
+			d.muCapture.Unlock()
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return nil
+}
+
 func singleBatchRecords(t *testing.T, rows ...int64) <-chan source.RecordBatchResult {
 	t.Helper()
 	batch := int64RecordBatch(t, "id", rows, nil)
 	return mustClosedRecords(source.RecordBatchResult{Batch: batch})
+}
+
+func TestReplaceStrategyAppliesDiscardValueContractToRecreatedTable(t *testing.T) {
+	job, src, base := minimalJob()
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	finalSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "value", ColumnPath: []string{"value"},
+	}}}
+	dest := &contractCaptureReplaceDestination{fakeDestination: base}
+	job.Destination = dest
+	job.Config.SchemaContract = "discard_value"
+	job.Schema = finalSchema
+	job.SourceSchema = sourceSchema
+	job.SchemaComparison = comparison
+	job.DestinationSchema = finalSchema
+	src.readCh = mustClosedRecords(source.RecordBatchResult{
+		Batch: intStringRecordBatch(t, "id", []int64{1}, "value", []string{"invalid"}),
+	})
+
+	require.NoError(t, (&ReplaceStrategy{}).Execute(context.Background(), job))
+	dest.muCapture.Lock()
+	defer dest.muCapture.Unlock()
+	require.Len(t, dest.types, 1)
+	require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, dest.types[0]))
+	require.Equal(t, []int{1}, dest.nulls)
+	require.Equal(t, schema.TypeInt64, dest.schemas[0].Columns[1].DataType)
+}
+
+func TestReplaceStrategyAppliesDiscardRowContractToRecreatedTable(t *testing.T) {
+	job, src, base := minimalJob()
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	finalSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "value", ColumnPath: []string{"value"},
+	}}}
+	dest := &contractCaptureReplaceDestination{fakeDestination: base}
+	job.Destination = dest
+	job.Config.SchemaContract = "discard_row"
+	job.Schema = finalSchema
+	job.SourceSchema = sourceSchema
+	job.SchemaComparison = comparison
+	job.DestinationSchema = finalSchema
+	job.SchemaAligner = transformer.NewSafeTypeCaster(finalSchema.ToArrowSchema())
+	src.readCh = mustClosedRecords(source.RecordBatchResult{
+		Batch: intStringRecordBatch(t, "id", []int64{1}, "value", []string{"invalid"}),
+	})
+
+	require.NoError(t, (&ReplaceStrategy{}).Execute(context.Background(), job))
+	dest.muCapture.Lock()
+	defer dest.muCapture.Unlock()
+	require.Equal(t, []int64{0}, dest.rows)
+	require.Equal(t, schema.TypeInt64, dest.schemas[0].Columns[1].DataType)
+}
+
+func TestMultiTableReplaceUsesContractFinalSchemaAndTransformation(t *testing.T) {
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	finalSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "value", ColumnPath: []string{"value"},
+	}}}
+	table := source.SourceTableInfo{Name: "public.events", Schema: sourceSchema}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{
+		TableName: table.Name, Batch: intStringRecordBatch(t, "id", []int64{1}, "value", []string{"invalid"}),
+	}
+	close(records)
+	dest := &contractCaptureReplaceDestination{fakeDestination: &fakeDestination{}}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{IncrementalStrategy: config.StrategyReplace, SchemaContract: "discard_value"},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table},
+		TableDestNames: map[string]string{table.Name: "lake.events"},
+		EvolutionPlans: map[string]*schemaevolution.EvolutionPlan{
+			table.Name: {TransformComparison: comparison, FinalSchema: finalSchema},
+		},
+	}
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job))
+	dest.muCapture.Lock()
+	defer dest.muCapture.Unlock()
+	require.Len(t, dest.types, 1)
+	require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, dest.types[0]))
+	require.Equal(t, []int{1}, dest.nulls)
+	require.Equal(t, schema.TypeInt64, dest.schemas[0].Columns[1].DataType)
+	require.Equal(t, schema.TypeInt64, dest.prepareCalls[0].Schema.Columns[1].DataType)
+}
+
+func TestMultiTableReplaceDiscardRowFiltersViolations(t *testing.T) {
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	finalSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "value", ColumnPath: []string{"value"},
+	}}}
+	table := source.SourceTableInfo{Name: "public.events", Schema: sourceSchema}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{
+		TableName: table.Name, Batch: intStringRecordBatch(t, "id", []int64{1}, "value", []string{"invalid"}),
+	}
+	close(records)
+	dest := &contractCaptureReplaceDestination{fakeDestination: &fakeDestination{}}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{IncrementalStrategy: config.StrategyReplace, SchemaContract: "discard_row"},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table},
+		TableDestNames: map[string]string{table.Name: "lake.events"},
+		EvolutionPlans: map[string]*schemaevolution.EvolutionPlan{
+			table.Name: {TransformComparison: comparison, FinalSchema: finalSchema},
+		},
+	}
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job))
+	dest.muCapture.Lock()
+	defer dest.muCapture.Unlock()
+	require.Equal(t, []int64{0}, dest.rows)
+	require.Equal(t, schema.TypeInt64, dest.schemas[0].Columns[1].DataType)
+}
+
+func TestReplaceNeverPublishesStagingOnlyCDCColumns(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		name := "staging"
+		if direct {
+			name = "direct"
+		}
+		t.Run(name, func(t *testing.T) {
+			job, src, base := minimalJob()
+			fullSchema := &schema.TableSchema{Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: "_cdc_unchanged_cols", DataType: schema.TypeString, Nullable: true},
+			}}
+			capture := &contractCaptureReplaceDestination{fakeDestination: base}
+			if direct {
+				job.Destination = &directContractCaptureReplaceDestination{contractCaptureReplaceDestination: capture}
+			} else {
+				job.Destination = capture
+			}
+			job.Schema = fullSchema
+			job.SourceSchema = fullSchema
+			src.readCh = mustClosedRecords(source.RecordBatchResult{
+				Batch: intStringRecordBatch(t, "id", []int64{1}, "_cdc_unchanged_cols", []string{"value"}),
+			})
+
+			require.NoError(t, (&ReplaceStrategy{}).Execute(context.Background(), job))
+			capture.muCapture.Lock()
+			defer capture.muCapture.Unlock()
+			require.Equal(t, [][]string{{"id"}}, capture.fields)
+			require.Equal(t, []string{"id"}, capture.schemas[0].ColumnNames())
+			require.Equal(t, []string{"id"}, base.prepareCalls[0].Schema.ColumnNames())
+			if !direct {
+				require.Len(t, base.swapOptions, 1)
+				require.Equal(t, []string{"id"}, base.swapOptions[0].Schema.ColumnNames())
+			}
+		})
+	}
+}
+
+func TestMultiTableReplaceNeverPublishesStagingOnlyCDCColumns(t *testing.T) {
+	fullSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "_cdc_unchanged_cols", DataType: schema.TypeString, Nullable: true},
+	}}
+	table := source.SourceTableInfo{Name: "events", Schema: fullSchema}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{
+		TableName: table.Name, Batch: intStringRecordBatch(t, "id", []int64{1}, "_cdc_unchanged_cols", []string{"value"}),
+	}
+	close(records)
+	base := &fakeDestination{}
+	dest := &contractCaptureReplaceDestination{fakeDestination: base}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{IncrementalStrategy: config.StrategyReplace},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table}, TableDestNames: map[string]string{table.Name: "events"},
+	}
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job))
+	dest.muCapture.Lock()
+	defer dest.muCapture.Unlock()
+	require.Equal(t, [][]string{{"id"}}, dest.fields)
+	require.Equal(t, []string{"id"}, dest.schemas[0].ColumnNames())
+	require.Equal(t, []string{"id"}, base.prepareCalls[0].Schema.ColumnNames())
+	require.Equal(t, []string{"id"}, base.swapOptions[0].Schema.ColumnNames())
 }
 
 func TestIngestionJob_GetRecords_UsesBuffered(t *testing.T) {
@@ -337,6 +582,52 @@ func TestReplaceStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+func TestReplaceStrategyManagedCDCDoesNotDelegateTargetCursor(t *testing.T) {
+	job, src, _ := minimalJob()
+	dest := &replaceCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
+	manager, err := NewCDCStateManager(dest, "managed-replace", job.Config.DestTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), job.Config.SourceTable, job.Config.DestTable, "source-v1"))
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	job.Destination = dest
+	job.Config.IncrementalStrategy = config.StrategyReplace
+	job.CDCStateManager = manager
+	src.readCh = mustClosedRecords()
+	require.NoError(t, (&ReplaceStrategy{}).Execute(t.Context(), job))
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].SkipCDCResume)
+	require.Len(t, dest.mergeCalls, 1)
+	require.True(t, dest.mergeCalls[0].SkipCDCResume)
+	dest.stateMu.Lock()
+	dest.incarnations[job.Config.DestTable] = "externally-replaced"
+	dest.stateMu.Unlock()
+	err = manager.Persist(t.Context(), source.CDCStateCommitToken{
+		Position: "0/20", SnapshotPositions: map[string]string{job.Config.SourceTable: "0/10"},
+		SnapshotIncarnations: map[string]string{job.Config.SourceTable: "source-v1"},
+	})
+	require.ErrorContains(t, err, "was replaced during its snapshot")
+}
+
+func TestManagedReplaceFailsClosedWithoutConditionalSwap(t *testing.T) {
+	job, src, _ := minimalJob()
+	dest := newCDCStateDestination()
+	manager, err := NewCDCStateManager(dest, "managed-replace-unsupported-swap", job.Config.DestTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), job.Config.SourceTable, job.Config.DestTable, "source-v1"))
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	job.Destination = dest
+	job.CDCStateManager = manager
+	src.readCh = mustClosedRecords()
+	prepareCalls := len(dest.prepareCalls)
+	writeCalls := len(dest.writeCalls)
+
+	err = (&ReplaceStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "cannot atomically fence managed CDC table replacement")
+	require.Len(t, dest.prepareCalls, prepareCalls)
+	require.Len(t, dest.writeCalls, writeCalls)
+	require.Empty(t, dest.swapCalls)
+}
+
 func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	src.primaryKeysUnique = true
@@ -359,6 +650,897 @@ func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing
 	if len(dest.swapCalls) != 1 || dest.swapCalls[0][0] != dest.prepareCalls[0].Table {
 		t.Fatalf("expected staging table to be swapped directly, got swaps=%v prepares=%v", dest.swapCalls, dest.prepareCalls)
 	}
+}
+
+func TestReplaceStrategy_Execute_SkipsDedupWhenWhitespaceTrimmingCannotChangeNumericPrimaryKey(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.WhitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 1 {
+		t.Fatalf("expected unique numeric primary key to keep fast path, got %d PrepareTable calls", len(dest.prepareCalls))
+	}
+	if len(dest.mergeCalls) != 0 {
+		t.Fatalf("expected no MergeTable call for numeric primary key, got %d", len(dest.mergeCalls))
+	}
+}
+
+func TestReplaceStrategy_Execute_DedupsWhenWhitespaceTrimmingCanCollapseStringPrimaryKeys(t *testing.T) {
+	job, src, dest := minimalJob()
+	stringPrimaryKeySchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeString, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+	job.Schema = stringPrimaryKeySchema
+	job.SourceSchema = stringPrimaryKeySchema
+	job.WhitespaceTrimmer = transformer.NewWhitespaceTrimmer()
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("expected trim-sensitive primary key to use dedup path, got %d PrepareTable calls", len(dest.prepareCalls))
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("raw staging table should be PK-free after whitespace trimming, got %v", got)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("expected MergeTable call after whitespace trimming, got %d", len(dest.mergeCalls))
+	}
+}
+
+func TestReplaceStrategy_Execute_RequestsDirectAtomicDeduplication(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &directReplaceDestination{fakeDestination: dest}
+	job.Config.IncrementalKey = "id"
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.prepareCalls) != 1 || dest.prepareCalls[0].Table != job.Config.DestTable {
+		t.Fatalf("direct replace should prepare the target once, got %+v", dest.prepareCalls)
+	}
+	if got := dest.prepareCalls[0].PrimaryKeys; len(got) != 1 || got[0] != "id" {
+		t.Fatalf("direct target should retain its primary key metadata, got %v", got)
+	}
+	if len(dest.writeCalls) != 1 {
+		t.Fatalf("expected one direct write, got %d", len(dest.writeCalls))
+	}
+	if !dest.writeCalls[0].DeduplicatePrimaryKeys {
+		t.Fatal("direct replace did not request primary-key deduplication")
+	}
+	if got := dest.writeCalls[0].PrimaryKeys; len(got) != 1 || got[0] != "id" {
+		t.Fatalf("WriteOptions.PrimaryKeys = %v, want [id]", got)
+	}
+	if dest.writeCalls[0].IncrementalKey != "id" {
+		t.Fatalf("WriteOptions.IncrementalKey = %q, want id", dest.writeCalls[0].IncrementalKey)
+	}
+	if len(dest.mergeCalls) != 0 || len(dest.swapCalls) != 0 {
+		t.Fatalf("direct replace should not stage/merge/swap, merge=%v swap=%v", dest.mergeCalls, dest.swapCalls)
+	}
+}
+
+type directReplaceDestination struct {
+	*fakeDestination
+}
+
+func (d *directReplaceDestination) SupportsAtomicSwap() bool { return false }
+func (d *directReplaceDestination) SupportsDirectReplaceDeduplication() bool {
+	return true
+}
+
+type replaceCDCStateDestination struct{ *cdcStateDestination }
+
+func (*replaceCDCStateDestination) SupportsCDCConditionalSwap() bool { return true }
+
+func (d *replaceCDCStateDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.fakeDestination.WriteParallel(ctx, records, opts)
+}
+
+func (d *replaceCDCStateDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	targetIncarnation, _, _ := d.CDCTargetIncarnation(ctx, opts.TargetTable)
+	if opts.CDCExpectedIncarnation != targetIncarnation {
+		return errors.New("destination target incarnation changed before staged replacement publish")
+	}
+	stagingIncarnation, _, _ := d.CDCTargetIncarnation(ctx, opts.StagingTable)
+	if opts.CDCExpectedStagingIncarnation != stagingIncarnation {
+		return errors.New("destination staging incarnation changed before staged replacement publish")
+	}
+	if err := d.fakeDestination.SwapTable(ctx, opts); err != nil {
+		return err
+	}
+	d.stateMu.Lock()
+	d.incarnations[opts.TargetTable] = stagingIncarnation
+	d.stateMu.Unlock()
+	return nil
+}
+
+type managedDirectReplaceDestination struct{ *replaceCDCStateDestination }
+
+func (*managedDirectReplaceDestination) SupportsAtomicSwap() bool { return false }
+func (*managedDirectReplaceDestination) SupportsDirectReplaceDeduplication() bool {
+	return true
+}
+
+type recreatingDirectReplaceDestination struct {
+	*managedDirectReplaceDestination
+	recreateTable string
+}
+
+func (d *recreatingDirectReplaceDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	d.stateMu.Lock()
+	d.incarnations[d.recreateTable] = "external-v2"
+	d.stateMu.Unlock()
+	current, _, _ := d.CDCTargetIncarnation(ctx, d.recreateTable)
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	if opts.CDCExpectedIncarnation != current {
+		return errors.New("destination incarnation changed before direct replacement write")
+	}
+	return nil
+}
+
+type recreatingStagedReplaceDestination struct {
+	*replaceCDCStateDestination
+	recreateTable string
+}
+
+type recreatingAfterStagedReplaceDestination struct {
+	*replaceCDCStateDestination
+}
+
+type recreatingStagingAtSwapDestination struct {
+	*replaceCDCStateDestination
+}
+
+func (d *recreatingStagingAtSwapDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	d.stateMu.Lock()
+	d.incarnations[opts.StagingTable] = "unrelated-staging-recreation"
+	d.stateMu.Unlock()
+	return d.replaceCDCStateDestination.SwapTable(ctx, opts)
+}
+
+func (d *recreatingAfterStagedReplaceDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	if err := d.replaceCDCStateDestination.SwapTable(ctx, opts); err != nil {
+		return err
+	}
+	d.stateMu.Lock()
+	d.incarnations[opts.TargetTable] = "unrelated-recreation"
+	d.stateMu.Unlock()
+	return nil
+}
+
+func (d *recreatingStagedReplaceDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if err := d.fakeDestination.WriteParallel(ctx, records, opts); err != nil {
+		return err
+	}
+	d.stateMu.Lock()
+	d.incarnations[d.recreateTable] = "external-v2"
+	d.stateMu.Unlock()
+	return nil
+}
+
+func (d *recreatingStagedReplaceDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	current, _, _ := d.CDCTargetIncarnation(ctx, opts.TargetTable)
+	if opts.CDCExpectedIncarnation != current {
+		return errors.New("destination incarnation changed before staged replacement publish")
+	}
+	return d.replaceCDCStateDestination.SwapTable(ctx, opts)
+}
+
+func TestManagedReplaceRejectsTargetRecreationDuringExtraction(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		name := "direct"
+		if staged {
+			name = "staged"
+		}
+		t.Run(name, func(t *testing.T) {
+			job, src, _ := minimalJob()
+			stateDest := newCDCStateDestination()
+			stateDest.incarnations[job.Config.DestTable] = "target-v1"
+			base := &replaceCDCStateDestination{cdcStateDestination: stateDest}
+			if staged {
+				job.Destination = &recreatingStagedReplaceDestination{replaceCDCStateDestination: base, recreateTable: job.Config.DestTable}
+			} else {
+				job.Destination = &recreatingDirectReplaceDestination{
+					managedDirectReplaceDestination: &managedDirectReplaceDestination{replaceCDCStateDestination: base},
+					recreateTable:                   job.Config.DestTable,
+				}
+			}
+			manager, err := NewCDCStateManager(job.Destination, "replace-recreation-"+name, job.Config.DestTable, "")
+			require.NoError(t, err)
+			require.NoError(t, manager.RegisterTableIncarnation(t.Context(), job.Config.SourceTable, job.Config.DestTable, "source-v1"))
+			require.NoError(t, manager.BeginRun(t.Context(), true))
+			job.CDCStateManager = manager
+			src.readCh = singleBatchRecords(t, 1)
+
+			err = (&ReplaceStrategy{}).Execute(t.Context(), job)
+			require.ErrorContains(t, err, "incarnation changed")
+		})
+	}
+}
+
+func TestManagedReplaceRejectsRecreationAfterFencedPublication(t *testing.T) {
+	job, src, _ := minimalJob()
+	stateDest := newCDCStateDestination()
+	stateDest.incarnations[job.Config.DestTable] = "target-v1"
+	dest := &recreatingAfterStagedReplaceDestination{replaceCDCStateDestination: &replaceCDCStateDestination{cdcStateDestination: stateDest}}
+	job.Destination = dest
+	manager, err := NewCDCStateManager(dest, "replace-post-publication-recreation", job.Config.DestTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), job.Config.SourceTable, job.Config.DestTable, "source-v1"))
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	job.CDCStateManager = manager
+	src.readCh = singleBatchRecords(t, 1)
+
+	err = (&ReplaceStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "changed after its fenced replacement")
+}
+
+func TestManagedReplaceRejectsStagingRecreationBeforeFencedPublication(t *testing.T) {
+	job, src, _ := minimalJob()
+	stateDest := newCDCStateDestination()
+	stateDest.incarnations[job.Config.DestTable] = "target-v1"
+	dest := &recreatingStagingAtSwapDestination{replaceCDCStateDestination: &replaceCDCStateDestination{cdcStateDestination: stateDest}}
+	job.Destination = dest
+	manager, err := NewCDCStateManager(dest, "replace-staging-recreation", job.Config.DestTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), job.Config.SourceTable, job.Config.DestTable, "source-v1"))
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	job.CDCStateManager = manager
+	src.readCh = singleBatchRecords(t, 1)
+
+	err = (&ReplaceStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "staging incarnation changed")
+	current, exists, incarnationErr := dest.CDCTargetIncarnation(t.Context(), job.Config.DestTable)
+	require.NoError(t, incarnationErr)
+	require.True(t, exists)
+	require.Equal(t, "target-v1", current)
+}
+
+func TestManagedMultiTableReplaceRejectsTargetRecreationDuringExtraction(t *testing.T) {
+	tableSchema := streamTestSchema()
+	table := source.SourceTableInfo{Name: "public.users", Schema: tableSchema, PrimaryKeys: []string{"id"}}
+	records := mustClosedRecords(source.RecordBatchResult{
+		TableName: table.Name, Batch: int64RecordBatch(t, "id", []int64{1}, nil),
+	})
+	stateDest := newCDCStateDestination()
+	stateDest.incarnations["users"] = "target-v1"
+	dest := &recreatingDirectReplaceDestination{
+		managedDirectReplaceDestination: &managedDirectReplaceDestination{
+			replaceCDCStateDestination: &replaceCDCStateDestination{cdcStateDestination: stateDest},
+		},
+		recreateTable: "users",
+	}
+	manager, err := NewCDCStateManager(dest, "multi-replace-recreation", "users", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), table.Name, "users", "source-v1"))
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{}, Source: &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table}, TableDestNames: map[string]string{table.Name: "users"},
+		CDCStateManager: manager,
+	}
+
+	err = (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job)
+	require.ErrorContains(t, err, "incarnation changed")
+}
+
+func TestManagedMultiTableReplaceBindFailureCleansOnlyUnpublishedStaging(t *testing.T) {
+	tableSchema := streamTestSchema()
+	tables := []source.SourceTableInfo{
+		{Name: "public.users", Schema: tableSchema, PrimaryKeys: []string{"id"}},
+		{Name: "public.orders", Schema: tableSchema, PrimaryKeys: []string{"id"}},
+	}
+	records := mustClosedRecords(
+		source.RecordBatchResult{TableName: tables[0].Name, Batch: int64RecordBatch(t, "id", []int64{1}, nil)},
+		source.RecordBatchResult{TableName: tables[1].Name, Batch: int64RecordBatch(t, "id", []int64{2}, nil)},
+	)
+	stateDest := newCDCStateDestination()
+	stateDest.incarnations["users"] = "users-v1"
+	stateDest.incarnations["orders"] = "orders-v1"
+	dest := &recreatingAfterStagedReplaceDestination{replaceCDCStateDestination: &replaceCDCStateDestination{cdcStateDestination: stateDest}}
+	manager, err := NewCDCStateManager(dest, "multi-replace-bind-failure", "users", "")
+	require.NoError(t, err)
+	for _, table := range tables {
+		require.NoError(t, manager.RegisterTableIncarnation(t.Context(), table.Name, strings.TrimPrefix(table.Name, "public."), "source-v1"))
+	}
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{}, Source: &announcingMultiTableSource{tables: tables, records: records},
+		Destination: dest, Tables: tables,
+		TableDestNames:  map[string]string{"public.users": "users", "public.orders": "orders"},
+		CDCStateManager: manager,
+	}
+
+	err = (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job)
+	require.ErrorContains(t, err, "changed after its fenced replacement")
+	var stagingTables []string
+	for _, call := range stateDest.prepareCalls {
+		if call.ExpiresAfter == destination.ManagedStagingTTL {
+			stagingTables = append(stagingTables, call.Table)
+		}
+	}
+	require.GreaterOrEqual(t, len(stagingTables), 2)
+	require.Len(t, stateDest.swapCalls, 1)
+	publishedStaging := stateDest.swapCalls[0][0]
+	var unpublishedStaging []string
+	for _, stagingTable := range stagingTables {
+		if stagingTable != publishedStaging {
+			unpublishedStaging = append(unpublishedStaging, stagingTable)
+		}
+	}
+	require.ElementsMatch(t, unpublishedStaging, stateDest.dropCalls)
+	require.NotContains(t, stateDest.dropCalls, publishedStaging)
+	require.NotContains(t, stateDest.dropCalls, "users")
+}
+
+type directReplaceWithoutDedupDestination struct {
+	*fakeDestination
+}
+
+func (d *directReplaceWithoutDedupDestination) SupportsAtomicSwap() bool { return false }
+
+func TestReplaceStrategy_Execute_DoesNotRequestDirectDeduplicationWithoutCapability(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &directReplaceWithoutDedupDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords()
+
+	strat := &ReplaceStrategy{}
+	if err := strat.Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(dest.writeCalls) != 1 {
+		t.Fatalf("expected one direct write, got %d", len(dest.writeCalls))
+	}
+	if dest.writeCalls[0].DeduplicatePrimaryKeys {
+		t.Fatal("direct replace requested deduplication from a destination without the capability")
+	}
+	if got := dest.writeCalls[0].PrimaryKeys; len(got) != 1 || got[0] != "id" {
+		t.Fatalf("WriteOptions.PrimaryKeys = %v, want [id]", got)
+	}
+}
+
+func TestReplaceStrategy_DirectFailureCleanupStopsAtWriteAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*fakeSourceTable, *fakeDestination)
+		wantDrop  bool
+	}{
+		{
+			name: "read start failure",
+			configure: func(src *fakeSourceTable, _ *fakeDestination) {
+				src.readErr = errors.New("source unavailable")
+			},
+			wantDrop: true,
+		},
+		{
+			name: "write failure",
+			configure: func(src *fakeSourceTable, dest *fakeDestination) {
+				src.readCh = mustClosedRecords()
+				dest.writeErr = errors.New("catalog rejected write")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, src, dest := minimalJob()
+			job.Destination = &directReplaceDestination{fakeDestination: dest}
+			tc.configure(src, dest)
+
+			err := (&ReplaceStrategy{}).Execute(context.Background(), job)
+			if err == nil {
+				t.Fatal("expected direct replace to fail")
+			}
+			if tc.wantDrop {
+				require.Equal(t, []string{job.Config.DestTable}, dest.dropCalls)
+			} else {
+				require.Empty(t, dest.dropCalls, "a write error may be a lost response after durable replacement")
+			}
+		})
+	}
+}
+
+func TestReplaceStrategy_DirectFailurePreservesPreexistingTarget(t *testing.T) {
+	job, src, dest := minimalJob()
+	dest.tableSchemas = map[string]*schema.TableSchema{job.Config.DestTable: job.Schema}
+	job.Destination = &directReplaceDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords()
+	dest.writeErr = errors.New("catalog rejected write")
+
+	err := (&ReplaceStrategy{}).Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected direct replace to fail")
+	}
+	if len(dest.dropCalls) != 0 {
+		t.Fatalf("preexisting target must survive failed direct replace, got drops %v", dest.dropCalls)
+	}
+}
+
+func TestReplaceStrategy_ReadSetupFailureDropsManagedStaging(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.readErr = errors.New("source unavailable")
+
+	err := (&ReplaceStrategy{}).Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected read setup failure")
+	}
+	staging := dest.prepareCalls[0].Table
+	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
+		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)
+	}
+}
+
+func TestReplaceStrategy_WriterFailureBoundsNonclosingSourceDrain(t *testing.T) {
+	previousTimeout := canceledSourceDrainTimeout
+	canceledSourceDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { canceledSourceDrainTimeout = previousTimeout })
+
+	job, src, base := minimalJob()
+	records := make(chan source.RecordBatchResult)
+	src.readCh = records
+	job.Destination = &immediateFailStagedMergeDestination{fakeDestination: base}
+
+	started := time.Now()
+	err := (&ReplaceStrategy{}).Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected writer failure")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("replace waited indefinitely for a nonclosing source")
+	}
+	close(records)
+	if len(base.dropCalls) != 1 {
+		t.Fatalf("expected failed replace staging cleanup, got %v", base.dropCalls)
+	}
+}
+
+func TestReplaceStrategy_ExecuteMultiTable_PropagatesDirectDeduplicationConfiguration(t *testing.T) {
+	tableSchema := streamTestSchema()
+	tableSchema.IncrementalKey = "id"
+	table := source.SourceTableInfo{
+		Name:        "public.users",
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
+	stateDest := newCDCStateDestination()
+	replaceDest := &replaceCDCStateDestination{cdcStateDestination: stateDest}
+	managedDest := &managedDirectReplaceDestination{replaceCDCStateDestination: replaceDest}
+	manager, err := NewCDCStateManager(managedDest, "managed-multi-replace", "users", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), table.Name, "users", "source-v1"))
+	require.NoError(t, manager.BeginRun(t.Context(), true))
+	dest := stateDest.fakeDestination
+	job := &MultiTableIngestionJob{
+		Config:          &config.IngestConfig{},
+		Source:          src,
+		Destination:     managedDest,
+		Tables:          src.tables,
+		TableDestNames:  map[string]string{"public.users": "users"},
+		CDCStateManager: manager,
+	}
+
+	if err := (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job); err != nil {
+		t.Fatalf("ExecuteMultiTable returned error: %v", err)
+	}
+
+	if len(dest.writeCalls) != 1 {
+		t.Fatalf("expected one table write, got %d", len(dest.writeCalls))
+	}
+	write := dest.writeCalls[0]
+	if !write.DeduplicatePrimaryKeys {
+		t.Fatal("multi-table direct replace did not request primary-key deduplication")
+	}
+	if got := write.PrimaryKeys; len(got) != 1 || got[0] != "id" {
+		t.Fatalf("WriteOptions.PrimaryKeys = %v, want [id]", got)
+	}
+	if write.IncrementalKey != "id" {
+		t.Fatalf("WriteOptions.IncrementalKey = %q, want id", write.IncrementalKey)
+	}
+	if !write.SkipCDCResume {
+		t.Fatal("managed multi-table direct replace delegated the CDC cursor to the destination")
+	}
+	stateDest.stateMu.Lock()
+	stateDest.incarnations["users"] = "externally-replaced"
+	stateDest.stateMu.Unlock()
+	err = manager.Persist(t.Context(), source.CDCStateCommitToken{
+		Position: "0/20", SnapshotPositions: map[string]string{table.Name: "0/10"},
+		SnapshotIncarnations: map[string]string{table.Name: "source-v1"},
+	})
+	require.ErrorContains(t, err, "was replaced during its snapshot")
+}
+
+func TestReplaceStrategy_MultiTableDirectWriteFailurePreservesAttemptedTargets(t *testing.T) {
+	tableSchema := streamTestSchema()
+	tables := []source.SourceTableInfo{
+		{Name: "public.users", Schema: tableSchema, PrimaryKeys: []string{"id"}},
+		{Name: "public.orders", Schema: tableSchema, PrimaryKeys: []string{"id"}},
+	}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Err: errors.New("source stream failed")}
+	close(records)
+	src := &announcingMultiTableSource{tables: tables, records: records}
+	base := &fakeDestination{tableSchemas: map[string]*schema.TableSchema{
+		"users": tableSchema,
+	}}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{},
+		Source:      src,
+		Destination: &directReplaceDestination{fakeDestination: base},
+		Tables:      tables,
+		TableDestNames: map[string]string{
+			"public.users":  "users",
+			"public.orders": "orders",
+		},
+	}
+
+	err := (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected multi-table direct replace to fail")
+	}
+	require.Empty(t, base.dropCalls, "multi-table write errors may follow durable writes")
+}
+
+func TestReplaceStrategy_MultiTableSwapFailureCleansActiveStages(t *testing.T) {
+	tableSchema := streamTestSchema()
+	tableSchema.IncrementalKey = "id"
+	table := source.SourceTableInfo{Name: "public.users", Schema: tableSchema, PrimaryKeys: []string{"id"}}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
+	dest := &fakeDestination{swapErr: errors.New("swap failed")}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         src,
+		Destination:    dest,
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "users"},
+	}
+
+	err := (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected swap failure")
+	}
+	if len(dest.dropCalls) < 2 {
+		t.Fatalf("expected raw and normalised stage cleanup, got %v", dest.dropCalls)
+	}
+	normalised := dest.prepareCalls[len(dest.prepareCalls)-1].Table
+	if dest.dropCalls[len(dest.dropCalls)-1] != normalised {
+		t.Fatalf("expected active normalised stage %q to be cleaned, got %v", normalised, dest.dropCalls)
+	}
+}
+
+func TestAppendStrategy_WriterFailureBoundsNonclosingSource(t *testing.T) {
+	previousTimeout := canceledSourceDrainTimeout
+	canceledSourceDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { canceledSourceDrainTimeout = previousTimeout })
+	job, src, base := minimalJob()
+	records := make(chan source.RecordBatchResult)
+	src.readCh = records
+	job.Destination = &immediateFailStagedMergeDestination{fakeDestination: base}
+
+	started := time.Now()
+	err := (&AppendStrategy{}).Execute(context.Background(), job)
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("append did not return promptly after writer failure: %v", err)
+	}
+	close(records)
+}
+
+type cancelAwareMultiTableSource struct {
+	*announcingMultiTableSource
+	done chan struct{}
+}
+
+func (s *cancelAwareMultiTableSource) ReadAll(ctx context.Context, _ source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	records := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(s.done)
+		defer close(records)
+		for {
+			select {
+			case records <- source.RecordBatchResult{TableName: s.tables[0].Name}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return records, nil
+}
+
+type immediateFailMultiTableDestination struct {
+	*directReplaceDestination
+}
+
+type ownedDirectReplaceDestination struct {
+	*directReplaceDestination
+	preparedToken string
+	dropTokens    []string
+	ownerChanged  bool
+}
+
+type uncertainPrepareOwnedDestination struct {
+	*directReplaceDestination
+	preparedToken string
+	dropTokens    []string
+}
+
+func (d *uncertainPrepareOwnedDestination) PrepareTable(_ context.Context, opts destination.PrepareOptions) error {
+	d.preparedToken = opts.OwnershipToken
+	return errors.New("prepare response lost after target creation")
+}
+
+func (d *uncertainPrepareOwnedDestination) DropTableIfOwned(_ context.Context, _ string, token string) error {
+	d.dropTokens = append(d.dropTokens, token)
+	return nil
+}
+
+type contextAwareDropDestination struct {
+	*fakeDestination
+	successfulDrops []string
+}
+
+type uncertainManagedStagingPrepareDestination struct {
+	*contextAwareDropDestination
+}
+
+func (d *uncertainManagedStagingPrepareDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := d.contextAwareDropDestination.PrepareTable(ctx, opts); err != nil {
+		return err
+	}
+	if opts.ExpiresAfter > 0 {
+		return errors.New("managed staging prepare response lost after create")
+	}
+	return nil
+}
+
+func (d *contextAwareDropDestination) DropTable(ctx context.Context, table string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.successfulDrops = append(d.successfulDrops, table)
+	return d.fakeDestination.DropTable(ctx, table)
+}
+
+func (d *ownedDirectReplaceDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	d.preparedToken = opts.OwnershipToken
+	return d.directReplaceDestination.PrepareTable(ctx, opts)
+}
+
+func (d *ownedDirectReplaceDestination) WriteParallel(
+	context.Context,
+	<-chan source.RecordBatchResult,
+	destination.WriteOptions,
+) error {
+	d.ownerChanged = true
+	return errors.New("write failed after replacement owner appeared")
+}
+
+func (d *ownedDirectReplaceDestination) DropTableIfOwned(_ context.Context, _ string, token string) error {
+	d.dropTokens = append(d.dropTokens, token)
+	if d.ownerChanged {
+		return errors.New("ownership changed")
+	}
+	return nil
+}
+
+func TestDirectReplaceWriteFailurePreservesOwnedTarget(t *testing.T) {
+	job, src, base := minimalJob()
+	src.readCh = mustClosedRecords()
+	dest := &ownedDirectReplaceDestination{
+		directReplaceDestination: &directReplaceDestination{fakeDestination: base},
+	}
+	job.Destination = dest
+
+	err := (&ReplaceStrategy{}).Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected write failure")
+	}
+	require.NotEmpty(t, dest.preparedToken)
+	require.Empty(t, dest.dropTokens, "ownership does not prove a failed write was uncommitted")
+	if len(base.dropCalls) != 0 {
+		t.Fatalf("unconditional cleanup deleted a replacement owner: %v", base.dropCalls)
+	}
+}
+
+func TestMultiTableDirectReplaceWriteFailurePreservesOwnedTarget(t *testing.T) {
+	tableSchema := streamTestSchema()
+	table := source.SourceTableInfo{Name: "public.users", Schema: tableSchema}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	base := &fakeDestination{}
+	dest := &ownedDirectReplaceDestination{
+		directReplaceDestination: &directReplaceDestination{fakeDestination: base},
+	}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table},
+		TableDestNames: map[string]string{table.Name: "users"},
+	}
+
+	require.Error(t, (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job))
+	require.NotEmpty(t, dest.preparedToken)
+	require.Empty(t, dest.dropTokens, "ownership does not prove a failed write was uncommitted")
+	require.Empty(t, base.dropCalls, "unconditional cleanup must not delete the replacement owner")
+}
+
+func TestDirectReplaceUncertainPrepareFailureCleansRegisteredOwnedTarget(t *testing.T) {
+	job, _, base := minimalJob()
+	dest := &uncertainPrepareOwnedDestination{directReplaceDestination: &directReplaceDestination{fakeDestination: base}}
+	job.Destination = dest
+
+	require.ErrorContains(t, (&ReplaceStrategy{}).Execute(context.Background(), job), "prepare response lost")
+	require.NotEmpty(t, dest.preparedToken)
+	require.Equal(t, []string{dest.preparedToken}, dest.dropTokens)
+	require.Empty(t, base.dropCalls)
+}
+
+func TestMultiTableDirectReplaceUncertainPrepareFailureCleansRegisteredOwnedTarget(t *testing.T) {
+	table := source.SourceTableInfo{Name: "users", Schema: streamTestSchema()}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	base := &fakeDestination{}
+	dest := &uncertainPrepareOwnedDestination{directReplaceDestination: &directReplaceDestination{fakeDestination: base}}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{IncrementalStrategy: config.StrategyReplace},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table}, TableDestNames: map[string]string{table.Name: "users"},
+	}
+
+	require.ErrorContains(t, (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job), "prepare response lost")
+	require.NotEmpty(t, dest.preparedToken)
+	require.Equal(t, []string{dest.preparedToken}, dest.dropTokens)
+	require.Empty(t, base.dropCalls)
+}
+
+func TestReplaceFailureUsesDetachedStagingCleanupContext(t *testing.T) {
+	job, src, base := minimalJob()
+	src.readCh = mustClosedRecords()
+	base.swapErr = errors.New("swap failed")
+	dest := &contextAwareDropDestination{fakeDestination: base}
+	job.Destination = dest
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := (&ReplaceStrategy{}).Execute(ctx, job)
+	if err == nil {
+		t.Fatal("expected replace failure")
+	}
+	if len(dest.successfulDrops) != 2 {
+		t.Fatalf("staging cleanup inherited canceled caller context: %v", dest.successfulDrops)
+	}
+}
+
+func TestMultiTableReplaceLostStagingPrepareUsesDetachedCleanup(t *testing.T) {
+	table := source.SourceTableInfo{Name: "users", Schema: streamTestSchema()}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	base := &fakeDestination{}
+	dest := &uncertainManagedStagingPrepareDestination{contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{IncrementalStrategy: config.StrategyReplace},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{table}, TableDestNames: map[string]string{table.Name: "users"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.ErrorContains(t, (&ReplaceStrategy{}).ExecuteMultiTable(ctx, job), "prepare response lost")
+	require.Len(t, dest.successfulDrops, 1)
+	require.Equal(t, base.prepareCalls[0].Table, dest.successfulDrops[0])
+}
+
+func TestReplaceLostStagingPrepareUsesDetachedCleanup(t *testing.T) {
+	job, _, base := minimalJob()
+	dest := &uncertainManagedStagingPrepareDestination{contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}}
+	job.Destination = dest
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.ErrorContains(t, (&ReplaceStrategy{}).Execute(ctx, job), "prepare response lost")
+	require.Len(t, base.prepareCalls, 1)
+	require.Equal(t, []string{base.prepareCalls[0].Table}, dest.successfulDrops)
+}
+
+func TestDeduplicateStagingLostNormalisedPrepareCleansBothStagesDetached(t *testing.T) {
+	base := &fakeDestination{}
+	dest := &uncertainManagedStagingPrepareDestination{contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}}
+	rawTable := "lake.events_raw"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := deduplicateStaging(ctx, dest, rawTable, "lake.events", "", "", streamTestSchema(), []string{"id"}, "", nil, false)
+	require.ErrorContains(t, err, "prepare response lost")
+	require.Len(t, base.prepareCalls, 1)
+	require.ElementsMatch(t, []string{rawTable, base.prepareCalls[0].Table}, dest.successfulDrops)
+}
+
+func (d *immediateFailMultiTableDestination) WriteParallel(
+	context.Context,
+	<-chan source.RecordBatchResult,
+	destination.WriteOptions,
+) error {
+	return errors.New("writer failed")
+}
+
+func TestReplaceStrategy_MultiTableWriterFailureCancelsSource(t *testing.T) {
+	tableSchema := streamTestSchema()
+	table := source.SourceTableInfo{Name: "public.users", Schema: tableSchema}
+	done := make(chan struct{})
+	src := &cancelAwareMultiTableSource{
+		announcingMultiTableSource: &announcingMultiTableSource{tables: []source.SourceTableInfo{table}},
+		done:                       done,
+	}
+	base := &fakeDestination{}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         src,
+		Destination:    &immediateFailMultiTableDestination{directReplaceDestination: &directReplaceDestination{fakeDestination: base}},
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "users"},
+	}
+
+	err := (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected writer failure")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("source producer remained blocked after writer failure")
+	}
+}
+
+func TestReplaceStrategy_MultiTableWriterFailureBoundsNonclosingSourceDrain(t *testing.T) {
+	previousTimeout := canceledSourceDrainTimeout
+	canceledSourceDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { canceledSourceDrainTimeout = previousTimeout })
+
+	tableSchema := streamTestSchema()
+	table := source.SourceTableInfo{Name: "public.users", Schema: tableSchema}
+	records := make(chan source.RecordBatchResult)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
+	base := &fakeDestination{}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         src,
+		Destination:    &immediateFailMultiTableDestination{directReplaceDestination: &directReplaceDestination{fakeDestination: base}},
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "users"},
+	}
+
+	started := time.Now()
+	err := (&ReplaceStrategy{}).ExecuteMultiTable(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected writer failure")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("replace waited indefinitely for a nonclosing source")
+	}
+	close(records)
 }
 
 func TestReplaceStrategy_Execute_UsesDestinationReplaceStagingPolicy(t *testing.T) {

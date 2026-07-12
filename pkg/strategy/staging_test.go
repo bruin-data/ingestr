@@ -54,6 +54,7 @@ func TestSyntheticStagingIdentifierEncodesQualificationAndAmbiguity(t *testing.T
 		{"sales.schema", "order.events"},
 		{"analytics__users"},
 		{"_ingestr_hex_616263"},
+		{"ingestr_hex_616263"},
 		{"Case Schema", "orders"},
 	}
 	seen := map[string]bool{"analytics__users": true}
@@ -69,6 +70,28 @@ func TestSyntheticStagingIdentifierEncodesQualificationAndAmbiguity(t *testing.T
 			t.Fatalf("synthetic staging identifier collision for %q: %q", parts, got)
 		}
 		seen[got] = true
+	}
+}
+
+func TestManagedStagingNameIsValidForS3Tables(t *testing.T) {
+	policy := destination.ReplaceStagingPolicy{
+		DefaultPlacement:     destination.ReplaceStagingManagedSchema,
+		DefaultManagedSchema: "bruin_staging",
+	}
+	for _, target := range []string{"analytics.orders", "analytics.foo__bar"} {
+		parts := tablename.Split(GenerateReplaceStagingTableName(target, "merge", "", policy))
+		if len(parts) != 2 || parts[0] != "bruin_staging" {
+			t.Fatalf("managed staging table for %q = %q, want bruin_staging.table", target, parts)
+		}
+		if strings.HasPrefix(parts[1], "_") {
+			t.Fatalf("S3 Tables staging identifier starts with an underscore: %q", parts[1])
+		}
+		for _, r := range parts[1] {
+			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+				continue
+			}
+			t.Fatalf("S3 Tables staging identifier contains invalid character %q: %q", r, parts[1])
+		}
 	}
 }
 

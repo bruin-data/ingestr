@@ -24,6 +24,131 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type readAllSetupErrorSource struct {
+	*announcingMultiTableSource
+	err error
+}
+
+type cancelOnNthManagedStagingPrepareDestination struct {
+	*contextAwareDropDestination
+	cancel  context.CancelFunc
+	failAt  int
+	managed int
+}
+
+func (d *cancelOnNthManagedStagingPrepareDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := d.contextAwareDropDestination.PrepareTable(ctx, opts); err != nil {
+		return err
+	}
+	if opts.ExpiresAfter > 0 {
+		d.managed++
+		if d.managed == d.failAt {
+			d.cancel()
+			return errors.New("managed staging prepare response lost after create")
+		}
+	}
+	return nil
+}
+
+func TestStreamingLostStagingPrepareUsesDetachedCleanup(t *testing.T) {
+	job, _, base := minimalJob()
+	dest := &uncertainManagedStagingPrepareDestination{contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}}
+	job.Destination = dest
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge}).Execute(ctx, job)
+	require.ErrorContains(t, err, "prepare response lost")
+	require.Len(t, base.prepareCalls, 2)
+	require.Equal(t, []string{base.prepareCalls[1].Table}, dest.successfulDrops)
+}
+
+func TestStreamingMultiTableLostStagingPrepareUsesDetachedCleanup(t *testing.T) {
+	table := source.SourceTableInfo{Name: "events", Schema: streamTestSchema(), PrimaryKeys: []string{"id"}}
+	base := &fakeDestination{}
+	dest := &uncertainManagedStagingPrepareDestination{contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}}
+	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{}, Source: &announcingMultiTableSource{tables: []source.SourceTableInfo{table}}, Destination: dest,
+		Tables: []source.SourceTableInfo{table}, TableDestNames: map[string]string{table.Name: "events"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge}).ExecuteMultiTable(ctx, job)
+	require.ErrorContains(t, err, "prepare response lost")
+	require.Len(t, base.prepareCalls, 2)
+	require.Equal(t, []string{base.prepareCalls[1].Table}, dest.successfulDrops)
+}
+
+func TestStreamingDynamicTableLostStagingPrepareUsesDetachedCleanup(t *testing.T) {
+	initial := source.SourceTableInfo{Name: "users", Schema: streamTestSchema(), PrimaryKeys: []string{"id"}}
+	dynamic := source.SourceTableInfo{Name: "products", Schema: streamTestSchema(), PrimaryKeys: []string{"id"}}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: dynamic.Name, TableInfo: &dynamic}
+	close(records)
+	base := &fakeDestination{}
+	ctx, cancel := context.WithCancel(context.Background())
+	dest := &cancelOnNthManagedStagingPrepareDestination{
+		contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}, cancel: cancel, failAt: 2,
+	}
+	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{NoLoadTimestamp: true, FullRefresh: true},
+		Source: &announcingMultiTableSource{tables: []source.SourceTableInfo{initial}, records: records}, Destination: dest,
+		Tables: []source.SourceTableInfo{initial}, TableDestNames: map[string]string{initial.Name: initial.Name},
+	}
+
+	err := NewStreamingExecutor(StreamingOptions{
+		Strategy: config.StrategyMerge, FlushInterval: time.Hour, FlushRecords: 1,
+	}).ExecuteMultiTable(ctx, job)
+	require.ErrorContains(t, err, "prepare response lost")
+	var managedStages []string
+	for _, call := range base.prepareCalls {
+		if call.ExpiresAfter > 0 {
+			managedStages = append(managedStages, call.Table)
+		}
+	}
+	require.Len(t, managedStages, 2)
+	require.ElementsMatch(t, managedStages, dest.successfulDrops)
+}
+
+func (s *readAllSetupErrorSource) ReadAll(context.Context, source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	return nil, s.err
+}
+
+func TestStreamingReadSetupFailureDropsManagedStaging(t *testing.T) {
+	job, src, dest := minimalJob()
+	src.readErr = errors.New("stream read setup failed")
+	executor := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge})
+
+	err := executor.Execute(context.Background(), job)
+	require.Error(t, err)
+	require.Len(t, dest.dropCalls, 1)
+	require.Contains(t, dest.dropCalls[0], "_stream_")
+}
+
+func TestStreamingMultiTableReadSetupFailureDropsManagedStaging(t *testing.T) {
+	tableSchema := streamTestSchema()
+	table := source.SourceTableInfo{Name: "public.users", Schema: tableSchema, PrimaryKeys: []string{"id"}}
+	src := &readAllSetupErrorSource{
+		announcingMultiTableSource: &announcingMultiTableSource{tables: []source.SourceTableInfo{table}},
+		err:                        errors.New("stream read-all setup failed"),
+	}
+	dest := &fakeDestination{}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         src,
+		Destination:    dest,
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "users"},
+	}
+	executor := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge})
+
+	err := executor.ExecuteMultiTable(context.Background(), job)
+	require.Error(t, err)
+	require.Len(t, dest.dropCalls, 1)
+	require.Contains(t, dest.dropCalls[0], "_stream_")
+}
+
 type fakeCommitter struct {
 	mu     sync.Mutex
 	tokens []any
@@ -48,6 +173,17 @@ type cancelAwareSourceTable struct {
 	*fakeSourceTable
 	batches []arrow.RecordBatch
 	done    chan struct{}
+}
+
+type singleReleaseCountingRecordBatch struct {
+	arrow.RecordBatch
+	releases atomic.Int64
+}
+
+func (b *singleReleaseCountingRecordBatch) Release() {
+	if b.releases.Add(1) == 1 {
+		b.RecordBatch.Release()
+	}
 }
 
 func (t *cancelAwareSourceTable) Read(ctx context.Context, _ source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -81,6 +217,28 @@ func (c *fakeCommitter) committed() []any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]any(nil), c.tokens...)
+}
+
+func TestStreamingSequentialFlushFailureReleasesEveryBatchOnce(t *testing.T) {
+	dest := &fakeDestination{writeErr: errors.New("injected write failure")}
+	tables := map[string]*streamTableState{
+		"public.first":  {destTable: "first", schema: streamTestSchema()},
+		"public.second": {destTable: "second", schema: streamTestSchema()},
+		"public.third":  {destTable: "third", schema: streamTestSchema()},
+	}
+	loop := newTestLoop(dest, StreamingOptions{Strategy: config.StrategyAppend}, tables)
+
+	batches := make([]*singleReleaseCountingRecordBatch, 0, len(tables))
+	for table := range tables {
+		batch := &singleReleaseCountingRecordBatch{RecordBatch: int64RecordBatch(t, "id", []int64{1}, nil)}
+		batches = append(batches, batch)
+		loop.buffer(source.RecordBatchResult{TableName: table, Batch: batch})
+	}
+
+	require.ErrorContains(t, loop.flush(t.Context()), "injected write failure")
+	for _, batch := range batches {
+		require.EqualValues(t, 1, batch.releases.Load(), "every started or unstarted batch must have exactly one owner release it")
+	}
 }
 
 // ctxRecordingDest records the context error observed at each WriteParallel
@@ -763,6 +921,7 @@ func TestStreaming_LeaseLossDuringStatePersistSkipsSourceCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, manager.RegisterTable(context.Background(), "public.items", "raw.items"))
 	require.NoError(t, manager.BeginRun(context.Background(), false))
+	require.NoError(t, manager.BindDestinationIncarnation(context.Background(), "public.items", "raw.items"))
 	stateDest.block = true
 
 	committer := &fakeCommitter{}
@@ -773,6 +932,7 @@ func TestStreaming_LeaseLossDuringStatePersistSkipsSourceCommit(t *testing.T) {
 		Committer:     committer,
 		StateManager:  manager,
 	}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+	loop.cfg.SourceTable = "public.items"
 	loop.buffer(source.RecordBatchResult{
 		Batch: int64RecordBatch(t, "id", []int64{1}, nil),
 		CommitToken: source.CDCStateCommitToken{
@@ -798,6 +958,7 @@ func TestStreamingFinalizesLegacySlotAfterDurableStateAndSourceCommit(t *testing
 	require.NoError(t, err)
 	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"))
 	require.NoError(t, manager.BeginRun(t.Context(), false))
+	require.NoError(t, manager.BindDestinationIncarnation(t.Context(), "public.items", "raw.items"))
 
 	committer := &fakeCommitter{}
 	finalizer := &fakeLegacySlotFinalizer{committer: committer}
@@ -809,6 +970,7 @@ func TestStreamingFinalizesLegacySlotAfterDurableStateAndSourceCommit(t *testing
 		StateManager:    manager,
 		LegacyFinalizer: finalizer,
 	}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+	loop.cfg.SourceTable = "public.items"
 	loop.buffer(source.RecordBatchResult{
 		Batch: int64RecordBatch(t, "id", []int64{1}, nil),
 		CommitToken: source.CDCStateCommitToken{
@@ -939,7 +1101,7 @@ func TestStreaming_MultiTableRouting(t *testing.T) {
 	assert.ElementsMatch(t, []string{"ds.users", "ds.orders"}, mergedTables)
 }
 
-func TestStreaming_UnknownTableBatchDropped(t *testing.T) {
+func TestStreaming_UnknownTableBatchFailsClosed(t *testing.T) {
 	dest := &fakeDestination{}
 	loop := newTestLoop(dest, StreamingOptions{
 		FlushInterval: time.Hour,
@@ -952,7 +1114,7 @@ func TestStreaming_UnknownTableBatchDropped(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1}, nil), TableName: "public.unknown"}
 	close(records)
 
-	require.NoError(t, loop.run(context.Background(), records))
+	require.EqualError(t, loop.run(context.Background(), records), `streaming received 1 row(s) for unknown table "public.unknown"`)
 	assert.Equal(t, 0, writeCallCount(dest))
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -45,6 +46,35 @@ type cdcStateDestination struct {
 
 type caseCanonicalCDCStateDestination struct {
 	*cdcStateDestination
+}
+
+type nonConditionalCDCStateDestination struct {
+	*fakeDestination
+}
+
+func (*nonConditionalCDCStateDestination) LoadCDCState(context.Context, string, string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
+func (*nonConditionalCDCStateDestination) LoadCDCStateFence(context.Context, string, string) (destination.CDCStateFence, error) {
+	return destination.CDCStateFence{}, nil
+}
+
+func (*nonConditionalCDCStateDestination) DeleteCDCStateEvents(context.Context, string, string, []string) error {
+	return nil
+}
+
+func (*nonConditionalCDCStateDestination) WriteCDCState(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	return nil
+}
+
+func (*nonConditionalCDCStateDestination) ClaimCDCTarget(context.Context, string, destination.CDCTargetClaim) error {
+	return nil
 }
 
 func (d *caseCanonicalCDCStateDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
@@ -108,6 +138,12 @@ func newCDCStateDestination() *cdcStateDestination {
 		targets:         make(map[string]string),
 		incarnations:    make(map[string]string),
 	}
+}
+
+func TestNewCDCStateManagerRejectsDestinationWithoutConditionalTruncate(t *testing.T) {
+	dest := &nonConditionalCDCStateDestination{fakeDestination: &fakeDestination{}}
+	_, err := NewCDCStateManager(dest, "missing-conditional-truncate", "raw.orders", "")
+	require.ErrorContains(t, err, "cannot conditionally apply managed CDC truncates")
 }
 
 func (d *cdcStateDestination) ClaimCDCTarget(_ context.Context, _ string, claim destination.CDCTargetClaim) error {
@@ -291,6 +327,94 @@ func TestCDCStateWALTruncatePreservesRegisteredSourceIncarnation(t *testing.T) {
 	position, err := restarted.ResumePosition(ctx, "public.orders")
 	require.NoError(t, err)
 	require.Equal(t, "00000000/00000030", position)
+}
+
+func TestMultiTableSnapshotInvalidationIsDurableBeforeNonAtomicTruncate(t *testing.T) {
+	ctx := t.Context()
+	dest := &orderedCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
+	dest.incarnations["raw.items"] = "target-v1"
+	manager, err := NewCDCStateManager(dest, "non-atomic-invalidation", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, "public.items", "raw.items", "source-v1", "schema-v1"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	require.NoError(t, manager.BindDestinationIncarnation(ctx, "public.items", "raw.items"))
+	dest.resetOrder()
+	job := &MultiTableIngestionJob{
+		Tables:          []source.SourceTableInfo{{Name: "public.items"}},
+		TableDestNames:  map[string]string{"public.items": "raw.items"},
+		CDCStateManager: manager,
+	}
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
+		TableName: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v2",
+	}}
+	records <- source.RecordBatchResult{TableName: "public.items", Truncate: true}
+	close(records)
+
+	_, err = destination.WriteWithTruncateBoundaries(ctx, dest, applyMultiTableSnapshotInvalidations(ctx, job, records), destination.WriteOptions{
+		Table: "raw.items", CDCExpectedIncarnation: "target-v1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"state", "truncate"}, dest.recordedOrder())
+}
+
+func TestMultiTableSnapshotInvalidationWithoutBoundaryPreservesPriorState(t *testing.T) {
+	ctx := t.Context()
+	dest := &orderedCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
+	dest.incarnations["raw.items"] = "target-v1"
+	manager, err := NewCDCStateManager(dest, "non-atomic-missing-boundary", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, "public.items", "raw.items", "source-v1", "schema-v1"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	require.NoError(t, manager.BindDestinationIncarnation(ctx, "public.items", "raw.items"))
+	dest.resetOrder()
+	job := &MultiTableIngestionJob{
+		Tables:          []source.SourceTableInfo{{Name: "public.items"}},
+		TableDestNames:  map[string]string{"public.items": "raw.items"},
+		CDCStateManager: manager,
+	}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
+		TableName: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v2",
+	}}
+	close(records)
+
+	var gotErr error
+	for result := range applyMultiTableSnapshotInvalidations(ctx, job, records) {
+		gotErr = result.Err
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	require.ErrorContains(t, gotErr, "was not followed by a replacement boundary")
+	require.Empty(t, dest.recordedOrder())
+}
+
+func TestMultiTableSnapshotInvalidationCancellationDrainsUpstream(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	batch := &singleReleaseCountingRecordBatch{RecordBatch: int64RecordBatch(t, "id", []int64{1}, nil)}
+	records := make(chan source.RecordBatchResult)
+	out := applyMultiTableSnapshotInvalidations(ctx, &MultiTableIngestionJob{}, records)
+	producerDone := make(chan struct{})
+	go func() {
+		records <- source.RecordBatchResult{Batch: batch}
+		close(records)
+		close(producerDone)
+	}()
+
+	for result := range out {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot invalidation wrapper stranded its upstream producer after cancellation")
+	}
+	require.EqualValues(t, 1, batch.releases.Load())
 }
 
 func TestCDCStateRequiresMatchingDestinationTableIncarnation(t *testing.T) {
@@ -1425,6 +1549,26 @@ func TestCDCStateRequiresLatestGenerationCompletedSnapshot(t *testing.T) {
 	if manager.stateTable != "_bruin_staging.cdc_state" {
 		t.Fatalf("unexpected shared state table: %s", manager.stateTable)
 	}
+}
+
+func TestCDCStateBatchSnapshotCompletionUsesFinalCheckpoint(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	manager, err := NewCDCStateManager(dest, "batch-truncate-completion", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, "public.orders", "raw.orders", "source-v1", "schema-v1"))
+	require.NoError(t, manager.ClaimTarget(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+
+	manager.RecordBatchSnapshotCompletion("public.orders", "")
+	require.NoError(t, manager.Persist(ctx, source.CDCStateCommitToken{Position: "00000000/00000020"}))
+
+	restarted, err := NewCDCStateManager(dest, "batch-truncate-completion", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableState(ctx, "public.orders", "raw.orders", "source-v1", "schema-v1"))
+	position, err := restarted.ResumePosition(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "00000000/00000020", position)
 }
 
 func TestCDCStateConnectorsShareTableWithoutSharingRows(t *testing.T) {

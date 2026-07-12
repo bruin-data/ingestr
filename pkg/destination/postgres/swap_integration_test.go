@@ -65,4 +65,81 @@ func TestSwapTablePreservesQuotedDottedTargetBoundary(t *testing.T) {
 	require.Equal(t, int64(99), sentinelID)
 	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'order.events_old_%'`).Scan(&oldCount))
 	require.Zero(t, oldCount)
+
+	expected, exists, err := dest.CDCTargetIncarnation(ctx, `"public"."order.events"`)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, dest.Exec(ctx, `
+		DROP TABLE "public"."order.events";
+		CREATE TABLE "public"."order.events" (id bigint);
+		INSERT INTO "public"."order.events" VALUES (3);
+		CREATE TABLE "public"."stale_swap_staging" (id bigint);
+		INSERT INTO "public"."stale_swap_staging" VALUES (4);
+	`))
+	expectedStaging, exists, err := dest.CDCTargetIncarnation(ctx, `"public"."stale_swap_staging"`)
+	require.NoError(t, err)
+	require.True(t, exists)
+	err = dest.SwapTable(ctx, destination.SwapOptions{
+		StagingTable:                  `"public"."stale_swap_staging"`,
+		TargetTable:                   `"public"."order.events"`,
+		CDCExpectedIncarnation:        expected,
+		CDCExpectedStagingIncarnation: expectedStaging,
+	})
+	require.ErrorContains(t, err, "physical incarnation changed before swap")
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id FROM "public"."order.events"`).Scan(&targetID))
+	require.Equal(t, int64(3), targetID)
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE "public"."swap_target" (id bigint);
+		INSERT INTO "public"."swap_target" VALUES (10);
+		CREATE TABLE "public"."swap_staging" (id bigint);
+		INSERT INTO "public"."swap_staging" VALUES (20);
+	`))
+	expectedTarget, exists, err := dest.CDCTargetIncarnation(ctx, `"public"."swap_target"`)
+	require.NoError(t, err)
+	require.True(t, exists)
+	expectedStaging, exists, err = dest.CDCTargetIncarnation(ctx, `"public"."swap_staging"`)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, dest.Exec(ctx, `
+		DROP TABLE "public"."swap_staging";
+		CREATE TABLE "public"."swap_staging" (id bigint);
+		INSERT INTO "public"."swap_staging" VALUES (30);
+	`))
+	err = dest.SwapTable(ctx, destination.SwapOptions{
+		StagingTable:                  `"public"."swap_staging"`,
+		TargetTable:                   `"public"."swap_target"`,
+		CDCExpectedIncarnation:        expectedTarget,
+		CDCExpectedStagingIncarnation: expectedStaging,
+	})
+	require.ErrorContains(t, err, "staging table")
+	require.ErrorContains(t, err, "physical incarnation changed before swap")
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id FROM "public"."swap_target"`).Scan(&targetID))
+	require.Equal(t, int64(10), targetID)
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE "public"."merge_target" (id bigint PRIMARY KEY, value text);
+		INSERT INTO "public"."merge_target" VALUES (1, 'original');
+		CREATE TABLE "public"."merge_staging" (id bigint, value text);
+		INSERT INTO "public"."merge_staging" VALUES (1, 'ingestr');
+	`))
+	expectedTarget, exists, err = dest.CDCTargetIncarnation(ctx, `"public"."merge_target"`)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, dest.Exec(ctx, `
+		DROP TABLE "public"."merge_target";
+		CREATE TABLE "public"."merge_target" (id bigint PRIMARY KEY, value text);
+		INSERT INTO "public"."merge_target" VALUES (1, 'external');
+	`))
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:           `"public"."merge_staging"`,
+		TargetTable:            `"public"."merge_target"`,
+		PrimaryKeys:            []string{"id"},
+		Columns:                []string{"id", "value"},
+		CDCExpectedIncarnation: expectedTarget,
+	})
+	require.ErrorContains(t, err, "physical incarnation changed before merge")
+	var value string
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT value FROM "public"."merge_target" WHERE id = 1`).Scan(&value))
+	require.Equal(t, "external", value)
 }
