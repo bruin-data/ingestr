@@ -331,12 +331,12 @@ func TestMergeDecimalPrecision_DefaultPrecision(t *testing.T) {
 	assert.Equal(t, 2, scale)
 }
 
-func TestMergeDecimalPrecision_MaxPrecisionCap(t *testing.T) {
+func TestMergeDecimalPrecision_ReportsRequiredPrecisionAboveMaximum(t *testing.T) {
 	src := schema.Column{DataType: schema.TypeDecimal, Precision: 35, Scale: 10}
 	dest := schema.Column{DataType: schema.TypeDecimal, Precision: 30, Scale: 15}
 
 	precision, scale := MergeDecimalPrecision(src, dest)
-	assert.LessOrEqual(t, precision, 38, "precision should not exceed 38")
+	assert.Equal(t, 40, precision, "must not silently discard integer digits")
 	assert.Equal(t, 15, scale, "should use larger scale")
 }
 

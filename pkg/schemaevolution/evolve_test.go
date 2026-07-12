@@ -46,6 +46,17 @@ func TestApplicableComparison_KeepsTypeChangesWhenSupported(t *testing.T) {
 	require.Len(t, got.Changes, 3)
 }
 
+func TestApplicableComparisonKeepsNullabilityRelaxationWithoutTypeChanges(t *testing.T) {
+	comparison := &SchemaComparison{HasChanges: true, Changes: []SchemaChange{
+		{Type: ChangeWidenType, ColumnName: "value"},
+		{Type: ChangeRelaxNullability, ColumnName: "optional"},
+	}}
+	got := ApplicableComparison(comparison, false)
+	require.True(t, got.HasChanges)
+	require.Len(t, got.Changes, 1)
+	require.Equal(t, ChangeRelaxNullability, got.Changes[0].Type)
+}
+
 func TestApplicableComparison_NilAndEmpty(t *testing.T) {
 	assert.False(t, ApplicableComparison(nil, true).HasChanges)
 	assert.False(t, ApplicableComparison(&SchemaComparison{}, true).HasChanges)
@@ -78,6 +89,7 @@ func TestBuildFinalSchema_AppliesApplicableChanges(t *testing.T) {
 	assert.Equal(t, schema.TypeInt64, byName["val"].DataType)
 	assert.Contains(t, byName, "added")
 	assert.Contains(t, byName, "gone")
+	assert.True(t, byName["gone"].Nullable, "soft-removed columns must accept NULL in future rows")
 
 	// Without type-change support: val keeps its original type.
 	finalNoType := BuildFinalSchema(dest, ApplicableComparison(widenComparison(), false))

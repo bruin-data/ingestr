@@ -75,6 +75,39 @@ func TestParseColumnOverrides_DecimalWithPrecisionOnly(t *testing.T) {
 	assert.Equal(t, schema.TypeDecimal, amount.DataType)
 	assert.Equal(t, 18, amount.Precision)
 	assert.Equal(t, 0, amount.Scale)
+	assert.True(t, amount.ScaleSpecified)
+
+	result := amount.ApplyToColumn(schema.Column{DataType: schema.TypeDecimal, Precision: 10, Scale: 4})
+	assert.Equal(t, 18, result.Precision)
+	assert.Zero(t, result.Scale)
+}
+
+func TestParseColumnOverrides_DecimalValidationAndExplicitZeroScale(t *testing.T) {
+	overrides, err := ParseColumnOverrides("amount:decimal(18,0)")
+	require.NoError(t, err)
+	amount, ok := overrides.Get("amount")
+	require.True(t, ok)
+	require.True(t, amount.ScaleSpecified)
+	require.Zero(t, amount.Scale)
+
+	result := amount.ApplyToColumn(schema.Column{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 10, Scale: 4,
+	})
+	require.Equal(t, 18, result.Precision)
+	require.Zero(t, result.Scale)
+
+	for _, spec := range []string{
+		"amount:decimal(0,0)",
+		"amount:decimal(39,2)",
+		"amount:decimal(10,-1)",
+		"amount:decimal(10,11)",
+		"amount:decimal(10,2,1)",
+	} {
+		t.Run(spec, func(t *testing.T) {
+			_, err := ParseColumnOverrides(spec)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestParseColumnOverrides_SizedString(t *testing.T) {
@@ -444,6 +477,46 @@ func TestCompare_OverrideMatchesDestination(t *testing.T) {
 	result, err := Compare(source, dest, opts)
 	require.NoError(t, err)
 	assert.False(t, result.HasChanges)
+}
+
+func TestCompare_RequiredOverrideDoesNotClaimNullabilityRelaxation(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: false}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: false}}}
+	overrides, err := ParseColumnOverrides("value:bigint")
+	require.NoError(t, err)
+
+	comparison, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+	require.NoError(t, err)
+	require.Len(t, comparison.Changes, 1)
+	require.Equal(t, ChangeOverrideType, comparison.Changes[0].Type)
+	require.False(t, comparison.Changes[0].NewColumn.Nullable)
+	require.False(t, BuildFinalSchema(dest, comparison).Columns[0].Nullable)
+}
+
+func TestCompare_OverrideStillEmitsNullabilityRelaxation(t *testing.T) {
+	tests := []struct {
+		name     string
+		override string
+		changes  []ChangeType
+	}{
+		{name: "override matches destination", override: "value:integer", changes: []ChangeType{ChangeRelaxNullability}},
+		{name: "override changes type", override: "value:double", changes: []ChangeType{ChangeRelaxNullability, ChangeOverrideType}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: true}}}
+			dest := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt64, Nullable: false}}}
+			overrides, err := ParseColumnOverrides(tt.override)
+			require.NoError(t, err)
+			comparison, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+			require.NoError(t, err)
+			require.Len(t, comparison.Changes, len(tt.changes))
+			for i, changeType := range tt.changes {
+				require.Equal(t, changeType, comparison.Changes[i].Type)
+			}
+			require.True(t, BuildFinalSchema(dest, comparison).Columns[0].Nullable)
+		})
+	}
 }
 
 func TestCompare_DecimalOverrideWithPrecision(t *testing.T) {

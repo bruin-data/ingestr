@@ -51,12 +51,14 @@ const (
 	ChangeWidenType
 	ChangeOverrideType // User-specified type override
 	ChangeRemoveColumn // Column exists in destination but not in source
+	ChangeRelaxNullability
 )
 
 // SchemaChange represents a single schema change operation.
 type SchemaChange struct {
 	Type       ChangeType
 	ColumnName string
+	ColumnPath []string
 	OldColumn  *schema.Column // nil for ADD
 	NewColumn  schema.Column
 }

@@ -73,6 +73,198 @@ func TestDiscardValueTransformer_AllowsNewColumns(t *testing.T) {
 	assert.Equal(t, "beta", newCol.Value(1))
 }
 
+func TestDiscardValueTransformer_PreservesConfiguredPrimaryKey(t *testing.T) {
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "age", DataType: schema.TypeString, Nullable: true},
+	}}
+	destSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "age", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison, err := Compare(sourceSchema, destSchema, &CompareOptions{PrimaryKeys: []string{"id"}})
+	require.NoError(t, err)
+	transformer := NewDiscardValueTransformer(comparison, sourceSchema, destSchema)
+
+	idBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	idBuilder.AppendValues([]int64{10, 20}, nil)
+	idColumn := idBuilder.NewArray()
+	idBuilder.Release()
+	ageBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	ageBuilder.AppendValues([]string{"old", "young"}, nil)
+	ageColumn := ageBuilder.NewArray()
+	ageBuilder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "age", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil), []arrow.Array{idColumn, ageColumn}, 2)
+	idColumn.Release()
+	ageColumn.Release()
+	defer batch.Release()
+
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	defer transformed.Release()
+	ids := transformed.Column(0).(*array.Int64)
+	assert.Equal(t, int64(10), ids.Value(0))
+	assert.Equal(t, int64(20), ids.Value(1))
+	assert.Zero(t, ids.NullN())
+	assert.Equal(t, 2, transformed.Column(1).NullN())
+}
+
+func TestDiscardValueTransformerPreservesConformingValuesForNullabilityChange(t *testing.T) {
+	comparison := &SchemaComparison{HasChanges: true, Changes: []SchemaChange{{
+		Type: ChangeRelaxNullability, ColumnName: "value", ColumnPath: []string{"value"},
+	}}}
+	transformer := NewDiscardValueTransformer(comparison, nil, nil)
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(7)
+	builder.AppendNull()
+	values := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{
+		Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: true,
+	}}, nil), []arrow.Array{values}, 2)
+	values.Release()
+	defer batch.Release()
+
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	require.Same(t, batch, transformed)
+	require.Equal(t, int64(7), transformed.Column(0).(*array.Int64).Value(0))
+	require.True(t, transformed.Column(0).IsNull(1))
+}
+
+func TestDiscardRowTransformerPreservesRowsAfterNestedNullabilityRelaxation(t *testing.T) {
+	structType := arrow.StructOf(arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true})
+	builder := array.NewStructBuilder(memory.DefaultAllocator, structType)
+	nameBuilder := builder.FieldBuilder(0).(*array.StringBuilder)
+	builder.Append(true)
+	nameBuilder.Append("keep")
+	builder.Append(true)
+	nameBuilder.AppendNull()
+	profiles := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{
+		Name: "profile", Type: structType, Nullable: true,
+	}}, nil), []arrow.Array{profiles}, 2)
+	profiles.Release()
+	defer batch.Release()
+
+	transformer := NewDiscardRowTransformer(nil, nil, &SchemaComparison{HasChanges: true, Changes: []SchemaChange{{
+		Type: ChangeRelaxNullability, ColumnName: "profile.name", ColumnPath: []string{"profile", "name"},
+	}}})
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	defer transformed.Release()
+	require.EqualValues(t, 2, transformed.NumRows())
+	profile := transformed.Column(0).(*array.Struct)
+	require.Equal(t, "keep", profile.Field(0).(*array.String).Value(0))
+	require.True(t, profile.Field(0).IsNull(1))
+}
+
+func TestDiscardRowTransformerPreservesRowsAfterTopLevelNullabilityRelaxation(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(7)
+	builder.AppendNull()
+	values := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{
+		Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: true,
+	}}, nil), []arrow.Array{values}, 2)
+	values.Release()
+	defer batch.Release()
+
+	transformer := NewDiscardRowTransformer(nil, nil, &SchemaComparison{HasChanges: true, Changes: []SchemaChange{{
+		Type: ChangeRelaxNullability, ColumnName: "value", ColumnPath: []string{"value"},
+	}}})
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	require.Same(t, batch, transformed)
+	require.EqualValues(t, 2, transformed.NumRows())
+}
+
+func TestDiscardRowTransformerChecksFixedSizeListElements(t *testing.T) {
+	builder := array.NewFixedSizeListBuilder(memory.DefaultAllocator, 2, arrow.PrimitiveTypes.Int64)
+	valuesBuilder := builder.ValueBuilder().(*array.Int64Builder)
+	builder.Append(true)
+	valuesBuilder.AppendNull()
+	valuesBuilder.AppendNull()
+	builder.Append(true)
+	valuesBuilder.AppendNull()
+	valuesBuilder.Append(9)
+	builder.AppendNull()
+	items := builder.NewListArray()
+	builder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{
+		Name: "items", Type: items.DataType(), Nullable: true,
+	}}, nil), []arrow.Array{items}, 3)
+	items.Release()
+	defer batch.Release()
+
+	transformer := NewDiscardRowTransformer(nil, nil, &SchemaComparison{HasChanges: true, Changes: []SchemaChange{{
+		Type: ChangeWidenType, ColumnName: "items.element", ColumnPath: []string{"items", "element"},
+	}}})
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	defer transformed.Release()
+	require.EqualValues(t, 2, transformed.NumRows())
+
+	got := transformed.Column(0).(*array.FixedSizeList)
+	require.True(t, got.IsValid(0), "all-null fixed-size list is non-violating")
+	start, end := got.ValueOffsets(0)
+	for i := start; i < end; i++ {
+		require.True(t, got.ListValues().IsNull(int(i)))
+	}
+	require.True(t, got.IsNull(1), "null parent list is non-violating")
+}
+
+func TestDiscardValueTransformerMatchesNestedChangeToParentField(t *testing.T) {
+	structType := arrow.StructOf(arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true})
+	builder := array.NewStructBuilder(memory.DefaultAllocator, structType)
+	builder.Append(true)
+	builder.FieldBuilder(0).(*array.StringBuilder).Append("invalid")
+	profiles := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{
+		Name: "profile", Type: structType, Nullable: true,
+	}}, nil), []arrow.Array{profiles}, 1)
+	profiles.Release()
+	defer batch.Release()
+
+	transformer := NewDiscardValueTransformer(&SchemaComparison{HasChanges: true, Changes: []SchemaChange{{
+		Type: ChangeWidenType, ColumnName: "profile.name", ColumnPath: []string{"profile", "name"},
+	}}}, nil, nil)
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	defer transformed.Release()
+	require.True(t, transformed.Column(0).IsNull(0))
+}
+
+func TestDiscardValueTransformerPreservesNestedSiblingsForRemovedField(t *testing.T) {
+	structType := arrow.StructOf(arrow.Field{Name: "kept", Type: arrow.BinaryTypes.String, Nullable: true})
+	builder := array.NewStructBuilder(memory.DefaultAllocator, structType)
+	builder.Append(true)
+	builder.FieldBuilder(0).(*array.StringBuilder).Append("preserved")
+	profiles := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{
+		Name: "profile", Type: structType, Nullable: true,
+	}}, nil), []arrow.Array{profiles}, 1)
+	profiles.Release()
+	defer batch.Release()
+
+	transformer := NewDiscardValueTransformer(&SchemaComparison{HasChanges: true, Changes: []SchemaChange{{
+		Type: ChangeRemoveColumn, ColumnName: "profile.removed", ColumnPath: []string{"profile", "removed"},
+		OldColumn: &schema.Column{Name: "removed", DataType: schema.TypeString},
+	}}}, nil, nil)
+	transformed, err := transformer.Transform(context.Background(), batch)
+	require.NoError(t, err)
+	require.Same(t, batch, transformed)
+	profile := transformed.Column(0).(*array.Struct)
+	require.Equal(t, "preserved", profile.Field(0).(*array.String).Value(0))
+}
+
 func TestIngestrColumnFiller_HasColumns(t *testing.T) {
 	t.Run("EmptyColumns", func(t *testing.T) {
 		filler := NewIngestrColumnFiller(nil)

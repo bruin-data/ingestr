@@ -176,6 +176,8 @@ func TestCompare_TypeWidening_IntToFloat(t *testing.T) {
 	change := result.Changes[0]
 	assert.Equal(t, ChangeWidenType, change.Type)
 	assert.Equal(t, schema.TypeFloat64, change.NewColumn.DataType)
+	assert.False(t, change.NewColumn.Nullable)
+	assert.False(t, BuildFinalSchema(dest, result).Columns[0].Nullable)
 }
 
 func TestCompare_TypeWidening_ToString(t *testing.T) {
@@ -424,7 +426,26 @@ func TestCompare_SameTypeDifferentNullability(t *testing.T) {
 
 	result, err := Compare(source, dest, nil)
 	require.NoError(t, err)
-	assert.False(t, result.HasChanges, "nullability difference alone should not trigger widening")
+	require.True(t, result.HasChanges)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeRelaxNullability, result.Changes[0].Type)
+}
+
+func TestCompare_IgnoresInferredNullabilityForConfiguredPrimaryKeys(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	dest := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "value", DataType: schema.TypeString, Nullable: false},
+	}}
+
+	result, err := Compare(source, dest, &CompareOptions{PrimaryKeys: []string{"ID"}})
+	require.NoError(t, err)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeRelaxNullability, result.Changes[0].Type)
+	assert.Equal(t, "value", result.Changes[0].ColumnName)
 }
 
 func TestMakeNullable(t *testing.T) {

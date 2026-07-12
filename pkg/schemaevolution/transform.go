@@ -3,6 +3,7 @@ package schemaevolution
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -35,12 +36,17 @@ func NewDiscardValueTransformer(comparison *SchemaComparison, _ *schema.TableSch
 
 	if comparison != nil {
 		for _, change := range comparison.Changes {
-			if change.Type == ChangeAddColumn {
+			if change.Type == ChangeAddColumn || change.Type == ChangeRemoveColumn || change.Type == ChangeRelaxNullability {
 				// New columns are allowed in discard_value mode, keep their values.
+				// Removed source fields are filled during schema alignment; they do not
+				// invalidate conforming siblings in the same nested parent.
+				// Nullability relaxation is applied as schema evolution because NULL
+				// cannot be transformed into a value accepted by a required column.
 				continue
 			}
 			// Track type incompatibilities to NULL out values.
-			transformer.violations[change.ColumnName] = true
+			path := changePath(change)
+			transformer.violations[strings.ToLower(path[0])] = true
 		}
 	}
 
@@ -61,7 +67,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 	// For each column with violations, replace with NULL values
 	for colIdx := 0; colIdx < int(batch.NumCols()); colIdx++ {
 		colName := batchSchema.Field(colIdx).Name
-		if t.violations[colName] {
+		if t.violations[strings.ToLower(colName)] {
 			// Violation: discard value (set to NULL)
 			// If the column exists in destination schema, use destination type (to satisfy strict typing)
 			// Otherwise use source type (e.g. for rejected new columns)
@@ -69,7 +75,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 			targetType := field.Type
 			if t.destSchema != nil {
 				for _, destCol := range t.destSchema.Columns {
-					if destCol.Name == colName {
+					if strings.EqualFold(destCol.Name, colName) {
 						targetType = schema.DataTypeToArrowType(destCol)
 						break
 					}
@@ -104,7 +110,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 	newSchema := arrow.NewSchema(newFields, nil)
 	newBatch := array.NewRecordBatch(newSchema, columns, batch.NumRows())
 	for i, col := range columns {
-		if t.violations[batchSchema.Field(i).Name] {
+		if t.violations[strings.ToLower(batchSchema.Field(i).Name)] {
 			col.Release()
 		}
 	}
@@ -113,7 +119,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 
 // DiscardRowTransformer filters out rows with incompatible values.
 type DiscardRowTransformer struct {
-	violations map[string]bool // column name -> has violation
+	violations []SchemaChange
 	schema     *schema.TableSchema
 	destSchema *schema.TableSchema
 	allocator  memory.Allocator
@@ -122,7 +128,7 @@ type DiscardRowTransformer struct {
 // NewDiscardRowTransformer creates a transformer for discard_row mode.
 func NewDiscardRowTransformer(sourceSchema, destSchema *schema.TableSchema, comparison *SchemaComparison) *DiscardRowTransformer {
 	transformer := &DiscardRowTransformer{
-		violations: make(map[string]bool),
+		violations: make([]SchemaChange, 0),
 		schema:     sourceSchema,
 		destSchema: destSchema,
 		allocator:  memory.DefaultAllocator,
@@ -130,11 +136,11 @@ func NewDiscardRowTransformer(sourceSchema, destSchema *schema.TableSchema, comp
 
 	if comparison != nil {
 		for _, change := range comparison.Changes {
-			if isInternalAllowedChange(change) {
+			if isDiscardRowAllowedChange(change) {
 				continue
 			}
 			// Track all violations (both new columns and type mismatches)
-			transformer.violations[change.ColumnName] = true
+			transformer.violations = append(transformer.violations, change)
 		}
 	}
 
@@ -147,19 +153,6 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 		return batch, nil
 	}
 
-	// Find column indices that have violations
-	violationCols := make(map[int]string)
-	schema := batch.Schema()
-	for i := 0; i < schema.NumFields(); i++ {
-		colName := schema.Field(i).Name
-		if t.violations[colName] {
-			violationCols[i] = colName
-		}
-	}
-
-	if len(violationCols) == 0 {
-		return batch, nil
-	}
 	allocator := allocatorOrDefault(t.allocator)
 
 	// Create a boolean filter array: true for rows to keep, false for rows to discard
@@ -170,11 +163,13 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 	for rowIdx := 0; rowIdx < int(batch.NumRows()); rowIdx++ {
 		keepRow := true
 
-		// Check if any violation column has a non-NULL value
-		for colIdx := range violationCols {
-			col := batch.Column(colIdx)
-			if col.IsValid(rowIdx) {
-				// This row has data in a violation column, discard it
+		for _, violation := range t.violations {
+			path := changePath(violation)
+			colIdx := fieldIndexFold(batch.Schema(), path[0])
+			if colIdx < 0 {
+				continue
+			}
+			if rowViolatesChange(batch.Column(colIdx), path[1:], rowIdx) {
 				keepRow = false
 				break
 			}
@@ -201,6 +196,88 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 	}
 
 	return filtered, nil
+}
+
+func changePath(change SchemaChange) []string {
+	if len(change.ColumnPath) > 0 {
+		return change.ColumnPath
+	}
+	return strings.Split(change.ColumnName, ".")
+}
+
+func fieldIndexFold(sc *arrow.Schema, name string) int {
+	for i, field := range sc.Fields() {
+		if strings.EqualFold(field.Name, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+func rowViolatesChange(values arrow.Array, path []string, row int) bool {
+	if len(path) == 0 {
+		return values.IsValid(row)
+	}
+	if values.IsNull(row) {
+		return false
+	}
+
+	switch nested := values.(type) {
+	case *array.Struct:
+		structType := nested.DataType().(*arrow.StructType)
+		for i, field := range structType.Fields() {
+			if strings.EqualFold(field.Name, path[0]) {
+				return rowViolatesChange(nested.Field(i), path[1:], row)
+			}
+		}
+	case *array.List:
+		if path[0] != "element" {
+			return false
+		}
+		start, end := nested.ValueOffsets(row)
+		for i := start; i < end; i++ {
+			if rowViolatesChange(nested.ListValues(), path[1:], int(i)) {
+				return true
+			}
+		}
+	case *array.LargeList:
+		if path[0] != "element" {
+			return false
+		}
+		start, end := nested.ValueOffsets(row)
+		for i := start; i < end; i++ {
+			if rowViolatesChange(nested.ListValues(), path[1:], int(i)) {
+				return true
+			}
+		}
+	case *array.FixedSizeList:
+		if path[0] != "element" {
+			return false
+		}
+		start, end := nested.ValueOffsets(row)
+		for i := start; i < end; i++ {
+			if rowViolatesChange(nested.ListValues(), path[1:], int(i)) {
+				return true
+			}
+		}
+	case *array.Map:
+		start, end := nested.ValueOffsets(row)
+		var child arrow.Array
+		switch path[0] {
+		case "key":
+			child = nested.Keys()
+		case "value":
+			child = nested.Items()
+		default:
+			return false
+		}
+		for i := start; i < end; i++ {
+			if rowViolatesChange(child, path[1:], int(i)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TransformBatchStream wraps a batch channel and applies transformation to each batch.
