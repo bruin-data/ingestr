@@ -11,6 +11,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDecoderIgnoresTruncateOfNonTargetTables(t *testing.T) {
+	decoder := NewDecoder(&schema.TableSchema{}, "public", "events")
+	decoder.targetRelID = 42
+	changes, err := decoder.Decode(truncateMessage(7), 100)
+	require.NoError(t, err)
+	require.Nil(t, changes)
+}
+
+func truncateMessage(relIDs ...uint32) []byte {
+	msg := []byte{msgTypeTruncate}
+	msg = binary.BigEndian.AppendUint32(msg, uint32(len(relIDs)))
+	msg = append(msg, 0)
+	for _, id := range relIDs {
+		msg = binary.BigEndian.AppendUint32(msg, id)
+	}
+	return msg
+}
+
 func TestConvertTextValue(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -332,13 +332,19 @@ func TestFlushWindowCompaction(t *testing.T) {
 		results := make(chan source.RecordBatchResult, 4)
 		require.NoError(t, accum.flushAll(results, nil))
 		close(results)
-		res := <-results
-		require.NotNil(t, res.Batch)
-		defer res.Batch.Release()
-		assert.EqualValues(t, 3, res.Batch.NumRows())
-		assert.False(t, deletedValueAt(t, res.Batch, 0))
-		assert.True(t, deletedValueAt(t, res.Batch, 1))
-		assert.False(t, deletedValueAt(t, res.Batch, 2))
+		var batches []arrow.RecordBatch
+		for res := range results {
+			require.NotNil(t, res.Batch)
+			batches = append(batches, res.Batch)
+		}
+		require.Len(t, batches, 2, "keyless CDC emits one durable write unit per source transaction")
+		defer batches[0].Release()
+		defer batches[1].Release()
+		assert.EqualValues(t, 1, batches[0].NumRows())
+		assert.False(t, deletedValueAt(t, batches[0], 0))
+		assert.EqualValues(t, 2, batches[1].NumRows())
+		assert.True(t, deletedValueAt(t, batches[1], 0))
+		assert.False(t, deletedValueAt(t, batches[1], 1))
 	})
 
 	t.Run("pk-changing update keeps old-key history and new-key row", func(t *testing.T) {

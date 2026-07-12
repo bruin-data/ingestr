@@ -536,10 +536,10 @@ func TestMultiTableDecoderReportsEveryHistoricalSchemaMismatch(t *testing.T) {
 // rebuild. A missed announcement would leave the consumer writing new-shape
 // batches into old-shape staging.
 func TestShapeChangedTables(t *testing.T) {
-	prev := map[string]*schema.TableSchema{
-		"a": {Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
-		"b": {Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
-		"c": {Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
+	prev := map[string]source.SourceTableInfo{
+		"a": {Name: "a", Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}}},
+		"b": {Name: "b", Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}}},
+		"c": {Name: "c", Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}}, PrimaryKeys: []string{"id"}},
 	}
 	refreshed := []source.SourceTableInfo{
 		{Name: "a", Schema: &schema.TableSchema{Columns: []schema.Column{
@@ -551,12 +551,23 @@ func TestShapeChangedTables(t *testing.T) {
 		}}},
 		{Name: "c", Schema: &schema.TableSchema{Columns: []schema.Column{
 			{Name: "id", DataType: schema.TypeInt32},
-		}}},
+		}}, PrimaryKeys: nil},
 		{Name: "new_table", Schema: &schema.TableSchema{Columns: []schema.Column{
 			{Name: "id", DataType: schema.TypeInt32},
 		}}},
 	}
 
 	changed := shapeChangedTables(prev, refreshed)
-	require.Equal(t, []int{0, 1}, changed) // a: column added, b: type changed; c unchanged, new_table excluded
+	require.Equal(t, []int{0, 1, 2}, changed) // a: column added, b: type changed, c: primary key dropped
+}
+
+func TestSingleTableSchemaRefreshKeepsFreshAutoDetectedPrimaryKeys(t *testing.T) {
+	reader := &CDCReader{tableSchema: &schema.TableSchema{PrimaryKeys: []string{"old_id"}}}
+	refreshed := &schema.TableSchema{PrimaryKeys: []string{"new_id"}}
+	reader.applyConfiguredPrimaryKeys(refreshed)
+	require.Equal(t, []string{"new_id"}, refreshed.PrimaryKeys)
+
+	reader.configuredPrimaryKeys = []string{"configured_id"}
+	reader.applyConfiguredPrimaryKeys(refreshed)
+	require.Equal(t, []string{"configured_id"}, refreshed.PrimaryKeys)
 }

@@ -1259,12 +1259,9 @@ func (s *PostgresCDCSource) warnKeylessTable(name string) {
 	fmt.Printf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
-// publicationTableFullName renders a table name the way GetTables and the WAL
-// decoder key tables: bare name for public, schema-qualified otherwise.
+// publicationTableFullName renders the canonical schema-qualified table name
+// used by GetTables and the WAL decoder.
 func publicationTableFullName(schemaName, tableName string) string {
-	if schemaName == "public" {
-		return tableName
-	}
 	return schemaName + "." + tableName
 }
 
@@ -1419,7 +1416,9 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 		}
 		if resumeMetadataChanged(opts.CDCResumeIncarnations[table.Name], opts.CDCResumeSchemaFingerprints[table.Name], table.Incarnation, table.SchemaFingerprint) {
 			delete(resumeLSNs, table.Name)
-			invalidations = append(invalidations, source.CDCSnapshotInvalidation{TableName: table.Name, Incarnation: table.Incarnation})
+			invalidations = append(invalidations, source.CDCSnapshotInvalidation{
+				TableName: table.Name, Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint,
+			})
 		}
 	}
 	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)

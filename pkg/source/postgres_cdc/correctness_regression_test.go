@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,220 @@ func TestBatchAccumulatorFlushesOnByteLimitBelowRowThreshold(t *testing.T) {
 	result.Batch.Release()
 	assert.Empty(t, a.changes)
 	assert.Zero(t, a.totalBytes)
+}
+
+func TestBatchAccumulatorEmitsStableUniqueDataBatchIdentity(t *testing.T) {
+	for schemaName, tableSchema := range map[string]*schema.TableSchema{
+		"keyless": keylessTestSchema(),
+		"keyed":   keyedTestSchema(),
+	} {
+		for _, tableName := range []string{"", "public.events"} {
+			t.Run(schemaName+"/"+tableName, func(t *testing.T) {
+				flushWindows := func(windows [][]Change) []source.CDCStateCommitToken {
+					a := newBatchAccumulator(100, map[string]*schema.TableSchema{tableName: tableSchema})
+					a.stableAll = true
+					results := make(chan source.RecordBatchResult, 16)
+					for _, window := range windows {
+						a.add(tableName, window, window[0].LSN)
+						require.NoError(t, a.flushStableKeylessContext(t.Context(), results, func() any {
+							return source.CDCStateCommitToken{Position: "00000000/00000100"}
+						}, 0, false))
+						require.NoError(t, a.flushAllContext(t.Context(), results, func() any {
+							return source.CDCStateCommitToken{Position: "00000000/00000100"}
+						}))
+					}
+					close(results)
+					var tokens []source.CDCStateCommitToken
+					for result := range results {
+						require.NotNil(t, result.Batch)
+						result.Batch.Release()
+						token, ok := result.CommitToken.(source.CDCStateCommitToken)
+						require.True(t, ok)
+						tokens = append(tokens, token)
+					}
+					return tokens
+				}
+
+				c1 := Change{Operation: "INSERT", LSN: 0x110, Sequence: 2, Values: []interface{}{int32(1), "same"}}
+				c2 := Change{Operation: "INSERT", LSN: 0x120, Sequence: 2, Values: []interface{}{int32(1), "same"}}
+				c3 := Change{Operation: "INSERT", LSN: 0x130, Sequence: 2, Values: []interface{}{int32(1), "same"}}
+				firstGrouping := flushWindows([][]Change{{c1, c2}, {c3}})
+				retryGrouping := flushWindows([][]Change{{c1, c2, c3}})
+
+				require.Len(t, firstGrouping, 3)
+				require.Equal(t, firstGrouping, retryGrouping, "accumulator window regrouping must not change transaction write identities")
+				require.NotEqual(t, firstGrouping[0].DataBatchID, firstGrouping[1].DataBatchID, "duplicate payloads from distinct transactions need distinct identities")
+				require.NotEqual(t, firstGrouping[1].DataBatchID, firstGrouping[2].DataBatchID)
+			})
+		}
+	}
+}
+
+func TestDataBatchIdentityIsTableScoped(t *testing.T) {
+	changes := []Change{{LSN: 0x110, Sequence: 2}}
+	require.NotEqual(t, transactionDataBatchID("public.events", changes), transactionDataBatchID("public.audit", changes))
+	require.True(t, strings.HasPrefix(transactionDataBatchID("public.events", changes), "pgcdc-keyless-v1:"))
+}
+
+func TestIncompleteKeylessSequenceWindowIsNotFlushedOnErrorPath(t *testing.T) {
+	tableSchema := keylessTestSchema()
+	accum := newBatchAccumulator(1, map[string]*schema.TableSchema{"public.events": tableSchema})
+	accum.add("public.events", []Change{{
+		Operation: "INSERT", LSN: 0x900, Sequence: 2, Values: []interface{}{int32(1), "same"},
+	}}, 0x900)
+	results := make(chan source.RecordBatchResult, 1)
+	token := func() any { return source.CDCStateCommitToken{Position: "00000000/000008FF"} }
+
+	require.NoError(t, accum.flushStableKeylessContext(t.Context(), results, token, 0x900, true))
+	require.NoError(t, accum.flushReadyContext(t.Context(), results, token))
+	require.NoError(t, accum.flushAllContext(t.Context(), results, token))
+	require.Empty(t, results, "a partial deterministic window must be replayed, not emitted with a drain-dependent identity")
+
+	require.NoError(t, accum.flushStableKeylessContext(t.Context(), results, token, 0, false))
+	result := <-results
+	require.NotNil(t, result.Batch)
+	result.Batch.Release()
+}
+
+func TestKeylessDataBatchWindowIsByteBoundedAndCapacityIndependent(t *testing.T) {
+	compactValues := []interface{}{strings.Repeat("x", 128)}
+	spareValues := make([]interface{}, 1, 64)
+	spareValues[0] = compactValues[0]
+	compact := Change{Operation: "INSERT", Values: compactValues}
+	spare := Change{Operation: "INSERT", Values: spareValues}
+	require.Equal(t, stableChangeBytes(compact), stableChangeBytes(spare))
+
+	large := Change{Operation: "INSERT", Values: []interface{}{strings.Repeat("x", int(keylessDataBatchWindowBytes/2)+1)}}
+	state := keylessBatchWindowState{}
+	state.assign(&large)
+	require.Equal(t, uint64(0), large.DataBatchWindow)
+	second := large
+	state.assign(&second)
+	require.Equal(t, uint64(1), second.DataBatchWindow)
+}
+
+func TestLargeKeylessTransactionFragmentsHaveStableUniqueIdentities(t *testing.T) {
+	const changeCount = defaultCommittedDrainChanges*2 + 2
+	run := func(drainLimit int) ([]string, int64) {
+		tableSchema := keylessTestSchema()
+		decoder := NewDecoder(tableSchema, "public", "events")
+		decoder.currentTxLSN = 0x900
+		for i := 0; i < changeCount; i++ {
+			require.NoError(t, decoder.appendChange(Change{
+				Operation: "INSERT", LSN: decoder.currentTxLSN, Values: []interface{}{int32(i), "same"},
+			}))
+		}
+		require.NoError(t, decoder.pendingChanges.Seal())
+		decoder.committed = decoder.pendingChanges
+		decoder.pendingChanges = newChangeSpoolWithBudget[Change](defaultTransactionMemoryBytes, decoder.memoryBudget, nil)
+		accum := newBatchAccumulator(changeCount+1, map[string]*schema.TableSchema{"": tableSchema})
+		results := make(chan source.RecordBatchResult, 8)
+		flush := func(changes []Change) {
+			accum.add("", changes, decoder.currentTxLSN)
+			pendingLow, pending := decoder.CommittedLowWater()
+			require.NoError(t, accum.flushStableKeylessContext(t.Context(), results, func() any {
+				return source.CDCStateCommitToken{Position: "00000000/00000800"}
+			}, pendingLow, pending))
+		}
+		for decoder.HasCommitted() {
+			fragment, err := decoder.DrainCommitted(drainLimit)
+			require.NoError(t, err)
+			flush(fragment)
+		}
+		require.NoError(t, decoder.Close())
+		close(results)
+		var ids []string
+		var rows int64
+		for result := range results {
+			token := result.CommitToken.(source.CDCStateCommitToken)
+			ids = append(ids, token.DataBatchID)
+			rows += result.Batch.NumRows()
+			result.Batch.Release()
+		}
+		return ids, rows
+	}
+
+	firstIDs, firstRows := run(257)
+	replayIDs, replayRows := run(defaultCommittedDrainChanges + 333)
+	require.EqualValues(t, changeCount, firstRows)
+	require.Equal(t, firstRows, replayRows)
+	require.Len(t, firstIDs, 3)
+	require.Equal(t, firstIDs, replayIDs)
+	require.Len(t, map[string]struct{}{firstIDs[0]: {}, firstIDs[1]: {}, firstIDs[2]: {}}, 3)
+}
+
+func TestLargeMultiTableKeylessTransactionFragmentsHaveStableUniqueIdentities(t *testing.T) {
+	const changesPerTable = defaultCommittedDrainChanges*2 + 2
+	run := func(drainLimit int, blockedInterleaving bool) ([]string, int64) {
+		tableSchema := keylessTestSchema()
+		tables := []source.SourceTableInfo{{Name: "public.events", Schema: tableSchema}, {Name: "public.audit", Schema: tableSchema}}
+		decoder := NewMultiTableDecoder(tables)
+		decoder.currentTxLSN = 0x900
+		appendTableChange := func(table string, value int) {
+			require.NoError(t, decoder.appendChange(TableChange{TableName: table, Change: Change{
+				Operation: "INSERT", Values: []interface{}{int32(value), "same"},
+			}}))
+		}
+		if blockedInterleaving {
+			for _, table := range tables {
+				for i := 0; i < changesPerTable; i++ {
+					appendTableChange(table.Name, i)
+				}
+			}
+		} else {
+			for i := 0; i < changesPerTable; i++ {
+				for _, table := range tables {
+					appendTableChange(table.Name, i)
+				}
+			}
+		}
+		require.NoError(t, decoder.pendingChanges.Seal())
+		decoder.committed = decoder.pendingChanges
+		decoder.committedLSN = decoder.currentTxLSN
+		decoder.committedTableSequences = make(map[string]uint64)
+		decoder.pendingChanges = newChangeSpoolWithBudget[streamedChange](defaultTransactionMemoryBytes, decoder.memoryBudget, streamedChangeXID)
+		schemas := map[string]*schema.TableSchema{tables[0].Name: tableSchema, tables[1].Name: tableSchema}
+		accum := newBatchAccumulator(changesPerTable*len(tables)+1, schemas)
+		results := make(chan source.RecordBatchResult, 16)
+		flush := func(groups []DecodedChanges) {
+			for _, group := range groups {
+				accum.add(group.TableName, group.Changes, group.LSN)
+			}
+			pendingLow, pending := decoder.CommittedLowWater()
+			require.NoError(t, accum.flushStableKeylessContext(t.Context(), results, func() any {
+				return source.CDCStateCommitToken{Position: "00000000/00000800"}
+			}, pendingLow, pending))
+		}
+		for decoder.HasCommitted() {
+			groups, err := decoder.DrainCommitted(drainLimit)
+			require.NoError(t, err)
+			flush(groups)
+		}
+		require.NoError(t, decoder.Close())
+		close(results)
+		var ids []string
+		var rows int64
+		for result := range results {
+			token := result.CommitToken.(source.CDCStateCommitToken)
+			ids = append(ids, token.DataBatchID)
+			rows += result.Batch.NumRows()
+			result.Batch.Release()
+		}
+		sort.Strings(ids)
+		return ids, rows
+	}
+
+	firstIDs, firstRows := run(317, false)
+	replayIDs, replayRows := run(defaultCommittedDrainChanges+471, true)
+	require.EqualValues(t, changesPerTable*2, firstRows)
+	require.Equal(t, firstRows, replayRows)
+	require.Len(t, firstIDs, 6)
+	require.Equal(t, firstIDs, replayIDs)
+	unique := make(map[string]struct{}, len(firstIDs))
+	for _, id := range firstIDs {
+		unique[id] = struct{}{}
+	}
+	require.Len(t, unique, len(firstIDs))
 }
 
 func TestBatchAccumulatorByteLimitIsGlobalAcrossTables(t *testing.T) {

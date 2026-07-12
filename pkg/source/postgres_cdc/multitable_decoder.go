@@ -35,18 +35,20 @@ func streamedChangeXID(change streamedChange) uint32 { return change.XID }
 // (Stream Start/Stop/Commit/Abort) and, when the stream runs with the
 // `binary 'true'` option, binary-format tuple data.
 type MultiTableDecoder struct {
-	tableSchemas   map[string]*schema.TableSchema // schema name.table name -> schema
-	expectedRelIDs map[string]uint32              // full table name -> connect-time relation ID
-	relations      map[uint32]*RelationInfo
-	targetRelIDs   map[uint32]string // relation ID -> full table name
-	pendingChanges *changeSpool[streamedChange]
-	committed      *changeSpool[streamedChange]
-	committedLSN   pglogrepl.LSN
-	currentTxLSN   pglogrepl.LSN
-	typeMap        *pgtype.Map
-	allowedUnknown map[string]map[string]struct{}
-	historicalIDs  map[string]map[uint32]struct{}
-	memoryBudget   *byteBudget
+	tableSchemas            map[string]*schema.TableSchema // schema name.table name -> schema
+	expectedRelIDs          map[string]uint32              // full table name -> connect-time relation ID
+	relations               map[uint32]*RelationInfo
+	targetRelIDs            map[uint32]string // relation ID -> full table name
+	pendingChanges          *changeSpool[streamedChange]
+	committed               *changeSpool[streamedChange]
+	committedLSN            pglogrepl.LSN
+	committedTableSequences map[string]uint64
+	committedBatchWindows   map[string]*keylessBatchWindowState
+	currentTxLSN            pglogrepl.LSN
+	typeMap                 *pgtype.Map
+	allowedUnknown          map[string]map[string]struct{}
+	historicalIDs           map[string]map[uint32]struct{}
+	memoryBudget            *byteBudget
 
 	// Protocol v2 streaming state. Between Stream Start and Stream Stop,
 	// change messages carry a subtransaction xid and are buffered per
@@ -216,6 +218,8 @@ func (d *MultiTableDecoder) handleStreamCommit(data []byte) ([]DecodedChanges, e
 	}
 	d.committed = buffered
 	d.committedLSN = commitLSN
+	d.committedTableSequences = make(map[string]uint64)
+	d.committedBatchWindows = make(map[string]*keylessBatchWindowState)
 	return d.DrainCommitted(defaultCommittedDrainChanges)
 }
 
@@ -302,7 +306,9 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 	tableName := fmt.Sprintf("%s.%s", rel.Namespace, rel.Name)
 	if _, ok := d.tableSchemas[tableName]; !ok {
 		tableName = ""
-		// Also try without schema prefix for public schema
+		// Keep accepting legacy callers that constructed public table metadata
+		// with a bare name. GetTables always supplies the canonical qualified
+		// form, so managed CDC state never takes this compatibility path.
 		if rel.Namespace == "public" {
 			if _, ok := d.tableSchemas[rel.Name]; ok {
 				tableName = rel.Name
@@ -396,6 +402,8 @@ func (d *MultiTableDecoder) handleCommit() ([]DecodedChanges, error) {
 	}
 	d.committed = d.pendingChanges
 	d.committedLSN = d.currentTxLSN
+	d.committedTableSequences = make(map[string]uint64)
+	d.committedBatchWindows = make(map[string]*keylessBatchWindowState)
 	d.pendingChanges = newChangeSpoolWithBudget[streamedChange](defaultTransactionMemoryBytes, d.memoryBudget, streamedChangeXID)
 	return d.DrainCommitted(defaultCommittedDrainChanges)
 }
@@ -412,6 +420,12 @@ func (d *MultiTableDecoder) DrainCommitted(limit int) ([]DecodedChanges, error) 
 	if !d.HasCommitted() {
 		return nil, nil
 	}
+	if d.committedTableSequences == nil {
+		d.committedTableSequences = make(map[string]uint64)
+	}
+	if d.committedBatchWindows == nil {
+		d.committedBatchWindows = make(map[string]*keylessBatchWindowState)
+	}
 	buffered, err := d.committed.Drain(limit)
 	if err != nil {
 		return nil, err
@@ -424,6 +438,14 @@ func (d *MultiTableDecoder) DrainCommitted(limit int) ([]DecodedChanges, error) 
 			continue
 		}
 		tc.Change.LSN = d.committedLSN
+		d.committedTableSequences[tc.TableName]++
+		tc.Change.Sequence = d.committedTableSequences[tc.TableName] * 2
+		window := d.committedBatchWindows[tc.TableName]
+		if window == nil {
+			window = &keylessBatchWindowState{}
+			d.committedBatchWindows[tc.TableName] = window
+		}
+		window.assign(&tc.Change)
 		idx, ok := groupIdx[tc.TableName]
 		if !ok {
 			idx = len(groups)

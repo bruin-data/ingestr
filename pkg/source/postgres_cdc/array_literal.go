@@ -20,6 +20,13 @@ type arrayElement struct {
 // recover the elements. Quoted elements are unescaped (\" -> ", \\ -> \), so a
 // jsonb[] element is returned as standalone JSON ready for per-element typing.
 func parsePostgresArrayLiteral(s string) ([]arrayElement, bool) {
+	return parsePostgresArrayLiteralWithDelimiter(s, ',')
+}
+
+func parsePostgresArrayLiteralWithDelimiter(s string, delimiter byte) ([]arrayElement, bool) {
+	if delimiter == 0 {
+		delimiter = ','
+	}
 	s = strings.TrimSpace(s)
 	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
 		return nil, false
@@ -58,7 +65,7 @@ func parsePostgresArrayLiteral(s string) ([]arrayElement, bool) {
 				i++
 			}
 			elems = append(elems, arrayElement{value: b.String()})
-			for i < n && inner[i] != ',' {
+			for i < n && inner[i] != delimiter {
 				i++
 			}
 			if i < n {
@@ -74,7 +81,7 @@ func parsePostgresArrayLiteral(s string) ([]arrayElement, bool) {
 		if inner[i] == '{' {
 			return nil, false
 		}
-		for i < n && inner[i] != ',' {
+		for i < n && inner[i] != delimiter {
 			i++
 		}
 		raw := strings.TrimSpace(inner[start:i])

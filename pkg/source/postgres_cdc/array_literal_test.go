@@ -3,6 +3,9 @@ package postgres_cdc
 import (
 	"reflect"
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParsePostgresArrayLiteral(t *testing.T) {
@@ -58,4 +61,38 @@ func TestParsePostgresArrayLiteral(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvertTextValueRejectsUnsupportedArrayShapes(t *testing.T) {
+	col := schema.Column{Name: "items", DataType: schema.TypeArray, ArrayType: schema.TypeString}
+	for _, literal := range []string{"[2:3]={a,b}", "{{a,b},{c,d}}"} {
+		t.Run(literal, func(t *testing.T) {
+			value, err := convertTextValue(literal, col)
+			require.Nil(t, value)
+			require.ErrorContains(t, err, "only one-dimensional arrays with default bounds are supported")
+		})
+	}
+}
+
+func TestConvertTextValueUsesArrayElementMetadata(t *testing.T) {
+	col := schema.Column{
+		Name:      "items",
+		DataType:  schema.TypeArray,
+		ArrayType: schema.TypeString,
+		Element:   &schema.Column{DataType: schema.TypeInt32},
+	}
+
+	value, err := convertTextValue("{1,2}", col)
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{int32(1), int32(2)}, value)
+}
+
+func TestConvertTextValueUsesPostgresArrayDelimiter(t *testing.T) {
+	col := schema.Column{
+		Name: "boxes", DataType: schema.TypeArray, ArrayType: schema.TypeString, ArrayDelimiter: ";",
+	}
+
+	value, err := convertTextValue("{(1,1),(0,0);(2,2),(1,1)}", col)
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{"(1,1),(0,0)", "(2,2),(1,1)"}, value)
 }

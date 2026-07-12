@@ -14,13 +14,14 @@ import (
 )
 
 type CDCReader struct {
-	source            *PostgresCDCSource
-	tableName         string
-	tableSchema       *schema.TableSchema
-	cdcConfig         CDCConfig
-	allowedUnknown    map[string]struct{}
-	incarnation       string
-	schemaFingerprint string
+	source                *PostgresCDCSource
+	tableName             string
+	tableSchema           *schema.TableSchema
+	configuredPrimaryKeys []string
+	cdcConfig             CDCConfig
+	allowedUnknown        map[string]struct{}
+	incarnation           string
+	schemaFingerprint     string
 }
 
 func NewCDCReader(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig) *CDCReader {
@@ -66,9 +67,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				return
 			}
 			tableSchema = addCDCColumns(tableSchema)
-			if len(r.tableSchema.PrimaryKeys) > 0 {
-				tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
-			}
+			r.applyConfiguredPrimaryKeys(tableSchema)
 			r.tableSchema = tableSchema
 		}
 
@@ -121,7 +120,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		// Full mode: Phase 1: Snapshot
 		if replacementSnapshot && opts.Streaming {
 			if err := sendResult(ctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
-				TableName: r.tableName, Incarnation: incarnation,
+				TableName: r.tableName, Incarnation: incarnation, SchemaFingerprint: fingerprint,
 			}}); err != nil {
 				return
 			}
@@ -255,6 +254,7 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 	}
 
 	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
+	accum.stableAll = opts.CDCStableDataBatches
 
 	err = streamLoop(ctx, repl, mode, batchSize, accum, results, opts.Streaming)
 	if err == nil && mode == ModeBatch {
@@ -287,12 +287,7 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 		return 0, fmt.Errorf("failed to refresh schema for table %s: %w", r.tableName, err)
 	}
 	tableSchema = addCDCColumns(tableSchema)
-	// Keep the merge keys the run started with: they may carry user-provided
-	// keys that re-detection would drop, and the decoder, compaction, and
-	// unchanged-TOAST fill must keep keying off the same columns.
-	if len(r.tableSchema.PrimaryKeys) > 0 {
-		tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
-	}
+	r.applyConfiguredPrimaryKeys(tableSchema)
 	r.tableSchema = tableSchema
 	if schemaErr != nil {
 		if r.allowedUnknown == nil {
@@ -346,7 +341,7 @@ func (r *CDCReader) resnapshotTable(ctx context.Context, slotName string, table 
 		return 0, fmt.Errorf("failed to parse schema backfill LSN: %w", err)
 	}
 	if err := sendResult(ctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
-		TableName: table.Name, Incarnation: table.Incarnation,
+		TableName: table.Name, Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint,
 	}}); err != nil {
 		return 0, err
 	}
@@ -378,6 +373,12 @@ func (r *CDCReader) resnapshotTable(ctx context.Context, slotName string, table 
 		return 0, err
 	}
 	return snapshotLSN, nil
+}
+
+func (r *CDCReader) applyConfiguredPrimaryKeys(tableSchema *schema.TableSchema) {
+	if tableSchema != nil && len(r.configuredPrimaryKeys) > 0 {
+		tableSchema.PrimaryKeys = append([]string(nil), r.configuredPrimaryKeys...)
+	}
 }
 
 func parseStoredPostgresLSN(raw string) (pglogrepl.LSN, error) {
@@ -425,13 +426,11 @@ type singleTableChangeFilter interface {
 // transaction and defeat accumulation entirely (see hadActivity in
 // Replicator.NextChanges).
 //
-// When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
-// pipeline can confirm the replication slot only after the data is durable.
+// Each flushed batch carries its safe source position. Streaming uses it to
+// confirm the replication slot; managed batch ingestion uses it to identify
+// keyless transaction fragments durably.
 func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
-	var token tokenFunc
-	if streaming {
-		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
-	}
+	token := func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 
 	// lastIdleToken is the highest LSN already handed to the pipeline via a bare
 	// idle commit token, so we only emit one when the caught-up position has
@@ -472,6 +471,10 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, batchSi
 			changes = nil
 		}
 		accum.add("", changes, lsn)
+		pendingLow, pending := repl.PendingLowWater()
+		if err := accum.flushStableKeylessContext(ctx, results, token, pendingLow, pending); err != nil {
+			return err
+		}
 
 		if err := accum.flushReadyContext(ctx, results, token); err != nil {
 			return err

@@ -36,8 +36,11 @@ type CDCTable struct {
 	source      *PostgresCDCSource
 	tableName   string
 	primaryKeys []string
-	strategy    config.IncrementalStrategy
-	tableSchema *schema.TableSchema
+	// userProvidedPrimaryKeys distinguishes configured merge keys from keys
+	// auto-detected from PostgreSQL, which must be refreshed after DDL.
+	userProvidedPrimaryKeys bool
+	strategy                config.IncrementalStrategy
+	tableSchema             *schema.TableSchema
 }
 
 func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, error) {
@@ -73,11 +76,12 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	}
 
 	return &CDCTable{
-		source:      src,
-		tableName:   req.Name,
-		primaryKeys: pks,
-		strategy:    strategy,
-		tableSchema: tableSchema,
+		source:                  src,
+		tableName:               req.Name,
+		primaryKeys:             pks,
+		userProvidedPrimaryKeys: len(req.PrimaryKeys) > 0,
+		strategy:                strategy,
+		tableSchema:             tableSchema,
 	}, nil
 }
 
@@ -116,6 +120,9 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 
 		// Create the CDC reader
 		reader := NewCDCReader(t.source, t.tableName, t.tableSchema, t.source.cdcConfig)
+		if t.userProvidedPrimaryKeys {
+			reader.configuredPrimaryKeys = append([]string(nil), t.primaryKeys...)
+		}
 
 		// Start reading
 		batches, err := reader.Read(ctx, opts)
@@ -173,9 +180,13 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 			numeric_precision,
 			numeric_scale,
 			character_maximum_length,
-			udt_name
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
+			c.udt_name,
+			COALESCE(elem.typdelim::text, '')
+		FROM information_schema.columns c
+		LEFT JOIN pg_namespace udtns ON udtns.nspname = c.udt_schema
+		LEFT JOIN pg_type array_type ON array_type.typnamespace = udtns.oid AND array_type.typname = c.udt_name
+		LEFT JOIN pg_type elem ON elem.oid = array_type.typelem
+		WHERE c.table_schema = $1 AND c.table_name = $2
 		ORDER BY ordinal_position
 	`
 
@@ -187,10 +198,10 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 
 	var columns []schema.Column
 	for rows.Next() {
-		var columnName, dataType, isNullable, udtName string
+		var columnName, dataType, isNullable, udtName, arrayDelimiter string
 		var numericPrecision, numericScale, charMaxLen *int
 
-		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName); err != nil {
+		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName, &arrayDelimiter); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -205,10 +216,11 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		dt, precision, scale, arrayType := postgres.MapPostgresToDataType(pgType)
 
 		col := schema.Column{
-			Name:      columnName,
-			DataType:  dt,
-			Nullable:  isNullable == "YES",
-			ArrayType: arrayType,
+			Name:           columnName,
+			DataType:       dt,
+			Nullable:       isNullable == "YES",
+			ArrayType:      arrayType,
+			ArrayDelimiter: arrayDelimiter,
 		}
 
 		if numericPrecision != nil {

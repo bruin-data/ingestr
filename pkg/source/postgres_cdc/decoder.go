@@ -43,26 +43,28 @@ const (
 )
 
 type Change struct {
-	Operation string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
-	LSN       pglogrepl.LSN
-	Sequence  uint64 // 1-based order within the committing transaction
-	Values    []interface{}
-	OldValues []interface{} // For UPDATE/DELETE with replica identity
+	Operation       string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
+	LSN             pglogrepl.LSN
+	Sequence        uint64 // 1-based order within the committing transaction
+	DataBatchWindow uint64
+	Values          []interface{}
+	OldValues       []interface{} // For UPDATE/DELETE with replica identity
 }
 
 type Decoder struct {
-	tableSchema    *schema.TableSchema
-	targetSchema   string
-	targetTable    string
-	relations      map[uint32]*RelationInfo
-	targetRelID    uint32
-	expectedRelID  uint32
-	pendingChanges *changeSpool[Change]
-	committed      *changeSpool[Change]
-	currentTxLSN   pglogrepl.LSN
-	typeMap        *pgtype.Map
-	allowedUnknown map[string]struct{}
-	memoryBudget   *byteBudget
+	tableSchema          *schema.TableSchema
+	targetSchema         string
+	targetTable          string
+	relations            map[uint32]*RelationInfo
+	targetRelID          uint32
+	expectedRelID        uint32
+	pendingChanges       *changeSpool[Change]
+	committed            *changeSpool[Change]
+	committedBatchWindow keylessBatchWindowState
+	currentTxLSN         pglogrepl.LSN
+	typeMap              *pgtype.Map
+	allowedUnknown       map[string]struct{}
+	memoryBudget         *byteBudget
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
@@ -257,6 +259,7 @@ func (d *Decoder) handleCommit() ([]Change, error) {
 		return nil, err
 	}
 	d.committed = d.pendingChanges
+	d.committedBatchWindow = keylessBatchWindowState{}
 	d.pendingChanges = newChangeSpoolWithBudget[Change](defaultTransactionMemoryBytes, d.memoryBudget, nil)
 	return d.DrainCommitted(defaultCommittedDrainChanges)
 }
@@ -276,6 +279,9 @@ func (d *Decoder) DrainCommitted(limit int) ([]Change, error) {
 	changes, err := d.committed.Drain(limit)
 	if err != nil {
 		return nil, err
+	}
+	for i := range changes {
+		d.committedBatchWindow.assign(&changes[i])
 	}
 	if d.committed.Len() == 0 {
 		err = d.committed.Close()
@@ -567,11 +573,24 @@ func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map
 		// element by the element type. Returning a []interface{} lets the list
 		// builder populate the array; the snapshot path produces the same shape
 		// via pgx, keeping streaming and snapshot consistent.
-		elems, ok := parsePostgresArrayLiteral(text)
-		if !ok {
-			return nil, fmt.Errorf("invalid PostgreSQL array literal %q", text)
+		var delimiter byte
+		if col.ArrayDelimiter != "" {
+			if len(col.ArrayDelimiter) != 1 {
+				return nil, fmt.Errorf("unsupported PostgreSQL array delimiter %q", col.ArrayDelimiter)
+			}
+			delimiter = col.ArrayDelimiter[0]
 		}
-		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		elems, ok := parsePostgresArrayLiteralWithDelimiter(text, delimiter)
+		if !ok {
+			return nil, fmt.Errorf("unsupported PostgreSQL array literal %q: only one-dimensional arrays with default bounds are supported", text)
+		}
+		elemCol := schema.Column{
+			DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale,
+			MaxLength: col.MaxLength, FixedLength: col.FixedLength,
+		}
+		if col.Element != nil {
+			elemCol = *col.Element
+		}
 		out := make([]interface{}, len(elems))
 		for i, e := range elems {
 			if e.isNull {

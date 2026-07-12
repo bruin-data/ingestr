@@ -285,7 +285,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 			if opts.Streaming {
 				if _, replacement := replacements[table.Name]; replacement {
 					if err := sendResult(gctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
-						TableName: table.Name, Incarnation: table.Incarnation,
+						TableName: table.Name, Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint,
 					}}); err != nil {
 						return err
 					}
@@ -383,19 +383,19 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 	}
 	reconcileTableKeys(tables)
 
-	prevSchemas := make(map[string]*schema.TableSchema, len(r.tables))
+	previousTables := make(map[string]source.SourceTableInfo, len(r.tables))
 	prevIncarnations := make(map[string]string, len(r.tables))
 	for _, t := range r.tables {
-		prevSchemas[t.Name] = t.Schema
+		previousTables[t.Name] = t
 		prevIncarnations[t.Name] = t.Incarnation
 	}
 	var added []source.SourceTableInfo
 	for _, t := range tables {
-		if _, ok := prevSchemas[t.Name]; !ok {
+		if _, ok := previousTables[t.Name]; !ok {
 			added = append(added, t)
 		}
 	}
-	changedIndexes := shapeChangedTables(prevSchemas, tables)
+	changedIndexes := shapeChangedTables(previousTables, tables)
 	changedSet := make(map[string]struct{}, len(changedIndexes)+len(signal.changedTables)+len(signal.reincarnatedTables))
 	for _, idx := range changedIndexes {
 		changedSet[tables[idx].Name] = struct{}{}
@@ -495,18 +495,30 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 // shapeChangedTables returns the indices of refreshed tables whose column
 // shape differs from the schema previously tracked for them. Tables not in
 // prev (newly added) are excluded — the backfill path announces those.
-func shapeChangedTables(prev map[string]*schema.TableSchema, refreshed []source.SourceTableInfo) []int {
+func shapeChangedTables(prev map[string]source.SourceTableInfo, refreshed []source.SourceTableInfo) []int {
 	var out []int
 	for i := range refreshed {
 		old, ok := prev[refreshed[i].Name]
 		if !ok {
 			continue
 		}
-		if !old.SameColumnShape(refreshed[i].Schema) {
+		if !old.Schema.SameColumnShape(refreshed[i].Schema) || !equalColumnNames(old.PrimaryKeys, refreshed[i].PrimaryKeys) {
 			out = append(out, i)
 		}
 	}
 	return out
+}
+
+func equalColumnNames(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !strings.EqualFold(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // detectNewTables lists the tables the stream should currently cover and
@@ -817,14 +829,13 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		schemas[t.Name] = t.Schema
 	}
 	accum := newBatchAccumulator(batchSize, schemas)
+	accum.stableAll = opts.CDCStableDataBatches
 
-	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
-	// confirms the slot only after the data is durable. barrierNonce is empty in
-	// streaming mode, so the barrier exit below never triggers.
-	var token tokenFunc
-	if opts.Streaming {
-		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
-	}
+	// Every batch carries its safe source position. Streaming confirms the slot
+	// from it; managed batch ingestion uses it to identify keyless fragments.
+	// barrierNonce is empty in streaming mode, so the barrier exit below never
+	// triggers.
+	token := func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 
 	// lastIdleToken is the highest LSN already handed to the pipeline via a bare
 	// idle commit token, so we only emit one when the caught-up position has
@@ -918,6 +929,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		}
 		for _, g := range groups {
 			accum.add(g.TableName, g.Changes, g.LSN)
+		}
+		pendingLow, pending := repl.PendingLowWater()
+		if err := accum.flushStableKeylessContext(ctx, results, token, pendingLow, pending); err != nil {
+			return nil, err
 		}
 
 		// Flush tables that have accumulated enough rows

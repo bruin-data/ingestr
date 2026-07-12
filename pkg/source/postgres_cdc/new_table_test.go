@@ -79,7 +79,7 @@ func TestBackfillSlotName(t *testing.T) {
 }
 
 func TestPublicationTableFullName(t *testing.T) {
-	assert.Equal(t, "users", publicationTableFullName("public", "users"))
+	assert.Equal(t, "public.users", publicationTableFullName("public", "users"))
 	assert.Equal(t, "app.orders", publicationTableFullName("app", "orders"))
 }
 
