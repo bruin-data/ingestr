@@ -54,10 +54,14 @@ func (s *MMapSource) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read mmap arrow schema: %w", err)
 	}
+	knownSchema := schemaFromArrow(arrowSchema, "")
+	if err := schemainfer.ValidateSchema(knownSchema); err != nil {
+		return fmt.Errorf("invalid mmap arrow schema: %w", err)
+	}
 
 	s.filePaths = filePaths
 	s.arrowSchema = arrowSchema
-	s.knownSchema = schemaFromArrow(arrowSchema, "")
+	s.knownSchema = knownSchema
 
 	config.Debug("[MMAP] Connected to %d Arrow file(s), first: %s", len(filePaths), filePaths[0])
 	return nil

@@ -337,7 +337,11 @@ func mapBigQueryFieldToDataType(field *bigquery.FieldSchema) (schema.DataType, i
 		return schema.TypeDecimal, int(field.Precision), int(field.Scale), schema.TypeUnknown
 
 	case bigquery.BigNumericFieldType:
-		return schema.TypeDecimal, int(field.Precision), int(field.Scale), schema.TypeUnknown
+		precision, scale := int(field.Precision), int(field.Scale)
+		if precision == 0 {
+			precision, scale = 76, 38
+		}
+		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
 
 	case bigquery.StringFieldType:
 		return schema.TypeString, 0, 0, schema.TypeUnknown

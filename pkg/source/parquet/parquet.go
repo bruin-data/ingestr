@@ -52,10 +52,14 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read parquet schema: %w", err)
 	}
+	knownSchema := schemaFromArrow(arrowSchema, "")
+	if err := schemainfer.ValidateSchema(knownSchema); err != nil {
+		return fmt.Errorf("invalid parquet arrow schema: %w", err)
+	}
 
 	s.filePaths = paths
 	s.arrowSchema = arrowSchema
-	s.knownSchema = schemaFromArrow(arrowSchema, "")
+	s.knownSchema = knownSchema
 
 	config.Debug("[PARQUET-SRC] Connected to %d parquet file(s), first: %s", len(paths), paths[0])
 	return nil

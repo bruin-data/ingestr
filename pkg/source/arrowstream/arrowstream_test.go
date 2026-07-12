@@ -113,6 +113,25 @@ func TestArrowStreamSourceSkipsBatchesWhenAllColumnsExcluded(t *testing.T) {
 	assert.Zero(t, batches)
 }
 
+func TestArrowStreamSourceRejectsUnsupportedDecimal256Schema(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: arrow.StructOf(arrow.Field{
+			Name: "amount", Type: &arrow.Decimal256Type{Precision: 50, Scale: 2}, Nullable: true,
+		}), Nullable: true,
+	}}, nil)
+	writer := ipc.NewWriter(&buf, ipc.WithSchema(arrowSchema), ipc.WithAllocator(memory.DefaultAllocator))
+	require.NoError(t, writer.Close())
+
+	src := NewArrowStreamSourceWithReader(&buf)
+	err := src.Connect(context.Background(), "arrow-stream://-")
+	require.ErrorContains(t, err, "invalid arrow stream schema")
+	require.ErrorContains(t, err, "payload.amount")
+	require.ErrorContains(t, err, "maximum supported precision is 38")
+}
+
 func writeTestStream(t *testing.T, buf *bytes.Buffer) {
 	t.Helper()
 

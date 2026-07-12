@@ -467,3 +467,48 @@ func TestParseDecimal128Fast_FallsBack(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendValueRecursiveAndFixedBuilders(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+
+	structType := arrow.StructOf(
+		arrow.Field{Name: "Name", Type: arrow.BinaryTypes.String, Nullable: true},
+		arrow.Field{Name: "count", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	)
+	structBuilder := array.NewStructBuilder(mem, structType)
+	AppendValue(structBuilder, map[string]interface{}{"name": "alpha", "count": int64(7)})
+	structArray := structBuilder.NewStructArray()
+	structBuilder.Release()
+	require.Equal(t, "alpha", structArray.Field(0).(*array.String).Value(0))
+	require.Equal(t, int64(7), structArray.Field(1).(*array.Int64).Value(0))
+	structArray.Release()
+
+	mapBuilder := array.NewMapBuilder(mem, arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64, false)
+	AppendValue(mapBuilder, map[string]int64{"b": 2, "a": 1})
+	mapArray := mapBuilder.NewMapArray()
+	mapBuilder.Release()
+	require.Equal(t, []string{"a", "b"}, []string{mapArray.Keys().(*array.String).Value(0), mapArray.Keys().(*array.String).Value(1)})
+	require.Equal(t, []int64{1, 2}, []int64{mapArray.Items().(*array.Int64).Value(0), mapArray.Items().(*array.Int64).Value(1)})
+	mapArray.Release()
+
+	fixedBinaryBuilder := array.NewFixedSizeBinaryBuilder(mem, &arrow.FixedSizeBinaryType{ByteWidth: 4})
+	AppendValue(fixedBinaryBuilder, []byte{1, 2, 3, 4})
+	AppendValue(fixedBinaryBuilder, []byte{1, 2})
+	fixedBinary := fixedBinaryBuilder.NewFixedSizeBinaryArray()
+	fixedBinaryBuilder.Release()
+	require.Equal(t, []byte{1, 2, 3, 4}, fixedBinary.Value(0))
+	require.True(t, fixedBinary.IsNull(1))
+	fixedBinary.Release()
+
+	fixedListBuilder := array.NewFixedSizeListBuilder(mem, 2, arrow.PrimitiveTypes.Int64)
+	AppendValue(fixedListBuilder, []int64{3, 4})
+	AppendValue(fixedListBuilder, []int64{5})
+	fixedList := fixedListBuilder.NewListArray()
+	fixedListBuilder.Release()
+	require.False(t, fixedList.IsNull(0))
+	require.True(t, fixedList.IsNull(1))
+	values := fixedList.ListValues().(*array.Int64)
+	require.Equal(t, []int64{3, 4}, []int64{values.Value(0), values.Value(1)})
+	fixedList.Release()
+}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMergeArrowTypes_SameType(t *testing.T) {
@@ -400,6 +401,41 @@ func TestArrowFieldToColumn_List(t *testing.T) {
 	if col.ArrayType != schema.TypeInt64 {
 		t.Errorf("expected array element type TypeInt64, got %v", col.ArrayType)
 	}
+}
+
+func TestArrowFieldToColumnFixedSizeList(t *testing.T) {
+	listType := arrow.FixedSizeListOfField(3, arrow.Field{
+		Name: "item", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+	})
+	col := ArrowFieldToColumn("coordinates", listType, true)
+	require.Equal(t, schema.TypeArray, col.DataType)
+	require.Equal(t, schema.TypeInt32, col.ArrayType)
+	require.NotNil(t, col.Element)
+	require.Equal(t, schema.TypeInt32, col.Element.DataType)
+	require.False(t, col.Element.Nullable)
+	require.EqualValues(t, 3, col.ArrayLength)
+	roundTrip := schema.DataTypeToArrowType(col)
+	fixed, ok := roundTrip.(*arrow.FixedSizeListType)
+	require.True(t, ok)
+	require.EqualValues(t, 3, fixed.Len())
+}
+
+func TestMergeArrowTypesFixedSizeLists(t *testing.T) {
+	left := arrow.FixedSizeListOf(3, arrow.PrimitiveTypes.Int32)
+	widerElement := arrow.FixedSizeListOf(3, arrow.PrimitiveTypes.Int64)
+	merged, err := MergeArrowTypes(left, widerElement)
+	require.NoError(t, err)
+	fixed, ok := merged.(*arrow.FixedSizeListType)
+	require.True(t, ok)
+	require.EqualValues(t, 3, fixed.Len())
+	require.Equal(t, arrow.PrimitiveTypes.Int64, fixed.Elem())
+
+	variable, err := MergeArrowTypes(left, arrow.ListOf(arrow.PrimitiveTypes.Int64))
+	require.NoError(t, err)
+	require.IsType(t, &arrow.ListType{}, variable)
+
+	_, err = MergeArrowTypes(left, arrow.FixedSizeListOf(4, arrow.PrimitiveTypes.Int32))
+	require.ErrorContains(t, err, "incompatible fixed-size list lengths")
 }
 
 func TestValidateSchema(t *testing.T) {

@@ -2,6 +2,7 @@ package schemainfer
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -62,6 +63,47 @@ func MergeArrowTypes(existing, new arrow.DataType) (arrow.DataType, error) {
 		return schema.JSONArrowType, nil
 	}
 
+	if isListArrowType(existing.ID()) && isListArrowType(new.ID()) {
+		aElem, aNullable := listElement(existing)
+		bElem, bNullable := listElement(new)
+		elem, err := MergeArrowTypes(aElem, bElem)
+		if err != nil {
+			return nil, fmt.Errorf("merge list element types: %w", err)
+		}
+		field := arrow.Field{
+			Name: "element", Type: elem, Nullable: aNullable || bNullable,
+		}
+		aFixed, aIsFixed := existing.(*arrow.FixedSizeListType)
+		bFixed, bIsFixed := new.(*arrow.FixedSizeListType)
+		if aIsFixed && bIsFixed {
+			if aFixed.Len() != bFixed.Len() {
+				return nil, fmt.Errorf("incompatible fixed-size list lengths %d and %d", aFixed.Len(), bFixed.Len())
+			}
+			return arrow.FixedSizeListOfField(aFixed.Len(), field), nil
+		}
+		return arrow.ListOfField(field), nil
+	}
+	if existing.ID() == arrow.STRUCT && new.ID() == arrow.STRUCT {
+		return mergeStructTypes(existing.(*arrow.StructType), new.(*arrow.StructType))
+	}
+	if existing.ID() == arrow.MAP && new.ID() == arrow.MAP {
+		a, b := existing.(*arrow.MapType), new.(*arrow.MapType)
+		if !arrow.TypeEqual(a.KeyType(), b.KeyType()) {
+			return nil, fmt.Errorf("incompatible map key types %s and %s", a.KeyType(), b.KeyType())
+		}
+		item, err := MergeArrowTypes(a.ItemType(), b.ItemType())
+		if err != nil {
+			return nil, fmt.Errorf("merge map value types: %w", err)
+		}
+		return arrow.MapOfFields(
+			arrow.Field{Name: "key", Type: a.KeyType(), Nullable: false},
+			arrow.Field{Name: "value", Type: item, Nullable: a.ItemField().Nullable || b.ItemField().Nullable},
+		), nil
+	}
+	if nestedArrowType(existing.ID()) || nestedArrowType(new.ID()) {
+		return nil, fmt.Errorf("incompatible nested types %s and %s", existing, new)
+	}
+
 	existingPriority, existingOk := typePriority[existing.ID()]
 	newPriority, newOk := typePriority[new.ID()]
 
@@ -99,6 +141,65 @@ func MergeArrowTypes(existing, new arrow.DataType) (arrow.DataType, error) {
 
 	// Default: promote to string for safety
 	return arrow.BinaryTypes.String, nil
+}
+
+func isListArrowType(id arrow.Type) bool {
+	return id == arrow.LIST || id == arrow.LARGE_LIST || id == arrow.FIXED_SIZE_LIST
+}
+
+func listElement(dataType arrow.DataType) (arrow.DataType, bool) {
+	switch list := dataType.(type) {
+	case *arrow.ListType:
+		return list.Elem(), list.ElemField().Nullable
+	case *arrow.LargeListType:
+		return list.Elem(), list.ElemField().Nullable
+	case *arrow.FixedSizeListType:
+		return list.Elem(), list.ElemField().Nullable
+	default:
+		panic("listElement called with non-list type")
+	}
+}
+
+func mergeStructTypes(existing, incoming *arrow.StructType) (arrow.DataType, error) {
+	fields := existing.Fields()
+	index := make(map[string]int, len(fields))
+	incomingNames := make(map[string]struct{}, incoming.NumFields())
+	for _, field := range incoming.Fields() {
+		incomingNames[strings.ToLower(field.Name)] = struct{}{}
+	}
+	for i, field := range fields {
+		folded := strings.ToLower(field.Name)
+		index[folded] = i
+		if _, ok := incomingNames[folded]; !ok {
+			fields[i].Nullable = true
+		}
+	}
+	for _, field := range incoming.Fields() {
+		folded := strings.ToLower(field.Name)
+		i, ok := index[folded]
+		if !ok {
+			field.Nullable = true
+			fields = append(fields, field)
+			index[folded] = len(fields) - 1
+			continue
+		}
+		merged, err := MergeArrowTypes(fields[i].Type, field.Type)
+		if err != nil {
+			return nil, fmt.Errorf("merge struct field %q: %w", field.Name, err)
+		}
+		fields[i].Type = merged
+		fields[i].Nullable = fields[i].Nullable || field.Nullable
+	}
+	return arrow.StructOf(fields...), nil
+}
+
+func nestedArrowType(id arrow.Type) bool {
+	switch id {
+	case arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST, arrow.STRUCT, arrow.MAP:
+		return true
+	default:
+		return false
+	}
 }
 
 // isNumericType returns true if the type is a numeric type.
@@ -250,7 +351,11 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		col.DataType = schema.TypeFloat64
 	case arrow.DECIMAL128, arrow.DECIMAL256:
 		col.DataType = schema.TypeDecimal
-		if decType, ok := dt.(*arrow.Decimal128Type); ok {
+		switch decType := dt.(type) {
+		case *arrow.Decimal128Type:
+			col.Precision = int(decType.Precision)
+			col.Scale = int(decType.Scale)
+		case *arrow.Decimal256Type:
 			col.Precision = int(decType.Precision)
 			col.Scale = int(decType.Scale)
 		}
@@ -258,6 +363,9 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		col.DataType = schema.TypeString
 	case arrow.BINARY, arrow.LARGE_BINARY:
 		col.DataType = schema.TypeBinary
+	case arrow.FIXED_SIZE_BINARY:
+		col.DataType = schema.TypeFixedBinary
+		col.FixedLength = dt.(*arrow.FixedSizeBinaryType).ByteWidth
 	case arrow.DATE32, arrow.DATE64:
 		col.DataType = schema.TypeDate
 	case arrow.TIME32, arrow.TIME64:
@@ -268,12 +376,34 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		} else {
 			col.DataType = schema.TypeTimestamp
 		}
-	case arrow.LIST, arrow.LARGE_LIST:
+	case arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST:
 		col.DataType = schema.TypeArray
-		if listType, ok := dt.(*arrow.ListType); ok {
-			elemCol := ArrowFieldToColumn("", listType.Elem(), true)
+		if listType, ok := dt.(arrow.ListLikeType); ok {
+			elemField := listType.ElemField()
+			elemCol := ArrowFieldToColumn(elemField.Name, elemField.Type, elemField.Nullable)
 			col.ArrayType = elemCol.DataType
+			col.Element = &elemCol
 		}
+		if fixed, ok := dt.(*arrow.FixedSizeListType); ok {
+			col.ArrayLength = fixed.Len()
+		}
+	case arrow.STRUCT:
+		col.DataType = schema.TypeStruct
+		structType := dt.(*arrow.StructType)
+		fields := make([]schema.Column, structType.NumFields())
+		for i, field := range structType.Fields() {
+			fields[i] = ArrowFieldToColumn(field.Name, field.Type, field.Nullable)
+		}
+		col.StructFields = &schema.TableSchema{Columns: fields}
+	case arrow.MAP:
+		col.DataType = schema.TypeMap
+		mapType := dt.(*arrow.MapType)
+		keyField := mapType.KeyField()
+		valueField := mapType.ItemField()
+		key := ArrowFieldToColumn(keyField.Name, keyField.Type, false)
+		value := ArrowFieldToColumn(valueField.Name, valueField.Type, valueField.Nullable)
+		col.MapKey = &key
+		col.MapValue = &value
 	case arrow.EXTENSION:
 		// Check if it's a JSON extension type
 		if isJSONType(dt) {
@@ -308,6 +438,43 @@ func ValidateSchema(s *schema.TableSchema) error {
 	for i, col := range s.Columns {
 		if col.Name == "" {
 			return fmt.Errorf("column %d has empty name", i)
+		}
+		if err := validateInferredColumn(col, col.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateInferredColumn(col schema.Column, path string) error {
+	if col.DataType == schema.TypeDecimal && col.Precision > 38 {
+		return fmt.Errorf("column %s has decimal precision %d; maximum supported precision is 38", path, col.Precision)
+	}
+	switch col.DataType {
+	case schema.TypeArray:
+		if col.Element != nil {
+			return validateInferredColumn(*col.Element, path+".element")
+		}
+		return validateInferredColumn(schema.Column{
+			Name: "element", DataType: col.ArrayType, Nullable: true,
+			Precision: col.Precision, Scale: col.Scale, MaxLength: col.MaxLength, FixedLength: col.FixedLength,
+		}, path+".element")
+	case schema.TypeStruct:
+		if col.StructFields != nil {
+			for _, field := range col.StructFields.Columns {
+				if err := validateInferredColumn(field, path+"."+field.Name); err != nil {
+					return err
+				}
+			}
+		}
+	case schema.TypeMap:
+		if col.MapKey != nil {
+			if err := validateInferredColumn(*col.MapKey, path+".key"); err != nil {
+				return err
+			}
+		}
+		if col.MapValue != nil {
+			return validateInferredColumn(*col.MapValue, path+".value")
 		}
 	}
 	return nil

@@ -58,9 +58,14 @@ func (s *ArrowStreamSource) Connect(ctx context.Context, uri string) error {
 		reader.Release()
 		return fmt.Errorf("arrow stream has no schema")
 	}
+	knownSchema := schemaFromArrow(arrowSchema, "")
+	if err := schemainfer.ValidateSchema(knownSchema); err != nil {
+		reader.Release()
+		return fmt.Errorf("invalid arrow stream schema: %w", err)
+	}
 
 	s.reader = reader
-	s.knownSchema = schemaFromArrow(arrowSchema, "")
+	s.knownSchema = knownSchema
 	config.Debug("[ARROW-STREAM] Connected to Arrow IPC stream with %d columns", len(s.knownSchema.Columns))
 	return nil
 }

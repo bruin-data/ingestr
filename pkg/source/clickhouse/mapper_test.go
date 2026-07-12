@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
@@ -89,6 +90,20 @@ func TestMapClickHouseToDataType_ArrayWrappers(t *testing.T) {
 			require.Equal(t, tt.wantArray, gotArray)
 		})
 	}
+}
+
+func TestMapClickHouseDecimal256ArrayFailsSchemaValidation(t *testing.T) {
+	dataType, precision, scale, arrayType := MapClickHouseToDataType("Array(Decimal256(76,38))")
+	require.Equal(t, schema.TypeArray, dataType)
+	require.Equal(t, schema.TypeDecimal, arrayType)
+	require.Equal(t, 76, precision)
+	require.Equal(t, 38, scale)
+
+	err := schemainfer.ValidateSchema(&schema.TableSchema{Columns: []schema.Column{{
+		Name: "amounts", DataType: dataType, ArrayType: arrayType, Precision: precision, Scale: scale,
+	}}})
+	require.ErrorContains(t, err, "amounts.element")
+	require.ErrorContains(t, err, "decimal precision 76")
 }
 
 func TestNativeScanTarget_ArrayWrappers(t *testing.T) {

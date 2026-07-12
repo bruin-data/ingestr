@@ -182,12 +182,16 @@ func (i *SchemaInferrer) ToTableSchema(tableName string) (*schema.TableSchema, e
 		return nil, nil
 	}
 
-	return &schema.TableSchema{
+	result := &schema.TableSchema{
 		Name:        tblName,
 		Schema:      schemaName,
 		Columns:     columns,
 		PrimaryKeys: nil, // Cannot infer PKs from data
-	}, nil
+	}
+	if err := ValidateSchema(result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // DroppedColumns returns columns that were dropped during inference (all-null nullable columns).

@@ -266,6 +266,10 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 		return castUnknownArray(arr, target)
 	}
 
+	if aligned, handled, err := alignNestedArray(ctx, arr, target, safe); handled {
+		return aligned, err
+	}
+
 	if isJSONType(target) {
 		return castArrayToJSON(ctx, arr, target)
 	}
@@ -320,6 +324,95 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 	}
 
 	return nil, err
+}
+
+func alignNestedArray(ctx context.Context, arr arrow.Array, target arrow.DataType, safe bool) (arrow.Array, bool, error) {
+	switch targetType := target.(type) {
+	case *arrow.StructType:
+		source, ok := arr.(*array.Struct)
+		if !ok {
+			return nil, false, nil
+		}
+		result, err := alignStructArray(ctx, source, targetType, safe)
+		return result, true, err
+	case *arrow.MapType:
+		source, ok := arr.(*array.Map)
+		if !ok {
+			return nil, false, nil
+		}
+		keys, err := castArrayToType(ctx, source.Keys(), targetType.KeyType(), safe)
+		if err != nil {
+			return nil, true, fmt.Errorf("failed to align map key: %w", err)
+		}
+		defer keys.Release()
+		items, err := castArrayToType(ctx, source.Items(), targetType.ItemType(), safe)
+		if err != nil {
+			return nil, true, fmt.Errorf("failed to align map value: %w", err)
+		}
+		defer items.Release()
+
+		entriesType := targetType.Elem().(*arrow.StructType)
+		entriesData := array.NewData(entriesType, keys.Len(), []*memory.Buffer{nil}, []arrow.ArrayData{keys.Data(), items.Data()}, 0, 0)
+		defer entriesData.Release()
+		return rebuildNestedArray(arr, target, []arrow.ArrayData{entriesData}), true, nil
+	case arrow.ListLikeType:
+		if arr.DataType().ID() != target.ID() {
+			return nil, false, nil
+		}
+		source, ok := arr.(array.ListLike)
+		if !ok {
+			return nil, false, nil
+		}
+		values, err := castArrayToType(ctx, source.ListValues(), targetType.Elem(), safe)
+		if err != nil {
+			return nil, true, fmt.Errorf("failed to align list element: %w", err)
+		}
+		defer values.Release()
+		return rebuildNestedArray(arr, target, []arrow.ArrayData{values.Data()}), true, nil
+	}
+
+	return nil, false, nil
+}
+
+func alignStructArray(ctx context.Context, source *array.Struct, target *arrow.StructType, safe bool) (arrow.Array, error) {
+	sourceType := source.DataType().(*arrow.StructType)
+	sourceFields := make(map[string]int, sourceType.NumFields())
+	for i, field := range sourceType.Fields() {
+		sourceFields[strings.ToLower(field.Name)] = i
+	}
+
+	children := make([]arrow.Array, target.NumFields())
+	defer func() {
+		for _, child := range children {
+			if child != nil {
+				child.Release()
+			}
+		}
+	}()
+
+	childData := make([]arrow.ArrayData, target.NumFields())
+	for i, field := range target.Fields() {
+		sourceIndex, ok := sourceFields[strings.ToLower(field.Name)]
+		var err error
+		if ok {
+			children[i], err = castArrayToType(ctx, source.Field(sourceIndex), field.Type, safe)
+		} else {
+			children[i], err = makeNullArray(memory.DefaultAllocator, field.Type, source.Len())
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to align struct field %s: %w", field.Name, err)
+		}
+		childData[i] = children[i].Data()
+	}
+
+	return rebuildNestedArray(source, target, childData), nil
+}
+
+func rebuildNestedArray(source arrow.Array, target arrow.DataType, children []arrow.ArrayData) arrow.Array {
+	data := source.Data()
+	resultData := array.NewData(target, source.Len(), data.Buffers(), children, source.NullN(), data.Offset())
+	defer resultData.Release()
+	return array.MakeFromData(resultData)
 }
 
 func normalizeArrayOffset(arr arrow.Array) (arrow.Array, bool, error) {

@@ -722,6 +722,25 @@ func AppendValue(builder array.Builder, val interface{}) {
 
 	case *array.ListBuilder:
 		appendListValue(b, val)
+	case *array.FixedSizeListBuilder:
+		appendFixedSizeListValue(b, val)
+	case *array.StructBuilder:
+		appendStructValue(b, val)
+	case *array.MapBuilder:
+		appendMapValue(b, val)
+	case *array.FixedSizeBinaryBuilder:
+		var data []byte
+		switch v := val.(type) {
+		case []byte:
+			data = v
+		case string:
+			data = []byte(v)
+		}
+		if len(data) != b.Type().(*arrow.FixedSizeBinaryType).ByteWidth {
+			b.AppendNull()
+		} else {
+			b.Append(data)
+		}
 
 	default:
 		builder.AppendNull()
@@ -805,6 +824,111 @@ func parseDecimal128Fast(s string, precision, scale int32) (decimal128.Num, bool
 		v = -v
 	}
 	return decimal128.FromI64(v), true
+}
+
+func appendFixedSizeListValue(b *array.FixedSizeListBuilder, val interface{}) {
+	rv := reflect.ValueOf(val)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		b.AppendNull()
+		return
+	}
+	if rv.Len() != int(b.Type().(*arrow.FixedSizeListType).Len()) {
+		b.AppendNull()
+		return
+	}
+	b.Append(true)
+	for i := 0; i < rv.Len(); i++ {
+		elem, ok := listElementValue(rv.Index(i))
+		if !ok {
+			b.ValueBuilder().AppendNull()
+		} else {
+			AppendValue(b.ValueBuilder(), elem)
+		}
+	}
+}
+
+func appendStructValue(b *array.StructBuilder, val interface{}) {
+	values := make([]interface{}, b.NumField())
+	matched := false
+	switch v := val.(type) {
+	case map[string]interface{}:
+		matched = true
+		fields := b.Type().(*arrow.StructType).Fields()
+		for i, field := range fields {
+			for key, value := range v {
+				if strings.EqualFold(key, field.Name) {
+					values[i] = value
+					break
+				}
+			}
+		}
+	default:
+		rv := reflect.ValueOf(val)
+		if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+			rv = rv.Elem()
+		}
+		if rv.IsValid() && rv.Kind() == reflect.Map && rv.Type().Key().Kind() == reflect.String {
+			matched = true
+			fields := b.Type().(*arrow.StructType).Fields()
+			for _, key := range rv.MapKeys() {
+				for i, field := range fields {
+					if strings.EqualFold(key.String(), field.Name) {
+						values[i] = rv.MapIndex(key).Interface()
+						break
+					}
+				}
+			}
+		} else if rv.IsValid() && rv.Kind() == reflect.Struct {
+			matched = true
+			fields := b.Type().(*arrow.StructType).Fields()
+			for i := 0; i < rv.NumField(); i++ {
+				if !rv.Field(i).CanInterface() {
+					continue
+				}
+				inputName := rv.Type().Field(i).Name
+				for _, tag := range []string{"json", "bson"} {
+					if tagged := strings.Split(rv.Type().Field(i).Tag.Get(tag), ",")[0]; tagged != "" && tagged != "-" {
+						inputName = tagged
+						break
+					}
+				}
+				for fieldIndex, field := range fields {
+					if strings.EqualFold(inputName, field.Name) {
+						values[fieldIndex] = rv.Field(i).Interface()
+						break
+					}
+				}
+			}
+		} else if rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) && rv.Len() == b.NumField() {
+			for i := range values {
+				values[i] = rv.Index(i).Interface()
+			}
+			matched = true
+		}
+	}
+	if !matched {
+		b.AppendNull()
+		return
+	}
+	b.Append(true)
+	for i, value := range values {
+		AppendValue(b.FieldBuilder(i), value)
+	}
+}
+
+func appendMapValue(b *array.MapBuilder, val interface{}) {
+	rv := reflect.ValueOf(val)
+	if !rv.IsValid() || rv.Kind() != reflect.Map {
+		b.AppendNull()
+		return
+	}
+	keys := rv.MapKeys()
+	sort.Slice(keys, func(i, j int) bool { return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface()) })
+	b.Append(true)
+	for _, key := range keys {
+		AppendValue(b.KeyBuilder(), key.Interface())
+		AppendValue(b.ItemBuilder(), rv.MapIndex(key).Interface())
+	}
 }
 
 func appendListValue(b *array.ListBuilder, val interface{}) {

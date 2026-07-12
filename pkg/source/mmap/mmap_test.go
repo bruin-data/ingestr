@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -14,6 +17,53 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMMapSourceConnectValidatesNestedDecimalPrecision(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		precision int32
+		wantError bool
+	}{
+		{name: "maximum supported precision", precision: 38},
+		{name: "unsupported precision", precision: 50, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "nested.arrow")
+			arrowSchema := arrow.NewSchema([]arrow.Field{{
+				Name: "payload",
+				Type: arrow.StructOf(arrow.Field{
+					Name:     "amount",
+					Type:     &arrow.Decimal256Type{Precision: tt.precision, Scale: 4},
+					Nullable: true,
+				}),
+				Nullable: true,
+			}}, nil)
+			writeArrowSchemaFile(t, path, arrowSchema)
+
+			src := NewMMapSource()
+			err := src.Connect(context.Background(), "mmap://"+path)
+			if tt.wantError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "payload.amount")
+				assert.Contains(t, err.Error(), "precision 50")
+				assert.Empty(t, src.filePaths)
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = src.Close(context.Background()) })
+		})
+	}
+}
+
+func writeArrowSchemaFile(t *testing.T, path string, arrowSchema *arrow.Schema) {
+	t.Helper()
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	w, err := ipc.NewFileWriter(f, ipc.WithSchema(arrowSchema))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, f.Close())
+}
 
 func TestMMapSourceSingleFile(t *testing.T) {
 	t.Parallel()

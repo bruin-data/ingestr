@@ -704,6 +704,105 @@ func TestCastRecordToSchema(t *testing.T) {
 	})
 }
 
+func TestFileBuffer_AlignsNestedSchemaEvolution(t *testing.T) {
+	profileSource := arrow.StructOf(
+		arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		arrow.Field{Name: "removed", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	)
+	profileTarget := arrow.StructOf(
+		arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		arrow.Field{Name: "active", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
+	)
+	eventSource := arrow.StructOf(
+		arrow.Field{Name: "code", Type: arrow.BinaryTypes.String, Nullable: true},
+		arrow.Field{Name: "removed", Type: arrow.BinaryTypes.String, Nullable: true},
+	)
+	eventTarget := arrow.StructOf(
+		arrow.Field{Name: "code", Type: arrow.BinaryTypes.String, Nullable: true},
+		arrow.Field{Name: "count", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	)
+	mapValueSource := arrow.StructOf(
+		arrow.Field{Name: "score", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		arrow.Field{Name: "removed", Type: arrow.BinaryTypes.String, Nullable: true},
+	)
+	mapValueTarget := arrow.StructOf(
+		arrow.Field{Name: "score", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		arrow.Field{Name: "label", Type: arrow.BinaryTypes.String, Nullable: true},
+	)
+
+	sourcePayload := arrow.StructOf(
+		arrow.Field{Name: "profile", Type: profileSource, Nullable: true},
+		arrow.Field{Name: "events", Type: arrow.ListOf(eventSource), Nullable: true},
+		arrow.Field{Name: "lookup", Type: arrow.MapOf(arrow.BinaryTypes.String, mapValueSource), Nullable: true},
+	)
+	targetPayload := arrow.StructOf(
+		arrow.Field{Name: "profile", Type: profileTarget, Nullable: true},
+		arrow.Field{Name: "events", Type: arrow.ListOf(eventTarget), Nullable: true},
+		arrow.Field{Name: "lookup", Type: arrow.MapOf(arrow.BinaryTypes.String, mapValueTarget), Nullable: true},
+		arrow.Field{Name: "added", Type: arrow.BinaryTypes.String, Nullable: true},
+	)
+	sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: sourcePayload, Nullable: true}}, nil)
+	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: targetPayload, Nullable: true}}, nil)
+
+	builder := array.NewBuilder(memory.DefaultAllocator, sourcePayload)
+	arrowconv.AppendValue(builder, map[string]interface{}{
+		"profile": map[string]interface{}{"name": "Ada", "removed": int64(9)},
+		"events":  []interface{}{map[string]interface{}{"code": "created", "removed": "old"}},
+		"lookup":  map[string]interface{}{"primary": map[string]interface{}{"score": int32(7), "removed": "old"}},
+	})
+	builder.AppendNull()
+	payload := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{payload}, 2)
+	payload.Release()
+	defer record.Release()
+
+	assertAligned := func(t *testing.T, result arrow.RecordBatch) {
+		t.Helper()
+		require.True(t, result.Schema().Equal(targetSchema))
+		outer := result.Column(0).(*array.Struct)
+		assert.True(t, outer.IsValid(0))
+		assert.True(t, outer.IsNull(1))
+
+		profile := outer.Field(0).(*array.Struct)
+		assert.Equal(t, "Ada", profile.Field(0).(*array.String).Value(0))
+		assert.True(t, profile.Field(1).IsNull(0), "new struct field must be null-filled")
+
+		events := outer.Field(1).(*array.List)
+		eventValues := events.ListValues().(*array.Struct)
+		assert.Equal(t, "created", eventValues.Field(0).(*array.String).Value(0))
+		assert.True(t, eventValues.Field(1).IsNull(0), "new list element field must be null-filled")
+
+		lookup := outer.Field(2).(*array.Map)
+		assert.Equal(t, "primary", lookup.Keys().(*array.String).Value(0))
+		mapValues := lookup.Items().(*array.Struct)
+		assert.Equal(t, int64(7), mapValues.Field(0).(*array.Int64).Value(0))
+		assert.True(t, mapValues.Field(1).IsNull(0), "new map value field must be null-filled")
+		assert.True(t, outer.Field(3).IsNull(0), "new outer field must be null-filled")
+	}
+
+	t.Run("direct cast", func(t *testing.T) {
+		result, err := CastRecordToSchema(record, targetSchema, true)
+		require.NoError(t, err)
+		defer result.Release()
+		assertAligned(t, result)
+	})
+
+	t.Run("file round trip", func(t *testing.T) {
+		buf, err := NewFileBuffer()
+		require.NoError(t, err)
+		defer func() { _ = buf.Close() }()
+		require.NoError(t, buf.Append(context.Background(), record))
+
+		ch, err := buf.Reader(context.Background(), targetSchema)
+		require.NoError(t, err)
+		batches := readAllBatches(t, ch)
+		defer releaseBatches(batches)
+		require.Len(t, batches, 1)
+		assertAligned(t, batches[0])
+	})
+}
+
 func TestCastRecordToSchema_UnknownToJSONEncodesScalarStrings(t *testing.T) {
 	mem := memory.DefaultAllocator
 
