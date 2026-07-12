@@ -122,18 +122,18 @@ Salesforce source allows ingesting the following objects into separate tables:
 | `account` | id | SystemModstamp | merge | Individual or organization that interacts with your business. |
 | `account_history` | id | CreatedDate | merge | Tracks changes made to fields on Account records. |
 | `agent_work` | id | SystemModstamp | merge | Represents a work item routed to an agent through Omni-Channel. |
-| `campaign` | id | - | replace | Marketing initiative or project designed to achieve specific goals, such as generating leads. |
+| `campaign` | id | SystemModstamp | merge | Marketing initiative or project designed to achieve specific goals, such as generating leads. |
 | `campaign_history` | id | CreatedDate | merge | Tracks changes made to fields on Campaign records. |
-| `campaign_member` | id | - | replace | Association between a Contact or Lead and a Campaign. |
+| `campaign_member` | id | SystemModstamp | merge | Association between a Contact or Lead and a Campaign. |
 | `campaign_member_status` | id | - | replace | Represents the possible member statuses for a Campaign. |
 | `case` | id | SystemModstamp | merge | A customer issue or problem, used for support and service tracking. |
 | `case_feed` | id | SystemModstamp | merge | Feed items (posts, comments, updates) associated with a Case. |
 | `case_history` | id | CreatedDate | merge | Tracks changes made to fields on Case records. |
-| `case_milestone` | id | - | replace | Represents a milestone (required step) in an entitlement process on a Case. |
-| `contact` | id | - | replace | An individual person associated with an account or organization. |
+| `case_milestone` | id | SystemModstamp | merge | Represents a milestone (required step) in an entitlement process on a Case. |
+| `contact` | id | SystemModstamp | merge | An individual person associated with an account or organization. |
 | `contact_history` | id | CreatedDate | merge | Tracks changes made to fields on Contact records. |
-| `content_document` | id | - | replace | A document uploaded to a library in Salesforce Files or CRM Content. |
-| `content_version` | id | - | replace | A specific version of a document in Salesforce Files or CRM Content. |
+| `content_document` | id | SystemModstamp | merge | A document uploaded to a library in Salesforce Files or CRM Content. |
+| `content_version` | id | SystemModstamp | merge | A specific version of a document in Salesforce Files or CRM Content. |
 | `conversation` | id | LastModifiedDate | merge | Represents a conversation in messaging channels. |
 | `conversation_entry` | id | SystemModstamp | merge | An individual message or event within a Conversation. |
 | `conversation_participant` | id | LastModifiedDate | merge | A participant in a Conversation. |
@@ -146,7 +146,7 @@ Salesforce source allows ingesting the following objects into separate tables:
 | `folder` | id | - | replace | A folder used to organize documents, dashboards, reports, or email templates. |
 | `forecasting_quota` | id | - | replace | An individual user's or territory's forecast quota for a period. |
 | `group` | id | - | replace | A set of users, such as a public group or queue. |
-| `lead` | id | - | replace | Prospective customer/individual/org. that has shown interest in a company's products/services. |
+| `lead` | id | SystemModstamp | merge | Prospective customer/individual/org. that has shown interest in a company's products/services. |
 | `lead_history` | id | CreatedDate | merge | Tracks changes made to fields on Lead records. |
 | `opportunity` | id | SystemModstamp | merge | Represents a sales opportunity for a specific account or contact. |
 | `opportunity_contact_role` | id | - | replace | Represents the association between an Opportunity and a Contact. |
@@ -157,9 +157,9 @@ Salesforce source allows ingesting the following objects into separate tables:
 | `opportunity_split_type` | id | - | replace | Represents the type of an Opportunity split, such as revenue or overlay. |
 | `permission_set` | id | - | replace | A set of permissions and settings that can be assigned to users. |
 | `permission_set_assignment` | id | - | replace | The assignment of a Permission Set to a user. |
-| `pricebook` | id | - | replace | Used to manage product pricing and create price books. |
-| `pricebook_entry` | id | - | replace | Represents a specific price for a product in a price book. |
-| `product` | id | - | replace | For managing and organizing your product-related data within the Salesforce ecosystem. |
+| `pricebook` | id | SystemModstamp | merge | Used to manage product pricing and create price books. |
+| `pricebook_entry` | id | SystemModstamp | merge | Represents a specific price for a product in a price book. |
+| `product` | id | SystemModstamp | merge | For managing and organizing your product-related data within the Salesforce ecosystem. |
 | `profile` | id | - | replace | Defines a user's permissions and access settings. |
 | `record_type` | id | - | replace | Represents a record type, which offers different business processes and page layouts per object. |
 | `report` | id | - | replace | Represents a report, a set of data returned in rows and columns. |
