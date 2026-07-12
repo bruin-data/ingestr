@@ -1,11 +1,28 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/urfave/cli/v3"
 )
+
+func TestColumnsHelpDocumentsDecimalPrecisionOnlyScale(t *testing.T) {
+	command := IngestCommand()
+	for _, flag := range command.Flags {
+		if flag.Names()[0] != "columns" {
+			continue
+		}
+		help := flag.(*cli.StringFlag).Usage
+		if !strings.Contains(help, "decimal(p)") || !strings.Contains(help, "decimal(p,0)") {
+			t.Fatalf("columns help does not document decimal(p) scale semantics: %q", help)
+		}
+		return
+	}
+	t.Fatal("columns flag not found")
+}
 
 func TestParseExtractPartitionInterval(t *testing.T) {
 	tests := []struct {

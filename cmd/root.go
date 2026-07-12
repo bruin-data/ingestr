@@ -19,6 +19,7 @@ func NewApp() *cli.Command {
 		Version: versionFlagValue(),
 		Commands: []*cli.Command{
 			IngestCommand(),
+			CheckCommand(),
 			ServerCommand(),
 		},
 	}

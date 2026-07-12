@@ -169,7 +169,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "columns",
-				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:varchar(50):fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p,s), string, text, varchar(n), boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
+				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:varchar(50):fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p), decimal(p,s), string, text, varchar(n), boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary. decimal(p) is equivalent to decimal(p,0)",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
 			&cli.BoolFlag{

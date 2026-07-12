@@ -49,4 +49,6 @@ Tables created on the source after CDC has been set up are picked up automatical
 
 With a user-managed publication (`publication=` supplied), ingestr never alters the publication: a new table is picked up after you run `ALTER PUBLICATION ... ADD TABLE` yourself (or immediately, if the publication was created `FOR ALL TABLES`).
 
-The backfill-plus-stream handoff is safe under the `merge` strategy: changes that fall in the overlap between the snapshot and the WAL stream are applied idempotently by primary key. Tables without a primary key (or replica identity) cannot be part of logical replication and are skipped with a warning.
+The backfill-plus-stream handoff is safe under the `merge` strategy: changes that fall in the overlap between the snapshot and the WAL stream are applied idempotently by primary key. Tables without a usable replica identity cannot be part of logical replication and are skipped with a warning.
+
+A table using `REPLICA IDENTITY FULL` can be replicated without a primary key, but it has no stable row identity for a merge. ingestr lands it as an append-only retract log: an update produces a deleted old image plus a live new image, and a delete produces a deleted old image. WAL transactions carry stable durable identifiers; destinations with durable commit-token support, including Iceberg, use them to make finite-run and streaming retries idempotent.

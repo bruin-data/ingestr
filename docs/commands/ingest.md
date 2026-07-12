@@ -80,7 +80,7 @@ ingestr ingest \
 > **New tables.** Postgres CDC picks up tables created after ingestion started. A batch run detects them at startup; a stream additionally re-checks the source on an interval (`discover_interval` URI parameter, default `30s`). When a running stream finds a new eligible table, it exits before changing destination data and asks its supervisor to restart it. The restarted process snapshots the table and then streams its retained WAL. User-managed publications are respected, so add the table to the publication yourself. See the [Postgres CDC documentation](../supported-sources/postgres.md#change-data-capture-postgrescdc) for details.
 
 > [!INFO]
-> Column-level schema changes are picked up at startup. If a table's columns change while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
+> **Mid-stream schema changes.** Sources that announce refreshed table schemas, including CDC sources, can apply compatible column changes without a restart. ingestr first flushes records buffered under the old schema, evolves the destination according to `--schema-contract`, aligns subsequent batches to the effective destination schema, and recreates staging before continuing. Primary-key changes still require stopping the stream and running a full refresh. Changes between incompatible nested container kinds, fixed-size-list cardinality changes, map-key changes, and fixed-binary width changes are rejected. Atomic-snapshot schema refresh with `discard_row` is also unsupported. A destination that cannot alter an existing column type keeps its current physical type; use a full refresh when that type must change. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
 
 ### Monitoring a stream
 
@@ -230,7 +230,7 @@ ingestr ingest \
    --columns 'id:bigint,signup_date:date,balance:decimal(18,2)'
 ```
 
-Supported types include `bigint`, `int`, `smallint`, `tinyint`, `float`, `double`, `decimal(p,s)`, `string`, `text`, `varchar(n)`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `json`, `uuid`, and `binary`.
+Supported types include `bigint`, `int`, `smallint`, `tinyint`, `float`, `double`, `decimal(p)`, `decimal(p,s)`, `string`, `text`, `varchar(n)`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `json`, `uuid`, and `binary`. `decimal(p)` is equivalent to `decimal(p,0)`; use `decimal(p,s)` when fractional digits must be preserved.
 
 #### Sized string types
 

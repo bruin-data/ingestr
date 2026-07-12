@@ -291,7 +291,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("arrowstream", "Arrow Stream", []string{"arrow-stream", "arrowstream"}, true, false),
 		genericURIConnector("asana", "Asana", []string{"asana"}, true, false),
 		genericURIConnector("athena", "Amazon Athena", []string{"athena"}, true, true),
-		genericURIConnector("iceberg", "Apache Iceberg", []string{"iceberg", "iceberg+rest", "iceberg+glue", "iceberg+hive", "iceberg+hadoop", "iceberg+sql", "iceberg+sqlite", "iceberg+postgres"}, false, true),
+		genericURIConnector("iceberg", "Apache Iceberg", []string{"iceberg", "iceberg+rest", "iceberg+nessie", "iceberg+polaris", "iceberg+s3tables", "iceberg+glue", "iceberg+hive", "iceberg+hadoop", "iceberg+sql", "iceberg+sqlite", "iceberg+postgres"}, false, true),
 		genericURIConnector("attio", "Attio", []string{"attio"}, true, false),
 		genericURIConnector("avro", "Avro File", []string{"avro"}, true, false),
 		genericURIConnector("balldontlie", "balldontlie", []string{"balldontlie"}, true, false),
