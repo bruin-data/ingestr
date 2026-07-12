@@ -78,17 +78,18 @@ func TestParseSchemaTable(t *testing.T) {
 func TestBuildCreateTableSQL(t *testing.T) {
 	t.Parallel()
 	columns := []schema.Column{
-		{Name: "id", DataType: schema.TypeInt64},
-		{Name: "name", DataType: schema.TypeString},
-		{Name: "active", DataType: schema.TypeBoolean},
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+		{Name: "active", DataType: schema.TypeBoolean, Nullable: false},
 	}
 
 	sql := buildCreateTableSQL(`"doc"."users"`, columns, []string{"id"})
-	assert.Contains(t, sql, `CREATE TABLE IF NOT EXISTS "doc"."users"`)
-	assert.Contains(t, sql, `"id" BIGINT`)
-	assert.Contains(t, sql, `"name" TEXT`)
-	assert.Contains(t, sql, `"active" BOOLEAN`)
-	assert.Contains(t, sql, `PRIMARY KEY ("id")`)
+	assert.Equal(t, `CREATE TABLE IF NOT EXISTS "doc"."users" (
+  "id" BIGINT NOT NULL,
+  "name" TEXT,
+  "active" BOOLEAN NOT NULL,
+  PRIMARY KEY ("id")
+)`, sql)
 }
 
 func TestBuildCreateTableSQLNoPrimaryKey(t *testing.T) {

@@ -15,10 +15,13 @@ func (d *Dialect) Name() string {
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
-		destination.QuoteTableName(table),
-		d.QuoteIdentifier(col.Name),
-		d.TypeName(col))
+	quotedTable := destination.QuoteTableName(table)
+	quotedColumn := d.QuoteIdentifier(col.Name)
+	add := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", quotedTable, quotedColumn, d.TypeName(col))
+	if col.Nullable {
+		return add
+	}
+	return fmt.Sprintf("%s; ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", add, quotedTable, quotedColumn)
 }
 
 func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {

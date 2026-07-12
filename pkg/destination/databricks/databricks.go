@@ -604,7 +604,11 @@ func (d *DatabricksDestination) buildCreateTableSQL(fullTable string, columns []
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToDatabricks(col)
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
+		nullability := ""
+		if !col.Nullable {
+			nullability = " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf("%s %s%s", quoteIdentifier(col.Name), colType, nullability))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", fullTable, strings.Join(colDefs, ",\n  "))

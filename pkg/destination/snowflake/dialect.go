@@ -15,10 +15,15 @@ func (d *Dialect) Name() string {
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+	nullability := ""
+	if !col.Nullable {
+		nullability = " NOT NULL"
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s%s",
 		table,
 		d.QuoteIdentifier(col.Name),
-		d.TypeName(col))
+		d.TypeName(col),
+		nullability)
 }
 
 func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {

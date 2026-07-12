@@ -1108,7 +1108,11 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSnowflake(col)
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
+		colDef := fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType)
+		if !col.Nullable {
+			colDef += " NOT NULL"
+		}
+		colDefs = append(colDefs, colDef)
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))

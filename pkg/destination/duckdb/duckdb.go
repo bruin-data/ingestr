@@ -1768,7 +1768,11 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToDuckDB(col)
-		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, quoteIdentifier(col.Name), colType))
+		nullability := ""
+		if !col.Nullable {
+			nullability = " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s%s`, quoteIdentifier(col.Name), colType, nullability))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))

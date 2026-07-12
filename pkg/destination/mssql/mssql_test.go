@@ -536,6 +536,21 @@ func TestFilterColumnsRetainsOrdinaryCaseInsensitiveMSSQLMatching(t *testing.T) 
 	}
 }
 
+func TestBuildCreateTableSQL_PreservesRequiredness(t *testing.T) {
+	got := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+	}, []string{"id"})
+
+	want := "IF OBJECT_ID('[dbo].[events]', 'U') IS NULL CREATE TABLE [dbo].[events] (\n" +
+		"  [id] BIGINT NOT NULL,\n" +
+		"  [name] NVARCHAR(MAX),\n" +
+		"  PRIMARY KEY ([id])\n)"
+	if got != want {
+		t.Fatalf("buildCreateTableSQL() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
 	sql := buildDeleteInsertDeleteSQL("dbo.events", "updated_at")
 

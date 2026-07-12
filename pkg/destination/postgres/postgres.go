@@ -1369,6 +1369,9 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 			DataType: mapPostgresTypeToSchema(dataType, udtName),
 			Nullable: isNullable == "YES",
 		}
+		if col.DataType == schema.TypeArray {
+			col.ArrayType = mapPostgresArrayElementTypeToSchema(udtName)
+		}
 
 		if numPrecision != nil {
 			col.Precision = *numPrecision
@@ -1399,22 +1402,22 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 }
 
 func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
-	switch dataType {
-	case "boolean":
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "boolean", "bool":
 		return schema.TypeBoolean
-	case "smallint":
+	case "smallint", "int2":
 		return schema.TypeInt16
-	case "integer":
+	case "integer", "int", "int4":
 		return schema.TypeInt32
-	case "bigint":
+	case "bigint", "int8":
 		return schema.TypeInt64
-	case "real":
+	case "real", "float4":
 		return schema.TypeFloat32
-	case "double precision":
+	case "double precision", "float8":
 		return schema.TypeFloat64
 	case "numeric", "decimal":
 		return schema.TypeDecimal
-	case "character varying", "varchar", "character", "char", "text":
+	case "character varying", "varchar", "character", "char", "text", "bpchar", "name":
 		return schema.TypeString
 	case "bytea":
 		return schema.TypeBinary
@@ -1424,7 +1427,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		return schema.TypeTime
 	case "timestamp", "timestamp without time zone":
 		return schema.TypeTimestamp
-	case "timestamp with time zone":
+	case "timestamp with time zone", "timestamptz":
 		return schema.TypeTimestampTZ
 	case "interval":
 		return schema.TypeInterval
@@ -1432,7 +1435,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		return schema.TypeJSON
 	case "uuid":
 		return schema.TypeUUID
-	case "ARRAY":
+	case "array":
 		return schema.TypeArray
 	default:
 		if strings.HasPrefix(udtName, "_") {
@@ -1440,6 +1443,11 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		}
 		return schema.TypeString
 	}
+}
+
+func mapPostgresArrayElementTypeToSchema(udtName string) schema.DataType {
+	elementType := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(udtName)), "_")
+	return mapPostgresTypeToSchema(elementType, "")
 }
 
 // quoteColumns returns column names wrapped in double quotes.
@@ -1532,7 +1540,11 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToPostgres(col)
-		colDefs = append(colDefs, fmt.Sprintf(`%s %s`, destination.QuoteIdentifier(col.Name), colType))
+		nullability := ""
+		if !col.Nullable {
+			nullability = " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf(`%s %s%s`, destination.QuoteIdentifier(col.Name), colType, nullability))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", table, strings.Join(colDefs, ",\n  "))

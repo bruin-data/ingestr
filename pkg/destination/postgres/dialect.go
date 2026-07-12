@@ -20,10 +20,15 @@ func (d *Dialect) Name() string {
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+	nullability := ""
+	if !col.Nullable {
+		nullability = " NOT NULL"
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s%s",
 		destination.QuoteTableName(table),
 		d.QuoteIdentifier(col.Name),
-		d.TypeName(col))
+		d.TypeName(col),
+		nullability)
 }
 
 func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {
@@ -39,6 +44,11 @@ func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Colum
 
 func (d *Dialect) SupportsAlterType() bool {
 	return true
+}
+
+func (d *Dialect) RelaxColumnNullabilitySQL(table, colName string) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL",
+		destination.QuoteTableName(table), d.QuoteIdentifier(colName))
 }
 
 func (d *Dialect) TypeName(col schema.Column) string {
@@ -69,6 +79,8 @@ func (d *Dialect) TypeName(col schema.Column) string {
 		return "TEXT"
 	case schema.TypeBinary:
 		return "BYTEA"
+	case schema.TypeFixedBinary:
+		return "BYTEA"
 	case schema.TypeDate:
 		return "DATE"
 	case schema.TypeTime:
@@ -84,8 +96,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
-		return d.TypeName(elemCol) + "[]"
+		return d.TypeName(postgresArrayElementColumn(col)) + "[]"
 	default:
 		return "TEXT"
 	}

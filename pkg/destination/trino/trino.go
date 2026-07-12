@@ -537,7 +537,11 @@ func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Col
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToTrino(col)
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
+		nullability := ""
+		if !col.Nullable {
+			nullability = " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf("%s %s%s", quoteIdentifier(col.Name), colType, nullability))
 	}
 
 	sql := fmt.Sprintf(

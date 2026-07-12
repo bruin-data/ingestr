@@ -612,7 +612,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 				{Name: "name", DataType: schema.TypeString, Nullable: true},
 			},
 			primaryKeys: nil,
-			want:        "CREATE TABLE IF NOT EXISTS `users` (\n  `id` BIGINT,\n  `name` TEXT\n)",
+			want:        "CREATE TABLE IF NOT EXISTS `users` (\n  `id` BIGINT NOT NULL,\n  `name` TEXT\n)",
 		},
 		{
 			name:  "table with primary key",
@@ -622,7 +622,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 				{Name: "name", DataType: schema.TypeString, Nullable: true},
 			},
 			primaryKeys: []string{"id"},
-			want:        "CREATE TABLE IF NOT EXISTS `users` (\n  `id` BIGINT,\n  `name` TEXT,\n  PRIMARY KEY (`id`)\n)",
+			want:        "CREATE TABLE IF NOT EXISTS `users` (\n  `id` BIGINT NOT NULL,\n  `name` TEXT,\n  PRIMARY KEY (`id`)\n)",
 		},
 		{
 			name:  "table with composite primary key",
@@ -633,7 +633,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 				{Name: "created_at", DataType: schema.TypeTimestamp, Nullable: true},
 			},
 			primaryKeys: []string{"user_id", "post_id"},
-			want:        "CREATE TABLE IF NOT EXISTS `user_posts` (\n  `user_id` BIGINT,\n  `post_id` BIGINT,\n  `created_at` DATETIME(6),\n  PRIMARY KEY (`user_id`, `post_id`)\n)",
+			want:        "CREATE TABLE IF NOT EXISTS `user_posts` (\n  `user_id` BIGINT NOT NULL,\n  `post_id` BIGINT NOT NULL,\n  `created_at` DATETIME(6),\n  PRIMARY KEY (`user_id`, `post_id`)\n)",
 		},
 		{
 			name:  "schema qualified table",
@@ -642,7 +642,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 				{Name: "id", DataType: schema.TypeInt64, Nullable: false},
 			},
 			primaryKeys: nil,
-			want:        "CREATE TABLE IF NOT EXISTS `mydb`.`users` (\n  `id` BIGINT\n)",
+			want:        "CREATE TABLE IF NOT EXISTS `mydb`.`users` (\n  `id` BIGINT NOT NULL\n)",
 		},
 		{
 			name:  "table with various types",
@@ -656,7 +656,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 				{Name: "created_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 			},
 			primaryKeys: []string{"id"},
-			want:        "CREATE TABLE IF NOT EXISTS `test_table` (\n  `id` BIGINT,\n  `name` TEXT,\n  `active` BOOLEAN,\n  `score` DOUBLE,\n  `amount` DECIMAL(10,2),\n  `created_at` TIMESTAMP(6),\n  PRIMARY KEY (`id`)\n)",
+			want:        "CREATE TABLE IF NOT EXISTS `test_table` (\n  `id` BIGINT NOT NULL,\n  `name` TEXT,\n  `active` BOOLEAN NOT NULL,\n  `score` DOUBLE,\n  `amount` DECIMAL(10,2),\n  `created_at` TIMESTAMP(6),\n  PRIMARY KEY (`id`)\n)",
 		},
 	}
 

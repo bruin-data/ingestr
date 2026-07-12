@@ -6,7 +6,25 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
+
+func TestTrinoRequirednessDDL(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "required", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "optional", DataType: schema.TypeString, Nullable: true},
+	}
+	if got, want := buildCreateTableSQL("iceberg", "raw", "events", columns), "CREATE TABLE IF NOT EXISTS \"iceberg\".\"raw\".\"events\" (\n  \"required\" BIGINT NOT NULL,\n  \"optional\" VARCHAR\n)"; got != want {
+		t.Fatalf("buildCreateTableSQL() = %q, want %q", got, want)
+	}
+	dialect := &Dialect{}
+	if got, want := dialect.AddColumnSQL(`"iceberg"."raw"."events"`, columns[0]), `ALTER TABLE "iceberg"."raw"."events" ADD COLUMN "required" BIGINT NOT NULL`; got != want {
+		t.Fatalf("required AddColumnSQL() = %q, want %q", got, want)
+	}
+	if got, want := dialect.AddColumnSQL(`"iceberg"."raw"."events"`, columns[1]), `ALTER TABLE "iceberg"."raw"."events" ADD COLUMN "optional" VARCHAR`; got != want {
+		t.Fatalf("optional AddColumnSQL() = %q, want %q", got, want)
+	}
+}
 
 func TestParseTrinoURI(t *testing.T) {
 	tests := []struct {

@@ -816,7 +816,11 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSynapse(col)
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
+		colDef := fmt.Sprintf("%s %s", quoteColumn(col.Name), colType)
+		if !col.Nullable {
+			colDef += " NOT NULL"
+		}
+		colDefs = append(colDefs, colDef)
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))

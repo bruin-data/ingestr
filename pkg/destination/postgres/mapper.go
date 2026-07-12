@@ -35,6 +35,8 @@ func MapDataTypeToPostgres(col schema.Column) string {
 		return "TEXT"
 	case schema.TypeBinary:
 		return "BYTEA"
+	case schema.TypeFixedBinary:
+		return "BYTEA"
 	case schema.TypeDate:
 		return "DATE"
 	case schema.TypeTime:
@@ -50,9 +52,18 @@ func MapDataTypeToPostgres(col schema.Column) string {
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
-		return MapDataTypeToPostgres(elemCol) + "[]"
+		return MapDataTypeToPostgres(postgresArrayElementColumn(col)) + "[]"
 	default:
 		return "TEXT"
+	}
+}
+
+func postgresArrayElementColumn(col schema.Column) schema.Column {
+	if col.Element != nil {
+		return *col.Element
+	}
+	return schema.Column{
+		DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale,
+		MaxLength: col.MaxLength, FixedLength: col.FixedLength, Nullable: true,
 	}
 }

@@ -24,6 +24,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBuildCreateTableSQLPreservesRequiredness(t *testing.T) {
+	got := buildCreateTableSQL(`"DB"."PUBLIC"."EVENTS"`, []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+	}, []string{"id"})
+
+	assert.Equal(t, `CREATE TABLE IF NOT EXISTS "DB"."PUBLIC"."EVENTS" (
+  "ID" BIGINT NOT NULL,
+  "NAME" VARCHAR,
+  PRIMARY KEY ("ID")
+)`, got)
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	t.Run("non_cdc", func(t *testing.T) {
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "")
@@ -116,6 +129,14 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
 		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 	})
+}
+
+func TestSnowflakeDialectAddColumnPreservesRequiredness(t *testing.T) {
+	dialect := &Dialect{}
+	require.Equal(t, `ALTER TABLE DB.SCHEMA.EVENTS ADD COLUMN "REQUIRED" BIGINT NOT NULL`,
+		dialect.AddColumnSQL("DB.SCHEMA.EVENTS", schema.Column{Name: "required", DataType: schema.TypeInt64}))
+	require.Equal(t, `ALTER TABLE DB.SCHEMA.EVENTS ADD COLUMN "OPTIONAL" BIGINT`,
+		dialect.AddColumnSQL("DB.SCHEMA.EVENTS", schema.Column{Name: "optional", DataType: schema.TypeInt64, Nullable: true}))
 }
 
 func TestParseSchemaTable(t *testing.T) {

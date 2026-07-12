@@ -1493,7 +1493,11 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 		if binaryClaimKey && col.Name == "destination_table" {
 			colType += " CHARACTER SET ascii COLLATE ascii_bin"
 		}
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
+		nullability := ""
+		if !col.Nullable {
+			nullability = " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf("%s %s%s", quoteColumn(col.Name), colType, nullability))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))

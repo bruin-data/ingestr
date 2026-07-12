@@ -498,8 +498,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 			primaryKeys: nil,
 			validate: func(t *testing.T, sql string) {
 				assert.Contains(t, sql, "CREATE TABLE IF NOT EXISTS users")
-				assert.Contains(t, sql, `"id" BIGINT`)
-				assert.NotContains(t, sql, `NOT NULL`)
+				assert.Contains(t, sql, `"id" BIGINT NOT NULL`)
 				assert.Contains(t, sql, `"name" VARCHAR`)
 				assert.NotContains(t, sql, "PRIMARY KEY")
 			},
@@ -552,6 +551,37 @@ func TestBuildCreateTableSQL(t *testing.T) {
 			tt.validate(t, sql)
 		})
 	}
+}
+
+func TestDuckDBDialectAddColumnPreservesRequiredness(t *testing.T) {
+	dialect := &Dialect{}
+	require.Equal(
+		t,
+		`ALTER TABLE "main"."events" ADD COLUMN "required" BIGINT; ALTER TABLE "main"."events" ALTER COLUMN "required" SET NOT NULL`,
+		dialect.AddColumnSQL("main.events", schema.Column{Name: "required", DataType: schema.TypeInt64}),
+	)
+	require.Equal(
+		t,
+		`ALTER TABLE "main"."events" ADD COLUMN "optional" BIGINT`,
+		dialect.AddColumnSQL("main.events", schema.Column{Name: "optional", DataType: schema.TypeInt64, Nullable: true}),
+	)
+}
+
+func TestDuckDBDialectRequiredAddColumnExecutes(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE required_add (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, (&Dialect{}).AddColumnSQL("required_add", schema.Column{
+		Name: "required_value", DataType: schema.TypeInt64, Nullable: false,
+	})))
+
+	db := openDuckDB(t, ctx, path)
+	var nullable string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT is_nullable FROM information_schema.columns
+		WHERE table_name='required_add' AND column_name='required_value'
+	`).Scan(&nullable))
+	require.Equal(t, "NO", nullable)
 }
 
 func TestStrategySupport(t *testing.T) {
@@ -620,6 +650,19 @@ func TestPrepareTable_CreateTable(t *testing.T) {
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'test_table'").Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count, "table should exist")
+	var required, optional string
+	err = db.QueryRowContext(ctx, `
+		SELECT is_nullable FROM information_schema.columns
+		WHERE table_name = 'test_table' AND column_name = 'id'
+	`).Scan(&required)
+	require.NoError(t, err)
+	err = db.QueryRowContext(ctx, `
+		SELECT is_nullable FROM information_schema.columns
+		WHERE table_name = 'test_table' AND column_name = 'name'
+	`).Scan(&optional)
+	require.NoError(t, err)
+	assert.Equal(t, "NO", required)
+	assert.Equal(t, "YES", optional)
 }
 
 func TestPrepareTable_DropFirst(t *testing.T) {

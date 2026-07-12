@@ -7,6 +7,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,6 +15,16 @@ func TestValidateManagedCDCStateFailsClosed(t *testing.T) {
 	dest := NewRedshiftDestination()
 
 	require.ErrorContains(t, dest.ValidateManagedCDCState(), "does not support destination-managed PostgreSQL CDC state")
+}
+
+func TestRedshiftDialectAddColumnPreservesRequiredness(t *testing.T) {
+	dialect := &Dialect{}
+	if got, want := dialect.AddColumnSQL("public.events", schema.Column{Name: "required", DataType: schema.TypeInt64}), `ALTER TABLE "public"."events" ADD COLUMN "required" BIGINT NOT NULL`; got != want {
+		t.Fatalf("required AddColumnSQL() = %q, want %q", got, want)
+	}
+	if got, want := dialect.AddColumnSQL("public.events", schema.Column{Name: "optional", DataType: schema.TypeInt64, Nullable: true}), `ALTER TABLE "public"."events" ADD COLUMN "optional" BIGINT`; got != want {
+		t.Fatalf("optional AddColumnSQL() = %q, want %q", got, want)
+	}
 }
 
 type testRecord struct {

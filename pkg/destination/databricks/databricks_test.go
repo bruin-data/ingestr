@@ -9,6 +9,18 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
+func TestBuildCreateTableSQLPreservesRequiredness(t *testing.T) {
+	dest := &DatabricksDestination{}
+	got := dest.buildCreateTableSQL("`main`.`raw`.`events`", []schema.Column{
+		{Name: "required", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "optional", DataType: schema.TypeString, Nullable: true},
+	}, nil)
+	want := "CREATE TABLE IF NOT EXISTS `main`.`raw`.`events` (\n  `required` BIGINT NOT NULL,\n  `optional` STRING\n)"
+	if got != want {
+		t.Fatalf("buildCreateTableSQL() = %q, want %q", got, want)
+	}
+}
+
 func TestMapDataTypeToDatabricks_SizedString(t *testing.T) {
 	tests := []struct {
 		name     string

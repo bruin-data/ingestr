@@ -195,7 +195,7 @@ func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schem
 
 	colDef := func(col schema.Column, forceNotNull bool) string {
 		def := fmt.Sprintf("%s %s", quoteColumn(col.Name), MapDataTypeToStarRocks(col))
-		if forceNotNull {
+		if forceNotNull || !col.Nullable {
 			def += " NOT NULL"
 		}
 		return def

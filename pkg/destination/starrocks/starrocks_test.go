@@ -88,6 +88,24 @@ func TestBuildCreateTableSQL_PrimaryKey(t *testing.T) {
 	}
 }
 
+func TestBuildCreateTableSQL_PreservesRequiredNonKeyColumns(t *testing.T) {
+	d := &StarRocksDestination{replicationNum: "1"}
+	got := d.buildCreateTableSQL("db.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "required_value", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "optional_value", DataType: schema.TypeString, Nullable: true},
+	}, []string{"id"})
+	want := "CREATE TABLE IF NOT EXISTS `db`.`events` (\n" +
+		"  `id` BIGINT NOT NULL,\n" +
+		"  `required_value` BIGINT NOT NULL,\n" +
+		"  `optional_value` VARCHAR(65533)\n)\n" +
+		"PRIMARY KEY (`id`)\nDISTRIBUTED BY HASH (`id`)\n" +
+		"PROPERTIES (\"replication_num\" = \"1\")"
+	if got != want {
+		t.Fatalf("buildCreateTableSQL() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestBuildCreateTableSQL_ReordersNonKeyableFirstColumn(t *testing.T) {
 	d := &StarRocksDestination{replicationNum: "1"}
 	cols := []schema.Column{

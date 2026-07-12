@@ -880,7 +880,11 @@ func escapeTableName(table string) string {
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
 	for _, col := range columns {
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), MapDataTypeToFabric(col)))
+		colDef := fmt.Sprintf("%s %s", quoteColumn(col.Name), MapDataTypeToFabric(col))
+		if !col.Nullable {
+			colDef += " NOT NULL"
+		}
+		colDefs = append(colDefs, colDef)
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))

@@ -131,6 +131,78 @@ func TestPostgresSwapRejectsOverQualifiedNames(t *testing.T) {
 	}
 }
 
+func TestMapPostgresArrayElementTypeToSchema(t *testing.T) {
+	tests := []struct {
+		udtName string
+		want    schema.DataType
+	}{
+		{udtName: "_int4", want: schema.TypeInt32},
+		{udtName: "_text", want: schema.TypeString},
+		{udtName: "_numeric", want: schema.TypeDecimal},
+		{udtName: "_uuid", want: schema.TypeUUID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.udtName, func(t *testing.T) {
+			if got := mapPostgresArrayElementTypeToSchema(tt.udtName); got != tt.want {
+				t.Fatalf("mapPostgresArrayElementTypeToSchema(%q) = %v, want %v", tt.udtName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostgresArrayDDLPreservesElementShape(t *testing.T) {
+	tests := []struct {
+		name string
+		col  schema.Column
+		want string
+	}{
+		{name: "bounded varchar", col: schema.Column{DataType: schema.TypeArray, Element: &schema.Column{DataType: schema.TypeString, MaxLength: 12}}, want: "VARCHAR(12)[]"},
+		{name: "decimal", col: schema.Column{DataType: schema.TypeArray, Element: &schema.Column{DataType: schema.TypeDecimal, Precision: 10, Scale: 2}}, want: "NUMERIC(10,2)[]"},
+		{name: "nested", col: schema.Column{DataType: schema.TypeArray, Element: &schema.Column{DataType: schema.TypeArray, Element: &schema.Column{DataType: schema.TypeInt32}}}, want: "INTEGER[][]"},
+		{name: "fixed binary", col: schema.Column{DataType: schema.TypeArray, Element: &schema.Column{DataType: schema.TypeFixedBinary, FixedLength: 16}}, want: "BYTEA[]"},
+		{name: "legacy decimal", col: schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 8, Scale: 3}, want: "NUMERIC(8,3)[]"},
+	}
+	dialect := &Dialect{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dialect.TypeName(tt.col); got != tt.want {
+				t.Fatalf("Dialect.TypeName() = %q, want %q", got, tt.want)
+			}
+			if got := MapDataTypeToPostgres(tt.col); got != tt.want {
+				t.Fatalf("MapDataTypeToPostgres() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostgresDialectRelaxesNullability(t *testing.T) {
+	got := (&Dialect{}).RelaxColumnNullabilitySQL("public.events", "payload")
+	want := `ALTER TABLE "public"."events" ALTER COLUMN "payload" DROP NOT NULL`
+	if got != want {
+		t.Fatalf("RelaxColumnNullabilitySQL() = %q, want %q", got, want)
+	}
+}
+
+func TestPostgresRequirednessDDL(t *testing.T) {
+	got := buildCreateTableSQL(`"public"."events"`, []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "payload", DataType: schema.TypeString, Nullable: true},
+	}, nil)
+	want := "CREATE TABLE IF NOT EXISTS \"public\".\"events\" (\n  \"id\" BIGINT NOT NULL,\n  \"payload\" TEXT\n)"
+	if got != want {
+		t.Fatalf("buildCreateTableSQL() = %q, want %q", got, want)
+	}
+
+	dialect := &Dialect{}
+	if got := dialect.AddColumnSQL("public.events", schema.Column{Name: "required", DataType: schema.TypeInt64}); got != `ALTER TABLE "public"."events" ADD COLUMN "required" BIGINT NOT NULL` {
+		t.Fatalf("required AddColumnSQL() = %q", got)
+	}
+	if got := dialect.AddColumnSQL("public.events", schema.Column{Name: "optional", DataType: schema.TypeInt64, Nullable: true}); got != `ALTER TABLE "public"."events" ADD COLUMN "optional" BIGINT` {
+		t.Fatalf("optional AddColumnSQL() = %q", got)
+	}
+}
+
 func TestPostgresValueGetterMatchesArrowutilValue(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	t.Cleanup(func() { mem.AssertSize(t, 0) })

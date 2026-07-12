@@ -1078,7 +1078,11 @@ func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryK
 	colDefs := make([]string, 0, len(columns)+1)
 	for _, col := range columns {
 		isComparableString := col.IsPrimaryKey || comparableColumns[col.Name]
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), mapDataTypeToOracle(col, isComparableString)))
+		colDef := fmt.Sprintf("%s %s", quoteColumn(col.Name), mapDataTypeToOracle(col, isComparableString))
+		if !col.Nullable {
+			colDef += " NOT NULL"
+		}
+		colDefs = append(colDefs, colDef)
 	}
 	if len(primaryKeys) > 0 {
 		quotedKeys := quoteColumns(primaryKeys)

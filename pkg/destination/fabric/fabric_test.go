@@ -13,6 +13,21 @@ import (
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
+func TestBuildCreateTableSQLPreservesRequiredness(t *testing.T) {
+	got := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+	}, []string{"id"})
+
+	want := "IF OBJECT_ID('dbo.events', 'U') IS NULL CREATE TABLE [dbo].[events] (\n" +
+		"  [id] BIGINT NOT NULL,\n" +
+		"  [name] VARCHAR(MAX),\n" +
+		"  PRIMARY KEY NONCLUSTERED ([id]) NOT ENFORCED\n)"
+	if got != want {
+		t.Fatalf("buildCreateTableSQL() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestURIToConnString(t *testing.T) {
 	tests := []struct {
 		name          string

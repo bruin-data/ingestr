@@ -307,9 +307,9 @@ func TestMapDataTypeToOracle(t *testing.T) {
 func TestBuildCreateTableSQL(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
-			{Name: "id", DataType: schema.TypeInt64},
-			{Name: "name", DataType: schema.TypeString, MaxLength: 100},
-			{Name: "created_at", DataType: schema.TypeTimestampTZ},
+			{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 100, Nullable: true},
+			{Name: "created_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 		},
 	}
 
@@ -323,11 +323,26 @@ func TestBuildCreateTableSQL(t *testing.T) {
 )`, got)
 }
 
+func TestBuildCreateTableSQLPreservesRequiredness(t *testing.T) {
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+	}}
+
+	got := buildCreateTableSQL("analytics.users", tableSchema, []string{"id"})
+
+	assert.Equal(t, `CREATE TABLE "ANALYTICS"."USERS" (
+  "ID" NUMBER(19,0) NOT NULL,
+  "NAME" CLOB,
+  PRIMARY KEY ("ID")
+)`, got)
+}
+
 func TestBuildCreateTableSQL_StringPrimaryKeyUsesVarchar(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
-			{Name: "id", DataType: schema.TypeString},
-			{Name: "name", DataType: schema.TypeString},
+			{Name: "id", DataType: schema.TypeString, Nullable: true},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
 		},
 	}
 
@@ -343,9 +358,9 @@ func TestBuildCreateTableSQL_StringPrimaryKeyUsesVarchar(t *testing.T) {
 func TestBuildCreateTableSQL_StringIncrementalKeyUsesVarchar(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
-			{Name: "id", DataType: schema.TypeInt64},
-			{Name: "cursor", DataType: schema.TypeString},
-			{Name: "name", DataType: schema.TypeString},
+			{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "cursor", DataType: schema.TypeString, Nullable: true},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
 		},
 		IncrementalKey: "cursor",
 	}
@@ -363,8 +378,8 @@ func TestBuildCreateTableSQL_StringIncrementalKeyUsesVarchar(t *testing.T) {
 func TestBuildCreateTableSQL_SchemaPrimaryKeyUsesVarcharWithoutConstraint(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
-			{Name: "id", DataType: schema.TypeString},
-			{Name: "name", DataType: schema.TypeString},
+			{Name: "id", DataType: schema.TypeString, Nullable: true},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
 		},
 		PrimaryKeys: []string{"id"},
 	}
