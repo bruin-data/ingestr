@@ -31,6 +31,21 @@ func TestParseIcebergConfig(t *testing.T) {
 	require.False(t, cfg.CreateNamespace)
 }
 
+func TestParseIcebergConfigRejectsEmptyCatalogName(t *testing.T) {
+	for _, value := range []string{"", " \t "} {
+		_, err := parseIcebergConfig("iceberg+sqlite:///:memory:?catalog_name=" + url.QueryEscape(value))
+		require.ErrorContains(t, err, "catalog_name must not be empty")
+	}
+}
+
+func TestParseIcebergConfigRejectsInternallyManagedProperties(t *testing.T) {
+	for _, key := range []string{tableCDCResumeStateKey, managedTablePurgeClaim, atomicSnapshotAttemptProperty, atomicSnapshotTargetProperty} {
+		_, err := parseIcebergConfig("iceberg+hadoop:///tmp/warehouse?table." + key + "=forged")
+		require.ErrorContains(t, err, "managed internally")
+		require.ErrorContains(t, err, key)
+	}
+}
+
 func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -135,6 +150,42 @@ func TestDestinationConnectSQLiteCatalog(t *testing.T) {
 
 	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
 	require.NoError(t, dest.Close(ctx))
+}
+
+func TestDestinationRejectsExternalWritePaths(t *testing.T) {
+	for _, catalogType := range []string{"hadoop", "sqlite"} {
+		for _, key := range []string{"write.data.path", "write.metadata.path"} {
+			for _, value := range []string{t.TempDir(), ""} {
+				dest := NewDestination()
+				var uri string
+				if catalogType == "hadoop" {
+					uri = "iceberg+hadoop://?warehouse=" + url.QueryEscape(t.TempDir())
+				} else {
+					uri = "iceberg+sqlite://" + filepath.Join(t.TempDir(), "catalog.db") + "?warehouse_path=" + url.QueryEscape(t.TempDir())
+				}
+				err := dest.Connect(context.Background(), uri+"&table."+key+"="+url.QueryEscape(value))
+				require.ErrorContains(t, err, "cannot be isolated for orphan cleanup or purged reliably")
+				require.ErrorContains(t, err, key)
+			}
+		}
+	}
+}
+
+func TestDestinationCheckConnectionSQLiteCatalog(t *testing.T) {
+	ctx := context.Background()
+	dest := NewDestination()
+	catalogDB := filepath.Join(t.TempDir(), "catalog.db")
+	warehouse := t.TempDir()
+
+	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
+	t.Cleanup(func() { require.NoError(t, dest.Close(ctx)) })
+
+	require.NoError(t, dest.CheckConnection(ctx))
+	namespaces, err := dest.catalog.ListNamespaces(ctx, nil)
+	require.NoError(t, err)
+	for _, namespace := range namespaces {
+		require.NotContains(t, namespace[0], "ingestr_connection_check_", "connection check must clean up its namespace")
+	}
 }
 
 func TestIcebergSchemaFromTableSchemaNormalizesJSON(t *testing.T) {

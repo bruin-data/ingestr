@@ -2,15 +2,83 @@ package iceberg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"testing"
 	"time"
 
+	icebergtable "github.com/apache/iceberg-go/table"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRowDeltaRetriesCommitConflictWithoutLeavingAttemptFiles(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.row_delta.retry"
+	tableSchema := mergeTestSchema()
+	writeTableRows(t, dest, target, tableSchema, false, [][]any{{int64(1), "before", 1.0, int64(1)}})
+	before := allTableParquetFiles(t, dest, target)
+	base := dest.catalog
+	dest.catalog = &failNthCommitCatalog{Catalog: base, failAt: 1, err: icebergtable.ErrCommitFailed}
+	batches, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{{int64(2), "new", 2.0, int64(2)}})
+	require.NoError(t, err)
+	require.NoError(t, dest.MergeRecords(ctx, recordBatches(batches...), destination.WriteOptions{Table: target, Schema: tableSchema}, destination.MergeOptions{
+		TargetTable: target, PrimaryKeys: []string{"id"}, Columns: tableSchema.ColumnNames(), CommitToken: "row-delta-retry",
+	}))
+	require.Len(t, allTableParquetFiles(t, dest, target), len(before)+2)
+}
+
+func TestRowDeltaExhaustedCommitConflictsCleanOutputs(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.row_delta.cleanup"
+	tableSchema := mergeTestSchema()
+	writeTableRows(t, dest, target, tableSchema, false, [][]any{{int64(1), "before", 1.0, int64(1)}})
+	before := allTableParquetFiles(t, dest, target)
+	dest.catalog = &commitOutcomeCatalog{Catalog: dest.catalog, beforeCommitErrs: []error{
+		icebergtable.ErrCommitFailed, icebergtable.ErrCommitFailed, icebergtable.ErrCommitFailed,
+		icebergtable.ErrCommitFailed, icebergtable.ErrCommitFailed,
+	}}
+	batches, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{{int64(2), "new", 2.0, int64(2)}})
+	require.NoError(t, err)
+	err = dest.MergeRecords(ctx, recordBatches(batches...), destination.WriteOptions{Table: target, Schema: tableSchema}, destination.MergeOptions{
+		TargetTable: target, PrimaryKeys: []string{"id"}, Columns: tableSchema.ColumnNames(), CommitToken: "row-delta-fail",
+	})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, icebergtable.ErrCommitFailed))
+	require.Equal(t, before, allTableParquetFiles(t, dest, target))
+}
+
+func TestRowDeltaCancellationAfterOutputCleansFiles(t *testing.T) {
+	dest := newHadoopDestination(t)
+	target := "lake.row_delta.canceled_output"
+	tableSchema := mergeTestSchema()
+	writeTableRows(t, dest, target, tableSchema, false, [][]any{{int64(1), "before", 1.0, int64(1)}})
+	before := allTableParquetFiles(t, dest, target)
+	tbl, err := dest.loadIcebergTable(context.Background(), target)
+	require.NoError(t, err)
+	writeSchema, err := tableWriteSchema(tbl)
+	require.NoError(t, err)
+	projection := newRowProjection(writeSchema, arrowSchemaColumnNames(writeSchema))
+	ctx, cancel := context.WithCancel(context.Background())
+	produce := func(emit rowEmit) error {
+		for i := 0; i <= batchBuildRows; i++ {
+			if i == batchBuildRows {
+				cancel()
+			}
+			if err := emit(projection, []any{int64(i + 10), "new", float64(i), int64(i)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	err = dest.commitRowDelta(ctx, tbl, "merge", newCommitMetadata("canceled-row-delta", ""), writeSchema, produce, nil, nil, 1)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, before, allTableParquetFiles(t, dest, target))
+}
 
 // latestSnapshotSummary returns the summary properties of the table's current
 // snapshot, used to detect whether an operation committed equality delete
@@ -148,6 +216,84 @@ func TestMergeTablePartitionedOutsidePrimaryKeyFallsBack(t *testing.T) {
 	requireNoEqualityDeletes(t, dest, target)
 }
 
+func TestMergeTableWithLiveFilesFromOlderPartitionSpecFallsBack(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.cow.mixed_spec_target"
+	staging := "lake.cow.mixed_spec_staging"
+	tableSchema := mergeTestSchema()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       target,
+		Schema:      tableSchema,
+		PartitionBy: "id",
+	}))
+	writeTableRows(t, dest, target, tableSchema, false, [][]any{
+		{int64(1), "old", 1.0, nil},
+		{int64(2), "unchanged", 2.0, nil},
+	})
+	old, err := dest.loadIcebergTable(ctx, target)
+	require.NoError(t, err)
+	oldSpec := old.Metadata().PartitionSpec()
+	oldSpecID := oldSpec.ID()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       target,
+		Schema:      tableSchema,
+		PartitionBy: "bucket[4](id)",
+	}))
+	evolved, err := dest.loadIcebergTable(ctx, target)
+	require.NoError(t, err)
+	evolvedSpec := evolved.Metadata().PartitionSpec()
+	require.NotEqual(t, oldSpecID, evolvedSpec.ID())
+
+	writeTableRows(t, dest, staging, tableSchema, true, [][]any{
+		{int64(1), "updated", 10.0, nil},
+		{int64(3), "inserted", 3.0, nil},
+	})
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: staging,
+		TargetTable:  target,
+		PrimaryKeys:  []string{"id"},
+		Columns:      tableSchema.ColumnNames(),
+	}))
+
+	rows := singleRowByKey(t, readTableRows(t, dest, target), "id")
+	require.Len(t, rows, 3)
+	require.Equal(t, "updated", rows[int64(1)][1])
+	require.Equal(t, "unchanged", rows[int64(2)][1])
+	require.Equal(t, "inserted", rows[int64(3)][1])
+	requireNoEqualityDeletes(t, dest, target)
+}
+
+func TestPrepareTableEmptyPartitionExpressionPreservesCurrentSpec(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	table := "lake.partition.preserve_current"
+	tableSchema := mergeTestSchema()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       table,
+		Schema:      tableSchema,
+		PartitionBy: "bucket[8](id)",
+	}))
+	before, err := dest.loadIcebergTable(ctx, table)
+	require.NoError(t, err)
+	beforeSpec := before.Metadata().PartitionSpec()
+	specID := beforeSpec.ID()
+	require.True(t, partitionExpressionMatches(before, "bucket[8](id)"))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  table,
+		Schema: tableSchema,
+	}))
+	after, err := dest.loadIcebergTable(ctx, table)
+	require.NoError(t, err)
+	afterSpec := after.Metadata().PartitionSpec()
+	require.Equal(t, specID, afterSpec.ID())
+	require.True(t, partitionExpressionMatches(after, "bucket[8](id)"))
+}
+
 func TestMergeTableSpilledRuns(t *testing.T) {
 	withSpillRunRows(t, 8)
 
@@ -238,6 +384,43 @@ func TestSCD2TableUsesRowDeltaByDefault(t *testing.T) {
 	got := readTableRows(t, dest, target)
 	require.Len(t, got.Rows, 3, "changed key gains a closed version, unchanged key stays single")
 	requireEqualityDeletes(t, dest, target)
+}
+
+func TestSCD2RowDeltaPreservesV3Lineage(t *testing.T) {
+	dest := newHadoopDestinationWithTableProperties(t, url.Values{"table.format-version": []string{"3"}})
+	target, staging := "lake.mor.v3_scd2_target", "lake.mor.v3_scd2_staging"
+	t1 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+	writeTableRows(t, dest, target, scd2TestSchema(), false, nil)
+	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{
+		scd2Row(1, "active", 1.0, micros(t1)), scd2Row(2, "active", 2.0, micros(t1)),
+	})
+	runSCD2(t, dest, target, staging, t1, "")
+	before, err := dest.loadIcebergTable(context.Background(), target)
+	require.NoError(t, err)
+	lineageBefore := readV3LineageByID(t, before)
+	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{
+		scd2Row(1, "inactive", 1.0, micros(t2)), scd2Row(2, "active", 2.0, micros(t2)),
+	})
+	runSCD2(t, dest, target, staging, t2, "")
+	after, err := dest.loadIcebergTable(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, lineageBefore[int64(2)], readV3LineageByID(t, after)[int64(2)])
+	tasks, err := after.Scan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.True(t, allTasksHaveRowLineage(tasks))
+}
+
+func TestV3SCD2RetriesCommitConflict(t *testing.T) {
+	dest := newHadoopDestinationWithTableProperties(t, url.Values{"table.format-version": []string{"3"}})
+	target, staging := "lake.mor.v3_scd2_retry_target", "lake.mor.v3_scd2_retry_staging"
+	t1 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	writeTableRows(t, dest, target, scd2TestSchema(), false, nil)
+	writeTableRows(t, dest, staging, scd2TestSchema(), true, [][]any{scd2Row(1, "active", 1.0, micros(t1))})
+	dest.catalog = &failNthCommitCatalog{Catalog: dest.catalog, failAt: 1, err: icebergtable.ErrCommitFailed}
+
+	runSCD2(t, dest, target, staging, t1, "")
+	require.Len(t, readTableRows(t, dest, target).Rows, 1)
 }
 
 func TestSCD2TableRowDeltaDedupesByIncrementalKey(t *testing.T) {

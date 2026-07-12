@@ -154,6 +154,31 @@ func TestSpillSorterMultiPassMerge(t *testing.T) {
 	}
 }
 
+func TestSpillMergeCursorMemoryTracksRunLimit(t *testing.T) {
+	withSpillRunRows(t, 7)
+	previousFanIn := spillMergeFanIn
+	spillMergeFanIn = 64
+	t.Cleanup(func() { spillMergeFanIn = previousFanIn })
+
+	for i := range 70 {
+		sorter, err := newSpillSorter(spillTestSchema(), []string{"id"})
+		require.NoError(t, err)
+		for row := range 70 {
+			require.NoError(t, sorter.Add([]any{int64(row % 5), fmt.Sprintf("%d-%d", i, row)}))
+		}
+		it, err := sorter.Iter()
+		require.NoError(t, err)
+		for it.NextGroup() {
+			for it.NextRow() {
+			}
+		}
+		require.NoError(t, it.Err())
+		it.Close()
+		sorter.Close()
+	}
+	require.LessOrEqual(t, effectiveSpillMergeFanIn()*spillCursorBatchRows(), spillRunRows)
+}
+
 func TestSpillSorterRejectsNullKeys(t *testing.T) {
 	sorter, err := newSpillSorter(spillTestSchema(), []string{"id"})
 	require.NoError(t, err)

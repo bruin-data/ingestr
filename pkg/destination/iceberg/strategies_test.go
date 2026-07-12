@@ -7,6 +7,7 @@ import (
 	"time"
 
 	iceberggo "github.com/apache/iceberg-go"
+	icebergtable "github.com/apache/iceberg-go/table"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/require"
@@ -405,6 +406,25 @@ func TestDeleteInsertTable(t *testing.T) {
 	require.Equal(t, "v2", rows[int64(7)][1])
 	require.NotContains(t, rows, int64(5))
 	require.NotContains(t, rows, int64(6))
+}
+
+func TestV3DeleteInsertRetriesCommitConflict(t *testing.T) {
+	dest := newHadoopDestinationWithTableProperties(t, url.Values{"table.format-version": []string{"3"}})
+	ctx := context.Background()
+	target, staging := "lake.di.v3_retry_target", "lake.di.v3_retry_staging"
+	writeTableRows(t, dest, target, mergeTestSchema(), false, [][]any{
+		{int64(1), "old", 1.0, nil}, {int64(2), "keep", 2.0, nil},
+	})
+	writeTableRows(t, dest, staging, mergeTestSchema(), true, [][]any{{int64(1), "new", 3.0, nil}})
+	dest.catalog = &failNthCommitCatalog{Catalog: dest.catalog, failAt: 1, err: icebergtable.ErrCommitFailed}
+
+	require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+		StagingTable: staging, TargetTable: target, IncrementalKey: "id",
+		IntervalStart: int64(1), IntervalEnd: int64(1), PrimaryKeys: []string{"id"},
+	}))
+	rows := singleRowByKey(t, readTableRows(t, dest, target), "id")
+	require.Equal(t, "new", rows[int64(1)][1])
+	require.Equal(t, "keep", rows[int64(2)][1])
 }
 
 func TestDeleteInsertTableTimestampInterval(t *testing.T) {
