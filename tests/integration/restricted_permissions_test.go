@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	mysqldest "github.com/bruin-data/ingestr/pkg/destination/mysql"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -197,6 +198,25 @@ func TestMySQLDestination_RestrictedPermissions(t *testing.T) {
 		require.NoError(t, adminDB.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", defaultDB, targetTable)).Scan(&count))
 		assert.Equal(t, replaceFixtureRows, count)
+	})
+
+	t.Run("managed_cdc_identity_requires_process_privilege", func(t *testing.T) {
+		target := fmt.Sprintf("%s.%s", defaultDB, targetTable)
+		deniedDest := mysqldest.NewMySQLDestination()
+		require.NoError(t, deniedDest.Connect(ctx, restrictedURI))
+		require.ErrorContains(t, deniedDest.ValidateManagedCDCTarget(ctx, target), "global MySQL PROCESS privilege")
+		require.NoError(t, deniedDest.Close(ctx))
+
+		_, err := adminDB.ExecContext(ctx, fmt.Sprintf("GRANT PROCESS ON *.* TO '%s'@'%%'", user))
+		require.NoError(t, err)
+		dest := mysqldest.NewMySQLDestination()
+		require.NoError(t, dest.Connect(ctx, restrictedURI))
+		defer func() { _ = dest.Close(ctx) }()
+		require.NoError(t, dest.ValidateManagedCDCTarget(ctx, target))
+		incarnation, exists, err := dest.CDCTargetIncarnation(ctx, target)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.NotEmpty(t, incarnation)
 	})
 }
 

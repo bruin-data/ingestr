@@ -1217,14 +1217,14 @@ func (d *MSSQLDestination) ValidateManagedCDCTarget(ctx context.Context, table s
 	if err != nil {
 		return err
 	}
+	if identity.server != "" && !strings.EqualFold(identity.server, d.server) {
+		return fmt.Errorf("managed CDC does not support linked SQL Server target %q without distributed transactions", table)
+	}
 	if strings.EqualFold(identity.server, d.server) && strings.EqualFold(identity.database, d.database) {
 		return d.ValidateManagedCDCState()
 	}
 
 	catalog := quoteColumn("master") + ".sys.databases"
-	if !strings.EqualFold(identity.server, d.server) {
-		catalog = quoteColumn(identity.server) + "." + catalog
-	}
 	var compatibilityLevel int
 	query := fmt.Sprintf("SELECT [compatibility_level] FROM %s WHERE [name] = @p1", catalog)
 	if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&compatibilityLevel); err != nil {
@@ -1316,6 +1316,19 @@ func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 	if err != nil {
 		return "", false, err
 	}
+	return d.mssqlTargetIncarnation(ctx, d.db, table, identity)
+}
+
+type mssqlIncarnationQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (d *MSSQLDestination) mssqlTargetIncarnation(
+	ctx context.Context,
+	queryer mssqlIncarnationQueryer,
+	table string,
+	identity mssqlTargetIdentity,
+) (string, bool, error) {
 	prefix := identity.catalogPrefix(d.server)
 	if prefix == "" {
 		return "", false, fmt.Errorf("cannot resolve SQL Server catalog for CDC target %q", table)
@@ -1326,7 +1339,7 @@ func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		WHERE s.name = @p1 AND t.name = @p2`, prefix, prefix)
 	var objectID int64
 	var createdAt string
-	err = d.db.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
+	err := queryer.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -1334,6 +1347,43 @@ func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		return "", false, fmt.Errorf("failed to read SQL Server CDC target incarnation for %s: %w", table, err)
 	}
 	return destination.CDCTargetKey(identity.server, identity.database, strconv.FormatInt(objectID, 10), createdAt), true, nil
+}
+
+func (d *MSSQLDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return fmt.Errorf("cannot conditionally truncate SQL Server table %q without a bound incarnation", table)
+	}
+	identity, err := d.resolveTargetIdentity(ctx, table)
+	if err != nil {
+		return err
+	}
+	if identity.server != "" && !strings.EqualFold(identity.server, d.server) {
+		return fmt.Errorf("cannot conditionally truncate linked SQL Server CDC target %q without a distributed transaction", table)
+	}
+	resolvedTable := quoteTable(identity.qualifiedTable(d.server))
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT TOP (1) 1 FROM %s WITH (TABLOCKX, HOLDLOCK)", resolvedTable))
+	if err != nil {
+		return fmt.Errorf("failed to lock SQL Server CDC target %s: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	current, exists, err := d.mssqlTargetIncarnation(ctx, tx, table, identity)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("SQL Server CDC target %q physical incarnation changed", table)
+	}
+	if _, err := tx.ExecContext(ctx, "TRUNCATE TABLE "+resolvedTable); err != nil {
+		return fmt.Errorf("failed to truncate SQL Server CDC target %s: %w", table, err)
+	}
+	return tx.Commit()
 }
 
 type mssqlTargetIdentity struct {

@@ -46,6 +46,7 @@ type fakeSourceTable struct {
 func TestMultiTableColumnRenamingRewritesCDCMarkers(t *testing.T) {
 	ctx := context.Background()
 	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{},
 		ColumnRenamers: map[string]*transformer.ColumnRenamer{
 			"public.items": transformer.NewColumnRenamer(map[string]string{"configData": "config_data"}),
 		},
@@ -54,7 +55,9 @@ func TestMultiTableColumnRenamingRewritesCDCMarkers(t *testing.T) {
 	records <- source.RecordBatchResult{TableName: "public.items", Batch: cdcRenameRecordBatch(t, "configData", nil, `["configData"]`)}
 	close(records)
 
-	result := <-job.ApplyBatchTransformation(ctx, records)
+	out, err := job.ApplyBatchTransformation(ctx, records)
+	require.NoError(t, err)
+	result := <-out
 	require.NoError(t, result.Err)
 	require.NotNil(t, result.Batch)
 	defer result.Batch.Release()
@@ -65,6 +68,7 @@ func TestMultiTableColumnRenamingRewritesCDCMarkers(t *testing.T) {
 func TestMultiTableDynamicAnnouncementInstallsColumnRenamer(t *testing.T) {
 	ctx := context.Background()
 	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{},
 		Destination: &fakeDestination{},
 		NormalizeTableInfo: func(_ context.Context, table source.SourceTableInfo, _ string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
 			table.Schema = &schema.TableSchema{Columns: []schema.Column{
@@ -83,7 +87,8 @@ func TestMultiTableDynamicAnnouncementInstallsColumnRenamer(t *testing.T) {
 	records <- source.RecordBatchResult{TableName: rawInfo.Name, Batch: cdcRenameRecordBatch(t, "configData", nil, `["configData"]`)}
 	close(records)
 
-	out := job.ApplyBatchTransformation(ctx, records)
+	out, err := job.ApplyBatchTransformation(ctx, records)
+	require.NoError(t, err)
 	announcement := <-out
 	require.NoError(t, announcement.Err)
 	require.Equal(t, "config_data", announcement.TableInfo.Schema.Columns[0].Name)
@@ -166,8 +171,10 @@ type fakeDestination struct {
 	prepareCalls  []destination.PrepareOptions
 	writeCalls    []destination.WriteOptions
 	swapCalls     [][2]string
+	swapOptions   []destination.SwapOptions
 	mergeCalls    []destination.MergeOptions
 	diCalls       []destination.DeleteInsertOptions
+	scdCalls      []destination.SCD2Options
 	dropCalls     []string
 	execCalls     []execCall
 	truncateCalls []string
@@ -177,6 +184,7 @@ type fakeDestination struct {
 	}
 
 	prepareErrByTable map[string]error
+	prepareHook       func(destination.PrepareOptions) error
 	writeErr          error
 	swapErr           error
 	mergeErr          error
@@ -250,6 +258,9 @@ func (d *fakeDestination) PrepareTable(ctx context.Context, opts destination.Pre
 	if d.prepareErrByTable != nil {
 		err = d.prepareErrByTable[opts.Table]
 	}
+	if err == nil && d.prepareHook != nil {
+		err = d.prepareHook(opts)
+	}
 	d.mu.Unlock()
 	return err
 }
@@ -276,6 +287,7 @@ func (d *fakeDestination) SwapTable(ctx context.Context, opts destination.SwapOp
 	d.mu.Lock()
 	d.calls = append(d.calls, "SwapTable")
 	d.swapCalls = append(d.swapCalls, [2]string{opts.StagingTable, opts.TargetTable})
+	d.swapOptions = append(d.swapOptions, opts)
 	swapErr := d.swapErr
 	d.mu.Unlock()
 	return swapErr
@@ -302,6 +314,7 @@ func (d *fakeDestination) DeleteInsertTable(ctx context.Context, opts destinatio
 func (d *fakeDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
 	d.mu.Lock()
 	d.calls = append(d.calls, "SCD2Table")
+	d.scdCalls = append(d.scdCalls, opts)
 	d.mu.Unlock()
 	return nil
 }
@@ -321,6 +334,21 @@ func (d *fakeDestination) DropTable(ctx context.Context, table string) error {
 type truncateCapableDestination struct {
 	*fakeDestination
 }
+
+type nonEvolvingPlanDestination struct {
+	destination.Destination
+	tableSchema *schema.TableSchema
+}
+
+func (d *nonEvolvingPlanDestination) GetTableSchema(context.Context, string) (*schema.TableSchema, error) {
+	return d.tableSchema, nil
+}
+
+func (d *nonEvolvingPlanDestination) GetScheme() string { return "non-evolving" }
+
+type noTypeEvolutionDestination struct{ *fakeDestination }
+
+func (d *noTypeEvolutionDestination) SupportsColumnTypeChanges() bool { return false }
 
 func (d *truncateCapableDestination) TruncateTable(ctx context.Context, table string) error {
 	d.mu.Lock()
@@ -576,6 +604,108 @@ func TestApplyEvolution_NoMigrationDoesNothing(t *testing.T) {
 	job.EvolutionPlan = &schemaevolution.EvolutionPlan{Comparison: &schemaevolution.SchemaComparison{}}
 	require.NoError(t, job.ApplyEvolution(context.Background()))
 	assert.Empty(t, dest.execCalls)
+}
+
+func TestMidStreamEvolutionPlanRespectsDestinationCapabilities(t *testing.T) {
+	destinationSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: true}}}
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt64, Nullable: true}}}
+	cfg := &config.IngestConfig{}
+
+	t.Run("capable", func(t *testing.T) {
+		dest := &fakeDestination{tableSchemas: map[string]*schema.TableSchema{"events": destinationSchema}}
+		plan, err := planDestinationSchemaEvolution(context.Background(), dest, "events", sourceSchema, cfg)
+		require.NoError(t, err)
+		require.Len(t, plan.Comparison.Changes, 1)
+		require.Equal(t, schema.TypeInt64, plan.FinalSchema.Columns[0].DataType)
+	})
+
+	t.Run("unsupported type change", func(t *testing.T) {
+		dest := &noTypeEvolutionDestination{fakeDestination: &fakeDestination{
+			tableSchemas: map[string]*schema.TableSchema{"events": destinationSchema},
+		}}
+		plan, err := planDestinationSchemaEvolution(context.Background(), dest, "events", sourceSchema, cfg)
+		require.NoError(t, err)
+		require.Empty(t, plan.Comparison.Changes)
+		require.Equal(t, schema.TypeInt32, plan.FinalSchema.Columns[0].DataType)
+		st := &streamTableState{}
+		configureStreamingContractState(cfg, sourceSchema, plan, st)
+		require.Equal(t, schema.TypeInt32, st.schema.Columns[0].DataType)
+		require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int32, st.schemaAligner.OutputSchema(nil).Field(0).Type))
+	})
+
+	t.Run("non evolver", func(t *testing.T) {
+		dest := &nonEvolvingPlanDestination{tableSchema: destinationSchema}
+		plan, err := planDestinationSchemaEvolution(context.Background(), dest, "events", sourceSchema, cfg)
+		require.NoError(t, err)
+		require.Empty(t, plan.Comparison.Changes)
+		require.Equal(t, schema.TypeInt32, plan.FinalSchema.Columns[0].DataType)
+		st := &streamTableState{}
+		configureStreamingContractState(cfg, sourceSchema, plan, st)
+		require.Equal(t, schema.TypeInt32, st.schema.Columns[0].DataType)
+		require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int32, st.schemaAligner.OutputSchema(nil).Field(0).Type))
+	})
+}
+
+func TestMultiTableBatchTransformationUsesPerTableContractAndFinalSchema(t *testing.T) {
+	sourceChanged := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	sourceStable := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}
+	finalChanged := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "value",
+		OldColumn: &schema.Column{Name: "value", DataType: schema.TypeInt64},
+		NewColumn: schema.Column{Name: "value", DataType: schema.TypeString, Nullable: true},
+	}}}
+	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{SchemaContract: "discard_value"},
+		Tables: []source.SourceTableInfo{
+			{Name: "changed", Schema: sourceChanged},
+			{Name: "stable", Schema: sourceStable},
+		},
+		EvolutionPlans: map[string]*schemaevolution.EvolutionPlan{
+			"changed": {TransformComparison: comparison, FinalSchema: finalChanged},
+		},
+	}
+
+	makeBatch := func(value string) arrow.RecordBatch {
+		ids := array.NewInt64Builder(memory.DefaultAllocator)
+		values := array.NewStringBuilder(memory.DefaultAllocator)
+		ids.Append(1)
+		values.Append(value)
+		idArray, valueArray := ids.NewArray(), values.NewArray()
+		ids.Release()
+		values.Release()
+		batch := array.NewRecordBatch(sourceChanged.ToArrowSchema(), []arrow.Array{idArray, valueArray}, 1)
+		idArray.Release()
+		valueArray.Release()
+		return batch
+	}
+	in := make(chan source.RecordBatchResult, 2)
+	in <- source.RecordBatchResult{TableName: "changed", Batch: makeBatch("invalid")}
+	in <- source.RecordBatchResult{TableName: "stable", Batch: makeBatch("preserved")}
+	close(in)
+
+	out, err := job.ApplyBatchTransformation(context.Background(), in)
+	require.NoError(t, err)
+	changed := <-out
+	require.NoError(t, changed.Err)
+	require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, changed.Batch.Column(1).DataType()))
+	require.True(t, changed.Batch.Column(1).IsNull(0))
+	changed.Batch.Release()
+	stable := <-out
+	require.NoError(t, stable.Err)
+	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.String, stable.Batch.Column(1).DataType()))
+	require.Equal(t, "preserved", stable.Batch.Column(1).(*array.String).Value(0))
+	stable.Batch.Release()
+	require.Equal(t, finalChanged.ColumnNames(), job.WriteSchemaFor("changed", sourceChanged).ColumnNames())
 }
 
 func captureStdout(t *testing.T, fn func()) string {

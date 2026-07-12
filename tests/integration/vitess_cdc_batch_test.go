@@ -68,7 +68,7 @@ func startVitessCDCEnv(t *testing.T, ctx context.Context, numShards string) *vit
 	// vtgate can accept connections before it can serve queries; retry.
 	require.Eventually(t, func() bool {
 		return db.PingContext(ctx) == nil
-	}, 120*time.Second, 2*time.Second, "vtgate did not become query-ready")
+	}, vitessQueryReadyTimeout, 2*time.Second, "vtgate did not become query-ready")
 
 	return &vitessCDCEnv{
 		db:        db,

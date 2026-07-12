@@ -73,6 +73,69 @@ func TestValidateManagedCDCTargetChecksCrossDatabaseCompatibility(t *testing.T) 
 	}
 }
 
+func TestValidateManagedCDCTargetRejectsLinkedServer(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "local", database: "default", compatibilityLevel: 160}
+
+	err = dest.ValidateManagedCDCTarget(t.Context(), "linked.legacy.dbo.items")
+	if err == nil || !strings.Contains(err.Error(), "does not support linked SQL Server target") {
+		t.Fatalf("linked-server validation error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTruncateCDCTableIfIncarnation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		objectID   int64
+		wantErr    string
+		wantCommit bool
+	}{
+		{name: "matching", objectID: 42, wantCommit: true},
+		{name: "recreated", objectID: 43, wantErr: "physical incarnation changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			dest := &MSSQLDestination{db: db, server: "local", database: "app"}
+			createdAt := "2026-07-17T12:00:00.0000000"
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[dbo].[events] WITH (TABLOCKX, HOLDLOCK)")).
+				WillReturnRows(sqlmock.NewRows([]string{"1"}))
+			mock.ExpectQuery("SELECT CAST\\(t.object_id AS BIGINT\\), CONVERT\\(NVARCHAR\\(33\\), t.create_date, 126\\)").
+				WithArgs("dbo", "events").
+				WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(tc.objectID, createdAt))
+			if tc.wantCommit {
+				mock.ExpectExec(regexp.QuoteMeta("TRUNCATE TABLE [app].[dbo].[events]")).WillReturnResult(sqlmock.NewResult(0, 2))
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+			expected := destination.CDCTargetKey("local", "app", "42", createdAt)
+			err = dest.TruncateCDCTableIfIncarnation(t.Context(), "dbo.events", expected)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("TruncateCDCTableIfIncarnation() error = %v, want %q", err, tc.wantErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestCanonicalCDCTargetUsesConnectedDefaultSchema(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

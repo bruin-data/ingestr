@@ -65,6 +65,9 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}); err != nil {
 		return fmt.Errorf("failed to prepare destination table: %w", err)
 	}
+	if !job.Config.KeepStaging {
+		defer dropManagedStagingDetached(ctx, job.Destination, stagingTable, "SCD2")
+	}
 
 	// Create staging table with same extended schema
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
@@ -152,19 +155,12 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		StagingTable:   stagingTable,
 		TargetTable:    job.Config.DestTable,
 		PrimaryKeys:    job.Config.PrimaryKeys,
-		Columns:        job.Schema.ColumnNames(),
+		Columns:        destination.DestinationColumns(job.Schema.ColumnNames()),
 		IncrementalKey: job.Config.IncrementalKey,
 		Timestamp:      processTimestamp,
 		Schema:         job.Schema,
 	}); err != nil {
 		return fmt.Errorf("failed to perform SCD2 merge: %w", err)
-	}
-
-	// Drop staging table (skip when KeepStaging is set for test inspection).
-	if !job.Config.KeepStaging {
-		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-			config.Debug("[SCD2] Warning: failed to drop staging table: %v", err)
-		}
 	}
 
 	return nil

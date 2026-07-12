@@ -19,6 +19,26 @@ func NewDuckLakeDestination() *DuckLakeDestination {
 func (d *DuckLakeDestination) Schemes() []string { return []string{"ducklake"} }
 func (d *DuckLakeDestination) GetScheme() string { return "ducklake" }
 
+func (d *DuckLakeDestination) ValidateManagedCDCState() error {
+	return fmt.Errorf("managed CDC target incarnation fencing is not supported for DuckLake")
+}
+
+func (d *DuckLakeDestination) ValidateManagedCDCTarget(context.Context, string) error {
+	return fmt.Errorf("managed CDC target incarnation fencing is not supported for DuckLake")
+}
+
+func (d *DuckLakeDestination) CDCTargetIncarnation(context.Context, string) (string, bool, error) {
+	return "", false, fmt.Errorf("managed CDC target incarnation fencing is not supported for DuckLake")
+}
+
+func (d *DuckLakeDestination) EnsureCDCTargetIncarnation(context.Context, string) (string, bool, error) {
+	return "", false, fmt.Errorf("managed CDC target incarnation fencing is not supported for DuckLake")
+}
+
+func (d *DuckLakeDestination) TruncateCDCTableIfIncarnation(context.Context, string, string) error {
+	return fmt.Errorf("managed CDC target incarnation fencing is not supported for DuckLake")
+}
+
 func (d *DuckLakeDestination) Connect(ctx context.Context, uri string) error {
 	cfg, err := srcduckdb.ParseLakehouseURI(uri)
 	if err != nil {

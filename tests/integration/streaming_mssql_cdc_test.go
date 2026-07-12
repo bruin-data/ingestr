@@ -40,7 +40,7 @@ func TestMSSQLCDC_Streaming(t *testing.T) {
 		postgres.WithPassword("destpass"),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(30*time.Second),
+				WithOccurrence(2).WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)

@@ -2979,12 +2979,13 @@ COMMIT TRANSACTION;`, quotedClaimTable, quotedClaimTable, quotedClaimTable)
 }
 
 func (d *BigQueryDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
-	project, dataset, tableName, err := d.parseTable(table)
+	project, dataset, tableName, _, err := d.resolveTable(table)
 	if err != nil {
 		return "", false, err
 	}
-	if dataset == "" {
-		dataset = d.datasetID
+	project, dataset, tableName, _, err = d.resolvePhysicalCDCTarget(ctx, project, dataset, tableName)
+	if err != nil {
+		return "", false, err
 	}
 	metadata, err := d.client.DatasetInProject(project, dataset).Table(tableName).Metadata(ctx)
 	if err != nil {
@@ -3003,29 +3004,45 @@ func bigQueryTableIncarnation(project, dataset, table string, creationTime time.
 	return destination.CDCTargetKey(project, dataset, table, strconv.FormatInt(creationTime.UnixNano(), 10))
 }
 
-func (d *BigQueryDestination) canonicalCDCTarget(ctx context.Context, project, dataset, table string) (string, error) {
+func (d *BigQueryDestination) resolveDatasetCase(ctx context.Context, project, dataset string) (bigQueryDatasetCase, error) {
 	key := project + "." + dataset
 	d.datasetCaseMu.Lock()
 	datasetCase, cached := d.datasetCase[key]
 	d.datasetCaseMu.Unlock()
-	if !cached {
-		metadata, err := d.client.DatasetInProject(project, dataset).Metadata(ctx)
-		provisional := false
-		if err != nil {
-			if !isNotFoundError(err) {
-				return "", fmt.Errorf("failed to read BigQuery dataset metadata for CDC target %s: %w", key, err)
-			}
-			// A first load may resolve its connector identity before PrepareTable
-			// creates the dataset. New datasets use BigQuery's case-sensitive default.
-			metadata = &bigquery.DatasetMetadata{}
-			provisional = true
+	if cached {
+		return datasetCase, nil
+	}
+	metadata, err := d.client.DatasetInProject(project, dataset).Metadata(ctx)
+	provisional := false
+	if err != nil {
+		if !isNotFoundError(err) {
+			return bigQueryDatasetCase{}, fmt.Errorf("failed to read BigQuery dataset metadata for CDC target %s: %w", key, err)
 		}
-		datasetCase = bigQueryDatasetCase{caseInsensitive: metadata.IsCaseInsensitive, provisional: provisional}
-		d.cacheDatasetCase(key, datasetCase.caseInsensitive, datasetCase.provisional)
+		// A first load may resolve its connector identity before PrepareTable
+		// creates the dataset. New datasets use BigQuery's case-sensitive default.
+		metadata = &bigquery.DatasetMetadata{}
+		provisional = true
+	}
+	datasetCase = bigQueryDatasetCase{caseInsensitive: metadata.IsCaseInsensitive, provisional: provisional}
+	d.cacheDatasetCase(key, datasetCase.caseInsensitive, datasetCase.provisional)
+	return datasetCase, nil
+}
+
+func (d *BigQueryDestination) resolvePhysicalCDCTarget(ctx context.Context, project, dataset, table string) (string, string, string, bool, error) {
+	datasetCase, err := d.resolveDatasetCase(ctx, project, dataset)
+	if err != nil {
+		return "", "", "", false, err
 	}
 	if datasetCase.caseInsensitive {
-		dataset = strings.ToLower(dataset)
 		table = strings.ToLower(table)
+	}
+	return project, dataset, table, datasetCase.caseInsensitive, nil
+}
+
+func (d *BigQueryDestination) canonicalCDCTarget(ctx context.Context, project, dataset, table string) (string, error) {
+	project, dataset, table, _, err := d.resolvePhysicalCDCTarget(ctx, project, dataset, table)
+	if err != nil {
+		return "", err
 	}
 	return destination.CDCTargetKey(project, dataset, table), nil
 }

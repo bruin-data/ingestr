@@ -9,10 +9,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,35 @@ type cdcStateDestination struct {
 
 type caseCanonicalCDCStateDestination struct {
 	*cdcStateDestination
+}
+
+type nonConditionalCDCStateDestination struct {
+	*fakeDestination
+}
+
+func (*nonConditionalCDCStateDestination) LoadCDCState(context.Context, string, string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
+func (*nonConditionalCDCStateDestination) LoadCDCStateFence(context.Context, string, string) (destination.CDCStateFence, error) {
+	return destination.CDCStateFence{}, nil
+}
+
+func (*nonConditionalCDCStateDestination) DeleteCDCStateEvents(context.Context, string, string, []string) error {
+	return nil
+}
+
+func (*nonConditionalCDCStateDestination) WriteCDCState(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	return nil
+}
+
+func (*nonConditionalCDCStateDestination) ClaimCDCTarget(context.Context, string, destination.CDCTargetClaim) error {
+	return nil
 }
 
 func (d *caseCanonicalCDCStateDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
@@ -101,6 +132,24 @@ func (d *cdcStateDestination) CDCTargetIncarnation(_ context.Context, table stri
 	return incarnation, true, nil
 }
 
+func (d *cdcStateDestination) ApplySchemaEvolutionIfIncarnation(
+	ctx context.Context,
+	table string,
+	comparison *schemaevolution.SchemaComparison,
+	expectedIncarnation string,
+) ([]string, error) {
+	d.stateMu.Lock()
+	incarnation := d.incarnations[table]
+	if incarnation == "" {
+		incarnation = "incarnation:" + table
+	}
+	d.stateMu.Unlock()
+	if incarnation != expectedIncarnation {
+		return nil, fmt.Errorf("destination physical incarnation changed before schema evolution")
+	}
+	return d.ApplySchemaEvolution(ctx, table, comparison)
+}
+
 func newCDCStateDestination() *cdcStateDestination {
 	return &cdcStateDestination{
 		fakeDestination: &fakeDestination{},
@@ -108,6 +157,13 @@ func newCDCStateDestination() *cdcStateDestination {
 		targets:         make(map[string]string),
 		incarnations:    make(map[string]string),
 	}
+}
+
+func TestNewCDCStateManagerAllowsDestinationWithoutConditionalTruncate(t *testing.T) {
+	dest := &nonConditionalCDCStateDestination{fakeDestination: &fakeDestination{}}
+	manager, err := NewCDCStateManager(dest, "missing-conditional-truncate", "raw.orders", "")
+	require.NoError(t, err)
+	require.NotNil(t, manager)
 }
 
 func (d *cdcStateDestination) ClaimCDCTarget(_ context.Context, _ string, claim destination.CDCTargetClaim) error {
@@ -221,6 +277,262 @@ func TestCDCStateRequiresMatchingSourceTableIncarnation(t *testing.T) {
 	}
 }
 
+func TestCDCStateReusesIncompleteAtomicSnapshotAttemptAcrossRestart(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const (
+		connectorID = "atomic-attempt-restart"
+		sourceTable = "public.orders"
+		destTable   = "raw.orders"
+	)
+
+	first, err := NewCDCStateManager(dest, connectorID, destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-v1"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	firstAttempt, err := first.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.NotEmpty(t, firstAttempt)
+	journal, pending, err := first.PendingAtomicSnapshotAttempt(sourceTable, destTable)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.False(t, journal.sourceMetadataKnown)
+	require.Empty(t, journal.sourceIncarnation)
+	require.Empty(t, journal.sourceSchemaFingerprint)
+
+	restarted, err := NewCDCStateManager(dest, connectorID, destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-v1"))
+	require.NoError(t, restarted.BeginRun(ctx, false))
+	retriedAttempt, err := restarted.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.Equal(t, firstAttempt, retriedAttempt)
+	require.NoError(t, restarted.CompleteAtomicSnapshotAttempt(ctx, sourceTable, destTable, retriedAttempt))
+
+	nextRun, err := NewCDCStateManager(dest, connectorID, destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, nextRun.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-v1"))
+	require.NoError(t, nextRun.BeginRun(ctx, false))
+	nextAttempt, err := nextRun.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.NotEqual(t, firstAttempt, nextAttempt)
+}
+
+func TestCDCStateSealCapturesFinalSourceMetadataAfterSchemaRefresh(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const (
+		sourceTable = "public.orders"
+		destTable   = "raw.orders"
+	)
+	manager, err := NewCDCStateManager(dest, "atomic-seal-final-metadata", destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-before"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	attemptID, err := manager.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-after-refresh"))
+	require.NoError(t, manager.SealAtomicSnapshotAttempt(ctx, sourceTable, destTable, attemptID, "0/900", "destination-v1"))
+
+	attempt, pending, err := manager.PendingAtomicSnapshotAttempt(sourceTable, destTable)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.True(t, attempt.sourceMetadataKnown)
+	require.Equal(t, "source-v1", attempt.sourceIncarnation)
+	require.Equal(t, "schema-after-refresh", attempt.sourceSchemaFingerprint)
+
+	restarted, err := NewCDCStateManager(dest, "atomic-seal-final-metadata", destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-after-refresh"))
+	require.NoError(t, restarted.BeginRun(ctx, false))
+	recovered, pending, err := restarted.PendingAtomicSnapshotAttempt(sourceTable, destTable)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, attempt, recovered)
+}
+
+func TestCDCStateAbandonedAtomicAttemptDoesNotSurviveNewSnapshotEpoch(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const (
+		connectorID = "atomic-attempt-abandon"
+		sourceTable = "public.orders"
+		destTable   = "raw.orders"
+	)
+
+	manager, err := NewCDCStateManager(dest, connectorID, destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTable(ctx, sourceTable, destTable))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	abandoned, err := manager.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.NoError(t, manager.AbandonAtomicSnapshotAttempt(ctx, sourceTable, destTable, abandoned))
+	require.NoError(t, manager.InvalidateSnapshot(ctx, sourceTable, destTable, "source-v2"))
+	active, err := manager.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.NotEqual(t, abandoned, active)
+
+	restarted, err := NewCDCStateManager(dest, connectorID, destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTable(ctx, sourceTable, destTable))
+	require.NoError(t, restarted.BeginRun(ctx, false))
+	retried, err := restarted.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.Equal(t, active, retried)
+	require.Equal(t, uint64(1), restarted.snapshotEpochs[sourceTable])
+}
+
+func TestCDCStatePruningKeepsOnlyNewestAtomicAttemptRecoveryAnchor(t *testing.T) {
+	const (
+		connectorID = "atomic-prune"
+		runID       = "00000000000000000000000000000001"
+		sourceTable = "public.orders"
+		destTable   = "raw.orders"
+	)
+	eventID := func(suffix string) string { return connectorID + "-" + runID + "-" + suffix }
+	first := atomicSnapshotJournalEntry{attemptID: "00000000000000000000000000000011", sequence: 1}
+	second := atomicSnapshotJournalEntry{
+		attemptID: "00000000000000000000000000000022", sequence: 2, ready: true,
+		resumeLSN: "0/200", expectedIncarnation: "destination-v1",
+		sourceMetadataKnown: true, sourceIncarnation: "source-v1", sourceSchemaFingerprint: "schema-v1",
+	}
+	manager := &CDCStateManager{
+		connectorID: connectorID,
+		runID:       runID,
+		generation:  1,
+		runs:        map[string]struct{}{runID: {}},
+		entries: []destination.CDCStateEntry{
+			{EventID: eventID("run"), StateKind: cdcStateKindRun, Generation: 1, Position: zeroCDCPosition},
+			{EventID: eventID("attempt-open"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 1, Status: cdcStateStatusInProgress, Position: encodeAtomicSnapshotAttempt(first)},
+			{EventID: eventID("attempt-terminal"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 1, Status: destination.CDCStateStatusComplete, Position: encodeAtomicSnapshotAttempt(first)},
+			{EventID: eventID("attempt-next-open"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 1, Status: cdcStateStatusInProgress, Position: encodeAtomicSnapshotAttempt(atomicSnapshotJournalEntry{
+				attemptID: second.attemptID, sequence: second.sequence,
+			})},
+			{EventID: eventID("attempt-next-ready"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 2, Status: cdcStateStatusReady, Position: encodeAtomicSnapshotAttempt(second)},
+		},
+	}
+
+	stale := manager.supersededEventIDs()
+	require.Contains(t, stale, eventID("attempt-open"))
+	require.Contains(t, stale, eventID("attempt-terminal"))
+	require.Contains(t, stale, eventID("attempt-next-open"))
+	require.NotContains(t, stale, eventID("attempt-next-ready"))
+
+	for _, deletedID := range stale {
+		kept := manager.entries[:0]
+		for _, entry := range manager.entries {
+			if entry.EventID != deletedID {
+				kept = append(kept, entry)
+			}
+		}
+		manager.entries = kept
+		manager.destTables = map[string]string{sourceTable: destTable}
+		recovered, sequences, err := manager.recoverAtomicSnapshotAttempts()
+		require.NoError(t, err)
+		require.Equal(t, second, recovered[sourceTable])
+		require.Equal(t, second.sequence, sequences[sourceTable])
+	}
+}
+
+func TestCDCStatePruningRetainsTerminalAtomicAttemptAnchor(t *testing.T) {
+	const (
+		connectorID = "atomic-terminal-prune"
+		runID       = "00000000000000000000000000000001"
+		sourceTable = "public.orders"
+		destTable   = "raw.orders"
+	)
+	eventID := func(suffix string) string { return connectorID + "-" + runID + "-" + suffix }
+	attempt := atomicSnapshotJournalEntry{
+		attemptID: "00000000000000000000000000000011", sequence: 1, ready: true,
+		resumeLSN: "0/100", expectedIncarnation: "destination-v1", sourceMetadataKnown: true,
+		sourceIncarnation: "source-v1", sourceSchemaFingerprint: "schema-v1",
+	}
+	manager := &CDCStateManager{
+		connectorID: connectorID,
+		runID:       runID,
+		generation:  1,
+		runs:        map[string]struct{}{runID: {}},
+		destTables:  map[string]string{sourceTable: destTable},
+		entries: []destination.CDCStateEntry{
+			{EventID: eventID("run"), StateKind: cdcStateKindRun, Generation: 1, Position: zeroCDCPosition},
+			{EventID: eventID("open"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 1, Status: cdcStateStatusInProgress, Position: encodeAtomicSnapshotAttempt(atomicSnapshotJournalEntry{attemptID: attempt.attemptID, sequence: attempt.sequence})},
+			{EventID: eventID("ready"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 1, Status: cdcStateStatusReady, Position: encodeAtomicSnapshotAttempt(attempt)},
+			{EventID: eventID("terminal"), SourceTable: sourceTable, DestinationTable: destTable, StateKind: cdcStateKindAtomicAttempt, Generation: 2, Status: destination.CDCStateStatusComplete, Position: encodeAtomicSnapshotAttempt(attempt)},
+		},
+	}
+
+	stale := manager.supersededEventIDs()
+	require.Contains(t, stale, eventID("open"))
+	require.Contains(t, stale, eventID("ready"))
+	require.NotContains(t, stale, eventID("terminal"))
+	for _, deletedID := range stale {
+		kept := manager.entries[:0]
+		for _, entry := range manager.entries {
+			if entry.EventID != deletedID {
+				kept = append(kept, entry)
+			}
+		}
+		manager.entries = kept
+		recovered, sequences, err := manager.recoverAtomicSnapshotAttempts()
+		require.NoError(t, err)
+		require.Empty(t, recovered)
+		require.Equal(t, attempt.sequence, sequences[sourceTable])
+	}
+}
+
+func TestCDCStateAtomicAttemptJournalRemainsBoundedAcrossRestarts(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.pruneBatchSize = 1
+	const (
+		connectorID = "atomic-restart-pruning"
+		sourceTable = "public.orders"
+		destTable   = "raw.orders"
+	)
+	var manager *CDCStateManager
+	var attemptID string
+	for run := 0; run < 2*cdcStatePruneThreshold+5; run++ {
+		var err error
+		manager, err = NewCDCStateManager(dest, connectorID, destTable, "")
+		require.NoError(t, err)
+		require.NoError(t, manager.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-v1"))
+		require.NoError(t, manager.BeginRun(ctx, false))
+		current, err := manager.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+		require.NoError(t, err)
+		if attemptID == "" {
+			attemptID = current
+		}
+		require.Equal(t, attemptID, current)
+	}
+	require.NoError(t, manager.CompleteAtomicSnapshotAttempt(ctx, sourceTable, destTable, attemptID))
+
+	restarted, err := NewCDCStateManager(dest, connectorID, destTable, "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableState(ctx, sourceTable, destTable, "source-v1", "schema-v1"))
+	require.NoError(t, restarted.BeginRun(ctx, false))
+	_, pending, err := restarted.PendingAtomicSnapshotAttempt(sourceTable, destTable)
+	require.NoError(t, err)
+	require.False(t, pending)
+
+	dest.stateMu.Lock()
+	atomicRows := 0
+	for _, state := range dest.states[restarted.stateTable] {
+		if state.connectorID == connectorID && state.entry.StateKind == cdcStateKindAtomicAttempt {
+			atomicRows++
+		}
+	}
+	dest.stateMu.Unlock()
+	require.LessOrEqual(t, atomicRows, 2, "journal should retain only its terminal recovery anchor and a bounded tail")
+
+	nextID, err := restarted.AtomicSnapshotAttempt(ctx, sourceTable, destTable)
+	require.NoError(t, err)
+	require.NotEqual(t, attemptID, nextID)
+	next, pending, err := restarted.PendingAtomicSnapshotAttempt(sourceTable, destTable)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, uint64(2), next.sequence)
+}
+
 func TestCDCStateRequiresMatchingSourceSchemaFingerprint(t *testing.T) {
 	ctx := t.Context()
 	dest := newCDCStateDestination()
@@ -293,6 +605,189 @@ func TestCDCStateWALTruncatePreservesRegisteredSourceIncarnation(t *testing.T) {
 	require.Equal(t, "00000000/00000030", position)
 }
 
+func TestMultiTableSnapshotInvalidationIsDurableBeforeNonAtomicTruncate(t *testing.T) {
+	ctx := t.Context()
+	dest := &orderedCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
+	dest.incarnations["raw.items"] = "target-v1"
+	manager, err := NewCDCStateManager(dest, "non-atomic-invalidation", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, "public.items", "raw.items", "source-v1", "schema-v1"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	require.NoError(t, manager.BindDestinationIncarnation(ctx, "public.items", "raw.items"))
+	dest.resetOrder()
+	job := &MultiTableIngestionJob{
+		Tables:          []source.SourceTableInfo{{Name: "public.items"}},
+		TableDestNames:  map[string]string{"public.items": "raw.items"},
+		CDCStateManager: manager,
+	}
+	records := make(chan source.RecordBatchResult, 4)
+	records <- source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
+		TableName: "public.items",
+	}}
+	records <- source.RecordBatchResult{TableName: "public.items", TableInfo: &source.SourceTableInfo{
+		Name: "public.items", Incarnation: "source-v2",
+	}}
+	records <- source.RecordBatchResult{TableName: "public.items", TableInfo: &source.SourceTableInfo{
+		Name: "public.items", SchemaFingerprint: "schema-v2",
+	}}
+	records <- source.RecordBatchResult{TableName: "public.items", Truncate: true}
+	close(records)
+
+	_, err = destination.WriteWithTruncateBoundaries(ctx, dest, applyMultiTableSnapshotInvalidations(ctx, job, records), destination.WriteOptions{
+		Table: "raw.items", CDCExpectedIncarnation: "target-v1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"state", "truncate"}, dest.recordedOrder())
+	incarnation, fingerprint := manager.CurrentSourceMetadata("public.items")
+	require.Equal(t, "source-v2", incarnation)
+	require.Equal(t, "schema-v2", fingerprint)
+}
+
+func TestMergeSnapshotInvalidationMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		invalidation source.CDCSnapshotInvalidation
+		table        source.SourceTableInfo
+		want         source.CDCSnapshotInvalidation
+		wantErr      string
+	}{
+		{
+			name:         "fills incarnation",
+			invalidation: source.CDCSnapshotInvalidation{TableName: "public.items", SchemaFingerprint: "schema-v2"},
+			table:        source.SourceTableInfo{Name: "public.items", Incarnation: "source-v2"},
+			want: source.CDCSnapshotInvalidation{
+				TableName: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v2",
+			},
+		},
+		{
+			name:         "fills schema",
+			invalidation: source.CDCSnapshotInvalidation{TableName: "public.items", Incarnation: "source-v2"},
+			table:        source.SourceTableInfo{Name: "public.items", SchemaFingerprint: "schema-v2"},
+			want: source.CDCSnapshotInvalidation{
+				TableName: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v2",
+			},
+		},
+		{
+			name:         "keeps empty metadata empty",
+			invalidation: source.CDCSnapshotInvalidation{TableName: "public.items"},
+			table:        source.SourceTableInfo{Name: "public.items"},
+			want:         source.CDCSnapshotInvalidation{TableName: "public.items"},
+		},
+		{
+			name:         "rejects mismatched table",
+			invalidation: source.CDCSnapshotInvalidation{TableName: "public.items"},
+			table:        source.SourceTableInfo{Name: "public.orders"},
+			wantErr:      "followed by metadata for public.orders",
+		},
+		{
+			name:         "rejects conflicting incarnation",
+			invalidation: source.CDCSnapshotInvalidation{TableName: "public.items", Incarnation: "source-v2"},
+			table:        source.SourceTableInfo{Name: "public.items", Incarnation: "source-v3"},
+			wantErr:      "conflicting incarnation metadata",
+		},
+		{
+			name: "rejects conflicting schema",
+			invalidation: source.CDCSnapshotInvalidation{
+				TableName: "public.items", SchemaFingerprint: "schema-v2",
+			},
+			table:   source.SourceTableInfo{Name: "public.items", SchemaFingerprint: "schema-v3"},
+			wantErr: "conflicting schema metadata",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := mergeSnapshotInvalidationMetadata(tc.invalidation, &tc.table)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestMultiTableSnapshotInvalidationRejectsConflictingAnnouncementMetadata(t *testing.T) {
+	records := mustClosedRecords(
+		source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
+			TableName: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v2",
+		}},
+		source.RecordBatchResult{TableName: "public.items", TableInfo: &source.SourceTableInfo{
+			Name: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v3",
+		}},
+	)
+	job := &MultiTableIngestionJob{Tables: []source.SourceTableInfo{{Name: "public.items"}}}
+
+	var gotErr error
+	for result := range applyMultiTableSnapshotInvalidations(t.Context(), job, records) {
+		if result.Err != nil {
+			gotErr = result.Err
+		}
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	require.ErrorContains(t, gotErr, "conflicting schema metadata")
+}
+
+func TestMultiTableSnapshotInvalidationWithoutBoundaryPreservesPriorState(t *testing.T) {
+	ctx := t.Context()
+	dest := &orderedCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
+	dest.incarnations["raw.items"] = "target-v1"
+	manager, err := NewCDCStateManager(dest, "non-atomic-missing-boundary", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, "public.items", "raw.items", "source-v1", "schema-v1"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	require.NoError(t, manager.BindDestinationIncarnation(ctx, "public.items", "raw.items"))
+	dest.resetOrder()
+	job := &MultiTableIngestionJob{
+		Tables:          []source.SourceTableInfo{{Name: "public.items"}},
+		TableDestNames:  map[string]string{"public.items": "raw.items"},
+		CDCStateManager: manager,
+	}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
+		TableName: "public.items", Incarnation: "source-v2", SchemaFingerprint: "schema-v2",
+	}}
+	close(records)
+
+	var gotErr error
+	for result := range applyMultiTableSnapshotInvalidations(ctx, job, records) {
+		gotErr = result.Err
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	require.ErrorContains(t, gotErr, "was not followed by a replacement boundary")
+	require.Empty(t, dest.recordedOrder())
+}
+
+func TestMultiTableSnapshotInvalidationCancellationDrainsUpstream(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	batch := &singleReleaseCountingRecordBatch{RecordBatch: int64RecordBatch(t, "id", []int64{1}, nil)}
+	records := make(chan source.RecordBatchResult)
+	out := applyMultiTableSnapshotInvalidations(ctx, &MultiTableIngestionJob{}, records)
+	producerDone := make(chan struct{})
+	go func() {
+		records <- source.RecordBatchResult{Batch: batch}
+		close(records)
+		close(producerDone)
+	}()
+
+	for result := range out {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot invalidation wrapper stranded its upstream producer after cancellation")
+	}
+	require.EqualValues(t, 1, batch.releases.Load())
+}
+
 func TestCDCStateRequiresMatchingDestinationTableIncarnation(t *testing.T) {
 	ctx := t.Context()
 	dest := newCDCStateDestination()
@@ -326,6 +821,37 @@ func TestCDCStateRequiresMatchingDestinationTableIncarnation(t *testing.T) {
 	if got, err := restarted.ResumePosition(ctx, "public.orders"); err != nil || got != "" {
 		t.Fatalf("recreated destination resume = %q, %v; want forced snapshot", got, err)
 	}
+}
+
+func TestCDCStateRejectsReplacementAfterResumeBeforeBind(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.incarnations["raw.orders"] = "destination-v1"
+	first, err := NewCDCStateManager(dest, "resume-bind-incarnation", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTableIncarnation(ctx, "public.orders", "raw.orders", "source-v1"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.BindDestinationIncarnation(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:             "00000000/00000020",
+		SnapshotPositions:    map[string]string{"public.orders": "00000000/00000010"},
+		SnapshotIncarnations: map[string]string{"public.orders": "source-v1"},
+	}))
+
+	restarted, err := NewCDCStateManager(dest, "resume-bind-incarnation", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableIncarnation(ctx, "public.orders", "raw.orders", "source-v1"))
+	position, err := restarted.ResumePosition(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "00000000/00000020", position)
+	require.NoError(t, restarted.BeginRun(ctx, false))
+	dest.stateMu.Lock()
+	dest.incarnations["raw.orders"] = "destination-v2"
+	dest.stateMu.Unlock()
+
+	err = restarted.BindDestinationIncarnation(ctx, "public.orders", "raw.orders")
+	require.ErrorContains(t, err, "replaced after its resume position was selected")
+	require.Empty(t, restarted.BoundDestinationIncarnation("public.orders"))
 }
 
 func TestCDCStateRejectsDestinationReplacementBeforeCheckpoint(t *testing.T) {
@@ -1425,6 +1951,26 @@ func TestCDCStateRequiresLatestGenerationCompletedSnapshot(t *testing.T) {
 	if manager.stateTable != "_bruin_staging.cdc_state" {
 		t.Fatalf("unexpected shared state table: %s", manager.stateTable)
 	}
+}
+
+func TestCDCStateBatchSnapshotCompletionUsesFinalCheckpoint(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	manager, err := NewCDCStateManager(dest, "batch-truncate-completion", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableState(ctx, "public.orders", "raw.orders", "source-v1", "schema-v1"))
+	require.NoError(t, manager.ClaimTarget(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+
+	manager.RecordBatchSnapshotCompletion("public.orders", "")
+	require.NoError(t, manager.Persist(ctx, source.CDCStateCommitToken{Position: "00000000/00000020"}))
+
+	restarted, err := NewCDCStateManager(dest, "batch-truncate-completion", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableState(ctx, "public.orders", "raw.orders", "source-v1", "schema-v1"))
+	position, err := restarted.ResumePosition(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "00000000/00000020", position)
 }
 
 func TestCDCStateConnectorsShareTableWithoutSharingRows(t *testing.T) {

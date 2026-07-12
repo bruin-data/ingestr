@@ -30,8 +30,11 @@ type PrepareOptions struct {
 }
 
 type WriteOptions struct {
-	Table            string
-	Schema           *schema.TableSchema
+	Table  string
+	Schema *schema.TableSchema
+	// TargetSchema is the visible schema produced by an atomic replacement when
+	// Schema contains staging-only columns needed while processing the input.
+	TargetSchema     *schema.TableSchema
 	PrimaryKeys      []string
 	Parallelism      int
 	AtomicCommit     bool
@@ -176,6 +179,8 @@ type TableWriteConfig struct {
 	PrimaryKeys            []string
 	DeduplicatePrimaryKeys bool
 	IncrementalKey         string
+	IncrementalPredicate   string
+	CDCMode                bool
 	SkipCDCResume          bool
 	CDCExpectedIncarnation string
 }
@@ -190,7 +195,8 @@ type MultiTableWriteOptions struct {
 	LoaderFileFormat string
 	// CancelSource stops the producer when a per-table writer fails. The writer
 	// drains records after invoking it so producer-owned resources can unwind.
-	CancelSource context.CancelFunc
+	CancelSource       context.CancelFunc
+	CancelDrainTimeout time.Duration
 	// TableWriter overrides the destination's per-table write path. Its boolean
 	// result reports whether it applied at least one source truncate boundary.
 	TableWriter func(context.Context, string, <-chan source.RecordBatchResult, WriteOptions) (bool, error)
@@ -330,6 +336,14 @@ type CDCTargetIncarnationProvider interface {
 	CDCTargetIncarnation(ctx context.Context, table string) (incarnation string, exists bool, err error)
 }
 
+// ManagedCDCWriteFencer is implemented by destinations whose row writes,
+// merges, and table swaps atomically reject a stale CDCExpectedIncarnation.
+// Reading the target incarnation separately is not sufficient because the
+// target can be replaced between that read and the DML commit.
+type ManagedCDCWriteFencer interface {
+	SupportsManagedCDCWriteFencing() bool
+}
+
 // ManagedCDCStateValidator checks destination-specific durability requirements
 // before a managed CDC run acquires a lease or mutates destination state.
 type ManagedCDCStateValidator interface {
@@ -395,22 +409,37 @@ type AtomicSnapshotOptions struct {
 // stage snapshot pages and publish the completed snapshot in one table commit.
 // It does not provide atomic publication across multiple destination tables.
 // Streaming falls back to its historical truncate-and-page behavior when this
-// interface is not implemented. Begin, write, and publish must be idempotent for
-// one AttemptID. Once publication becomes durable, retrying publish for that
-// AttemptID must report success without duplicating rows or replacing a newer
-// attempt, including when the original success response was lost.
+// interface is not implemented. Begin and write must durably finish before
+// returning success and be idempotent for one AttemptID. Publish retries for a
+// sealed attempt use the original commit token, source boundary, and target
+// incarnation fence. Once publication becomes durable, retrying publish for
+// that AttemptID must return the original published incarnation without
+// duplicating rows or replacing a newer attempt, including when the original
+// success response was lost.
 type AtomicSnapshotPublisher interface {
 	BeginAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
 	EvolveAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
 	WriteAtomicSnapshot(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
-	PublishAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
+	// PublishAtomicSnapshot returns the exact physical incarnation made visible
+	// by the commit. Managed CDC uses it to bind state without trusting a
+	// post-publication identity lookup that could race with an external replace.
+	PublishAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) (publishedIncarnation string, err error)
 }
 
 // AtomicSnapshotAborter reclaims an owned snapshot stage only when the caller
-// knows publication was never attempted. It is separate from
-// AtomicSnapshotPublisher so existing publishers remain compatible.
+// knows publication was never attempted. Abort must be idempotent because a
+// successful response can be lost before the durable attempt is retired. It is
+// separate from AtomicSnapshotPublisher so existing publishers remain compatible.
 type AtomicSnapshotAborter interface {
 	AbortAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
+}
+
+// AtomicSnapshotDiscarder retires an obsolete sealed attempt whose publish
+// result may have been lost. It must delete only an unpublished stage and must
+// be an idempotent no-op when that AttemptID was already published. It must
+// never remove or replace a visible target.
+type AtomicSnapshotDiscarder interface {
+	DiscardAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
 }
 
 type OwnedTableDropper interface {
@@ -491,6 +520,19 @@ type CDCTruncateCapable interface {
 // readers never observe an empty or partially reloaded target.
 type AtomicTruncateInsertWriter interface {
 	TruncateInsertRecords(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
+}
+
+// AtomicTruncateInsertBoundaryAware acknowledges that TruncateInsertRecords
+// treats every Truncate marker as a replacement boundary: rows received before
+// the marker must not be present in the final atomic commit.
+type AtomicTruncateInsertBoundaryAware interface {
+	SupportsTruncateInsertBoundaries() bool
+}
+
+// AtomicTruncateInsertStagingAware acknowledges that TruncateInsertRecords
+// can consume staging-only input columns while publishing only TargetSchema.
+type AtomicTruncateInsertStagingAware interface {
+	SupportsTruncateInsertStagingColumns() bool
 }
 
 // AtomicTruncateInsertSchemaEvolver marks an atomic truncate+insert writer that

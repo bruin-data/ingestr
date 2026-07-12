@@ -1135,6 +1135,14 @@ func (d *MySQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string
 }
 
 func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	return d.mysqlTargetIncarnation(ctx, d.db, table)
+}
+
+type mysqlIncarnationQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (d *MySQLDestination) mysqlTargetIncarnation(ctx context.Context, queryer mysqlIncarnationQueryer, table string) (string, bool, error) {
 	if d.isVitess {
 		return "", false, errors.New("vitess and planetscale do not expose a durable physical table incarnation")
 	}
@@ -1143,7 +1151,7 @@ func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		database = d.database
 	}
 	var engine string
-	err := d.db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`, database, tableName).Scan(&engine)
+	err := queryer.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`, database, tableName).Scan(&engine)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -1160,9 +1168,9 @@ func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 	}
 	internalName := database + "/" + tableName
 	var tableID uint64
-	err = d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
-	if err != nil {
-		err = d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
+	err = queryer.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
+	if isMySQLMissingInnoDBDictionaryTableError(err) {
+		err = queryer.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -1171,6 +1179,38 @@ func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		return "", false, fmt.Errorf("failed to read durable InnoDB table identity for %s: %w", table, err)
 	}
 	return mysqlTableIncarnation(database, tableName, tableID), true, nil
+}
+
+func (d *MySQLDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return fmt.Errorf("cannot conditionally truncate MySQL table %q without a bound incarnation", table)
+	}
+	if d.isVitess {
+		return errors.New("vitess and planetscale do not expose a durable physical table incarnation")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT 1 FROM %s LIMIT 1 FOR UPDATE", quoteTable(table)))
+	if err != nil {
+		return fmt.Errorf("failed to lock MySQL CDC target %s: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	current, exists, err := d.mysqlTargetIncarnation(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("MySQL CDC target %q physical incarnation changed", table)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(table))); err != nil {
+		return fmt.Errorf("failed to truncate MySQL CDC target %s: %w", table, err)
+	}
+	return tx.Commit()
 }
 
 func mysqlTableIncarnation(database, table string, tableID uint64) string {
@@ -1182,6 +1222,44 @@ func (d *MySQLDestination) ValidateManagedCDCState() error {
 		return errors.New("vitess and planetscale do not expose a durable physical table incarnation")
 	}
 	return nil
+}
+
+func (d *MySQLDestination) ValidateManagedCDCTarget(ctx context.Context, table string) error {
+	if err := d.ValidateManagedCDCState(); err != nil {
+		return err
+	}
+	if d.db == nil {
+		return errors.New("MySQL destination is not connected")
+	}
+	_, _, err := d.mysqlTargetIncarnation(ctx, d.db, table)
+	if err == nil {
+		return nil
+	}
+	if isMySQLInnoDBDictionaryPermissionError(err) {
+		return fmt.Errorf("managed CDC cannot read durable InnoDB table identity; grant the global MySQL PROCESS privilege if this server requires it: %w", err)
+	}
+	return err
+}
+
+func isMySQLMissingInnoDBDictionaryTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1109 || myErr.Number == 1146
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown table") || strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist")
+}
+
+func isMySQLInnoDBDictionaryPermissionError(err error) bool {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1044 || myErr.Number == 1142 || myErr.Number == 1227
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "access denied") || strings.Contains(msg, "command denied") || strings.Contains(msg, "process privilege")
 }
 
 func canonicalMySQLTarget(database, table string, lowerCaseTableNames int) string {
@@ -1240,16 +1318,16 @@ func (d *MySQLDestination) DeleteCDCStateEvents(ctx context.Context, table, conn
 	return err
 }
 
-// isMySQLMissingTableError reports whether err means the queried table does not
-// exist. Plain MySQL raises errno 1146 ("... doesn't exist"); vtgate raises
-// errno 1146 or 1051 with "table ... does not exist" (VT05004/VT05005).
+// isMySQLMissingTableError reports whether the queried table or its database
+// does not exist. Managed CDC reads its state before PrepareTable creates the
+// _bruin_staging database on a first run.
 func isMySQLMissingTableError(err error) bool {
 	var myErr *mysqldriver.MySQLError
 	if errors.As(err, &myErr) {
-		return myErr.Number == 1146 || myErr.Number == 1051
+		return myErr.Number == 1146 || myErr.Number == 1051 || myErr.Number == 1049
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist") || strings.Contains(msg, "unknown database")
 }
 
 func (d *MySQLDestination) GetScheme() string {

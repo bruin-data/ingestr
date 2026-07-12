@@ -18,7 +18,10 @@ const DefaultStagingSchema = "_bruin_staging"
 // identifiers don't collide via silent truncation and don't fail on MySQL.
 const maxStagingTableNameLen = 60
 
-const encodedStagingIdentifierPrefix = "_ingestr_hex_"
+const (
+	encodedStagingIdentifierPrefix       = "ingestr_hex_"
+	legacyEncodedStagingIdentifierPrefix = "_ingestr_hex_"
+)
 
 func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string {
 	catalog, originSchema, tableName := splitCatalogSchemaTable(targetTable)
@@ -183,7 +186,7 @@ func syntheticStagingIdentifier(parts ...string) string {
 }
 
 func isUnambiguousLegacyStagingIdentifier(candidate string, parts []string) bool {
-	if strings.HasPrefix(candidate, encodedStagingIdentifierPrefix) {
+	if strings.HasPrefix(candidate, encodedStagingIdentifierPrefix) || strings.HasPrefix(candidate, legacyEncodedStagingIdentifierPrefix) {
 		return false
 	}
 	for _, part := range parts {

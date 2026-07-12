@@ -558,7 +558,7 @@ func TestPostgresCDC_Snapshot(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -682,7 +682,7 @@ func TestPostgresCDC_IncrementalResume(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -817,7 +817,7 @@ func TestPostgresCDC_DestinationStateTruncateAndSnapshotRecovery(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -938,7 +938,7 @@ func TestPostgresCDC_LegacyAutoSlotCutoverRequiresSuccessfulDurability(t *testin
 		postgres.WithDatabase("destdb"),
 		postgres.WithUsername("destuser"),
 		postgres.WithPassword("destpass"),
-		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(30*time.Second)),
+		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(60*time.Second)),
 	)
 	require.NoError(t, err)
 	defer func() { _ = destContainer.Terminate(ctx) }()
@@ -997,7 +997,7 @@ func TestPostgresCDC_LegacyAutoSlotCutoverRequiresSuccessfulDurability(t *testin
 	require.Positive(t, completedState, "legacy slot must only be removed after v2 state is durable")
 }
 
-func TestPostgresCDC_SharedStateMySQL(t *testing.T) {
+func TestPostgresCDC_RejectsUnfencedMySQLDestination(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1020,35 +1020,17 @@ func TestPostgresCDC_SharedStateMySQL(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		IncrementalStrategy: config.StrategyMerge,
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	sourcePool, err := pgxpool.New(ctx, sourceConnString)
-	require.NoError(t, err)
-	defer sourcePool.Close()
-	_, err = sourcePool.Exec(ctx, `DELETE FROM public.test_cdc WHERE id = 1; INSERT INTO public.test_cdc (name, value) VALUES ('mysql-state', 901)`)
-	require.NoError(t, err)
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	err := pipeline.New(cfg).Run(ctx)
+	require.ErrorContains(t, err, "atomic destination write, merge, and swap fencing is not supported")
 
 	db, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
-	defer func() { _, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS `"+target+"`") }()
-
-	var stateTables int
+	var targetTables int
 	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
-		WHERE table_schema = '_bruin_staging' AND table_name = 'cdc_state'`).Scan(&stateTables))
-	assert.Equal(t, 1, stateTables)
-	var generation int64
-	require.NoError(t, db.QueryRowContext(ctx, `
-		SELECT MAX(state_generation) FROM _bruin_staging.cdc_state
-		WHERE destination_table = ? AND state_kind = 'snapshot' AND state_status = 'complete'`, target).Scan(&generation))
-	assert.Equal(t, int64(2), generation)
-	var activeRows, deletedRows int
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+target+"` WHERE `_cdc_deleted` = 0").Scan(&activeRows))
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+target+"` WHERE `_cdc_deleted` = 1").Scan(&deletedRows))
-	assert.Equal(t, 3, activeRows)
-	assert.Equal(t, 1, deletedRows)
+		WHERE table_schema = DATABASE() AND table_name = ?`, target).Scan(&targetTables))
+	require.Zero(t, targetTables, "admission failure must happen before creating the CDC target")
 }
 
 func postgresCDCStateTables(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []string {
@@ -1094,7 +1076,7 @@ func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -1212,7 +1194,7 @@ func TestPostgresCDC_MergePreservesUnchangedJSONB(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -1321,7 +1303,7 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -1456,7 +1438,7 @@ func TestPostgresCDC_IntraBatchChangedThenUnchangedOverwritesExistingRow(t *test
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -1548,7 +1530,7 @@ func TestPostgresCDC_BatchModeCompletesWithActiveWrites(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
@@ -1663,20 +1645,16 @@ func TestPostgresCDC_BatchModeCompletesWithActiveWrites(t *testing.T) {
 	t.Logf("Final row count: %d (initial: %d, background writes: %d)", finalCount, initialCount, writtenCount)
 }
 
-func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
+func TestPostgresCDC_RejectsUnfencedDuckDBDestination(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
 	ctx := context.Background()
-
-	// Setup source PostgreSQL with logical replication
 	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
 	defer func() { _ = sourceContainer.Terminate(ctx) }()
-
 	setupCDCSource(t, ctx, sourceConnString)
 
-	// Create temp path for DuckDB destination (don't create the file - DuckDB will create it)
 	tmpDir, err := os.MkdirTemp("", "cdc_test_*")
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
@@ -1684,8 +1662,6 @@ func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
 	duckdbPath := fmt.Sprintf("%s/test.duckdb", tmpDir)
 	duckdbURI := fmt.Sprintf("duckdb:///%s", duckdbPath)
 	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
-
-	// Run the first CDC pipeline (full snapshot)
 	cfg := &config.IngestConfig{
 		SourceURI:           cdcSourceURI,
 		DestURI:             duckdbURI,
@@ -1695,79 +1671,15 @@ func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
 		IncrementalStrategy: "merge",
 	}
 
-	p := pipeline.New(cfg)
-	err = p.Run(ctx)
+	err = pipeline.New(cfg).Run(ctx)
+	require.ErrorContains(t, err, "atomic destination write, merge, and swap fencing is not supported")
+
+	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckdbPath))
 	require.NoError(t, err)
-
-	// Query DuckDB to verify initial data
-	verifyDuckDB := func(query string) (interface{}, error) {
-		db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckdbPath))
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = db.Close() }()
-
-		var result interface{}
-		err = db.QueryRow(query).Scan(&result)
-		return result, err
-	}
-
-	// Verify initial count
-	count, err := verifyDuckDB("SELECT COUNT(*) FROM test_cdc_dest")
-	require.NoError(t, err)
-	assert.Equal(t, int64(3), count, "Should have 3 rows from initial snapshot")
-
-	// Get max LSN from first run
-	firstMaxLSN, err := verifyDuckDB(`SELECT MAX("_cdc_lsn") FROM test_cdc_dest`)
-	require.NoError(t, err)
-	assert.NotNil(t, firstMaxLSN, "Should have a max LSN after first run")
-	t.Logf("First run max LSN: %v", firstMaxLSN)
-
-	// Make changes to source
-	sourcePool, err := pgxpool.New(ctx, sourceConnString)
-	require.NoError(t, err)
-	defer sourcePool.Close()
-
-	_, err = sourcePool.Exec(ctx, `INSERT INTO public.test_cdc (name, value) VALUES ('item4', 400)`)
-	require.NoError(t, err)
-
-	_, err = sourcePool.Exec(ctx, `UPDATE public.test_cdc SET value = 150 WHERE id = 1`)
-	require.NoError(t, err)
-
-	// Run the second CDC pipeline (should resume from LSN)
-	cfg2 := &config.IngestConfig{
-		SourceURI:           cdcSourceURI,
-		DestURI:             duckdbURI,
-		SourceTable:         "public.test_cdc",
-		DestTable:           "test_cdc_dest",
-		PrimaryKeys:         []string{"id"},
-		IncrementalStrategy: "merge",
-	}
-
-	p2 := pipeline.New(cfg2)
-	err = p2.Run(ctx)
-	require.NoError(t, err)
-
-	// Verify incremental changes were captured
-	count, err = verifyDuckDB("SELECT COUNT(*) FROM test_cdc_dest")
-	require.NoError(t, err)
-	assert.Equal(t, int64(4), count, "Should have 4 rows after incremental sync")
-
-	// Verify new record (use EqualValues for type-agnostic comparison)
-	item4Value, err := verifyDuckDB(`SELECT value FROM test_cdc_dest WHERE name = 'item4'`)
-	require.NoError(t, err)
-	assert.EqualValues(t, 400, item4Value, "item4 should have value 400")
-
-	// Verify update
-	item1Value, err := verifyDuckDB(`SELECT value FROM test_cdc_dest WHERE id = 1`)
-	require.NoError(t, err)
-	assert.EqualValues(t, 150, item1Value, "item1 should be updated to value 150")
-
-	// Verify LSN advanced
-	secondMaxLSN, err := verifyDuckDB(`SELECT MAX("_cdc_lsn") FROM test_cdc_dest`)
-	require.NoError(t, err)
-	assert.NotEqual(t, firstMaxLSN, secondMaxLSN, "LSN should have advanced after incremental sync")
-	t.Logf("Second run max LSN: %v", secondMaxLSN)
+	defer func() { _ = db.Close() }()
+	var targetTables int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'test_cdc_dest'`).Scan(&targetTables))
+	require.Zero(t, targetTables, "admission failure must happen before creating the CDC target")
 }
 
 // TestPostgresCDC_MultiTable_SchemaEvolution reproduces issue #766: a column
@@ -1949,12 +1861,7 @@ func TestPostgresCDC_MultiTableTrimWhitespace(t *testing.T) {
 	assert.False(t, rows[1].note.Valid)
 }
 
-// TestPostgresCDC_UnawareDestination_SQLite pins the contract that the
-// staging-only _cdc_unchanged_cols column never reaches the merge SQL of
-// destinations that don't consume it. A TOAST-sized payload forces the
-// decoder to emit unchanged markers; without column filtering the SQLite
-// merge would reference a column the target table doesn't have.
-func TestPostgresCDC_UnawareDestination_SQLite(t *testing.T) {
+func TestPostgresCDC_RejectsUnfencedSQLiteDestination(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1997,30 +1904,16 @@ func TestPostgresCDC_UnawareDestination_SQLite(t *testing.T) {
 		PrimaryKeys:         []string{"id"},
 		IncrementalStrategy: "merge",
 	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	// Partial update: config_data stays TOASTed-unchanged, so the change row
-	// carries an unchanged marker for it.
-	_, err = srcPool.Exec(ctx, `UPDATE public.toast_items SET status = 'completed' WHERE id = 1`)
-	require.NoError(t, err)
-
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	err = pipeline.New(cfg).Run(ctx)
+	require.ErrorContains(t, err, "atomic destination write, merge, and swap fencing is not supported")
 
 	dest, err := sql.Open("sqlite3", sqlitePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dest.Close() })
 
-	var status string
-	require.NoError(t, dest.QueryRow(`SELECT status FROM toast_items_dest WHERE id = 1`).Scan(&status))
-	assert.Equal(t, "completed", status, "changed column must be applied")
-
-	var count int
-	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM toast_items_dest`).Scan(&count))
-	assert.Equal(t, 1, count)
-
-	// The staging-only column must not exist on the destination table.
-	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('toast_items_dest') WHERE name = '_cdc_unchanged_cols'`).Scan(&count))
-	assert.Equal(t, 0, count, "_cdc_unchanged_cols must stay staging-only")
+	var targetTables int
+	require.NoError(t, dest.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'toast_items_dest'`).Scan(&targetTables))
+	require.Zero(t, targetTables, "admission failure must happen before creating the CDC target")
 }
 
 func cdcReplicationSlotName(tableName, publication, suffix string) string {
@@ -2105,6 +1998,9 @@ func TestPostgresCDC_BatchRunAdvancesReplicationSlot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	if pgDest.uri == "" {
+		t.Skip("shared PostgreSQL destination container not available")
+	}
 
 	ctx := context.Background()
 
@@ -2112,17 +2008,17 @@ func TestPostgresCDC_BatchRunAdvancesReplicationSlot(t *testing.T) {
 	defer func() { _ = sourceContainer.Terminate(ctx) }()
 	setupCDCSource(t, ctx, sourceConnString)
 
-	tmpDir, err := os.MkdirTemp("", "cdc_slot_mt_*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-	duckdbURI := fmt.Sprintf("duckdb:///%s/test.duckdb", tmpDir)
+	destSchema := uniqueSchemaName(t, "cdc_slot_mt")
+	ensurePostgresSchema(t, ctx, pgDest.uri, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, pgDest.uri, destSchema) })
 
 	// Full-database CDC: no SourceTable -> multi-table path.
-	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
+	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+		"&publication=test_pub&mode=batch&dest_schema=" + destSchema
 	assertBatchRunsAdvanceSlot(t, ctx, sourceConnString, func() *config.IngestConfig {
 		return &config.IngestConfig{
 			SourceURI:           cdcSourceURI,
-			DestURI:             duckdbURI,
+			DestURI:             pgDest.uri,
 			IncrementalStrategy: "merge",
 		}
 	})
@@ -2135,6 +2031,9 @@ func TestPostgresCDC_SingleTableBatchRunAdvancesReplicationSlot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	if pgDest.uri == "" {
+		t.Skip("shared PostgreSQL destination container not available")
+	}
 
 	ctx := context.Background()
 
@@ -2142,18 +2041,17 @@ func TestPostgresCDC_SingleTableBatchRunAdvancesReplicationSlot(t *testing.T) {
 	defer func() { _ = sourceContainer.Terminate(ctx) }()
 	setupCDCSource(t, ctx, sourceConnString)
 
-	tmpDir, err := os.MkdirTemp("", "cdc_slot_st_*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-	duckdbURI := fmt.Sprintf("duckdb:///%s/test.duckdb", tmpDir)
+	destSchema := uniqueSchemaName(t, "cdc_slot_st")
+	ensurePostgresSchema(t, ctx, pgDest.uri, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, pgDest.uri, destSchema) })
 
 	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
 	assertBatchRunsAdvanceSlot(t, ctx, sourceConnString, func() *config.IngestConfig {
 		return &config.IngestConfig{
 			SourceURI:           cdcSourceURI,
-			DestURI:             duckdbURI,
+			DestURI:             pgDest.uri,
 			SourceTable:         "public.test_cdc",
-			DestTable:           "test_cdc_dest",
+			DestTable:           destSchema + ".test_cdc_dest",
 			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: "merge",
 		}

@@ -350,6 +350,18 @@ func ValidateSchema(s *schema.TableSchema) error {
 		if col.Name == "" {
 			return fmt.Errorf("column %d has empty name", i)
 		}
+		if col.DataType == schema.TypeDecimal || (col.DataType == schema.TypeArray && col.ArrayType == schema.TypeDecimal) {
+			precision := col.Precision
+			if precision == 0 {
+				precision = 38
+			}
+			if precision < 1 || precision > 38 {
+				return fmt.Errorf("column %q decimal precision %d is invalid: maximum supported precision is 38", col.Name, col.Precision)
+			}
+			if col.Scale < 0 || col.Scale > precision {
+				return fmt.Errorf("column %q decimal scale %d is invalid for precision %d", col.Name, col.Scale, precision)
+			}
+		}
 	}
 	return nil
 }

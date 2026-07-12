@@ -17,6 +17,10 @@ type EvolutionPlan struct {
 	// Comparison is the set of schema changes the destination should apply.
 	// It is nil or empty when no migration is required.
 	Comparison *SchemaComparison
+	// TransformComparison retains the logical source-to-destination differences
+	// used by runtime contract transforms, including changes the destination
+	// cannot or must not apply physically.
+	TransformComparison *SchemaComparison
 	// FinalSchema is what the destination table will look like once the
 	// applicable changes have been applied.
 	FinalSchema *schema.TableSchema

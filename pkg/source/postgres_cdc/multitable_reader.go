@@ -285,7 +285,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 			if opts.Streaming {
 				if _, replacement := replacements[table.Name]; replacement {
 					if err := sendResult(gctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
-						TableName: table.Name, Incarnation: table.Incarnation,
+						TableName: table.Name, Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint,
 					}}); err != nil {
 						return err
 					}
@@ -817,12 +817,15 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		schemas[t.Name] = t.Schema
 	}
 	accum := newBatchAccumulator(batchSize, schemas)
+	accum.stableAll = opts.CDCStableDataBatches
+	defer accum.discard()
 
-	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
-	// confirms the slot only after the data is durable. barrierNonce is empty in
-	// streaming mode, so the barrier exit below never triggers.
+	// Every batch carries its safe source position. Streaming confirms the slot
+	// from it; managed batch ingestion uses it to identify transaction fragments.
+	// barrierNonce is empty in streaming mode, so the barrier exit below never
+	// triggers.
 	var token tokenFunc
-	if opts.Streaming {
+	if opts.Streaming || accum.stableAll {
 		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 	}
 
@@ -918,6 +921,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		}
 		for _, g := range groups {
 			accum.add(g.TableName, g.Changes, g.LSN)
+		}
+		pendingLow, pending := repl.PendingLowWater()
+		if err := accum.flushStableKeylessContext(ctx, results, token, pendingLow, pending); err != nil {
+			return nil, err
 		}
 
 		// Flush tables that have accumulated enough rows

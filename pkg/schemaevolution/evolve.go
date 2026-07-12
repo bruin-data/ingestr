@@ -24,6 +24,18 @@ type SchemaEvolver interface {
 	SupportsColumnTypeChanges() bool
 }
 
+// IncarnationFencedSchemaEvolver applies schema changes only while the
+// destination table still has the expected physical identity. The identity
+// check, table lock, and DDL must share one destination transaction.
+type IncarnationFencedSchemaEvolver interface {
+	ApplySchemaEvolutionIfIncarnation(
+		ctx context.Context,
+		table string,
+		comparison *SchemaComparison,
+		expectedIncarnation string,
+	) ([]string, error)
+}
+
 // ApplicableComparison returns the subset of changes that will actually be
 // reflected in the destination schema given whether the destination supports
 // column type changes. Add/remove/nullability changes always apply; type

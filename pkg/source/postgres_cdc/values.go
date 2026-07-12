@@ -167,9 +167,15 @@ func expandUpdates(changes []Change, tableSchema *schema.TableSchema) []Change {
 		if deleteSequence > 0 {
 			deleteSequence--
 		}
-		out = append(out, Change{Operation: "DELETE", LSN: c.LSN, Sequence: deleteSequence, Values: c.OldValues})
+		out = append(out, Change{
+			Operation: "DELETE", LSN: c.LSN, Sequence: deleteSequence,
+			DataBatchWindow: c.DataBatchWindow, Values: c.OldValues,
+		})
 		if keyless {
-			out = append(out, Change{Operation: "INSERT", LSN: c.LSN, Sequence: c.Sequence, Values: resolvedNewImage(c)})
+			out = append(out, Change{
+				Operation: "INSERT", LSN: c.LSN, Sequence: c.Sequence,
+				DataBatchWindow: c.DataBatchWindow, Values: resolvedNewImage(c),
+			})
 		} else {
 			out = append(out, c)
 		}

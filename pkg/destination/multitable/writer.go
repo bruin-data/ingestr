@@ -64,6 +64,9 @@ func WriteWithResult(
 	}
 
 	router := NewRouter(tables, 8)
+	if opts.CancelDrainTimeout > 0 {
+		router.drainTimeout = opts.CancelDrainTimeout
+	}
 	router.Route(writeCtx, records, opts.CancelSource != nil)
 
 	var wg sync.WaitGroup
@@ -84,24 +87,49 @@ func WriteWithResult(
 			if ch == nil {
 				return
 			}
+			defer drainAndRelease(ch)
 
-			truncated, err := destination.WriteWithTruncateBoundariesAfterCancel(writeCtx, dest, ch, destination.WriteOptions{
-				Table:            tableConfig.DestTable,
-				Schema:           tableConfig.Schema,
-				PrimaryKeys:      tableConfig.PrimaryKeys,
-				Parallelism:      parallelism,
-				StagingTable:     opts.StagingTable,
-				StagingBucket:    opts.StagingBucket,
-				LoaderFileSize:   opts.LoaderFileSize,
-				LoaderFileFormat: opts.LoaderFileFormat,
-			}, cancelInput)
+			cancelAfterWriteError := func() {
+				if router.Err() == nil {
+					cancelInput()
+				}
+			}
+			writeOpts := destination.WriteOptions{
+				Table:                  tableConfig.DestTable,
+				Schema:                 tableConfig.Schema,
+				PrimaryKeys:            tableConfig.PrimaryKeys,
+				Parallelism:            parallelism,
+				StagingTable:           opts.StagingTable,
+				StagingBucket:          opts.StagingBucket,
+				LoaderFileSize:         opts.LoaderFileSize,
+				LoaderFileFormat:       opts.LoaderFileFormat,
+				DeduplicatePrimaryKeys: tableConfig.DeduplicatePrimaryKeys,
+				IncrementalKey:         tableConfig.IncrementalKey,
+				SkipCDCResume:          tableConfig.SkipCDCResume,
+				CDCExpectedIncarnation: tableConfig.CDCExpectedIncarnation,
+			}
+			var truncated bool
+			var err error
+			if opts.TableWriter != nil {
+				truncated, err = opts.TableWriter(writeCtx, table, ch, writeOpts)
+			} else if tableConfig.CDCMode {
+				truncated, err = destination.WriteWithTruncateBoundariesAfterCancel(writeCtx, dest, ch, writeOpts, cancelAfterWriteError)
+			} else {
+				err = dest.WriteParallel(writeCtx, ch, writeOpts)
+				if err != nil {
+					cancelAfterWriteError()
+				}
+			}
 			if truncated {
 				resultMu.Lock()
 				result.TruncatedTables[table] = true
 				resultMu.Unlock()
 			}
 			if err != nil {
-				cancelInput()
+				routerErr := router.Err()
+				if routerErr == nil || !errors.Is(err, routerErr) {
+					cancelInput()
+				}
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
@@ -132,4 +160,12 @@ func WriteWithResult(
 
 	config.Debug("[MULTITABLE] Multi-table write completed in %v", time.Since(startTotal))
 	return result, nil
+}
+
+func drainAndRelease(records <-chan source.RecordBatchResult) {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
 }

@@ -94,7 +94,7 @@ func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	// vtgate can accept connections before it can serve queries; retry.
 	require.Eventually(t, func() bool {
 		return db.PingContext(ctx) == nil
-	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+	}, vitessQueryReadyTimeout, 2*time.Second, "vtgate did not become query-ready")
 
 	_, err = db.ExecContext(ctx, "DROP TABLE IF EXISTS items")
 	require.NoError(t, err)

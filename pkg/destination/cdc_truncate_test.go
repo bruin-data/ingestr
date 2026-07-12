@@ -24,6 +24,18 @@ type conditionalBoundaryDestination struct {
 	conditionalCalls   atomic.Int64
 }
 
+type unconditionalBoundaryDestination struct {
+	*boundaryWriteDestination
+	unconditionalCalls atomic.Int64
+}
+
+func (d *unconditionalBoundaryDestination) GetScheme() string { return "unconditional" }
+
+func (d *unconditionalBoundaryDestination) TruncateCDCTable(context.Context, string) error {
+	d.unconditionalCalls.Add(1)
+	return nil
+}
+
 func (d *conditionalBoundaryDestination) TruncateCDCTable(context.Context, string) error {
 	d.unconditionalCalls.Add(1)
 	return nil
@@ -205,6 +217,30 @@ func TestWriteWithTruncateBoundariesRefusesRecreatedManagedTarget(t *testing.T) 
 	}
 	if got := dest.conditionalCalls.Load(); got != 1 {
 		t.Fatalf("conditional truncate calls = %d, want 1", got)
+	}
+}
+
+func TestWriteWithTruncateBoundariesRejectsUnsupportedManagedTruncateWithoutMutation(t *testing.T) {
+	dest := &unconditionalBoundaryDestination{boundaryWriteDestination: &boundaryWriteDestination{
+		write: func(_ context.Context, records <-chan source.RecordBatchResult, _ WriteOptions) error {
+			for result := range records {
+				releaseCDCResult(result)
+			}
+			return nil
+		},
+	}}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Truncate: true, CDCWALTruncate: true}
+	close(records)
+
+	_, err := WriteWithTruncateBoundaries(context.Background(), dest, records, WriteOptions{
+		Table: "items", CDCExpectedIncarnation: "bound-original-uuid",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot conditionally truncate managed CDC targets") {
+		t.Fatalf("WriteWithTruncateBoundaries() error = %v, want unsupported conditional truncate", err)
+	}
+	if got := dest.unconditionalCalls.Load(); got != 0 {
+		t.Fatalf("unconditional truncate calls = %d, want 0", got)
 	}
 }
 

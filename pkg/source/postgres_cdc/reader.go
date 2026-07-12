@@ -121,7 +121,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		// Full mode: Phase 1: Snapshot
 		if replacementSnapshot && opts.Streaming {
 			if err := sendResult(ctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
-				TableName: r.tableName, Incarnation: incarnation,
+				TableName: r.tableName, Incarnation: incarnation, SchemaFingerprint: fingerprint,
 			}}); err != nil {
 				return
 			}
@@ -245,6 +245,7 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 	}
 
 	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
+	accum.stableAll = opts.CDCStableDataBatches
 
 	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
 	if err == nil && !opts.Streaming {
@@ -336,7 +337,7 @@ func (r *CDCReader) resnapshotTable(ctx context.Context, slotName string, table 
 		return 0, fmt.Errorf("failed to parse schema backfill LSN: %w", err)
 	}
 	if err := sendResult(ctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
-		TableName: table.Name, Incarnation: table.Incarnation,
+		TableName: table.Name, Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint,
 	}}); err != nil {
 		return 0, err
 	}
@@ -415,11 +416,13 @@ type singleTableChangeFilter interface {
 // transaction and defeat accumulation entirely (see hadActivity in
 // Replicator.NextChanges).
 //
-// When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
-// pipeline can confirm the replication slot only after the data is durable.
+// Each flushed batch carries its safe source position. Streaming uses it to
+// confirm the replication slot; managed batch ingestion uses it to identify
+// transaction fragments durably.
 func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
+	defer accum.discard()
 	var token tokenFunc
-	if streaming {
+	if streaming || accum.stableAll {
 		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 	}
 
@@ -462,6 +465,10 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 			changes = nil
 		}
 		accum.add("", changes, lsn)
+		pendingLow, pending := repl.PendingLowWater()
+		if err := accum.flushStableKeylessContext(ctx, results, token, pendingLow, pending); err != nil {
+			return err
+		}
 
 		if err := accum.flushReadyContext(ctx, results, token); err != nil {
 			return err

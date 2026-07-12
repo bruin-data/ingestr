@@ -6,44 +6,43 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
-	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	pgdestination "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// slowDuckDBDestination wraps a real DuckDB destination and sleeps for a
+// slowPostgresDestination wraps a real PostgreSQL destination and sleeps for a
 // configurable duration before each Write / WriteParallel. It exists only to
 // drive the destination-write phase of a CDC batch run past the source's
 // wal_sender_timeout so the keepalive goroutine in postgres_cdc.Source can be
 // regression-tested.
-type slowDuckDBDestination struct {
-	*duckdb.DuckDBDestination
+type slowPostgresDestination struct {
+	*pgdestination.PostgresDestination
 	writeDelay time.Duration
 }
 
-func newSlowDuckDB() *slowDuckDBDestination {
-	return &slowDuckDBDestination{DuckDBDestination: duckdb.NewDuckDBDestination()}
+func newSlowPostgres() *slowPostgresDestination {
+	return &slowPostgresDestination{PostgresDestination: pgdestination.NewPostgresDestination()}
 }
 
-func (s *slowDuckDBDestination) Schemes() []string { return []string{"slowduckdb"} }
+func (s *slowPostgresDestination) Schemes() []string { return []string{"slowpostgres"} }
 
-func (s *slowDuckDBDestination) GetScheme() string { return "duckdb" }
+func (s *slowPostgresDestination) GetScheme() string { return "postgres" }
 
 // Connect parses our scheme's `delay` query param, then forwards to the
-// embedded DuckDB destination with a rewritten `duckdb://` URI.
-func (s *slowDuckDBDestination) Connect(ctx context.Context, uri string) error {
+// embedded PostgreSQL destination with a rewritten `postgres://` URI.
+func (s *slowPostgresDestination) Connect(ctx context.Context, uri string) error {
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return fmt.Errorf("invalid slowduckdb URI: %w", err)
+		return fmt.Errorf("invalid slowpostgres URI: %w", err)
 	}
 	q := parsed.Query()
 	if raw := q.Get("delay"); raw != "" {
@@ -54,26 +53,26 @@ func (s *slowDuckDBDestination) Connect(ctx context.Context, uri string) error {
 		s.writeDelay = d
 		q.Del("delay")
 	}
-	parsed.Scheme = "duckdb"
+	parsed.Scheme = "postgres"
 	parsed.RawQuery = q.Encode()
-	return s.DuckDBDestination.Connect(ctx, parsed.String())
+	return s.PostgresDestination.Connect(ctx, parsed.String())
 }
 
-func (s *slowDuckDBDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+func (s *slowPostgresDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	if err := s.sleep(ctx); err != nil {
 		return err
 	}
-	return s.DuckDBDestination.Write(ctx, records, opts)
+	return s.PostgresDestination.Write(ctx, records, opts)
 }
 
-func (s *slowDuckDBDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+func (s *slowPostgresDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	if err := s.sleep(ctx); err != nil {
 		return err
 	}
-	return s.DuckDBDestination.WriteParallel(ctx, records, opts)
+	return s.PostgresDestination.WriteParallel(ctx, records, opts)
 }
 
-func (s *slowDuckDBDestination) sleep(ctx context.Context) error {
+func (s *slowPostgresDestination) sleep(ctx context.Context) error {
 	if s.writeDelay <= 0 {
 		return nil
 	}
@@ -86,7 +85,7 @@ func (s *slowDuckDBDestination) sleep(ctx context.Context) error {
 }
 
 func init() {
-	registry.Default.RegisterDestination([]string{"slowduckdb"}, func() interface{} { return newSlowDuckDB() })
+	registry.Default.RegisterDestination([]string{"slowpostgres"}, func() interface{} { return newSlowPostgres() })
 }
 
 // setupPostgresCDCContainerWithTimeout is a variant of setupPostgresCDCContainer
@@ -138,7 +137,7 @@ func setupPostgresCDCContainerWithTimeout(t *testing.T, ctx context.Context, wal
 // grows across "successful" runs.
 //
 // This test forces that scenario deterministically: wal_sender_timeout=8s on
-// the source, and slowduckdb with delay=10s on the destination. The
+// the source, and slowpostgres with delay=10s on the destination. The
 // destination phase outlasts the source's timeout; without the keepalive
 // goroutine, assertBatchRunsAdvanceSlot fails on the first resume run
 // because confirmed_flush_lsn stays frozen at the snapshot LSN. The timeout
@@ -150,24 +149,36 @@ func TestPostgresCDC_BatchRunAdvancesSlotWithSlowWrites(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	if pgDest.uri == "" {
+		t.Skip("shared PostgreSQL destination container not available")
+	}
 
 	sourceContainer, sourceConnString := setupPostgresCDCContainerWithTimeout(t, ctx, "8s")
 	defer func() { _ = sourceContainer.Terminate(ctx) }()
 	setupCDCSource(t, ctx, sourceConnString)
 
-	tmpDir, err := os.MkdirTemp("", "cdc_slot_keepalive_*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	destSchema := uniqueSchemaName(t, "cdc_slot_keepalive")
+	ensurePostgresSchema(t, ctx, pgDest.uri, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, pgDest.uri, destSchema) })
 
-	// slowduckdb adds a 10s sleep before each Write/WriteParallel call,
+	parsedDestURI, err := url.Parse(pgDest.uri)
+	require.NoError(t, err)
+	parsedDestURI.Scheme = "slowpostgres"
+	query := parsedDestURI.Query()
+	query.Set("delay", "10s")
+	parsedDestURI.RawQuery = query.Encode()
+
+	// slowpostgres adds a 10s sleep before each Write/WriteParallel call,
 	// pushing the destination phase past the 8s wal_sender_timeout above.
-	destURI := fmt.Sprintf("slowduckdb:///%s/test.duckdb?delay=10s", tmpDir)
 	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
 
 	assertBatchRunsAdvanceSlot(t, ctx, sourceConnString, func() *config.IngestConfig {
 		return &config.IngestConfig{
 			SourceURI:           cdcSourceURI,
-			DestURI:             destURI,
+			DestURI:             parsedDestURI.String(),
+			SourceTable:         "public.test_cdc",
+			DestTable:           destSchema + ".test_cdc_dest",
+			PrimaryKeys:         []string{"id"},
 			IncrementalStrategy: "merge",
 		}
 	})

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,8 @@ type PostgresDestination struct {
 	pool *pgxpool.Pool
 	uri  string
 }
+
+const postgresOwnedTableCommentPrefix = "ingestr:ownership:"
 
 type postgresStatementDescriber interface {
 	Prepare(context.Context, string, string, []uint32) (*pgconn.StatementDescription, error)
@@ -104,6 +107,9 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
+	if opts.OwnershipToken != "" {
+		return d.prepareOwnedTable(ctx, resolvedTable, opts)
+	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
@@ -136,6 +142,40 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	return nil
+}
+
+func (d *PostgresDestination) prepareOwnedTable(ctx context.Context, table string, opts destination.PrepareOptions) error {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin owned table creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	createSQL := strings.Replace(
+		buildCreateTableSQL(destination.QuoteTableName(table), opts.Schema.Columns, opts.PrimaryKeys),
+		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
+	)
+	if _, err := tx.Exec(ctx, createSQL); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "42P07" || pgErr.Code == "23505") {
+			return fmt.Errorf("destination table %s appeared concurrently while preparing an owned target: %w", table, err)
+		}
+		config.LogFailedQuery(createSQL, err)
+		return fmt.Errorf("failed to create owned table: %w", err)
+	}
+
+	commentSQL := fmt.Sprintf("COMMENT ON TABLE %s IS '%s'", destination.QuoteTableName(table), postgresOwnedTableComment(opts.OwnershipToken))
+	if _, err := tx.Exec(ctx, commentSQL); err != nil {
+		return fmt.Errorf("failed to mark owned table: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit owned table creation: %w", err)
+	}
+	return nil
+}
+
+func postgresOwnedTableComment(token string) string {
+	return fmt.Sprintf("%s%x", postgresOwnedTableCommentPrefix, sha256.Sum256([]byte(token)))
 }
 
 func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string, primaryKeys []string) error {
@@ -363,12 +403,28 @@ func (d *PostgresDestination) copyRecord(ctx context.Context, record arrow.Recor
 	}
 	defer conn.Release()
 	pgxConn := conn.Conn()
-
-	plan, err := copyPlans.get(ctx, pgxConn.PgConn(), record, opts.Table)
+	tableIdent, tx, err := d.beginPostgresWrite(ctx, pgxConn, opts)
 	if err != nil {
 		return 0, err
 	}
-	return copyPostgresRecord(ctx, pgxConn, record, opts.Schema, plan)
+	if tx != nil {
+		defer func() { _ = tx.Rollback(ctx) }()
+	}
+
+	plan, err := copyPlans.getForIdentifier(ctx, pgxConn.PgConn(), record, tableIdent)
+	if err != nil {
+		return 0, err
+	}
+	count, err := copyPostgresRecord(ctx, pgxConn, tx, record, opts.Schema, plan)
+	if err != nil {
+		return 0, err
+	}
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
+	}
+	return count, nil
 }
 
 func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.RecordBatch, records <-chan source.RecordBatchResult, opts destination.WriteOptions, copyPlans postgresCopyPlanCache) (int64, int, *source.RecordBatchResult, error) {
@@ -380,15 +436,32 @@ func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.
 	defer conn.Release()
 	pgxConn := conn.Conn()
 
-	plan, err := copyPlans.get(ctx, pgxConn.PgConn(), record, opts.Table)
+	tableIdent, tx, err := d.beginPostgresWrite(ctx, pgxConn, opts)
+	if err != nil {
+		record.Release()
+		return 0, 0, nil, err
+	}
+	if tx != nil {
+		defer func() { _ = tx.Rollback(ctx) }()
+	}
+
+	plan, err := copyPlans.getForIdentifier(ctx, pgxConn.PgConn(), record, tableIdent)
 	if err != nil {
 		record.Release()
 		return 0, 0, nil, err
 	}
 	if !recordSupportsDirectPostgresCopy(record, plan.oids) {
 		defer record.Release()
-		rows, err := copyPostgresRecord(ctx, pgxConn, record, opts.Schema, plan)
-		return rows, 1, nil, err
+		rows, err := copyPostgresRecord(ctx, pgxConn, tx, record, opts.Schema, plan)
+		if err != nil {
+			return 0, 1, nil, err
+		}
+		if tx != nil {
+			if err := tx.Commit(ctx); err != nil {
+				return 0, 1, nil, err
+			}
+		}
+		return rows, 1, nil, nil
 	}
 
 	stream, err := newPostgresRecordCopyStream(ctx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
@@ -397,20 +470,64 @@ func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.
 	}
 	defer stream.Close()
 	tag, err := pgxConn.PgConn().CopyFrom(ctx, stream, plan.copySQL)
-	return tag.RowsAffected(), stream.Batches(), stream.Pending(), err
+	if err != nil {
+		return 0, stream.Batches(), stream.Pending(), err
+	}
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, stream.Batches(), stream.Pending(), err
+		}
+	}
+	return tag.RowsAffected(), stream.Batches(), stream.Pending(), nil
 }
 
-func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, record arrow.RecordBatch, tableSchema *schema.TableSchema, plan *postgresCopyPlan) (int64, error) {
+func (d *PostgresDestination) beginPostgresWrite(ctx context.Context, pgxConn *pgx.Conn, opts destination.WriteOptions) (pgx.Identifier, pgx.Tx, error) {
+	tableIdent := parseTableIdentifier(opts.Table)
+	if opts.CDCExpectedIncarnation == "" {
+		return tableIdent, nil, nil
+	}
+
+	tx, err := pgxConn.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	fail := func(err error) (pgx.Identifier, pgx.Tx, error) {
+		_ = tx.Rollback(ctx)
+		return nil, nil, err
+	}
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, opts.Table)
+	if err != nil {
+		return fail(err)
+	}
+	targetRef := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+targetRef+" IN ROW EXCLUSIVE MODE"); err != nil {
+		return fail(fmt.Errorf("failed to lock managed CDC target %s before write: %w", opts.Table, err))
+	}
+	current, exists, err := d.postgresTargetIncarnation(ctx, tx, targetRef)
+	if err != nil {
+		return fail(err)
+	}
+	if !exists || current != opts.CDCExpectedIncarnation {
+		return fail(fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed before write", opts.Table))
+	}
+	return pgx.Identifier{schemaName, tableName}, tx, nil
+}
+
+func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, tx pgx.Tx, record arrow.RecordBatch, tableSchema *schema.TableSchema, plan *postgresCopyPlan) (int64, error) {
 	reader, ok := newArrowCopyReader(record, tableSchema, pgxConn.TypeMap(), plan.oids)
 	if !ok {
 		getters := postgresValueGetters(record, tableSchema)
 		values := make([]any, record.NumCols())
-		return pgxConn.CopyFrom(ctx, plan.tableIdent, plan.columns, pgx.CopyFromSlice(int(record.NumRows()), func(row int) ([]any, error) {
+		source := pgx.CopyFromSlice(int(record.NumRows()), func(row int) ([]any, error) {
 			for column := range values {
 				values[column] = getters[column](row)
 			}
 			return values, nil
-		}))
+		})
+		if tx != nil {
+			return tx.CopyFrom(ctx, plan.tableIdent, plan.columns, source)
+		}
+		return pgxConn.CopyFrom(ctx, plan.tableIdent, plan.columns, source)
 	}
 
 	tag, err := pgxConn.PgConn().CopyFrom(ctx, reader, plan.copySQL)
@@ -421,6 +538,10 @@ func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, record arrow.Rec
 }
 
 func (c postgresCopyPlanCache) get(ctx context.Context, describer postgresStatementDescriber, record arrow.RecordBatch, table string) (*postgresCopyPlan, error) {
+	return c.getForIdentifier(ctx, describer, record, parseTableIdentifier(table))
+}
+
+func (c postgresCopyPlanCache) getForIdentifier(ctx context.Context, describer postgresStatementDescriber, record arrow.RecordBatch, tableIdent pgx.Identifier) (*postgresCopyPlan, error) {
 	if plan := c[record.Schema()]; plan != nil {
 		return plan, nil
 	}
@@ -432,7 +553,6 @@ func (c postgresCopyPlanCache) get(ctx context.Context, describer postgresStatem
 		quotedColumns[i] = destination.QuoteIdentifier(columns[i])
 	}
 
-	tableIdent := parseTableIdentifier(table)
 	selectSQL := fmt.Sprintf("select %s from %s", strings.Join(quotedColumns, ", "), tableIdent.Sanitize())
 	description, err := describePostgresStatement(ctx, describer, selectSQL)
 	if err != nil {
@@ -676,6 +796,35 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if opts.CDCExpectedIncarnation != "" {
+		if opts.CDCExpectedStagingIncarnation == "" {
+			return fmt.Errorf("cannot conditionally swap managed CDC target %s without a bound staging incarnation", targetTable)
+		}
+		lockRefs := []string{targetRef, stagingRef}
+		slices.Sort(lockRefs)
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+strings.Join(lockRefs, ", ")+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+			return fmt.Errorf("failed to lock managed CDC target and staging tables before swap: %w", err)
+		}
+		for _, expected := range []struct {
+			table       string
+			ref         string
+			incarnation string
+			role        string
+		}{
+			{table: targetTable, ref: targetRef, incarnation: opts.CDCExpectedIncarnation, role: "target"},
+			{table: stagingTable, ref: stagingRef, incarnation: opts.CDCExpectedStagingIncarnation, role: "staging table"},
+		} {
+			current, exists, err := d.postgresTargetIncarnation(ctx, tx, expected.ref)
+			if err != nil {
+				return err
+			}
+			if !exists || current != expected.incarnation {
+				return fmt.Errorf("PostgreSQL CDC %s %q physical incarnation changed before swap", expected.role, expected.table)
+			}
+		}
+	} else if opts.CDCExpectedStagingIncarnation != "" {
+		return fmt.Errorf("cannot conditionally swap staging table without a bound target incarnation")
+	}
 
 	// Postgres' ALTER TABLE … RENAME TO … is same-schema only. If staging lives in a
 	// different schema (the new _bruin_staging design), move it into the target's
@@ -830,6 +979,23 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
+	if opts.CDCExpectedIncarnation != "" {
+		targetSchema, targetName, err := d.resolveSchemaTable(ctx, tx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		quotedTargetTable = quotePostgresTable(targetSchema, targetName)
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+quotedTargetTable+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+			return fmt.Errorf("failed to lock managed CDC target %s before merge: %w", opts.TargetTable, err)
+		}
+		current, exists, err := d.postgresTargetIncarnation(ctx, tx, quotedTargetTable)
+		if err != nil {
+			return err
+		}
+		if !exists || current != opts.CDCExpectedIncarnation {
+			return fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed before merge", opts.TargetTable)
+		}
+	}
 
 	if hasCDCDeleted {
 		// CDC mode: dedupe within the staging table and apply changes deterministically.
@@ -1112,6 +1278,56 @@ func (d *PostgresDestination) DropTable(ctx context.Context, table string) error
 	return nil
 }
 
+func (d *PostgresDestination) DropTableIfOwned(ctx context.Context, table, ownershipToken string) error {
+	if ownershipToken == "" {
+		return fmt.Errorf("cannot conditionally drop PostgreSQL table %q without an ownership token", table)
+	}
+	if err := tablename.TwoLevel("postgres").CheckName(table); err != nil {
+		return err
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin owned table cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	qualifiedTable := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+qualifiedTable+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return nil
+		}
+		return fmt.Errorf("failed to lock owned table %s for cleanup: %w", table, err)
+	}
+
+	var comment *string
+	if err := tx.QueryRow(ctx, `
+		SELECT obj_description(c.oid, 'pg_class')
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2
+	`, schemaName, tableName).Scan(&comment); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect PostgreSQL table ownership: %w", err)
+	}
+	if comment == nil || *comment != postgresOwnedTableComment(ownershipToken) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, "DROP TABLE "+qualifiedTable); err != nil {
+		return fmt.Errorf("failed to drop owned PostgreSQL table %s: %w", table, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit owned PostgreSQL table cleanup: %w", err)
+	}
+	return nil
+}
+
 // TruncateTable empties a table while preserving its definition and dependents.
 func (d *PostgresDestination) TruncateTable(ctx context.Context, table string) error {
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s", destination.QuoteTableName(table))
@@ -1146,6 +1362,14 @@ func (d *PostgresDestination) SupportsSCD2Strategy() bool { return true }
 
 // SupportsAtomicSwap returns true as PostgreSQL supports atomic table renames.
 func (d *PostgresDestination) SupportsAtomicSwap() bool { return true }
+
+func (d *PostgresDestination) SupportsCDCConditionalSwap() bool {
+	return true
+}
+
+func (d *PostgresDestination) SupportsManagedCDCWriteFencing() bool {
+	return true
+}
 
 // GetScheme returns the primary URI scheme for PostgreSQL.
 func (d *PostgresDestination) GetScheme() string { return "postgres" }
@@ -1214,7 +1438,7 @@ func (d *PostgresDestination) postgresTargetIncarnation(ctx context.Context, que
 	if err != nil {
 		return "", false, err
 	}
-	resolvedTable := destination.QuoteTableName(schemaName + "." + tableName)
+	resolvedTable := quotePostgresTable(schemaName, tableName)
 	var databaseOID, relationOID, relationKind string
 	err = queryer.QueryRow(ctx, `
 		SELECT d.oid::text, c.oid::text, c.relkind::text
@@ -1276,13 +1500,13 @@ func (d *PostgresDestination) ClaimAndPrepareEmptyCDCTarget(
 		return "", fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
 	}
 	createSQL := strings.Replace(
-		buildCreateTableSQL(destination.QuoteTableName(schemaName+"."+tableName), opts.Schema.Columns, opts.PrimaryKeys),
+		buildCreateTableSQL(quotePostgresTable(schemaName, tableName), opts.Schema.Columns, opts.PrimaryKeys),
 		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
 	)
 	if _, err := tx.Exec(ctx, createSQL); err != nil {
 		return "", fmt.Errorf("failed to exclusively create CDC target: %w", err)
 	}
-	incarnation, exists, err := d.postgresTargetIncarnation(ctx, tx, schemaName+"."+tableName)
+	incarnation, exists, err := d.postgresTargetIncarnation(ctx, tx, quotePostgresTable(schemaName, tableName))
 	if err != nil {
 		return "", err
 	}
@@ -1305,18 +1529,18 @@ func (d *PostgresDestination) TruncateCDCTableIfIncarnation(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	resolved := schemaName + "." + tableName
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+destination.QuoteTableName(resolved)+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+	resolvedRef := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+resolvedRef+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return err
 	}
-	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
+	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolvedRef)
 	if err != nil {
 		return err
 	}
 	if !exists || current != expectedIncarnation {
 		return fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed", table)
 	}
-	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
+	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+resolvedRef); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

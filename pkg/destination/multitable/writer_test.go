@@ -3,6 +3,7 @@ package multitable
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,6 +154,36 @@ func TestWriteCancelsOtherTablesOnFirstError(t *testing.T) {
 	}
 }
 
+func TestWritePropagatesSkipCDCResume(t *testing.T) {
+	var got destination.WriteOptions
+	dest := &fakeDestination{writeFn: func(_ context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+		got = opts
+		for result := range records {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
+		}
+		return nil
+	}}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+
+	_, err := WriteWithResult(t.Context(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{
+			"events": {DestTable: "raw.events", SkipCDCResume: true, CDCExpectedIncarnation: "bound-table-uuid"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.SkipCDCResume {
+		t.Fatal("managed multi-table write did not propagate SkipCDCResume")
+	}
+	if got.CDCExpectedIncarnation != "bound-table-uuid" {
+		t.Fatalf("managed multi-table expected incarnation = %q, want bound-table-uuid", got.CDCExpectedIncarnation)
+	}
+}
+
 // TestWriteRouterDeadlock reproduces the exact deadlock pattern:
 // interleaved records for two tables, one writer fails after first record.
 // Without cancellation propagation, the router blocks sending to the failed
@@ -291,6 +322,69 @@ func TestWriteFailureReturnsWhenCanceledProducerNeverCloses(t *testing.T) {
 	}
 }
 
+func TestWriteDeliversSourceErrorToEveryFullTableChannel(t *testing.T) {
+	sourceErr := errors.New("source failed")
+	startReading := make(chan struct{})
+
+	dest := &fakeDestination{
+		writeFn: func(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+			select {
+			case <-startReading:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			for result := range records {
+				if result.Err != nil {
+					return fmt.Errorf("source stream: %w", result.Err)
+				}
+			}
+			return nil
+		},
+	}
+
+	records := make(chan source.RecordBatchResult, 17)
+	for range 8 {
+		records <- source.RecordBatchResult{TableName: "users"}
+		records <- source.RecordBatchResult{TableName: "orders"}
+	}
+	records <- source.RecordBatchResult{Err: sourceErr}
+	close(records)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Write(context.Background(), dest, records, destination.MultiTableWriteOptions{
+			TableConfigs: map[string]destination.TableWriteConfig{
+				"users":  {DestTable: "dataset.users"},
+				"orders": {DestTable: "dataset.orders"},
+			},
+		})
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for len(records) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(records) != 0 {
+		t.Fatal("router did not reach the source error while table channels were full")
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(startReading)
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), sourceErr.Error()) {
+			t.Fatalf("Write error = %v, want source error", err)
+		}
+		for _, table := range []string{"users", "orders"} {
+			if !strings.Contains(err.Error(), "table "+table+":") {
+				t.Errorf("Write error = %v, want source error from table %s", err, table)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write deadlocked while delivering a source error to full table channels")
+	}
+}
+
 // TestWriteDoesNotDeadlockWithScarceSharedResourceScopedPerBatch models the
 // Snowflake connection-pool exhaustion deadlock generically: many tables
 // each spawn several workers (numTables * parallelism exceeds the size of a
@@ -407,7 +501,7 @@ func TestWriteWithResultSplitsTableAtTruncate(t *testing.T) {
 
 	result, err := WriteWithResult(context.Background(), dest, records, destination.MultiTableWriteOptions{
 		TableConfigs: map[string]destination.TableWriteConfig{
-			"items": {DestTable: "raw.items"},
+			"items": {DestTable: "raw.items", CDCMode: true},
 		},
 	})
 	if err != nil {

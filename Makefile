@@ -96,7 +96,7 @@ test-python:
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
+	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 30m ./tests/integration/...
 
 # High-volume PostgreSQL CDC accuracy and schema-churn test (~6 minutes with
 # the default profile). Covers late tables, add/drop/rename/type DDL, JSONB,

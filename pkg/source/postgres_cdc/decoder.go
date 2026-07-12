@@ -43,26 +43,28 @@ const (
 )
 
 type Change struct {
-	Operation string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
-	LSN       pglogrepl.LSN
-	Sequence  uint64 // 1-based order within the committing transaction
-	Values    []interface{}
-	OldValues []interface{} // For UPDATE/DELETE with replica identity
+	Operation       string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
+	LSN             pglogrepl.LSN
+	Sequence        uint64 // 1-based order within the committing transaction
+	DataBatchWindow uint64
+	Values          []interface{}
+	OldValues       []interface{} // For UPDATE/DELETE with replica identity
 }
 
 type Decoder struct {
-	tableSchema    *schema.TableSchema
-	targetSchema   string
-	targetTable    string
-	relations      map[uint32]*RelationInfo
-	targetRelID    uint32
-	expectedRelID  uint32
-	pendingChanges *changeSpool[Change]
-	committed      *changeSpool[Change]
-	currentTxLSN   pglogrepl.LSN
-	typeMap        *pgtype.Map
-	allowedUnknown map[string]struct{}
-	memoryBudget   *byteBudget
+	tableSchema          *schema.TableSchema
+	targetSchema         string
+	targetTable          string
+	relations            map[uint32]*RelationInfo
+	targetRelID          uint32
+	expectedRelID        uint32
+	pendingChanges       *changeSpool[Change]
+	committed            *changeSpool[Change]
+	committedBatchWindow keylessBatchWindowState
+	currentTxLSN         pglogrepl.LSN
+	typeMap              *pgtype.Map
+	allowedUnknown       map[string]struct{}
+	memoryBudget         *byteBudget
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
@@ -257,6 +259,7 @@ func (d *Decoder) handleCommit() ([]Change, error) {
 		return nil, err
 	}
 	d.committed = d.pendingChanges
+	d.committedBatchWindow = keylessBatchWindowState{}
 	d.pendingChanges = newChangeSpoolWithBudget[Change](defaultTransactionMemoryBytes, d.memoryBudget, nil)
 	return d.DrainCommitted(defaultCommittedDrainChanges)
 }
@@ -276,6 +279,9 @@ func (d *Decoder) DrainCommitted(limit int) ([]Change, error) {
 	changes, err := d.committed.Drain(limit)
 	if err != nil {
 		return nil, err
+	}
+	for i := range changes {
+		d.committedBatchWindow.assign(&changes[i])
 	}
 	if d.committed.Len() == 0 {
 		err = d.committed.Close()

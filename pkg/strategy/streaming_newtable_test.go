@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
@@ -227,7 +228,7 @@ func TestStreaming_AnnouncementForKnownTableIgnored(t *testing.T) {
 	assert.Equal(t, 1, writeCallCount(dest))
 }
 
-func TestStreaming_AnnouncementWithoutPreparerDropsBatches(t *testing.T) {
+func TestStreaming_AnnouncementWithoutPreparerFailsClosed(t *testing.T) {
 	dest := &fakeDestination{}
 	loop := newTestLoop(dest, StreamingOptions{
 		FlushInterval: time.Hour,
@@ -242,7 +243,7 @@ func TestStreaming_AnnouncementWithoutPreparerDropsBatches(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1}, nil), TableName: "public.products"}
 	close(records)
 
-	require.NoError(t, loop.run(context.Background(), records))
+	require.EqualError(t, loop.run(context.Background(), records), `streaming received 1 row(s) for unknown table "public.products"`)
 	assert.Equal(t, 0, writeCallCount(dest))
 }
 
@@ -503,6 +504,53 @@ func TestStreaming_NewTableAbsentTargetCanBeClaimedAndPrepared(t *testing.T) {
 	require.False(t, dest.missing[target])
 }
 
+func TestStreaming_NewManagedCDCAppendRejectsNonIdempotentDestinationBeforeClaim(t *testing.T) {
+	const (
+		startup = "public.users"
+		late    = "public.events"
+		target  = "landing.public_events"
+	)
+	dest := newLateTableCDCStateDestination()
+	dest.missing[target] = true
+	manager, err := NewCDCStateManager(dest, "connector-a", "landing.public_users", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTable(t.Context(), startup, "landing.public_users"))
+	require.NoError(t, manager.ClaimTarget(t.Context(), startup, "landing.public_users"))
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+	dest.stateMu.Lock()
+	stateWritesBefore := dest.cdcWrites
+	dest.stateMu.Unlock()
+
+	info := source.SourceTableInfo{
+		Name: late, Schema: keylessCDCSchema(), DestSchema: "landing",
+		Incarnation: "100", SchemaFingerprint: "schema-a",
+	}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: late, TableInfo: &info}
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{newTableInfo(startup)}, records: records}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Source:         src,
+		Destination:    dest,
+		Tables:         src.tables,
+		TableDestNames: map[string]string{startup: "landing.public_users"},
+	}
+
+	err = NewStreamingExecutor(StreamingOptions{
+		Strategy: config.StrategyAppend, FlushInterval: time.Hour, StateManager: manager,
+	}).ExecuteMultiTable(t.Context(), job)
+	require.ErrorContains(t, err, "managed streaming CDC append requires destination support for idempotent commit-token writes")
+	require.Empty(t, dest.targets[target], "unsafe late target was claimed")
+	require.True(t, dest.missing[target], "unsafe late target was created")
+	dest.stateMu.Lock()
+	require.Equal(t, stateWritesBefore, dest.cdcWrites, "unsafe late discovery wrote CDC state")
+	dest.stateMu.Unlock()
+	for _, call := range dest.prepareCalls {
+		require.NotEqual(t, target, call.Table, "unsafe late target was prepared")
+	}
+}
+
 func TestCDCStateLateDiscoveredTargetClaimIsAtomicAcrossConnectors(t *testing.T) {
 	const target = "landing.public_products"
 	dest := newLateTableCDCStateDestination()
@@ -674,6 +722,95 @@ func seedLateCompletedState(t *testing.T, dest *lateTableCDCStateDestination, co
 		SnapshotIncarnations: map[string]string{sourceName: "100"},
 		SnapshotSchemas:      map[string]string{sourceName: "schema-a"},
 	}))
+}
+
+func TestStreamingDynamicTableFreezeRejectsBeforePrepare(t *testing.T) {
+	initial := newTableInfo("users")
+	dynamicSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeString, Nullable: true},
+	}, PrimaryKeys: []string{"id"}}
+	destinationSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}, PrimaryKeys: []string{"id"}}
+	dynamic := source.SourceTableInfo{Name: "products", Schema: dynamicSchema, PrimaryKeys: []string{"id"}}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: dynamic.Name, TableInfo: &dynamic}
+	close(records)
+	dest := &fakeDestination{tableSchemas: map[string]*schema.TableSchema{
+		"users": initial.Schema, "products": destinationSchema,
+	}}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{SchemaContract: "freeze", NoLoadTimestamp: true, FullRefresh: true},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{initial}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{initial}, TableDestNames: map[string]string{"users": "users"},
+	}
+
+	exec := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge, FlushInterval: time.Hour, FlushRecords: 1})
+	err := exec.ExecuteMultiTable(context.Background(), job)
+	require.ErrorContains(t, err, "schema contract violation")
+	for _, call := range dest.prepareCalls {
+		require.NotEqual(t, "products", call.Table)
+		require.NotContains(t, call.Table, "products")
+	}
+}
+
+func TestStreamingDynamicTableDiscardValueUsesFinalSchemaAndTransforms(t *testing.T) {
+	initial := newTableInfo("users")
+	dynamicSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeString, Nullable: true},
+	}, PrimaryKeys: []string{"id"}}
+	destinationSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64}, {Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}, PrimaryKeys: []string{"id"}}
+	dynamic := source.SourceTableInfo{Name: "products", Schema: dynamicSchema, PrimaryKeys: []string{"id"}}
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{TableName: dynamic.Name, TableInfo: &dynamic}
+	records <- source.RecordBatchResult{
+		TableName: dynamic.Name, Batch: intStringRecordBatch(t, "id", []int64{1}, "value", []string{"invalid"}),
+	}
+	close(records)
+	base := &fakeDestination{tableSchemas: map[string]*schema.TableSchema{
+		"users": initial.Schema, "products": destinationSchema,
+	}}
+	dest := &contractCaptureReplaceDestination{fakeDestination: base}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{SchemaContract: "discard_value", NoLoadTimestamp: true, FullRefresh: true},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{initial}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{initial}, TableDestNames: map[string]string{"users": "users"},
+	}
+
+	exec := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge, FlushInterval: time.Hour, FlushRecords: 1})
+	require.NoError(t, exec.ExecuteMultiTable(context.Background(), job))
+	dest.muCapture.Lock()
+	defer dest.muCapture.Unlock()
+	require.Equal(t, []int64{1}, dest.rows)
+	require.Equal(t, []int{1}, dest.nulls)
+	require.True(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, dest.types[0]))
+	require.Equal(t, schema.TypeInt64, dest.schemas[0].Columns[1].DataType)
+}
+
+func TestStreamingDynamicTableRejectsUnsupportedDecimalBeforePrepare(t *testing.T) {
+	initial := newTableInfo("users")
+	dynamic := source.SourceTableInfo{Name: "products", Schema: &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 50, Scale: 2,
+	}}}}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: dynamic.Name, TableInfo: &dynamic}
+	close(records)
+	dest := &fakeDestination{}
+	job := &MultiTableIngestionJob{
+		Config:      &config.IngestConfig{NoLoadTimestamp: true, FullRefresh: true},
+		Source:      &announcingMultiTableSource{tables: []source.SourceTableInfo{initial}, records: records},
+		Destination: dest, Tables: []source.SourceTableInfo{initial}, TableDestNames: map[string]string{"users": "users"},
+	}
+
+	exec := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge, FlushInterval: time.Hour, FlushRecords: 1})
+	err := exec.ExecuteMultiTable(context.Background(), job)
+	require.ErrorContains(t, err, "maximum supported precision is 38")
+	require.ErrorContains(t, err, "products")
+	for _, call := range dest.prepareCalls {
+		require.NotContains(t, call.Table, "products")
+	}
 }
 
 func TestWithLoadTimestampColumn(t *testing.T) {

@@ -2,6 +2,8 @@ package duckdb
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -1417,14 +1419,44 @@ func canonicalDuckDBTarget(tn tablename.TableName) string {
 }
 
 func (d *DuckDBDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
-	tn := duckTable(table)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.cdcTargetIncarnationLocked(ctx, table)
+}
+
+const duckDBCDCIncarnationMarkerPrefix = "\n\n[bruin managed CDC incarnation:"
+
+type duckDBTableIncarnation struct {
+	catalog string
+	schema  string
+	table   string
+	comment string
+	marker  string
+}
+
+func (d *DuckDBDestination) cdcTargetIncarnationLocked(ctx context.Context, table string) (string, bool, error) {
+	incarnation, exists, err := d.duckDBTableIncarnationLocked(ctx, table)
+	if err != nil || !exists {
+		return "", exists, err
+	}
+	if incarnation.marker == "" {
+		return "", true, nil
+	}
+	return destination.CDCTargetKey(
+		strings.ToLower(incarnation.catalog),
+		strings.ToLower(incarnation.schema),
+		strings.ToLower(incarnation.table),
+		incarnation.marker,
+	), true, nil
+}
+
+func (d *DuckDBDestination) duckDBTableIncarnationLocked(ctx context.Context, table string) (duckDBTableIncarnation, bool, error) {
+	tn := duckTable(table)
 	if tn.Catalog == "" {
 		if d.catalog == "" {
 			catalog, err := d.currentCatalog(ctx)
 			if err != nil {
-				return "", false, err
+				return duckDBTableIncarnation{}, false, err
 			}
 			d.catalog = catalog
 		}
@@ -1432,39 +1464,145 @@ func (d *DuckDBDestination) CDCTargetIncarnation(ctx context.Context, table stri
 	}
 	tn.Schema = canonicalDuckDBSchema(tn.Schema)
 	literal := func(value string) string { return strings.ReplaceAll(value, "'", "''") }
-	query := fmt.Sprintf(`SELECT CAST(database_oid AS VARCHAR), CAST(table_oid AS VARCHAR)
+	query := fmt.Sprintf(`SELECT database_name, schema_name, table_name, comment
 		FROM duckdb_tables()
 		WHERE lower(database_name) = lower('%s') AND lower(schema_name) = lower('%s') AND lower(table_name) = lower('%s')`,
 		literal(tn.Catalog), literal(tn.Schema), literal(tn.Table))
 	stmt, err := d.conn.NewStatement()
 	if err != nil {
-		return "", false, err
+		return duckDBTableIncarnation{}, false, err
 	}
 	defer func() { _ = stmt.Close() }()
 	if err := stmt.SetSqlQuery(query); err != nil {
-		return "", false, err
+		return duckDBTableIncarnation{}, false, err
 	}
 	reader, _, err := stmt.ExecuteQuery(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("failed to read DuckDB CDC target incarnation for %s: %w", table, err)
+		return duckDBTableIncarnation{}, false, fmt.Errorf("failed to read DuckDB CDC target incarnation for %s: %w", table, err)
 	}
 	defer reader.Release()
 	if !reader.Next() {
 		if err := reader.Err(); err != nil {
-			return "", false, err
+			return duckDBTableIncarnation{}, false, err
 		}
-		return "", false, nil
+		return duckDBTableIncarnation{}, false, nil
 	}
 	batch := reader.RecordBatch()
 	if batch.NumRows() == 0 {
-		return "", false, nil
+		return duckDBTableIncarnation{}, false, nil
 	}
-	databaseOIDs, databaseOK := batch.Column(0).(*array.String)
-	tableOIDs, tableOK := batch.Column(1).(*array.String)
-	if !databaseOK || !tableOK {
-		return "", false, fmt.Errorf("unexpected DuckDB CDC target incarnation column types")
+	catalogs, catalogOK := batch.Column(0).(*array.String)
+	schemas, schemaOK := batch.Column(1).(*array.String)
+	tables, tableOK := batch.Column(2).(*array.String)
+	comments, commentOK := batch.Column(3).(*array.String)
+	if !catalogOK || !schemaOK || !tableOK || !commentOK {
+		return duckDBTableIncarnation{}, false, fmt.Errorf("unexpected DuckDB CDC target incarnation column types")
 	}
-	return destination.CDCTargetKey(databaseOIDs.Value(0), tableOIDs.Value(0)), true, nil
+	result := duckDBTableIncarnation{
+		catalog: strings.Clone(catalogs.Value(0)),
+		schema:  strings.Clone(schemas.Value(0)),
+		table:   strings.Clone(tables.Value(0)),
+	}
+	if !comments.IsNull(0) {
+		result.comment = strings.Clone(comments.Value(0))
+		result.marker = duckDBCDCIncarnationMarker(result.comment)
+	}
+	return result, true, reader.Err()
+}
+
+func duckDBCDCIncarnationMarker(comment string) string {
+	if !strings.HasSuffix(comment, "]") {
+		return ""
+	}
+	markerStart := strings.LastIndex(comment, duckDBCDCIncarnationMarkerPrefix)
+	if markerStart < 0 {
+		return ""
+	}
+	marker := comment[markerStart+len(duckDBCDCIncarnationMarkerPrefix) : len(comment)-1]
+	if len(marker) != 32 {
+		return ""
+	}
+	if _, err := hex.DecodeString(marker); err != nil {
+		return ""
+	}
+	return marker
+}
+
+func (d *DuckDBDestination) EnsureCDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.exec(ctx, "BEGIN"); err != nil {
+		return "", false, fmt.Errorf("failed to begin DuckDB CDC incarnation initialization: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = d.exec(ctx, "ROLLBACK")
+		}
+	}()
+	incarnation, exists, err := d.duckDBTableIncarnationLocked(ctx, table)
+	if err != nil || !exists {
+		return "", exists, err
+	}
+	if incarnation.marker == "" {
+		token := make([]byte, 16)
+		if _, err := rand.Read(token); err != nil {
+			return "", false, fmt.Errorf("failed to create DuckDB CDC incarnation marker: %w", err)
+		}
+		incarnation.marker = hex.EncodeToString(token)
+		comment := incarnation.comment + duckDBCDCIncarnationMarkerPrefix + incarnation.marker + "]"
+		commentLiteral := strings.ReplaceAll(comment, "'", "''")
+		qualifiedTable := strings.Join([]string{
+			destination.QuoteIdentifier(incarnation.catalog),
+			destination.QuoteIdentifier(incarnation.schema),
+			destination.QuoteIdentifier(incarnation.table),
+		}, ".")
+		if err := d.exec(ctx, fmt.Sprintf("COMMENT ON TABLE %s IS '%s'", qualifiedTable, commentLiteral)); err != nil {
+			return "", false, fmt.Errorf("failed to initialize DuckDB CDC target incarnation for %s: %w", table, err)
+		}
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return "", false, fmt.Errorf("failed to commit DuckDB CDC incarnation initialization: %w", err)
+	}
+	committed = true
+	return destination.CDCTargetKey(
+		strings.ToLower(incarnation.catalog),
+		strings.ToLower(incarnation.schema),
+		strings.ToLower(incarnation.table),
+		incarnation.marker,
+	), true, nil
+}
+
+func (d *DuckDBDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return fmt.Errorf("cannot conditionally truncate DuckDB table %q without a bound incarnation", table)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.exec(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("failed to begin conditional DuckDB truncate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = d.exec(ctx, "ROLLBACK")
+		}
+	}()
+	current, exists, err := d.cdcTargetIncarnationLocked(ctx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("DuckDB CDC target %q physical incarnation changed", table)
+	}
+	if err := d.exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", destination.QuoteTableName(table))); err != nil {
+		return fmt.Errorf("failed to truncate DuckDB CDC target %s: %w", table, err)
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("failed to commit conditional DuckDB truncate: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func (d *DuckDBDestination) currentCatalog(ctx context.Context) (string, error) {

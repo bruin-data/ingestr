@@ -1397,7 +1397,9 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 		}
 		if resumeMetadataChanged(opts.CDCResumeIncarnations[table.Name], opts.CDCResumeSchemaFingerprints[table.Name], table.Incarnation, table.SchemaFingerprint) {
 			delete(resumeLSNs, table.Name)
-			invalidations = append(invalidations, source.CDCSnapshotInvalidation{TableName: table.Name, Incarnation: table.Incarnation})
+			invalidations = append(invalidations, source.CDCSnapshotInvalidation{
+				TableName: table.Name, Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint,
+			})
 		}
 	}
 	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)

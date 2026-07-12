@@ -41,7 +41,7 @@ func TestVitessDestination_ReplaceAndMerge(t *testing.T) {
 	// vtgate can accept connections before it is able to serve queries; retry.
 	require.Eventually(t, func() bool {
 		return db.PingContext(ctx) == nil
-	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+	}, vitessQueryReadyTimeout, 2*time.Second, "vtgate did not become query-ready")
 
 	sourceURI := jsonlURI(t, "testdata/conformance.jsonl")
 	destTable := vitessKeyspace + ".dest_conformance"
@@ -93,7 +93,7 @@ func TestVitessDestination_ShardedRejected(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return db.PingContext(ctx) == nil
-	}, 120*time.Second, 2*time.Second, "vtgate did not become query-ready")
+	}, vitessQueryReadyTimeout, 2*time.Second, "vtgate did not become query-ready")
 
 	cfg := &config.IngestConfig{
 		SourceURI:           jsonlURI(t, "testdata/conformance.jsonl"),

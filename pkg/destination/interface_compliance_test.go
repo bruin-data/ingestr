@@ -1,6 +1,8 @@
 package destination_test
 
 import (
+	"testing"
+
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/athena"
 	"github.com/bruin-data/ingestr/pkg/destination/bigquery"
@@ -25,9 +27,27 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/vitess"
 )
 
+func TestBigQueryDoesNotAdvertiseUnsafeConditionalCDCTruncate(t *testing.T) {
+	if _, ok := any(&bigquery.BigQueryDestination{}).(destination.CDCConditionalTruncater); ok {
+		t.Fatal("BigQuery must not advertise conditional CDC truncate without an atomic table-incarnation fence")
+	}
+}
+
+func TestOnlyFencedDestinationsAdvertiseManagedCDCWriteFencing(t *testing.T) {
+	if !(&postgres.PostgresDestination{}).SupportsManagedCDCWriteFencing() {
+		t.Fatal("PostgreSQL must advertise its transactionally enforced CDC write fence")
+	}
+	if _, ok := any(&sqlite.SQLiteDestination{}).(destination.ManagedCDCWriteFencer); ok {
+		t.Fatal("SQLite must not advertise managed CDC write fencing until its DML paths enforce the incarnation")
+	}
+}
+
 // Destinations eligible for destination-managed PostgreSQL CDC state must
 // support one connector-scoped read from the shared state table.
 var (
+	_ destination.ManagedCDCWriteFencer = (*postgres.PostgresDestination)(nil)
+	_ destination.OwnedTableDropper     = (*postgres.PostgresDestination)(nil)
+
 	_ destination.CDCStateReader = (*bigquery.BigQueryDestination)(nil)
 	_ destination.CDCStateReader = (*duckdb.DuckDBDestination)(nil)
 	_ destination.CDCStateReader = (*duckdb.DuckLakeDestination)(nil)
@@ -57,6 +77,7 @@ var (
 
 var (
 	_ destination.CDCStateWriter                 = (*bigquery.BigQueryDestination)(nil)
+	_ destination.ManagedCDCStateValidator       = (*duckdb.DuckLakeDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*mysql.MySQLDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*planetscale.Destination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*redshift.RedshiftDestination)(nil)
@@ -90,6 +111,16 @@ var (
 	_ destination.CDCTargetIncarnationProvider = (*redshift.RedshiftDestination)(nil)
 	_ destination.CDCTargetIncarnationProvider = (*sqlite.SQLiteDestination)(nil)
 	_ destination.CDCTargetIncarnationProvider = (*vitess.Destination)(nil)
+)
+
+var (
+	_ destination.CDCConditionalTruncater = (*duckdb.DuckDBDestination)(nil)
+	_ destination.CDCConditionalTruncater = (*duckdb.DuckLakeDestination)(nil)
+	_ destination.CDCConditionalTruncater = (*mssql.MSSQLDestination)(nil)
+	_ destination.CDCConditionalTruncater = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCConditionalTruncater = (*oracle.OracleDestination)(nil)
+	_ destination.CDCConditionalTruncater = (*postgres.PostgresDestination)(nil)
+	_ destination.CDCConditionalTruncater = (*sqlite.SQLiteDestination)(nil)
 )
 
 var (

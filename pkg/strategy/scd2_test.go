@@ -55,6 +55,7 @@ func TestSCD2Strategy_Execute_BasicFlow(t *testing.T) {
 		Columns: []schema.Column{
 			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
 			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "_cdc_unchanged_cols", DataType: schema.TypeString, Nullable: true},
 		},
 		PrimaryKeys: []string{"id"},
 	}
@@ -98,6 +99,8 @@ func TestSCD2Strategy_Execute_BasicFlow(t *testing.T) {
 
 	// Should have called SCD2Table
 	assert.Contains(t, dest.calls, "SCD2Table")
+	require.Len(t, dest.scdCalls, 1)
+	assert.NotContains(t, dest.scdCalls[0].Columns, "_cdc_unchanged_cols")
 
 	// Should have called DropTable for staging cleanup
 	assert.Contains(t, dest.calls, "DropTable")
@@ -113,6 +116,19 @@ func TestSCD2Strategy_RejectsCDCBeforeDestinationOrSourceWork(t *testing.T) {
 	require.Empty(t, dest.prepareCalls)
 	require.Empty(t, dest.writeCalls)
 	require.False(t, src.readCalled)
+}
+
+func TestSCD2LostStagingPrepareUsesDetachedCleanup(t *testing.T) {
+	job, _, base := minimalJob()
+	job.Config.PrimaryKeys = []string{"id"}
+	dest := &uncertainManagedStagingPrepareDestination{contextAwareDropDestination: &contextAwareDropDestination{fakeDestination: base}}
+	job.Destination = dest
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.ErrorContains(t, (&SCD2Strategy{}).Execute(ctx, job), "prepare response lost")
+	require.Len(t, base.prepareCalls, 2)
+	require.Equal(t, []string{base.prepareCalls[1].Table}, dest.successfulDrops)
 }
 
 func TestSCD2Strategy_ExtendSchemaWithSCDColumns(t *testing.T) {

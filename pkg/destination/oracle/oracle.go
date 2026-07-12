@@ -816,9 +816,17 @@ func (d *OracleDestination) ClaimCDCTarget(ctx context.Context, claimTable strin
 }
 
 func (d *OracleDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	return d.oracleTargetIncarnation(ctx, d.db, table)
+}
+
+type oracleIncarnationQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (d *OracleDestination) oracleTargetIncarnation(ctx context.Context, queryer oracleIncarnationQueryer, table string) (string, bool, error) {
 	owner, tableName := d.effectiveSchemaTable(table)
 	var objectID int64
-	err := d.db.QueryRowContext(ctx, `SELECT OBJECT_ID FROM ALL_OBJECTS
+	err := queryer.QueryRowContext(ctx, `SELECT OBJECT_ID FROM ALL_OBJECTS
 		WHERE OWNER = :1 AND OBJECT_NAME = :2 AND OBJECT_TYPE = 'TABLE'`, owner, tableName).Scan(&objectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -827,6 +835,32 @@ func (d *OracleDestination) CDCTargetIncarnation(ctx context.Context, table stri
 		return "", false, fmt.Errorf("failed to read Oracle CDC target incarnation for %s: %w", table, err)
 	}
 	return destination.CDCTargetKey(owner, strconv.FormatInt(objectID, 10)), true, nil
+}
+
+func (d *OracleDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return fmt.Errorf("cannot conditionally truncate Oracle table %q without a bound incarnation", table)
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	quotedTable := quoteTable(table)
+	if _, err := tx.ExecContext(ctx, "LOCK TABLE "+quotedTable+" IN EXCLUSIVE MODE"); err != nil {
+		return fmt.Errorf("failed to lock Oracle CDC target %s: %w", table, err)
+	}
+	current, exists, err := d.oracleTargetIncarnation(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("oracle CDC target %q physical incarnation changed", table)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+quotedTable); err != nil {
+		return fmt.Errorf("failed to truncate Oracle CDC target %s: %w", table, err)
+	}
+	return tx.Commit()
 }
 
 func (d *OracleDestination) canonicalCDCTarget(table string) string {

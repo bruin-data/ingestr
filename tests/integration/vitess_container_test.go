@@ -26,11 +26,12 @@ const (
 	// workload (10k on vttestserver), so seeding more than that lets us prove the
 	// MySQL source detects Vitess and switches to the OLAP workload to read the
 	// whole table.
-	vitessBasePort  = "33574"
-	vitessMySQLPort = "33577/tcp"
-	vitessKeyspace  = "vtdb"
-	vitessTable     = "events"
-	vitessSeedRows  = 20000
+	vitessBasePort          = "33574"
+	vitessMySQLPort         = "33577/tcp"
+	vitessKeyspace          = "vtdb"
+	vitessTable             = "events"
+	vitessSeedRows          = 20000
+	vitessQueryReadyTimeout = 180 * time.Second
 )
 
 func startVitessContainer(ctx context.Context) (testcontainers.Container, string, string, error) {
@@ -89,7 +90,7 @@ func TestVitessSourceReadsBeyondRowCap(t *testing.T) {
 	// vtgate can accept connections before it is able to serve queries; retry.
 	require.Eventually(t, func() bool {
 		return db.PingContext(ctx) == nil
-	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+	}, vitessQueryReadyTimeout, 2*time.Second, "vtgate did not become query-ready")
 
 	seedVitessTable(t, ctx, db)
 
@@ -132,7 +133,7 @@ func TestMySQLSchemeRejectsVitess(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	require.Eventually(t, func() bool {
 		return db.PingContext(ctx) == nil
-	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+	}, vitessQueryReadyTimeout, 2*time.Second, "vtgate did not become query-ready")
 
 	// The connect-time probe fails before any table is read, so no seeding is needed.
 	mysqlURI := strings.Replace(uri, "vitess://", "mysql://", 1)

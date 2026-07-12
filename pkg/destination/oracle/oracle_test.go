@@ -196,7 +196,7 @@ func TestOracleStagingNamesEncodeQuotedTableDots(t *testing.T) {
 			require.Len(t, parts, 2)
 			require.Equal(t, `"appUser"`, parts[0])
 			require.NotContains(t, parts[1], ".")
-			require.Contains(t, quoteTable(staging), `"appUser"."_INGESTR_HEX_`)
+			require.Contains(t, quoteTable(staging), `"appUser"."INGESTR_HEX_`)
 		})
 	}
 }
@@ -233,6 +233,43 @@ func TestCDCTargetIncarnationChangesWithOracleObjectIdentity(t *testing.T) {
 	require.True(t, exists)
 	require.NotEqual(t, first, second)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTruncateCDCTableIfIncarnation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		objectID   int64
+		wantErr    string
+		wantCommit bool
+	}{
+		{name: "matching", objectID: 10, wantCommit: true},
+		{name: "recreated", objectID: 11, wantErr: "physical incarnation changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &OracleDestination{db: db, currentUser: "APP"}
+			mock.ExpectBegin()
+			mock.ExpectExec(regexp.QuoteMeta(`LOCK TABLE "APP"."EVENTS" IN EXCLUSIVE MODE`)).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectQuery(`SELECT OBJECT_ID FROM ALL_OBJECTS`).WithArgs("APP", "EVENTS").
+				WillReturnRows(sqlmock.NewRows([]string{"object_id"}).AddRow(tc.objectID))
+			if tc.wantCommit {
+				mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "APP"."EVENTS"`)).WillReturnResult(sqlmock.NewResult(0, 2))
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+			err = dest.TruncateCDCTableIfIncarnation(t.Context(), "APP.EVENTS", destination.CDCTargetKey("APP", "10"))
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.wantErr)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestGetTableSchemaPreservesQuotedCaseDistinctPrimaryKeyIdentity(t *testing.T) {

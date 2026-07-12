@@ -13,6 +13,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"golang.org/x/sync/errgroup"
@@ -55,8 +57,16 @@ func NewStreamingExecutor(opts StreamingOptions) *StreamingExecutor {
 }
 
 func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) error {
-	if err := job.ApplyEvolution(ctx); err != nil {
-		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	_, atomicSnapshots := job.Destination.(destination.AtomicSnapshotPublisher)
+	if atomicSnapshots {
+		if err := requireManagedAtomicSnapshotAbort(job.Destination, e.opts.StateManager); err != nil {
+			return err
+		}
+	}
+	if !atomicSnapshots && e.opts.StateManager == nil {
+		if err := job.ApplyEvolution(ctx); err != nil {
+			return fmt.Errorf("failed to apply schema evolution: %w", err)
+		}
 	}
 
 	st := &streamTableState{
@@ -69,8 +79,83 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		partitionBy:          job.Config.PartitionBy,
 		clusterBy:            job.Config.ClusterBy,
 	}
+	if err := e.requireSafeDirectCDCWrites(job.Destination, st); err != nil {
+		return err
+	}
+	configureStreamingContractState(job.Config, job.Schema, job.EvolutionPlan, st)
+	if atomicSnapshots {
+		if e.opts.StateManager == nil {
+			st.deferredEvolution = job.ApplyEvolution
+		} else {
+			st.deferredEvolution = func(ctx context.Context) error {
+				expectedIncarnation, err := boundDestinationIncarnation(e.opts.StateManager, job.Config.SourceTable, st.destTable)
+				if err != nil {
+					return err
+				}
+				return job.ApplyEvolutionIfIncarnation(ctx, expectedIncarnation)
+			}
+		}
+		if job.EvolutionPlan != nil && job.EvolutionPlan.FinalSchema != nil {
+			configureAtomicStreamingContractState(job.Config, job.Schema, job.EvolutionPlan, st)
+		} else if job.DestinationSchema != nil {
+			st.atomicTargetSchema = job.DestinationSchema
+			mode, _ := schemaevolution.ParseContractMode(job.Config.SchemaContract)
+			switch mode {
+			case schemaevolution.ContractDiscardValue:
+				st.atomicBatchTransformer = schemaevolution.NewDiscardValueTransformer(job.SchemaComparison, job.Schema, st.atomicTargetSchema)
+			case schemaevolution.ContractDiscardRow:
+				st.atomicBatchTransformer = schemaevolution.NewDiscardRowTransformer(job.Schema, st.atomicTargetSchema, job.SchemaComparison)
+			}
+			if st.atomicBatchTransformer != nil {
+				st.atomicWriteSchema = st.atomicTargetSchema
+				st.schemaAligner = transformer.NewSafeTypeCaster(st.atomicWriteSchema.ToArrowSchema())
+			}
+		}
+	}
+	loop := newFlushLoop(job.Destination, job.Config, e.opts, map[string]*streamTableState{"": st})
+	defer loop.cleanup(ctx)
+	if publisher, ok := job.Destination.(destination.AtomicSnapshotPublisher); ok && e.opts.StateManager != nil {
+		position, recovered, err := recoverManagedAtomicSnapshotBeforeRead(
+			ctx, job.Destination, publisher, e.opts.StateManager, job.Config.SourceTable, st.destTable,
+		)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			job.Config.CDCResumeLSN = position
+			job.Config.CDCResumeIncarnation, job.Config.CDCResumeSchemaFingerprint = e.opts.StateManager.CurrentSourceMetadata(job.Config.SourceTable)
+		}
+	}
 	if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
 		return err
+	}
+	if e.opts.StateManager != nil {
+		if err := e.opts.StateManager.BindDestinationIncarnation(ctx, job.Config.SourceTable, st.destTable); err != nil {
+			return fmt.Errorf("failed to bind CDC destination before starting stream: %w", err)
+		}
+		if e.opts.StateManager.BoundDestinationIncarnation(job.Config.SourceTable) == "" {
+			return fmt.Errorf("managed CDC destination %s has no bound physical incarnation", st.destTable)
+		}
+	}
+	if !atomicSnapshots && e.opts.StateManager != nil {
+		expectedIncarnation, err := boundDestinationIncarnation(e.opts.StateManager, job.Config.SourceTable, st.destTable)
+		if err != nil {
+			return err
+		}
+		if err := job.ApplyEvolutionIfIncarnation(ctx, expectedIncarnation); err != nil {
+			return fmt.Errorf("failed to apply schema evolution: %w", err)
+		}
+	}
+	if atomicSnapshots && strings.TrimSpace(job.Config.CDCResumeLSN) != "" && !job.Config.FullRefresh && st.deferredEvolution != nil {
+		if err := st.deferredEvolution(ctx); err != nil {
+			return fmt.Errorf("failed to apply schema evolution before resuming stream: %w", err)
+		}
+		st.evolutionApplied = true
+		if e.opts.StateManager != nil {
+			if err := e.opts.StateManager.BindDestinationIncarnation(ctx, job.Config.SourceTable, st.destTable); err != nil {
+				return fmt.Errorf("failed to revalidate CDC destination after schema evolution: %w", err)
+			}
+		}
 	}
 	parallelism := job.Config.ExtractParallelism
 	if parallelism <= 0 {
@@ -79,7 +164,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
-	records, err := job.GetRecords(readCtx, source.ReadOptions{
+	records, err := job.getStreamingRecords(readCtx, source.ReadOptions{
 		IncrementalKey:             job.Config.IncrementalKey,
 		IntervalStart:              job.Config.IntervalStart,
 		PageSize:                   job.Config.PageSize,
@@ -92,6 +177,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		CDCSlotSuffix:              job.Config.CDCSlotSuffix,
 		CDCLegacySlotSuffix:        job.Config.CDCLegacySlotSuffix,
 		CDCSnapshotReplace:         st.isCDC && supportsCDCSnapshotReplace(job.Destination),
+		CDCStableDataBatches:       managedStreamingNeedsStableDataBatches(e.opts, map[string]*streamTableState{"": st}, false),
 		Streaming:                  true,
 		FlushInterval:              job.Config.FlushInterval,
 		FlushRecords:               job.Config.FlushRecords,
@@ -104,7 +190,6 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		records = job.Tracker.Wrap(records)
 	}
 
-	loop := newFlushLoop(job.Destination, job.Config, e.opts, map[string]*streamTableState{"": st})
 	// CDC sources re-announce their table (with its refreshed schema) after
 	// rebuilding their stream around mid-stream DDL; evolve the destination
 	// before the new-shape batches arrive. Sources that never announce
@@ -112,7 +197,9 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
 		return evolveDestinationTable(ctx, job.Destination, destTable, newSchema, job.Config)
 	}
-	defer loop.cleanup(ctx)
+	loop.evolveTablePlan = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+		return evolveDestinationTablePlan(ctx, job.Destination, destTable, newSchema, job.Config)
+	}
 	err = loop.run(ctx, records)
 	if err != nil {
 		cancelRead()
@@ -123,6 +210,11 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 
 // ExecuteMultiTable runs the streaming loop over a multi-table source (CDC).
 func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTableIngestionJob) error {
+	if _, atomicSnapshots := job.Destination.(destination.AtomicSnapshotPublisher); atomicSnapshots {
+		if err := requireManagedAtomicSnapshotAbort(job.Destination, e.opts.StateManager); err != nil {
+			return err
+		}
+	}
 	anyTableHasCDC := false
 	for _, ti := range job.Tables {
 		if hasCDCColumns(ti.Schema) {
@@ -135,26 +227,91 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	}
 
 	tables := make(map[string]*streamTableState, len(job.Tables))
+	loop := newFlushLoop(job.Destination, job.Config, e.opts, tables)
+	defer loop.cleanup(ctx)
 	for _, ti := range job.Tables {
+		sourceSchema := ti.Schema
 		st := &streamTableState{
-			destTable:         job.GetDestTableName(ti.Name),
-			schema:            ti.Schema,
-			primaryKeys:       ti.PrimaryKeys,
-			incrementalKey:    ti.Schema.IncrementalKey,
-			isCDC:             hasCDCColumns(ti.Schema),
-			incarnation:       ti.Incarnation,
-			schemaFingerprint: ti.SchemaFingerprint,
+			destTable:            job.GetDestTableName(ti.Name),
+			schema:               ti.Schema,
+			primaryKeys:          ti.PrimaryKeys,
+			incrementalKey:       ti.Schema.IncrementalKey,
+			incrementalPredicate: job.Config.IncrementalPredicate,
+			isCDC:                hasCDCColumns(ti.Schema),
+			incarnation:          ti.Incarnation,
+			schemaFingerprint:    ti.SchemaFingerprint,
 		}
-
-		if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
-			return fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+		if err := e.requireSafeDirectCDCWrites(job.Destination, st); err != nil {
+			return err
 		}
+		configureStreamingContractState(job.Config, sourceSchema, job.EvolutionPlans[ti.Name], st)
+		if _, atomicSnapshots := job.Destination.(destination.AtomicSnapshotPublisher); atomicSnapshots {
+			sourceTable := ti.Name
+			if e.opts.StateManager == nil {
+				st.deferredEvolution = func(ctx context.Context) error { return job.ApplyEvolutionFor(ctx, sourceTable) }
+			} else {
+				st.deferredEvolution = func(ctx context.Context) error {
+					expectedIncarnation, err := boundDestinationIncarnation(e.opts.StateManager, sourceTable, st.destTable)
+					if err != nil {
+						return err
+					}
+					return job.ApplyEvolutionForIfIncarnation(ctx, sourceTable, expectedIncarnation)
+				}
+			}
+			configureAtomicStreamingContractState(job.Config, sourceSchema, job.EvolutionPlans[sourceTable], st)
+		} else if e.opts.StateManager == nil {
+			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
+				return fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+			}
+		}
+		if publisher, ok := job.Destination.(destination.AtomicSnapshotPublisher); ok && e.opts.StateManager != nil {
+			position, recovered, err := recoverManagedAtomicSnapshotBeforeRead(
+				ctx, job.Destination, publisher, e.opts.StateManager, ti.Name, st.destTable,
+			)
+			if err != nil {
+				return err
+			}
+			if recovered {
+				if job.CDCResumeLSNs == nil {
+					job.CDCResumeLSNs = make(map[string]string)
+				}
+				job.CDCResumeLSNs[ti.Name] = position
+			}
+		}
+		tables[ti.Name] = st
 		if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
 			return err
 		}
-		tables[ti.Name] = st
+		if e.opts.StateManager != nil {
+			if err := e.opts.StateManager.BindDestinationIncarnation(ctx, ti.Name, st.destTable); err != nil {
+				return fmt.Errorf("failed to bind CDC destination for %s before starting stream: %w", ti.Name, err)
+			}
+			if e.opts.StateManager.BoundDestinationIncarnation(ti.Name) == "" {
+				return fmt.Errorf("managed CDC destination %s has no bound physical incarnation", st.destTable)
+			}
+		}
+		if _, atomicSnapshots := job.Destination.(destination.AtomicSnapshotPublisher); !atomicSnapshots && e.opts.StateManager != nil {
+			expectedIncarnation, err := boundDestinationIncarnation(e.opts.StateManager, ti.Name, st.destTable)
+			if err != nil {
+				return err
+			}
+			if err := job.ApplyEvolutionForIfIncarnation(ctx, ti.Name, expectedIncarnation); err != nil {
+				return fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+			}
+		}
+		if _, atomicSnapshots := job.Destination.(destination.AtomicSnapshotPublisher); atomicSnapshots &&
+			strings.TrimSpace(job.CDCResumeLSNs[ti.Name]) != "" && !job.Config.FullRefresh && st.deferredEvolution != nil {
+			if err := st.deferredEvolution(ctx); err != nil {
+				return fmt.Errorf("failed to apply schema evolution before resuming stream for %s: %w", ti.Name, err)
+			}
+			st.evolutionApplied = true
+			if e.opts.StateManager != nil {
+				if err := e.opts.StateManager.BindDestinationIncarnation(ctx, ti.Name, st.destTable); err != nil {
+					return fmt.Errorf("failed to revalidate CDC destination for %s after schema evolution: %w", ti.Name, err)
+				}
+			}
+		}
 	}
-
 	parallelism := job.Config.ExtractParallelism
 	if parallelism <= 0 {
 		parallelism = 4
@@ -167,16 +324,17 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		knownTables = append(knownTables, table.Name)
 	}
 	resumeIncarnations, resumeSchemas := cdcResumeMetadata(job.Tables)
-	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
+	records, err := job.readAllStreaming(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:         parallelism,
-			PageSize:            job.Config.PageSize,
-			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
-			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
-			CDCSnapshotReplace:  (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
-			Streaming:           true,
-			FlushInterval:       job.Config.FlushInterval,
-			FlushRecords:        job.Config.FlushRecords,
+			Parallelism:          parallelism,
+			PageSize:             job.Config.PageSize,
+			CDCSlotSuffix:        job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix:  job.Config.CDCLegacySlotSuffix,
+			CDCSnapshotReplace:   (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
+			CDCStableDataBatches: managedStreamingNeedsStableDataBatches(e.opts, tables, job.Config.FullRefresh),
+			Streaming:            true,
+			FlushInterval:        job.Config.FlushInterval,
+			FlushRecords:         job.Config.FlushRecords,
 		},
 		KnownTables:                 knownTables,
 		CDCResumeLSNs:               job.CDCResumeLSNs,
@@ -186,12 +344,10 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	if err != nil {
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
 	}
-
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
 
-	loop := newFlushLoop(job.Destination, job.Config, e.opts, tables)
 	// CDC sources announce tables created mid-stream before emitting their
 	// batches. Normal runs stop at that boundary so a restart can include the
 	// table in the startup set; explicit full refresh retains dynamic handling.
@@ -206,13 +362,41 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
 		}
 		st := &streamTableState{
-			destTable:         multiTableDestName(job.Destination, ti),
-			schema:            ti.Schema,
-			primaryKeys:       ti.PrimaryKeys,
-			incrementalKey:    ti.Schema.IncrementalKey,
-			isCDC:             hasCDCColumns(ti.Schema),
-			incarnation:       ti.Incarnation,
-			schemaFingerprint: ti.SchemaFingerprint,
+			destTable:            multiTableDestName(job.Destination, ti),
+			schema:               ti.Schema,
+			primaryKeys:          ti.PrimaryKeys,
+			incrementalKey:       ti.Schema.IncrementalKey,
+			incrementalPredicate: job.Config.IncrementalPredicate,
+			isCDC:                hasCDCColumns(ti.Schema),
+			incarnation:          ti.Incarnation,
+			schemaFingerprint:    ti.SchemaFingerprint,
+		}
+		if err := e.requireSafeDirectCDCWrites(job.Destination, st); err != nil {
+			return nil, err
+		}
+		plan, err := planDestinationSchemaEvolution(ctx, job.Destination, st.destTable, ti.Schema, job.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate schema contract for newly discovered table %s: %w", ti.Name, err)
+		}
+		configureStreamingContractState(job.Config, ti.Schema, plan, st)
+		_, atomicSnapshots := job.Destination.(destination.AtomicSnapshotPublisher)
+		if atomicSnapshots {
+			if e.opts.StateManager == nil {
+				st.deferredEvolution = func(ctx context.Context) error { return applyEvolutionPlan(ctx, job.Destination, plan) }
+			} else {
+				st.deferredEvolution = func(ctx context.Context) error {
+					expectedIncarnation, err := boundDestinationIncarnation(e.opts.StateManager, ti.Name, st.destTable)
+					if err != nil {
+						return err
+					}
+					return applyEvolutionPlanIfIncarnation(ctx, job.Destination, plan, expectedIncarnation)
+				}
+			}
+			configureAtomicStreamingContractState(job.Config, ti.Schema, plan, st)
+		} else if e.opts.StateManager == nil {
+			if err := applyEvolutionPlan(ctx, job.Destination, plan); err != nil {
+				return nil, fmt.Errorf("failed to evolve newly discovered table %s: %w", ti.Name, err)
+			}
 		}
 		for sourceTable, destTable := range job.TableDestNames {
 			if sourceTable != ti.Name && destTable == st.destTable {
@@ -233,12 +417,16 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			}
 		}
 		pendingSafeBoundary := e.opts.StateManager != nil && e.opts.StateManager.HasPendingLateSnapshotBoundary(ti.Name)
-		if pendingSafeBoundary {
+		if pendingSafeBoundary && !atomicSnapshots {
 			if err := e.prepareLateStagingTable(ctx, job.Destination, job.Config, st); err != nil {
+				cleanupUnregisteredStreamTable(ctx, job.Destination, st)
 				return nil, err
 			}
-		} else if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
-			return nil, err
+		} else if !pendingSafeBoundary {
+			if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
+				cleanupUnregisteredStreamTable(ctx, job.Destination, st)
+				return nil, err
+			}
 		}
 		if job.TableDestNames == nil {
 			job.TableDestNames = make(map[string]string)
@@ -246,9 +434,25 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		job.TableDestNames[ti.Name] = st.destTable
 		if e.opts.StateManager != nil {
 			if err := e.opts.StateManager.RegisterTableState(ctx, ti.Name, st.destTable, ti.Incarnation, ti.SchemaFingerprint); err != nil {
+				cleanupUnregisteredStreamTable(ctx, job.Destination, st)
 				return nil, err
 			}
+			if !atomicSnapshots {
+				expectedIncarnation, err := boundDestinationIncarnation(e.opts.StateManager, ti.Name, st.destTable)
+				if err != nil {
+					cleanupUnregisteredStreamTable(ctx, job.Destination, st)
+					return nil, err
+				}
+				if err := applyEvolutionPlanIfIncarnation(ctx, job.Destination, plan, expectedIncarnation); err != nil {
+					cleanupUnregisteredStreamTable(ctx, job.Destination, st)
+					return nil, fmt.Errorf("failed to evolve newly discovered table %s: %w", ti.Name, err)
+				}
+			}
 		}
+		if job.EvolutionPlans == nil {
+			job.EvolutionPlans = make(map[string]*schemaevolution.EvolutionPlan)
+		}
+		job.EvolutionPlans[ti.Name] = plan
 		return st, nil
 	}
 	// CDC sources also re-announce a table (with its refreshed schema) after
@@ -258,13 +462,36 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
 		return evolveDestinationTable(ctx, job.Destination, destTable, newSchema, job.Config)
 	}
-	defer loop.cleanup(ctx)
+	loop.evolveTablePlan = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error) {
+		return evolveDestinationTablePlan(ctx, job.Destination, destTable, newSchema, job.Config)
+	}
 	err = loop.run(ctx, records)
 	if err != nil {
 		cancelRead()
 		drainAndReleaseUntil(records, streamAbortDrainTimeout)
 	}
 	return err
+}
+
+func cleanupUnregisteredStreamTable(ctx context.Context, dest destination.Destination, st *streamTableState) {
+	if st == nil || connectorLeaseLoss(ctx) != nil {
+		return
+	}
+	if st.targetCreatedByRun && !st.atomicPublishAttempted {
+		cleanupFailedOwnedDirectReplace(ctx, dest, st.destTable, true, st.targetOwnershipToken)
+		st.targetCreatedByRun = false
+	}
+	if st.stagingTable == "" {
+		return
+	}
+	cleanupCtx, cancel := detachedLeaseContext(ctx, streamFinalFlushTimeout)
+	defer cancel()
+	if connectorLeaseLoss(cleanupCtx) != nil {
+		return
+	}
+	if err := dest.DropTable(cleanupCtx, st.stagingTable); err != nil {
+		config.Debug("[STREAM] Warning: failed to drop unregistered staging table %s: %v", st.stagingTable, err)
+	}
 }
 
 func (e *StreamingExecutor) lateTargetPrepareOptions(st *streamTableState) destination.PrepareOptions {
@@ -309,6 +536,52 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 	return connectorLeaseLoss(ctx)
 }
 
+func configureStreamingContractState(cfg *config.IngestConfig, sourceSchema *schema.TableSchema, plan *schemaevolution.EvolutionPlan, st *streamTableState) {
+	if plan == nil || plan.FinalSchema == nil {
+		st.schema = sourceSchema
+		st.batchTransformer = nil
+		st.schemaAligner = nil
+		return
+	}
+	st.schema = destination.StagingIngestSchema(sourceSchema, plan.FinalSchema)
+	st.schema = destination.PreserveSourceCDCColumnTypes(st.schema, sourceSchema)
+	comparison := plan.TransformComparison
+	if comparison == nil {
+		comparison = plan.Comparison
+	}
+	mode, _ := schemaevolution.ParseContractMode(cfg.SchemaContract)
+	switch mode {
+	case schemaevolution.ContractDiscardValue:
+		st.batchTransformer = schemaevolution.NewDiscardValueTransformer(comparison, sourceSchema, plan.FinalSchema)
+	case schemaevolution.ContractDiscardRow:
+		st.batchTransformer = schemaevolution.NewDiscardRowTransformer(sourceSchema, plan.FinalSchema, comparison)
+	default:
+		st.batchTransformer = nil
+	}
+	st.schemaAligner = transformer.NewSafeTypeCaster(st.schema.ToArrowSchema())
+}
+
+func configureAtomicStreamingContractState(cfg *config.IngestConfig, sourceSchema *schema.TableSchema, plan *schemaevolution.EvolutionPlan, st *streamTableState) {
+	if plan == nil || plan.FinalSchema == nil {
+		return
+	}
+	st.atomicTargetSchema = plan.FinalSchema
+	mode, _ := schemaevolution.ParseContractMode(cfg.SchemaContract)
+	if mode != schemaevolution.ContractDiscardValue && mode != schemaevolution.ContractDiscardRow {
+		return
+	}
+	comparison := plan.TransformComparison
+	if comparison == nil {
+		comparison = plan.Comparison
+	}
+	st.atomicWriteSchema = st.schema
+	if mode == schemaevolution.ContractDiscardValue {
+		st.atomicBatchTransformer = schemaevolution.NewDiscardValueTransformer(comparison, sourceSchema, plan.FinalSchema)
+	} else {
+		st.atomicBatchTransformer = schemaevolution.NewDiscardRowTransformer(sourceSchema, plan.FinalSchema, comparison)
+	}
+}
+
 // multiTableDestName computes the destination table name for a source table
 // discovered mid-stream, matching the pipeline's upfront naming.
 func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo) string {
@@ -341,6 +614,9 @@ func withLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
 // prepareTable sets up the destination (and staging, for merge) tables for one
 // stream table and records the staging name on the state.
 func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.Destination, cfg *config.IngestConfig, st *streamTableState) error {
+	if err := e.requireSafeDirectCDCWrites(dest, st); err != nil {
+		return err
+	}
 	switch e.opts.Strategy {
 	case config.StrategyMerge:
 		if st.isCDC && len(st.primaryKeys) == 0 {
@@ -348,6 +624,17 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 			// directly in the destination table and flush skips the merge
 			// (stagingTable stays empty). See isAppendOnlyCDCTable in merge.go.
 			return prepareAppendOnlyCDCTable(ctx, dest, st.destTable, st.schema)
+		}
+		if _, ok := dest.(destination.DirectMergeWriter); ok {
+			st.directMerge = true
+			return prepareMergeTarget(ctx, dest, mergeTableParams{
+				DestTable:   st.destTable,
+				Schema:      st.schema,
+				PrimaryKeys: st.primaryKeys,
+				PartitionBy: st.partitionBy,
+				ClusterBy:   st.clusterBy,
+				IsCDC:       st.isCDC,
+			})
 		}
 		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
 		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
@@ -374,14 +661,33 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 		if st.isCDC {
 			prepSchema = st.schema
 		}
+		if _, atomicSnapshots := dest.(destination.AtomicSnapshotPublisher); atomicSnapshots && st.isCDC {
+			existingSchema, err := dest.GetTableSchema(ctx, st.destTable)
+			if err != nil {
+				return fmt.Errorf("failed to inspect destination table %s before atomic append streaming: %w", st.destTable, err)
+			}
+			if existingSchema != nil {
+				return nil
+			}
+			st.targetOwnershipToken = newTargetOwnershipToken(dest, false)
+			if st.targetOwnershipToken == "" {
+				return fmt.Errorf("destination %s cannot safely clean up a failed atomic append target", dest.GetScheme())
+			}
+			st.targetCreatedByRun = true
+			prepSchema = st.schema
+			if st.atomicTargetSchema != nil {
+				prepSchema = st.atomicTargetSchema
+			}
+		}
 		if err := dest.PrepareTable(ctx, destination.PrepareOptions{
-			Table:       st.destTable,
-			Schema:      prepSchema,
-			DropFirst:   false,
-			PrimaryKeys: nil,
-			PartitionBy: st.partitionBy,
-			ClusterBy:   st.clusterBy,
-			CDCMode:     st.isCDC,
+			Table:          st.destTable,
+			Schema:         prepSchema,
+			DropFirst:      false,
+			PrimaryKeys:    nil,
+			PartitionBy:    st.partitionBy,
+			ClusterBy:      st.clusterBy,
+			CDCMode:        st.isCDC,
+			OwnershipToken: st.targetOwnershipToken,
 		}); err != nil {
 			return fmt.Errorf("failed to prepare destination table %s: %w", st.destTable, err)
 		}
@@ -391,23 +697,57 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 	}
 }
 
+func (e *StreamingExecutor) requireSafeDirectCDCWrites(dest destination.Destination, st *streamTableState) error {
+	if st == nil || !st.isCDC {
+		return nil
+	}
+	if e.opts.StateManager != nil && e.opts.Strategy == config.StrategyAppend {
+		return requireIdempotentCommitTokenWrites(dest, "managed streaming CDC append")
+	}
+	if e.opts.Strategy == config.StrategyMerge && len(st.primaryKeys) == 0 {
+		if err := requireIdempotentCommitTokenWrites(dest, "streaming merge for keyless CDC table "+st.destTable); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // streamTableState tracks one destination table's buffered batches across
 // flush cycles. stagingTable is empty in append mode.
 type streamTableState struct {
-	destTable            string
-	stagingTable         string
-	schema               *schema.TableSchema
-	primaryKeys          []string
-	incrementalKey       string
-	incrementalPredicate string
-	isCDC                bool
-	partitionBy          string
-	clusterBy            []string
-	incarnation          string
-	schemaFingerprint    string
+	sourceTable            string
+	destTable              string
+	stagingTable           string
+	schema                 *schema.TableSchema
+	primaryKeys            []string
+	incrementalKey         string
+	incrementalPredicate   string
+	isCDC                  bool
+	partitionBy            string
+	clusterBy              []string
+	incarnation            string
+	schemaFingerprint      string
+	directMerge            bool
+	atomicSnapshot         bool
+	atomicTargetSchema     *schema.TableSchema
+	atomicWriteSchema      *schema.TableSchema
+	atomicBatchTransformer schemaevolution.BatchTransformer
+	batchTransformer       schemaevolution.BatchTransformer
+	schemaAligner          *transformer.TypeCaster
+	snapshotAttemptID      string
+	atomicPublishAttempted bool
+	targetCreatedByRun     bool
+	targetOwnershipToken   string
+	snapshotStarted        bool
+	deferredEvolution      func(context.Context) error
+	evolutionApplied       bool
 
-	pending     []arrow.RecordBatch
-	pendingRows int64
+	pending           []arrow.RecordBatch
+	pendingBoundaries []dataWriteBoundary
+	pendingRows       int64
+
+	checkpointID       source.DurableID
+	checkpointPosition string
 }
 
 type flushLoop struct {
@@ -425,7 +765,8 @@ type flushLoop struct {
 	// source schema changed mid-stream (the source re-announces it with the
 	// refreshed schema after rebuilding its stream). Nil means mid-stream
 	// schema changes are unsupported and re-announcements are ignored.
-	evolveTable func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error
+	evolveTable     func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error
+	evolveTablePlan func(ctx context.Context, destTable string, newSchema *schema.TableSchema) (*schemaevolution.EvolutionPlan, error)
 
 	buffered int64 // rows buffered across all tables
 
@@ -435,6 +776,9 @@ type flushLoop struct {
 	lastToken    any
 	tokenDirty   bool
 	pendingState source.CDCStateCommitToken
+
+	lastDurableCommitID       source.DurableID
+	lastDurableCommitPosition string
 	// pendingTruncates contains source tables whose previous snapshot marker was
 	// invalidated before applying a replicated WAL TRUNCATE. The next durable
 	// source position completes the new empty-table snapshot boundary.
@@ -442,6 +786,41 @@ type flushLoop struct {
 	legacyFinalized  bool
 
 	cycles int64
+}
+
+type dataWriteBoundary struct {
+	SourceTable string
+	Token       source.DurableID
+	Position    string
+}
+
+func managedCDCDataWriteID(sourceTable string, batchID source.DurableID) source.DurableID {
+	if sourceTable == "" || batchID == "" {
+		return ""
+	}
+	return source.DurableID("managed-cdc-data-v1:" + destination.CDCTargetKey(sourceTable, string(batchID)))
+}
+
+func combinedCommitMetadata(boundaries []dataWriteBoundary) (source.DurableID, string) {
+	var position string
+	for _, boundary := range boundaries {
+		if boundary.Position != "" {
+			position = boundary.Position
+		}
+	}
+	if len(boundaries) == 1 {
+		return boundaries[0].Token, position
+	}
+	return "", position
+}
+
+func hasExactDataWriteBoundary(boundaries []dataWriteBoundary) bool {
+	for _, boundary := range boundaries {
+		if boundary.Token != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func newFlushLoop(dest destination.Destination, cfg *config.IngestConfig, opts StreamingOptions, tables map[string]*streamTableState) *flushLoop {
@@ -469,6 +848,9 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 			if !ok {
 				// Source ended on its own (e.g. its context was cancelled and
 				// it closed the channel before we observed ctx.Done).
+				if ctx.Err() != nil && l.hasActiveAtomicSnapshot() {
+					return ctx.Err()
+				}
 				return l.finalFlush(ctx)
 			}
 			if res.Err != nil {
@@ -542,11 +924,57 @@ func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchRes
 			return err
 		}
 	}
+	if err := l.applyDeferredEvolution(ctx, res); err != nil {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return err
+	}
+	if err := l.transformResultBatch(ctx, &res); err != nil {
+		return err
+	}
 	if err := l.handleResult(ctx, res); err != nil {
 		return err
 	}
 	if token, ok := res.CommitToken.(source.CDCStateCommitToken); ok && len(token.SnapshotPositions) > 0 && (l.buffered > 0 || l.tokenDirty) {
 		return l.flush(ctx)
+	}
+	return nil
+}
+
+func (l *flushLoop) transformResultBatch(ctx context.Context, res *source.RecordBatchResult) error {
+	if res.Batch == nil || res.Err != nil {
+		return nil
+	}
+	st, ok := l.tableState(res.TableName)
+	if !ok {
+		return nil
+	}
+
+	batchTransformer := st.batchTransformer
+	if st.atomicSnapshot {
+		batchTransformer = st.atomicBatchTransformer
+	}
+	if batchTransformer != nil {
+		transformed, err := batchTransformer.Transform(ctx, res.Batch)
+		if err != nil {
+			res.Batch.Release()
+			res.Batch = nil
+			return fmt.Errorf("streaming contract transformation failed for table %s: %w", st.destTable, err)
+		}
+		if transformed != res.Batch {
+			res.Batch.Release()
+			res.Batch = transformed
+		}
+	}
+	if st.schemaAligner != nil {
+		transformed, err := st.schemaAligner.Transform(res.Batch)
+		res.Batch.Release()
+		if err != nil {
+			res.Batch = nil
+			return fmt.Errorf("streaming schema alignment failed for table %s: %w", st.destTable, err)
+		}
+		res.Batch = transformed
 	}
 	return nil
 }
@@ -567,7 +995,17 @@ func (l *flushLoop) invalidateSnapshot(ctx context.Context, invalidation source.
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := l.opts.StateManager.InvalidateSnapshot(ctx, invalidation.TableName, st.destTable, invalidation.Incarnation); err != nil {
+	if st.atomicSnapshot {
+		if st.atomicPublishAttempted {
+			return fmt.Errorf("cannot invalidate snapshot for table %s while atomic publication outcome is unknown", st.destTable)
+		}
+		if err := l.abortUnpublishedAtomicSnapshot(ctx, invalidation.TableName, st); err != nil {
+			return fmt.Errorf("failed to abort stale atomic snapshot for table %s: %w", st.destTable, err)
+		}
+	}
+	if err := l.opts.StateManager.InvalidateSnapshotStatePreservingDestination(
+		ctx, invalidation.TableName, st.destTable, invalidation.Incarnation, invalidation.SchemaFingerprint,
+	); err != nil {
 		return err
 	}
 	st.incarnation = invalidation.Incarnation
@@ -586,8 +1024,14 @@ func (l *flushLoop) tableState(sourceTable string) (*streamTableState, bool) {
 
 func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResult) error {
 	if !res.Truncate {
-		l.buffer(res)
-		return nil
+		return l.bufferResult(res)
+	}
+	if !res.CDCWALTruncate {
+		if _, atomicSnapshots := l.dest.(destination.AtomicSnapshotPublisher); atomicSnapshots {
+			if err := requireManagedAtomicSnapshotAbort(l.dest, l.opts.StateManager); err != nil {
+				return err
+			}
+		}
 	}
 
 	if l.buffered > 0 || l.tokenDirty {
@@ -603,36 +1047,89 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		return fmt.Errorf("source requested truncate for unknown table %q", res.TableName)
 	}
 	stateTable := ""
+	lateSnapshotBoundaryHandled := false
 	if l.opts.StateManager != nil {
 		stateTable = l.stateSourceTable(res.TableName)
 		if stateTable == "" {
 			return fmt.Errorf("cannot resolve source table for CDC truncate")
 		}
 		if res.CDCWALTruncate {
-			if err := l.opts.StateManager.InvalidateSnapshot(ctx, stateTable, st.destTable, st.incarnation); err != nil {
+			if err := l.opts.StateManager.InvalidateSnapshotPreservingDestination(ctx, stateTable, st.destTable, st.incarnation); err != nil {
 				return fmt.Errorf("failed to invalidate CDC state before source truncate for %s: %w", stateTable, err)
 			}
 		}
 		if !res.CDCWALTruncate {
-			handled, err := l.opts.StateManager.ApplyLateSnapshotBoundary(ctx, stateTable, st.destTable)
+			var handled bool
+			var err error
+			if _, atomicSnapshots := l.dest.(destination.AtomicSnapshotPublisher); atomicSnapshots {
+				handled, err = l.opts.StateManager.BindLateAtomicSnapshotBoundary(ctx, stateTable, st.destTable)
+			} else {
+				handled, err = l.opts.StateManager.ApplyLateSnapshotBoundary(ctx, stateTable, st.destTable)
+			}
 			if err != nil {
 				return err
 			}
-			if handled {
-				l.buffer(res)
-				return nil
-			}
+			lateSnapshotBoundaryHandled = handled
 		}
-		if err := l.opts.StateManager.BindDestinationIncarnation(ctx, stateTable, st.destTable); err != nil {
-			return fmt.Errorf("failed to bind CDC destination before source truncate for %s: %w", stateTable, err)
+		if !res.CDCWALTruncate && !lateSnapshotBoundaryHandled {
+			if err := l.opts.StateManager.BindDestinationIncarnation(ctx, stateTable, st.destTable); err != nil {
+				return fmt.Errorf("failed to bind CDC destination before source truncate for %s: %w", stateTable, err)
+			}
 		}
 	}
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	if !res.CDCWALTruncate {
+		if publisher, ok := l.dest.(destination.AtomicSnapshotPublisher); ok {
+			if st.snapshotStarted && st.snapshotAttemptID != "" {
+				if st.atomicPublishAttempted {
+					return fmt.Errorf("cannot restart atomic snapshot for table %s while publication outcome is unknown", st.destTable)
+				}
+				if err := l.abortUnpublishedAtomicSnapshot(ctx, stateTable, st); err != nil {
+					return fmt.Errorf("failed to abort previous atomic snapshot for table %s: %w", st.destTable, err)
+				}
+			}
+			attemptID, err := atomicSnapshotAttemptID(ctx, l.opts.StateManager, stateTable, st.destTable)
+			if err != nil {
+				return fmt.Errorf("failed to establish durable atomic snapshot attempt for %s: %w", st.destTable, err)
+			}
+			st.snapshotStarted = true
+			st.snapshotAttemptID = attemptID
+			st.atomicPublishAttempted = false
+			expectedIncarnation := ""
+			if l.opts.StateManager != nil && l.opts.StateManager.dest != nil {
+				expectedIncarnation = l.opts.StateManager.BoundDestinationIncarnation(stateTable)
+				if expectedIncarnation == "" {
+					return fmt.Errorf("managed CDC destination %s has no bound physical incarnation", st.destTable)
+				}
+			}
+			if err := publisher.BeginAtomicSnapshot(ctx, destination.AtomicSnapshotOptions{
+				Table: st.destTable, Schema: l.atomicSnapshotWriteSchema(st), TargetSchema: l.atomicSnapshotTargetSchema(st), PrimaryKeys: st.primaryKeys,
+				PartitionBy: st.partitionBy, ClusterBy: st.clusterBy, Parallelism: l.cfg.EffectiveDestinationParallelism(), AttemptID: st.snapshotAttemptID,
+				CDCExpectedIncarnation: expectedIncarnation,
+			}); err != nil {
+				return fmt.Errorf("failed to begin atomic snapshot for table %s: %w", st.destTable, err)
+			}
+			st.atomicSnapshot = true
+			return l.bufferResult(res)
+		}
+		if lateSnapshotBoundaryHandled {
+			return l.bufferResult(res)
+		}
+	}
 	var truncateErr error
 	if res.CDCWALTruncate {
-		truncateErr = destination.ApplyCDCTruncate(ctx, l.dest, st.destTable)
+		if l.opts.StateManager != nil {
+			truncateErr = destination.ApplyCDCTruncateIfIncarnation(
+				ctx,
+				l.dest,
+				st.destTable,
+				l.opts.StateManager.BoundDestinationIncarnation(stateTable),
+			)
+		} else {
+			truncateErr = destination.ApplyCDCTruncate(ctx, l.dest, st.destTable)
+		}
 	} else {
 		truncateErr = destination.ApplyTruncate(ctx, l.dest, st.destTable)
 	}
@@ -645,8 +1142,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	if stateTable != "" && res.CDCWALTruncate {
 		l.pendingTruncates[stateTable] = st.incarnation
 	}
-	l.buffer(res)
-	return nil
+	return l.bufferResult(res)
 }
 
 func (l *flushLoop) stateSourceTable(recordTable string) string {
@@ -657,11 +1153,54 @@ func (l *flushLoop) stateSourceTable(recordTable string) string {
 		return l.cfg.SourceTable
 	}
 	if len(l.tables) == 1 {
-		for table := range l.tables {
+		for table, st := range l.tables {
+			if table == "" && st.sourceTable != "" {
+				return st.sourceTable
+			}
 			return table
 		}
 	}
 	return ""
+}
+
+func (l *flushLoop) abortUnpublishedAtomicSnapshot(ctx context.Context, sourceTable string, st *streamTableState) error {
+	aborter, ok := l.dest.(destination.AtomicSnapshotAborter)
+	if !ok {
+		return fmt.Errorf("destination %s cannot abort owned atomic snapshot attempts", l.dest.GetScheme())
+	}
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamFinalFlushTimeout)
+	defer cancel()
+	if err := aborter.AbortAtomicSnapshot(abortCtx, destination.AtomicSnapshotOptions{
+		Table: st.destTable, AttemptID: st.snapshotAttemptID,
+	}); err != nil {
+		return err
+	}
+	if l.opts.StateManager != nil {
+		if err := l.opts.StateManager.AbandonAtomicSnapshotAttempt(
+			ctx, sourceTable, st.destTable, st.snapshotAttemptID,
+		); err != nil {
+			return fmt.Errorf("failed to abandon durable atomic snapshot attempt: %w", err)
+		}
+	}
+	st.atomicSnapshot = false
+	st.snapshotStarted = false
+	st.snapshotAttemptID = ""
+	return nil
+}
+
+func (l *flushLoop) applyDeferredEvolution(ctx context.Context, res source.RecordBatchResult) error {
+	if res.Batch == nil {
+		return nil
+	}
+	st, ok := l.tableState(res.TableName)
+	if !ok || st.deferredEvolution == nil || st.evolutionApplied || st.snapshotStarted {
+		return nil
+	}
+	if err := st.deferredEvolution(ctx); err != nil {
+		return fmt.Errorf("failed to apply deferred schema evolution for table %s: %w", st.destTable, err)
+	}
+	st.evolutionApplied = true
+	return nil
 }
 
 // ensureTable provisions per-table state for a table announced mid-stream.
@@ -704,12 +1243,25 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	}
 	st.incarnation = ti.Incarnation
 	st.schemaFingerprint = ti.SchemaFingerprint
-	if l.evolveTable == nil || ti.Schema == nil {
+	if ti.Schema == nil {
+		return nil
+	}
+	if err := schemainfer.ValidateSchema(ti.Schema); err != nil {
+		return fmt.Errorf("invalid refreshed schema for source table %s: %w", ti.Name, err)
+	}
+	if l.evolveTable == nil && l.evolveTablePlan == nil {
 		return nil
 	}
 	newSchema := ti.Schema
 	if !l.cfg.NoLoadTimestamp {
 		newSchema = withLoadTimestampColumn(newSchema)
+	}
+	keysChanged := !equalFoldedStrings(st.primaryKeys, ti.PrimaryKeys)
+	if keysChanged {
+		return fmt.Errorf(
+			"streaming primary-key change for table %s from %v to %v requires a new snapshot; stop the stream and run a full refresh",
+			st.destTable, st.primaryKeys, ti.PrimaryKeys,
+		)
 	}
 	if st.schema.SameColumnShape(newSchema) && sameColumnNullability(st.schema, newSchema) {
 		return nil
@@ -721,18 +1273,81 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := l.evolveTable(ctx, st.destTable, newSchema); err != nil {
+	if publisher, ok := l.dest.(destination.AtomicSnapshotPublisher); ok && st.atomicSnapshot {
+		contractMode, err := schemaevolution.ParseContractMode(l.cfg.SchemaContract)
+		if err != nil {
+			return fmt.Errorf("failed to parse schema contract for atomic snapshot refresh: %w", err)
+		}
+		if contractMode == schemaevolution.ContractDiscardRow {
+			return fmt.Errorf("atomic snapshot schema refresh for table %s is unsupported with discard_row because refreshed rows cannot be published without contract filtering", st.destTable)
+		}
+		plan, err := planDestinationSchemaEvolution(ctx, l.dest, st.destTable, newSchema, l.cfg)
+		if err != nil {
+			return fmt.Errorf("failed to validate atomic snapshot schema change for table %s: %w", st.destTable, err)
+		}
+		configureStreamingContractState(l.cfg, newSchema, plan, st)
+		st.atomicTargetSchema = plan.FinalSchema
+		st.atomicWriteSchema = nil
+		st.atomicBatchTransformer = nil
+		if contractMode == schemaevolution.ContractDiscardValue {
+			st.atomicWriteSchema = st.schema
+			st.atomicBatchTransformer = schemaevolution.NewDiscardValueTransformer(plan.TransformComparison, newSchema, plan.FinalSchema)
+		}
+		st.schemaAligner = transformer.NewSafeTypeCaster(l.atomicSnapshotWriteSchema(st).ToArrowSchema())
+		st.isCDC = hasCDCColumns(newSchema)
+		st.primaryKeys = append([]string(nil), ti.PrimaryKeys...)
+		_, supportsDirectMerge := l.dest.(destination.DirectMergeWriter)
+		st.directMerge = len(st.primaryKeys) > 0 && supportsDirectMerge
+		expectedIncarnation := ""
+		if l.opts.StateManager != nil && l.opts.StateManager.dest != nil {
+			expectedIncarnation = l.opts.StateManager.BoundDestinationIncarnation(l.stateSourceTable(ti.Name))
+			if expectedIncarnation == "" {
+				return fmt.Errorf("managed CDC destination %s has no bound physical incarnation", st.destTable)
+			}
+		}
+		if err := publisher.EvolveAtomicSnapshot(ctx, destination.AtomicSnapshotOptions{
+			Table: st.destTable, Schema: l.atomicSnapshotWriteSchema(st), TargetSchema: l.atomicSnapshotTargetSchema(st), PrimaryKeys: st.primaryKeys,
+			PartitionBy: st.partitionBy, ClusterBy: st.clusterBy, Parallelism: l.cfg.EffectiveDestinationParallelism(), AttemptID: st.snapshotAttemptID,
+			CDCExpectedIncarnation: expectedIncarnation,
+		}); err != nil {
+			return fmt.Errorf("failed to evolve atomic snapshot staging for table %s after schema change: %w", st.destTable, err)
+		}
+		if err := connectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		output.Statusf("[STREAM] %s | Snapshot schema change staged for %s (dest: %s)\n", time.Now().Format("15:04:05"), ti.Name, st.destTable)
+		return nil
+	}
+	var plan *schemaevolution.EvolutionPlan
+	if l.opts.StateManager != nil {
+		expectedIncarnation, err := boundDestinationIncarnation(
+			l.opts.StateManager,
+			l.stateSourceTable(ti.Name),
+			st.destTable,
+		)
+		if err != nil {
+			return err
+		}
+		plan, err = evolveDestinationTablePlanIfIncarnation(ctx, l.dest, st.destTable, newSchema, l.cfg, expectedIncarnation)
+		if err != nil {
+			return fmt.Errorf("failed to evolve destination table %s: %w", st.destTable, err)
+		}
+	} else if l.evolveTablePlan != nil {
+		var err error
+		plan, err = l.evolveTablePlan(ctx, st.destTable, newSchema)
+		if err != nil {
+			return fmt.Errorf("failed to evolve destination table %s: %w", st.destTable, err)
+		}
+	} else if err := l.evolveTable(ctx, st.destTable, newSchema); err != nil {
 		return fmt.Errorf("failed to evolve destination table %s: %w", st.destTable, err)
 	}
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
 
-	st.schema = newSchema
+	configureStreamingContractState(l.cfg, newSchema, plan, st)
 	st.isCDC = hasCDCColumns(newSchema)
-	if len(ti.PrimaryKeys) > 0 {
-		st.primaryKeys = ti.PrimaryKeys
-	}
+	st.primaryKeys = append([]string(nil), ti.PrimaryKeys...)
 	if st.stagingTable != "" {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return err
@@ -769,7 +1384,41 @@ func sameColumnNullability(left, right *schema.TableSchema) bool {
 	return true
 }
 
+func equalFoldedStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !strings.EqualFold(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func (l *flushLoop) buffer(res source.RecordBatchResult) {
+	if err := l.transformResultBatch(context.Background(), &res); err != nil {
+		panic(err)
+	}
+	if err := l.bufferResult(res); err != nil {
+		panic(err)
+	}
+}
+
+func (l *flushLoop) bufferResult(res source.RecordBatchResult) error {
+	var st *streamTableState
+	if res.Batch != nil && res.Batch.NumRows() > 0 {
+		var ok bool
+		st, ok = l.tableState(res.TableName)
+		if !ok {
+			rows := res.Batch.NumRows()
+			res.Batch.Release()
+			return fmt.Errorf("streaming received %d row(s) for unknown table %q", rows, res.TableName)
+		}
+		if res.TableName != "" {
+			st.sourceTable = res.TableName
+		}
+	}
 	if res.CommitToken != nil {
 		l.lastToken = res.CommitToken
 		l.tokenDirty = true
@@ -816,22 +1465,52 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 			}
 		}
 	}
+	if l.opts.StateManager == nil && res.DurableCheckpointID != "" {
+		if res.DurableCheckpointTable == "" {
+			l.lastDurableCommitID = res.DurableCheckpointID
+			l.lastDurableCommitPosition = res.DurableCheckpointPosition
+		} else if checkpointState, ok := l.tableState(res.DurableCheckpointTable); ok {
+			checkpointState.checkpointID = res.DurableCheckpointID
+			checkpointState.checkpointPosition = res.DurableCheckpointPosition
+		} else {
+			config.Debug("[STREAM] Ignoring checkpoint for unknown table %q", res.DurableCheckpointTable)
+		}
+	}
+	if res.Batch != nil && res.Batch.NumRows() == 0 {
+		res.Batch.Release()
+		res.Batch = nil
+	}
 	if res.Batch == nil {
-		return
+		if l.opts.StateManager == nil && res.DurableCheckpointID == "" && res.DurableCommitID != "" {
+			if checkpointState, ok := l.tableState(res.TableName); ok && res.TableName != "" {
+				checkpointState.checkpointID = res.DurableCommitID
+				checkpointState.checkpointPosition = res.DurableCommitPosition
+			} else {
+				l.lastDurableCommitID = res.DurableCommitID
+				l.lastDurableCommitPosition = res.DurableCommitPosition
+			}
+		}
+		return nil
 	}
-	if res.Batch.NumRows() == 0 {
-		res.Batch.Release()
-		return
+	boundary := dataWriteBoundary{
+		SourceTable: l.stateSourceTable(res.TableName),
+		Token:       res.DurableCommitID,
+		Position:    res.DurableCommitPosition,
 	}
-	st, ok := l.tableState(res.TableName)
-	if !ok {
-		config.Debug("[STREAM] Dropping batch for unknown table %q (%d rows)", res.TableName, res.Batch.NumRows())
-		res.Batch.Release()
-		return
+	if l.managedCDCNeedsDataWriteIdentity(st) {
+		token, ok := res.CommitToken.(source.CDCStateCommitToken)
+		if !ok || token.Position == "" || token.DataBatchID == "" {
+			res.Batch.Release()
+			return fmt.Errorf("managed CDC data batch for table %s has no typed source position and stable data batch identity", res.TableName)
+		}
+		boundary.Token = managedCDCDataWriteID(boundary.SourceTable, token.DataBatchID)
+		boundary.Position = token.Position
 	}
 	st.pending = append(st.pending, res.Batch)
+	st.pendingBoundaries = append(st.pendingBoundaries, boundary)
 	st.pendingRows += res.Batch.NumRows()
 	l.buffered += res.Batch.NumRows()
+	return nil
 }
 
 // flush writes all buffered batches to the destination (one write+merge cycle
@@ -856,18 +1535,21 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("CDC snapshot state references unknown table %q", sourceTable)
 			}
+			if st.atomicSnapshot {
+				continue
+			}
 			if err := l.opts.StateManager.BindDestinationIncarnation(ctx, sourceTable, st.destTable); err != nil {
 				return fmt.Errorf("streaming flush: failed to bind CDC destination for %s: %w", sourceTable, err)
 			}
 		}
 	}
-
 	type flushWork struct {
 		name string
 		st   *streamTableState
 
-		batches []arrow.RecordBatch
-		rows    int64
+		batches    []arrow.RecordBatch
+		boundaries []dataWriteBoundary
+		rows       int64
 	}
 
 	var work []flushWork
@@ -875,10 +1557,18 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		if st.pendingRows == 0 {
 			continue
 		}
-		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows})
+		work = append(work, flushWork{name: name, st: st, batches: st.pending, boundaries: st.pendingBoundaries, rows: st.pendingRows})
 		l.buffered -= st.pendingRows
 		st.pending = nil
+		st.pendingBoundaries = nil
 		st.pendingRows = 0
+	}
+	releaseWork := func() {
+		for _, pending := range work {
+			for _, batch := range pending.batches {
+				batch.Release()
+			}
+		}
 	}
 	keylessSnapshots := make(map[string]*streamTableState)
 	if l.opts.StateManager != nil && l.pendingState.Position != "" {
@@ -890,7 +1580,8 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			if _, freshSnapshot := l.pendingState.SnapshotPositions[sourceTable]; freshSnapshot {
 				continue
 			}
-			if err := l.opts.StateManager.InvalidateSnapshot(ctx, sourceTable, w.st.destTable, w.st.incarnation); err != nil {
+			if err := l.opts.StateManager.InvalidateSnapshotPreservingDestination(ctx, sourceTable, w.st.destTable, w.st.incarnation); err != nil {
+				releaseWork()
 				return fmt.Errorf("streaming flush: failed to invalidate keyless CDC state for %s: %w", sourceTable, err)
 			}
 			keylessSnapshots[sourceTable] = w.st
@@ -903,6 +1594,87 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		if displayName == "" {
 			displayName = st.destTable
 		}
+		managedBoundaryWrites := l.managedCDCNeedsDataWriteIdentity(st)
+		preserveExactBoundaries := l.opts.StateManager == nil &&
+			hasExactDataWriteBoundary(w.boundaries) &&
+			((st.isCDC && len(st.primaryKeys) == 0) || l.opts.Strategy == config.StrategyAppend)
+		if managedBoundaryWrites || preserveExactBoundaries {
+			if len(w.boundaries) != len(w.batches) {
+				for _, batch := range w.batches {
+					batch.Release()
+				}
+				return fmt.Errorf("streaming flush: table %s lost source write boundaries", displayName)
+			}
+			sourceTable := ""
+			expectedIncarnation := ""
+			if managedBoundaryWrites {
+				sourceTable = l.stateSourceTable(w.name)
+				if sourceTable == "" {
+					for _, batch := range w.batches {
+						batch.Release()
+					}
+					return fmt.Errorf("streaming flush: managed CDC table %s has no source table identity", displayName)
+				}
+				expectedIncarnation = l.opts.StateManager.BoundDestinationIncarnation(sourceTable)
+				if expectedIncarnation == "" {
+					for _, batch := range w.batches {
+						batch.Release()
+					}
+					return fmt.Errorf("streaming flush: managed CDC table %s has no bound destination incarnation", displayName)
+				}
+			}
+			for i, batch := range w.batches {
+				boundary := w.boundaries[i]
+				writeToken := boundary.Token
+				if managedBoundaryWrites && boundary.SourceTable != sourceTable {
+					for _, unstarted := range w.batches[i:] {
+						unstarted.Release()
+					}
+					return fmt.Errorf("streaming flush: managed CDC table %s has inconsistent source write identity", displayName)
+				}
+				if st.isCDC && len(st.primaryKeys) == 0 && writeToken == "" {
+					for _, unstarted := range w.batches[i:] {
+						unstarted.Release()
+					}
+					return fmt.Errorf("streaming flush: keyless CDC table %s has no durable data batch identity", displayName)
+				}
+				writeOpts := destination.WriteOptions{
+					Table: st.destTable, Schema: st.schema, Parallelism: l.cfg.EffectiveDestinationParallelism(), CDCExpectedIncarnation: expectedIncarnation,
+					StagingBucket: l.cfg.StagingBucket, LoaderFileSize: l.cfg.LoaderFileSize, LoaderFileFormat: l.cfg.LoaderFileFormat,
+					CommitToken: writeToken, CDCResumeLSN: boundary.Position,
+					SkipCDCResume: managedBoundaryWrites || (writeToken != "" && boundary.Position == ""),
+				}
+				if managedBoundaryWrites {
+					writeOpts.CDCResumeLSN = ""
+				}
+				records := (<-chan source.RecordBatchResult)(prefilledBatchChannel([]arrow.RecordBatch{batch}))
+				if col, ok := loadTimestampColumn(st.schema); ok {
+					records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
+				}
+				if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
+					drainAndRelease(records)
+					for _, unstarted := range w.batches[i+1:] {
+						unstarted.Release()
+					}
+					return fmt.Errorf("streaming flush: failed to write managed CDC boundary for table %s at %s: %w", displayName, boundary.Position, err)
+				}
+				if err := connectorLeaseLoss(ctx); err != nil {
+					for _, unstarted := range w.batches[i+1:] {
+						unstarted.Release()
+					}
+					return err
+				}
+			}
+			return nil
+		}
+
+		managedCDC := l.opts.StateManager != nil
+		commitToken, cdcResumeLSN := combinedCommitMetadata(w.boundaries)
+		skipCDCResume := commitToken != "" && cdcResumeLSN == ""
+		if managedCDC {
+			cdcResumeLSN = ""
+			skipCDCResume = true
+		}
 
 		writeOpts := destination.WriteOptions{
 			Table:            st.destTable,
@@ -911,10 +1683,32 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			StagingBucket:    l.cfg.StagingBucket,
 			LoaderFileSize:   l.cfg.LoaderFileSize,
 			LoaderFileFormat: l.cfg.LoaderFileFormat,
+			CommitToken:      commitToken,
+			CDCResumeLSN:     cdcResumeLSN,
+			SkipCDCResume:    skipCDCResume,
 		}
-		if st.stagingTable != "" {
+		expectedIncarnation := ""
+		if managedCDC && l.opts.StateManager.dest != nil {
+			expectedIncarnation = l.opts.StateManager.BoundDestinationIncarnation(l.stateSourceTable(w.name))
+			if expectedIncarnation == "" {
+				for _, batch := range w.batches {
+					batch.Release()
+				}
+				return fmt.Errorf("managed CDC destination %s has no bound physical incarnation", st.destTable)
+			}
+		}
+		if st.atomicSnapshot {
+			writeOpts.Schema = l.atomicSnapshotWriteSchema(st)
+			writeOpts.CDCExpectedIncarnation = expectedIncarnation
+		}
+		if st.stagingTable != "" && !st.atomicSnapshot {
 			writeOpts.Table = st.stagingTable
 			writeOpts.StagingTable = true
+			writeOpts.CommitToken = ""
+			writeOpts.CDCResumeLSN = ""
+			writeOpts.SkipCDCResume = true
+		} else if !st.atomicSnapshot {
+			writeOpts.CDCExpectedIncarnation = expectedIncarnation
 		}
 
 		if err := connectorLeaseLoss(ctx); err != nil {
@@ -927,7 +1721,32 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
 		}
-		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
+		if st.atomicSnapshot {
+			publisher := l.dest.(destination.AtomicSnapshotPublisher)
+			writeOpts.AtomicSnapshotAttemptID = st.snapshotAttemptID
+			if err := publisher.WriteAtomicSnapshot(ctx, records, writeOpts); err != nil {
+				drainAndRelease(records)
+				return fmt.Errorf("streaming flush: failed to stage %d snapshot rows for table %s: %w", w.rows, displayName, err)
+			}
+		} else if st.directMerge {
+			direct := l.dest.(destination.DirectMergeWriter)
+			if err := direct.MergeRecords(ctx, records, writeOpts, destination.MergeOptions{
+				TargetTable:            st.destTable,
+				PrimaryKeys:            st.primaryKeys,
+				Columns:                destination.MergeColumnsFor(l.dest, st.schema.ColumnNames()),
+				IncrementalKey:         mergeIncrementalKeyForSchema(st.schema, st.incrementalKey),
+				IncrementalPredicate:   st.incrementalPredicate,
+				Schema:                 st.schema,
+				Parallelism:            writeOpts.Parallelism,
+				CommitToken:            commitToken,
+				CDCResumeLSN:           cdcResumeLSN,
+				SkipCDCResume:          skipCDCResume,
+				CDCExpectedIncarnation: expectedIncarnation,
+			}); err != nil {
+				drainAndRelease(records)
+				return fmt.Errorf("streaming flush: failed to merge %d rows directly for table %s: %w", w.rows, displayName, err)
+			}
+		} else if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
 			drainAndRelease(records)
 			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
 		}
@@ -935,11 +1754,12 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			return err
 		}
 
-		if st.stagingTable != "" {
+		if st.stagingTable != "" && !st.atomicSnapshot {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
-			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate); err != nil {
+			if err := mergeStagingIntoWithCommit(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate,
+				commitToken, cdcResumeLSN, skipCDCResume, expectedIncarnation); err != nil {
 				return fmt.Errorf("streaming flush: failed to merge table %s: %w", displayName, err)
 			}
 			if err := connectorLeaseLoss(ctx); err != nil {
@@ -966,12 +1786,12 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	} else {
 		for i, w := range work {
 			if err := flushOne(ctx, w); err != nil {
-				for _, unstarted := range work[i+1:] {
-					for _, batch := range unstarted.batches {
+				flushErr = err
+				for _, pending := range work[i+1:] {
+					for _, batch := range pending.batches {
 						batch.Release()
 					}
 				}
-				flushErr = err
 				break
 			}
 		}
@@ -997,12 +1817,103 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		return err
 	}
 
+	for tableName, st := range l.tables {
+		if !st.atomicSnapshot {
+			continue
+		}
+		sourceTable := l.stateSourceTable(tableName)
+		position, complete := l.pendingState.SnapshotPositions[sourceTable]
+		if !complete {
+			continue
+		}
+		publisher := l.dest.(destination.AtomicSnapshotPublisher)
+		expectedIncarnation := ""
+		if l.opts.StateManager != nil && l.opts.StateManager.dest != nil {
+			expectedIncarnation = l.opts.StateManager.BoundDestinationIncarnation(sourceTable)
+			if expectedIncarnation == "" {
+				return fmt.Errorf("managed CDC destination %s has no bound physical incarnation", st.destTable)
+			}
+		}
+		publishOpts := destination.AtomicSnapshotOptions{
+			Table: st.destTable, Schema: st.schema, TargetSchema: l.atomicSnapshotTargetSchema(st), PrimaryKeys: st.primaryKeys,
+			PartitionBy: st.partitionBy, ClusterBy: st.clusterBy, Parallelism: l.cfg.EffectiveDestinationParallelism(),
+			CommitToken: atomicSnapshotCommitID(st.snapshotAttemptID), CDCResumeLSN: position, SkipCDCResume: l.opts.StateManager != nil, AttemptID: st.snapshotAttemptID,
+			CDCExpectedIncarnation: expectedIncarnation,
+		}
+		st.atomicPublishAttempted = true
+		if l.opts.StateManager != nil {
+			if err := l.opts.StateManager.SealAtomicSnapshotAttempt(
+				ctx, sourceTable, st.destTable, st.snapshotAttemptID, position, expectedIncarnation,
+			); err != nil {
+				return fmt.Errorf("streaming flush: failed to seal durable atomic snapshot attempt for %s: %w", sourceTable, err)
+			}
+		}
+		publishedIncarnation, err := publisher.PublishAtomicSnapshot(ctx, publishOpts)
+		if err != nil {
+			return fmt.Errorf("streaming flush: failed to publish snapshot for table %s: %w", st.destTable, err)
+		}
+		if l.opts.StateManager != nil {
+			if publishedIncarnation == "" {
+				return fmt.Errorf("streaming flush: atomic publication for %s returned no physical incarnation", st.destTable)
+			}
+			if err := l.opts.StateManager.BindPublishedDestinationIncarnation(
+				ctx, sourceTable, st.destTable, expectedIncarnation, publishedIncarnation,
+			); err != nil {
+				return fmt.Errorf("streaming flush: failed to bind published CDC destination for %s: %w", sourceTable, err)
+			}
+			if err := completeAtomicSnapshotAttempt(
+				ctx, l.opts.StateManager, sourceTable, st.destTable, st.snapshotAttemptID,
+			); err != nil {
+				return fmt.Errorf("streaming flush: failed to complete durable atomic snapshot attempt for %s: %w", sourceTable, err)
+			}
+		}
+		st.atomicSnapshot = false
+		st.snapshotStarted = false
+		st.snapshotAttemptID = ""
+		st.atomicPublishAttempted = false
+		st.targetCreatedByRun = false
+	}
+
+	ackBlocked := l.hasActiveAtomicSnapshot()
+	if l.opts.StateManager == nil && !ackBlocked {
+		if tokenWriter, ok := l.dest.(destination.DurableCommitTokenWriter); ok {
+			workedTables := make(map[*streamTableState]struct{}, len(work))
+			for _, w := range work {
+				workedTables[w.st] = struct{}{}
+			}
+			for _, st := range l.tables {
+				if st.atomicSnapshot {
+					continue
+				}
+				if _, wroteRows := workedTables[st]; wroteRows {
+					continue
+				}
+				checkpointID := st.checkpointID
+				checkpointPosition := st.checkpointPosition
+				if checkpointID == "" {
+					checkpointID = l.lastDurableCommitID
+					checkpointPosition = l.lastDurableCommitPosition
+				}
+				if checkpointID == "" {
+					continue
+				}
+				cdcResumeLSN := ""
+				if st.isCDC {
+					cdcResumeLSN = checkpointPosition
+				}
+				if err := tokenWriter.CommitWriteToken(ctx, st.destTable, checkpointID, cdcResumeLSN); err != nil {
+					return fmt.Errorf("streaming flush: failed to persist source position for table %s: %w", st.destTable, err)
+				}
+			}
+		}
+	}
+
 	var flushedRows int64
 	for _, w := range work {
 		flushedRows += w.rows
 	}
 
-	if l.opts.StateManager != nil && l.tokenDirty {
+	if l.opts.StateManager != nil && l.tokenDirty && !ackBlocked {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return err
 		}
@@ -1013,7 +1924,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			return err
 		}
 	}
-	if l.opts.Committer != nil && l.tokenDirty {
+	if l.opts.Committer != nil && l.tokenDirty && !ackBlocked {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return err
 		}
@@ -1024,7 +1935,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			return err
 		}
 	}
-	if l.opts.StateManager != nil && l.opts.LegacyFinalizer != nil && l.tokenDirty && !l.legacyFinalized {
+	if l.opts.StateManager != nil && l.opts.LegacyFinalizer != nil && l.tokenDirty && !ackBlocked && !l.legacyFinalized {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return err
 		}
@@ -1036,8 +1947,16 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		}
 		l.legacyFinalized = true
 	}
-	l.tokenDirty = false
-	l.pendingState = source.CDCStateCommitToken{}
+	if !ackBlocked {
+		l.tokenDirty = false
+		l.pendingState = source.CDCStateCommitToken{}
+		l.lastDurableCommitID = ""
+		l.lastDurableCommitPosition = ""
+		for _, st := range l.tables {
+			st.checkpointID = ""
+			st.checkpointPosition = ""
+		}
+	}
 
 	// Only after the commit: the counters mean "durable in the destination and
 	// acknowledged to the source", not merely "written".
@@ -1056,6 +1975,58 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		output.Statusf("[STREAM] %s | cycle %d: flushed %d rows in %s\n", time.Now().Format("15:04:05"), l.cycles, flushedRows, time.Since(start).Round(time.Millisecond))
 	}
 	return nil
+}
+
+func (l *flushLoop) managedCDCNeedsDataWriteIdentity(st *streamTableState) bool {
+	if l.opts.StateManager == nil || st == nil || !st.isCDC || st.atomicSnapshot {
+		return false
+	}
+	return l.opts.Strategy == config.StrategyAppend || len(st.primaryKeys) == 0
+}
+
+func managedStreamingNeedsStableDataBatches(
+	opts StreamingOptions,
+	tables map[string]*streamTableState,
+	allowLateTables bool,
+) bool {
+	if opts.StateManager == nil {
+		return false
+	}
+	if allowLateTables && (opts.Strategy == config.StrategyAppend || opts.Strategy == config.StrategyMerge) {
+		return true
+	}
+	for _, st := range tables {
+		if st != nil && st.isCDC && (opts.Strategy == config.StrategyAppend || len(st.primaryKeys) == 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *flushLoop) atomicSnapshotTargetSchema(st *streamTableState) *schema.TableSchema {
+	if st.atomicTargetSchema != nil {
+		return st.atomicTargetSchema
+	}
+	if l.opts.Strategy == config.StrategyAppend && st.isCDC {
+		return st.schema
+	}
+	return destination.DestinationTableSchema(st.schema)
+}
+
+func (l *flushLoop) atomicSnapshotWriteSchema(st *streamTableState) *schema.TableSchema {
+	if st.atomicWriteSchema != nil {
+		return st.atomicWriteSchema
+	}
+	return st.schema
+}
+
+func (l *flushLoop) hasActiveAtomicSnapshot() bool {
+	for _, st := range l.tables {
+		if st.atomicSnapshot {
+			return true
+		}
+	}
+	return false
 }
 
 // flushConcurrency returns how many tables may flush at once: destinations
@@ -1095,6 +2066,13 @@ func (l *flushLoop) resetStaging(ctx context.Context, st *streamTableState) erro
 func (l *flushLoop) shutdown(ctx context.Context, records <-chan source.RecordBatchResult) error {
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return l.abortLeaseLoss(records, err)
+	}
+	// A partially staged atomic snapshot must never be flushed during shutdown.
+	// Its hidden attempt is safe to reclaim on restart; returning promptly also
+	// prevents a canceled source snapshot from being drained into durable pages.
+	if l.hasActiveAtomicSnapshot() {
+		startBoundedRecordDrain(records, streamDrainTimeout)
+		return ctx.Err()
 	}
 	deadline := time.NewTimer(streamDrainTimeout)
 	defer deadline.Stop()
@@ -1138,7 +2116,6 @@ drain:
 			break drain
 		}
 	}
-
 	return l.finalFlush(ctx)
 }
 
@@ -1152,12 +2129,36 @@ func (l *flushLoop) finalFlush(ctx context.Context) error {
 	}
 	flushCtx, cancel := detachedLeaseContext(ctx, streamFinalFlushTimeout)
 	defer cancel()
+	for _, st := range l.tables {
+		if st.deferredEvolution == nil || st.evolutionApplied || st.snapshotStarted {
+			continue
+		}
+		if err := st.deferredEvolution(flushCtx); err != nil {
+			return fmt.Errorf("failed to apply deferred schema evolution for table %s: %w", st.destTable, err)
+		}
+		st.evolutionApplied = true
+	}
 
-	if l.buffered == 0 && !l.tokenDirty {
+	if l.buffered == 0 && !l.tokenDirty && !l.hasPendingDurableCheckpoint() {
 		return nil
 	}
 	config.Debug("[STREAM] Final flush: %d buffered rows", l.buffered)
 	return l.flush(flushCtx)
+}
+
+func (l *flushLoop) hasPendingDurableCheckpoint() bool {
+	if l.opts.StateManager != nil {
+		return false
+	}
+	if l.lastDurableCommitID != "" {
+		return true
+	}
+	for _, st := range l.tables {
+		if st.checkpointID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanup drops staging tables (best-effort) regardless of how the loop ended.
@@ -1173,6 +2174,19 @@ func (l *flushLoop) cleanup(ctx context.Context) {
 	for _, st := range l.tables {
 		if connectorLeaseLoss(dropCtx) != nil {
 			return
+		}
+		if st.snapshotStarted && !st.atomicPublishAttempted && st.snapshotAttemptID != "" {
+			if aborter, ok := l.dest.(destination.AtomicSnapshotAborter); ok {
+				if err := aborter.AbortAtomicSnapshot(dropCtx, destination.AtomicSnapshotOptions{
+					Table: st.destTable, AttemptID: st.snapshotAttemptID,
+				}); err != nil {
+					config.Debug("[STREAM] Warning: failed to abort atomic snapshot stage for %s: %v", st.destTable, err)
+				}
+			}
+		}
+		if st.targetCreatedByRun && !st.atomicPublishAttempted {
+			cleanupFailedOwnedDirectReplace(dropCtx, l.dest, st.destTable, true, st.targetOwnershipToken)
+			st.targetCreatedByRun = false
 		}
 		if st.stagingTable == "" {
 			continue
@@ -1193,6 +2207,7 @@ func (l *flushLoop) releasePending() {
 		}
 		l.buffered -= st.pendingRows
 		st.pending = nil
+		st.pendingBoundaries = nil
 		st.pendingRows = 0
 	}
 }

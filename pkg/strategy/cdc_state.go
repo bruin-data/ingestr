@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -30,8 +31,10 @@ const (
 	cdcStateKindCheckpoint    = "checkpoint"
 	cdcStateKindSnapshot      = "snapshot"
 	cdcStateKindDestination   = "destination"
+	cdcStateKindAtomicAttempt = "atomic_snapshot"
 	cdcStateKindRun           = "run"
 	cdcStateStatusInProgress  = "in_progress"
+	cdcStateStatusReady       = "ready"
 	zeroCDCPosition           = "00000000/00000000"
 	cdcStatePruneThreshold    = 100
 	cdcStatePruneBatchSize    = 900
@@ -51,7 +54,7 @@ var cdcStateSchema = &schema.TableSchema{Columns: []schema.Column{
 	{Name: "state_kind", DataType: schema.TypeString, MaxLength: 32, Nullable: false},
 	{Name: "state_generation", DataType: schema.TypeInt64, Nullable: false},
 	{Name: "state_status", DataType: schema.TypeString, MaxLength: 32, Nullable: false},
-	{Name: "_cdc_lsn", DataType: schema.TypeString, MaxLength: 64, Nullable: false},
+	{Name: "_cdc_lsn", DataType: schema.TypeString, MaxLength: 1024, Nullable: false},
 	{Name: "recorded_at", DataType: schema.TypeTimestampTZ, Nullable: false},
 }}
 
@@ -103,6 +106,7 @@ type CDCStateManager struct {
 	targetPrepared      bool
 	loaded              bool
 	started             bool
+	fullRefresh         bool
 	generation          int64
 	runID               string
 	runEventID          string
@@ -116,6 +120,10 @@ type CDCStateManager struct {
 	knownSchemas        map[string]string
 	knownDestinations   map[string]string
 	boundDestinations   map[string]string
+	boundDestinationRaw map[string]string
+	batchSnapshots      map[string]string
+	atomicAttempts      map[string]atomicSnapshotJournalEntry
+	atomicSequences     map[string]uint64
 	lateTargetModes     map[string]lateTargetMode
 	lateTargetRaw       map[string]string
 	snapshotEpochs      map[string]uint64
@@ -124,6 +132,18 @@ type CDCStateManager struct {
 }
 
 type lateTargetMode uint8
+
+type atomicSnapshotJournalEntry struct {
+	attemptID               string
+	sequence                uint64
+	snapshotEpoch           uint64
+	ready                   bool
+	resumeLSN               string
+	expectedIncarnation     string
+	sourceMetadataKnown     bool
+	sourceIncarnation       string
+	sourceSchemaFingerprint string
+}
 
 const (
 	lateTargetNone lateTargetMode = iota
@@ -187,6 +207,10 @@ func newCDCStateManager(dest destination.Destination, connectorID, stateTable st
 		knownSchemas:        make(map[string]string),
 		knownDestinations:   make(map[string]string),
 		boundDestinations:   make(map[string]string),
+		boundDestinationRaw: make(map[string]string),
+		batchSnapshots:      make(map[string]string),
+		atomicAttempts:      make(map[string]atomicSnapshotJournalEntry),
+		atomicSequences:     make(map[string]uint64),
 		lateTargetModes:     make(map[string]lateTargetMode),
 		lateTargetRaw:       make(map[string]string),
 		snapshotEpochs:      make(map[string]uint64),
@@ -225,13 +249,17 @@ func (m *CDCStateManager) RegisterTableState(ctx context.Context, sourceTable, d
 // this returns, an older completed epoch can no longer make the table
 // resumable, even if the process crashes during truncate or backfill.
 func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, destTable, incarnation string) error {
+	return m.InvalidateSnapshotState(ctx, sourceTable, destTable, incarnation, "")
+}
+
+func (m *CDCStateManager) InvalidateSnapshotState(ctx context.Context, sourceTable, destTable, incarnation, schemaFingerprint string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
 		return err
 	}
-	if err := m.registerTable(ctx, sourceTable, destTable, incarnation, ""); err != nil {
+	if err := m.registerTable(ctx, sourceTable, destTable, incarnation, schemaFingerprint); err != nil {
 		return err
 	}
 	if incarnation == "" {
@@ -251,6 +279,7 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 	delete(m.knownSchemas, sourceTable)
 	delete(m.knownDestinations, sourceTable)
 	delete(m.boundDestinations, sourceTable)
+	delete(m.boundDestinationRaw, sourceTable)
 	return nil
 }
 
@@ -270,7 +299,7 @@ func (m *CDCStateManager) BindDestinationIncarnation(ctx context.Context, source
 			return fmt.Errorf("CDC destination table %q disappeared before snapshot write", destTable)
 		}
 	}
-	current, exists, err := m.currentDestinationIncarnation(ctx, sourceTable)
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
 	if err != nil {
 		return err
 	}
@@ -280,7 +309,287 @@ func (m *CDCStateManager) BindDestinationIncarnation(ctx context.Context, source
 	if bound := m.boundDestinations[sourceTable]; bound != "" && current != bound {
 		return fmt.Errorf("CDC destination table %q was replaced during its snapshot", destTable)
 	}
+	if known := m.knownDestinations[sourceTable]; known != "" && current != known {
+		return fmt.Errorf("CDC destination table %q was replaced after its resume position was selected", destTable)
+	}
 	m.boundDestinations[sourceTable] = current
+	m.boundDestinationRaw[sourceTable] = raw
+	return nil
+}
+
+func (m *CDCStateManager) BoundDestinationIncarnation(sourceTable string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.boundDestinationRaw[sourceTable]
+}
+
+// AtomicSnapshotAttempt returns the durable identity of the current snapshot
+// publication. An incomplete attempt is carried into the next run so an
+// ambiguous successful publish is retried with the same idempotency key.
+func (m *CDCStateManager) AtomicSnapshotAttempt(ctx context.Context, sourceTable, destTable string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.started || m.generation == 0 {
+		return "", fmt.Errorf("CDC state run has not started")
+	}
+	registered, ok := m.destTables[sourceTable]
+	if !ok || registered != destTable {
+		return "", fmt.Errorf("CDC state is not registered for source table %q and destination %q", sourceTable, destTable)
+	}
+	if attempt, exists := m.atomicAttempts[sourceTable]; exists {
+		if attempt.ready {
+			return "", fmt.Errorf("sealed atomic snapshot attempt for %s must be recovered before source read", sourceTable)
+		}
+		return attempt.attemptID, nil
+	}
+	attemptID, err := newCDCStateRunID()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate atomic snapshot attempt for %s: %w", sourceTable, err)
+	}
+	sequence := m.atomicSequences[sourceTable] + 1
+	attempt := atomicSnapshotJournalEntry{
+		attemptID:     attemptID,
+		sequence:      sequence,
+		snapshotEpoch: m.snapshotEpochs[sourceTable],
+	}
+	if err := m.writeState(
+		ctx,
+		sourceTable,
+		destTable,
+		cdcStateKindAtomicAttempt,
+		m.generation,
+		cdcStateStatusInProgress,
+		encodeAtomicSnapshotAttempt(attempt),
+	); err != nil {
+		return "", fmt.Errorf("failed to persist atomic snapshot attempt for %s: %w", sourceTable, err)
+	}
+	m.atomicAttempts[sourceTable] = attempt
+	m.atomicSequences[sourceTable] = sequence
+	return attemptID, nil
+}
+
+func (m *CDCStateManager) SealAtomicSnapshotAttempt(
+	ctx context.Context,
+	sourceTable, destTable, attemptID, resumeLSN, expectedIncarnation string,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	attempt, exists := m.atomicAttempts[sourceTable]
+	if !m.started || !exists || attemptID == "" || attempt.attemptID != attemptID {
+		return fmt.Errorf("atomic snapshot attempt for %s does not match the active durable attempt", sourceTable)
+	}
+	if m.destTables[sourceTable] != destTable {
+		return fmt.Errorf("CDC state destination for %s is %q, not %q", sourceTable, m.destTables[sourceTable], destTable)
+	}
+	if !cdcStatePositionValid(resumeLSN) || expectedIncarnation == "" {
+		return fmt.Errorf("atomic snapshot attempt for %s has an invalid durable boundary or publication fence", sourceTable)
+	}
+	attempt.ready = true
+	attempt.resumeLSN = resumeLSN
+	attempt.expectedIncarnation = expectedIncarnation
+	attempt.sourceMetadataKnown = true
+	attempt.sourceIncarnation = m.currentIncarnations[sourceTable]
+	attempt.sourceSchemaFingerprint = m.currentSchemas[sourceTable]
+	if err := m.writeState(
+		ctx,
+		sourceTable,
+		destTable,
+		cdcStateKindAtomicAttempt,
+		m.generation,
+		cdcStateStatusReady,
+		encodeAtomicSnapshotAttempt(attempt),
+	); err != nil {
+		return fmt.Errorf("failed to seal atomic snapshot attempt for %s: %w", sourceTable, err)
+	}
+	m.atomicAttempts[sourceTable] = attempt
+	return nil
+}
+
+func (m *CDCStateManager) PendingAtomicSnapshotAttempt(sourceTable, destTable string) (atomicSnapshotJournalEntry, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	attempt, exists := m.atomicAttempts[sourceTable]
+	if !exists {
+		return atomicSnapshotJournalEntry{}, false, nil
+	}
+	if m.destTables[sourceTable] != destTable {
+		return atomicSnapshotJournalEntry{}, false, fmt.Errorf(
+			"CDC state destination for %s is %q, not %q",
+			sourceTable,
+			m.destTables[sourceTable],
+			destTable,
+		)
+	}
+	return attempt, true, nil
+}
+
+func (m *CDCStateManager) FullRefresh() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fullRefresh
+}
+
+func (m *CDCStateManager) CompleteAtomicSnapshotAttempt(ctx context.Context, sourceTable, destTable, attemptID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.started || m.generation == 0 {
+		return fmt.Errorf("CDC state run has not started")
+	}
+	attempt, exists := m.atomicAttempts[sourceTable]
+	if !exists || attemptID == "" || attempt.attemptID != attemptID {
+		return fmt.Errorf("atomic snapshot attempt for %s does not match the active durable attempt", sourceTable)
+	}
+	if registered := m.destTables[sourceTable]; registered != destTable {
+		return fmt.Errorf("CDC state destination for %s is %q, not %q", sourceTable, registered, destTable)
+	}
+	if err := m.writeState(
+		ctx,
+		sourceTable,
+		destTable,
+		cdcStateKindAtomicAttempt,
+		m.generation,
+		destination.CDCStateStatusComplete,
+		encodeAtomicSnapshotAttempt(attempt),
+	); err != nil {
+		return fmt.Errorf("failed to complete atomic snapshot attempt for %s: %w", sourceTable, err)
+	}
+	delete(m.atomicAttempts, sourceTable)
+	return nil
+}
+
+func (m *CDCStateManager) AbandonAtomicSnapshotAttempt(ctx context.Context, sourceTable, destTable, attemptID string) error {
+	return m.CompleteAtomicSnapshotAttempt(ctx, sourceTable, destTable, attemptID)
+}
+
+func (m *CDCStateManager) DestinationIncarnationForPublication(ctx context.Context, destTable string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	raw, _, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return "", err
+	}
+	if !exists || raw == "" {
+		return "", fmt.Errorf("CDC replacement table %q has no stable physical incarnation", destTable)
+	}
+	return raw, nil
+}
+
+// BindPublishedDestinationIncarnation accepts the physical incarnation created
+// by a destination-fenced replacement. The caller must provide the incarnation
+// that guarded publication so an unrelated or stale run cannot rebind state.
+func (m *CDCStateManager) BindPublishedDestinationIncarnation(
+	ctx context.Context,
+	sourceTable, destTable, expectedPrevious, expectedPublished string,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if expectedPrevious == "" || expectedPublished == "" || m.boundDestinationRaw[sourceTable] != expectedPrevious {
+		return fmt.Errorf("CDC destination table %q replacement was not fenced by its bound incarnation", destTable)
+	}
+	if err := m.registerTable(ctx, sourceTable, destTable, "", ""); err != nil {
+		return err
+	}
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || raw != expectedPublished {
+		return fmt.Errorf("CDC destination table %q changed after its fenced replacement was published", destTable)
+	}
+	m.boundDestinations[sourceTable] = current
+	m.boundDestinationRaw[sourceTable] = raw
+	return nil
+}
+
+func (m *CDCStateManager) BindRecoveredPublishedDestinationIncarnation(
+	ctx context.Context,
+	sourceTable, destTable, expectedPublished string,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if expectedPublished == "" {
+		return fmt.Errorf("CDC destination table %q recovered publication has no physical incarnation", destTable)
+	}
+	if err := m.registerTable(ctx, sourceTable, destTable, "", ""); err != nil {
+		return err
+	}
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || raw != expectedPublished {
+		return fmt.Errorf("CDC destination table %q changed after its recovered fenced replacement was published", destTable)
+	}
+	m.boundDestinations[sourceTable] = current
+	m.boundDestinationRaw[sourceTable] = raw
+	return nil
+}
+
+func (m *CDCStateManager) CurrentSourceMetadata(sourceTable string) (incarnation, schemaFingerprint string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.currentIncarnations[sourceTable], m.currentSchemas[sourceTable]
+}
+
+func (m *CDCStateManager) InvalidateSnapshotPreservingDestination(ctx context.Context, sourceTable, destTable, incarnation string) error {
+	return m.InvalidateSnapshotStatePreservingDestination(ctx, sourceTable, destTable, incarnation, "")
+}
+
+func (m *CDCStateManager) InvalidateSnapshotStatePreservingDestination(ctx context.Context, sourceTable, destTable, incarnation, schemaFingerprint string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
+		return err
+	}
+	if err := m.registerTable(ctx, sourceTable, destTable, incarnation, schemaFingerprint); err != nil {
+		return err
+	}
+	if incarnation == "" {
+		incarnation = m.currentIncarnations[sourceTable]
+	}
+	if !m.started || m.generation == 0 {
+		return fmt.Errorf("CDC state run has not started")
+	}
+	expected := m.boundDestinations[sourceTable]
+	if expected == "" {
+		expected = m.knownDestinations[sourceTable]
+	}
+	if expected == "" {
+		return fmt.Errorf("CDC destination table %q has no previously verified physical incarnation", destTable)
+	}
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expected {
+		return fmt.Errorf("CDC destination table %q was replaced after its prior snapshot boundary", destTable)
+	}
+	epoch := m.snapshotEpochs[sourceTable] + 1
+	position := encodeCDCStatePositionWithSchema(zeroCDCPosition, incarnation, m.currentSchemas[sourceTable], epoch)
+	if err := m.writeState(ctx, sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position); err != nil {
+		return fmt.Errorf("failed to invalidate CDC snapshot for %s: %w", sourceTable, err)
+	}
+	_, afterWrite, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || afterWrite != expected {
+		return fmt.Errorf("CDC destination table %q changed while invalidating its prior snapshot boundary", destTable)
+	}
+	m.snapshotEpochs[sourceTable] = epoch
+	delete(m.knownComplete, sourceTable)
+	delete(m.knownIncarnations, sourceTable)
+	delete(m.knownSchemas, sourceTable)
+	delete(m.knownDestinations, sourceTable)
+	m.boundDestinations[sourceTable] = expected
+	m.boundDestinationRaw[sourceTable] = raw
 	return nil
 }
 
@@ -345,6 +654,7 @@ func (m *CDCStateManager) ClaimLateDiscoveredTarget(
 		m.lateTargetModes[sourceTable] = lateTargetCreatedEmpty
 		m.lateTargetRaw[sourceTable] = createdIncarnation
 		m.boundDestinations[sourceTable] = cdcDestinationIncarnationDigest(createdIncarnation)
+		m.boundDestinationRaw[sourceTable] = createdIncarnation
 		return nil
 	}
 	if !allowReplacement {
@@ -370,11 +680,10 @@ func (m *CDCStateManager) ClaimLateDiscoveredTarget(
 	if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
 		return err
 	}
-	if !allowReplacement {
-		m.lateTargetModes[sourceTable] = lateTargetConditionalReplace
-		m.lateTargetRaw[sourceTable] = rawDestinationIncarnation
-		m.boundDestinations[sourceTable] = destinationIncarnation
-	}
+	m.lateTargetModes[sourceTable] = lateTargetConditionalReplace
+	m.lateTargetRaw[sourceTable] = rawDestinationIncarnation
+	m.boundDestinations[sourceTable] = destinationIncarnation
+	m.boundDestinationRaw[sourceTable] = rawDestinationIncarnation
 	return nil
 }
 
@@ -516,6 +825,14 @@ func (m *CDCStateManager) validateTarget(ctx context.Context, destTable string) 
 // needs no truncate; an existing target is truncated only by an incarnation
 // compare-and-swap operation supplied by the destination.
 func (m *CDCStateManager) ApplyLateSnapshotBoundary(ctx context.Context, sourceTable, destTable string) (bool, error) {
+	return m.applyLateSnapshotBoundary(ctx, sourceTable, destTable, true)
+}
+
+func (m *CDCStateManager) BindLateAtomicSnapshotBoundary(ctx context.Context, sourceTable, destTable string) (bool, error) {
+	return m.applyLateSnapshotBoundary(ctx, sourceTable, destTable, false)
+}
+
+func (m *CDCStateManager) applyLateSnapshotBoundary(ctx context.Context, sourceTable, destTable string, truncateVisibleTarget bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -536,7 +853,7 @@ func (m *CDCStateManager) ApplyLateSnapshotBoundary(ctx context.Context, sourceT
 		return true, fmt.Errorf("CDC destination table %q was replaced after its late-target claim", destTable)
 	}
 
-	if mode == lateTargetConditionalReplace {
+	if mode == lateTargetConditionalReplace && truncateVisibleTarget {
 		truncater, ok := m.dest.(destination.CDCConditionalTruncater)
 		if !ok {
 			return true, fmt.Errorf("destination scheme %q cannot conditionally truncate late-discovered CDC targets", m.dest.GetScheme())
@@ -546,6 +863,7 @@ func (m *CDCStateManager) ApplyLateSnapshotBoundary(ctx context.Context, sourceT
 		}
 	}
 	m.boundDestinations[sourceTable] = expectedDigest
+	m.boundDestinationRaw[sourceTable] = expectedRaw
 	delete(m.lateTargetModes, sourceTable)
 	delete(m.lateTargetRaw, sourceTable)
 	return true, nil
@@ -726,6 +1044,77 @@ func (m *CDCStateManager) StateEmpty(ctx context.Context) (bool, error) {
 	return len(m.entries) == 0, nil
 }
 
+type atomicSnapshotAttemptCandidate struct {
+	entry     atomicSnapshotJournalEntry
+	destTable string
+	terminal  bool
+}
+
+func (m *CDCStateManager) recoverAtomicSnapshotAttempts() (
+	map[string]atomicSnapshotJournalEntry,
+	map[string]uint64,
+	error,
+) {
+	candidates := make(map[string]*atomicSnapshotAttemptCandidate)
+	for _, entry := range m.entries {
+		if entry.StateKind != cdcStateKindAtomicAttempt {
+			continue
+		}
+		journal, valid := decodeAtomicSnapshotAttempt(entry.Position)
+		if !valid {
+			continue
+		}
+		candidate := candidates[entry.SourceTable]
+		if candidate == nil || journal.sequence > candidate.entry.sequence {
+			candidate = &atomicSnapshotAttemptCandidate{entry: journal, destTable: entry.DestinationTable}
+			candidates[entry.SourceTable] = candidate
+		}
+		if journal.sequence != candidate.entry.sequence {
+			continue
+		}
+		if journal.attemptID != candidate.entry.attemptID ||
+			journal.snapshotEpoch != candidate.entry.snapshotEpoch ||
+			entry.DestinationTable != candidate.destTable {
+			return nil, nil, fmt.Errorf(
+				"CDC source table %q has conflicting atomic snapshot attempt sequence %d",
+				entry.SourceTable,
+				journal.sequence,
+			)
+		}
+		if journal.ready {
+			if candidate.entry.ready &&
+				(journal.resumeLSN != candidate.entry.resumeLSN ||
+					journal.expectedIncarnation != candidate.entry.expectedIncarnation ||
+					journal.sourceMetadataKnown != candidate.entry.sourceMetadataKnown ||
+					journal.sourceIncarnation != candidate.entry.sourceIncarnation ||
+					journal.sourceSchemaFingerprint != candidate.entry.sourceSchemaFingerprint) {
+				return nil, nil, fmt.Errorf(
+					"CDC source table %q has conflicting sealed atomic snapshot attempt %q",
+					entry.SourceTable,
+					journal.attemptID,
+				)
+			}
+			candidate.entry = journal
+		}
+		candidate.terminal = candidate.terminal || entry.Status == destination.CDCStateStatusComplete
+	}
+
+	recovered := make(map[string]atomicSnapshotJournalEntry)
+	sequences := make(map[string]uint64)
+	for sourceTable, candidate := range candidates {
+		sequences[sourceTable] = candidate.entry.sequence
+		if candidate.terminal {
+			continue
+		}
+		destTable, registered := m.destTables[sourceTable]
+		if !registered || candidate.destTable != destTable {
+			continue
+		}
+		recovered[sourceTable] = candidate.entry
+	}
+	return recovered, sequences, nil
+}
+
 // BeginRun appends an in-progress marker for every registered source table at
 // a new connector generation. A crash leaves that generation incomplete, so
 // older completed rows cannot make a partial target resumable.
@@ -745,13 +1134,26 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	recoveredAttempts, recoveredSequences, err := m.recoverAtomicSnapshotAttempts()
+	if err != nil {
+		return err
+	}
 	if fullRefresh {
 		m.knownComplete = make(map[string]string)
 		m.knownIncarnations = make(map[string]string)
 		m.knownDestinations = make(map[string]string)
 	}
 	m.boundDestinations = make(map[string]string)
+	m.boundDestinationRaw = make(map[string]string)
+	m.batchSnapshots = make(map[string]string)
+	m.atomicAttempts = make(map[string]atomicSnapshotJournalEntry, len(recoveredAttempts))
+	m.atomicSequences = recoveredSequences
 	m.snapshotEpochs = make(map[string]uint64)
+	m.fullRefresh = fullRefresh
+	for sourceTable, recovered := range recoveredAttempts {
+		m.atomicAttempts[sourceTable] = recovered
+		m.snapshotEpochs[sourceTable] = recovered.snapshotEpoch
+	}
 	m.generation++
 	runID, err := newCDCStateRunID()
 	if err != nil {
@@ -778,9 +1180,23 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 		tables = append(tables, table)
 	}
 	sort.Strings(tables)
-	events := make([]cdcStateWriteEvent, 0, len(tables))
+	events := make([]cdcStateWriteEvent, 0, len(tables)+len(recoveredAttempts))
 	for _, sourceTable := range tables {
 		events = append(events, m.newStateWriteEvent(sourceTable, m.destTables[sourceTable], cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, zeroCDCPosition))
+		if attempt, exists := m.atomicAttempts[sourceTable]; exists {
+			status := cdcStateStatusInProgress
+			if attempt.ready {
+				status = cdcStateStatusReady
+			}
+			events = append(events, m.newStateWriteEvent(
+				sourceTable,
+				m.destTables[sourceTable],
+				cdcStateKindAtomicAttempt,
+				m.generation,
+				status,
+				encodeAtomicSnapshotAttempt(attempt),
+			))
+		}
 	}
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
@@ -801,6 +1217,18 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 
 	if !m.started || m.generation == 0 {
 		return fmt.Errorf("CDC state run has not started")
+	}
+	token.SnapshotPositions = cloneStringMap(token.SnapshotPositions)
+	token.SnapshotIncarnations = cloneStringMap(token.SnapshotIncarnations)
+	token.SnapshotSchemas = cloneStringMap(token.SnapshotSchemas)
+	for table, position := range m.batchSnapshots {
+		if position == "" {
+			position = token.Position
+		}
+		if position == "" {
+			return fmt.Errorf("completed batch snapshot for %s has no durable source position", table)
+		}
+		token.SnapshotPositions[table] = position
 	}
 	if token.Position != "" && !cdcStatePositionValid(token.Position) {
 		return fmt.Errorf("invalid CDC checkpoint position %q", token.Position)
@@ -942,15 +1370,167 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 			return fmt.Errorf("CDC destination table %q changed while its state was being persisted", m.destTables[sourceTable])
 		}
 		m.knownDestinations[sourceTable] = expected
-		if _, freshSnapshot := token.SnapshotPositions[sourceTable]; freshSnapshot {
-			delete(m.boundDestinations, sourceTable)
-		}
 	}
 	m.pruneSuperseded(ctx)
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	m.batchSnapshots = make(map[string]string)
 	return nil
+}
+
+func (m *CDCStateManager) RecordBatchSnapshotCompletion(sourceTable, position string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.batchSnapshots == nil {
+		m.batchSnapshots = make(map[string]string)
+	}
+	m.batchSnapshots[sourceTable] = position
+}
+
+func applyMultiTableSnapshotInvalidations(
+	ctx context.Context,
+	job *MultiTableIngestionJob,
+	records <-chan source.RecordBatchResult,
+) <-chan source.RecordBatchResult {
+	out := make(chan source.RecordBatchResult)
+	drainTimeout := canceledSourceDrainTimeout
+	go func() {
+		defer close(out)
+		knownTables := make(map[string]struct{}, len(job.Tables))
+		for _, table := range job.Tables {
+			knownTables[table.Name] = struct{}{}
+		}
+		pending := make(map[string]source.CDCSnapshotInvalidation)
+		fail := func(result source.RecordBatchResult, err error) {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
+			select {
+			case out <- source.RecordBatchResult{Err: err}:
+			case <-ctx.Done():
+			}
+			<-startBoundedRecordDrain(records, drainTimeout)
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				<-startBoundedRecordDrain(records, drainTimeout)
+				return
+			case result, ok := <-records:
+				if !ok {
+					if len(pending) > 0 {
+						tables := make([]string, 0, len(pending))
+						for table := range pending {
+							tables = append(tables, table)
+						}
+						sort.Strings(tables)
+						fail(source.RecordBatchResult{}, fmt.Errorf("source snapshot invalidation for %s was not followed by a replacement boundary", tables[0]))
+					}
+					return
+				}
+				if result.Err != nil {
+					fail(result, result.Err)
+					return
+				}
+				if result.SnapshotInvalidation != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
+					invalidation := *result.SnapshotInvalidation
+					if _, known := knownTables[invalidation.TableName]; !known {
+						fail(source.RecordBatchResult{}, fmt.Errorf("source requested snapshot invalidation for unknown table %q", invalidation.TableName))
+						return
+					}
+					if _, exists := pending[invalidation.TableName]; exists {
+						fail(source.RecordBatchResult{}, fmt.Errorf("source repeated snapshot invalidation for %s before its replacement boundary", invalidation.TableName))
+						return
+					}
+					pending[invalidation.TableName] = invalidation
+					continue
+				}
+				if invalidation, waiting := pending[result.TableName]; waiting {
+					if !result.Truncate || result.CDCWALTruncate {
+						if result.Batch == nil && result.TableInfo != nil {
+							merged, err := mergeSnapshotInvalidationMetadata(invalidation, result.TableInfo)
+							if err != nil {
+								fail(result, err)
+								return
+							}
+							pending[result.TableName] = merged
+							select {
+							case out <- result:
+							case <-ctx.Done():
+								<-startBoundedRecordDrain(records, drainTimeout)
+								return
+							}
+							continue
+						}
+						fail(result, fmt.Errorf("source snapshot invalidation for %s was not followed by a replacement boundary", result.TableName))
+						return
+					}
+					if job.CDCStateManager == nil {
+						fail(result, fmt.Errorf("source requested snapshot invalidation without destination-managed CDC state"))
+						return
+					}
+					if err := job.CDCStateManager.InvalidateSnapshotStatePreservingDestination(
+						ctx, invalidation.TableName, job.GetDestTableName(invalidation.TableName),
+						invalidation.Incarnation, invalidation.SchemaFingerprint,
+					); err != nil {
+						fail(result, err)
+						return
+					}
+					delete(pending, result.TableName)
+				}
+				select {
+				case out <- result:
+				case <-ctx.Done():
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
+					<-startBoundedRecordDrain(records, drainTimeout)
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func mergeSnapshotInvalidationMetadata(
+	invalidation source.CDCSnapshotInvalidation,
+	table *source.SourceTableInfo,
+) (source.CDCSnapshotInvalidation, error) {
+	if table == nil {
+		return invalidation, nil
+	}
+	if table.Name != "" && table.Name != invalidation.TableName {
+		return invalidation, fmt.Errorf(
+			"source snapshot invalidation for %s was followed by metadata for %s",
+			invalidation.TableName, table.Name,
+		)
+	}
+	if invalidation.Incarnation != "" && table.Incarnation != "" && invalidation.Incarnation != table.Incarnation {
+		return invalidation, fmt.Errorf("source snapshot invalidation for %s has conflicting incarnation metadata", invalidation.TableName)
+	}
+	if invalidation.SchemaFingerprint != "" && table.SchemaFingerprint != "" && invalidation.SchemaFingerprint != table.SchemaFingerprint {
+		return invalidation, fmt.Errorf("source snapshot invalidation for %s has conflicting schema metadata", invalidation.TableName)
+	}
+	if invalidation.Incarnation == "" {
+		invalidation.Incarnation = table.Incarnation
+	}
+	if invalidation.SchemaFingerprint == "" {
+		invalidation.SchemaFingerprint = table.SchemaFingerprint
+	}
+	return invalidation, nil
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (m *CDCStateManager) prepareTable(ctx context.Context) error {
@@ -1309,6 +1889,9 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 		if !cdcStateEntryPositionValid(entry) {
 			continue
 		}
+		if entry.StateKind == cdcStateKindAtomicAttempt {
+			continue
+		}
 		runID, ok := cdcStateRunID(entry.EventID, m.connectorID)
 		if !ok || entry.Generation != m.generation || runID != m.runID {
 			continue
@@ -1324,6 +1907,9 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 	for _, entry := range keep {
 		keepIDs[entry.EventID] = struct{}{}
 	}
+	for eventID := range m.atomicSnapshotJournalKeepIDs() {
+		keepIDs[eventID] = struct{}{}
+	}
 	stale := make([]string, 0, len(m.entries)-len(keepIDs))
 	for _, entry := range m.entries {
 		if _, ok := keepIDs[entry.EventID]; !ok && entry.EventID != "" && cdcStateEntryPositionValid(entry) {
@@ -1333,9 +1919,102 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 	return stale
 }
 
+func (m *CDCStateManager) atomicSnapshotJournalKeepIDs() map[string]struct{} {
+	type candidate struct {
+		entry   destination.CDCStateEntry
+		attempt atomicSnapshotJournalEntry
+	}
+	candidates := make(map[string]candidate)
+	for _, entry := range m.entries {
+		if entry.StateKind != cdcStateKindAtomicAttempt || entry.EventID == "" {
+			continue
+		}
+		attempt, valid := decodeAtomicSnapshotAttempt(entry.Position)
+		if !valid {
+			continue
+		}
+		current, exists := candidates[entry.SourceTable]
+		if !exists || preferAtomicSnapshotJournalAnchor(entry, attempt, current.entry, current.attempt) {
+			candidates[entry.SourceTable] = candidate{entry: entry, attempt: attempt}
+		}
+	}
+	conflicted := make(map[string]bool)
+	for _, entry := range m.entries {
+		if entry.StateKind != cdcStateKindAtomicAttempt {
+			continue
+		}
+		attempt, valid := decodeAtomicSnapshotAttempt(entry.Position)
+		selected, exists := candidates[entry.SourceTable]
+		if !valid || !exists || attempt.sequence != selected.attempt.sequence {
+			continue
+		}
+		if atomicSnapshotJournalEntriesConflict(entry, attempt, selected.entry, selected.attempt) {
+			conflicted[entry.SourceTable] = true
+		}
+	}
+	keep := make(map[string]struct{}, len(candidates))
+	for sourceTable, candidate := range candidates {
+		if !conflicted[sourceTable] {
+			keep[candidate.entry.EventID] = struct{}{}
+		}
+	}
+	if len(conflicted) > 0 {
+		for _, entry := range m.entries {
+			if entry.StateKind == cdcStateKindAtomicAttempt && conflicted[entry.SourceTable] {
+				keep[entry.EventID] = struct{}{}
+			}
+		}
+	}
+	return keep
+}
+
+func atomicSnapshotJournalEntriesConflict(
+	left destination.CDCStateEntry,
+	leftAttempt atomicSnapshotJournalEntry,
+	right destination.CDCStateEntry,
+	rightAttempt atomicSnapshotJournalEntry,
+) bool {
+	if leftAttempt.attemptID != rightAttempt.attemptID ||
+		leftAttempt.snapshotEpoch != rightAttempt.snapshotEpoch ||
+		left.DestinationTable != right.DestinationTable {
+		return true
+	}
+	return leftAttempt.ready && rightAttempt.ready &&
+		(leftAttempt.resumeLSN != rightAttempt.resumeLSN ||
+			leftAttempt.expectedIncarnation != rightAttempt.expectedIncarnation ||
+			leftAttempt.sourceMetadataKnown != rightAttempt.sourceMetadataKnown ||
+			leftAttempt.sourceIncarnation != rightAttempt.sourceIncarnation ||
+			leftAttempt.sourceSchemaFingerprint != rightAttempt.sourceSchemaFingerprint)
+}
+
+func preferAtomicSnapshotJournalAnchor(
+	candidate destination.CDCStateEntry,
+	candidateAttempt atomicSnapshotJournalEntry,
+	current destination.CDCStateEntry,
+	currentAttempt atomicSnapshotJournalEntry,
+) bool {
+	if candidateAttempt.sequence != currentAttempt.sequence {
+		return candidateAttempt.sequence > currentAttempt.sequence
+	}
+	candidateTerminal := candidate.Status == destination.CDCStateStatusComplete
+	currentTerminal := current.Status == destination.CDCStateStatusComplete
+	if candidateTerminal != currentTerminal {
+		return candidateTerminal
+	}
+	if candidateAttempt.ready != currentAttempt.ready {
+		return candidateAttempt.ready
+	}
+	if candidate.Generation != current.Generation {
+		return candidate.Generation > current.Generation
+	}
+	return candidate.EventID > current.EventID
+}
+
 func preferCDCStateEntry(candidate, current destination.CDCStateEntry) bool {
 	if candidate.StateKind == current.StateKind &&
-		(candidate.StateKind == cdcStateKindSnapshot || candidate.StateKind == cdcStateKindDestination) {
+		(candidate.StateKind == cdcStateKindSnapshot ||
+			candidate.StateKind == cdcStateKindDestination ||
+			candidate.StateKind == cdcStateKindAtomicAttempt) {
 		_, _, candidateEpoch, _ := decodeCDCStateEntry(candidate)
 		_, _, currentEpoch, _ := decodeCDCStateEntry(current)
 		if candidateEpoch != currentEpoch {
@@ -1372,6 +2051,10 @@ func decodeCDCStateEntry(entry destination.CDCStateEntry) (position, incarnation
 	if entry.StateKind == cdcStateKindDestination {
 		position, incarnation, epoch, valid = decodeCDCDestinationState(entry.Position)
 		return position, incarnation, epoch, valid
+	}
+	if entry.StateKind == cdcStateKindAtomicAttempt {
+		attempt, valid := decodeAtomicSnapshotAttempt(entry.Position)
+		return zeroCDCPosition, attempt.attemptID, attempt.sequence, valid
 	}
 	position, incarnation, epoch = decodeCDCStatePosition(entry.Position)
 	return position, incarnation, epoch, cdcStatePositionValid(entry.Position)
@@ -1501,4 +2184,86 @@ func decodeCDCDestinationState(encoded string) (position, incarnation string, sn
 		return "", "", 0, false
 	}
 	return parts[2], parts[1], epoch, true
+}
+
+func encodeAtomicSnapshotAttempt(attempt atomicSnapshotJournalEntry) string {
+	ready := "0"
+	if attempt.ready {
+		ready = "1"
+	}
+	parts := []string{
+		"a2",
+		strconv.FormatUint(attempt.sequence, 16),
+		strconv.FormatUint(attempt.snapshotEpoch, 16),
+		attempt.attemptID,
+		ready,
+		attempt.resumeLSN,
+		base64.RawURLEncoding.EncodeToString([]byte(attempt.expectedIncarnation)),
+		base64.RawURLEncoding.EncodeToString([]byte(attempt.sourceIncarnation)),
+		base64.RawURLEncoding.EncodeToString([]byte(attempt.sourceSchemaFingerprint)),
+	}
+	if attempt.ready && !attempt.sourceMetadataKnown {
+		parts = parts[:7]
+		parts[0] = "a1"
+	}
+	return strings.Join(parts, ":")
+}
+
+func decodeAtomicSnapshotAttempt(encoded string) (atomicSnapshotJournalEntry, bool) {
+	parts := strings.Split(encoded, ":")
+	legacy := len(parts) == 7 && parts[0] == "a1"
+	current := len(parts) == 9 && parts[0] == "a2"
+	if (!legacy && !current) || len(parts[3]) != 32 {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	sequence, err := strconv.ParseUint(parts[1], 16, 64)
+	if err != nil || sequence == 0 {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	epoch, err := strconv.ParseUint(parts[2], 16, 64)
+	if err != nil {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	if _, err := hex.DecodeString(parts[3]); err != nil {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	incarnation, err := base64.RawURLEncoding.DecodeString(parts[6])
+	if err != nil {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	var sourceIncarnation, sourceSchemaFingerprint []byte
+	if parts[0] == "a2" {
+		sourceIncarnation, err = base64.RawURLEncoding.DecodeString(parts[7])
+		if err != nil {
+			return atomicSnapshotJournalEntry{}, false
+		}
+		sourceSchemaFingerprint, err = base64.RawURLEncoding.DecodeString(parts[8])
+		if err != nil {
+			return atomicSnapshotJournalEntry{}, false
+		}
+	}
+	attempt := atomicSnapshotJournalEntry{
+		attemptID:               parts[3],
+		sequence:                sequence,
+		snapshotEpoch:           epoch,
+		ready:                   parts[4] == "1",
+		resumeLSN:               parts[5],
+		expectedIncarnation:     string(incarnation),
+		sourceMetadataKnown:     parts[0] == "a2" && parts[4] == "1",
+		sourceIncarnation:       string(sourceIncarnation),
+		sourceSchemaFingerprint: string(sourceSchemaFingerprint),
+	}
+	if parts[4] != "0" && parts[4] != "1" {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	if attempt.ready && (!cdcStatePositionValid(attempt.resumeLSN) || attempt.expectedIncarnation == "") {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	if !attempt.ready && (attempt.resumeLSN != "" ||
+		attempt.expectedIncarnation != "" ||
+		attempt.sourceIncarnation != "" ||
+		attempt.sourceSchemaFingerprint != "") {
+		return atomicSnapshotJournalEntry{}, false
+	}
+	return attempt, true
 }

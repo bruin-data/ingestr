@@ -2571,6 +2571,15 @@ func validateDestinationManagedCDCState(dest destination.Destination) error {
 	if _, ok := dest.(destination.CDCTargetIncarnationProvider); !ok {
 		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: destination-table incarnation checks are not supported", dest.GetScheme())
 	}
+	if validator, ok := dest.(destination.ManagedCDCStateValidator); ok {
+		if err := validator.ValidateManagedCDCState(); err != nil {
+			return fmt.Errorf("destination scheme %q cannot safely use managed CDC state: %w", dest.GetScheme(), err)
+		}
+	}
+	writeFencer, ok := dest.(destination.ManagedCDCWriteFencer)
+	if !ok || !writeFencer.SupportsManagedCDCWriteFencing() {
+		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: atomic destination write, merge, and swap fencing is not supported", dest.GetScheme())
+	}
 	cdcMerge, ok := dest.(destination.CDCMergeAware)
 	if !ok || !cdcMerge.SupportsCDCMerge() {
 		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: CDC-aware merge is not supported", dest.GetScheme())
@@ -2578,13 +2587,6 @@ func validateDestinationManagedCDCState(dest destination.Destination) error {
 	unchangedCols, ok := dest.(destination.CDCUnchangedColsAware)
 	if !ok || !unchangedCols.SupportsCDCUnchangedCols() {
 		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: preserving unchanged TOAST columns is not supported", dest.GetScheme())
-	}
-	validator, ok := dest.(destination.ManagedCDCStateValidator)
-	if !ok {
-		return nil
-	}
-	if err := validator.ValidateManagedCDCState(); err != nil {
-		return fmt.Errorf("destination scheme %q cannot safely use managed CDC state: %w", dest.GetScheme(), err)
 	}
 	return nil
 }

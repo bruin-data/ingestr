@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	internalregistry "github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -469,14 +470,82 @@ func (m *mockManagedCDCStateDestination) SupportsCDCMerge() bool { return true }
 
 func (m *mockManagedCDCStateDestination) SupportsCDCUnchangedCols() bool { return true }
 
+func (m *mockManagedCDCStateDestination) SupportsManagedCDCWriteFencing() bool { return true }
+
+func (m *mockManagedCDCStateDestination) Write(
+	ctx context.Context,
+	records <-chan source.RecordBatchResult,
+	opts destination.WriteOptions,
+) error {
+	return m.WriteParallel(ctx, records, opts)
+}
+
+func (m *mockManagedCDCStateDestination) WriteParallel(
+	_ context.Context,
+	records <-chan source.RecordBatchResult,
+	opts destination.WriteOptions,
+) error {
+	if err := validateMockManagedCDCIncarnation(opts.Table, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return nil
+}
+
+func (m *mockManagedCDCStateDestination) MergeTable(_ context.Context, opts destination.MergeOptions) error {
+	return validateMockManagedCDCIncarnation(opts.TargetTable, opts.CDCExpectedIncarnation)
+}
+
+func (m *mockManagedCDCStateDestination) SwapTable(_ context.Context, opts destination.SwapOptions) error {
+	if opts.CDCExpectedIncarnation == "" {
+		if opts.CDCExpectedStagingIncarnation != "" {
+			return errors.New("cannot conditionally swap staging table without a bound target incarnation")
+		}
+		return nil
+	}
+	if opts.CDCExpectedStagingIncarnation == "" {
+		return errors.New("cannot conditionally swap a managed CDC target without a bound staging incarnation")
+	}
+	if err := validateMockManagedCDCIncarnation(opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+	return validateMockManagedCDCIncarnation(opts.StagingTable, opts.CDCExpectedStagingIncarnation)
+}
+
 type mockUnsafeToastCDCStateDestination struct {
+	mockManagedCDCStateDestination
+}
+
+type mockUnsafeDMLFenceCDCStateDestination struct {
 	mockManagedCDCStateDestination
 }
 
 func (m *mockUnsafeToastCDCStateDestination) SupportsCDCUnchangedCols() bool { return false }
 
+func (m *mockUnsafeDMLFenceCDCStateDestination) SupportsManagedCDCWriteFencing() bool {
+	return false
+}
+
 func (m *mockManagedCDCStateDestination) CDCTargetIncarnation(_ context.Context, table string) (string, bool, error) {
-	return "incarnation:" + table, true, nil
+	return mockManagedCDCIncarnation(table), true, nil
+}
+
+func mockManagedCDCIncarnation(table string) string {
+	return "incarnation:" + table
+}
+
+func validateMockManagedCDCIncarnation(table, expected string) error {
+	if expected != "" && expected != mockManagedCDCIncarnation(table) {
+		return fmt.Errorf("managed CDC target %q physical incarnation changed", table)
+	}
+	return nil
 }
 
 type canonicalIdentityDestination struct {
@@ -902,6 +971,10 @@ func (m *mockManagedCDCStateDestination) TruncateTable(_ context.Context, _ stri
 	return nil
 }
 
+func (m *mockManagedCDCStateDestination) TruncateCDCTableIfIncarnation(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func (m *mockManagedCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
 	return nil, nil
 }
@@ -1043,6 +1116,9 @@ func TestValidateDestinationManagedCDCState(t *testing.T) {
 	if err := validateDestinationManagedCDCState(&mockManagedCDCStateDestination{}); err != nil {
 		t.Fatalf("destination without validator was rejected: %v", err)
 	}
+	if err := validateDestinationManagedCDCState(&mockUnsafeDMLFenceCDCStateDestination{}); err == nil || !strings.Contains(err.Error(), "atomic destination write") {
+		t.Fatalf("destination without atomic DML fencing validation error = %v", err)
+	}
 	if err := validateDestinationManagedCDCState(&mockUnsafeToastCDCStateDestination{}); err == nil || !strings.Contains(err.Error(), "unchanged TOAST") {
 		t.Fatalf("destination without unchanged-TOAST merge support validation error = %v", err)
 	}
@@ -1053,6 +1129,51 @@ func TestValidateDestinationManagedCDCState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "consistency ONE is unsafe") {
 		t.Fatalf("validation error = %v, want consistency rejection", err)
 	}
+	duckLake := duckdb.NewDuckLakeDestination()
+	err = validateDestinationManagedCDCState(duckLake)
+	if err == nil || !strings.Contains(err.Error(), "target incarnation fencing is not supported for DuckLake") {
+		t.Fatalf("DuckLake managed CDC validation error = %v", err)
+	}
+}
+
+func TestMockManagedCDCStateDestinationEnforcesWriteFences(t *testing.T) {
+	dest := &mockManagedCDCStateDestination{}
+	emptyRecords := func() <-chan source.RecordBatchResult {
+		records := make(chan source.RecordBatchResult)
+		close(records)
+		return records
+	}
+
+	require.NoError(t, dest.WriteParallel(t.Context(), emptyRecords(), destination.WriteOptions{
+		Table:                  "raw.items",
+		CDCExpectedIncarnation: mockManagedCDCIncarnation("raw.items"),
+	}))
+	require.ErrorContains(t, dest.WriteParallel(t.Context(), emptyRecords(), destination.WriteOptions{
+		Table:                  "raw.items",
+		CDCExpectedIncarnation: "stale",
+	}), "physical incarnation changed")
+
+	require.NoError(t, dest.MergeTable(t.Context(), destination.MergeOptions{
+		TargetTable:            "raw.items",
+		CDCExpectedIncarnation: mockManagedCDCIncarnation("raw.items"),
+	}))
+	require.ErrorContains(t, dest.MergeTable(t.Context(), destination.MergeOptions{
+		TargetTable:            "raw.items",
+		CDCExpectedIncarnation: "stale",
+	}), "physical incarnation changed")
+
+	require.NoError(t, dest.SwapTable(t.Context(), destination.SwapOptions{
+		TargetTable:                   "raw.items",
+		StagingTable:                  "raw.items_staging",
+		CDCExpectedIncarnation:        mockManagedCDCIncarnation("raw.items"),
+		CDCExpectedStagingIncarnation: mockManagedCDCIncarnation("raw.items_staging"),
+	}))
+	require.ErrorContains(t, dest.SwapTable(t.Context(), destination.SwapOptions{
+		TargetTable:                   "raw.items",
+		StagingTable:                  "raw.items_staging",
+		CDCExpectedIncarnation:        mockManagedCDCIncarnation("raw.items"),
+		CDCExpectedStagingIncarnation: "stale",
+	}), "physical incarnation changed")
 }
 
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {

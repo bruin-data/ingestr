@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,16 +16,30 @@ import (
 
 type orderedCDCStateDestination struct {
 	*cdcStateDestination
-	orderMu           sync.Mutex
-	order             []string
-	replaceAfterWrite bool
+	orderMu                          sync.Mutex
+	order                            []string
+	replaceAfterWrite                bool
+	replaceDuringStateInvalidation   bool
+	replaceBeforeConditionalTruncate bool
 }
 
 func (d *orderedCDCStateDestination) WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	d.orderMu.Lock()
 	d.order = append(d.order, "state")
 	d.orderMu.Unlock()
-	return d.cdcStateDestination.WriteCDCState(ctx, records, opts)
+	if err := d.cdcStateDestination.WriteCDCState(ctx, records, opts); err != nil {
+		return err
+	}
+	d.orderMu.Lock()
+	replace := d.replaceDuringStateInvalidation
+	d.replaceDuringStateInvalidation = false
+	d.orderMu.Unlock()
+	if replace {
+		d.stateMu.Lock()
+		d.incarnations["raw.items"] = "externally-replaced"
+		d.stateMu.Unlock()
+	}
+	return nil
 }
 
 func (d *orderedCDCStateDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -47,6 +62,21 @@ func (d *orderedCDCStateDestination) TruncateTable(_ context.Context, table stri
 	d.truncateCalls = append(d.truncateCalls, table)
 	d.mu.Unlock()
 	return nil
+}
+
+func (d *orderedCDCStateDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expected string) error {
+	d.orderMu.Lock()
+	d.order = append(d.order, "truncate")
+	d.orderMu.Unlock()
+	d.mu.Lock()
+	d.truncateCalls = append(d.truncateCalls, table)
+	d.mu.Unlock()
+	if d.replaceBeforeConditionalTruncate {
+		d.stateMu.Lock()
+		d.incarnations[table] = "externally-replaced"
+		d.stateMu.Unlock()
+	}
+	return d.cdcStateDestination.TruncateCDCTableIfIncarnation(ctx, table, expected)
 }
 
 func (d *orderedCDCStateDestination) resetOrder() {
@@ -80,6 +110,9 @@ func replacementSnapshotLoop(t *testing.T) (*flushLoop, *orderedCDCStateDestinat
 		SnapshotPositions:    map[string]string{"public.items": "00000000/00000010"},
 		SnapshotIncarnations: map[string]string{"public.items": "100"},
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.BindDestinationIncarnation(ctx, "public.items", "raw.items"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,6 +179,19 @@ func TestStreamingSnapshotInvalidationFailurePreventsTruncate(t *testing.T) {
 	}
 }
 
+func TestStreamingSnapshotInvalidationRejectsTargetRecreatedDuringStateWrite(t *testing.T) {
+	loop, dest, _, _ := replacementSnapshotLoop(t)
+	dest.replaceDuringStateInvalidation = true
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{TableName: "public.items", Incarnation: "101"}}
+	close(records)
+
+	err := loop.run(t.Context(), records)
+	require.ErrorContains(t, err, "changed while invalidating its prior snapshot boundary")
+	require.Equal(t, []string{"state"}, dest.recordedOrder())
+	require.Empty(t, dest.truncateCalls)
+}
+
 func TestStreamingWALTruncateCompletesStableDestinationIncarnation(t *testing.T) {
 	loop, dest, _, _ := replacementSnapshotLoop(t)
 	token := source.CDCStateCommitToken{Position: "00000000/00000030"}
@@ -175,6 +221,43 @@ func TestStreamingWALTruncateCompletesStableDestinationIncarnation(t *testing.T)
 	if got, err := restarted.ResumePosition(t.Context(), "public.items"); err != nil || got != token.Position {
 		t.Fatalf("resume after completed WAL truncate = %q, %v; want %s", got, err, token.Position)
 	}
+}
+
+func TestStreamingWALTruncateRefusesTargetRecreatedAfterBinding(t *testing.T) {
+	loop, dest, _, _ := replacementSnapshotLoop(t)
+	dest.replaceBeforeConditionalTruncate = true
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{
+		TableName:      "public.items",
+		Truncate:       true,
+		CDCWALTruncate: true,
+		CommitToken:    source.CDCStateCommitToken{Position: "00000000/00000030"},
+	}
+	close(records)
+
+	err := loop.run(t.Context(), records)
+	if err == nil || !strings.Contains(err.Error(), "physical incarnation changed") {
+		t.Fatalf("streaming WAL truncate error = %v, want incarnation change", err)
+	}
+	if got := dest.recordedOrder(); len(got) != 2 || got[0] != "state" || got[1] != "truncate" {
+		t.Fatalf("WAL truncate replacement ordering = %v, want [state truncate]", got)
+	}
+}
+
+func TestStreamingWALTruncateRejectsTargetRecreatedDuringInvalidation(t *testing.T) {
+	loop, dest, _, _ := replacementSnapshotLoop(t)
+	dest.replaceDuringStateInvalidation = true
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{
+		TableName: "public.items", Truncate: true, CDCWALTruncate: true,
+		CommitToken: source.CDCStateCommitToken{Position: "00000000/00000030"},
+	}
+	close(records)
+
+	err := loop.run(t.Context(), records)
+	require.ErrorContains(t, err, "changed while invalidating its prior snapshot boundary")
+	require.Equal(t, []string{"state"}, dest.recordedOrder())
+	require.Empty(t, dest.truncateCalls)
 }
 
 func TestStreamingFreshSnapshotRejectsDestinationReplacementAfterWrite(t *testing.T) {
@@ -221,7 +304,8 @@ func TestStreamingKeylessAppendCrashBeforeStateForcesReplacement(t *testing.T) {
 		TableName: "public.items",
 		Batch:     int64RecordBatch(t, "id", []int64{7}, nil),
 		CommitToken: source.CDCStateCommitToken{
-			Position: "00000000/00000030",
+			Position:    "00000000/00000030",
+			DataBatchID: "public.items:1:00000000/00000030/0000000000000001:00000000/00000030/0000000000000001",
 		},
 	})
 	require.Error(t, loop.flush(t.Context()))

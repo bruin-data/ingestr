@@ -183,6 +183,49 @@ func TestStreamLoopAccumulatesSingleRowTransactions(t *testing.T) {
 	assert.Less(t, batchCount, numTxns, "batch count must not equal row count")
 }
 
+func TestBatchStreamLoopEmitsStableKeylessBatchIdentity(t *testing.T) {
+	steps, _ := buildSingleRowTxnStream(1)
+	repl := &fakeReplicator{steps: steps}
+	results := make(chan source.RecordBatchResult, len(steps)+1)
+	tableSchema := testStreamSchema()
+	tableSchema.PrimaryKeys = nil
+	accum := newBatchAccumulator(10000, map[string]*schema.TableSchema{"": tableSchema})
+	accum.stableAll = true
+
+	require.NoError(t, streamLoop(t.Context(), repl, 10000, accum, results, false))
+	close(results)
+	result := <-results
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+	token, ok := result.CommitToken.(source.CDCStateCommitToken)
+	require.True(t, ok)
+	require.NotEmpty(t, token.Position)
+	require.NotEmpty(t, token.DataBatchID)
+}
+
+func TestBatchStreamLoopEmitsStableKeyedBatchIdentity(t *testing.T) {
+	steps, _ := buildSingleRowTxnStream(2)
+	repl := &fakeReplicator{steps: steps}
+	results := make(chan source.RecordBatchResult, len(steps)+1)
+	accum := newBatchAccumulator(10000, map[string]*schema.TableSchema{"": testStreamSchema()})
+	accum.stableAll = true
+
+	require.NoError(t, streamLoop(t.Context(), repl, 10000, accum, results, false))
+	close(results)
+	var ids []source.DurableID
+	for result := range results {
+		require.NotNil(t, result.Batch)
+		token, ok := result.CommitToken.(source.CDCStateCommitToken)
+		require.True(t, ok)
+		require.NotEmpty(t, token.Position)
+		require.NotEmpty(t, token.DataBatchID)
+		ids = append(ids, token.DataBatchID)
+		result.Batch.Release()
+	}
+	require.Len(t, ids, 2)
+	require.NotEqual(t, ids[0], ids[1])
+}
+
 func TestStreamLoopLeaseLossDiscardsAccumulatorWithoutMaterializing(t *testing.T) {
 	lease := &readerTestLease{done: make(chan struct{}), err: errors.New("lease backend terminated")}
 	ctx := source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(lease))

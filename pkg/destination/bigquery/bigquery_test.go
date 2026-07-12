@@ -239,7 +239,7 @@ func TestCanonicalCDCTargetHonorsDatasetCaseSensitivity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metadataCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		caseInsensitive := strings.Contains(r.URL.Path, "/datasets/insensitive")
+		caseInsensitive := strings.Contains(strings.ToLower(r.URL.Path), "/datasets/insensitive")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"datasetReference":  map[string]string{"projectId": "test-project", "datasetId": "dataset"},
 			"isCaseInsensitive": caseInsensitive,
@@ -253,15 +253,15 @@ func TestCanonicalCDCTargetHonorsDatasetCaseSensitivity(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	dest := &BigQueryDestination{client: client}
 
-	got, err := dest.canonicalCDCTarget(t.Context(), "test-project", "insensitive", "Orders")
-	if err != nil || got != destination.CDCTargetKey("test-project", "insensitive", "orders") {
+	got, err := dest.canonicalCDCTarget(t.Context(), "test-project", "Insensitive", "Orders")
+	if err != nil || got != destination.CDCTargetKey("test-project", "Insensitive", "orders") {
 		t.Fatalf("case-insensitive target = %q, %v", got, err)
 	}
 	got, err = dest.canonicalCDCTarget(t.Context(), "test-project", "sensitive", "Orders")
 	if err != nil || got != destination.CDCTargetKey("test-project", "sensitive", "Orders") {
 		t.Fatalf("case-sensitive target = %q, %v", got, err)
 	}
-	if _, err := dest.canonicalCDCTarget(t.Context(), "test-project", "insensitive", "Other"); err != nil {
+	if _, err := dest.canonicalCDCTarget(t.Context(), "test-project", "Insensitive", "Other"); err != nil {
 		t.Fatal(err)
 	}
 	if metadataCalls.Load() != 2 {

@@ -115,9 +115,151 @@ func TestCDCTruncatePreservesInnoDBPhysicalIdentityWithoutChangingBatchTruncate(
 	}
 }
 
+func TestTruncateCDCTableIfIncarnation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		currentID  uint64
+		wantErr    string
+		wantDelete bool
+	}{
+		{name: "matching", currentID: 42, wantDelete: true},
+		{name: "recreated", currentID: 43, wantErr: "physical incarnation changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &MySQLDestination{db: db, database: "app"}
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM `app`.`events` LIMIT 1 FOR UPDATE")).
+				WillReturnRows(sqlmock.NewRows([]string{"1"}))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+				WithArgs("app", "events").
+				WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+				WithArgs("app/events").
+				WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(tc.currentID))
+			if tc.wantDelete {
+				mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `app`.`events`")).WillReturnResult(sqlmock.NewResult(0, 2))
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+
+			err = dest.TruncateCDCTableIfIncarnation(t.Context(), "app.events", mysqlTableIncarnation("app", "events", 42))
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tc.wantErr)
+			}
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestVitessManagedCDCStateFailsWithoutDurableIncarnation(t *testing.T) {
 	dest := NewVitessCompatibleDestination("vitess")
 	assert.ErrorContains(t, dest.ValidateManagedCDCState(), "do not expose a durable physical table incarnation")
+	assert.ErrorContains(t, dest.ValidateManagedCDCTarget(t.Context(), "events"), "do not expose a durable physical table incarnation")
+}
+
+func TestValidateManagedCDCTargetChecksInnoDBDictionaryAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		queryErr error
+		wantErr  string
+	}{
+		{name: "allowed"},
+		{
+			name:     "process privilege missing",
+			queryErr: &mysqldriver.MySQLError{Number: 1227, Message: "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"},
+			wantErr:  "grant the global MySQL PROCESS privilege if this server requires it",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &MySQLDestination{db: db, database: "app"}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+				WithArgs("app", "events").
+				WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+			expectation := mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+				WithArgs("app/events")
+			if tc.queryErr != nil {
+				expectation.WillReturnError(tc.queryErr)
+			} else {
+				expectation.WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+			}
+
+			err = dest.ValidateManagedCDCTarget(t.Context(), "app.events")
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tc.wantErr)
+			}
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestValidateManagedCDCTargetFallsBackToMariaDBDictionary(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnError(&mysqldriver.MySQLError{Number: 1109, Message: "Unknown table 'INNODB_TABLES' in information_schema"})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+
+	assert.NoError(t, dest.ValidateManagedCDCTarget(t.Context(), "app.events"))
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCDCTargetIncarnationDoesNotHideDictionaryPermissionErrorBehindLegacyFallback(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	denied := &mysqldriver.MySQLError{Number: 1227, Message: "PROCESS privilege required"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnError(denied)
+
+	_, _, err = dest.CDCTargetIncarnation(t.Context(), "events")
+	assert.ErrorIs(t, err, denied)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCDCTargetIncarnationFallsBackWhenCurrentDictionaryTableIsUnavailable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnError(&mysqldriver.MySQLError{Number: 1109, Message: "Unknown table 'INNODB_TABLES' in information_schema"})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+
+	got, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	assert.NoError(t, err)
+	assert.True(t, exists)
+	assert.Equal(t, mysqlTableIncarnation("app", "events", 42), got)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestCDCTargetClaimTableUsesBinaryCollation(t *testing.T) {
@@ -530,20 +672,18 @@ func TestIsLoadDataLocalDisabledError(t *testing.T) {
 	}
 }
 
-// isMySQLMissingTableError must recognize both plain MySQL ("doesn't exist",
-// errno 1146) and vtgate (VT05004/VT05005 "does not exist", errno 1146/1051)
-// forms, so a first CDC run against a Vitess/PlanetScale destination is treated
-// as "no cursor yet" rather than an error.
 func TestIsMySQLMissingTableError(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 		want bool
 	}{
+		{"mysql unknown database", &mysqldriver.MySQLError{Number: 1049, Message: "Unknown database '_bruin_staging'"}, true},
 		{"mysql errno 1146", &mysqldriver.MySQLError{Number: 1146, Message: "Table 'db.t' doesn't exist"}, true},
 		{"vtgate errno 1051", &mysqldriver.MySQLError{Number: 1051, Message: "VT05004: table 't' does not exist"}, true},
 		{"vtgate text without errno", errors.New("target: db.0.primary: vttablet: table 't' does not exist in keyspace 'db'"), true},
 		{"plain mysql text without errno", errors.New("Error 1146: Table 'db.t' doesn't exist"), true},
+		{"unknown database text without errno", errors.New("Unknown database '_bruin_staging'"), true},
 		{"other mysql error", &mysqldriver.MySQLError{Number: 1045, Message: "Access denied"}, false},
 		{"unrelated error", errors.New("connection refused"), false},
 	}

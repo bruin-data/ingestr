@@ -4,16 +4,27 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/progress"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 )
+
+func dropManagedStagingDetached(ctx context.Context, dest destination.Destination, table, strategy string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := dest.DropTable(cleanupCtx, table); err != nil {
+		config.Debug("[%s] Warning: failed to drop staging table %s: %v", strategy, table, err)
+	}
+}
 
 type IngestionJob struct {
 	Config       *config.IngestConfig
@@ -71,6 +82,14 @@ type IngestionJob struct {
 
 // GetRecords returns the transformed record stream for this job.
 func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	return j.getRecords(ctx, opts, false)
+}
+
+func (j *IngestionJob) getStreamingRecords(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	return j.getRecords(ctx, opts, true)
+}
+
+func (j *IngestionJob) getRecords(ctx context.Context, opts source.ReadOptions, dynamicSchema bool) (<-chan source.RecordBatchResult, error) {
 	var records <-chan source.RecordBatchResult
 	if j.BufferedRecords != nil {
 		records = j.BufferedRecords
@@ -81,7 +100,7 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 			return nil, err
 		}
 	}
-	return j.ApplyBatchTransformation(ctx, records)
+	return j.applyBatchTransformation(ctx, records, dynamicSchema)
 }
 
 // ApplyEvolution applies the pending schema evolution plan to the destination.
@@ -89,6 +108,10 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 // strategy layer only decides when the plan runs.
 func (j *IngestionJob) ApplyEvolution(ctx context.Context) error {
 	return applyEvolutionPlan(ctx, j.Destination, j.EvolutionPlan)
+}
+
+func (j *IngestionJob) ApplyEvolutionIfIncarnation(ctx context.Context, expectedIncarnation string) error {
+	return applyEvolutionPlanIfIncarnation(ctx, j.Destination, j.EvolutionPlan, expectedIncarnation)
 }
 
 type WriteStrategy interface {
@@ -138,28 +161,75 @@ func (j *MultiTableIngestionJob) ApplyEvolutionFor(ctx context.Context, sourceTa
 	return applyEvolutionPlan(ctx, j.Destination, j.EvolutionPlans[sourceTable])
 }
 
+func (j *MultiTableIngestionJob) ApplyEvolutionForIfIncarnation(ctx context.Context, sourceTable, expectedIncarnation string) error {
+	return applyEvolutionPlanIfIncarnation(ctx, j.Destination, j.EvolutionPlans[sourceTable], expectedIncarnation)
+}
+
+func (j *MultiTableIngestionJob) WriteSchemaFor(sourceTable string, sourceSchema *schema.TableSchema) *schema.TableSchema {
+	plan := j.EvolutionPlans[sourceTable]
+	writeSchema := sourceSchema
+	if plan != nil && plan.FinalSchema != nil {
+		writeSchema = destination.StagingIngestSchema(sourceSchema, plan.FinalSchema)
+		writeSchema = destination.PreserveSourceCDCColumnTypes(writeSchema, sourceSchema)
+	}
+	if j.Config != nil && j.Config.IncrementalStrategy == config.StrategyReplace {
+		return destination.DestinationTableSchema(writeSchema)
+	}
+	return writeSchema
+}
+
 // evolveDestinationTable builds and applies a fresh schema evolution plan for
 // one table against the destination's current shape, honoring the configured
 // schema contract. It is the mid-stream counterpart of the pipeline's startup
 // evolution, used when a CDC source re-announces a table whose source schema
 // changed while streaming.
 func evolveDestinationTable(ctx context.Context, dest destination.Destination, destTable string, sourceSchema *schema.TableSchema, cfg *config.IngestConfig) error {
+	_, err := evolveDestinationTablePlan(ctx, dest, destTable, sourceSchema, cfg)
+	return err
+}
+
+func evolveDestinationTablePlan(ctx context.Context, dest destination.Destination, destTable string, sourceSchema *schema.TableSchema, cfg *config.IngestConfig) (*schemaevolution.EvolutionPlan, error) {
+	return evolveDestinationTablePlanIfIncarnation(ctx, dest, destTable, sourceSchema, cfg, "")
+}
+
+func evolveDestinationTablePlanIfIncarnation(
+	ctx context.Context,
+	dest destination.Destination,
+	destTable string,
+	sourceSchema *schema.TableSchema,
+	cfg *config.IngestConfig,
+	expectedIncarnation string,
+) (*schemaevolution.EvolutionPlan, error) {
+	plan, err := planDestinationSchemaEvolution(ctx, dest, destTable, sourceSchema, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyEvolutionPlanIfIncarnation(ctx, dest, plan, expectedIncarnation); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+func planDestinationSchemaEvolution(ctx context.Context, dest destination.Destination, destTable string, sourceSchema *schema.TableSchema, cfg *config.IngestConfig) (*schemaevolution.EvolutionPlan, error) {
+	if err := schemainfer.ValidateSchema(sourceSchema); err != nil {
+		return nil, fmt.Errorf("invalid source schema for destination table %s: %w", destTable, err)
+	}
 	destSchema, err := dest.GetTableSchema(ctx, destTable)
 	if err != nil {
-		return fmt.Errorf("failed to get destination schema: %w", err)
+		return nil, fmt.Errorf("failed to get destination schema: %w", err)
 	}
 	if destSchema == nil {
-		return nil
+		return &schemaevolution.EvolutionPlan{Table: destTable, FinalSchema: destination.DestinationTableSchema(sourceSchema)}, nil
 	}
 	destSchema = destination.PreserveSourceCDCColumnTypes(destSchema, sourceSchema)
 
 	contractMode, err := schemaevolution.ParseContractMode(cfg.SchemaContract)
 	if err != nil {
-		return fmt.Errorf("failed to parse schema contract: %w", err)
+		return nil, fmt.Errorf("failed to parse schema contract: %w", err)
 	}
 	overrides, err := schemaevolution.ParseColumnOverrides(cfg.Columns)
 	if err != nil {
-		return fmt.Errorf("failed to parse column overrides: %w", err)
+		return nil, fmt.Errorf("failed to parse column overrides: %w", err)
 	}
 
 	primaryKeys := cfg.PrimaryKeys
@@ -174,31 +244,59 @@ func evolveDestinationTable(ctx context.Context, dest destination.Destination, d
 	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
 	if err != nil {
-		return fmt.Errorf("failed to compare schemas: %w", err)
+		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}
 	if !comparison.HasChanges {
-		return nil
+		return &schemaevolution.EvolutionPlan{Table: destTable, Comparison: comparison, TransformComparison: comparison, FinalSchema: destSchema}, nil
 	}
 
 	contractResult := schemaevolution.ApplyContract(schemaevolution.SchemaContract{Mode: contractMode}, comparison)
 	if contractMode == schemaevolution.ContractFreeze && contractResult.HasViolations() {
-		return contractResult.ViolationError()
+		return nil, contractResult.ViolationError()
 	}
 	filtered := &schemaevolution.SchemaComparison{
 		Changes:    contractResult.Allowed,
 		HasChanges: len(contractResult.Allowed) > 0,
 	}
-	return applyEvolutionPlan(ctx, dest, &schemaevolution.EvolutionPlan{
-		Table:       destTable,
-		Comparison:  filtered,
-		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filtered),
-	})
+	evolver, ok := dest.(schemaevolution.SchemaEvolver)
+	if !ok {
+		return &schemaevolution.EvolutionPlan{
+			Table:               destTable,
+			Comparison:          &schemaevolution.SchemaComparison{},
+			TransformComparison: comparison,
+			FinalSchema:         schemaevolution.BuildFinalSchema(destSchema, nil),
+		}, nil
+	}
+	applicable := schemaevolution.ApplicableComparison(filtered, evolver.SupportsColumnTypeChanges())
+	return &schemaevolution.EvolutionPlan{
+		Table:               destTable,
+		Comparison:          applicable,
+		TransformComparison: comparison,
+		FinalSchema:         schemaevolution.BuildFinalSchema(destSchema, applicable),
+	}, nil
 }
 
 // applyEvolutionPlan asks the destination to apply an abstract evolution plan.
 // Destinations that cannot evolve schemas (do not implement SchemaEvolver) are
 // silently skipped, matching the previous no-dialect behavior.
 func applyEvolutionPlan(ctx context.Context, dest destination.Destination, plan *schemaevolution.EvolutionPlan) error {
+	return applyEvolutionPlanIfIncarnation(ctx, dest, plan, "")
+}
+
+func boundDestinationIncarnation(manager *CDCStateManager, sourceTable, destTable string) (string, error) {
+	expectedIncarnation := manager.BoundDestinationIncarnation(sourceTable)
+	if expectedIncarnation == "" {
+		return "", fmt.Errorf("managed CDC destination %s has no bound physical incarnation", destTable)
+	}
+	return expectedIncarnation, nil
+}
+
+func applyEvolutionPlanIfIncarnation(
+	ctx context.Context,
+	dest destination.Destination,
+	plan *schemaevolution.EvolutionPlan,
+	expectedIncarnation string,
+) error {
 	if plan == nil || !plan.HasChanges() {
 		return nil
 	}
@@ -207,7 +305,20 @@ func applyEvolutionPlan(ctx context.Context, dest destination.Destination, plan 
 		return nil
 	}
 	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
-	warnings, err := evolver.ApplySchemaEvolution(ctx, plan.Table, plan.Comparison)
+	var warnings []string
+	var err error
+	if expectedIncarnation == "" {
+		warnings, err = evolver.ApplySchemaEvolution(ctx, plan.Table, plan.Comparison)
+	} else if fenced, ok := dest.(schemaevolution.IncarnationFencedSchemaEvolver); ok {
+		warnings, err = fenced.ApplySchemaEvolutionIfIncarnation(
+			ctx, plan.Table, plan.Comparison, expectedIncarnation,
+		)
+	} else {
+		return fmt.Errorf(
+			"destination scheme %q cannot fence managed CDC schema evolution to a physical table incarnation",
+			dest.GetScheme(),
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -230,6 +341,14 @@ func (j *MultiTableIngestionJob) GetDestTableName(sourceTable string) string {
 }
 
 func (j *MultiTableIngestionJob) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	return j.readAll(ctx, opts, false)
+}
+
+func (j *MultiTableIngestionJob) readAllStreaming(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	return j.readAll(ctx, opts, true)
+}
+
+func (j *MultiTableIngestionJob) readAll(ctx context.Context, opts source.MultiTableReadOptions, dynamicSchema bool) (<-chan source.RecordBatchResult, error) {
 	if opts.KnownTables == nil {
 		opts.KnownTables = make([]string, 0, len(j.Tables))
 		for _, table := range j.Tables {
@@ -240,17 +359,63 @@ func (j *MultiTableIngestionJob) ReadAll(ctx context.Context, opts source.MultiT
 	if err != nil {
 		return nil, err
 	}
-	return j.ApplyBatchTransformation(ctx, records), nil
+	return j.applyBatchTransformation(ctx, records, dynamicSchema)
 }
 
-func (j *MultiTableIngestionJob) ApplyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+func (j *MultiTableIngestionJob) ApplyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult) (<-chan source.RecordBatchResult, error) {
+	return j.applyBatchTransformation(ctx, records, false)
+}
+
+func (j *MultiTableIngestionJob) applyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult, dynamicSchema bool) (<-chan source.RecordBatchResult, error) {
 	if len(j.ColumnRenamers) > 0 || j.NormalizeTableInfo != nil {
 		records = j.applyColumnRenaming(ctx, records)
 	}
 	if j.WhitespaceTrimmer != nil {
 		records = transformer.Wrap(records, j.WhitespaceTrimmer)
 	}
-	return j.ApplyLoadTimestamp(records)
+
+	if dynamicSchema {
+		return j.ApplyLoadTimestamp(records), nil
+	}
+
+	contract := ""
+	if j.Config != nil {
+		contract = j.Config.SchemaContract
+	}
+	mode, err := schemaevolution.ParseContractMode(contract)
+	if err != nil {
+		return nil, fmt.Errorf("invalid schema contract mode: %w", err)
+	}
+	contractTransformers := make(map[string]schemaevolution.BatchTransformer)
+	aligners := make(map[string]*transformer.TypeCaster)
+	for _, table := range j.Tables {
+		plan := j.EvolutionPlans[table.Name]
+		writeSchema := j.WriteSchemaFor(table.Name, table.Schema)
+		if writeSchema != nil {
+			aligners[table.Name] = transformer.NewSafeTypeCaster(writeSchema.ToArrowSchema())
+		}
+		if plan == nil || plan.FinalSchema == nil {
+			continue
+		}
+		comparison := plan.TransformComparison
+		if comparison == nil {
+			comparison = plan.Comparison
+		}
+		switch mode {
+		case schemaevolution.ContractDiscardValue:
+			contractTransformers[table.Name] = schemaevolution.NewDiscardValueTransformer(comparison, table.Schema, plan.FinalSchema)
+		case schemaevolution.ContractDiscardRow:
+			contractTransformers[table.Name] = schemaevolution.NewDiscardRowTransformer(table.Schema, plan.FinalSchema, comparison)
+		}
+	}
+	if len(contractTransformers) > 0 {
+		records = transformMultiTableContractBatches(ctx, records, contractTransformers)
+	}
+	records = j.ApplyLoadTimestamp(records)
+	if len(aligners) > 0 {
+		records = transformMultiTableAlignedBatches(ctx, records, aligners)
+	}
+	return records, nil
 }
 
 func (j *MultiTableIngestionJob) ApplyLoadTimestamp(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
@@ -299,6 +464,7 @@ func (j *MultiTableIngestionJob) applyColumnRenaming(ctx context.Context, record
 				if result.Batch != nil {
 					result.Batch.Release()
 				}
+				drainAndRelease(records)
 				return
 			}
 		}
@@ -325,6 +491,55 @@ func (j *MultiTableIngestionJob) setColumnRenamer(table string, renamer *transfo
 	j.ColumnRenamers[table] = renamer
 }
 
+func transformMultiTableContractBatches(ctx context.Context, records <-chan source.RecordBatchResult, transforms map[string]schemaevolution.BatchTransformer) <-chan source.RecordBatchResult {
+	return transformMultiTableBatches(ctx, records, func(table string, batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+		if transform := transforms[table]; transform != nil {
+			return transform.Transform(ctx, batch)
+		}
+		batch.Retain()
+		return batch, nil
+	})
+}
+
+func transformMultiTableAlignedBatches(ctx context.Context, records <-chan source.RecordBatchResult, aligners map[string]*transformer.TypeCaster) <-chan source.RecordBatchResult {
+	return transformMultiTableBatches(ctx, records, func(table string, batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+		if aligner := aligners[table]; aligner != nil {
+			return aligner.Transform(batch)
+		}
+		batch.Retain()
+		return batch, nil
+	})
+}
+
+func transformMultiTableBatches(ctx context.Context, records <-chan source.RecordBatchResult, transform func(string, arrow.RecordBatch) (arrow.RecordBatch, error)) <-chan source.RecordBatchResult {
+	out := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(out)
+		for result := range records {
+			if result.Err == nil && result.Batch != nil {
+				transformed, err := transform(result.TableName, result.Batch)
+				result.Batch.Release()
+				if err != nil {
+					result.Batch = nil
+					result.Err = err
+				} else {
+					result.Batch = transformed
+				}
+			}
+			select {
+			case out <- result:
+			case <-ctx.Done():
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
+				drainAndRelease(records)
+				return
+			}
+		}
+	}()
+	return out
+}
+
 // MultiTableStrategy extends WriteStrategy for multi-table sources.
 // Strategies that support multi-table CDC should implement this interface.
 type MultiTableStrategy interface {
@@ -349,6 +564,10 @@ func Get(name config.IncrementalStrategy) (WriteStrategy, error) {
 // ApplyBatchTransformation wraps record batches with contract-based transformation if needed.
 // Also applies column renaming if a naming convention is configured.
 func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult) (<-chan source.RecordBatchResult, error) {
+	return j.applyBatchTransformation(ctx, records, false)
+}
+
+func (j *IngestionJob) applyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult, dynamicSchema bool) (<-chan source.RecordBatchResult, error) {
 	// Cast column types first (for --columns type overrides on known-schema sources).
 	// Casting parses every value (decimals, dates), so it is the CPU-heaviest
 	// stage of the stream; fan it out across batches.
@@ -368,6 +587,18 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 	// Apply column masking
 	if j.ColumnMasker != nil && j.ColumnMasker.HasMasks() {
 		records = transformer.Wrap(records, j.ColumnMasker)
+	}
+
+	// Dynamic streams apply contract transformations inside the flush loop so
+	// table re-announcements can retarget them to the refreshed schema.
+	if dynamicSchema {
+		if j.IngestrColumnFiller != nil && j.IngestrColumnFiller.HasColumns() {
+			records = schemaevolution.TransformBatchStream(ctx, records, j.IngestrColumnFiller)
+		}
+		if j.LoadTimestamp != nil {
+			records = transformer.Wrap(records, j.LoadTimestamp)
+		}
+		return records, nil
 	}
 
 	// Determine if schema contract transformation is needed

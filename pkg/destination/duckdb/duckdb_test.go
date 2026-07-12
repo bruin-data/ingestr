@@ -52,6 +52,18 @@ func TestNewDuckDBDestination(t *testing.T) {
 	}
 }
 
+func TestDuckLakeManagedCDCTargetIncarnationFailsClosed(t *testing.T) {
+	dest := NewDuckLakeDestination()
+
+	require.ErrorContains(t, dest.ValidateManagedCDCState(), "not supported for DuckLake")
+	require.ErrorContains(t, dest.ValidateManagedCDCTarget(t.Context(), "events"), "not supported for DuckLake")
+	_, _, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.ErrorContains(t, err, "not supported for DuckLake")
+	_, _, err = dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+	require.ErrorContains(t, err, "not supported for DuckLake")
+	require.ErrorContains(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "events", "marker"), "not supported for DuckLake")
+}
+
 func TestSchemes(t *testing.T) {
 	dest := NewDuckDBDestination()
 	schemes := dest.Schemes()
@@ -119,30 +131,136 @@ func TestClaimCDCTargetCanonicalizesCurrentCatalog(t *testing.T) {
 	require.NoError(t, dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim("customers", "connector-b")))
 }
 
-func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
+func TestCDCTargetIncarnationProbeDoesNotMutateUnclaimedTable(t *testing.T) {
 	dest, _ := connectTestDuckDB(t, t.Context())
-	if err := dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `COMMENT ON TABLE events IS 'customer-owned comment'`))
 
-	first, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	before, exists, err := dest.duckDBTableIncarnationLockedForTest(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, "customer-owned comment", before.comment)
+
+	incarnation, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Empty(t, incarnation)
+
+	after, exists, err := dest.duckDBTableIncarnationLockedForTest(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, before.comment, after.comment)
+	require.Empty(t, after.marker)
+}
+
+func TestCDCTargetIncarnationPersistsAcrossReopenAndPreservesComment(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `COMMENT ON TABLE events IS 'customer-owned comment'`))
+
+	first, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "events")
 	require.NoError(t, err)
 	require.True(t, exists)
 	require.NotEmpty(t, first)
-	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO events VALUES (1)`))
-	stable, exists, err := dest.CDCTargetIncarnation(t.Context(), "main.events")
+	marked, exists, err := dest.duckDBTableIncarnationLockedForTest(ctx, "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.True(t, strings.HasPrefix(marked.comment, "customer-owned comment"))
+	require.NotEmpty(t, marked.marker)
+	require.NoError(t, dest.Exec(ctx, `ALTER TABLE events ADD COLUMN payload VARCHAR`))
+	stable, exists, err := dest.CDCTargetIncarnation(ctx, "events")
 	require.NoError(t, err)
 	require.True(t, exists)
 	require.Equal(t, first, stable)
-	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE events`))
-	_, exists, err = dest.CDCTargetIncarnation(t.Context(), "events")
-	require.NoError(t, err)
-	require.False(t, exists)
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
-	recreated, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+
+	require.NoError(t, dest.Close(ctx))
+	reopened := NewDuckDBDestination()
+	require.NoError(t, reopened.Connect(ctx, fmt.Sprintf("duckdb:///%s", path)))
+	t.Cleanup(func() { _ = reopened.Close(ctx) })
+
+	stable, exists, err = reopened.CDCTargetIncarnation(ctx, "main.events")
 	require.NoError(t, err)
 	require.True(t, exists)
-	require.NotEqual(t, first, recreated)
+	require.Equal(t, first, stable)
+	require.NoError(t, reopened.Exec(ctx, `INSERT INTO events (id) VALUES (1)`))
+	stable, exists, err = reopened.EnsureCDCTargetIncarnation(ctx, "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, first, stable)
+}
+
+func TestCDCTargetIncarnationMarkerRemovedOnRecreate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statements []string
+	}{
+		{name: "drop and recreate", statements: []string{`DROP TABLE events`, `CREATE TABLE events (id BIGINT)`}},
+		{name: "create or replace", statements: []string{`CREATE OR REPLACE TABLE events (id BIGINT)`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest, _ := connectTestDuckDB(t, t.Context())
+			require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+			first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+			require.NoError(t, err)
+			require.True(t, exists)
+
+			for _, statement := range tc.statements {
+				require.NoError(t, dest.Exec(t.Context(), statement))
+			}
+			recreated, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+			require.NoError(t, err)
+			require.True(t, exists)
+			require.Empty(t, recreated)
+			recreated, exists, err = dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+			require.NoError(t, err)
+			require.True(t, exists)
+			require.NotEmpty(t, recreated)
+			require.NotEqual(t, first, recreated)
+		})
+	}
+}
+
+func TestTruncateCDCTableIfIncarnation(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	rowCount := func() int64 {
+		stmt, err := dest.conn.NewStatement()
+		require.NoError(t, err)
+		defer func() { _ = stmt.Close() }()
+		require.NoError(t, stmt.SetSqlQuery(`SELECT count(*) FROM events`))
+		reader, _, err := stmt.ExecuteQuery(t.Context())
+		require.NoError(t, err)
+		defer reader.Release()
+		require.True(t, reader.Next())
+		count, ok := int64ValueAt(reader.RecordBatch().Column(0), 0)
+		require.True(t, ok)
+		return count
+	}
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO events VALUES (1), (2)`))
+
+	expected, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "events", expected))
+
+	require.Zero(t, rowCount())
+	stable, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, expected, stable)
+
+	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE events`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO events VALUES (3)`))
+	require.ErrorContains(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "events", expected), "physical incarnation changed")
+	require.Equal(t, int64(1), rowCount())
+}
+
+func (d *DuckDBDestination) duckDBTableIncarnationLockedForTest(ctx context.Context, table string) (duckDBTableIncarnation, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.duckDBTableIncarnationLocked(ctx, table)
 }
 
 func TestParseDuckDBPath(t *testing.T) {
