@@ -157,6 +157,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "Allium", link: "/supported-sources/allium.md" },
               { text: "Amazon Kinesis", link: "/supported-sources/kinesis.md" },
+              { text: "Amplitude", link: "/supported-sources/amplitude.md" },
               { text: "Anthropic", link: "/supported-sources/anthropic.md" },
               { text: "API-Football", link: "/supported-sources/api-football.md" },
               { text: "AppsFlyer", link: "/supported-sources/appsflyer.md" },

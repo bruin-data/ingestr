@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1570,7 +1571,7 @@ func isBigQueryAlterTypeRewriteCandidate(sql string, err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, _, _, ok := parseAlterColumnTypeSQL(sql); !ok {
+	if _, _, ok := parseAlterColumnTypesSQL(sql); !ok {
 		return false
 	}
 
@@ -1579,45 +1580,47 @@ func isBigQueryAlterTypeRewriteCandidate(sql string, err error) bool {
 		strings.Contains(msg, "assignable to the new type")
 }
 
+type alterTypeChange struct {
+	column  string
+	newType string
+}
+
+// parseAlterColumnTypeSQL parses a single-clause ALTER COLUMN SET DATA TYPE.
 func parseAlterColumnTypeSQL(sql string) (table string, column string, newType string, ok bool) {
-	const (
-		prefix      = "ALTER TABLE "
-		alterColumn = " ALTER COLUMN "
-		setDataType = " SET DATA TYPE "
-	)
-
-	trimmed := strings.TrimSpace(sql)
-	upper := strings.ToUpper(trimmed)
-	if !strings.HasPrefix(upper, prefix) {
+	table, changes, ok := parseAlterColumnTypesSQL(sql)
+	if !ok || len(changes) != 1 {
 		return "", "", "", false
 	}
+	return table, changes[0].column, changes[0].newType, true
+}
 
-	rest := trimmed[len(prefix):]
-	restUpper := upper[len(prefix):]
-	alterIdx := strings.Index(restUpper, alterColumn)
-	if alterIdx < 0 {
-		return "", "", "", false
+var (
+	alterColumnTypesRe = regexp.MustCompile(`(?is)^ALTER TABLE\s+(.+?)\s+ALTER COLUMN\s+(.+)$`)
+	alterClauseSepRe   = regexp.MustCompile(`(?i),\s+ALTER COLUMN\s+`)
+	alterClauseRe      = regexp.MustCompile("(?is)^`?([^`\\s]+)`?\\s+SET DATA TYPE\\s+(.+)$")
+)
+
+// parseAlterColumnTypesSQL parses an ALTER TABLE statement carrying one or more
+// comma-separated "ALTER COLUMN <col> SET DATA TYPE <type>" clauses, so the
+// batched form produced by Dialect.BatchAlterColumnTypesSQL can be rewritten as
+// a single CREATE OR REPLACE TABLE.
+func parseAlterColumnTypesSQL(sql string) (table string, changes []alterTypeChange, ok bool) {
+	m := alterColumnTypesRe.FindStringSubmatch(strings.TrimSpace(sql))
+	if m == nil {
+		return "", nil, false
 	}
-
-	table = strings.TrimSpace(rest[:alterIdx])
-	afterAlter := rest[alterIdx+len(alterColumn):]
-	afterAlterUpper := restUpper[alterIdx+len(alterColumn):]
-	typeIdx := strings.Index(afterAlterUpper, setDataType)
-	if typeIdx < 0 {
-		return "", "", "", false
+	for _, clause := range alterClauseSepRe.Split(m[2], -1) {
+		c := alterClauseRe.FindStringSubmatch(strings.TrimSpace(clause))
+		if c == nil {
+			return "", nil, false
+		}
+		changes = append(changes, alterTypeChange{column: c[1], newType: strings.TrimSpace(c[2])})
 	}
-
-	column = strings.Trim(afterAlter[:typeIdx], "` ")
-	newType = strings.TrimSpace(afterAlter[typeIdx+len(setDataType):])
-	if table == "" || column == "" || newType == "" {
-		return "", "", "", false
-	}
-
-	return strings.ReplaceAll(table, "`", ""), column, newType, true
+	return strings.ReplaceAll(strings.TrimSpace(m[1]), "`", ""), changes, true
 }
 
 func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context, originalSQL string) error {
-	tableName, columnName, newType, ok := parseAlterColumnTypeSQL(originalSQL)
+	tableName, changes, ok := parseAlterColumnTypesSQL(originalSQL)
 	if !ok {
 		return fmt.Errorf("not an ALTER COLUMN TYPE statement: %s", originalSQL)
 	}
@@ -1633,12 +1636,18 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 		return fmt.Errorf("failed to fetch table metadata for rewrite: %w", err)
 	}
 
-	rewrittenSQL, err := d.buildAlterColumnTypeRewriteSQL(project, dataset, table, columnName, newType, meta)
+	typeChanges := make(map[string]string, len(changes))
+	for _, c := range changes {
+		typeChanges[c.column] = c.newType
+	}
+
+	rewrittenSQL, err := d.buildBatchAlterColumnTypeRewriteSQL(project, dataset, table, typeChanges, meta)
 	if err != nil {
 		return err
 	}
 
 	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s.%s", dataset, table)
+	config.Debug("[DEST] Column type change SQL: %s\n", rewrittenSQL)
 	job, err := d.runQueryJobWithRetry(ctx, rewrittenSQL, "alter type rewrite")
 	if err != nil {
 		return fmt.Errorf("rewrite query error (job %s): %w", jobRef(job), err)
@@ -1655,8 +1664,23 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	newType string,
 	meta *bigquery.TableMetadata,
 ) (string, error) {
+	return d.buildBatchAlterColumnTypeRewriteSQL(project, dataset, table, map[string]string{columnName: newType}, meta)
+}
+
+// buildBatchAlterColumnTypeRewriteSQL rewrites the table once, casting every
+// column in typeChanges to its new type in a single CREATE OR REPLACE TABLE.
+func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
+	project string,
+	dataset string,
+	table string,
+	typeChanges map[string]string,
+	meta *bigquery.TableMetadata,
+) (string, error) {
 	if meta == nil {
 		return "", errors.New("table metadata is required")
+	}
+	if len(typeChanges) == 0 {
+		return "", errors.New("no column type changes provided")
 	}
 	if meta.RangePartitioning != nil {
 		return "", errors.New("range-partitioned tables are not supported for type rewrite")
@@ -1666,17 +1690,19 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	}
 
 	selectExprs := make([]string, 0, len(meta.Schema))
-	foundColumn := false
+	found := make(map[string]bool, len(typeChanges))
 	for _, field := range meta.Schema {
-		if field.Name == columnName {
+		if newType, ok := typeChanges[field.Name]; ok {
 			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(field.Name), newType, quoteIdentifier(field.Name)))
-			foundColumn = true
+			found[field.Name] = true
 			continue
 		}
 		selectExprs = append(selectExprs, quoteIdentifier(field.Name))
 	}
-	if !foundColumn {
-		return "", fmt.Errorf("column %q not found in table metadata", columnName)
+	for col := range typeChanges {
+		if !found[col] {
+			return "", fmt.Errorf("column %q not found in table metadata", col)
+		}
 	}
 
 	var sqlBuilder strings.Builder

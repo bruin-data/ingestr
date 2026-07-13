@@ -36,6 +36,12 @@ type BatchColumnAdder interface {
 	BatchAddColumnsSQL(table string, cols []schema.Column) string
 }
 
+// BatchColumnTypeAlterer is an optional Dialect extension for databases that can
+// change several column types in a single ALTER TABLE statement.
+type BatchColumnTypeAlterer interface {
+	BatchAlterColumnTypesSQL(table string, cols []schema.Column) string
+}
+
 // BuildMigration turns an abstract schema comparison into the concrete DDL
 // statements (and human-readable warnings) for a dialect. It is dialect-
 // agnostic orchestration shared by SQL destinations; the dialect supplies the
@@ -45,13 +51,15 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 		return nil, nil
 	}
 
-	batcher, canBatch := dialect.(BatchColumnAdder)
+	batcher, canBatchAdd := dialect.(BatchColumnAdder)
+	typeAlterer, canBatchAlter := dialect.(BatchColumnTypeAlterer)
 	var addColumns []schema.Column
+	var typeChangeColumns []schema.Column
 
 	for _, change := range comparison.Changes {
 		switch change.Type {
 		case schemaevolution.ChangeAddColumn:
-			if canBatch {
+			if canBatchAdd {
 				addColumns = append(addColumns, change.NewColumn)
 			} else if sql := dialect.AddColumnSQL(table, change.NewColumn); sql != "" {
 				statements = append(statements, sql)
@@ -65,7 +73,11 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 				))
 				continue
 			}
-			if sql := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn); sql != "" {
+			if canBatchAlter {
+				col := change.NewColumn
+				col.Name = change.ColumnName
+				typeChangeColumns = append(typeChangeColumns, col)
+			} else if sql := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn); sql != "" {
 				statements = append(statements, sql)
 			}
 			if change.Type == schemaevolution.ChangeWidenType && change.OldColumn != nil {
@@ -76,7 +88,13 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 		}
 	}
 
-	if canBatch && len(addColumns) > 0 {
+	if canBatchAlter && len(typeChangeColumns) > 0 {
+		if sql := typeAlterer.BatchAlterColumnTypesSQL(table, typeChangeColumns); sql != "" {
+			statements = append(statements, sql)
+		}
+	}
+
+	if canBatchAdd && len(addColumns) > 0 {
 		if sql := batcher.BatchAddColumnsSQL(table, addColumns); sql != "" {
 			statements = append(statements, sql)
 		}

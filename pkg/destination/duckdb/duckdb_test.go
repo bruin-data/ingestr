@@ -780,6 +780,36 @@ func TestWrite_BasicData(t *testing.T) {
 	}
 }
 
+func TestIngestConnections_UsePreparedTableConstraints(t *testing.T) {
+	t.Setenv("INGESTR_DUCKDB_INGEST_CONNS", "4")
+
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt64}},
+		PrimaryKeys: []string{"id"},
+	}
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       "target",
+		Schema:      tableSchema,
+		DropFirst:   true,
+		PrimaryKeys: []string{"id"},
+	}))
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  "target",
+		Schema: tableSchema,
+	}))
+	assert.Equal(t, 1, dest.ingestConnections(destination.WriteOptions{Table: "target"}))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:     "staging",
+		Schema:    tableSchema,
+		DropFirst: true,
+	}))
+	assert.Equal(t, 4, dest.ingestConnections(destination.WriteOptions{Table: "staging"}))
+}
+
 func TestMergeTable(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

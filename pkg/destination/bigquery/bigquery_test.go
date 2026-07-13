@@ -22,6 +22,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	duckdbdest "github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/stretchr/testify/require"
@@ -2243,6 +2244,151 @@ func TestParseAlterColumnTypeSQL(t *testing.T) {
 	}
 	if table != "my_dataset.my_table" || column != "age" || newType != "STRING" {
 		t.Fatalf("unexpected parse result: table=%q column=%q newType=%q", table, column, newType)
+	}
+}
+
+func TestParseAlterColumnTypesSQL_MultiClause(t *testing.T) {
+	// A comma inside a type (NUMERIC(10,2)) must not be treated as a clause boundary.
+	sql := "ALTER TABLE my_dataset.my_table " +
+		"ALTER COLUMN `a` SET DATA TYPE STRING, " +
+		"ALTER COLUMN `b` SET DATA TYPE NUMERIC(10,2), " +
+		"ALTER COLUMN `c` SET DATA TYPE INT64"
+
+	table, changes, ok := parseAlterColumnTypesSQL(sql)
+	if !ok {
+		t.Fatal("expected multi-clause ALTER to parse")
+	}
+	if table != "my_dataset.my_table" {
+		t.Fatalf("unexpected table: %q", table)
+	}
+	want := []alterTypeChange{
+		{column: "a", newType: "STRING"},
+		{column: "b", newType: "NUMERIC(10,2)"},
+		{column: "c", newType: "INT64"},
+	}
+	if len(changes) != len(want) {
+		t.Fatalf("expected %d changes, got %d: %#v", len(want), len(changes), changes)
+	}
+	for i, w := range want {
+		if changes[i] != w {
+			t.Fatalf("change %d = %#v, want %#v", i, changes[i], w)
+		}
+	}
+}
+
+func TestParseAlterColumnTypesSQL_Invalid(t *testing.T) {
+	for _, sql := range []string{
+		"DROP TABLE my_dataset.my_table",
+		"ALTER TABLE my_dataset.my_table ADD COLUMN foo STRING",
+		"ALTER TABLE my_dataset.my_table ALTER COLUMN `a` RENAME TO `b`",
+	} {
+		if _, _, ok := parseAlterColumnTypesSQL(sql); ok {
+			t.Fatalf("expected %q not to parse as ALTER COLUMN TYPE", sql)
+		}
+	}
+}
+
+func TestBatchAlterColumnTypesSQL_RoundTrip(t *testing.T) {
+	d := &Dialect{}
+	cols := []schema.Column{
+		{Name: "a", DataType: schema.TypeString},
+		{Name: "b", DataType: schema.TypeInt64},
+		{Name: "c", DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
+	}
+
+	sql := d.BatchAlterColumnTypesSQL("ds.t", cols)
+
+	if strings.Count(sql, "ALTER TABLE") != 1 {
+		t.Fatalf("expected a single ALTER TABLE statement: %s", sql)
+	}
+	for _, want := range []string{
+		"ALTER COLUMN `a` SET DATA TYPE STRING",
+		"ALTER COLUMN `b` SET DATA TYPE INT64",
+		"ALTER COLUMN `c` SET DATA TYPE NUMERIC(10,2)",
+	} {
+		if !contains(sql, want) {
+			t.Fatalf("batch SQL missing %q:\n%s", want, sql)
+		}
+	}
+
+	// The rendered statement must parse back into the same changes.
+	table, changes, ok := parseAlterColumnTypesSQL(sql)
+	if !ok || table != "ds.t" || len(changes) != 3 {
+		t.Fatalf("round-trip failed: table=%q changes=%#v ok=%v", table, changes, ok)
+	}
+	if changes[2] != (alterTypeChange{column: "c", newType: "NUMERIC(10,2)"}) {
+		t.Fatalf("comma-bearing type did not round-trip: %#v", changes[2])
+	}
+}
+
+func TestBatchAlterColumnTypesSQL_Empty(t *testing.T) {
+	if sql := (&Dialect{}).BatchAlterColumnTypesSQL("ds.t", nil); sql != "" {
+		t.Fatalf("expected empty SQL for no columns, got %q", sql)
+	}
+}
+
+// End-to-end: the real BigQuery Dialect run through the real BuildMigration must
+// collapse multiple type changes into ONE statement (that our parser accepts).
+func TestBuildMigration_BigQueryBatchesTypeChanges(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "a", OldColumn: &schema.Column{Name: "a", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "a", DataType: schema.TypeString}},
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "b", OldColumn: &schema.Column{Name: "b", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "b", DataType: schema.TypeString}},
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "c", OldColumn: &schema.Column{Name: "c", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "c", DataType: schema.TypeString}},
+		},
+	}
+
+	stmts, _ := destination.BuildMigration(&Dialect{}, "my_dataset.my_table", comparison)
+	if len(stmts) != 1 {
+		t.Fatalf("expected a single batched ALTER statement, got %d: %v", len(stmts), stmts)
+	}
+
+	table, changes, ok := parseAlterColumnTypesSQL(stmts[0])
+	if !ok || table != "my_dataset.my_table" || len(changes) != 3 {
+		t.Fatalf("batched statement did not round-trip: table=%q changes=%#v ok=%v\nSQL: %s", table, changes, ok, stmts[0])
+	}
+	for _, c := range changes {
+		if c.newType != "STRING" {
+			t.Fatalf("expected STRING target for %q, got %q", c.column, c.newType)
+		}
+	}
+}
+
+func TestBuildBatchAlterColumnTypeRewriteSQL(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	meta := &bigquery.TableMetadata{
+		Schema: bigquery.Schema{
+			{Name: "id", Type: bigquery.IntegerFieldType},
+			{Name: "a", Type: bigquery.IntegerFieldType},
+			{Name: "b", Type: bigquery.IntegerFieldType},
+		},
+	}
+
+	sql, err := dest.buildBatchAlterColumnTypeRewriteSQL(
+		"my-project", "my_dataset", "my_table",
+		map[string]string{"a": "STRING", "b": "STRING"}, meta,
+	)
+	if err != nil {
+		t.Fatalf("buildBatchAlterColumnTypeRewriteSQL returned error: %v", err)
+	}
+	// All changed columns cast in ONE rewrite; unchanged column passed through.
+	if strings.Count(sql, "CREATE OR REPLACE TABLE") != 1 {
+		t.Fatalf("expected a single rewrite statement:\n%s", sql)
+	}
+	for _, want := range []string{"CAST(`a` AS STRING) AS `a`", "CAST(`b` AS STRING) AS `b`", "`id`"} {
+		if !contains(sql, want) {
+			t.Fatalf("rewrite SQL missing %q:\n%s", want, sql)
+		}
+	}
+
+	if _, err := dest.buildBatchAlterColumnTypeRewriteSQL(
+		"my-project", "my_dataset", "my_table",
+		map[string]string{"missing": "STRING"}, meta,
+	); err == nil {
+		t.Fatal("expected error when a changed column is absent from the table")
 	}
 }
 
