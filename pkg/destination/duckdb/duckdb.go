@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
 	"github.com/bruin-data/ingestr/pkg/tablename"
+	"golang.org/x/sync/errgroup"
 )
 
 type DuckDBDestination struct {
@@ -52,9 +54,7 @@ func (d *DuckDBDestination) recordSchema(table string, sch *schema.TableSchema, 
 		return
 	}
 	clone := *sch
-	if len(pks) > 0 {
-		clone.PrimaryKeys = pks
-	}
+	clone.PrimaryKeys = append([]string(nil), pks...)
 	d.schemasMu.Lock()
 	defer d.schemasMu.Unlock()
 	if d.schemas == nil {
@@ -172,8 +172,6 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 		return fmt.Errorf("schema is required")
 	}
 
-	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -196,6 +194,14 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err := d.exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
+	preparedSchema, err := d.getTableSchemaLocked(ctx, opts.Table)
+	if err != nil {
+		return fmt.Errorf("failed to inspect prepared table: %w", err)
+	}
+	if preparedSchema == nil {
+		return fmt.Errorf("prepared table %s was not found", opts.Table)
+	}
+	d.recordSchema(opts.Table, opts.Schema, preparedSchema.PrimaryKeys)
 	config.Debug("[DUCKDB] CREATE TABLE took %v", time.Since(startCreate))
 
 	return nil
@@ -263,6 +269,9 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 		}
 	}
 	if checkpointEvery == 0 {
+		if conns := d.ingestConnections(opts); conns > 1 {
+			return d.writeViaParallelADBCIngest(ctx, records, tableName, ingestOpts, startTotal, conns)
+		}
 		return d.writeViaSingleADBCIngest(ctx, records, tableName, ingestOpts, startTotal)
 	}
 
@@ -312,6 +321,76 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 
 	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
 	config.Debug("[DUCKDB] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
+	return nil
+}
+
+// ingestConnections decides how many connections to spread an ingest over.
+// The single-threaded Arrow-stream push through the driver is the bottleneck
+// for wide tables, and DuckDB handles concurrent appends to the same table
+// transactionally. Kept at 1 for MotherDuck (remote sessions) and for tables
+// with primary keys, where concurrent index appends can raise transaction
+// conflicts.
+func (d *DuckDBDestination) ingestConnections(opts destination.WriteOptions) int {
+	preparedSchema := d.lookupSchema(opts.Table)
+	if strings.HasPrefix(d.filePath, "md:") || len(opts.PrimaryKeys) > 0 ||
+		(preparedSchema != nil && len(preparedSchema.PrimaryKeys) > 0) {
+		return 1
+	}
+	if v := os.Getenv("INGESTR_DUCKDB_INGEST_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+		config.Debug("[DUCKDB] Ignoring invalid INGESTR_DUCKDB_INGEST_CONNS=%q", v)
+	}
+	return min(4, runtime.GOMAXPROCS(0))
+}
+
+// writeViaParallelADBCIngest runs several IngestStream appenders against the
+// same table, each on its own connection, all pulling batches from the shared
+// channel. Row order across workers is not preserved, which append semantics
+// do not require.
+func (d *DuckDBDestination) writeViaParallelADBCIngest(ctx context.Context, records <-chan source.RecordBatchResult, tableName string, ingestOpts adbc.IngestStreamOptions, startTotal time.Time, conns int) error {
+	g, gctx := errgroup.WithContext(ctx)
+	var totalRows atomic.Int64
+
+	for range conns {
+		g.Go(func() error {
+			first, err := nextNonEmptyRecord(gctx, records)
+			if err != nil {
+				return err
+			}
+			if first == nil {
+				return nil
+			}
+
+			conn, err := d.db.Open(gctx)
+			if err != nil {
+				first.Release()
+				return fmt.Errorf("failed to open ingest connection: %w", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			reader := newChannelRecordReader(gctx, records, first)
+			_, ingestErr := adbc.IngestStream(gctx, conn, reader, tableName, adbc.OptionValueIngestModeAppend, ingestOpts)
+			totalRows.Add(reader.rowsWritten())
+			readerErr := reader.Err()
+			reader.Release()
+
+			if ingestErr != nil {
+				config.Debug("[DUCKDB] IngestStream error: %v", ingestErr)
+				return fmt.Errorf("failed to ingest batch: %w", ingestErr)
+			}
+			return readerErr
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	rows := totalRows.Load()
+	totalRate := float64(rows) / time.Since(startTotal).Seconds()
+	config.Debug("[DUCKDB] Total: %d rows written in %v across %d connections (%.0f rows/sec)", rows, time.Since(startTotal), conns, totalRate)
 	return nil
 }
 
@@ -1171,10 +1250,13 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseSchemaTable(table)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.getTableSchemaLocked(ctx, table)
+}
+
+func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table string) (*schema.TableSchema, error) {
+	schemaName, tableName := parseSchemaTable(table)
 
 	query := fmt.Sprintf("DESCRIBE %s", destination.QuoteTableName(table))
 	stmt, err := d.conn.NewStatement()
@@ -1202,21 +1284,32 @@ func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*
 	defer reader.Release()
 
 	var columns []schema.Column
+	var primaryKeys []string
 	for reader.Next() {
 		batch := reader.RecordBatch()
 		for i := int64(0); i < batch.NumRows(); i++ {
-			colName := batch.Column(0).(*array.String).Value(int(i))
+			row := int(i)
+			colName := batch.Column(0).(*array.String).Value(row)
 			colType := batch.Column(1).(*array.String).Value(int(i))
 			nullable := true
 			if batch.NumCols() > 2 {
-				nullStr := batch.Column(2).(*array.String).Value(int(i))
+				nullStr := batch.Column(2).(*array.String).Value(row)
 				nullable = nullStr == "YES"
+			}
+			isPrimaryKey := false
+			if batch.NumCols() > 3 && !batch.Column(3).IsNull(row) {
+				key := batch.Column(3).(*array.String).Value(row)
+				isPrimaryKey = key == "PRI"
+			}
+			if isPrimaryKey {
+				primaryKeys = append(primaryKeys, strings.Clone(colName))
 			}
 
 			columns = append(columns, schema.Column{
-				Name:     strings.Clone(colName),
-				DataType: mapDuckDBTypeToSchema(colType),
-				Nullable: nullable,
+				Name:         strings.Clone(colName),
+				DataType:     mapDuckDBTypeToSchema(colType),
+				Nullable:     nullable,
+				IsPrimaryKey: isPrimaryKey,
 			})
 		}
 	}
@@ -1226,9 +1319,10 @@ func (d *DuckDBDestination) GetTableSchema(ctx context.Context, table string) (*
 	}
 
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  schemaName,
-		Columns: columns,
+		Name:        tableName,
+		Schema:      schemaName,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 

@@ -603,6 +603,8 @@ func AppendValue(builder array.Builder, val interface{}) {
 			v = strings.TrimSpace(v)
 			if v == "" {
 				b.AppendNull()
+			} else if num, ok := parseDecimal128Fast(v, dt.Precision, dt.Scale); ok {
+				b.Append(num)
 			} else {
 				num, err := decimal128.FromString(v, dt.Precision, dt.Scale)
 				if err != nil {
@@ -724,6 +726,85 @@ func AppendValue(builder array.Builder, val interface{}) {
 	default:
 		builder.AppendNull()
 	}
+}
+
+var pow10 = [19]int64{
+	1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000,
+	1000000000, 10000000000, 100000000000, 1000000000000, 10000000000000,
+	100000000000000, 1000000000000000, 10000000000000000, 100000000000000000,
+	1000000000000000000,
+}
+
+// parseDecimal128Fast parses plain decimal strings ([+-]digits[.digits]) whose
+// unscaled value fits in an int64 and whose fractional digits do not exceed
+// the target scale. Anything else (exponents, rounding, huge values) reports
+// false so the caller can use decimal128.FromString.
+func parseDecimal128Fast(s string, precision, scale int32) (decimal128.Num, bool) {
+	if scale < 0 || int(scale) >= len(pow10) {
+		return decimal128.Num{}, false
+	}
+
+	i := 0
+	neg := false
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		neg = s[i] == '-'
+		i++
+	}
+
+	var v int64
+	nDigits := 0
+	hasDigit := false
+	seenDot := false
+	fracDigits := int32(0)
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c == '.' {
+			if seenDot {
+				return decimal128.Num{}, false
+			}
+			seenDot = true
+			continue
+		}
+		if c < '0' || c > '9' {
+			return decimal128.Num{}, false
+		}
+		hasDigit = true
+		if seenDot {
+			if fracDigits == scale {
+				return decimal128.Num{}, false
+			}
+			fracDigits++
+		}
+		if v == 0 && c == '0' {
+			continue
+		}
+		if nDigits == 18 {
+			return decimal128.Num{}, false
+		}
+		v = v*10 + int64(c-'0')
+		nDigits++
+	}
+	if !hasDigit {
+		return decimal128.Num{}, false
+	}
+
+	for pad := scale - fracDigits; pad > 0; pad-- {
+		if v != 0 {
+			if nDigits == 18 {
+				return decimal128.Num{}, false
+			}
+			nDigits++
+		}
+		v *= 10
+	}
+
+	if int(precision) < len(pow10) && v >= pow10[precision] {
+		return decimal128.Num{}, false
+	}
+	if neg {
+		v = -v
+	}
+	return decimal128.FromI64(v), true
 }
 
 func appendListValue(b *array.ListBuilder, val interface{}) {

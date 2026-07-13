@@ -425,3 +425,45 @@ func TestAppendValue_Decimal128_JSONNumber(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDecimal128Fast_MatchesFromString(t *testing.T) {
+	inputs := []string{
+		"0", "1", "-1", "+5", "15716.10", "0.02", "-0.08", "1234567890.99",
+		"9999999999999.99", "0.10", ".5", "5.", "-123.45", "00042.10",
+	}
+	for _, s := range inputs {
+		got, ok := parseDecimal128Fast(s, 15, 2)
+		if !ok {
+			t.Errorf("parseDecimal128Fast(%q) unexpectedly fell back", s)
+			continue
+		}
+		want, err := decimal128.FromString(s, 15, 2)
+		if err != nil {
+			t.Fatalf("FromString(%q) error: %v", s, err)
+		}
+		if got != want {
+			t.Errorf("parseDecimal128Fast(%q) = %v; want %v", s, got, want)
+		}
+	}
+}
+
+func TestParseDecimal128Fast_FallsBack(t *testing.T) {
+	inputs := []string{
+		"",                    // no digits
+		"-",                   // sign only
+		".",                   // dot only
+		"1e5",                 // exponent
+		"1.234",               // more fractional digits than scale → needs rounding
+		"abc",                 // not a number
+		"1.2.3",               // double dot
+		"1234567890123456789", // > 18 digits
+		"10000000000000.00",   // exceeds precision 15 after scaling
+		"999999999999999",     // 15 digits + scale-2 padding exceeds precision 15
+		"nan",
+	}
+	for _, s := range inputs {
+		if _, ok := parseDecimal128Fast(s, 15, 2); ok {
+			t.Errorf("parseDecimal128Fast(%q) should have fallen back", s)
+		}
+	}
+}
