@@ -255,11 +255,6 @@ dependencies:
       licenses:
         - BSD-3-Clause
       status: allowed
-    - module: github.com/DataDog/zstd
-      version: v1.5.6
-      licenses:
-        - BSD-3-Clause
-      status: allowed
     - module: github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/attributes
       version: v0.29.1
       licenses:
@@ -357,7 +352,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/apache/arrow-adbc/go/adbc
-      version: v1.9.0
+      version: v1.11.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -754,11 +749,6 @@ dependencies:
         - EPL-2.0
       status: manual-review
       note: EPL-2.0 reviewed for the MQTT source dependency.
-    - module: github.com/ebitengine/purego
-      version: v0.10.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/elastic/elastic-transport-go/v8
       version: v8.8.0
       licenses:
@@ -1486,7 +1476,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/snowflakedb/gosnowflake
-      version: v1.18.1
+      version: v1.19.0
       licenses:
         - Apache-2.0
       status: allowed

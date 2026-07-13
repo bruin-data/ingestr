@@ -1,6 +1,6 @@
 module github.com/bruin-data/ingestr
 
-go 1.25.8
+go 1.26.5
 
 require (
 	cloud.google.com/go/auth v0.20.0
@@ -20,7 +20,7 @@ require (
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/aliyun/aliyun-odps-go-sdk v0.4.22
-	github.com/apache/arrow-adbc/go/adbc v1.9.0
+	github.com/apache/arrow-adbc/go/adbc v1.11.0
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/apache/cassandra-gocql-driver/v2 v2.1.1
 	github.com/apache/iceberg-go v0.6.1-0.20260608195837-914dd635527f
@@ -72,7 +72,7 @@ require (
 	github.com/shopspring/decimal v1.4.0
 	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/simpleforce/simpleforce v0.0.0-20220429021116-acf4ac67ef68
-	github.com/snowflakedb/gosnowflake v1.18.1
+	github.com/snowflakedb/gosnowflake v1.19.0
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8
 	github.com/stretchr/testify v1.11.1
 	github.com/stripe/stripe-go/v81 v81.4.0
