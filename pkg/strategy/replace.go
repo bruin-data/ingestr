@@ -444,12 +444,12 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 	defer cancelRead()
 	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:             parallelism,
-			PageSize:                job.Config.PageSize,
-			Limit:                   job.Config.SQLLimit,
-			CDCSlotSuffix:           job.Config.CDCSlotSuffix,
-			CDCLegacySlotSuffix:     job.Config.CDCLegacySlotSuffix,
-			FullRefresh:             job.Config.FullRefresh,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			Limit:               job.Config.SQLLimit,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			FullRefresh:         job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

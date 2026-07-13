@@ -563,9 +563,9 @@ func TestReplaceStrategy_ExecuteMultiTable_FullRefreshUsesLeasedSlotSuffix(t *te
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
 	job := &MultiTableIngestionJob{
 		Config: &config.IngestConfig{
-			FullRefresh:           true,
-			CDCSlotSuffix:         "current-destination-slot",
-			CDCLegacySlotSuffix:   "legacy-destination-slot",
+			FullRefresh:         true,
+			CDCSlotSuffix:       "current-destination-slot",
+			CDCLegacySlotSuffix: "legacy-destination-slot",
 		},
 		Source:         src,
 		Destination:    &fakeDestination{},

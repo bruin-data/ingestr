@@ -168,14 +168,14 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	resumeIncarnations, resumeSchemas := cdcResumeMetadata(job.Tables)
 	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:             parallelism,
-			PageSize:                job.Config.PageSize,
-			CDCSlotSuffix:           job.Config.CDCSlotSuffix,
-			CDCLegacySlotSuffix:     job.Config.CDCLegacySlotSuffix,
-			CDCSnapshotReplace:      (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
-			Streaming:               true,
-			FlushInterval:           job.Config.FlushInterval,
-			FlushRecords:            job.Config.FlushRecords,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			CDCSnapshotReplace:  (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
+			Streaming:           true,
+			FlushInterval:       job.Config.FlushInterval,
+			FlushRecords:        job.Config.FlushRecords,
 		},
 		KnownTables:                 knownTables,
 		CDCResumeLSNs:               job.CDCResumeLSNs,

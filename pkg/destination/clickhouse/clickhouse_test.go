@@ -11,12 +11,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-func TestCDCStatePruneBatchSize(t *testing.T) {
-	if got := (&ClickHouseDestination{}).CDCStatePruneBatchSize(); got != 10_000 {
-		t.Fatalf("CDCStatePruneBatchSize() = %d", got)
-	}
-}
-
 func TestWaitForMutationCompletion(t *testing.T) {
 	t.Run("completes", func(t *testing.T) {
 		calls := 0

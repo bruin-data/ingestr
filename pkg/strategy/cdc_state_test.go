@@ -110,22 +110,6 @@ func newCDCStateDestination() *cdcStateDestination {
 	}
 }
 
-func completedV2StateManager(t *testing.T, dest *cdcStateDestination, connectorID string) *CDCStateManager {
-	t.Helper()
-	manager, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, manager.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-	require.NoError(t, manager.ClaimTarget(t.Context(), "public.orders", "raw.orders"))
-	require.NoError(t, manager.BeginRun(t.Context(), false))
-	require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{
-		Position:             "00000000/00000020",
-		SnapshotPositions:    map[string]string{"public.orders": "00000000/00000010"},
-		SnapshotIncarnations: map[string]string{"public.orders": "100"},
-		SnapshotSchemas:      map[string]string{"public.orders": "schema-a"},
-	}))
-	return manager
-}
-
 func (d *cdcStateDestination) ClaimCDCTarget(_ context.Context, _ string, claim destination.CDCTargetClaim) error {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()

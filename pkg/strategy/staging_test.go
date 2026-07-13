@@ -114,7 +114,6 @@ func TestQuotedDotsRemainPlacementOnlyAcrossStagingPaths(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestQuotedCatalogAndStagingSchemaRemainPlacementComponents(t *testing.T) {
@@ -341,4 +340,3 @@ func TestManagedCDCStateTableName_UsesConfiguredCatalog(t *testing.T) {
 		t.Fatalf("managedCDCStateTableName() = %q, want projectA._bruin_staging.cdc_state", got)
 	}
 }
-

@@ -616,8 +616,8 @@ func (m *CDCStateManager) prepareTargetTable(ctx context.Context) error {
 }
 
 // RegisterTableForRead records the source-to-destination mapping without
-// creating the state table. It is used only when probing an optional legacy
-// state location during upgrades.
+// creating the state table, for paths that only need to consult state (such
+// as invalidating a missing source table) without starting a run.
 func (m *CDCStateManager) RegisterTableForRead(sourceTable, destTable string) {
 	m.RegisterTableForReadIncarnation(sourceTable, destTable, "")
 }

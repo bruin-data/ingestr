@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -996,31 +995,6 @@ func TestPostgresCDC_LegacyAutoSlotCutoverRequiresSuccessfulDurability(t *testin
 		  AND state_version = '2'
 	`).Scan(&completedState))
 	require.Positive(t, completedState, "legacy slot must only be removed after v2 state is durable")
-}
-
-func waitForReplicationSlotInactive(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slot string) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		var active bool
-		err := pool.QueryRow(ctx, `SELECT active FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&active)
-		return err == nil && !active
-	}, 10*time.Second, 100*time.Millisecond, "replication slot %s stayed active", slot)
-}
-
-func legacyCanonicalCDCStateURIForTest(rawURI string) string {
-	parsed, err := url.Parse(rawURI)
-	if err != nil {
-		return rawURI
-	}
-	if parsed.User != nil {
-		parsed.User = url.User(parsed.User.Username())
-	}
-	query := parsed.Query()
-	for _, key := range []string{"state_id", "mode", "binary", "discover_interval", "password", "pass", "token", "secret", "api_key", "private_key"} {
-		query.Del(key)
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
 }
 
 func TestPostgresCDC_SharedStateMySQL(t *testing.T) {

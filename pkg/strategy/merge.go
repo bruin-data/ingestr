@@ -418,13 +418,13 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	resumeIncarnations, resumeSchemas := cdcResumeMetadata(job.Tables)
 	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:             parallelism,
-			PageSize:                job.Config.PageSize,
-			Limit:                   job.Config.SQLLimit,
-			CDCSlotSuffix:           job.Config.CDCSlotSuffix,
-			CDCLegacySlotSuffix:     job.Config.CDCLegacySlotSuffix,
-			CDCSnapshotReplace:      anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
-			FullRefresh:             job.Config.FullRefresh,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			Limit:               job.Config.SQLLimit,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			CDCSnapshotReplace:  anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			FullRefresh:         job.Config.FullRefresh,
 		},
 		CDCResumeLSNs:               job.CDCResumeLSNs,
 		CDCResumeIncarnations:       resumeIncarnations,

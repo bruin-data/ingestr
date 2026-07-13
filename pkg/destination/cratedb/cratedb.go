@@ -125,10 +125,6 @@ func (d *CrateDBDestination) WriteParallel(ctx context.Context, records <-chan s
 	return d.writeInternal(ctx, records, opts, parallelism, false)
 }
 
-func (d *CrateDBDestination) WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	return d.writeInternal(ctx, records, opts, 1, true)
-}
-
 func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, parallelism int, requireRefresh bool) error {
 	config.Debug("[CRATEDB] Starting write to %s with %d workers", opts.Table, parallelism)
 	startTotal := time.Now()
@@ -414,127 +410,6 @@ func (d *CrateDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (st
 		return "", nil
 	}
 	return *maxLSN, nil
-}
-
-func (d *CrateDBDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
-	d.refreshTable(ctx, table)
-	query := fmt.Sprintf(`
-		SELECT "event_id", "source_table", "destination_table", "state_kind", "state_generation", "state_status", "_cdc_lsn"
-		FROM %s WHERE "connector_id" = $1`, destination.QuoteTableName(table))
-	rows, err := d.pool.Query(ctx, query, connectorID)
-	if err != nil {
-		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer rows.Close()
-
-	var entries []destination.CDCStateEntry
-	for rows.Next() {
-		var entry destination.CDCStateEntry
-		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry)
-	}
-	return entries, rows.Err()
-}
-
-func (d *CrateDBDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
-	ownerID, err := claim.OwnerID()
-	if err != nil {
-		return err
-	}
-	parts := tablename.Split(claim.DestinationTable)
-	tableName := parts[len(parts)-1]
-	var schemaName string
-	if len(parts) > 1 {
-		schemaName = parts[len(parts)-2]
-	} else if err := d.pool.QueryRow(ctx, "SELECT current_schema").Scan(&schemaName); err != nil {
-		return fmt.Errorf("failed to resolve effective CrateDB schema for CDC target: %w", err)
-	}
-	canonicalTarget := destination.CDCTargetKey(schemaName, tableName)
-	insert := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT ("destination_table") DO NOTHING`, destination.QuoteTableName(claimTable))
-	if _, err := d.pool.Exec(ctx, insert, canonicalTarget, ownerID); err != nil {
-		return err
-	}
-	if err := d.refreshTableRequired(ctx, claimTable); err != nil {
-		return err
-	}
-	var owner string
-	query := fmt.Sprintf(`SELECT "connector_id" FROM %s WHERE "destination_table" = $1`, destination.QuoteTableName(claimTable))
-	if err := d.pool.QueryRow(ctx, query, canonicalTarget).Scan(&owner); err != nil {
-		return err
-	}
-	if owner != ownerID {
-		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
-	}
-	return nil
-}
-
-func (d *CrateDBDestination) CDCTargetIncarnation(context.Context, string) (string, bool, error) {
-	return "", false, errors.New("CrateDB does not expose a durable physical table incarnation")
-}
-
-func (d *CrateDBDestination) ValidateManagedCDCState() error {
-	return errors.New("CrateDB does not expose a durable physical table incarnation")
-}
-
-func (d *CrateDBDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
-	if err := d.refreshTableRequired(ctx, table); err != nil {
-		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
-			return destination.CDCStateFence{}, nil
-		}
-		return destination.CDCStateFence{}, fmt.Errorf("failed to refresh CDC state fence: %w", err)
-	}
-	quotedTable := destination.QuoteTableName(table)
-	query := fmt.Sprintf(`
-		SELECT DISTINCT "event_id", "state_generation" FROM %s
-		WHERE "connector_id" = $1 AND "state_kind" = 'run'
-		  AND "state_generation" = (
-			SELECT MAX("state_generation") FROM %s
-			WHERE "connector_id" = $1 AND "state_kind" = 'run'
-		  ) ORDER BY "event_id"`, quotedTable, quotedTable)
-	rows, err := d.pool.Query(ctx, query, connectorID)
-	if err != nil {
-		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
-			return destination.CDCStateFence{}, nil
-		}
-		return destination.CDCStateFence{}, err
-	}
-	defer rows.Close()
-
-	var fence destination.CDCStateFence
-	for rows.Next() {
-		var eventID string
-		var generation int64
-		if err := rows.Scan(&eventID, &generation); err != nil {
-			return destination.CDCStateFence{}, err
-		}
-		fence.Generation = generation
-		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
-	}
-	return fence, rows.Err()
-}
-
-func (d *CrateDBDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
-	if len(eventIDs) == 0 {
-		return nil
-	}
-	args := make([]any, 0, len(eventIDs)+1)
-	args = append(args, connectorID)
-	placeholders := make([]string, len(eventIDs))
-	for i, eventID := range eventIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
-		args = append(args, eventID)
-	}
-	query := fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = $1 AND "event_id" IN (%s)`, destination.QuoteTableName(table), strings.Join(placeholders, ", "))
-	_, err := d.pool.Exec(ctx, query, args...)
-	if err == nil {
-		d.refreshTable(ctx, table)
-	}
-	return err
 }
 
 func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {

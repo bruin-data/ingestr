@@ -29,9 +29,6 @@ import (
 // support one connector-scoped read from the shared state table.
 var (
 	_ destination.CDCStateReader = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCStateReader = (*cassandra.CassandraDestination)(nil)
-	_ destination.CDCStateReader = (*clickhouse.ClickHouseDestination)(nil)
-	_ destination.CDCStateReader = (*cratedb.CrateDBDestination)(nil)
 	_ destination.CDCStateReader = (*duckdb.DuckDBDestination)(nil)
 	_ destination.CDCStateReader = (*duckdb.DuckLakeDestination)(nil)
 	_ destination.CDCStateReader = (*mssql.MSSQLDestination)(nil)
@@ -40,16 +37,12 @@ var (
 	_ destination.CDCStateReader = (*planetscale.Destination)(nil)
 	_ destination.CDCStateReader = (*postgres.PostgresDestination)(nil)
 	_ destination.CDCStateReader = (*redshift.RedshiftDestination)(nil)
-	_ destination.CDCStateReader = (*snowflake.SnowflakeDestination)(nil)
 	_ destination.CDCStateReader = (*sqlite.SQLiteDestination)(nil)
 	_ destination.CDCStateReader = (*vitess.Destination)(nil)
 )
 
 var (
 	_ destination.CDCStateFenceReader = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCStateFenceReader = (*cassandra.CassandraDestination)(nil)
-	_ destination.CDCStateFenceReader = (*clickhouse.ClickHouseDestination)(nil)
-	_ destination.CDCStateFenceReader = (*cratedb.CrateDBDestination)(nil)
 	_ destination.CDCStateFenceReader = (*duckdb.DuckDBDestination)(nil)
 	_ destination.CDCStateFenceReader = (*duckdb.DuckLakeDestination)(nil)
 	_ destination.CDCStateFenceReader = (*mssql.MSSQLDestination)(nil)
@@ -58,17 +51,12 @@ var (
 	_ destination.CDCStateFenceReader = (*planetscale.Destination)(nil)
 	_ destination.CDCStateFenceReader = (*postgres.PostgresDestination)(nil)
 	_ destination.CDCStateFenceReader = (*redshift.RedshiftDestination)(nil)
-	_ destination.CDCStateFenceReader = (*snowflake.SnowflakeDestination)(nil)
 	_ destination.CDCStateFenceReader = (*sqlite.SQLiteDestination)(nil)
 	_ destination.CDCStateFenceReader = (*vitess.Destination)(nil)
 )
 
 var (
-	_ destination.CDCStateWriter                 = (*cassandra.CassandraDestination)(nil)
 	_ destination.CDCStateWriter                 = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCStateWriter                 = (*cratedb.CrateDBDestination)(nil)
-	_ destination.ManagedCDCStateValidator       = (*cassandra.CassandraDestination)(nil)
-	_ destination.ManagedCDCStateValidator       = (*cratedb.CrateDBDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*mysql.MySQLDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*planetscale.Destination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*redshift.RedshiftDestination)(nil)
@@ -92,7 +80,6 @@ var (
 
 var (
 	_ destination.CDCTargetIncarnationProvider = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCTargetIncarnationProvider = (*cratedb.CrateDBDestination)(nil)
 	_ destination.CDCTargetIncarnationProvider = (*duckdb.DuckDBDestination)(nil)
 	_ destination.CDCTargetIncarnationProvider = (*duckdb.DuckLakeDestination)(nil)
 	_ destination.CDCTargetIncarnationProvider = (*mssql.MSSQLDestination)(nil)
@@ -107,8 +94,6 @@ var (
 
 var (
 	_ destination.CDCTargetClaimer = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCTargetClaimer = (*cassandra.CassandraDestination)(nil)
-	_ destination.CDCTargetClaimer = (*cratedb.CrateDBDestination)(nil)
 	_ destination.CDCTargetClaimer = (*duckdb.DuckDBDestination)(nil)
 	_ destination.CDCTargetClaimer = (*duckdb.DuckLakeDestination)(nil)
 	_ destination.CDCTargetClaimer = (*mssql.MSSQLDestination)(nil)
@@ -123,9 +108,6 @@ var (
 
 var (
 	_ destination.CDCStatePruner = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCStatePruner = (*cassandra.CassandraDestination)(nil)
-	_ destination.CDCStatePruner = (*clickhouse.ClickHouseDestination)(nil)
-	_ destination.CDCStatePruner = (*cratedb.CrateDBDestination)(nil)
 	_ destination.CDCStatePruner = (*duckdb.DuckDBDestination)(nil)
 	_ destination.CDCStatePruner = (*duckdb.DuckLakeDestination)(nil)
 	_ destination.CDCStatePruner = (*mssql.MSSQLDestination)(nil)
@@ -134,16 +116,11 @@ var (
 	_ destination.CDCStatePruner = (*planetscale.Destination)(nil)
 	_ destination.CDCStatePruner = (*postgres.PostgresDestination)(nil)
 	_ destination.CDCStatePruner = (*redshift.RedshiftDestination)(nil)
-	_ destination.CDCStatePruner = (*snowflake.SnowflakeDestination)(nil)
 	_ destination.CDCStatePruner = (*sqlite.SQLiteDestination)(nil)
 	_ destination.CDCStatePruner = (*vitess.Destination)(nil)
 )
 
-var (
-	_ destination.CDCStatePruneBatchSizer = (*bigquery.BigQueryDestination)(nil)
-	_ destination.CDCStatePruneBatchSizer = (*cassandra.CassandraDestination)(nil)
-	_ destination.CDCStatePruneBatchSizer = (*clickhouse.ClickHouseDestination)(nil)
-)
+var _ destination.CDCStatePruneBatchSizer = (*bigquery.BigQueryDestination)(nil)
 
 var (
 	_ destination.Destination = (*athena.AthenaDestination)(nil)

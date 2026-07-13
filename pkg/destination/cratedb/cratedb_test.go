@@ -1,15 +1,12 @@
 package cratedb
 
 import (
-	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -24,11 +21,6 @@ func TestGetScheme(t *testing.T) {
 	t.Parallel()
 	d := NewCrateDBDestination()
 	assert.Equal(t, "cratedb", d.GetScheme())
-}
-
-func TestManagedCDCStateFailsWithoutDurableIncarnation(t *testing.T) {
-	d := NewCrateDBDestination()
-	assert.ErrorContains(t, d.ValidateManagedCDCState(), "does not expose a durable physical table incarnation")
 }
 
 func TestStrategySupport(t *testing.T) {
@@ -48,42 +40,6 @@ func TestDeleteInsertUnsupported(t *testing.T) {
 	err := d.DeleteInsertTable(t.Context(), destination.DeleteInsertOptions{})
 	if err == nil || !strings.Contains(err.Error(), "delete+insert strategy is not supported") {
 		t.Fatalf("DeleteInsertTable error = %v, want unsupported error", err)
-	}
-}
-
-func TestWriteCDCStateRequiresSuccessfulRefresh(t *testing.T) {
-	wantErr := errors.New("refresh unavailable")
-	d := NewCrateDBDestination()
-	d.cdcStateRefreshOverride = func(_ context.Context, table string) error {
-		if table != "_bruin_staging.cdc_state" {
-			t.Fatalf("refresh table = %q", table)
-		}
-		return wantErr
-	}
-	records := make(chan source.RecordBatchResult)
-	close(records)
-
-	err := d.WriteCDCState(t.Context(), records, destination.WriteOptions{Table: "_bruin_staging.cdc_state"})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("WriteCDCState() error = %v, want refresh error", err)
-	}
-}
-
-func TestWriteCDCStateAcceptsSuccessfulRefresh(t *testing.T) {
-	d := NewCrateDBDestination()
-	refreshed := false
-	d.cdcStateRefreshOverride = func(_ context.Context, _ string) error {
-		refreshed = true
-		return nil
-	}
-	records := make(chan source.RecordBatchResult)
-	close(records)
-
-	if err := d.WriteCDCState(t.Context(), records, destination.WriteOptions{Table: "_bruin_staging.cdc_state"}); err != nil {
-		t.Fatalf("WriteCDCState() error = %v", err)
-	}
-	if !refreshed {
-		t.Fatal("WriteCDCState() did not require a refresh")
 	}
 }
 

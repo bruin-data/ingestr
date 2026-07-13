@@ -51,8 +51,6 @@ type Pipeline struct {
 	droppedColumns           map[string]bool // columns dropped during schema inference (all-null nullable)
 	logWriter                io.Writer
 	cdcConnectorID           string
-	previousCDCConnectorID   string
-	previousCDCConnectorIDs  []string
 }
 
 func New(cfg *config.IngestConfig) *Pipeline {

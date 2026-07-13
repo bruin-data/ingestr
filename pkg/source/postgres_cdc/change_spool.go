@@ -124,8 +124,6 @@ type changeSpool[T any] struct {
 	remaining   int
 	sealed      bool
 	keyFn       func(T) uint32
-	keyCounts   map[uint32]int
-	excluded    map[uint32]struct{}
 	keyFirstRaw map[uint32]int
 	excludedRaw []rawRange
 }
@@ -148,8 +146,6 @@ func newChangeSpoolWithBudget[T any](memoryLimit int64, budget *byteBudget, keyF
 		drainLimit:  defaultCommittedDrainBytes,
 		budget:      budget,
 		keyFn:       keyFn,
-		keyCounts:   make(map[uint32]int),
-		excluded:    make(map[uint32]struct{}),
 		keyFirstRaw: make(map[uint32]int),
 	}
 }
@@ -207,7 +203,6 @@ func (s *changeSpool[T]) noteAppend(value T) {
 		if _, exists := s.keyFirstRaw[key]; !exists {
 			s.keyFirstRaw[key] = rawIndex
 		}
-		s.keyCounts[key]++
 	}
 }
 
@@ -277,16 +272,7 @@ func (s *changeSpool[T]) Drain(limit int) ([]T, error) {
 			s.memoryBytes -= size
 			s.budget.release(size)
 		}
-		if s.keyFn != nil {
-			key := s.keyFn(value)
-			s.keyCounts[key]--
-			if s.rawExcluded(s.rawRead - 1) {
-				continue
-			}
-			if _, skip := s.excluded[key]; skip {
-				continue
-			}
-		} else if s.rawExcluded(s.rawRead - 1) {
+		if s.rawExcluded(s.rawRead - 1) {
 			continue
 		}
 		out = append(out, value)
@@ -306,17 +292,6 @@ func (s *changeSpool[T]) rawExcluded(rawIndex int) bool {
 		}
 	}
 	return false
-}
-
-func (s *changeSpool[T]) Exclude(key uint32) {
-	if s.keyFn == nil {
-		return
-	}
-	if _, exists := s.excluded[key]; exists {
-		return
-	}
-	s.excluded[key] = struct{}{}
-	s.remaining -= s.keyCounts[key]
 }
 
 // ExcludeFrom discards the already-buffered suffix beginning with the first
