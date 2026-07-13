@@ -228,20 +228,6 @@ func (d *MSSQLDestination) ensureTargetSchemaExists(ctx context.Context, identit
 	return nil
 }
 
-// parseTableName resolves the schema and table from a possibly multi-part
-// name (database.schema.table or linked-server server.database.schema.table),
-// mirroring the source's parseMSSQLTableRef: the table is the last component,
-// the schema the second-to-last.
-func parseTableName(table string) (string, string) {
-	parts := tablename.Split(table)
-	tableName := parts[len(parts)-1]
-	schemaName := "dbo"
-	if len(parts) > 1 && parts[len(parts)-2] != "" {
-		schemaName = parts[len(parts)-2]
-	}
-	return schemaName, tableName
-}
-
 func (d *MSSQLDestination) DropTable(ctx context.Context, table string) error {
 	dropSQL := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s",
 		escapeTableNameForObjectID(table), quoteTable(table))
@@ -1665,11 +1651,6 @@ func mssqlIdentifierIndex(columns []string, selected string) (int, bool) {
 		matched = i
 	}
 	return matched, matched >= 0
-}
-
-func extractTableName(table string) string {
-	parts := strings.Split(table, ".")
-	return parts[len(parts)-1]
 }
 
 func buildJoinCondition(keys []string, targetAlias, sourceAlias string) string {
