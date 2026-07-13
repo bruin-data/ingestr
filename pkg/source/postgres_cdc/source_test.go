@@ -188,4 +188,8 @@ func TestBuildReplicationConnString(t *testing.T) {
 			assert.Contains(t, got, "replication=database")
 		})
 	}
+
+	poolURI := buildReplicationConnString("postgres://user:pass@localhost:5432/mydb?pool_max_conns=1&sslmode=disable")
+	assert.NotContains(t, poolURI, "pool_max_conns")
+	assert.Contains(t, poolURI, "sslmode=disable")
 }

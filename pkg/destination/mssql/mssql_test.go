@@ -16,9 +16,422 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
+
+type releaseCountingBatch struct {
+	arrow.RecordBatch
+	releases int
+}
+
+func TestResolveMSSQLTargetIdentityIncludesServerAndDatabase(t *testing.T) {
+	tests := map[string]mssqlTargetIdentity{
+		"orders":                        {server: "srv", database: "db", schema: "sales", table: "orders"},
+		`"sales"."orders"`:              {server: "srv", database: "db", schema: "sales", table: "orders"},
+		"warehouse.sales.orders":        {server: "srv", database: "warehouse", schema: "sales", table: "orders"},
+		"linked.warehouse.sales.orders": {server: "linked", database: "warehouse", schema: "sales", table: "orders"},
+	}
+	for input, want := range tests {
+		if got := resolveMSSQLTargetIdentity("srv", "db", "sales", input); got != want {
+			t.Fatalf("resolveMSSQLTargetIdentity(%q) = %#v, want %#v", input, got, want)
+		}
+	}
+	if !mssqlCollationCaseSensitive("Latin1_General_100_CS_AS") || mssqlCollationCaseSensitive("Latin1_General_100_CI_AS") {
+		t.Fatal("collation case-sensitivity detection is incorrect")
+	}
+}
+
+func TestValidateManagedCDCStateRequiresOpenJSONCompatibility(t *testing.T) {
+	err := (&MSSQLDestination{database: "warehouse", compatibilityLevel: 120}).ValidateManagedCDCState()
+	if err == nil || !strings.Contains(err.Error(), "requires level 130") {
+		t.Fatalf("compatibility level 120 error = %v", err)
+	}
+	if err := (&MSSQLDestination{database: "warehouse", compatibilityLevel: 130}).ValidateManagedCDCState(); err != nil {
+		t.Fatalf("compatibility level 130 rejected: %v", err)
+	}
+}
+
+func TestValidateManagedCDCTargetChecksCrossDatabaseCompatibility(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "local", database: "default", compatibilityLevel: 160}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT [compatibility_level] FROM [master].sys.databases WHERE [name] = @p1")).
+		WithArgs("legacy").WillReturnRows(sqlmock.NewRows([]string{"compatibility_level"}).AddRow(120))
+
+	err = dest.ValidateManagedCDCTarget(t.Context(), "legacy.dbo.items")
+	if err == nil || !strings.Contains(err.Error(), "requires level 130") {
+		t.Fatalf("cross-database compatibility error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanonicalCDCTargetUsesConnectedDefaultSchema(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(SCHEMA_NAME(), 'dbo')")).WillReturnRows(sqlmock.NewRows([]string{"schema"}).AddRow("tenant_a"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT [name], [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1")).
+		WithArgs("AppDB").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "collation"}).AddRow("AppDB", "Latin1_General_100_CI_AS"))
+
+	got, err := dest.CanonicalCDCTarget(t.Context(), "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := destination.CDCTargetKeyDigest("server-a", "AppDB", "tenant_a", "orders")
+	if got != want {
+		t.Fatalf("CanonicalCDCTarget() = %q, want %q", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetTableSchemaUsesConnectedDefaultSchemaAndDatabase(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(SCHEMA_NAME(), 'dbo')")).
+		WillReturnRows(sqlmock.NewRows([]string{"schema"}).AddRow("tenant_a"))
+	mock.ExpectQuery(`FROM \[AppDB\]\.INFORMATION_SCHEMA\.COLUMNS c`).
+		WithArgs("tenant_a", "orders").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
+		}).AddRow("id", "bigint", "NO", nil, nil, nil))
+
+	got, err := dest.GetTableSchema(t.Context(), "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Schema != "tenant_a" || got.Name != "orders" {
+		t.Fatalf("GetTableSchema() = %#v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetTableSchemaUsesThreePartDatabase(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	mock.ExpectQuery(`FROM \[Warehouse\]\.INFORMATION_SCHEMA\.COLUMNS c`).
+		WithArgs("sales", "orders").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
+		}).AddRow("id", "bigint", "NO", nil, nil, nil))
+
+	got, err := dest.GetTableSchema(t.Context(), "Warehouse.sales.orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Schema != "sales" || got.Name != "orders" {
+		t.Fatalf("GetTableSchema() = %#v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareTableUsesConnectedDefaultSchema(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(SCHEMA_NAME(), 'dbo')")).
+		WillReturnRows(sqlmock.NewRows([]string{"schema"}).AddRow("tenant_a"))
+	mock.ExpectExec(`IF NOT EXISTS .*CREATE SCHEMA \[tenant_a\]`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`CREATE TABLE \[AppDB\]\.\[tenant_a\]\.\[orders\]`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:  "orders",
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSwapTableUsesResolvedDefaultSchema(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(SCHEMA_NAME(), 'dbo')")).
+		WillReturnRows(sqlmock.NewRows([]string{"schema"}).AddRow("tenant_a"))
+	mock.ExpectExec(`IF NOT EXISTS .*CREATE SCHEMA \[tenant_a\]`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("ALTER SCHEMA [tenant_a] TRANSFER [stage].[orders_staging]")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`OBJECT_ID\('\[AppDB\]\.\[tenant_a\]\.\[orders\]', 'U'\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename 'tenant_a.orders_staging', 'orders'")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err = dest.SwapTable(t.Context(), destination.SwapOptions{
+		TargetTable:  "orders",
+		StagingTable: "stage.orders_staging",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSwapTableTransfersCaseDistinctSchemasUnderCaseSensitiveCollation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	mock.ExpectExec(`IF NOT EXISTS .*CREATE SCHEMA \[Sales\]`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1")).
+		WithArgs("AppDB").
+		WillReturnRows(sqlmock.NewRows([]string{"collation_name"}).AddRow("Latin1_General_100_CS_AS"))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("ALTER SCHEMA [Sales] TRANSFER [sales].[orders_staging]")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`OBJECT_ID\('\[AppDB\]\.\[Sales\]\.\[orders\]', 'U'\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename 'Sales.orders_staging', 'orders'")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err = dest.SwapTable(t.Context(), destination.SwapOptions{
+		TargetTable:  "Sales.orders",
+		StagingTable: "sales.orders_staging",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCDCTargetIncarnationChangesWithObjectIdentity(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	query := regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)\n\t\tFROM [AppDB].sys.tables AS t\n\t\tJOIN [AppDB].sys.schemas AS s ON s.schema_id = t.schema_id\n\t\tWHERE s.name = @p1 AND t.name = @p2")
+	mock.ExpectQuery(query).WithArgs("dbo", "orders").WillReturnRows(sqlmock.NewRows([]string{"object_id", "created"}).AddRow(10, "2026-01-01T00:00:00"))
+	mock.ExpectQuery(query).WithArgs("dbo", "orders").WillReturnRows(sqlmock.NewRows([]string{"object_id", "created"}).AddRow(11, "2026-01-01T00:00:01"))
+
+	first, exists, err := dest.CDCTargetIncarnation(t.Context(), "dbo.orders")
+	if err != nil || !exists {
+		t.Fatalf("first incarnation=%q exists=%v err=%v", first, exists, err)
+	}
+	second, exists, err := dest.CDCTargetIncarnation(t.Context(), "dbo.orders")
+	if err != nil || !exists || second == first {
+		t.Fatalf("second incarnation=%q first=%q exists=%v err=%v", second, first, exists, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (b *releaseCountingBatch) Release() {
+	b.releases++
+	b.RecordBatch.Release()
+}
+
+func newReleaseCountingBatch(t *testing.T) *releaseCountingBatch {
+	t.Helper()
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	values := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil), []arrow.Array{values}, 1)
+	values.Release()
+	return &releaseCountingBatch{RecordBatch: record}
+}
+
+func TestWriteSerialBatchesReleasesBatchOnWriteError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+	dest := &MSSQLDestination{db: db}
+	batch := newReleaseCountingBatch(t)
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: batch}
+	close(records)
+
+	err = dest.Write(t.Context(), records, destination.WriteOptions{Table: "dbo.events"})
+	if err == nil || !strings.Contains(err.Error(), "begin failed") {
+		t.Fatalf("Write() error = %v, want begin failure", err)
+	}
+	if batch.releases != 1 {
+		t.Fatalf("batch releases = %d, want exactly 1", batch.releases)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareTableAcceptsConcurrentCreateWinner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	schema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	createSQL := buildCreateTableSQL("dbo.events", schema.Columns, nil)
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnError(mssqldb.Error{Number: 2714, Message: "There is already an object named 'events' in the database."})
+
+	dest := &MSSQLDestination{db: db}
+	if err := dest.PrepareTable(context.Background(), destination.PrepareOptions{Table: "dbo.events", Schema: schema}); err != nil {
+		t.Fatalf("PrepareTable() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureSchemaExistsAcceptsConcurrentCreateWinner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	createSQL := "IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '_bruin_staging') EXEC('CREATE SCHEMA [_bruin_staging]')"
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnError(mssqldb.Error{
+		Number:  2759,
+		Message: "CREATE SCHEMA failed due to previous errors.",
+		All: []mssqldb.Error{
+			{Number: 2714, Message: "There is already an object named '_bruin_staging' in the database."},
+			{Number: 2759, Message: "CREATE SCHEMA failed due to previous errors."},
+		},
+	})
+
+	dest := &MSSQLDestination{db: db}
+	if err := dest.ensureSchemaExists(context.Background(), "_bruin_staging"); err != nil {
+		t.Fatalf("ensureSchemaExists() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureSchemaExistsDoesNotHideOtherErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	createSQL := "IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '_bruin_staging') EXEC('CREATE SCHEMA [_bruin_staging]')"
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnError(mssqldb.Error{Number: 262, Message: "CREATE SCHEMA permission denied"})
+
+	dest := &MSSQLDestination{db: db}
+	err = dest.ensureSchemaExists(context.Background(), "_bruin_staging")
+	if err == nil || !strings.Contains(err.Error(), "failed to create schema") {
+		t.Fatalf("ensureSchemaExists() error = %v, want schema creation failure", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteCDCStateEventsScopesConnectorAndEventIDs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	query := "DELETE FROM [dbo].[cdc_state] WHERE [connector_id] = @p1 AND [event_id] IN (@p2, @p3)"
+	mock.ExpectExec(regexp.QuoteMeta(query)).WithArgs("connector-a", "event-1", "event-2").WillReturnResult(sqlmock.NewResult(0, 2))
+	dest := &MSSQLDestination{db: db}
+	if err := dest.DeleteCDCStateEvents(context.Background(), "dbo.cdc_state", "connector-a", []string{"event-1", "event-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadCDCStateFenceUsesConnectorScopedLatestRunQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	query := "SELECT DISTINCT [event_id], [state_generation] FROM [dbo].[cdc_state] WHERE [connector_id] = @p1 AND [state_kind] = 'run' AND [state_generation] = (SELECT MAX([state_generation]) FROM [dbo].[cdc_state] WHERE [connector_id] = @p1 AND [state_kind] = 'run') ORDER BY [event_id]"
+	mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs("connector-a").WillReturnRows(
+		sqlmock.NewRows([]string{"event_id", "state_generation"}).AddRow("run-a", int64(7)).AddRow("run-b", int64(7)),
+	)
+
+	dest := &MSSQLDestination{db: db}
+	fence, err := dest.LoadCDCStateFence(context.Background(), "dbo.cdc_state", "connector-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fence.Generation != 7 || len(fence.RunEventIDs) != 2 || fence.RunEventIDs[0] != "run-a" || fence.RunEventIDs[1] != "run-b" {
+		t.Fatalf("LoadCDCStateFence() = %#v", fence)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareTableDoesNotHideOtherCreateErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	schema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	createSQL := buildCreateTableSQL("dbo.events", schema.Columns, nil)
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnError(mssqldb.Error{Number: 262, Message: "CREATE TABLE permission denied"})
+
+	dest := &MSSQLDestination{db: db}
+	err = dest.PrepareTable(context.Background(), destination.PrepareOptions{Table: "dbo.events", Schema: schema})
+	if err == nil || !strings.Contains(err.Error(), "failed to create table") {
+		t.Fatalf("PrepareTable() error = %v, want create failure", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestBuildCreateTableSQL_StringPrimaryKeyUsesIndexableType(t *testing.T) {
 	sql := buildCreateTableSQL("dbo.events", []schema.Column{
@@ -39,6 +452,75 @@ func TestBuildCreateTableSQL_CapsLongStringPrimaryKeyLength(t *testing.T) {
 
 	assertContains(t, sql, "[id] NVARCHAR(450)")
 	assertContains(t, sql, "[name] NVARCHAR(1000)")
+}
+
+func TestBuildCreateTableSQLKeepsCaseDistinctPayloadUnbounded(t *testing.T) {
+	sql := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "Foo", DataType: schema.TypeString},
+		{Name: "foo", DataType: schema.TypeString},
+	}, []string{"Foo"})
+
+	assertContains(t, sql, "[Foo] NVARCHAR(450)")
+	assertContains(t, sql, "[foo] NVARCHAR(MAX)")
+	assertContains(t, sql, "PRIMARY KEY ([Foo])")
+}
+
+func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testing.T) {
+	columns := []string{
+		"id",
+		"payload",
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+		destination.CDCUnchangedColsColumn,
+	}
+	got := buildMergeSQL("dbo.items", "stage.items", []string{"id"}, columns, "")
+
+	assertContains(t, got, "OPENJSON(COALESCE(source.[_cdc_unchanged_cols], N'[]'))")
+	assertContains(t, got, "[value] COLLATE Latin1_General_100_BIN2 = N'payload' COLLATE Latin1_General_100_BIN2")
+	assertContains(t, got, "THEN source.[payload] ELSE target.[payload] END")
+	assertContains(t, got, "INSERT ([id], [payload], [_cdc_lsn], [_cdc_deleted], [_cdc_synced_at])")
+	if strings.Contains(got, "INSERT ([id], [payload], [_cdc_lsn], [_cdc_deleted], [_cdc_synced_at], [_cdc_unchanged_cols])") {
+		t.Fatalf("CDC marker leaked into target INSERT:\n%s", got)
+	}
+	if !NewMSSQLDestination().SupportsCDCUnchangedCols() {
+		t.Fatal("MSSQL destination must advertise unchanged-column support")
+	}
+}
+
+func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
+	columns := []string{"id", "Foo", "foo", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
+	got := buildMergeSQL("dbo.items", "stage.items", []string{"id"}, columns, "")
+
+	assertContains(t, got, "[value] COLLATE Latin1_General_100_BIN2 = N'Foo' COLLATE Latin1_General_100_BIN2")
+	assertContains(t, got, "[value] COLLATE Latin1_General_100_BIN2 = N'foo' COLLATE Latin1_General_100_BIN2")
+	assertContains(t, got, "THEN source.[Foo] ELSE target.[Foo] END")
+	assertContains(t, got, "THEN source.[foo] ELSE target.[foo] END")
+	if strings.Contains(got, "LOWER(") {
+		t.Fatalf("case-folded marker membership can conflate [Foo] and [foo]:\n%s", got)
+	}
+}
+
+func TestBuildCDCMergeSQLKeepsCaseDistinctPayloadSeparateFromPrimaryKey(t *testing.T) {
+	columns := []string{"Foo", "foo", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
+	got := buildMergeSQL("dbo.items", "stage.items", []string{"Foo"}, columns, "")
+
+	assertContains(t, got, "ON target.[Foo] = source.[Foo]")
+	assertContains(t, got, "SELECT la.[Foo], act.[foo]")
+	assertContains(t, got, "target.[foo] = CASE WHEN (source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1) AND NOT EXISTS")
+	assertContains(t, got, "THEN source.[foo] ELSE target.[foo] END")
+	if strings.Contains(got, "target.[Foo] = CASE") {
+		t.Fatalf("case-distinct primary key leaked into update set:\n%s", got)
+	}
+}
+
+func TestFilterColumnsRetainsOrdinaryCaseInsensitiveMSSQLMatching(t *testing.T) {
+	if got := strings.Join(filterColumns([]string{"ID", "Name"}, []string{"id"}), ","); got != "Name" {
+		t.Fatalf("ordinary case-insensitive filter = %q, want Name", got)
+	}
+	if got := strings.Join(filterColumns([]string{"Foo", "foo"}, []string{"Foo"}), ","); got != "foo" {
+		t.Fatalf("case-distinct filter = %q, want foo", got)
+	}
 }
 
 func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
@@ -457,6 +939,42 @@ func TestExtractValueRejectsInvalidUUIDStrings(t *testing.T) {
 
 	if _, err := extractValue(arr, 0, &schema.Column{DataType: schema.TypeUUID}); err == nil {
 		t.Fatal("expected invalid UUID error")
+	}
+}
+
+func TestColumnsForRecordKeepsCaseDistinctLogicalTypes(t *testing.T) {
+	fooBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	fooBuilder.Append("not-a-uuid")
+	foo := fooBuilder.NewArray()
+	defer foo.Release()
+	fooBuilder.Release()
+
+	lowerFooBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	lowerFooBuilder.Append("01234567-89ab-cdef-0123-456789abcdef")
+	lowerFoo := lowerFooBuilder.NewArray()
+	defer lowerFoo.Release()
+	lowerFooBuilder.Release()
+
+	record := array.NewRecordBatch(
+		arrow.NewSchema([]arrow.Field{
+			{Name: "Foo", Type: arrow.BinaryTypes.String},
+			{Name: "foo", Type: arrow.BinaryTypes.String},
+		}, nil),
+		[]arrow.Array{foo, lowerFoo},
+		1,
+	)
+	defer record.Release()
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "Foo", DataType: schema.TypeString},
+		{Name: "foo", DataType: schema.TypeUUID},
+	}}
+
+	columnTypes := columnsForRecord(record, tableSchema)
+	if got := mustExtractValue(t, record.Column(0), columnTypes[0]); got != "not-a-uuid" {
+		t.Fatalf("Foo extraction = %T %v, want original string", got, got)
+	}
+	if got := mustExtractValue(t, record.Column(1), columnTypes[1]); got.(mssqldb.UniqueIdentifier).String() != "01234567-89AB-CDEF-0123-456789ABCDEF" {
+		t.Fatalf("foo extraction = %T %v, want UUID", got, got)
 	}
 }
 

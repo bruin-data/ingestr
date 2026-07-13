@@ -117,7 +117,7 @@ func BuildBigQuerySchema(tableSchema *schema.TableSchema) bigquery.Schema {
 
 		applyBigQueryDecimalPrecisionScale(field, col)
 
-		if col.DataType == schema.TypeString && col.MaxLength > 0 {
+		if (col.DataType == schema.TypeString || col.DataType == schema.TypeBinary) && col.MaxLength > 0 {
 			field.MaxLength = int64(col.MaxLength)
 		}
 

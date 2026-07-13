@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,9 +24,11 @@ import (
 )
 
 type MSSQLDestination struct {
-	db       *sql.DB
-	uri      string
-	database string
+	db                 *sql.DB
+	uri                string
+	database           string
+	server             string
+	compatibilityLevel int
 }
 
 var errDirectInsertRequiresRetry = errors.New("direct insert transaction cannot be reused")
@@ -57,10 +60,19 @@ func (d *MSSQLDestination) Connect(ctx context.Context, uri string) error {
 		_ = db.Close()
 		return fmt.Errorf("failed to ping SQL Server: %w", err)
 	}
+	var serverName, currentDatabase string
+	var compatibilityLevel int
+	if err := db.QueryRowContext(ctx, `SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')), DB_NAME(), compatibility_level
+		FROM sys.databases WHERE name = DB_NAME()`).Scan(&serverName, &currentDatabase, &compatibilityLevel); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("failed to resolve SQL Server identity: %w", err)
+	}
 
 	d.db = db
 	d.uri = uri
-	d.database = database
+	d.server = serverName
+	d.database = currentDatabase
+	d.compatibilityLevel = compatibilityLevel
 	config.Debug("[MSSQL] Connected to database: %s", database)
 	return nil
 }
@@ -121,15 +133,19 @@ func (d *MSSQLDestination) Close(ctx context.Context) error {
 }
 
 func (d *MSSQLDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
-	schemaName, _ := parseTableName(opts.Table)
-	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
+	identity, err := d.resolveTargetIdentity(ctx, opts.Table)
+	if err != nil {
+		return err
+	}
+	resolvedTable := identity.qualifiedTable(d.server)
+	if err := d.ensureTargetSchemaExists(ctx, identity); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
 		dropSQL := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s",
-			escapeTableNameForObjectID(opts.Table), quoteTable(opts.Table))
+			escapeTableNameForObjectID(resolvedTable), quoteTable(resolvedTable))
 		if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -139,8 +155,11 @@ func (d *MSSQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 
 	if opts.Schema != nil {
 		startCreate := time.Now()
-		createSQL := buildCreateTableSQL(opts.Table, opts.Schema.Columns, opts.PrimaryKeys)
+		createSQL := buildCreateTableSQL(resolvedTable, opts.Schema.Columns, opts.PrimaryKeys)
 		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			if isObjectAlreadyExistsError(err) {
+				return nil
+			}
 			config.LogFailedQuery(createSQL, err)
 			return fmt.Errorf("failed to create table: %w", err)
 		}
@@ -148,6 +167,23 @@ func (d *MSSQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 	}
 
 	return nil
+}
+
+func isObjectAlreadyExistsError(err error) bool {
+	var sqlErr interface{ SQLErrorNumber() int32 }
+	if errors.As(err, &sqlErr) && sqlErr.SQLErrorNumber() == 2714 {
+		return true
+	}
+	var detailed mssqldb.Error
+	if !errors.As(err, &detailed) {
+		return false
+	}
+	for _, item := range detailed.All {
+		if item.Number == 2714 {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *MSSQLDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
@@ -161,10 +197,34 @@ func (d *MSSQLDestination) ensureSchemaExists(ctx context.Context, schemaName st
 		strings.ReplaceAll(schemaName, "]", "]]"),
 	)
 	if _, err := d.db.ExecContext(ctx, createSchemaSQL); err != nil {
+		if isObjectAlreadyExistsError(err) {
+			return nil
+		}
 		config.LogFailedQuery(createSchemaSQL, err)
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
 	}
 	config.Debug("[MSSQL] Ensured schema exists: %s", schemaName)
+	return nil
+}
+
+func (d *MSSQLDestination) ensureTargetSchemaExists(ctx context.Context, identity mssqlTargetIdentity) error {
+	if identity.schema == "" || strings.EqualFold(identity.schema, "dbo") {
+		return nil
+	}
+	if (identity.server == "" || strings.EqualFold(identity.server, d.server)) &&
+		(identity.database == "" || strings.EqualFold(identity.database, d.database)) {
+		return d.ensureSchemaExists(ctx, identity.schema)
+	}
+
+	prefix := identity.catalogPrefix(d.server)
+	var exists int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s.sys.schemas WHERE name = @p1", prefix)
+	if err := d.db.QueryRowContext(ctx, query, identity.schema).Scan(&exists); err != nil {
+		return fmt.Errorf("failed to inspect schema %s in %s: %w", identity.schema, prefix, err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("schema %q does not exist in SQL Server catalog %s", identity.schema, prefix)
+	}
 	return nil
 }
 
@@ -224,13 +284,20 @@ func (d *MSSQLDestination) writeSerialBatches(ctx context.Context, records <-cha
 
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
+		}
+		if result.Batch == nil {
+			continue
 		}
 
 		batchNum++
 		startBatch := time.Now()
 
 		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table, opts.Schema)
+		result.Batch.Release()
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -241,7 +308,6 @@ func (d *MSSQLDestination) writeSerialBatches(ctx context.Context, records <-cha
 		config.Debug("[MSSQL] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
 			batchNum, rows, batchDuration, rate, totalRows)
 
-		result.Batch.Release()
 	}
 
 	totalDuration := time.Since(startTime)
@@ -281,6 +347,9 @@ func (d *MSSQLDestination) writeParallelBatches(ctx context.Context, records <-c
 			for result := range records {
 				myBatch := int(batchNum.Add(1))
 				if result.Err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
 					results <- writeResult{batchNum: myBatch, err: result.Err}
 					cancel()
 					return
@@ -420,13 +489,12 @@ func columnsForRecord(record arrow.RecordBatch, tableSchema *schema.TableSchema)
 		return columns
 	}
 
-	byName := make(map[string]int, len(tableSchema.Columns))
-	for i, col := range tableSchema.Columns {
-		byName[strings.ToLower(col.Name)] = i
+	schemaNames := make([]string, len(tableSchema.Columns))
+	for i := range tableSchema.Columns {
+		schemaNames[i] = tableSchema.Columns[i].Name
 	}
-
 	for i, field := range record.Schema().Fields() {
-		if idx, ok := byName[strings.ToLower(field.Name)]; ok {
+		if idx, ok := mssqlIdentifierIndex(schemaNames, field.Name); ok {
 			columns[i] = &tableSchema.Columns[idx]
 		}
 	}
@@ -436,39 +504,52 @@ func columnsForRecord(record arrow.RecordBatch, tableSchema *schema.TableSchema)
 func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
-	stagingTable := opts.StagingTable
-	targetTable := opts.TargetTable
+	target, err := d.resolveTargetIdentity(ctx, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	staging, err := d.resolveTargetIdentity(ctx, opts.StagingTable)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(target.server, staging.server) || !strings.EqualFold(target.database, staging.database) {
+		return fmt.Errorf("cannot atomically swap SQL Server tables across catalogs: %q and %q", opts.TargetTable, opts.StagingTable)
+	}
+	if err := d.ensureTargetSchemaExists(ctx, target); err != nil {
+		return fmt.Errorf("failed to ensure target schema exists: %w", err)
+	}
 
-	targetSchema, targetTableOnly := parseTableName(targetTable)
-	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetTableOnly, time.Now().UnixNano())
+	targetTable := target.qualifiedTable(d.server)
+	oldNameCandidate := fmt.Sprintf("%s_old_%d", target.table, time.Now().UnixNano())
 	oldTableName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("mssql"))
-	oldTable := oldTableName
-	if strings.Contains(targetTable, ".") {
-		oldTable = targetSchema + "." + oldTableName
+	old := target
+	old.table = oldTableName
+	oldTable := old.qualifiedTable(d.server)
+	sameSchema, err := d.sameSwapSchema(ctx, target, staging)
+	if err != nil {
+		return err
 	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }()
 
-	stagingSchema, stagingName := parseTableName(stagingTable)
-	if stagingSchema != targetSchema {
-		// The replace strategy only PrepareTables the staging side, so the target
-		// schema may not exist yet (e.g. user supplies a brand-new schema in
-		// --dest-table). Ensure it exists before TRANSFER, otherwise the ALTER
-		// fails with "Cannot alter the schema 'X' because it does not exist".
-		if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+	if !sameSchema {
+		transferSQL, err := d.databaseScopedSQL(target, fmt.Sprintf(
+			"ALTER SCHEMA %s TRANSFER %s",
+			quoteColumn(target.schema),
+			quoteTable(staging.schema+"."+staging.table),
+		))
+		if err != nil {
+			return err
 		}
-		transferSQL := fmt.Sprintf("ALTER SCHEMA %s TRANSFER %s", quoteColumn(targetSchema), quoteTable(stagingTable))
 		if _, err := tx.ExecContext(ctx, transferSQL); err != nil {
 			config.LogFailedQuery(transferSQL, err)
-			_ = tx.Rollback()
 			return fmt.Errorf("failed to transfer staging table to target schema: %w", err)
 		}
-		stagingTable = targetSchema + "." + stagingName
+		staging.schema = target.schema
 	}
 
 	var exists int
@@ -477,24 +558,25 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		escapeTableNameForObjectID(targetTable),
 	)).Scan(&exists)
 	if err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("failed to check if table exists: %w", err)
 	}
 
 	if exists > 0 {
-		renameSQL := fmt.Sprintf("EXEC sp_rename '%s', '%s'",
-			escapeTableNameForRename(targetTable), extractTableName(oldTable))
+		renameSQL, err := d.renameTableSQL(target, old.table)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
-			_ = tx.Rollback()
 			return fmt.Errorf("failed to rename target table: %w", err)
 		}
 
-		renameSQL = fmt.Sprintf("EXEC sp_rename '%s', '%s'",
-			escapeTableNameForRename(stagingTable), extractTableName(targetTable))
+		renameSQL, err = d.renameTableSQL(staging, target.table)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
-			_ = tx.Rollback()
 			return fmt.Errorf("failed to rename staging table: %w", err)
 		}
 
@@ -502,15 +584,15 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 			escapeTableNameForObjectID(oldTable), quoteTable(oldTable))
 		if _, err := tx.ExecContext(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
-			_ = tx.Rollback()
 			return fmt.Errorf("failed to drop old table: %w", err)
 		}
 	} else {
-		renameSQL := fmt.Sprintf("EXEC sp_rename '%s', '%s'",
-			escapeTableNameForRename(stagingTable), extractTableName(targetTable))
+		renameSQL, err := d.renameTableSQL(staging, target.table)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
-			_ = tx.Rollback()
 			return fmt.Errorf("failed to rename staging table: %w", err)
 		}
 	}
@@ -521,6 +603,56 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 
 	config.Debug("[MSSQL] Table swap completed in %v", time.Since(startSwap))
 	return nil
+}
+
+func (d *MSSQLDestination) sameSwapSchema(ctx context.Context, target, staging mssqlTargetIdentity) (bool, error) {
+	if staging.schema == target.schema {
+		return true, nil
+	}
+	if !strings.EqualFold(staging.schema, target.schema) {
+		return false, nil
+	}
+
+	collation, err := d.databaseCollation(ctx, target)
+	if err != nil {
+		return false, err
+	}
+	return !mssqlCollationCaseSensitive(collation), nil
+}
+
+func (d *MSSQLDestination) databaseCollation(ctx context.Context, identity mssqlTargetIdentity) (string, error) {
+	var collation string
+	if strings.EqualFold(identity.server, d.server) {
+		if err := d.db.QueryRowContext(ctx, "SELECT [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1", identity.database).Scan(&collation); err != nil {
+			return "", fmt.Errorf("failed to resolve SQL Server database collation for %q: %w", identity.database, err)
+		}
+		return collation, nil
+	}
+
+	query := fmt.Sprintf("SELECT [collation_name] FROM %s.[master].[sys].[databases] WHERE [name] = @p1", quoteColumn(identity.server))
+	if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&collation); err != nil {
+		return "", fmt.Errorf("failed to resolve linked SQL Server database collation for %q: %w", identity.database, err)
+	}
+	return collation, nil
+}
+
+func (d *MSSQLDestination) databaseScopedSQL(identity mssqlTargetIdentity, statement string) (string, error) {
+	if identity.server != "" && !strings.EqualFold(identity.server, d.server) {
+		return "", fmt.Errorf("SQL Server linked-server DDL is not supported for %q", identity.server)
+	}
+	if identity.database == "" || strings.EqualFold(identity.database, d.database) {
+		return statement, nil
+	}
+	return fmt.Sprintf("EXEC %s.sys.sp_executesql N'%s'", quoteColumn(identity.database), strings.ReplaceAll(statement, "'", "''")), nil
+}
+
+func (d *MSSQLDestination) renameTableSQL(identity mssqlTargetIdentity, newName string) (string, error) {
+	statement := fmt.Sprintf(
+		"EXEC sys.sp_rename '%s', '%s'",
+		escapeTableNameForRename(identity.schema+"."+identity.table),
+		strings.ReplaceAll(newName, "'", "''"),
+	)
+	return d.databaseScopedSQL(identity, statement)
 }
 
 func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -765,7 +897,9 @@ func buildInsertSQL(targetTable, colList, selectClause string) string {
 
 func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
 	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, primaryKeys)
+	targetColumns := destination.DestinationColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKColumns := filterColumns(targetColumns, primaryKeys)
 	isCDC := destination.HasCDCDeletedColumn(columns)
 
 	onConditions := make([]string, len(primaryKeys))
@@ -773,9 +907,10 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []stri
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
 	}
 
-	insertCols := strings.Join(quotedColumns, ", ")
-	sourceCols := make([]string, len(quotedColumns))
-	for i, col := range quotedColumns {
+	stagingCols := strings.Join(quotedColumns, ", ")
+	insertCols := strings.Join(quotedTargetColumns, ", ")
+	sourceCols := make([]string, len(quotedTargetColumns))
+	for i, col := range quotedTargetColumns {
 		sourceCols[i] = "source." + col
 	}
 
@@ -783,7 +918,7 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []stri
 	pkPartition := strings.Join(quotedPKs, ", ")
 
 	if isCDC {
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onConditions, insertCols, sourceCols, pkPartition)
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onConditions, stagingCols, insertCols, sourceCols, pkPartition)
 	}
 
 	var updateSet string
@@ -834,11 +969,8 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns, onConditions []string, insertCols string, sourceCols []string, pkPartition string) string {
-	pkMap := make(map[string]bool, len(primaryKeys))
-	for _, pk := range primaryKeys {
-		pkMap[strings.ToLower(pk)] = true
-	}
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns, onConditions []string, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
+	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
@@ -848,7 +980,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 	selectCols := make([]string, 0, len(columns)+1)
 	for _, col := range columns {
 		alias := "act"
-		if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
+		if pkMap[col] || destination.IsCDCColumn(col) {
 			alias = "la"
 		}
 		selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteColumn(col)))
@@ -858,7 +990,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 	dedup := func(where, orderBy string) string {
 		return fmt.Sprintf(
 			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-			insertCols, insertCols, pkPartition, orderBy, quoteTable(stagingTable), where,
+			stagingCols, stagingCols, pkPartition, orderBy, quoteTable(stagingTable), where,
 		)
 	}
 	composedSource := fmt.Sprintf(
@@ -876,7 +1008,12 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		if destination.IsCDCColumn(col) {
 			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
 		} else {
-			updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, hasRowData, quoted, quoted)
+			unchanged := fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
+				quoteColumn(destination.CDCUnchangedColsColumn),
+				strings.ReplaceAll(col, "'", "''"),
+			)
+			updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s AND NOT %s THEN source.%s ELSE target.%s END", quoted, hasRowData, unchanged, quoted, quoted)
 		}
 	}
 
@@ -1078,6 +1215,39 @@ func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MSSQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MSSQLDestination) SupportsAtomicSwap() bool           { return true }
 func (d *MSSQLDestination) SupportsCDCMerge() bool             { return true }
+func (d *MSSQLDestination) SupportsCDCUnchangedCols() bool     { return true }
+
+func (d *MSSQLDestination) ValidateManagedCDCState() error {
+	return validateMSSQLCompatibilityLevel(d.database, d.compatibilityLevel)
+}
+
+func (d *MSSQLDestination) ValidateManagedCDCTarget(ctx context.Context, table string) error {
+	identity, err := d.resolveTargetIdentity(ctx, table)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(identity.server, d.server) && strings.EqualFold(identity.database, d.database) {
+		return d.ValidateManagedCDCState()
+	}
+
+	catalog := quoteColumn("master") + ".sys.databases"
+	if !strings.EqualFold(identity.server, d.server) {
+		catalog = quoteColumn(identity.server) + "." + catalog
+	}
+	var compatibilityLevel int
+	query := fmt.Sprintf("SELECT [compatibility_level] FROM %s WHERE [name] = @p1", catalog)
+	if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&compatibilityLevel); err != nil {
+		return fmt.Errorf("failed to resolve SQL Server compatibility level for database %q: %w", identity.database, err)
+	}
+	return validateMSSQLCompatibilityLevel(identity.database, compatibilityLevel)
+}
+
+func validateMSSQLCompatibilityLevel(database string, compatibilityLevel int) error {
+	if compatibilityLevel < 130 {
+		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed PostgreSQL CDC requires level 130 or newer for OPENJSON", database, compatibilityLevel)
+	}
+	return nil
+}
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *MSSQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
@@ -1097,7 +1267,7 @@ func (d *MSSQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (stri
 }
 
 func (d *MSSQLDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
-	query := fmt.Sprintf("SELECT [source_table], [state_kind], [state_generation], [state_status], [_cdc_lsn] FROM %s WHERE [connector_id] = @p1", quoteTable(table))
+	query := fmt.Sprintf("SELECT [event_id], [source_table], [destination_table], [state_kind], [state_generation], [state_status], [_cdc_lsn] FROM %s WHERE [connector_id] = @p1", quoteTable(table))
 	rows, err := d.db.QueryContext(ctx, query, connectorID)
 	if err != nil {
 		if strings.Contains(err.Error(), "Invalid object name") {
@@ -1110,7 +1280,7 @@ func (d *MSSQLDestination) LoadCDCState(ctx context.Context, table, connectorID 
 	var entries []destination.CDCStateEntry
 	for rows.Next() {
 		var entry destination.CDCStateEntry
-		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)
@@ -1118,20 +1288,225 @@ func (d *MSSQLDestination) LoadCDCState(ctx context.Context, table, connectorID 
 	return entries, rows.Err()
 }
 
+func (d *MSSQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	canonicalTarget, err := d.canonicalCDCTarget(ctx, claim.DestinationTable)
+	if err != nil {
+		return err
+	}
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var owner string
+	selectSQL := fmt.Sprintf("SELECT [connector_id] FROM %s WITH (UPDLOCK, HOLDLOCK) WHERE [destination_table] = @p1", quoteTable(claimTable))
+	err = tx.QueryRowContext(ctx, selectSQL, canonicalTarget).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		insert := fmt.Sprintf("INSERT INTO %s ([destination_table], [connector_id], [claimed_at]) VALUES (@p1, @p2, SYSUTCDATETIME())", quoteTable(claimTable))
+		if _, err := tx.ExecContext(ctx, insert, canonicalTarget, ownerID); err != nil {
+			return err
+		}
+		owner = ownerID
+	} else if err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return tx.Commit()
+}
+
+func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	identity, err := d.resolveTargetIdentity(ctx, table)
+	if err != nil {
+		return "", false, err
+	}
+	prefix := identity.catalogPrefix(d.server)
+	if prefix == "" {
+		return "", false, fmt.Errorf("cannot resolve SQL Server catalog for CDC target %q", table)
+	}
+	query := fmt.Sprintf(`SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)
+		FROM %s.sys.tables AS t
+		JOIN %s.sys.schemas AS s ON s.schema_id = t.schema_id
+		WHERE s.name = @p1 AND t.name = @p2`, prefix, prefix)
+	var objectID int64
+	var createdAt string
+	err = d.db.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read SQL Server CDC target incarnation for %s: %w", table, err)
+	}
+	return destination.CDCTargetKey(identity.server, identity.database, strconv.FormatInt(objectID, 10), createdAt), true, nil
+}
+
+type mssqlTargetIdentity struct {
+	server, database, schema, table string
+}
+
+func (i mssqlTargetIdentity) qualifiedTable(defaultServer string) string {
+	parts := make([]string, 0, 4)
+	if i.server != "" && !strings.EqualFold(i.server, defaultServer) {
+		parts = append(parts, i.server)
+	}
+	if i.database != "" {
+		parts = append(parts, i.database)
+	}
+	parts = append(parts, i.schema, i.table)
+	return strings.Join(parts, ".")
+}
+
+func (i mssqlTargetIdentity) catalogPrefix(defaultServer string) string {
+	parts := make([]string, 0, 2)
+	if i.server != "" && !strings.EqualFold(i.server, defaultServer) {
+		parts = append(parts, quoteColumn(i.server))
+	}
+	if i.database != "" {
+		parts = append(parts, quoteColumn(i.database))
+	}
+	return strings.Join(parts, ".")
+}
+
+func (d *MSSQLDestination) resolveTargetIdentity(ctx context.Context, target string) (mssqlTargetIdentity, error) {
+	parts := tablename.Split(target)
+	if len(parts) == 0 || len(parts) > 4 {
+		return mssqlTargetIdentity{}, fmt.Errorf("SQL Server table name must contain between one and four components, %q given", target)
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			return mssqlTargetIdentity{}, fmt.Errorf("SQL Server table name contains an empty component, %q given", target)
+		}
+	}
+	defaultSchema := "dbo"
+	if len(parts) == 1 {
+		if err := d.db.QueryRowContext(ctx, "SELECT COALESCE(SCHEMA_NAME(), 'dbo')").Scan(&defaultSchema); err != nil {
+			return mssqlTargetIdentity{}, fmt.Errorf("failed to resolve SQL Server default schema: %w", err)
+		}
+	}
+	return resolveMSSQLTargetIdentity(d.server, d.database, defaultSchema, target), nil
+}
+
+func resolveMSSQLTargetIdentity(defaultServer, defaultDatabase, defaultSchema, target string) mssqlTargetIdentity {
+	parts := tablename.Split(target)
+	identity := mssqlTargetIdentity{server: defaultServer, database: defaultDatabase, schema: defaultSchema}
+	switch len(parts) {
+	case 1:
+		identity.table = parts[0]
+	case 2:
+		identity.schema, identity.table = parts[0], parts[1]
+	case 3:
+		identity.database, identity.schema, identity.table = parts[0], parts[1], parts[2]
+	default:
+		identity.server, identity.database, identity.schema, identity.table = parts[len(parts)-4], parts[len(parts)-3], parts[len(parts)-2], parts[len(parts)-1]
+	}
+	return identity
+}
+
+func (d *MSSQLDestination) canonicalCDCTarget(ctx context.Context, target string) (string, error) {
+	identity, err := d.resolveTargetIdentity(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	var actualDatabase, collation string
+	if strings.EqualFold(identity.server, d.server) {
+		query := "SELECT [name], [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1"
+		if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
+			return "", fmt.Errorf("failed to resolve SQL Server database collation for %q: %w", identity.database, err)
+		}
+	} else {
+		var actualServer string
+		if err := d.db.QueryRowContext(ctx, "SELECT [name] FROM [sys].[servers] WHERE [name] = @p1", identity.server).Scan(&actualServer); err != nil {
+			return "", fmt.Errorf("failed to resolve linked SQL Server name %q: %w", identity.server, err)
+		}
+		identity.server = actualServer
+		query := fmt.Sprintf("SELECT [name], [collation_name] FROM %s.[master].[sys].[databases] WHERE [name] = @p1", quoteColumn(identity.server))
+		if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
+			return "", fmt.Errorf("failed to resolve linked SQL Server database collation for %q: %w", identity.database, err)
+		}
+	}
+	identity.database = actualDatabase
+	if !mssqlCollationCaseSensitive(collation) {
+		identity.schema = strings.ToLower(identity.schema)
+		identity.table = strings.ToLower(identity.table)
+	}
+	return destination.CDCTargetKeyDigest(identity.server, identity.database, identity.schema, identity.table), nil
+}
+
+func (d *MSSQLDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
+	return d.canonicalCDCTarget(ctx, table)
+}
+
+func mssqlCollationCaseSensitive(collation string) bool {
+	upper := strings.ToUpper(collation)
+	return strings.Contains(upper, "_CS_") || strings.Contains(upper, "_BIN")
+}
+
+func (d *MSSQLDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	quotedTable := quoteTable(table)
+	query := fmt.Sprintf("SELECT DISTINCT [event_id], [state_generation] FROM %s WHERE [connector_id] = @p1 AND [state_kind] = 'run' AND [state_generation] = (SELECT MAX([state_generation]) FROM %s WHERE [connector_id] = @p1 AND [state_kind] = 'run') ORDER BY [event_id]", quotedTable, quotedTable)
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "Invalid object name") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *MSSQLDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = fmt.Sprintf("@p%d", i+2)
+		args = append(args, eventID)
+	}
+	_, err := d.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE [connector_id] = @p1 AND [event_id] IN (%s)", quoteTable(table), strings.Join(placeholders, ", ")), args...)
+	return err
+}
+
 func (d *MSSQLDestination) GetScheme() string { return "mssql" }
 
 func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseTableName(table)
+	identity, err := d.resolveTargetIdentity(ctx, table)
+	if err != nil {
+		return nil, err
+	}
+	prefix := identity.catalogPrefix(d.server)
+	if prefix != "" {
+		prefix += "."
+	}
 
-	query := `
+	query := fmt.Sprintf(`
 		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
 		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH
-		FROM INFORMATION_SCHEMA.COLUMNS c
-		JOIN INFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+		FROM %sINFORMATION_SCHEMA.COLUMNS c
+		JOIN %sINFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = @p1 AND c.TABLE_NAME = @p2
-		ORDER BY c.ORDINAL_POSITION`
+		ORDER BY c.ORDINAL_POSITION`, prefix, prefix)
 
-	rows, err := d.db.QueryContext(ctx, query, schemaName, tableName)
+	rows, err := d.db.QueryContext(ctx, query, identity.schema, identity.table)
 	if err != nil {
 		config.LogFailedQuery(query, err)
 		return nil, fmt.Errorf("failed to query table schema: %w", err)
@@ -1175,8 +1550,8 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	}
 
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  schemaName,
+		Name:    identity.table,
+		Schema:  identity.schema,
 		Columns: columns,
 	}, nil
 }
@@ -1240,18 +1615,56 @@ func quoteColumns(columns []string) []string {
 }
 
 func filterColumns(columns []string, exclude []string) []string {
-	excludeMap := make(map[string]bool)
-	for _, col := range exclude {
-		excludeMap[strings.ToLower(col)] = true
-	}
-
-	var result []string
+	excluded := matchedMSSQLIdentifiers(columns, exclude)
+	result := make([]string, 0, len(columns))
 	for _, col := range columns {
-		if !excludeMap[strings.ToLower(col)] {
+		if !excluded[col] {
 			result = append(result, col)
 		}
 	}
 	return result
+}
+
+func matchedMSSQLIdentifiers(columns, selected []string) map[string]bool {
+	foldedCounts := make(map[string]int, len(columns))
+	for _, col := range columns {
+		foldedCounts[strings.ToLower(col)]++
+	}
+	exact := make(map[string]bool, len(selected))
+	folded := make(map[string]bool, len(selected))
+	for _, col := range selected {
+		exact[col] = true
+		folded[strings.ToLower(col)] = true
+	}
+
+	matched := make(map[string]bool, len(selected))
+	for _, col := range columns {
+		if exact[col] || (foldedCounts[strings.ToLower(col)] == 1 && folded[strings.ToLower(col)]) {
+			matched[col] = true
+		}
+	}
+	return matched
+}
+
+func mssqlIdentifierIndex(columns []string, selected string) (int, bool) {
+	for i, col := range columns {
+		if col == selected {
+			return i, true
+		}
+	}
+
+	folded := strings.ToLower(selected)
+	matched := -1
+	for i, col := range columns {
+		if strings.ToLower(col) != folded {
+			continue
+		}
+		if matched >= 0 {
+			return 0, false
+		}
+		matched = i
+	}
+	return matched, matched >= 0
 }
 
 func extractTableName(table string) string {
@@ -1297,14 +1710,15 @@ func escapeTableNameForRename(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
-	primaryKeySet := make(map[string]bool, len(primaryKeys))
-	for _, key := range primaryKeys {
-		primaryKeySet[strings.ToLower(key)] = true
+	columnNames := make([]string, len(columns))
+	for i := range columns {
+		columnNames[i] = columns[i].Name
 	}
+	primaryKeySet := matchedMSSQLIdentifiers(columnNames, primaryKeys)
 
 	var colDefs []string
 	for _, col := range columns {
-		colType := mapColumnTypeForCreate(col, primaryKeySet[strings.ToLower(col.Name)])
+		colType := mapColumnTypeForCreate(col, primaryKeySet[col.Name])
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 

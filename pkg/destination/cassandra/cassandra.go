@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,10 +23,19 @@ import (
 	"gopkg.in/inf.v0"
 )
 
+const (
+	cassandraCDCStateBatchSize      = 25
+	cassandraCDCStateBatchByteLimit = 32 * 1024
+	cassandraBatchValueOverhead     = 16
+)
+
 type CassandraDestination struct {
 	session           *gocql.Session
 	keyspace          string
 	replicationFactor int
+	consistency       gocql.Consistency
+	cdcFenceMu        sync.Mutex
+	cdcFenceTables    map[string]bool
 }
 
 func NewCassandraDestination() *CassandraDestination {
@@ -56,6 +66,7 @@ func (d *CassandraDestination) Connect(ctx context.Context, uri string) error {
 	d.session = session
 	d.keyspace = cfg.Keyspace
 	d.replicationFactor = cfg.ReplicationFactor
+	d.consistency = cfg.Consistency
 	config.Debug("[CASSANDRA DEST] Connected to cluster, release_version=%s", version)
 	return nil
 }
@@ -132,11 +143,7 @@ func (d *CassandraDestination) ensureKeyspace(ctx context.Context, keyspace stri
 		return fmt.Errorf("failed to check Cassandra keyspace %q: %w", keyspace, err)
 	}
 
-	createSQL := fmt.Sprintf(
-		"CREATE KEYSPACE %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': %d}",
-		cassandrautil.QuoteIdentifier(keyspace),
-		d.replicationFactor,
-	)
+	createSQL := buildCreateKeyspaceSQL(keyspace, d.replicationFactor)
 	if err := d.Exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create Cassandra keyspace %q: %w", keyspace, err)
 	}
@@ -145,6 +152,14 @@ func (d *CassandraDestination) ensureKeyspace(ctx context.Context, keyspace stri
 	}
 	config.Debug("[CASSANDRA DEST] Created keyspace: %s", keyspace)
 	return nil
+}
+
+func buildCreateKeyspaceSQL(keyspace string, replicationFactor int) string {
+	return fmt.Sprintf(
+		"CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': %d}",
+		cassandrautil.QuoteIdentifier(keyspace),
+		replicationFactor,
+	)
 }
 
 func buildCreateTableSQL(tableRef string, columns []schema.Column, primaryKeys []string) (string, error) {
@@ -191,6 +206,231 @@ func (d *CassandraDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *CassandraDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.writeParallel(ctx, records, opts, nil)
+}
+
+func (d *CassandraDestination) WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	tableRef, err := cassandrautil.QuoteTable(d.keyspace, opts.Table)
+	if err != nil {
+		return err
+	}
+	fenceRef, err := d.ensureCDCStateFenceTable(ctx, opts.Table)
+	if err != nil {
+		return err
+	}
+	for result := range records {
+		if result.Err != nil {
+			return result.Err
+		}
+		if result.Batch == nil {
+			continue
+		}
+		record := result.Batch
+		err := d.writeCDCStateRecordBatch(ctx, tableRef, fenceRef, record)
+		record.Release()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *CassandraDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	claimRef, err := cassandrautil.QuoteTable(d.keyspace, claimTable)
+	if err != nil {
+		return err
+	}
+	canonicalTarget, err := canonicalCassandraTable(d.keyspace, claim.DestinationTable)
+	if err != nil {
+		return err
+	}
+	query := cassandraTargetClaimQuery(claimRef)
+	existing := make(map[string]interface{})
+	applied, err := d.session.Query(query, canonicalTarget, ownerID, time.Now().UTC()).
+		Consistency(d.consistency).SerialConsistency(gocql.Serial).MapScanCASContext(ctx, existing)
+	if err != nil {
+		return fmt.Errorf("failed to claim Cassandra CDC destination target: %w", err)
+	}
+	if applied || fmt.Sprint(existing["connector_id"]) == ownerID {
+		return nil
+	}
+	return fmt.Errorf("CDC destination target %q is already claimed by connector %q", canonicalTarget, existing["connector_id"])
+}
+
+func canonicalCassandraTable(defaultKeyspace, table string) (string, error) {
+	keyspace, tableName, err := cassandrautil.ResolveTableName(defaultKeyspace, table)
+	if err != nil {
+		return "", err
+	}
+	return destination.CDCTargetKey(keyspace, tableName), nil
+}
+
+func cassandraTargetClaimQuery(claimRef string) string {
+	return fmt.Sprintf("INSERT INTO %s (%s, %s, %s) VALUES (?, ?, ?) IF NOT EXISTS", claimRef,
+		cassandrautil.QuoteIdentifier("destination_table"), cassandrautil.QuoteIdentifier("connector_id"), cassandrautil.QuoteIdentifier("claimed_at"))
+}
+
+func (d *CassandraDestination) writeCDCStateRecordBatch(ctx context.Context, tableRef, fenceRef string, record arrow.RecordBatch) error {
+	if record.NumRows() == 0 {
+		return nil
+	}
+	colNames := make([]string, int(record.NumCols()))
+	placeholders := make([]string, int(record.NumCols()))
+	connectorColumn := -1
+	eventColumn := -1
+	kindColumn := -1
+	generationColumn := -1
+	for col := 0; col < int(record.NumCols()); col++ {
+		name := record.ColumnName(col)
+		colNames[col] = cassandrautil.QuoteIdentifier(name)
+		placeholders[col] = "?"
+		switch name {
+		case "connector_id":
+			connectorColumn = col
+		case "event_id":
+			eventColumn = col
+		case "state_kind":
+			kindColumn = col
+		case "state_generation":
+			generationColumn = col
+		}
+	}
+	if connectorColumn < 0 || eventColumn < 0 || kindColumn < 0 || generationColumn < 0 {
+		return errors.New("cassandra CDC state batch is missing fence columns")
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableRef, strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
+	connectorID := fmt.Sprint(arrowToCassandra(record.Column(connectorColumn), 0))
+	fenceInsert := fmt.Sprintf("INSERT INTO %s (%s, %s, %s) VALUES (?, ?, ?)", fenceRef,
+		cassandrautil.QuoteIdentifier("connector_id"), cassandrautil.QuoteIdentifier("state_generation"), cassandrautil.QuoteIdentifier("event_id"))
+	for row := 0; row < int(record.NumRows()); row++ {
+		if fmt.Sprint(arrowToCassandra(record.Column(kindColumn), row)) != "run" {
+			continue
+		}
+		if err := d.session.Query(
+			fenceInsert,
+			fmt.Sprint(arrowToCassandra(record.Column(connectorColumn), row)),
+			arrowToCassandra(record.Column(generationColumn), row),
+			fmt.Sprint(arrowToCassandra(record.Column(eventColumn), row)),
+		).Consistency(d.consistency).ExecContext(ctx); err != nil {
+			return fmt.Errorf("failed to persist Cassandra CDC fence: %w", err)
+		}
+	}
+	rowSizes := make([]int, int(record.NumRows()))
+	for row := 0; row < int(record.NumRows()); row++ {
+		values := cassandraRecordValues(record, row)
+		rowSizes[row] = estimateCassandraBatchEntrySize(insertSQL, values)
+	}
+
+	return runCDCStateInsertChunks(rowSizes, func(start, end, _ int) error {
+		batch := d.session.Batch(gocql.LoggedBatch).Consistency(d.consistency)
+		for row := start; row < end; row++ {
+			if current := fmt.Sprint(arrowToCassandra(record.Column(connectorColumn), row)); current != connectorID {
+				return errors.New("cassandra CDC state batch spans connector partitions")
+			}
+			batch.Query(insertSQL, cassandraRecordValues(record, row)...)
+		}
+		if err := batch.ExecContext(ctx); err != nil {
+			return fmt.Errorf("failed to insert Cassandra CDC state batch: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *CassandraDestination) ensureCDCStateFenceTable(ctx context.Context, table string) (string, error) {
+	keyspace, tableName, err := cassandrautil.ResolveTableName(d.keyspace, table)
+	if err != nil {
+		return "", err
+	}
+	fenceRef := cassandrautil.QuoteIdentifier(keyspace) + "." + cassandrautil.QuoteIdentifier(tableName+"_fence")
+	d.cdcFenceMu.Lock()
+	defer d.cdcFenceMu.Unlock()
+	if d.cdcFenceTables[fenceRef] {
+		return fenceRef, nil
+	}
+	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s text, %s bigint, %s text, PRIMARY KEY ((%s), %s, %s)) WITH CLUSTERING ORDER BY (%s DESC)",
+		fenceRef,
+		cassandrautil.QuoteIdentifier("connector_id"), cassandrautil.QuoteIdentifier("state_generation"), cassandrautil.QuoteIdentifier("event_id"),
+		cassandrautil.QuoteIdentifier("connector_id"), cassandrautil.QuoteIdentifier("state_generation"), cassandrautil.QuoteIdentifier("event_id"),
+		cassandrautil.QuoteIdentifier("state_generation"))
+	if err := d.session.Query(query).ExecContext(ctx); err != nil {
+		return "", fmt.Errorf("failed to prepare Cassandra CDC fence table: %w", err)
+	}
+	if d.cdcFenceTables == nil {
+		d.cdcFenceTables = make(map[string]bool)
+	}
+	d.cdcFenceTables[fenceRef] = true
+	return fenceRef, nil
+}
+
+func cassandraRecordValues(record arrow.RecordBatch, row int) []interface{} {
+	values := make([]interface{}, int(record.NumCols()))
+	for col := 0; col < int(record.NumCols()); col++ {
+		values[col] = arrowToCassandra(record.Column(col), row)
+	}
+	return values
+}
+
+func estimateCassandraBatchEntrySize(statement string, values []interface{}) int {
+	size := len(statement)
+	for _, value := range values {
+		size += cassandraBatchValueOverhead
+		switch typed := value.(type) {
+		case nil:
+		case string:
+			size += len(typed)
+		case []byte:
+			size += len(typed)
+		case time.Time:
+			size += 16
+		default:
+			size += len(fmt.Sprint(typed))
+		}
+	}
+	return size
+}
+
+func runCDCStateInsertChunks(rowSizes []int, fn func(start, end, estimatedBytes int) error) error {
+	for start := 0; start < len(rowSizes); {
+		end := start
+		payload := 0
+		for end < len(rowSizes) && end-start < cassandraCDCStateBatchSize {
+			rowSize := rowSizes[end]
+			if rowSize > cassandraCDCStateBatchByteLimit {
+				return fmt.Errorf("cassandra CDC state row requires %d bytes, exceeds %d-byte batch limit", rowSize, cassandraCDCStateBatchByteLimit)
+			}
+			if end > start && payload+rowSize > cassandraCDCStateBatchByteLimit {
+				break
+			}
+			payload += rowSize
+			end++
+		}
+		if err := fn(start, end, payload); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+func runCDCStateChunks(total int, fn func(start, end int) error) error {
+	for start := 0; start < total; start += cassandraCDCStateBatchSize {
+		end := min(start+cassandraCDCStateBatchSize, total)
+		if err := fn(start, end); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *CassandraDestination) ValidateManagedCDCState() error {
+	return errors.New("cassandra destination does not support managed CDC because stale in-flight writes cannot be fenced for absent or truncated keys")
+}
+
+func (d *CassandraDestination) writeParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, consistency *gocql.Consistency) error {
 	parallelism := opts.Parallelism
 	if parallelism <= 0 {
 		parallelism = 4
@@ -234,7 +474,7 @@ func (d *CassandraDestination) WriteParallel(ctx context.Context, records <-chan
 					continue
 				}
 
-				rows, err := d.writeRecordBatch(ctx, tableRef, record)
+				rows, err := d.writeRecordBatch(ctx, tableRef, record, consistency)
 				record.Release()
 				results <- writeResult{batchNum: myBatch, rows: rows, err: err}
 				if err != nil {
@@ -270,7 +510,7 @@ func (d *CassandraDestination) WriteParallel(ctx context.Context, records <-chan
 	return nil
 }
 
-func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef string, record arrow.RecordBatch) (int64, error) {
+func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef string, record arrow.RecordBatch, consistency *gocql.Consistency) (int64, error) {
 	if record.NumRows() == 0 {
 		return 0, nil
 	}
@@ -299,7 +539,11 @@ func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef st
 		for col := 0; col < int(record.NumCols()); col++ {
 			values[col] = arrowToCassandra(record.Column(col), row)
 		}
-		if err := d.session.Query(insertSQL, values...).ExecContext(ctx); err != nil {
+		query := d.session.Query(insertSQL, values...)
+		if consistency != nil {
+			query.Consistency(*consistency)
+		}
+		if err := query.ExecContext(ctx); err != nil {
 			return int64(row), fmt.Errorf("failed to insert Cassandra row: %w", err)
 		}
 	}
@@ -498,16 +742,16 @@ func (d *CassandraDestination) LoadCDCState(ctx context.Context, table, connecto
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s FROM %s WHERE %s = ?",
-		cassandrautil.QuoteIdentifier("source_table"), cassandrautil.QuoteIdentifier("state_kind"),
+	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s, %s, %s FROM %s WHERE %s = ?",
+		cassandrautil.QuoteIdentifier("event_id"), cassandrautil.QuoteIdentifier("source_table"), cassandrautil.QuoteIdentifier("destination_table"), cassandrautil.QuoteIdentifier("state_kind"),
 		cassandrautil.QuoteIdentifier("state_generation"), cassandrautil.QuoteIdentifier("state_status"),
 		cassandrautil.QuoteIdentifier(destination.CDCLSNColumn), tableRef, cassandrautil.QuoteIdentifier("connector_id"))
-	iter := d.session.Query(query, connectorID).IterContext(ctx)
+	iter := d.session.Query(query, connectorID).Consistency(d.consistency).IterContext(ctx)
 
 	var entries []destination.CDCStateEntry
 	for {
 		var entry destination.CDCStateEntry
-		if !iter.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position) {
+		if !iter.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position) {
 			break
 		}
 		entries = append(entries, entry)
@@ -520,6 +764,137 @@ func (d *CassandraDestination) LoadCDCState(ctx context.Context, table, connecto
 	}
 	return entries, nil
 }
+
+func (d *CassandraDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	fenceRef, err := d.ensureCDCStateFenceTable(ctx, table)
+	if err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	connectorCol := cassandrautil.QuoteIdentifier("connector_id")
+	generationCol := cassandrautil.QuoteIdentifier("state_generation")
+	eventCol := cassandrautil.QuoteIdentifier("event_id")
+	latestQuery := cassandraFenceLatestQuery(fenceRef)
+	var generation int64
+	err = d.session.Query(latestQuery, connectorID).Consistency(d.consistency).ScanContext(ctx, &generation)
+	if errors.Is(err, gocql.ErrNotFound) {
+		legacy, legacyErr := d.loadLegacyCDCStateFence(ctx, table, connectorID)
+		if legacyErr != nil || legacy.Generation == 0 {
+			return legacy, legacyErr
+		}
+		insert := fmt.Sprintf("INSERT INTO %s (%s, %s, %s) VALUES (?, ?, ?)", fenceRef, connectorCol, generationCol, eventCol)
+		for _, eventID := range legacy.RunEventIDs {
+			if err := d.session.Query(insert, connectorID, legacy.Generation, eventID).Consistency(d.consistency).ExecContext(ctx); err != nil {
+				return destination.CDCStateFence{}, fmt.Errorf("failed to migrate Cassandra CDC fence: %w", err)
+			}
+		}
+		return legacy, nil
+	}
+	if err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	query := cassandraFenceGenerationQuery(fenceRef)
+	iter := d.session.Query(query, connectorID, generation).Consistency(d.consistency).IterContext(ctx)
+	fence := destination.CDCStateFence{Generation: generation}
+	var eventID string
+	for iter.Scan(&eventID) {
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	if err := iter.Close(); err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	sort.Strings(fence.RunEventIDs)
+	return fence, nil
+}
+
+func cassandraFenceLatestQuery(fenceRef string) string {
+	generationCol := cassandrautil.QuoteIdentifier("state_generation")
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = ? ORDER BY %s DESC LIMIT 1", generationCol, fenceRef, cassandrautil.QuoteIdentifier("connector_id"), generationCol)
+}
+
+func cassandraFenceGenerationQuery(fenceRef string) string {
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = ? AND %s = ?",
+		cassandrautil.QuoteIdentifier("event_id"), fenceRef, cassandrautil.QuoteIdentifier("connector_id"), cassandrautil.QuoteIdentifier("state_generation"))
+}
+
+func (d *CassandraDestination) loadLegacyCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	tableRef, err := cassandrautil.QuoteTable(d.keyspace, table)
+	if err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	connectorCol := cassandrautil.QuoteIdentifier("connector_id")
+	kindCol := cassandrautil.QuoteIdentifier("state_kind")
+	generationCol := cassandrautil.QuoteIdentifier("state_generation")
+	maxQuery := fmt.Sprintf("SELECT MAX(%s) FROM %s WHERE %s = ? AND %s = ? ALLOW FILTERING", generationCol, tableRef, connectorCol, kindCol)
+	var generation *int64
+	maxIter := d.session.Query(maxQuery, connectorID, "run").Consistency(d.consistency).IterContext(ctx)
+	if !maxIter.Scan(&generation) {
+		err := maxIter.Close()
+		if isCassandraMissingTableError(err) {
+			return destination.CDCStateFence{}, nil
+		}
+		if err == nil {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	if err := maxIter.Close(); err != nil {
+		if isCassandraMissingTableError(err) {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	if generation == nil {
+		return destination.CDCStateFence{}, nil
+	}
+
+	eventCol := cassandrautil.QuoteIdentifier("event_id")
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ? AND %s = ? AND %s = ? ALLOW FILTERING", eventCol, tableRef, connectorCol, kindCol, generationCol)
+	iter := d.session.Query(query, connectorID, "run", *generation).Consistency(d.consistency).IterContext(ctx)
+	fence := destination.CDCStateFence{Generation: *generation}
+	var eventID string
+	for iter.Scan(&eventID) {
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	if err := iter.Close(); err != nil {
+		if isCassandraMissingTableError(err) {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	sort.Strings(fence.RunEventIDs)
+	return fence, nil
+}
+
+func isCassandraMissingTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "unconfigured table") || strings.Contains(message, "does not exist") || strings.Contains(message, "keyspace")
+}
+
+func (d *CassandraDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	tableRef, err := cassandrautil.QuoteTable(d.keyspace, table)
+	if err != nil {
+		return err
+	}
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = ? AND %s = ?", tableRef, cassandrautil.QuoteIdentifier("connector_id"), cassandrautil.QuoteIdentifier("event_id"))
+	return runCDCStateChunks(len(eventIDs), func(start, end int) error {
+		batch := d.session.Batch(gocql.LoggedBatch).Consistency(d.consistency)
+		for _, eventID := range eventIDs[start:end] {
+			batch.Query(query, connectorID, eventID)
+		}
+		if err := batch.ExecContext(ctx); err != nil {
+			return fmt.Errorf("failed to delete Cassandra CDC state batch: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *CassandraDestination) CDCStatePruneBatchSize() int { return 10_000 }
 
 func (d *CassandraDestination) DeleteInsertTable(_ context.Context, _ destination.DeleteInsertOptions) error {
 	return errors.New("delete+insert strategy is not supported for cassandra destination")

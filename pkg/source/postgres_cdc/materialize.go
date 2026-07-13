@@ -34,7 +34,7 @@ func changesToBatch(changes []Change, tableSchema *schema.TableSchema) (arrow.Re
 			arrowconv.AppendValue(builders[colIdx], resolveColumnValue(change, colIdx))
 		}
 
-		builders[nSource].(*array.StringBuilder).Append(FormatLSN(change.LSN))
+		builders[nSource].(*array.StringBuilder).Append(FormatChangeLSN(change.LSN, change.Sequence))
 		builders[nSource+1].(*array.BooleanBuilder).Append(change.Operation == "DELETE")
 		perRowSyncedAt := syncedAt.Add(time.Duration(i) * time.Microsecond)
 		builders[nSource+2].(*array.TimestampBuilder).Append(arrow.Timestamp(perRowSyncedAt.UnixMicro()))

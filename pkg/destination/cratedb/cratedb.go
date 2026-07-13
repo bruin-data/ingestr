@@ -24,8 +24,9 @@ import (
 const maxUnnestBatch = 50000
 
 type CrateDBDestination struct {
-	pool *pgxpool.Pool
-	uri  string
+	pool                    *pgxpool.Pool
+	uri                     string
+	cdcStateRefreshOverride func(context.Context, string) error
 }
 
 func NewCrateDBDestination() *CrateDBDestination {
@@ -113,7 +114,7 @@ func (d *CrateDBDestination) ensureSchemaExists(_ context.Context, _ string) err
 }
 
 func (d *CrateDBDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	return d.writeInternal(ctx, records, opts, 1)
+	return d.writeInternal(ctx, records, opts, 1, false)
 }
 
 func (d *CrateDBDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -121,10 +122,14 @@ func (d *CrateDBDestination) WriteParallel(ctx context.Context, records <-chan s
 	if parallelism <= 0 {
 		parallelism = 4
 	}
-	return d.writeInternal(ctx, records, opts, parallelism)
+	return d.writeInternal(ctx, records, opts, parallelism, false)
 }
 
-func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, parallelism int) error {
+func (d *CrateDBDestination) WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.writeInternal(ctx, records, opts, 1, true)
+}
+
+func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, parallelism int, requireRefresh bool) error {
 	config.Debug("[CRATEDB] Starting write to %s with %d workers", opts.Table, parallelism)
 	startTotal := time.Now()
 
@@ -187,7 +192,13 @@ func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan s
 		return fmt.Errorf("write failed: %w", firstErr)
 	}
 
-	d.refreshTable(ctx, opts.Table)
+	if requireRefresh {
+		if err := d.refreshCDCStateTable(ctx, opts.Table); err != nil {
+			return fmt.Errorf("failed to refresh CDC state table %s: %w", opts.Table, err)
+		}
+	} else {
+		d.refreshTable(ctx, opts.Table)
+	}
 
 	config.Debug("[CRATEDB] Total: %d rows written in %v (%.0f rows/sec)",
 		totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
@@ -408,7 +419,7 @@ func (d *CrateDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (st
 func (d *CrateDBDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
 	d.refreshTable(ctx, table)
 	query := fmt.Sprintf(`
-		SELECT "source_table", "state_kind", "state_generation", "state_status", "_cdc_lsn"
+		SELECT "event_id", "source_table", "destination_table", "state_kind", "state_generation", "state_status", "_cdc_lsn"
 		FROM %s WHERE "connector_id" = $1`, destination.QuoteTableName(table))
 	rows, err := d.pool.Query(ctx, query, connectorID)
 	if err != nil {
@@ -422,12 +433,108 @@ func (d *CrateDBDestination) LoadCDCState(ctx context.Context, table, connectorI
 	var entries []destination.CDCStateEntry
 	for rows.Next() {
 		var entry destination.CDCStateEntry
-		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func (d *CrateDBDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	parts := tablename.Split(claim.DestinationTable)
+	tableName := parts[len(parts)-1]
+	var schemaName string
+	if len(parts) > 1 {
+		schemaName = parts[len(parts)-2]
+	} else if err := d.pool.QueryRow(ctx, "SELECT current_schema").Scan(&schemaName); err != nil {
+		return fmt.Errorf("failed to resolve effective CrateDB schema for CDC target: %w", err)
+	}
+	canonicalTarget := destination.CDCTargetKey(schemaName, tableName)
+	insert := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT ("destination_table") DO NOTHING`, destination.QuoteTableName(claimTable))
+	if _, err := d.pool.Exec(ctx, insert, canonicalTarget, ownerID); err != nil {
+		return err
+	}
+	if err := d.refreshTableRequired(ctx, claimTable); err != nil {
+		return err
+	}
+	var owner string
+	query := fmt.Sprintf(`SELECT "connector_id" FROM %s WHERE "destination_table" = $1`, destination.QuoteTableName(claimTable))
+	if err := d.pool.QueryRow(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return nil
+}
+
+func (d *CrateDBDestination) CDCTargetIncarnation(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("CrateDB does not expose a durable physical table incarnation")
+}
+
+func (d *CrateDBDestination) ValidateManagedCDCState() error {
+	return errors.New("CrateDB does not expose a durable physical table incarnation")
+}
+
+func (d *CrateDBDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	if err := d.refreshTableRequired(ctx, table); err != nil {
+		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, fmt.Errorf("failed to refresh CDC state fence: %w", err)
+	}
+	quotedTable := destination.QuoteTableName(table)
+	query := fmt.Sprintf(`
+		SELECT DISTINCT "event_id", "state_generation" FROM %s
+		WHERE "connector_id" = $1 AND "state_kind" = 'run'
+		  AND "state_generation" = (
+			SELECT MAX("state_generation") FROM %s
+			WHERE "connector_id" = $1 AND "state_kind" = 'run'
+		  ) ORDER BY "event_id"`, quotedTable, quotedTable)
+	rows, err := d.pool.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown") || strings.Contains(err.Error(), "RelationUnknown") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer rows.Close()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *CrateDBDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, eventID)
+	}
+	query := fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = $1 AND "event_id" IN (%s)`, destination.QuoteTableName(table), strings.Join(placeholders, ", "))
+	_, err := d.pool.Exec(ctx, query, args...)
+	if err == nil {
+		d.refreshTable(ctx, table)
+	}
+	return err
 }
 
 func (d *CrateDBDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -647,16 +754,30 @@ func (d *CrateDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *CrateDBDestination) SupportsAtomicSwap() bool           { return false }
 
 func (d *CrateDBDestination) refreshTable(ctx context.Context, table string) {
-	sql := fmt.Sprintf("REFRESH TABLE %s", destination.QuoteTableName(table))
-	if _, err := d.pool.Exec(ctx, sql); err != nil {
+	if err := d.refreshTableRequired(ctx, table); err != nil {
 		config.Debug("[CRATEDB] REFRESH TABLE %s failed: %v (non-fatal)", table, err)
 	}
+}
+
+func (d *CrateDBDestination) refreshCDCStateTable(ctx context.Context, table string) error {
+	if d.cdcStateRefreshOverride != nil {
+		return d.cdcStateRefreshOverride(ctx, table)
+	}
+	return d.refreshTableRequired(ctx, table)
+}
+
+func (d *CrateDBDestination) refreshTableRequired(ctx context.Context, table string) error {
+	sql := fmt.Sprintf("REFRESH TABLE %s", destination.QuoteTableName(table))
+	if _, err := d.pool.Exec(ctx, sql); err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- helpers ---
 
 func parseSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
+	parts := tablename.Split(table)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}

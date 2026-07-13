@@ -146,12 +146,10 @@ func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batc
 	if safe <= lastEmitted {
 		return lastEmitted
 	}
-	select {
-	case results <- source.RecordBatchResult{CommitToken: checkpointCommitToken(safe)}:
+	if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: checkpointCommitToken(safe)}); err == nil {
 		return safe
-	case <-ctx.Done():
-		return lastEmitted
 	}
+	return lastEmitted
 }
 
 func checkpointCommitToken(lsn pglogrepl.LSN) source.CDCStateCommitToken {
@@ -171,20 +169,19 @@ func snapshotCommitToken(lsn pglogrepl.LSN, snapshots map[string]string) source.
 }
 
 // standbyUpdate computes the standby status positions to report to Postgres.
-// In streaming mode the flushed/applied positions track the confirmed durable
-// LSN (committed) rather than the received position, so the slot only advances
-// once data is durable. committed==0 (nothing confirmed yet) falls back to the
-// replication start LSN so pglogrepl does not default the flush position to the
-// received position.
+// The flushed/applied positions track the confirmed durable LSN rather than
+// the received position, so the slot only advances once data is durable.
+// committed==0 falls back to the replication start LSN. Positions must always
+// be explicit because pglogrepl replaces zero flush/apply with write.
 func standbyUpdate(streaming bool, received, committed, start pglogrepl.LSN) pglogrepl.StandbyStatusUpdate {
-	ssu := pglogrepl.StandbyStatusUpdate{WALWritePosition: received}
-	if !streaming {
-		return ssu
+	flush := pglogrepl.LSN(0)
+	if streaming {
+		flush = committed
 	}
-	flush := committed
 	if flush == 0 {
 		flush = start
 	}
+	ssu := pglogrepl.StandbyStatusUpdate{WALWritePosition: max(received, flush)}
 	ssu.WALFlushPosition = flush
 	ssu.WALApplyPosition = flush
 	return ssu

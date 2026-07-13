@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -26,13 +27,14 @@ import (
 )
 
 type MySQLDestination struct {
-	db            *sql.DB
-	uri           string
-	database      string
-	isVitess      bool
-	vitessBackend bool
-	useLoadData   bool
-	scheme        string
+	db                  *sql.DB
+	uri                 string
+	database            string
+	isVitess            bool
+	vitessBackend       bool
+	useLoadData         bool
+	scheme              string
+	lowerCaseTableNames int
 }
 
 const (
@@ -80,6 +82,12 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping MySQL: %w", err)
 	}
 
+	var lowerCaseTableNames int
+	if err := db.QueryRowContext(ctx, "SELECT @@lower_case_table_names").Scan(&lowerCaseTableNames); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("failed to read MySQL lower_case_table_names: %w", err)
+	}
+
 	scheme := ""
 	if u, err := mysqluri.ParseURL(uri); err == nil {
 		scheme = u.Scheme
@@ -112,6 +120,7 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 	d.database = database
 	d.isVitess = d.vitessBackend
 	d.useLoadData = !d.vitessBackend
+	d.lowerCaseTableNames = lowerCaseTableNames
 	if scheme != "" {
 		d.scheme = scheme
 	}
@@ -241,9 +250,12 @@ func (d *MySQLDestination) ensureDatabaseExists(ctx context.Context, database st
 }
 
 func splitDatabaseTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
+	parts := tablename.Split(table)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
+	}
+	if len(parts) == 1 {
+		return "", parts[0]
 	}
 	return "", table
 }
@@ -269,6 +281,16 @@ func (d *MySQLDestination) TruncateTable(ctx context.Context, table string) erro
 	return nil
 }
 
+func (d *MySQLDestination) TruncateCDCTable(ctx context.Context, table string) error {
+	deleteSQL := fmt.Sprintf("DELETE FROM %s", quoteTable(table))
+	if _, err := d.db.ExecContext(ctx, deleteSQL); err != nil {
+		config.LogFailedQuery(deleteSQL, err)
+		return fmt.Errorf("failed to truncate table %s: %w", table, err)
+	}
+	config.Debug("[MYSQL] Truncated table: %s", table)
+	return nil
+}
+
 func (d *MySQLDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	return d.WriteParallel(ctx, records, opts)
 }
@@ -286,6 +308,9 @@ func (d *MySQLDestination) writeSequential(ctx context.Context, records <-chan s
 
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
 		}
 
@@ -595,6 +620,12 @@ func isLoadDataLocalDisabledError(err error) bool {
 
 func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+	if err := tablename.TwoLevel("mysql").CheckName(opts.StagingTable); err != nil {
+		return err
+	}
+	if err := tablename.TwoLevel("mysql").CheckName(opts.TargetTable); err != nil {
+		return err
+	}
 
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
@@ -603,6 +634,12 @@ func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	if targetDB == "" {
 		targetDB = d.database
 	}
+	stagingDB, stagingTableName := splitDatabaseTable(stagingTable)
+	if stagingDB == "" {
+		stagingDB = d.database
+	}
+	targetRef := quoteMySQLTable(targetDB, targetTableName)
+	stagingRef := quoteMySQLTable(stagingDB, stagingTableName)
 
 	// Replace only PrepareTables the staging side, so the target database may
 	// not exist yet. RENAME TABLE doesn't auto-create databases.
@@ -612,10 +649,7 @@ func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 
 	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetTableName, time.Now().UnixNano())
 	oldTableName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("mysql"))
-	oldTable := oldTableName
-	if targetDB != "" {
-		oldTable = targetDB + "." + oldTableName
-	}
+	oldRef := quoteMySQLTable(targetDB, oldTableName)
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -635,22 +669,22 @@ func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 
 	if exists > 0 {
 		renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s, %s TO %s",
-			quoteTable(targetTable), quoteTable(oldTable),
-			quoteTable(stagingTable), quoteTable(targetTable))
+			targetRef, oldRef,
+			stagingRef, targetRef)
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			_ = tx.Rollback()
 			return fmt.Errorf("failed to rename tables: %w", err)
 		}
 
-		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTable(oldTable))
+		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", oldRef)
 		if _, err := tx.ExecContext(ctx, dropOldSQL); err != nil {
 			config.LogFailedQuery(dropOldSQL, err)
 			_ = tx.Rollback()
 			return fmt.Errorf("failed to drop old table: %w", err)
 		}
 	} else {
-		renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s", quoteTable(stagingTable), quoteTable(targetTable))
+		renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s", stagingRef, targetRef)
 		if _, err := tx.ExecContext(ctx, renameSQL); err != nil {
 			config.LogFailedQuery(renameSQL, err)
 			_ = tx.Rollback()
@@ -666,12 +700,22 @@ func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	return nil
 }
 
+func quoteMySQLTable(database, table string) string {
+	quotedTable := fmt.Sprintf("`%s`", strings.ReplaceAll(table, "`", "``"))
+	if database == "" {
+		return quotedTable
+	}
+	return fmt.Sprintf("`%s`.%s", strings.ReplaceAll(database, "`", "``"), quotedTable)
+}
+
 func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
 	columns := opts.Columns
 	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	targetColumns := destination.DestinationColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKColumns := filterColumns(targetColumns, opts.PrimaryKeys)
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -711,12 +755,16 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	}
 
 	if len(nonPKColumns) > 0 {
+		updateSet := buildUpdateSet(nonPKColumns, "target", "source")
+		if isCDC {
+			updateSet = buildCDCUpdateSet(nonPKColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target INNER JOIN %s ON %s SET %s`,
 			quoteTable(opts.TargetTable),
 			upsertSource,
 			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
-			buildUpdateSet(nonPKColumns, "target", "source"),
+			updateSet,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -729,8 +777,8 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	insertSQL := fmt.Sprintf(
 		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		quoteTable(opts.TargetTable),
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedTargetColumns, ", "),
+		strings.Join(quotedTargetColumns, ", "),
 		upsertSource,
 		quoteTable(opts.TargetTable),
 		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
@@ -1007,6 +1055,32 @@ func (d *MySQLDestination) ManagedStagingPolicy() destination.ReplaceStagingPoli
 	return d.ReplaceStagingPolicy()
 }
 
+func (d *MySQLDestination) LegacyCDCStateTables(ctx context.Context, stateTable string) ([]string, error) {
+	query := `SELECT table_schema
+		FROM information_schema.columns
+		WHERE table_name = ?
+		GROUP BY table_schema
+		HAVING COUNT(DISTINCT CASE WHEN column_name IN
+			('event_id', 'state_version', 'connector_id', 'source_table', 'destination_table',
+			 'state_kind', 'state_generation', 'state_status', '_cdc_lsn', 'recorded_at')
+			THEN column_name END) = 10
+		ORDER BY table_schema`
+	rows, err := d.db.QueryContext(ctx, query, stateTable)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var tables []string
+	for rows.Next() {
+		var schemaName string
+		if err := rows.Scan(&schemaName); err != nil {
+			return nil, err
+		}
+		tables = append(tables, schemaName+"."+stateTable)
+	}
+	return tables, rows.Err()
+}
+
 func (d *MySQLDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *MySQLDestination) SupportsAppendStrategy() bool       { return true }
 func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }
@@ -1014,6 +1088,7 @@ func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }
 func (d *MySQLDestination) SupportsCDCMerge() bool             { return true }
+func (d *MySQLDestination) SupportsCDCUnchangedCols() bool     { return true }
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
@@ -1033,7 +1108,7 @@ func (d *MySQLDestination) GetMaxCDCLSN(ctx context.Context, table string) (stri
 }
 
 func (d *MySQLDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
-	query := fmt.Sprintf("SELECT `source_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s WHERE `connector_id` = ?", quoteTable(table))
+	query := fmt.Sprintf("SELECT `event_id`, `source_table`, `destination_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s WHERE `connector_id` = ?", quoteTable(table))
 	rows, err := d.db.QueryContext(ctx, query, connectorID)
 	if err != nil {
 		if isMySQLMissingTableError(err) {
@@ -1046,12 +1121,148 @@ func (d *MySQLDestination) LoadCDCState(ctx context.Context, table, connectorID 
 	var entries []destination.CDCStateEntry
 	for rows.Next() {
 		var entry destination.CDCStateEntry
-		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func (d *MySQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	database, tableName := splitDatabaseTable(claim.DestinationTable)
+	if database == "" {
+		database = d.database
+	}
+	canonicalTarget := canonicalMySQLTarget(database, tableName, d.lowerCaseTableNames)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	insert := fmt.Sprintf("INSERT INTO %s (`destination_table`, `connector_id`, `claimed_at`) VALUES (?, ?, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE `destination_table` = VALUES(`destination_table`)", quoteTable(claimTable))
+	if _, err := tx.ExecContext(ctx, insert, canonicalTarget, ownerID); err != nil {
+		return err
+	}
+	var owner string
+	query := fmt.Sprintf("SELECT `connector_id` FROM %s WHERE `destination_table` = ?", quoteTable(claimTable))
+	if err := tx.QueryRowContext(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return tx.Commit()
+}
+
+func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	if d.isVitess {
+		return "", false, errors.New("vitess and planetscale do not expose a durable physical table incarnation")
+	}
+	database, tableName := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
+	var engine string
+	err := d.db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`, database, tableName).Scan(&engine)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to inspect MySQL CDC target %s: %w", table, err)
+	}
+	if !strings.EqualFold(engine, "InnoDB") {
+		return "", false, fmt.Errorf("MySQL CDC target %s uses %s, which has no supported durable table incarnation", table, engine)
+	}
+
+	if d.lowerCaseTableNames != 0 {
+		database = strings.ToLower(database)
+		tableName = strings.ToLower(tableName)
+	}
+	internalName := database + "/" + tableName
+	var tableID uint64
+	err = d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
+	if err != nil {
+		err = d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read durable InnoDB table identity for %s: %w", table, err)
+	}
+	return mysqlTableIncarnation(database, tableName, tableID), true, nil
+}
+
+func mysqlTableIncarnation(database, table string, tableID uint64) string {
+	return destination.CDCTargetKey(database, table, strconv.FormatUint(tableID, 10))
+}
+
+func (d *MySQLDestination) ValidateManagedCDCState() error {
+	if d.isVitess {
+		return errors.New("vitess and planetscale do not expose a durable physical table incarnation")
+	}
+	return nil
+}
+
+func canonicalMySQLTarget(database, table string, lowerCaseTableNames int) string {
+	if lowerCaseTableNames != 0 {
+		database = strings.ToLower(database)
+		table = strings.ToLower(table)
+	}
+	return destination.CDCTargetKey(database, table)
+}
+
+func (d *MySQLDestination) CanonicalCDCTarget(_ context.Context, table string) (string, error) {
+	database, tableName := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
+	return canonicalMySQLTarget(database, tableName, d.lowerCaseTableNames), nil
+}
+
+func (d *MySQLDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	quotedTable := quoteTable(table)
+	query := fmt.Sprintf("SELECT DISTINCT `event_id`, `state_generation` FROM %s WHERE `connector_id` = ? AND `state_kind` = 'run' AND `state_generation` = (SELECT MAX(`state_generation`) FROM %s WHERE `connector_id` = ? AND `state_kind` = 'run') ORDER BY `event_id`", quotedTable, quotedTable)
+	rows, err := d.db.QueryContext(ctx, query, connectorID, connectorID)
+	if err != nil {
+		if isMySQLMissingTableError(err) {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *MySQLDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = "?"
+		args = append(args, eventID)
+	}
+	_, err := d.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE `connector_id` = ? AND `event_id` IN (%s)", quoteTable(table), strings.Join(placeholders, ", ")), args...)
+	return err
 }
 
 // isMySQLMissingTableError reports whether err means the queried table does not
@@ -1254,6 +1465,29 @@ func buildUpdateSet(columns []string, targetAlias, sourceAlias string) string {
 	return strings.Join(sets, ", ")
 }
 
+func buildCDCUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
+	sets := make([]string, len(columns))
+	for i, col := range columns {
+		target := targetAlias + "." + quoteColumn(col)
+		source := sourceAlias + "." + quoteColumn(col)
+		if destination.IsCDCColumn(col) {
+			sets[i] = target + " = " + source
+			continue
+		}
+		unchanged := fmt.Sprintf(
+			"JSON_CONTAINS(COALESCE(%s, '[]'), JSON_QUOTE(%s))",
+			unchangedRef,
+			mysqlUTF8Expression(col),
+		)
+		sets[i] = fmt.Sprintf("%s = CASE WHEN %s THEN %s ELSE %s END", target, unchanged, target, source)
+	}
+	return strings.Join(sets, ", ")
+}
+
+func mysqlUTF8Expression(value string) string {
+	return "CONVERT(0x" + hex.EncodeToString([]byte(value)) + " USING utf8mb4)"
+}
+
 func quoteColumn(col string) string {
 	return fmt.Sprintf("`%s`", strings.ReplaceAll(col, "`", "``"))
 }
@@ -1278,8 +1512,12 @@ func extractTableName(table string) string {
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
+	binaryClaimKey := isCDCTargetClaimTable(columns, primaryKeys)
 	for _, col := range columns {
 		colType := MapDataTypeToMySQL(col)
+		if binaryClaimKey && col.Name == "destination_table" {
+			colType += " CHARACTER SET ascii COLLATE ascii_bin"
+		}
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 
@@ -1295,6 +1533,20 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 
 	sql += "\n)"
 	return sql
+}
+
+func isCDCTargetClaimTable(columns []schema.Column, primaryKeys []string) bool {
+	if len(columns) != 3 || len(primaryKeys) != 1 || primaryKeys[0] != "destination_table" {
+		return false
+	}
+	want := map[string]bool{"destination_table": false, "connector_id": false, "claimed_at": false}
+	for _, col := range columns {
+		if _, ok := want[col.Name]; !ok {
+			return false
+		}
+		want[col.Name] = true
+	}
+	return want["destination_table"] && want["connector_id"] && want["claimed_at"]
 }
 
 func extractValue(arr arrow.Array, idx int) interface{} {

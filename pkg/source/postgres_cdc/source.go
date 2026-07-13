@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,8 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// keepaliveInterval bounds how often we ping the walsender with a
-// WALWritePosition-only standby status update during the destination-write
+// keepaliveInterval bounds how often we ping the walsender with a standby
+// status update during the destination-write
 // phase. Postgres's default wal_sender_timeout is 60s and any send from the
 // client resets it server-side; pinging every 5s leaves ample margin if the
 // server is configured lower (e.g. 10s) without flooding the connection.
@@ -78,7 +79,7 @@ type PostgresCDCSource struct {
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
 	pos *streamPosition
-	// caughtUp holds the LSN a batch run streamed up to (its targetLSN). It is
+	// caughtUp holds the LSN of the logical barrier decoded by a batch run. It is
 	// sent as a final standby status update by FinalizeBatch so the slot's
 	// confirmed_flush_lsn advances even when the run catches up before the
 	// replicator's 10s standby timer fires. Stays zero in streaming mode.
@@ -102,23 +103,92 @@ type PostgresCDCSource struct {
 	keylessWarnedMu sync.Mutex
 	keylessWarned   map[string]bool
 
-	stateMu           sync.Mutex
-	snapshotPositions map[string]string
+	stateMu              sync.Mutex
+	snapshotPositions    map[string]string
+	snapshotIncarnations map[string]string
+	snapshotSchemas      map[string]string
+
+	connectorLeaseMu  sync.Mutex
+	connectorLease    *postgresCDCLease
+	connectorIdentity source.ConnectorIdentity
+	legacySlots       map[string]bool
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
 	return &PostgresCDCSource{
-		pos:               newStreamPosition(),
-		caughtUp:          newStreamPosition(),
-		lag:               newLagState(),
-		snapshotPositions: make(map[string]string),
+		pos:                  newStreamPosition(),
+		caughtUp:             newStreamPosition(),
+		lag:                  newLagState(),
+		snapshotPositions:    make(map[string]string),
+		snapshotIncarnations: make(map[string]string),
+		snapshotSchemas:      make(map[string]string),
 	}
 }
 
 var (
-	_ source.LagReporter      = (*PostgresCDCSource)(nil)
-	_ source.CDCStateProvider = (*PostgresCDCSource)(nil)
+	_ source.LagReporter                    = (*PostgresCDCSource)(nil)
+	_ source.CDCStateProvider               = (*PostgresCDCSource)(nil)
+	_ source.ConnectorLeaser                = (*PostgresCDCSource)(nil)
+	_ source.ConnectorIdentityProvider      = (*PostgresCDCSource)(nil)
+	_ source.ConnectorPreflightValidator    = (*PostgresCDCSource)(nil)
+	_ source.ConnectorPreparer              = (*PostgresCDCSource)(nil)
+	_ source.TableExistenceChecker          = (*PostgresCDCSource)(nil)
+	_ source.TableSchemaFingerprintProvider = (*PostgresCDCSource)(nil)
+	_ source.CDCLegacySlotFinalizer         = (*PostgresCDCSource)(nil)
 )
+
+func (s *PostgresCDCSource) ValidateConnectorPreflight(ctx context.Context, opts source.ConnectorPreflightOptions) error {
+	if s.cdcConfig.Mode == ModeBatch && !opts.Streaming {
+		if err := validateBatchBarrierSupport(s.serverVersion); err != nil {
+			return err
+		}
+	}
+	return s.validatePublicationShape(ctx)
+}
+
+func (s *PostgresCDCSource) validatePublicationShape(ctx context.Context) error {
+	if s.managedPublication || s.serverVersion < 150000 {
+		return nil
+	}
+	rows, err := s.queryPool.Query(ctx, `
+		SELECT n.nspname, c.relname,
+		       pr.prqual IS NOT NULL AS has_row_filter,
+		       pr.prattrs IS NOT NULL AS has_column_list
+		FROM pg_publication_rel pr
+		JOIN pg_publication p ON p.oid = pr.prpubid
+		JOIN pg_class c ON c.oid = pr.prrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE p.pubname = $1 AND (pr.prqual IS NOT NULL OR pr.prattrs IS NOT NULL)
+		ORDER BY n.nspname, c.relname
+	`, s.cdcConfig.Publication)
+	if err != nil {
+		return fmt.Errorf("failed to validate PostgreSQL publication %q: %w", s.cdcConfig.Publication, err)
+	}
+	defer rows.Close()
+	var restricted []string
+	for rows.Next() {
+		var schemaName, tableName string
+		var rowFilter, columnList bool
+		if err := rows.Scan(&schemaName, &tableName, &rowFilter, &columnList); err != nil {
+			return fmt.Errorf("failed to inspect PostgreSQL publication %q: %w", s.cdcConfig.Publication, err)
+		}
+		features := make([]string, 0, 2)
+		if rowFilter {
+			features = append(features, "row filter")
+		}
+		if columnList {
+			features = append(features, "column list")
+		}
+		restricted = append(restricted, fmt.Sprintf("%s.%s (%s)", schemaName, tableName, strings.Join(features, ", ")))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to inspect PostgreSQL publication %q: %w", s.cdcConfig.Publication, err)
+	}
+	if len(restricted) > 0 {
+		return fmt.Errorf("PostgreSQL publication %q uses row filters or column lists on %s; postgres+cdc requires full-row publications so the initial snapshot and WAL stream have identical row and column coverage", s.cdcConfig.Publication, strings.Join(restricted, "; "))
+	}
+	return nil
+}
 
 func (s *PostgresCDCSource) Schemes() []string {
 	return []string{"postgres+cdc", "postgresql+cdc"}
@@ -131,6 +201,8 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.stateMu.Lock()
 	s.snapshotPositions = make(map[string]string)
+	s.snapshotIncarnations = make(map[string]string)
+	s.snapshotSchemas = make(map[string]string)
 	s.stateMu.Unlock()
 
 	// Create query pool for regular SQL operations
@@ -149,24 +221,18 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping postgres: %w", err)
 	}
 
-	// When no publication is specified in the URI, ingestr manages a default
-	// publication. Reconcile it on every run so it tracks the current set of
-	// logged tables; unlogged tables cannot be replicated and are skipped.
 	managedPublication := cdcConfig.Publication == ""
 	if managedPublication {
 		cdcConfig.Publication = defaultPublicationName
-		if err := ensureManagedPublication(ctx, queryPool, cdcConfig.Publication); err != nil {
-			queryPool.Close()
-			return fmt.Errorf("failed to ensure publication: %w", err)
-		}
 	}
 
 	// Server version gates the pgoutput options added in PostgreSQL 14
 	// (protocol v2 streaming, binary tuple format).
 	var serverVersion int
-	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion); err != nil {
+	var database string
+	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int, current_database()").Scan(&serverVersion, &database); err != nil {
 		queryPool.Close()
-		return fmt.Errorf("failed to determine server version: %w", err)
+		return fmt.Errorf("failed to determine PostgreSQL server identity: %w", err)
 	}
 	if cdcConfig.Binary && serverVersion < 140000 {
 		queryPool.Close()
@@ -180,6 +246,12 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 		queryPool.Close()
 		return fmt.Errorf("failed to create replication connection: %w", err)
 	}
+	system, err := pglogrepl.IdentifySystem(ctx, replConn)
+	if err != nil {
+		_ = replConn.Close(ctx)
+		queryPool.Close()
+		return fmt.Errorf("failed to identify PostgreSQL server: %w", err)
+	}
 
 	s.queryPool = queryPool
 	s.replConn = replConn
@@ -188,7 +260,64 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
 	s.serverVersion = serverVersion
+	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, pgConfig.ConnConfig.Host, pgConfig.ConnConfig.Port, database, cdcConfig)
 
+	return nil
+}
+
+func (s *PostgresCDCSource) ConnectorIdentity(_ context.Context) (source.ConnectorIdentity, error) {
+	if s.queryPool == nil || s.connectorIdentity.Database == "" || s.connectorIdentity.Connector == "" {
+		return source.ConnectorIdentity{}, fmt.Errorf("postgres CDC source is not connected")
+	}
+	return s.connectorIdentity, nil
+}
+
+func (s *PostgresCDCSource) TableIncarnation(ctx context.Context, table string) (string, error) {
+	if s.queryPool == nil {
+		return "", fmt.Errorf("postgres CDC source is not connected")
+	}
+	schemaName, tableName := parseTableName(table)
+	var oid string
+	err := s.queryPool.QueryRow(ctx, `
+		SELECT c.oid::text
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')
+	`, schemaName, tableName).Scan(&oid)
+	if err != nil {
+		return "", fmt.Errorf("failed to read source table incarnation for %s: %w", table, err)
+	}
+	return oid, nil
+}
+
+func (s *PostgresCDCSource) PrepareConnector(ctx context.Context) error {
+	if !s.managedPublication {
+		return nil
+	}
+	return s.reconcileManagedPublication(ctx)
+}
+
+func (s *PostgresCDCSource) reconcileManagedPublication(ctx context.Context) error {
+	lockConn, err := pgx.ConnectConfig(ctx, s.queryPool.Config().ConnConfig.Copy())
+	if err != nil {
+		return fmt.Errorf("failed to open PostgreSQL session for publication preparation: %w", err)
+	}
+	defer func() { _ = lockConn.Close(context.Background()) }()
+
+	key := publicationLeaseKey(s.connectorIdentity.Database, s.cdcConfig.Publication)
+	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", key); err != nil {
+		return fmt.Errorf("failed to acquire managed publication lock: %w", err)
+	}
+	migrationKey := publicationMigrationLeaseKey(s.connectorIdentity.Database, s.cdcConfig.Publication)
+	lockMigration := func() error {
+		if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationKey); err != nil {
+			return fmt.Errorf("failed to acquire managed publication migration lock: %w", err)
+		}
+		return nil
+	}
+	if err := ensureManagedPublication(ctx, s.queryPool, s.cdcConfig.Publication, lockMigration); err != nil {
+		return fmt.Errorf("failed to ensure publication: %w", err)
+	}
 	return nil
 }
 
@@ -230,6 +359,16 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 		if err := s.replConn.Close(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close replication connection: %w", err))
 		}
+		s.replConn = nil
+	}
+
+	s.connectorLeaseMu.Lock()
+	lease := s.connectorLease
+	s.connectorLeaseMu.Unlock()
+	if lease != nil {
+		if err := lease.Release(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to release connector lease: %w", err))
+		}
 	}
 
 	if s.queryPool != nil {
@@ -237,7 +376,7 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 	}
 
 	if len(errs) > 0 {
-		return errs[0]
+		return errors.Join(errs...)
 	}
 	return nil
 }
@@ -254,8 +393,8 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 // first standby-send error (a dead conn surfaces as an error here and the
 // follow-up FinalizeBatch send will fail in the same way; the run still
 // completes — the slot just stays where it was, same as before).
-func (s *PostgresCDCSource) startKeepalive(ctx context.Context, lsn pglogrepl.LSN) {
-	if s.replConn == nil || lsn == 0 {
+func (s *PostgresCDCSource) startKeepalive(ctx context.Context, caughtUp, durable pglogrepl.LSN) {
+	if s.replConn == nil || caughtUp == 0 {
 		return
 	}
 	s.keepaliveMu.Lock()
@@ -272,14 +411,13 @@ func (s *PostgresCDCSource) startKeepalive(ctx context.Context, lsn pglogrepl.LS
 	go func() {
 		defer close(done)
 		send := func() bool {
-			err := pglogrepl.SendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
-				WALWritePosition: lsn,
-			})
+			status := standbyUpdate(false, caughtUp, 0, durable)
+			err := sendStandbyStatusUpdate(ctx, s.replConn, status)
 			if err != nil {
 				config.Debug("[CDC] Keepalive standby status failed (replication connection lost): %v", err)
 				return false
 			}
-			config.Debug("[CDC] Keepalive standby status sent at LSN %s", lsn)
+			config.Debug("[CDC] Keepalive standby status sent at LSN %s (durable %s)", caughtUp, durable)
 			return true
 		}
 		// Send once immediately so the walsender's idle timer resets at the
@@ -348,7 +486,10 @@ func (s *PostgresCDCSource) DefaultStreamingStrategy() config.IncrementalStrateg
 // successful flush. The replication goroutine reads it when sending standby
 // status updates so the slot's confirmed_flush_lsn only advances past durable
 // data. The token is the pglogrepl.LSN attached to the last flushed batch.
-func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
+func (s *PostgresCDCSource) CommitStream(ctx context.Context, token any) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if stateToken, ok := token.(source.CDCStateCommitToken); ok {
 		token = stateToken.SourceCommitToken
 		if token == nil {
@@ -362,25 +503,48 @@ func (s *PostgresCDCSource) CommitStream(_ context.Context, token any) error {
 	if s.pos == nil {
 		return fmt.Errorf("postgres cdc: stream position not initialized")
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	s.pos.Commit(lsn)
 	config.Debug("[CDC] Confirmed durable LSN: %s", lsn)
 	return nil
 }
 
-func (s *PostgresCDCSource) recordSnapshotPosition(table string, lsn pglogrepl.LSN) {
+func (s *PostgresCDCSource) recordSnapshotState(table string, lsn pglogrepl.LSN, incarnation, schemaFingerprint string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if s.snapshotPositions == nil {
 		s.snapshotPositions = make(map[string]string)
 	}
 	s.snapshotPositions[table] = FormatLSN(lsn)
+	if incarnation != "" {
+		if s.snapshotIncarnations == nil {
+			s.snapshotIncarnations = make(map[string]string)
+		}
+		s.snapshotIncarnations[table] = incarnation
+	}
+	if schemaFingerprint != "" {
+		if s.snapshotSchemas == nil {
+			s.snapshotSchemas = make(map[string]string)
+		}
+		s.snapshotSchemas[table] = schemaFingerprint
+	}
 }
 
 func (s *PostgresCDCSource) CDCState() source.CDCStateCommitToken {
 	s.stateMu.Lock()
 	snapshots := make(map[string]string, len(s.snapshotPositions))
+	incarnations := make(map[string]string, len(s.snapshotIncarnations))
+	schemas := make(map[string]string, len(s.snapshotSchemas))
 	for table, position := range s.snapshotPositions {
 		snapshots[table] = position
+	}
+	for table, incarnation := range s.snapshotIncarnations {
+		incarnations[table] = incarnation
+	}
+	for table, fingerprint := range s.snapshotSchemas {
+		schemas[table] = fingerprint
 	}
 	s.stateMu.Unlock()
 
@@ -388,7 +552,7 @@ func (s *PostgresCDCSource) CDCState() source.CDCStateCommitToken {
 	if s.caughtUp != nil && s.caughtUp.Committed() > 0 {
 		position = FormatLSN(s.caughtUp.Committed())
 	}
-	return source.CDCStateCommitToken{Position: position, SnapshotPositions: snapshots}
+	return source.CDCStateCommitToken{Position: position, SnapshotPositions: snapshots, SnapshotIncarnations: incarnations, SnapshotSchemas: schemas}
 }
 
 // ReplicationLag reports how many WAL bytes the durable destination position
@@ -438,6 +602,9 @@ func (s *PostgresCDCSource) recordCaughtUpLSN(lsn pglogrepl.LSN) {
 // confirmed_flush_lsn, so lag and retained WAL grow without bound across runs.
 // Best-effort: a failure here does not fail an otherwise-successful ingest.
 func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if s.replConn == nil || s.caughtUp == nil {
 		return nil
 	}
@@ -450,7 +617,10 @@ func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
 	if lsn == 0 {
 		return nil
 	}
-	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	err := sendStandbyStatusUpdate(ctx, s.replConn, pglogrepl.StandbyStatusUpdate{
 		WALWritePosition: lsn,
 		WALFlushPosition: lsn,
 		WALApplyPosition: lsn,
@@ -459,8 +629,80 @@ func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
 		config.Debug("[CDC] Failed to send final standby status at LSN %s: %v", lsn, err)
 		return fmt.Errorf("failed to send final standby status: %w", err)
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	config.Debug("[CDC] Sent final standby status confirming LSN %s", lsn)
 	return nil
+}
+
+func (s *PostgresCDCSource) markLegacySlotInUse(slotName string) {
+	s.connectorLeaseMu.Lock()
+	defer s.connectorLeaseMu.Unlock()
+	if _, exists := s.legacySlots[slotName]; exists {
+		s.legacySlots[slotName] = true
+	}
+}
+
+func (s *PostgresCDCSource) FinalizeLegacySlot(ctx context.Context) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	s.connectorLeaseMu.Lock()
+	legacySlots := make([]string, 0, len(s.legacySlots))
+	for slotName, inUse := range s.legacySlots {
+		if !inUse {
+			legacySlots = append(legacySlots, slotName)
+		}
+	}
+	s.connectorLeaseMu.Unlock()
+	if len(legacySlots) == 0 {
+		return nil
+	}
+	slices.Sort(legacySlots)
+
+	for _, legacySlot := range legacySlots {
+		var active bool
+		err := s.queryPool.QueryRow(ctx, `
+		SELECT active
+		FROM pg_replication_slots
+		WHERE slot_name = $1 AND slot_type = 'logical'
+	`, legacySlot).Scan(&active)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to inspect obsolete legacy replication slot %s: %w", legacySlot, err)
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if active {
+			return fmt.Errorf("obsolete legacy replication slot %s became active before cutover", legacySlot)
+		}
+	}
+
+	for _, legacySlot := range legacySlots {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if _, err := s.queryPool.Exec(ctx, "SELECT pg_drop_replication_slot($1)", legacySlot); err != nil && !isMissingReplicationSlotError(err) {
+			return fmt.Errorf("failed to drop obsolete legacy replication slot %s: %w", legacySlot, err)
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		s.connectorLeaseMu.Lock()
+		delete(s.legacySlots, legacySlot)
+		s.connectorLeaseMu.Unlock()
+		config.Debug("[CDC] Dropped obsolete legacy automatic replication slot %s after durable cutover", legacySlot)
+	}
+	return nil
+}
+
+func isMissingReplicationSlotError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42704"
 }
 
 func (s *PostgresCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -469,6 +711,22 @@ func (s *PostgresCDCSource) GetTable(ctx context.Context, req source.TableReques
 	}
 
 	return NewCDCTable(s, req)
+}
+
+func (s *PostgresCDCSource) TableExists(ctx context.Context, table string) (bool, error) {
+	schemaName, tableName := parseTableName(table)
+	var exists bool
+	err := s.queryPool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')
+		)`, schemaName, tableName).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check source table existence: %w", err)
+	}
+	return exists, nil
 }
 
 func parseURIConfig(uri string) (CDCConfig, string, error) {
@@ -665,7 +923,7 @@ func selectPublishableTables(ctx context.Context, pool *pgxpool.Pool) (included 
 // the publication tracks tables added, dropped, or changed since the previous
 // run. Tables that are unlogged or lack a usable replica identity are skipped
 // with a warning.
-func ensureManagedPublication(ctx context.Context, pool *pgxpool.Pool, pubName string) error {
+func ensureManagedPublication(ctx context.Context, pool *pgxpool.Pool, pubName string, migrationLocks ...func() error) error {
 	included, skipped, err := selectPublishableTables(ctx, pool)
 	if err != nil {
 		return err
@@ -673,10 +931,6 @@ func ensureManagedPublication(ctx context.Context, pool *pgxpool.Pool, pubName s
 
 	for _, s := range skipped {
 		fmt.Printf("Warning: %s\n", s.warning(pubName))
-	}
-
-	if len(included) == 0 {
-		return fmt.Errorf("no tables eligible for replication for publication %q", pubName)
 	}
 
 	tableList := quotePublicationTables(included)
@@ -688,34 +942,73 @@ func ensureManagedPublication(ctx context.Context, pool *pgxpool.Pool, pubName s
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		config.Debug("[CDC] Creating publication %s for %d table(s)", pubName, len(included))
-		if _, err = pool.Exec(ctx, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pubIdent, tableList)); err != nil {
+		if _, err = pool.Exec(ctx, createPublicationSQL(pubIdent, tableList)); err != nil {
 			// Another instance may have created it concurrently; fall back to
 			// reconciling its table set instead of failing the run.
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && (pgErr.Code == pgErrDuplicate || pgErr.Code == pgErrAlreadyExists) {
 				config.Debug("[CDC] Publication %s created concurrently; updating its table set", pubName)
-				return setPublicationTables(ctx, pool, pubIdent, tableList)
+				return reconcilePublicationTables(ctx, pool, pubIdent, tableList, migrationLocks...)
 			}
 			return fmt.Errorf("failed to create publication: %w", err)
 		}
 		return nil
 	case err != nil:
 		return fmt.Errorf("failed to check publication existence: %w", err)
-	case pubAllTables:
+	case pubAllTables || len(included) == 0:
 		// A publication left over from an older ingestr as FOR ALL TABLES cannot
 		// have its table set altered, so recreate it with the explicit list.
 		config.Debug("[CDC] Recreating FOR ALL TABLES publication %s with explicit logged-table list", pubName)
-		if _, err = pool.Exec(ctx, fmt.Sprintf("DROP PUBLICATION %s", pubIdent)); err != nil {
-			return fmt.Errorf("failed to drop legacy publication: %w", err)
+		if err := acquirePublicationMigrationLock(migrationLocks); err != nil {
+			return err
 		}
-		if _, err = pool.Exec(ctx, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pubIdent, tableList)); err != nil {
-			return fmt.Errorf("failed to recreate publication: %w", err)
-		}
-		return nil
+		return recreatePublication(ctx, pool, pubIdent, tableList)
 	default:
 		config.Debug("[CDC] Updating publication %s to cover %d table(s)", pubName, len(included))
 		return setPublicationTables(ctx, pool, pubIdent, tableList)
 	}
+}
+
+func createPublicationSQL(pubIdent, tableList string) string {
+	if tableList == "" {
+		return fmt.Sprintf("CREATE PUBLICATION %s", pubIdent)
+	}
+	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pubIdent, tableList)
+}
+
+func reconcilePublicationTables(ctx context.Context, pool *pgxpool.Pool, pubIdent, tableList string, migrationLocks ...func() error) error {
+	if tableList == "" {
+		if err := acquirePublicationMigrationLock(migrationLocks); err != nil {
+			return err
+		}
+		return recreatePublication(ctx, pool, pubIdent, tableList)
+	}
+	return setPublicationTables(ctx, pool, pubIdent, tableList)
+}
+
+func acquirePublicationMigrationLock(locks []func() error) error {
+	if len(locks) == 0 || locks[0] == nil {
+		return nil
+	}
+	return locks[0]()
+}
+
+func recreatePublication(ctx context.Context, pool *pgxpool.Pool, pubIdent, tableList string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin publication migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, fmt.Sprintf("DROP PUBLICATION %s", pubIdent)); err != nil {
+		return fmt.Errorf("failed to drop legacy publication: %w", err)
+	}
+	if _, err := tx.Exec(ctx, createPublicationSQL(pubIdent, tableList)); err != nil {
+		return fmt.Errorf("failed to recreate publication: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit publication migration: %w", err)
+	}
+	return nil
 }
 
 // setPublicationTables replaces the table set of an existing FOR TABLE publication.
@@ -733,6 +1026,11 @@ func buildReplicationConnString(uri string) string {
 	}
 
 	query := parsed.Query()
+	for key := range query {
+		if strings.HasPrefix(key, "pool_") {
+			query.Del(key)
+		}
+	}
 	query.Set("replication", "database")
 	parsed.RawQuery = query.Encode()
 
@@ -768,7 +1066,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 		// without a usable replica identity (publishing them would make
 		// UPDATE/DELETE on the source fail), mirroring the managed-publication path.
 		query = `
-			SELECT n.nspname, c.relname
+			SELECT n.nspname, c.relname, c.oid::text
 			FROM pg_class c
 			JOIN pg_namespace n ON n.oid = c.relnamespace
 			WHERE c.relkind = 'r'
@@ -780,10 +1078,12 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 	} else {
 		// For specific table publications, use pg_publication_tables
 		query = `
-			SELECT schemaname, tablename
-			FROM pg_publication_tables
-			WHERE pubname = $1
-			ORDER BY schemaname, tablename
+			SELECT pt.schemaname, pt.tablename, c.oid::text
+			FROM pg_publication_tables pt
+			JOIN pg_namespace n ON n.nspname = pt.schemaname
+			JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename
+			WHERE pt.pubname = $1
+			ORDER BY pt.schemaname, pt.tablename
 		`
 	}
 
@@ -800,8 +1100,8 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	var tables []source.SourceTableInfo
 	for rows.Next() {
-		var schemaName, tableName string
-		if err := rows.Scan(&schemaName, &tableName); err != nil {
+		var schemaName, tableName, incarnation string
+		if err := rows.Scan(&schemaName, &tableName, &incarnation); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -815,16 +1115,22 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 		// Add CDC metadata columns
 		tableSchema = addCDCColumns(tableSchema)
+		fingerprint, err := s.TableSchemaFingerprint(ctx, fullName)
+		if err != nil {
+			return nil, err
+		}
 
 		if len(tableSchema.PrimaryKeys) == 0 {
 			s.warnKeylessTable(fullName)
 		}
 
 		tables = append(tables, source.SourceTableInfo{
-			Name:        fullName,
-			Schema:      tableSchema,
-			PrimaryKeys: tableSchema.PrimaryKeys,
-			DestSchema:  s.cdcConfig.DestSchema,
+			Name:              fullName,
+			Schema:            tableSchema,
+			PrimaryKeys:       tableSchema.PrimaryKeys,
+			DestSchema:        s.cdcConfig.DestSchema,
+			Incarnation:       incarnation,
+			SchemaFingerprint: fingerprint,
 		})
 
 		config.Debug("[CDC] Found table in publication: %s (PKs: %v)", fullName, tableSchema.PrimaryKeys)
@@ -836,7 +1142,7 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	if len(tables) == 0 {
 		config.Debug("[CDC] No tables found. pubAllTables=%v, query used: %s", pubAllTables, query)
-		return nil, fmt.Errorf("no tables found in publication %s", s.cdcConfig.Publication)
+		return []source.SourceTableInfo{}, nil
 	}
 
 	config.Debug("[CDC] Found %d tables in publication %s", len(tables), s.cdcConfig.Publication)
@@ -874,17 +1180,42 @@ func publicationTableFullName(schemaName, tableName string) string {
 // reconciled to it); for a user-supplied publication it is the publication's
 // membership (or all eligible tables for FOR ALL TABLES publications).
 func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[string]struct{}, error) {
-	names := make(map[string]struct{})
+	incarnations, err := s.listEligibleTableIncarnations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]struct{}, len(incarnations))
+	for name := range incarnations {
+		names[name] = struct{}{}
+	}
+	return names, nil
+}
+
+func (s *PostgresCDCSource) listEligibleTableIncarnations(ctx context.Context) (map[string]string, error) {
+	names := make(map[string]string)
 
 	if s.managedPublication {
-		included, _, err := selectPublishableTables(ctx, s.queryPool)
+		rows, err := s.queryPool.Query(ctx, `
+			SELECT n.nspname, c.relname, c.oid::text
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind = 'r'
+			  AND c.relpersistence = 'p'
+			  AND `+replicaIdentityClause+`
+			  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		`)
 		if err != nil {
 			return nil, err
 		}
-		for _, t := range included {
-			names[publicationTableFullName(t.schema, t.name)] = struct{}{}
+		defer rows.Close()
+		for rows.Next() {
+			var schemaName, tableName, incarnation string
+			if err := rows.Scan(&schemaName, &tableName, &incarnation); err != nil {
+				return nil, fmt.Errorf("failed to scan table identity: %w", err)
+			}
+			names[publicationTableFullName(schemaName, tableName)] = incarnation
 		}
-		return names, nil
+		return names, rows.Err()
 	}
 
 	var pubAllTables bool
@@ -896,7 +1227,7 @@ func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[str
 	var rows pgx.Rows
 	if pubAllTables {
 		rows, err = s.queryPool.Query(ctx, `
-			SELECT n.nspname, c.relname
+			SELECT n.nspname, c.relname, c.oid::text
 			FROM pg_class c
 			JOIN pg_namespace n ON n.oid = c.relnamespace
 			WHERE c.relkind = 'r'
@@ -906,9 +1237,11 @@ func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[str
 		`)
 	} else {
 		rows, err = s.queryPool.Query(ctx, `
-			SELECT schemaname, tablename
-			FROM pg_publication_tables
-			WHERE pubname = $1
+			SELECT pt.schemaname, pt.tablename, c.oid::text
+			FROM pg_publication_tables pt
+			JOIN pg_namespace n ON n.nspname = pt.schemaname
+			JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename
+			WHERE pt.pubname = $1
 		`, s.cdcConfig.Publication)
 	}
 	if err != nil {
@@ -917,16 +1250,47 @@ func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[str
 	defer rows.Close()
 
 	for rows.Next() {
-		var schemaName, tableName string
-		if err := rows.Scan(&schemaName, &tableName); err != nil {
+		var schemaName, tableName, incarnation string
+		if err := rows.Scan(&schemaName, &tableName, &incarnation); err != nil {
 			return nil, fmt.Errorf("failed to scan table name: %w", err)
 		}
-		names[publicationTableFullName(schemaName, tableName)] = struct{}{}
+		names[publicationTableFullName(schemaName, tableName)] = incarnation
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating table names: %w", err)
 	}
 	return names, nil
+}
+
+func (s *PostgresCDCSource) validateTablePublished(ctx context.Context, table string) error {
+	if s.managedPublication {
+		if err := s.reconcileManagedPublication(ctx); err != nil {
+			return fmt.Errorf("failed to reconcile managed publication before validating table %q: %w", table, err)
+		}
+	}
+	names, err := s.listEligibleTableNames(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to validate table %q against publication %q: %w", table, s.cdcConfig.Publication, err)
+	}
+	schemaName, tableName := parseTableName(table)
+	canonical := publicationTableFullName(schemaName, tableName)
+	if _, ok := names[canonical]; !ok {
+		return fmt.Errorf("table %q is not a publishable member of PostgreSQL publication %q", table, s.cdcConfig.Publication)
+	}
+	if s.managedPublication {
+		var published bool
+		if err := s.queryPool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_publication_tables
+				WHERE pubname = $1 AND schemaname = $2 AND tablename = $3
+			)`, s.cdcConfig.Publication, schemaName, tableName).Scan(&published); err != nil {
+			return fmt.Errorf("failed to verify managed publication membership for table %q: %w", table, err)
+		}
+		if !published {
+			return fmt.Errorf("table %q is not present in managed PostgreSQL publication %q", table, s.cdcConfig.Publication)
+		}
+	}
+	return nil
 }
 
 // reconcilePublication refreshes the managed publication's table set so tables
@@ -936,7 +1300,7 @@ func (s *PostgresCDCSource) reconcilePublication(ctx context.Context) error {
 	if !s.managedPublication {
 		return nil
 	}
-	return ensureManagedPublication(ctx, s.queryPool, s.cdcConfig.Publication)
+	return s.reconcileManagedPublication(ctx)
 }
 
 // ReadAll reads CDC changes from all tables in the publication.
@@ -946,8 +1310,61 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 		return nil, err
 	}
 
-	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, opts.CDCResumeLSNs, opts.CDCSlotSuffix)
+	if !opts.Streaming && opts.KnownTables != nil {
+		tables = filterKnownTables(tables, opts.KnownTables)
+	}
+
+	resumeLSNs := make(map[string]string, len(opts.CDCResumeLSNs))
+	for table, lsn := range opts.CDCResumeLSNs {
+		resumeLSNs[table] = lsn
+	}
+	var invalidations []source.CDCSnapshotInvalidation
+	for _, table := range tables {
+		if resumeLSNs[table.Name] == "" {
+			continue
+		}
+		if resumeMetadataChanged(opts.CDCResumeIncarnations[table.Name], opts.CDCResumeSchemaFingerprints[table.Name], table.Incarnation, table.SchemaFingerprint) {
+			delete(resumeLSNs, table.Name)
+			invalidations = append(invalidations, source.CDCSnapshotInvalidation{TableName: table.Name, Incarnation: table.Incarnation})
+		}
+	}
+	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)
+	reader.initialInvalidations = invalidations
+	if opts.Streaming {
+		reader.initialAnnouncements = newlyObservedTables(tables, opts.KnownTables)
+	}
 	return reader.Read(ctx, opts)
+}
+
+func filterKnownTables(tables []source.SourceTableInfo, knownNames []string) []source.SourceTableInfo {
+	known := make(map[string]struct{}, len(knownNames))
+	for _, name := range knownNames {
+		known[name] = struct{}{}
+	}
+	filtered := make([]source.SourceTableInfo, 0, len(knownNames))
+	for _, table := range tables {
+		if _, ok := known[table.Name]; ok {
+			filtered = append(filtered, table)
+		}
+	}
+	return filtered
+}
+
+func newlyObservedTables(tables []source.SourceTableInfo, knownNames []string) []source.SourceTableInfo {
+	if knownNames == nil {
+		return nil
+	}
+	known := make(map[string]struct{}, len(knownNames))
+	for _, name := range knownNames {
+		known[name] = struct{}{}
+	}
+	var observed []source.SourceTableInfo
+	for _, table := range tables {
+		if _, ok := known[table.Name]; !ok {
+			observed = append(observed, table)
+		}
+	}
+	return observed
 }
 
 const (

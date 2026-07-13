@@ -354,7 +354,7 @@ func (d *ClickHouseDestination) GetMaxCDCLSN(ctx context.Context, table string) 
 
 func (d *ClickHouseDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
 	db, name := d.parseTableName(table)
-	query := fmt.Sprintf("SELECT `source_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s.%s WHERE `connector_id` = ?",
+	query := fmt.Sprintf("SELECT `event_id`, `source_table`, `destination_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s.%s WHERE `connector_id` = ?",
 		quoteIdentifier(db), quoteIdentifier(name))
 	rows, err := d.conn.Query(ctx, query, connectorID)
 	if err != nil {
@@ -368,13 +368,60 @@ func (d *ClickHouseDestination) LoadCDCState(ctx context.Context, table, connect
 	var entries []destination.CDCStateEntry
 	for rows.Next() {
 		var entry destination.CDCStateEntry
-		if err := rows.Scan(&entry.SourceTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
 }
+
+func (d *ClickHouseDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	db, name := d.parseTableName(table)
+	quotedTable := fmt.Sprintf("%s.%s", quoteIdentifier(db), quoteIdentifier(name))
+	query := fmt.Sprintf("SELECT DISTINCT `event_id`, `state_generation` FROM %s WHERE `connector_id` = ? AND `state_kind` = 'run' AND `state_generation` = (SELECT MAX(`state_generation`) FROM %s WHERE `connector_id` = ? AND `state_kind` = 'run') ORDER BY `event_id`", quotedTable, quotedTable)
+	rows, err := d.conn.Query(ctx, query, connectorID, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNKNOWN_TABLE") || strings.Contains(err.Error(), "doesn't exist") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *ClickHouseDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	db, name := d.parseTableName(table)
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = "?"
+		args = append(args, eventID)
+	}
+	query := fmt.Sprintf("ALTER TABLE %s.%s DELETE WHERE `connector_id` = ? AND `event_id` IN (%s)", quoteIdentifier(db), quoteIdentifier(name), strings.Join(placeholders, ", "))
+	if err := d.conn.Exec(ctx, query, args...); err != nil {
+		return err
+	}
+	return d.waitForMutations(ctx, db, name)
+}
+
+func (d *ClickHouseDestination) CDCStatePruneBatchSize() int { return 10_000 }
 
 func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
@@ -387,7 +434,9 @@ func (d *ClickHouseDestination) DeleteInsertTable(ctx context.Context, opts dest
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
 
-	d.waitForMutations(ctx, targetDB, targetName)
+	if err := d.waitForMutations(ctx, targetDB, targetName); err != nil {
+		return fmt.Errorf("failed waiting for delete mutation: %w", err)
+	}
 
 	config.Debug("[CLICKHOUSE DELETE+INSERT] Executing INSERT: %s", insertSQL)
 	if err := d.conn.Exec(ctx, insertSQL); err != nil {
@@ -447,7 +496,9 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	}
 
 	// Wait for mutations
-	d.waitForMutations(ctx, targetDB, targetName)
+	if err := d.waitForMutations(ctx, targetDB, targetName); err != nil {
+		return fmt.Errorf("failed waiting for SCD2 update mutation: %w", err)
+	}
 
 	// Step 2: Soft-delete missing records (only if no incremental_key)
 	if opts.IncrementalKey == "" {
@@ -471,7 +522,9 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 			return fmt.Errorf("failed to soft-delete missing records: %w", err)
 		}
 
-		d.waitForMutations(ctx, targetDB, targetName)
+		if err := d.waitForMutations(ctx, targetDB, targetName); err != nil {
+			return fmt.Errorf("failed waiting for SCD2 soft-delete mutation: %w", err)
+		}
 	}
 
 	// Step 3: Insert new versions + net-new records
@@ -503,31 +556,81 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	return nil
 }
 
-func (d *ClickHouseDestination) waitForMutations(ctx context.Context, database, tableName string) {
-	waitSQL := fmt.Sprintf(
-		"SELECT count() FROM system.mutations WHERE database = '%s' AND table = '%s' AND is_done = 0",
-		database, tableName,
-	)
-	for i := 0; i < 60; i++ {
-		rows, err := d.conn.Query(ctx, waitSQL)
+const (
+	mutationWaitAttempts = 60
+	mutationWaitInterval = 500 * time.Millisecond
+)
+
+type mutationStatusFunc func(context.Context) (pending uint64, failure string, err error)
+
+func (d *ClickHouseDestination) waitForMutations(ctx context.Context, database, tableName string) error {
+	waitSQL := "SELECT count(), anyIf(latest_fail_reason, latest_fail_reason != '') FROM system.mutations WHERE database = ? AND table = ? AND is_done = 0"
+	status := func(ctx context.Context) (uint64, string, error) {
+		rows, err := d.conn.Query(ctx, waitSQL, database, tableName)
 		if err != nil {
-			break
+			return 0, "", fmt.Errorf("failed to query ClickHouse mutation status: %w", err)
 		}
-		var count uint64
-		if rows.Next() {
-			if err := rows.Scan(&count); err != nil {
-				_ = rows.Close()
-				break
+		if !rows.Next() {
+			rowsErr := rows.Err()
+			closeErr := rows.Close()
+			if rowsErr != nil {
+				return 0, "", fmt.Errorf("failed to read ClickHouse mutation status: %w", rowsErr)
 			}
+			if closeErr != nil {
+				return 0, "", fmt.Errorf("failed to close ClickHouse mutation status rows: %w", closeErr)
+			}
+			return 0, "", errors.New("ClickHouse mutation status query returned no rows")
+		}
+		var pending uint64
+		var failure string
+		if err := rows.Scan(&pending, &failure); err != nil {
+			_ = rows.Close()
+			return 0, "", fmt.Errorf("failed to scan ClickHouse mutation status: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return 0, "", fmt.Errorf("failed to read ClickHouse mutation status: %w", err)
 		}
 		if err := rows.Close(); err != nil {
-			break
+			return 0, "", fmt.Errorf("failed to close ClickHouse mutation status rows: %w", err)
 		}
-		if count == 0 {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
+		return pending, failure, nil
 	}
+	if err := waitForMutationCompletion(ctx, mutationWaitAttempts, mutationWaitInterval, status); err != nil {
+		return fmt.Errorf("ClickHouse mutation for %s.%s did not complete: %w", database, tableName, err)
+	}
+	return nil
+}
+
+func waitForMutationCompletion(ctx context.Context, attempts int, interval time.Duration, status mutationStatusFunc) error {
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pending, failure, err := status(ctx)
+		if err != nil {
+			return err
+		}
+		if failure != "" {
+			return fmt.Errorf("mutation failed: %s", failure)
+		}
+		if pending == 0 {
+			return nil
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return fmt.Errorf("timed out with mutations still pending after %d attempts", attempts)
 }
 
 func (d *ClickHouseDestination) DropTable(ctx context.Context, table string) error {

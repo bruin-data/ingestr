@@ -11,15 +11,20 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	duckdbdest "github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
@@ -94,6 +99,256 @@ func TestNewBigQueryDestination(t *testing.T) {
 	dest := NewBigQueryDestination()
 	if dest == nil {
 		t.Fatal("NewBigQueryDestination returned nil")
+	}
+}
+
+func TestManagedCDCStateCatalogUsesConnectedProject(t *testing.T) {
+	dest := &BigQueryDestination{projectID: "project-a"}
+	if got := dest.ManagedCDCStateCatalog(); got != "project-a" {
+		t.Fatalf("ManagedCDCStateCatalog() = %q, want project-a", got)
+	}
+}
+
+func TestWriteCDCStateUsesInsertAllWithEventID(t *testing.T) {
+	var insertCalls atomic.Int32
+	var jobCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/insertAll") {
+			insertCalls.Add(1)
+			var request struct {
+				Rows []struct {
+					InsertID string                 `json:"insertId"`
+					JSON     map[string]interface{} `json:"json"`
+				} `json:"rows"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(request.Rows) != 1 || request.Rows[0].InsertID != "event-1" || request.Rows[0].JSON["connector_id"] != "connector-1" {
+				t.Errorf("unexpected insertAll request: %#v", request)
+			}
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/jobs") {
+			jobCalls.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", datasetID: "test-dataset"}
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "event_id", Type: arrow.BinaryTypes.String},
+		{Name: "state_version", Type: arrow.BinaryTypes.String},
+		{Name: "connector_id", Type: arrow.BinaryTypes.String},
+		{Name: "source_table", Type: arrow.BinaryTypes.String},
+		{Name: "destination_table", Type: arrow.BinaryTypes.String},
+		{Name: "state_kind", Type: arrow.BinaryTypes.String},
+		{Name: "state_generation", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "state_status", Type: arrow.BinaryTypes.String},
+		{Name: "_cdc_lsn", Type: arrow.BinaryTypes.String},
+		{Name: "recorded_at", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	for index, value := range []string{"event-1", "v2", "connector-1", "public.orders", "raw.orders", "run"} {
+		builder.Field(index).(*array.StringBuilder).Append(value)
+	}
+	builder.Field(6).(*array.Int64Builder).Append(1)
+	builder.Field(7).(*array.StringBuilder).Append("in_progress")
+	builder.Field(8).(*array.StringBuilder).Append("00000000/00000000")
+	builder.Field(9).(*array.TimestampBuilder).Append(arrow.Timestamp(time.Now().UnixMicro()))
+	record := builder.NewRecordBatch()
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: record}
+	close(records)
+
+	if err := dest.WriteCDCState(t.Context(), records, destination.WriteOptions{Table: "test-project.test-dataset.cdc_state"}); err != nil {
+		t.Fatal(err)
+	}
+	if insertCalls.Load() != 1 || jobCalls.Load() != 0 {
+		t.Fatalf("insertAll calls=%d job calls=%d", insertCalls.Load(), jobCalls.Load())
+	}
+}
+
+func TestClaimCDCTargetUsesTransactionalInsertOrAssert(t *testing.T) {
+	var jobID string
+	var submittedSQL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/target_ds"):
+			_, _ = w.Write([]byte(`{"datasetReference":{"projectId":"test-project","datasetId":"target_ds"},"isCaseInsensitive":false}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			var req struct {
+				JobReference struct {
+					JobID string `json:"jobId"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			jobID = req.JobReference.JobID
+			submittedSQL = req.Configuration.Query.Query
+			writeBigQueryTestJob(w, jobID, submittedSQL)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"):
+			writeBigQueryTestQueryResults(w, jobID)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"):
+			writeBigQueryTestJob(w, jobID, submittedSQL)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", datasetID: "target_ds", location: "US"}
+
+	claim := destination.CDCTargetClaim{DestinationTable: "target_ds.events", ConnectorID: "connector-a", SourceTable: "public.events"}
+	if err := dest.ClaimCDCTarget(t.Context(), "test-project._bruin_staging.cdc_targets", claim); err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"BEGIN TRANSACTION", "FROM (SELECT 1 AS singleton)", "WHERE NOT EXISTS", "ASSERT", "COMMIT TRANSACTION"} {
+		if !strings.Contains(submittedSQL, fragment) {
+			t.Fatalf("claim SQL missing %q:\n%s", fragment, submittedSQL)
+		}
+	}
+}
+
+func TestCanonicalCDCTargetHonorsDatasetCaseSensitivity(t *testing.T) {
+	var metadataCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metadataCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		caseInsensitive := strings.Contains(r.URL.Path, "/datasets/insensitive")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"datasetReference":  map[string]string{"projectId": "test-project", "datasetId": "dataset"},
+			"isCaseInsensitive": caseInsensitive,
+		})
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client}
+
+	got, err := dest.canonicalCDCTarget(t.Context(), "test-project", "insensitive", "Orders")
+	if err != nil || got != destination.CDCTargetKey("test-project", "insensitive", "orders") {
+		t.Fatalf("case-insensitive target = %q, %v", got, err)
+	}
+	got, err = dest.canonicalCDCTarget(t.Context(), "test-project", "sensitive", "Orders")
+	if err != nil || got != destination.CDCTargetKey("test-project", "sensitive", "Orders") {
+		t.Fatalf("case-sensitive target = %q, %v", got, err)
+	}
+	if _, err := dest.canonicalCDCTarget(t.Context(), "test-project", "insensitive", "Other"); err != nil {
+		t.Fatal(err)
+	}
+	if metadataCalls.Load() != 2 {
+		t.Fatalf("metadata calls = %d, want one per dataset", metadataCalls.Load())
+	}
+}
+
+func TestCanonicalCDCTargetAllowsMissingFirstLoadDataset(t *testing.T) {
+	var metadataCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metadataCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":404,"message":"Not found: Dataset test-project:new_dataset","status":"NOT_FOUND"}}`))
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client}
+
+	got, err := dest.canonicalCDCTarget(t.Context(), "test-project", "new_dataset", "Orders")
+	require.NoError(t, err)
+	require.Equal(t, destination.CDCTargetKey("test-project", "new_dataset", "Orders"), got)
+	got, err = dest.canonicalCDCTarget(t.Context(), "test-project", "new_dataset", "Other")
+	require.NoError(t, err)
+	require.Equal(t, destination.CDCTargetKey("test-project", "new_dataset", "Other"), got)
+	require.EqualValues(t, 1, metadataCalls.Load(), "missing dataset case behavior should be cached for the first run")
+}
+
+func TestCanonicalCDCTargetCandidatesConvergeAfterMissingDatasetBecomesCaseInsensitive(t *testing.T) {
+	var exists atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !exists.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"not found","status":"NOT_FOUND"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"datasetReference":  map[string]string{"projectId": "test-project", "datasetId": "New_DataSet"},
+			"isCaseInsensitive": true,
+		})
+	}))
+	defer server.Close()
+
+	newDest := func() *BigQueryDestination {
+		client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Close() })
+		return &BigQueryDestination{client: client}
+	}
+
+	first, previous, err := newDest().CanonicalCDCTargetCandidates(t.Context(), "test-project.New_DataSet.Orders")
+	require.NoError(t, err)
+	require.Empty(t, previous)
+	require.Equal(t, destination.CDCTargetKey("test-project", "New_DataSet", "Orders"), first)
+
+	exists.Store(true)
+	current, previous, err := newDest().CanonicalCDCTargetCandidates(t.Context(), "test-project.New_DataSet.Orders")
+	require.NoError(t, err)
+	require.Equal(t, destination.CDCTargetKey("test-project", "new_dataset", "orders"), current)
+	require.Equal(t, []string{first}, previous)
+}
+
+func TestCanonicalCDCTargetDoesNotMaskDatasetMetadataErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":403,"message":"permission denied","status":"PERMISSION_DENIED"}}`))
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client}
+
+	_, err = dest.canonicalCDCTarget(t.Context(), "test-project", "forbidden", "Orders")
+	require.ErrorContains(t, err, "failed to read BigQuery dataset metadata")
+}
+
+func TestBigQueryTableIncarnationIsStableUntilRecreation(t *testing.T) {
+	created := time.Unix(1_700_000_000, 123_000_000)
+	first := bigQueryTableIncarnation("project", "dataset", "events", created)
+	if got := bigQueryTableIncarnation("project", "dataset", "events", created); got != first {
+		t.Fatalf("stable table creation identity changed: %q != %q", got, first)
+	}
+	if got := bigQueryTableIncarnation("project", "dataset", "events", created.Add(time.Millisecond)); got == first {
+		t.Fatal("recreated table retained the prior incarnation")
 	}
 }
 
@@ -484,6 +739,723 @@ func TestIsBigQueryDuplicateJobError(t *testing.T) {
 				t.Fatalf("isBigQueryDuplicateJobError() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPrepareTableAcceptsConcurrentCreateWinner(t *testing.T) {
+	ctx := context.Background()
+	var createCalls int
+	var metadataGets int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/"):
+			metadataGets++
+			if metadataGets <= 2 {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found: Table test-project:test-dataset.events"},
+				})
+				return
+			}
+			writeBigQueryTableMetadata(w, "INTEGER")
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables"):
+			createCalls++
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code": http.StatusConflict, "message": "Already Exists: Table test-project:test-dataset.events",
+					"errors": []map[string]string{{"reason": "duplicate", "message": "Already Exists"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{
+		client:        client,
+		projectID:     "test-project",
+		knownDatasets: map[string]bool{"test-project.test-dataset": true},
+	}
+	err = dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  "test-dataset.events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	})
+	if err != nil {
+		t.Fatalf("PrepareTable() error = %v", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", createCalls)
+	}
+	if metadataGets < 3 {
+		t.Fatalf("metadataGets = %d, want delayed visibility retry", metadataGets)
+	}
+}
+
+func TestPrepareTableRejectsIncompatibleConcurrentCreateWinner(t *testing.T) {
+	ctx := context.Background()
+	metadataGets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/"):
+			metadataGets++
+			if metadataGets == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found"},
+				})
+				return
+			}
+			writeBigQueryTableMetadata(w, "STRING")
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables"):
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code": http.StatusConflict, "message": "Already Exists",
+					"errors": []map[string]string{{"reason": "duplicate", "message": "Already Exists"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", knownDatasets: map[string]bool{"test-project.test-dataset": true}}
+
+	err = dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  "test-dataset.events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "incompatible column") {
+		t.Fatalf("PrepareTable() error = %v, want incompatible winner error", err)
+	}
+}
+
+func TestValidateBigQuerySchemaCompatibilityParameterizedTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *bigquery.FieldSchema
+		desired  schema.Column
+		wantErr  string
+	}{
+		{
+			name: "string narrower", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.StringFieldType, MaxLength: 32},
+			desired: schema.Column{Name: "value", DataType: schema.TypeString, MaxLength: 128}, wantErr: "narrower than required 128",
+		},
+		{
+			name: "bounded string cannot satisfy unbounded", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.StringFieldType, MaxLength: 32},
+			desired: schema.Column{Name: "value", DataType: schema.TypeString}, wantErr: "want unbounded",
+		},
+		{
+			name: "bytes narrower", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.BytesFieldType, MaxLength: 32},
+			desired: schema.Column{Name: "value", DataType: schema.TypeBinary, MaxLength: 128}, wantErr: "narrower than required 128",
+		},
+		{
+			name: "decimal scale narrower", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.NumericFieldType, Precision: 20, Scale: 2},
+			desired: schema.Column{Name: "value", DataType: schema.TypeDecimal, Precision: 10, Scale: 4}, wantErr: "scale 2 is narrower",
+		},
+		{
+			name: "decimal integer capacity narrower", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.NumericFieldType, Precision: 10, Scale: 5},
+			desired: schema.Column{Name: "value", DataType: schema.TypeDecimal, Precision: 12, Scale: 2}, wantErr: "integer-digit capacity 5 is narrower",
+		},
+		{
+			name: "unbounded string accepts bounded", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.StringFieldType},
+			desired: schema.Column{Name: "value", DataType: schema.TypeString, MaxLength: 128},
+		},
+		{
+			name: "wider decimal accepts desired", existing: &bigquery.FieldSchema{Name: "value", Type: bigquery.NumericFieldType, Precision: 20, Scale: 5},
+			desired: schema.Column{Name: "value", DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBigQuerySchemaCompatibility(
+				&bigquery.TableMetadata{Schema: bigquery.Schema{tt.existing}},
+				&schema.TableSchema{Columns: []schema.Column{tt.desired}},
+			)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateBigQuerySchemaCompatibility() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateBigQuerySchemaCompatibility() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func writeBigQueryTableMetadata(w http.ResponseWriter, fieldType string) {
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"tableReference": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+		"etag":           "winner-etag",
+		"schema": map[string]interface{}{
+			"fields": []map[string]interface{}{{"name": "id", "type": fieldType, "mode": "NULLABLE"}},
+		},
+	})
+}
+
+func TestIsAlreadyExistsErrorRejectsOtherConflicts(t *testing.T) {
+	err := &googleapi.Error{
+		Code:    http.StatusConflict,
+		Message: "table operation is temporarily conflicting",
+		Errors:  []googleapi.ErrorItem{{Reason: "concurrentUpdate"}},
+	}
+	if isAlreadyExistsError(err) {
+		t.Fatal("isAlreadyExistsError() = true for a non-duplicate conflict")
+	}
+}
+
+func TestDeleteCDCStateEventsReturnsCompletedJobError(t *testing.T) {
+	ctx := context.Background()
+	var jobID string
+	var submittedSQL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/queries"):
+			var req struct {
+				Query string `json:"query"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			submittedSQL = req.Query
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{"projectId": "test-project", "jobId": "age-check", "location": "US"},
+				"jobComplete":  true,
+				"schema":       map[string]interface{}{"fields": []map[string]string{{"name": "f0_", "type": "INTEGER", "mode": "NULLABLE"}}},
+				"rows":         []map[string]interface{}{{"f": []map[string]string{{"v": "0"}}}},
+				"totalRows":    "1",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			var req struct {
+				JobReference struct {
+					JobID string `json:"jobId"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			jobID = req.JobReference.JobID
+			submittedSQL = req.Configuration.Query.Query
+			writeBigQueryTestJob(w, jobID, submittedSQL)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"):
+			if strings.Contains(submittedSQL, "COUNTIF") {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+					"jobComplete":  true,
+					"schema":       map[string]interface{}{"fields": []map[string]string{{"name": "f0_", "type": "INTEGER", "mode": "NULLABLE"}}},
+					"rows":         []map[string]interface{}{{"f": []map[string]string{{"v": "0"}}}},
+					"totalRows":    "1",
+				})
+				return
+			}
+			writeBigQueryTestQueryResults(w, jobID)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"):
+			if strings.Contains(submittedSQL, "COUNTIF") {
+				writeBigQueryTestJob(w, jobID, submittedSQL)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference":  map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+				"configuration": map[string]interface{}{"query": map[string]interface{}{"query": "DELETE", "useLegacySql": false}},
+				"status": map[string]interface{}{
+					"state":       "DONE",
+					"errorResult": map[string]string{"reason": "accessDenied", "message": "updateData permission denied"},
+				},
+			})
+		default:
+			http.Error(w, r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(ctx, "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", datasetID: "test-dataset", location: "US"}
+
+	err = dest.DeleteCDCStateEvents(ctx, "test-dataset.cdc_state", "connector-a", []string{"event-a"})
+	if err == nil || !strings.Contains(err.Error(), "updateData permission denied") {
+		t.Fatalf("DeleteCDCStateEvents() error = %v, want completed job error", err)
+	}
+}
+
+func TestTruncateTableCancelsAndJoinsServerJobBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const jobID = "truncate-job"
+	var cancelCalls atomic.Int32
+	var terminalPolls atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs/"+jobID+"/cancel"):
+			cancelCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference":  map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+				"configuration": map[string]interface{}{"query": map[string]interface{}{"query": "TRUNCATE", "useLegacySql": false}},
+				"status":        map[string]string{"state": "RUNNING"},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"+jobID):
+			if cancelCalls.Load() == 0 {
+				cancel()
+				<-r.Context().Done()
+				return
+			}
+			terminalPolls.Add(1)
+			writeBigQueryTestQueryResults(w, jobID)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			terminalPolls.Add(1)
+			writeBigQueryTestJob(w, jobID, "TRUNCATE")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(context.Background(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", datasetID: "test-dataset", location: "US"}
+
+	err = dest.TruncateTable(ctx, "test-dataset.events")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("TruncateTable() error = %v, want context cancellation", err)
+	}
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("cancel calls = %d, want 1", cancelCalls.Load())
+	}
+	if terminalPolls.Load() == 0 {
+		t.Fatal("TruncateTable() returned before detached terminal polling")
+	}
+}
+
+func TestTruncateTableWaitsForTerminalJobWhenCancelFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const jobID = "slow-cancel-job"
+	var cancelCalls atomic.Int32
+	var terminalPolls atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs/"+jobID+"/cancel"):
+			cancelCalls.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"cancel denied"}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference":  map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+				"configuration": map[string]interface{}{"query": map[string]interface{}{"query": "TRUNCATE", "useLegacySql": false}},
+				"status":        map[string]string{"state": "RUNNING"},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"+jobID):
+			if cancelCalls.Load() == 0 {
+				cancel()
+				<-r.Context().Done()
+				return
+			}
+			poll := terminalPolls.Add(1)
+			if poll == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+					"jobComplete":  false,
+				})
+				return
+			}
+			writeBigQueryTestQueryResults(w, jobID)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			terminalPolls.Add(1)
+			writeBigQueryTestJob(w, jobID, "TRUNCATE")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(context.Background(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", datasetID: "test-dataset", location: "US"}
+
+	err = dest.TruncateTable(ctx, "test-dataset.events")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("TruncateTable() error = %v, want cancellation", err)
+	}
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("cancel calls = %d, want 1", cancelCalls.Load())
+	}
+	if terminalPolls.Load() < 1 {
+		t.Fatalf("terminal polls = %d, want at least 1", terminalPolls.Load())
+	}
+}
+
+func TestLoadJobAmbiguousStartRetriesWithStableJobID(t *testing.T) {
+	oldDelay := loadJobStartRetryDelay
+	loadJobStartRetryDelay = func(int) time.Duration { return time.Millisecond }
+	t.Cleanup(func() { loadJobStartRetryDelay = oldDelay })
+
+	var postCalls atomic.Int32
+	var firstJobID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/jobs") {
+			http.NotFound(w, r)
+			return
+		}
+		var req struct {
+			JobReference struct {
+				JobID string `json:"jobId"`
+			} `json:"jobReference"`
+			Configuration struct {
+				Load struct {
+					DestinationTable map[string]string `json:"destinationTable"`
+				} `json:"load"`
+			} `json:"configuration"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		call := postCalls.Add(1)
+		if call == 1 {
+			firstJobID = req.JobReference.JobID
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":503,"message":"ambiguous backend failure","errors":[{"reason":"backendError"}]}}`))
+			return
+		}
+		if req.JobReference.JobID != firstJobID {
+			t.Errorf("retry job ID = %q, want %q", req.JobReference.JobID, firstJobID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jobReference": map[string]string{"projectId": "test-project", "jobId": firstJobID, "location": "US"},
+			"configuration": map[string]interface{}{"load": map[string]interface{}{
+				"destinationTable": req.Configuration.Load.DestinationTable,
+				"sourceUris":       []string{"gs://bucket/chunk.jsonl"},
+			}},
+			"status": map[string]string{"state": "DONE"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(context.Background(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
+
+	job, err := dest.startLoadJobWithRetry(t.Context(), "ingestr_load_stable_1", tableRef, func() (*bigquery.Loader, func(), error) {
+		loader := tableRef.LoaderFrom(source)
+		loader.CreateDisposition = bigquery.CreateNever
+		loader.WriteDisposition = bigquery.WriteAppend
+		return loader, func() {}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID() != firstJobID || postCalls.Load() != 2 {
+		t.Fatalf("job=%q posts=%d, want stable ID %q over 2 posts", job.ID(), postCalls.Load(), firstJobID)
+	}
+}
+
+func TestLoadJobWaitErrorReconcilesOriginalWithoutResubmission(t *testing.T) {
+	oldDelay := bigQueryJobReconcileDelay
+	bigQueryJobReconcileDelay = time.Millisecond
+	t.Cleanup(func() { bigQueryJobReconcileDelay = oldDelay })
+
+	var postCalls atomic.Int32
+	var statusCalls atomic.Int32
+	const jobID = "ingestr_load_wait_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+				"configuration": map[string]interface{}{"load": map[string]interface{}{
+					"destinationTable": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+					"sourceUris":       []string{"gs://bucket/chunk.jsonl"},
+				}},
+				"status": map[string]string{"state": "RUNNING"},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"):
+			if statusCalls.Add(1) == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"code":503,"message":"transient status failure"}}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+				"configuration": map[string]interface{}{"load": map[string]interface{}{
+					"destinationTable": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+					"sourceUris":       []string{"gs://bucket/chunk.jsonl"},
+				}},
+				"status": map[string]string{"state": "DONE"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(context.Background(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
+	loader := tableRef.LoaderFrom(source)
+	loader.JobID = jobID
+	loader.ProjectID = "test-project"
+	loader.Location = "US"
+
+	job, err := loader.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waitForBigQueryJob(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+	if postCalls.Load() != 1 || statusCalls.Load() < 2 {
+		t.Fatalf("posts=%d status polls=%d, want one submission and reconciled status", postCalls.Load(), statusCalls.Load())
+	}
+}
+
+func TestWaitForBigQueryJobReturnsPermanentPollingError(t *testing.T) {
+	oldDelay := bigQueryJobReconcileDelay
+	bigQueryJobReconcileDelay = time.Millisecond
+	t.Cleanup(func() { bigQueryJobReconcileDelay = oldDelay })
+	const jobID = "permanent-poll-error"
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference":  map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+				"configuration": map[string]interface{}{"query": map[string]interface{}{"query": "SELECT 1"}},
+				"status":        map[string]string{"state": "RUNNING"},
+			})
+		case r.Method == http.MethodGet:
+			polls.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"permission denied"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	query := client.Query("SELECT 1")
+	query.JobID = jobID
+	query.Location = "US"
+	job, err := query.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = waitForBigQueryJob(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("wait error = %v, want permanent polling error", err)
+	}
+	if polls.Load() != 1 {
+		t.Fatalf("polls = %d, want one permanent-error poll", polls.Load())
+	}
+}
+
+func TestWaitForBigQueryJobBoundsRetryablePollingErrors(t *testing.T) {
+	oldDelay, oldAttempts, oldTimeout := bigQueryJobReconcileDelay, bigQueryJobAPIAttempts, bigQueryJobAPICallTimeout
+	bigQueryJobReconcileDelay, bigQueryJobAPIAttempts, bigQueryJobAPICallTimeout = time.Millisecond, 3, 10*time.Millisecond
+	t.Cleanup(func() {
+		bigQueryJobReconcileDelay, bigQueryJobAPIAttempts, bigQueryJobAPICallTimeout = oldDelay, oldAttempts, oldTimeout
+	})
+	const jobID = "bounded-poll-error"
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			writeBigQueryTestJob(w, jobID, "SELECT 1")
+			return
+		}
+		polls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":503,"message":"backend unavailable"}}`))
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	query := client.Query("SELECT 1")
+	query.JobID = jobID
+	query.Location = "US"
+	job, err := query.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = waitForBigQueryJob(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("wait error = %v, want bounded retry exhaustion", err)
+	}
+	if polls.Load() < 3 || polls.Load() > 12 {
+		t.Fatalf("polls = %d, want bounded wait/status calls", polls.Load())
+	}
+}
+
+func TestAmbiguousJobReconciliationDoesNotTrustFirstNotFound(t *testing.T) {
+	oldDelay, oldWindow := bigQueryJobReconcileDelay, bigQueryAmbiguousJobWindow
+	bigQueryJobReconcileDelay = time.Millisecond
+	bigQueryAmbiguousJobWindow = time.Second
+	t.Cleanup(func() { bigQueryJobReconcileDelay, bigQueryAmbiguousJobWindow = oldDelay, oldWindow })
+	const jobID = "delayed-visible-job"
+	var gets atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			if gets.Add(1) == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":404,"message":"not visible yet"}}`))
+				return
+			}
+			writeBigQueryTestJob(w, jobID, "MERGE")
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs/"+jobID+"/cancel"):
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	job, err := dest.reconcileAmbiguousBigQueryJob(ctx, jobID)
+	if job == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("job=%v err=%v, want discovered job and cancellation", job, err)
+	}
+	if gets.Load() < 2 {
+		t.Fatalf("job GETs=%d, want retry after initial 404", gets.Load())
+	}
+}
+
+func TestAmbiguousJobPermanentAuthorizationErrorReturns(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":403,"message":"permission denied"}}`))
+	}))
+	defer server.Close()
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	started := time.Now()
+	_, err = dest.reconcileAmbiguousBigQueryJob(ctx, "forbidden-job")
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error=%v, want permanent authorization failure", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("permanent authorization failure took %v", time.Since(started))
+	}
+}
+
+func TestBuildCDCStateFenceQueryDeduplicatesPhysicalRows(t *testing.T) {
+	quotedTable := "`test-project`.`test-dataset`.`cdc_state`"
+	want := "SELECT DISTINCT `event_id`, `state_generation` FROM " + quotedTable + " WHERE `connector_id` = @connector_id AND `state_kind` = 'run' AND `state_generation` = (SELECT MAX(`state_generation`) FROM " + quotedTable + " WHERE `connector_id` = @connector_id AND `state_kind` = 'run') ORDER BY `event_id`"
+	if got := buildCDCStateFenceQuery(quotedTable); got != want {
+		t.Fatalf("buildCDCStateFenceQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestReduceCDCJobMarkersResolvedWinsRegardlessOfRowOrder(t *testing.T) {
+	entries := []destination.CDCStateEntry{
+		{StateKind: "job", Status: "resolved", Position: "done"},
+		{StateKind: "job", Status: "pending", Position: "done"},
+		{StateKind: "job", Status: "pending", Position: "live"},
+		{StateKind: "checkpoint", Status: "complete", Position: "ignored"},
+	}
+	got := reduceCDCJobMarkers(entries)
+	if got["done"] || !got["live"] {
+		t.Fatalf("reduced markers = %v, want done=false live=true", got)
+	}
+}
+
+func TestResolvedCDCJobIDsOnlyReturnsAgedMarkers(t *testing.T) {
+	now := time.Now()
+	entries := []destination.CDCStateEntry{
+		{StateKind: "job", Status: "resolved", Position: "aged", RecordedAt: now.Add(-time.Hour)},
+		{StateKind: "job", Status: "resolved", Position: "young", RecordedAt: now.Add(-time.Minute)},
+		{StateKind: "job", Status: "pending", Position: "pending", RecordedAt: now.Add(-time.Hour)},
+		{StateKind: "job", Status: "resolved", Position: "aged", RecordedAt: now.Add(-2 * time.Hour)},
+	}
+	got := resolvedCDCJobIDs(entries, now.Add(-45*time.Minute))
+	if len(got) != 1 || got[0] != "aged" {
+		t.Fatalf("resolvedCDCJobIDs() = %v, want [aged]", got)
+	}
+}
+
+func TestCDCJobCleanupThrottleAvoidsRepeatedQueries(t *testing.T) {
+	dest := &BigQueryDestination{lastCDCJobCleanup: time.Now()}
+	dest.maybeCleanupCDCJobMarkers(t.Context(), "dataset.state", "connector")
+}
+
+func TestCDCStatePruneBatchSize(t *testing.T) {
+	if got := (&BigQueryDestination{}).CDCStatePruneBatchSize(); got != 10_000 {
+		t.Fatalf("CDCStatePruneBatchSize() = %d", got)
 	}
 }
 
@@ -1646,10 +2618,10 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_cdc_lsn` DESC) = 1) AS act") {
 			t.Fatalf("sql missing latest-active dedup:\n%s", sql)
 		}
-		if !contains(sql, "WHEN MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  UPDATE SET t.`name` = s.`name`") {
+		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  UPDATE SET t.`name` = s.`name`") {
 			t.Fatalf("sql missing full update for active or update-then-deleted rows:\n%s", sql)
 		}
-		if !contains(sql, "WHEN MATCHED AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
+		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
 			t.Fatalf("sql missing CDC-only update for delete-only windows:\n%s", sql)
 		}
 		if !contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {

@@ -103,6 +103,18 @@ func TestSCD2Strategy_Execute_BasicFlow(t *testing.T) {
 	assert.Contains(t, dest.calls, "DropTable")
 }
 
+func TestSCD2Strategy_RejectsCDCBeforeDestinationOrSourceWork(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Schema = keylessCDCSchema()
+	job.Config.IncrementalStrategy = config.StrategySCD2
+
+	err := (&SCD2Strategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "not supported for CDC records")
+	require.Empty(t, dest.prepareCalls)
+	require.Empty(t, dest.writeCalls)
+	require.False(t, src.readCalled)
+}
+
 func TestSCD2Strategy_ExtendSchemaWithSCDColumns(t *testing.T) {
 	original := &schema.TableSchema{
 		Columns: []schema.Column{

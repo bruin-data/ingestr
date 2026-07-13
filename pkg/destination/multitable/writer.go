@@ -53,9 +53,18 @@ func WriteWithResult(
 	// a failed table's full channel blocks the shared router goroutine.
 	writeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var cancelOnce sync.Once
+	cancelInput := func() {
+		cancelOnce.Do(func() {
+			cancel()
+			if opts.CancelSource != nil {
+				opts.CancelSource()
+			}
+		})
+	}
 
 	router := NewRouter(tables, 8)
-	router.Route(writeCtx, records)
+	router.Route(writeCtx, records, opts.CancelSource != nil)
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(tables))
@@ -76,7 +85,7 @@ func WriteWithResult(
 				return
 			}
 
-			truncated, err := destination.WriteWithTruncateBoundaries(writeCtx, dest, ch, destination.WriteOptions{
+			truncated, err := destination.WriteWithTruncateBoundariesAfterCancel(writeCtx, dest, ch, destination.WriteOptions{
 				Table:            tableConfig.DestTable,
 				Schema:           tableConfig.Schema,
 				PrimaryKeys:      tableConfig.PrimaryKeys,
@@ -85,14 +94,14 @@ func WriteWithResult(
 				StagingBucket:    opts.StagingBucket,
 				LoaderFileSize:   opts.LoaderFileSize,
 				LoaderFileFormat: opts.LoaderFileFormat,
-			})
+			}, cancelInput)
 			if truncated {
 				resultMu.Lock()
 				result.TruncatedTables[table] = true
 				resultMu.Unlock()
 			}
 			if err != nil {
-				cancel()
+				cancelInput()
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}

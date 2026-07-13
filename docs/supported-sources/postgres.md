@@ -38,14 +38,14 @@ CDC-specific URI parameters (all optional):
 
 Without `--source-table`, CDC runs in multi-table mode and replicates every table in the publication. Deletes are soft: rows are kept in the destination with `_cdc_deleted = true`.
 
-CDC progress is stored in connector-scoped checkpoint and per-table snapshot-marker tables in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Resume never relies on the maximum `_cdc_lsn` in a user table. A table becomes resumable only after its complete snapshot marker is durable, so an interrupted snapshot is safely replaced on restart. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
+CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. A table becomes resumable only after its complete snapshot marker is durable, so an interrupted snapshot is safely replaced on restart. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
 
 ### New tables
 
 Tables created on the source after CDC has been set up are picked up automatically:
 
 - **Batch mode**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
-- **Stream mode**: the running stream re-checks the source every `discover_interval`. When a new table appears, ingestr adds it to the managed publication, backfills its existing rows, creates the destination table on the fly, and continues streaming — the other tables are not interrupted, and no data is lost while the stream rebuilds (the replication slot retains WAL during the pause).
+- **Stream mode**: the running stream re-checks the source every `discover_interval`. When a new eligible table appears, the stream exits before changing destination data and reports that a restart is required. On restart, the table is included in the normal snapshot-and-stream path while the replication slot retains intervening WAL.
 
 With a user-managed publication (`publication=` supplied), ingestr never alters the publication: a new table is picked up after you run `ALTER PUBLICATION ... ADD TABLE` yourself (or immediately, if the publication was created `FOR ALL TABLES`).
 

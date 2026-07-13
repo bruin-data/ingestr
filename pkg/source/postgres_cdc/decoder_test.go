@@ -82,10 +82,42 @@ func TestConvertTextValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := convertTextValue(tt.text, tt.col)
+			got, err := convertTextValue(tt.text, tt.col)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+func TestConvertTextValueTimestamptzFractionalOffset(t *testing.T) {
+	got, err := convertTextValue("2024-01-15 10:30:45.123456+05:30", schema.Column{DataType: schema.TypeTimestampTZ})
+	require.NoError(t, err)
+	assert.Equal(t, "2024-01-15T05:00:45.123456Z", got.(time.Time).UTC().Format("2006-01-02T15:04:05.999999Z07:00"))
+}
+
+func TestConvertTextValueRejectsInvalidAndInfiniteTimestamps(t *testing.T) {
+	for _, text := range []string{"not-a-timestamp", "infinity", "-infinity"} {
+		t.Run(text, func(t *testing.T) {
+			value, err := convertTextValue(text, schema.Column{DataType: schema.TypeTimestampTZ})
+			require.Error(t, err)
+			assert.Nil(t, value)
+		})
+	}
+}
+
+func TestParseTupleDataPropagatesTypedTextConversionError(t *testing.T) {
+	text := "infinity"
+	data := make([]byte, 0, 2+1+4+len(text))
+	data = binary.BigEndian.AppendUint16(data, 1)
+	data = append(data, tupleDataText)
+	data = binary.BigEndian.AppendUint32(data, uint32(len(text)))
+	data = append(data, text...)
+	tableSchema := addCDCColumns(&schema.TableSchema{Columns: []schema.Column{{Name: "occurred_at", DataType: schema.TypeTimestampTZ}}})
+	rel := &RelationInfo{SchemaIndex: []int{0}}
+
+	value, err := parseTupleData(data, rel, tableSchema, nil)
+	require.ErrorContains(t, err, `column "occurred_at"`)
+	assert.Nil(t, value)
 }
 
 func TestReadString(t *testing.T) {
@@ -217,7 +249,7 @@ func TestDecoderBeginAndCommit(t *testing.T) {
 	err := decoder.handleBegin(beginData)
 	require.NoError(t, err)
 	assert.Equal(t, pglogrepl.LSN(100), decoder.currentTxLSN)
-	assert.Nil(t, decoder.pendingChanges)
+	assert.Zero(t, decoder.pendingChanges.Len())
 
 	// Commit with no changes should return nil batch
 	batch, err := decoder.handleCommit()

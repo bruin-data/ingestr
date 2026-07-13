@@ -18,19 +18,26 @@ const DefaultStagingSchema = "_bruin_staging"
 // identifiers don't collide via silent truncation and don't fail on MySQL.
 const maxStagingTableNameLen = 60
 
+const encodedStagingIdentifierPrefix = "_ingestr_hex_"
+
 func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string {
 	catalog, originSchema, tableName := splitCatalogSchemaTable(targetTable)
+	catalogRef, _, _ := splitCatalogSchemaTableRaw(targetTable)
 
 	stagingSchema := stagingDataset
 	if stagingSchema == "" {
 		stagingSchema = DefaultStagingSchema
 	}
 
-	embeddedName := tableName
+	embeddedParts := []string{tableName}
 	if originSchema != "" {
-		embeddedName = fmt.Sprintf("%s__%s", originSchema, tableName)
+		embeddedParts = []string{originSchema, tableName}
 	}
+	embeddedName := syntheticStagingIdentifier(embeddedParts...)
 
+	if catalogRef != "" {
+		catalog = catalogRef
+	}
 	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
 }
 
@@ -41,18 +48,54 @@ func managedStagingTableName(dest destination.Destination, targetTable, suffix, 
 	return GenerateStagingTableName(targetTable, suffix, stagingDataset)
 }
 
-func managedCDCStateTableName(dest destination.Destination, targetTable, stateTable, stagingDataset string) string {
+func managedCDCStateTableName(dest destination.Destination, stateTable, _ string) string {
+	policy := defaultReplaceStagingPolicy()
+	if provider, ok := dest.(destination.ManagedStagingPolicyProvider); ok {
+		policy = normaliseReplaceStagingPolicy(provider.ManagedStagingPolicy())
+	}
+
+	catalog := ""
+	if provider, ok := dest.(destination.ManagedCDCStateCatalogProvider); ok {
+		catalog = provider.ManagedCDCStateCatalog()
+	}
+	stateSchema := ""
+	switch policy.DefaultPlacement {
+	case destination.ReplaceStagingTargetSchema:
+		stateSchema = policy.DefaultTargetSchema
+	default:
+		stateSchema = policy.DefaultManagedSchema
+	}
+	if stateSchema == "" {
+		stateSchema = DefaultStagingSchema
+	}
+
+	return qualifyCatalog(catalog, fmt.Sprintf("%s.%s", stateSchema, stateTable))
+}
+
+func legacyManagedCDCStateTableName(dest destination.Destination, targetTable, stateTable, stagingDataset string) string {
 	policy := defaultReplaceStagingPolicy()
 	if provider, ok := dest.(destination.ManagedStagingPolicyProvider); ok {
 		policy = normaliseReplaceStagingPolicy(provider.ManagedStagingPolicy())
 	}
 
 	catalog, targetSchema, _ := splitCatalogSchemaTable(targetTable)
+	catalogRef, targetSchemaRef, _ := splitCatalogSchemaTableRaw(targetTable)
+	if catalogRef != "" {
+		catalog = catalogRef
+	}
+	if catalog == "" {
+		if provider, ok := dest.(destination.ManagedCDCStateCatalogProvider); ok {
+			catalog = provider.ManagedCDCStateCatalog()
+		}
+	}
 	stateSchema := stagingDataset
 	if stateSchema == "" {
 		switch policy.DefaultPlacement {
 		case destination.ReplaceStagingTargetSchema:
-			stateSchema = targetSchema
+			stateSchema = targetSchemaRef
+			if stateSchema == "" {
+				stateSchema = targetSchema
+			}
 			if stateSchema == "" {
 				stateSchema = policy.DefaultTargetSchema
 			}
@@ -70,12 +113,19 @@ func managedCDCStateTableName(dest destination.Destination, targetTable, stateTa
 func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
 	policy = normaliseReplaceStagingPolicy(policy)
 	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)
+	catalogRef, targetSchemaRef, _ := splitCatalogSchemaTableRaw(targetTable)
+	if catalogRef != "" {
+		catalog = catalogRef
+	}
 
 	stagingSchema := stagingDataset
 	if stagingSchema == "" {
 		switch policy.DefaultPlacement {
 		case destination.ReplaceStagingTargetSchema:
-			stagingSchema = targetSchema
+			stagingSchema = targetSchemaRef
+			if stagingSchema == "" {
+				stagingSchema = targetSchema
+			}
 			if stagingSchema == "" {
 				stagingSchema = policy.DefaultTargetSchema
 			}
@@ -87,10 +137,15 @@ func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string,
 		stagingSchema = policy.DefaultManagedSchema
 	}
 
-	embeddedName := tableName
-	if targetSchema != "" && stagingSchema != targetSchema {
-		embeddedName = fmt.Sprintf("%s__%s", targetSchema, tableName)
+	embeddedParts := []string{tableName}
+	targetSchemaPlacement := targetSchemaRef
+	if targetSchemaPlacement == "" {
+		targetSchemaPlacement = targetSchema
 	}
+	if targetSchema != "" && stagingSchema != targetSchemaPlacement {
+		embeddedParts = []string{targetSchema, tableName}
+	}
+	embeddedName := syntheticStagingIdentifier(embeddedParts...)
 
 	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
 }
@@ -118,9 +173,18 @@ func normaliseReplaceStagingPolicy(policy destination.ReplaceStagingPolicy) dest
 // honored via tablename.Split.
 func splitCatalogSchemaTable(table string) (catalog, schema, tableName string) {
 	parts := tablename.Split(table)
+	return catalogSchemaTable(parts, table)
+}
+
+func splitCatalogSchemaTableRaw(table string) (catalog, schema, tableName string) {
+	parts := tablename.SplitRaw(table)
+	return catalogSchemaTable(parts, table)
+}
+
+func catalogSchemaTable(parts []string, fallback string) (catalog, schema, tableName string) {
 	switch len(parts) {
 	case 0:
-		return "", "", table
+		return "", "", fallback
 	case 1:
 		return "", "", parts[0]
 	case 2:
@@ -137,6 +201,42 @@ func qualifyCatalog(catalog, name string) string {
 		return name
 	}
 	return catalog + "." + name
+}
+
+func syntheticStagingIdentifier(parts ...string) string {
+	legacy := strings.Join(parts, "__")
+	if isUnambiguousLegacyStagingIdentifier(legacy, parts) {
+		return legacy
+	}
+
+	var encoded strings.Builder
+	encoded.WriteString(encodedStagingIdentifierPrefix)
+	for i, part := range parts {
+		if i > 0 {
+			encoded.WriteByte('_')
+		}
+		encoded.WriteString(hex.EncodeToString([]byte(part)))
+	}
+	return encoded.String()
+}
+
+func isUnambiguousLegacyStagingIdentifier(candidate string, parts []string) bool {
+	if strings.HasPrefix(candidate, encodedStagingIdentifierPrefix) {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || strings.Contains(part, "__") {
+			return false
+		}
+		for i := 0; i < len(part); i++ {
+			ch := part[i]
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
@@ -168,6 +268,6 @@ func GenerateNormalisedStagingTableName(targetTable, stagingDataset string) stri
 	stagedParts := tablename.Split(staged)
 	bare := stagedParts[len(stagedParts)-1]
 	// Re-qualify the transient table in the target's own catalog/schema.
-	catalog, schema, _ := splitCatalogSchemaTable(targetTable)
+	catalog, schema, _ := splitCatalogSchemaTableRaw(targetTable)
 	return tablename.TableName{Catalog: catalog, Schema: schema, Table: bare}.String()
 }

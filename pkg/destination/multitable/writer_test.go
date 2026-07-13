@@ -6,13 +6,31 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
+
+type releaseCountingBatch struct{ releases *atomic.Int64 }
+
+func (b *releaseCountingBatch) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (b *releaseCountingBatch) Release()                     { b.releases.Add(1) }
+func (b *releaseCountingBatch) Retain()                      {}
+func (b *releaseCountingBatch) Schema() *arrow.Schema        { return nil }
+func (b *releaseCountingBatch) NumRows() int64               { return 0 }
+func (b *releaseCountingBatch) NumCols() int64               { return 0 }
+func (b *releaseCountingBatch) Columns() []arrow.Array       { return nil }
+func (b *releaseCountingBatch) Column(int) arrow.Array       { return nil }
+func (b *releaseCountingBatch) ColumnName(int) string        { return "" }
+func (b *releaseCountingBatch) SetColumn(int, arrow.Array) (arrow.RecordBatch, error) {
+	return nil, nil
+}
+func (b *releaseCountingBatch) NewSlice(int64, int64) arrow.RecordBatch { return b }
 
 type fakeDestination struct {
 	writeFn func(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error
@@ -202,6 +220,74 @@ func TestWriteRouterDeadlock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Write deadlocked: router blocked on failed table's channel, starving healthy table")
+	}
+}
+
+func TestWriteFailureCancelsProducerAndReleasesEveryBatchOnce(t *testing.T) {
+	dest := &fakeDestination{writeFn: func(context.Context, <-chan source.RecordBatchResult, destination.WriteOptions) error {
+		return errors.New("early write failure")
+	}}
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	releases := make([]atomic.Int64, 32)
+	records := make(chan source.RecordBatchResult)
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer close(records)
+		for i := range releases {
+			batch := &releaseCountingBatch{releases: &releases[i]}
+			select {
+			case records <- source.RecordBatchResult{TableName: "items", Batch: batch}:
+			case <-readCtx.Done():
+				batch.Release()
+				for j := i + 1; j < len(releases); j++ {
+					(&releaseCountingBatch{releases: &releases[j]}).Release()
+				}
+				return
+			}
+		}
+	}()
+
+	err := Write(context.Background(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{"items": {DestTable: "raw.items"}},
+		CancelSource: cancelRead,
+	})
+	if err == nil || !strings.Contains(err.Error(), "early write failure") {
+		t.Fatalf("Write() error = %v, want early write failure", err)
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("source producer remained blocked after table writer failure")
+	}
+	for i := range releases {
+		if got := releases[i].Load(); got != 1 {
+			t.Fatalf("batch %d release count = %d, want 1", i, got)
+		}
+	}
+}
+
+func TestWriteFailureReturnsWhenCanceledProducerNeverCloses(t *testing.T) {
+	dest := &fakeDestination{writeFn: func(context.Context, <-chan source.RecordBatchResult, destination.WriteOptions) error {
+		return errors.New("early write failure")
+	}}
+	var releases atomic.Int64
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: "items", Batch: &releaseCountingBatch{releases: &releases}}
+
+	started := time.Now()
+	err := Write(context.Background(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{"items": {DestTable: "raw.items"}},
+		CancelSource: func() {},
+	})
+	if err == nil || !strings.Contains(err.Error(), "early write failure") {
+		t.Fatalf("Write() error = %v, want early write failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Write() waited %s for a canceled producer that never closed", elapsed)
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("batch release count = %d, want 1", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ const (
 type Change struct {
 	Operation string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
 	LSN       pglogrepl.LSN
+	Sequence  uint64 // 1-based order within the committing transaction
 	Values    []interface{}
 	OldValues []interface{} // For UPDATE/DELETE with replica identity
 }
@@ -54,25 +56,31 @@ type Decoder struct {
 	targetTable    string
 	relations      map[uint32]*RelationInfo
 	targetRelID    uint32
-	pendingChanges []Change
+	expectedRelID  uint32
+	pendingChanges *changeSpool[Change]
+	committed      *changeSpool[Change]
 	currentTxLSN   pglogrepl.LSN
 	typeMap        *pgtype.Map
+	allowedUnknown map[string]struct{}
+	memoryBudget   *byteBudget
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
+	budget := newByteBudget(defaultDecoderMemoryBytes)
 	return &Decoder{
-		tableSchema:  tableSchema,
-		targetSchema: schemaName,
-		targetTable:  tableName,
-		relations:    make(map[uint32]*RelationInfo),
-		typeMap:      pgtype.NewMap(),
+		tableSchema:    tableSchema,
+		targetSchema:   schemaName,
+		targetTable:    tableName,
+		relations:      make(map[uint32]*RelationInfo),
+		typeMap:        pgtype.NewMap(),
+		pendingChanges: newChangeSpoolWithBudget[Change](defaultTransactionMemoryBytes, budget, nil),
+		memoryBudget:   budget,
 	}
 }
 
-// Decode decodes a WAL message and, on commit, returns the transaction's
-// decoded changes. Unchanged-TOAST fill, per-key compaction, and Arrow
-// materialization all happen once per flush window in the accumulator, not
-// per transaction.
+// Decode decodes a WAL message and, on commit, returns the first bounded chunk
+// of the transaction's decoded changes. Remaining chunks are drained before
+// the replicator reads more WAL.
 func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 	if len(data) == 0 {
 		return nil, nil
@@ -106,6 +114,26 @@ func (d *Decoder) Decode(data []byte, lsn pglogrepl.LSN) ([]Change, error) {
 	}
 }
 
+func logicalCommitLSN(data []byte) (pglogrepl.LSN, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	switch data[0] {
+	case msgTypeCommit:
+		if len(data) < 10 {
+			return 0, false
+		}
+		return pglogrepl.LSN(binary.BigEndian.Uint64(data[2:10])), true
+	case msgTypeStreamCommit:
+		if len(data) < 14 {
+			return 0, false
+		}
+		return pglogrepl.LSN(binary.BigEndian.Uint64(data[6:14])), true
+	default:
+		return 0, false
+	}
+}
+
 func (d *Decoder) handleTruncate(data []byte) error {
 	relationIDs, err := parseTruncateRelationIDs(data)
 	if err != nil {
@@ -113,8 +141,7 @@ func (d *Decoder) handleTruncate(data []byte) error {
 	}
 	for _, relID := range relationIDs {
 		if relID == d.targetRelID {
-			d.pendingChanges = append(d.pendingChanges, Change{Operation: "TRUNCATE", LSN: d.currentTxLSN})
-			break
+			return d.appendChange(Change{Operation: "TRUNCATE", LSN: d.currentTxLSN})
 		}
 	}
 	return nil
@@ -144,6 +171,13 @@ func (d *Decoder) handleRelation(data []byte) error {
 
 	isTarget := rel.Namespace == d.targetSchema && rel.Name == d.targetTable
 	if isTarget {
+		if d.expectedRelID != 0 && rel.RelationID != d.expectedRelID {
+			return &TableReincarnatedError{
+				Table:    d.targetSchema + "." + d.targetTable,
+				Previous: strconv.FormatUint(uint64(d.expectedRelID), 10),
+				Current:  strconv.FormatUint(uint64(rel.RelationID), 10),
+			}
+		}
 		d.targetRelID = rel.RelationID
 		config.Debug("[CDC] Found target relation: %s.%s (ID: %d)", rel.Namespace, rel.Name, rel.RelationID)
 	} else if d.targetRelID != 0 && rel.RelationID == d.targetRelID {
@@ -152,7 +186,7 @@ func (d *Decoder) handleRelation(data []byte) error {
 	}
 	if isTarget {
 		prev := d.relations[rel.RelationID]
-		if err := mapRelationToSchema(rel, prev, d.tableSchema, d.targetSchema+"."+d.targetTable); err != nil {
+		if err := mapRelationToSchema(rel, prev, d.tableSchema, d.targetSchema+"."+d.targetTable, d.allowedUnknown); err != nil {
 			// Do not store rel on error: a rebuilt stream must retry against the
 			// last accepted relation so schema-change detection remains stable.
 			return err
@@ -163,16 +197,35 @@ func (d *Decoder) handleRelation(data []byte) error {
 	return nil
 }
 
+func (d *Decoder) ExpectRelationID(relationID uint32) {
+	d.expectedRelID = relationID
+}
+
+func (d *Decoder) AllowUnknownRelationColumns(columns map[string]struct{}) {
+	d.allowedUnknown = columns
+}
+
 // handleBegin stamps the transaction with the commit ("final") LSN from the
 // Begin payload; see MultiTableDecoder.handleBegin for why the Begin record's
 // own WAL position must not be used.
 func (d *Decoder) handleBegin(data []byte) error {
-	d.pendingChanges = nil
+	if d.committed != nil && d.committed.Len() > 0 {
+		return errors.New("received BEGIN before committed transaction was drained")
+	}
+	if err := d.pendingChanges.Close(); err != nil {
+		return err
+	}
+	d.pendingChanges = newChangeSpoolWithBudget[Change](defaultTransactionMemoryBytes, d.memoryBudget, nil)
 	if len(data) < 8 {
 		return fmt.Errorf("begin message too short")
 	}
 	d.currentTxLSN = pglogrepl.LSN(binary.BigEndian.Uint64(data[:8]))
 	return nil
+}
+
+func (d *Decoder) appendChange(change Change) error {
+	change.Sequence = uint64(d.pendingChanges.Len()+1) * 2
+	return d.pendingChanges.Append(change)
 }
 
 // CurrentTxLSN returns the LSN of the transaction currently being decoded. It
@@ -186,7 +239,7 @@ func (d *Decoder) CurrentTxLSN() pglogrepl.LSN {
 // decoded but not yet emitted (BEGIN seen, COMMIT not yet processed). The bool
 // is false when no transaction is mid-flight.
 func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
-	if len(d.pendingChanges) == 0 {
+	if d.pendingChanges == nil || d.pendingChanges.Len() == 0 {
 		return 0, false
 	}
 	return d.currentTxLSN, true
@@ -197,13 +250,49 @@ func (d *Decoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 // whole flush window (batchAccumulator.flushTable), which subsumes the
 // per-commit passes.
 func (d *Decoder) handleCommit() ([]Change, error) {
-	if len(d.pendingChanges) == 0 {
+	if d.pendingChanges == nil || d.pendingChanges.Len() == 0 {
 		return nil, nil
 	}
+	if err := d.pendingChanges.Seal(); err != nil {
+		return nil, err
+	}
+	d.committed = d.pendingChanges
+	d.pendingChanges = newChangeSpoolWithBudget[Change](defaultTransactionMemoryBytes, d.memoryBudget, nil)
+	return d.DrainCommitted(defaultCommittedDrainChanges)
+}
 
-	changes := d.pendingChanges
-	d.pendingChanges = nil
-	return changes, nil
+func (d *Decoder) HasCommitted() bool {
+	return d.committed != nil && d.committed.Len() > 0
+}
+
+func (d *Decoder) CommittedLowWater() (pglogrepl.LSN, bool) {
+	return d.currentTxLSN, d.HasCommitted()
+}
+
+func (d *Decoder) DrainCommitted(limit int) ([]Change, error) {
+	if !d.HasCommitted() {
+		return nil, nil
+	}
+	changes, err := d.committed.Drain(limit)
+	if err != nil {
+		return nil, err
+	}
+	if d.committed.Len() == 0 {
+		err = d.committed.Close()
+		d.committed = nil
+	}
+	return changes, err
+}
+
+func (d *Decoder) Close() error {
+	var err error
+	if d.pendingChanges != nil {
+		err = errors.Join(err, d.pendingChanges.Close())
+	}
+	if d.committed != nil {
+		err = errors.Join(err, d.committed.Close())
+	}
+	return err
 }
 
 func (d *Decoder) handleInsert(data []byte) error {
@@ -223,6 +312,9 @@ func (d *Decoder) handleInsert(data []byte) error {
 	if rel == nil {
 		return fmt.Errorf("unknown relation ID: %d", relID)
 	}
+	if rel.Stale {
+		return nil
+	}
 
 	// Skip 'N' marker for new tuple
 	if len(data) < 1 || data[0] != 'N' {
@@ -235,13 +327,11 @@ func (d *Decoder) handleInsert(data []byte) error {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
 
-	d.pendingChanges = append(d.pendingChanges, Change{
+	return d.appendChange(Change{
 		Operation: "INSERT",
 		LSN:       d.currentTxLSN,
 		Values:    values,
 	})
-
-	return nil
 }
 
 func (d *Decoder) handleUpdate(data []byte) error {
@@ -259,6 +349,9 @@ func (d *Decoder) handleUpdate(data []byte) error {
 	rel := d.relations[relID]
 	if rel == nil {
 		return fmt.Errorf("unknown relation ID: %d", relID)
+	}
+	if rel.Stale {
+		return nil
 	}
 
 	var oldValues []interface{}
@@ -285,15 +378,14 @@ func (d *Decoder) handleUpdate(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse new tuple: %w", err)
 	}
+	markMissingRelationColumnsUnchanged(values, rel)
 
-	d.pendingChanges = append(d.pendingChanges, Change{
+	return d.appendChange(Change{
 		Operation: "UPDATE",
 		LSN:       d.currentTxLSN,
 		Values:    values,
 		OldValues: oldValues,
 	})
-
-	return nil
 }
 
 func (d *Decoder) handleDelete(data []byte) error {
@@ -312,6 +404,9 @@ func (d *Decoder) handleDelete(data []byte) error {
 	if rel == nil {
 		return fmt.Errorf("unknown relation ID: %d", relID)
 	}
+	if rel.Stale {
+		return nil
+	}
 
 	// Key ('K') or old tuple ('O') marker
 	if len(data) < 1 || (data[0] != 'K' && data[0] != 'O') {
@@ -324,13 +419,11 @@ func (d *Decoder) handleDelete(data []byte) error {
 		return fmt.Errorf("failed to parse tuple data: %w", err)
 	}
 
-	d.pendingChanges = append(d.pendingChanges, Change{
+	return d.appendChange(Change{
 		Operation: "DELETE",
 		LSN:       d.currentTxLSN,
 		Values:    values,
 	})
-
-	return nil
 }
 
 func readString(data []byte) (string, int) {
@@ -377,58 +470,72 @@ func skipTupleData(data []byte) []byte {
 	return data
 }
 
-func convertTextValue(text string, col schema.Column) interface{} {
+func convertTextValue(text string, col schema.Column) (interface{}, error) {
+	return convertTextValueWithMap(text, col, pgtype.NewMap())
+}
+
+func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map) (interface{}, error) {
+	if typeMap == nil {
+		typeMap = pgtype.NewMap()
+	}
 	switch col.DataType {
 	case schema.TypeBoolean:
-		return text == "t" || text == "true" || text == "1"
+		switch text {
+		case "t", "true", "1":
+			return true, nil
+		case "f", "false", "0":
+			return false, nil
+		default:
+			return nil, fmt.Errorf("invalid boolean %q", text)
+		}
 	case schema.TypeInt16:
-		if v, err := strconv.ParseInt(text, 10, 16); err == nil {
-			return int16(v)
+		v, err := strconv.ParseInt(text, 10, 16)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		return int16(v), nil
 	case schema.TypeInt32:
-		if v, err := strconv.ParseInt(text, 10, 32); err == nil {
-			return int32(v)
+		v, err := strconv.ParseInt(text, 10, 32)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		return int32(v), nil
 	case schema.TypeInt64:
-		if v, err := strconv.ParseInt(text, 10, 64); err == nil {
-			return v
+		v, err := strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		return v, nil
 	case schema.TypeFloat32:
-		if v, err := strconv.ParseFloat(text, 32); err == nil {
-			return float32(v)
+		v, err := strconv.ParseFloat(text, 32)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		return float32(v), nil
 	case schema.TypeFloat64:
-		if v, err := strconv.ParseFloat(text, 64); err == nil {
-			return v
+		v, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	case schema.TypeTimestamp, schema.TypeTimestampTZ:
-		// PostgreSQL timestamp format
-		formats := []string{
-			"2006-01-02 15:04:05.999999-07",
-			"2006-01-02 15:04:05.999999+00",
-			"2006-01-02 15:04:05.999999",
-			"2006-01-02 15:04:05-07",
-			"2006-01-02 15:04:05+00",
-			"2006-01-02 15:04:05",
-			time.RFC3339Nano,
-			time.RFC3339,
+		return v, nil
+	case schema.TypeTimestamp:
+		var value time.Time
+		if err := typeMap.Scan(pgtype.TimestampOID, pgtype.TextFormatCode, []byte(text), &value); err != nil {
+			return nil, err
 		}
-		for _, format := range formats {
-			if t, err := time.Parse(format, text); err == nil {
-				return t
-			}
+		return value, nil
+	case schema.TypeTimestampTZ:
+		var value time.Time
+		if err := typeMap.Scan(pgtype.TimestamptzOID, pgtype.TextFormatCode, []byte(text), &value); err != nil {
+			return nil, err
 		}
-		return nil
+		return value, nil
 	case schema.TypeDate:
-		if t, err := time.Parse("2006-01-02", text); err == nil {
-			return t
+		var value time.Time
+		if err := typeMap.Scan(pgtype.DateOID, pgtype.TextFormatCode, []byte(text), &value); err != nil {
+			return nil, err
 		}
-		return nil
+		return value, nil
 	case schema.TypeTime:
 		formats := []string{
 			"15:04:05.999999",
@@ -436,22 +543,24 @@ func convertTextValue(text string, col schema.Column) interface{} {
 		}
 		for _, format := range formats {
 			if t, err := time.Parse(format, text); err == nil {
-				return t
+				return t, nil
 			}
 		}
-		return nil
+		return nil, fmt.Errorf("invalid PostgreSQL time %q", text)
 	case schema.TypeDecimal:
-		return text // Keep as string for decimal handling
+		return text, nil // Keep as string for decimal handling
 	case schema.TypeBinary:
 		// bytea arrives as a hex literal ("\x48...") in text mode; decode it so
 		// the destination stores the raw bytes, matching the snapshot path and
 		// binary-mode decoding.
 		if strings.HasPrefix(text, `\x`) {
 			if b, err := hex.DecodeString(text[2:]); err == nil {
-				return b
+				return b, nil
+			} else {
+				return nil, err
 			}
 		}
-		return []byte(text)
+		return []byte(text), nil
 	case schema.TypeArray:
 		// Logical replication delivers arrays as Postgres array literals
 		// ({a,b}), not JSON arrays, so parse the literal and convert each
@@ -460,7 +569,7 @@ func convertTextValue(text string, col schema.Column) interface{} {
 		// via pgx, keeping streaming and snapshot consistent.
 		elems, ok := parsePostgresArrayLiteral(text)
 		if !ok {
-			return nil
+			return nil, fmt.Errorf("invalid PostgreSQL array literal %q", text)
 		}
 		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
 		out := make([]interface{}, len(elems))
@@ -469,10 +578,14 @@ func convertTextValue(text string, col schema.Column) interface{} {
 				out[i] = nil
 				continue
 			}
-			out[i] = convertTextValue(e.value, elemCol)
+			value, err := convertTextValueWithMap(e.value, elemCol, typeMap)
+			if err != nil {
+				return nil, fmt.Errorf("invalid array element %d: %w", i, err)
+			}
+			out[i] = value
 		}
-		return out
+		return out, nil
 	default:
-		return text
+		return text, nil
 	}
 }

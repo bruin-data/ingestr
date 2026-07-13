@@ -220,3 +220,112 @@ func TestColumnRenamer(t *testing.T) {
 		assert.InDelta(t, 250.0, arrowutil.Value(transformed.Column(0), 1), 0.000001)
 	})
 }
+
+func TestColumnRenamerRewritesCDCUnchangedColumns(t *testing.T) {
+	batch := stringRecordBatch(
+		t,
+		[]string{"configData", "_cdc_lsn", "_cdc_unchanged_cols"},
+		[][]*string{
+			{stringPtr("placeholder"), stringPtr("placeholder"), stringPtr("placeholder"), stringPtr("placeholder")},
+			{stringPtr("1/1"), stringPtr("1/2"), stringPtr("1/3"), stringPtr("1/4")},
+			{stringPtr(`["configData"]`), stringPtr(`[]`), nil, stringPtr(`null`)},
+		},
+	)
+	renamer := NewColumnRenamer(map[string]string{
+		"configData":          "config_data",
+		"_cdc_lsn":            "renamed_lsn",
+		"_cdc_unchanged_cols": "renamed_markers",
+	})
+
+	got, err := renamer.Transform(batch)
+	require.NoError(t, err)
+	defer got.Release()
+
+	assert.Equal(t, "config_data", got.Schema().Field(0).Name)
+	assert.Equal(t, "_cdc_lsn", got.Schema().Field(1).Name)
+	assert.Equal(t, "_cdc_unchanged_cols", got.Schema().Field(2).Name)
+	markers := got.Column(2).(*array.String)
+	assert.Equal(t, `["config_data"]`, markers.Value(0))
+	assert.Equal(t, `[]`, markers.Value(1))
+	assert.True(t, markers.IsNull(2))
+	assert.Equal(t, `null`, markers.Value(3))
+}
+
+func TestColumnRenamerRewritesCDCMarkersThroughComposedShortening(t *testing.T) {
+	const sourceName = "configurationDataWithANameThatExceedsTheDestinationIdentifierLimit"
+	const finalName = "configuration_data_with_a_name_8f31a21c"
+	batch := stringRecordBatch(
+		t,
+		[]string{sourceName, "_cdc_unchanged_cols"},
+		[][]*string{{stringPtr("placeholder")}, {stringPtr(`["` + sourceName + `"]`)}},
+	)
+
+	got, err := NewColumnRenamer(map[string]string{sourceName: finalName}).Transform(batch)
+	require.NoError(t, err)
+	defer got.Release()
+
+	assert.Equal(t, finalName, got.Schema().Field(0).Name)
+	assert.Equal(t, `[`+`"`+finalName+`"`+`]`, got.Column(1).(*array.String).Value(0))
+}
+
+func TestColumnRenamerCDCMarkerCollisionRequiresEveryContributorUnchanged(t *testing.T) {
+	batch := stringRecordBatch(
+		t,
+		[]string{"configData", "config_data", "_cdc_unchanged_cols"},
+		[][]*string{
+			{stringPtr("placeholder"), stringPtr("placeholder")},
+			{stringPtr("placeholder"), stringPtr("changed")},
+			{stringPtr(`["configData","config_data"]`), stringPtr(`["configData"]`)},
+		},
+	)
+
+	got, err := NewColumnRenamer(map[string]string{"configData": "config_data"}).Transform(batch)
+	require.NoError(t, err)
+	defer got.Release()
+
+	markers := got.Column(1).(*array.String)
+	assert.Equal(t, `["config_data"]`, markers.Value(0))
+	assert.Equal(t, `[]`, markers.Value(1))
+}
+
+func TestColumnRenamerRejectsInvalidCDCUnchangedColumns(t *testing.T) {
+	batch := stringRecordBatch(
+		t,
+		[]string{"configData", "_cdc_unchanged_cols"},
+		[][]*string{{stringPtr("placeholder")}, {stringPtr(`{"configData":true}`)}},
+	)
+
+	got, err := NewColumnRenamer(map[string]string{"configData": "config_data"}).Transform(batch)
+	require.ErrorContains(t, err, "invalid CDC unchanged-column marker at row 0")
+	assert.Nil(t, got)
+}
+
+func stringRecordBatch(t *testing.T, names []string, values [][]*string) arrow.RecordBatch {
+	t.Helper()
+	require.Len(t, values, len(names))
+	rowCount := len(values[0])
+	fields := make([]arrow.Field, len(names))
+	columns := make([]arrow.Array, len(names))
+	for i, name := range names {
+		require.Len(t, values[i], rowCount)
+		fields[i] = arrow.Field{Name: name, Type: arrow.BinaryTypes.String, Nullable: true}
+		builder := array.NewStringBuilder(memory.DefaultAllocator)
+		for _, value := range values[i] {
+			if value == nil {
+				builder.AppendNull()
+			} else {
+				builder.Append(*value)
+			}
+		}
+		columns[i] = builder.NewArray()
+		builder.Release()
+	}
+	batch := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, int64(rowCount))
+	for _, column := range columns {
+		column.Release()
+	}
+	t.Cleanup(batch.Release)
+	return batch
+}
+
+func stringPtr(value string) *string { return &value }

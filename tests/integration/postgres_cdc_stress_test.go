@@ -145,6 +145,15 @@ func stressSchemaPhases() []stressSchemaPhase {
 			`, stressEvolvingTable),
 		},
 		{
+			name: "widen numeric precision and scale",
+			sql: fmt.Sprintf(`
+				ALTER TABLE public.%[1]s ALTER COLUMN val TYPE NUMERIC(35,4) USING val::numeric;
+				UPDATE public.%[1]s
+				SET val = val + 0.1250, updated_at = now()
+				WHERE id %% 11 = 0;
+			`, stressEvolvingTable),
+		},
+		{
 			name: "add and populate large jsonb",
 			sql: fmt.Sprintf(`
 				ALTER TABLE public.%[1]s ADD COLUMN metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
@@ -346,7 +355,20 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	runErr := make(chan error, 1)
-	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+	var streamRestarts int
+	startStream := func() {
+		go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+	}
+	restartStreamIfRequired := func(err error) bool {
+		if err == nil || !strings.Contains(err.Error(), "requires restarting the stream before it can be ingested") {
+			return false
+		}
+		streamRestarts++
+		t.Logf("restarting stream after safe late-table discovery boundary: %v", err)
+		startStream()
+		return true
+	}
+	startStream()
 
 	ddlPhases := stressSchemaPhases()
 	ddlDelay := stressEventDelay(stressSchemaEvery, stressLoadDuration, len(ddlPhases))
@@ -461,6 +483,9 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		case <-loadDone:
 			running = false
 		case err := <-runErr:
+			if restartStreamIfRequired(err) {
+				continue
+			}
 			stopLoad()
 			<-loadDone
 			t.Fatalf("stream exited during load phase: %v", err)
@@ -520,6 +545,9 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	for {
 		select {
 		case err := <-runErr:
+			if restartStreamIfRequired(err) {
+				continue
+			}
 			dumpDiagnostics()
 			t.Fatalf("stream exited during convergence: %v", err)
 		default:
@@ -546,6 +574,7 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 	t.Log("destination converged on count/sum aggregates for all tables")
+	require.Positive(t, streamRestarts, "late-table workload should exercise the safe restart boundary")
 
 	// Aggregates can match while a final merge is still landing payload
 	// updates, so retry the deep comparison briefly before declaring failure.

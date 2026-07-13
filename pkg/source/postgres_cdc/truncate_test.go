@@ -26,7 +26,7 @@ func TestBatchAccumulatorKeepsOnlyRowsAfterLastTruncate(t *testing.T) {
 		t.Fatal(err)
 	}
 	truncate := <-results
-	if !truncate.Truncate || truncate.CommitToken != nil {
+	if !truncate.Truncate || !truncate.CDCWALTruncate || truncate.CommitToken != nil {
 		t.Fatalf("first result = %+v, want truncate without commit token", truncate)
 	}
 	batch := <-results
@@ -50,7 +50,7 @@ func TestBatchAccumulatorTruncateOnlyCarriesCommitToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := <-results
-	if !result.Truncate || result.CommitToken != "durable-11" {
+	if !result.Truncate || !result.CDCWALTruncate || result.CommitToken != "durable-11" {
 		t.Fatalf("result = %+v, want truncate with durable token", result)
 	}
 }

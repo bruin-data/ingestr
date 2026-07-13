@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,46 @@ type fakeCommitter struct {
 	mu     sync.Mutex
 	tokens []any
 	err    error
+}
+
+type fakeLegacySlotFinalizer struct {
+	committer *fakeCommitter
+	calls     int
+	err       error
+}
+
+func (f *fakeLegacySlotFinalizer) FinalizeLegacySlot(context.Context) error {
+	if len(f.committer.committed()) == 0 {
+		return errors.New("legacy slot finalized before source position commit")
+	}
+	f.calls++
+	return f.err
+}
+
+type cancelAwareSourceTable struct {
+	*fakeSourceTable
+	batches []arrow.RecordBatch
+	done    chan struct{}
+}
+
+func (t *cancelAwareSourceTable) Read(ctx context.Context, _ source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	results := make(chan source.RecordBatchResult, 1)
+	go func() {
+		defer close(t.done)
+		defer close(results)
+		for i, batch := range t.batches {
+			select {
+			case results <- source.RecordBatchResult{Batch: batch}:
+			case <-ctx.Done():
+				batch.Release()
+				for _, remaining := range t.batches[i+1:] {
+					remaining.Release()
+				}
+				return
+			}
+		}
+	}()
+	return results, nil
 }
 
 func (c *fakeCommitter) CommitStream(_ context.Context, token any) error {
@@ -61,6 +102,68 @@ type truncatingDest struct {
 	*fakeDestination
 	mu            sync.Mutex
 	truncateCalls []string
+}
+
+type streamingTestLease struct {
+	done chan struct{}
+	err  error
+}
+
+func (l *streamingTestLease) Done() <-chan struct{} { return l.done }
+func (l *streamingTestLease) Err() error            { return l.err }
+func (l *streamingTestLease) Release() error        { return nil }
+
+func guardedStreamingContext(lease source.ConnectorLease) context.Context {
+	return source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(lease))
+}
+
+type stageBlockingDestination struct {
+	*truncateCapableDestination
+	stage   string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *stageBlockingDestination) block(stage string) {
+	if d.stage != stage {
+		return
+	}
+	close(d.entered)
+	<-d.release
+}
+
+func (d *stageBlockingDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	err := d.fakeDestination.WriteParallel(ctx, records, opts)
+	d.block("write")
+	return err
+}
+
+func (d *stageBlockingDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	err := d.fakeDestination.MergeTable(ctx, opts)
+	d.block("merge")
+	return err
+}
+
+func (d *stageBlockingDestination) TruncateTable(ctx context.Context, table string) error {
+	err := d.truncateCapableDestination.TruncateTable(ctx, table)
+	d.block("reset")
+	return err
+}
+
+type blockingStateDestination struct {
+	*cdcStateDestination
+	entered chan struct{}
+	release chan struct{}
+	block   bool
+}
+
+func (d *blockingStateDestination) WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	err := d.cdcStateDestination.WriteCDCState(ctx, records, opts)
+	if d.block {
+		close(d.entered)
+		<-d.release
+	}
+	return err
 }
 
 func (d *truncatingDest) TruncateTable(_ context.Context, table string) error {
@@ -479,6 +582,32 @@ func TestStreaming_MergeFailureAbortsWithoutCommit(t *testing.T) {
 	assert.Empty(t, committer.committed())
 }
 
+func TestStreamingExecutorMergeFailureCancelsAndJoinsSource(t *testing.T) {
+	job, baseSource, dest := minimalJob()
+	job.Config.NoLoadTimestamp = true
+	job.Config.FlushRecords = 1
+	baseSource.strategy = config.StrategyMerge
+	src := &cancelAwareSourceTable{fakeSourceTable: baseSource, done: make(chan struct{})}
+	for i := 0; i < 32; i++ {
+		src.batches = append(src.batches, int64RecordBatch(t, "id", []int64{int64(i)}, nil))
+	}
+	job.Table = src
+	dest.mergeErr = errors.New("merge failed")
+
+	exec := NewStreamingExecutor(StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1,
+		Strategy:      config.StrategyMerge,
+	})
+	err := exec.Execute(context.Background(), job)
+	require.ErrorContains(t, err, "merge failed")
+	select {
+	case <-src.done:
+	case <-time.After(time.Second):
+		t.Fatal("source producer remained blocked after merge failure")
+	}
+}
+
 func TestStreaming_SourceErrorAborts(t *testing.T) {
 	dest := &fakeDestination{}
 	loop := newTestLoop(dest, StreamingOptions{
@@ -527,6 +656,237 @@ func TestStreaming_GracefulShutdownFlushesTail(t *testing.T) {
 	require.Len(t, dest.writeCtxErrs, 1)
 	assert.NoError(t, dest.writeCtxErrs[0])
 	dest.mu.Unlock()
+}
+
+func TestStreaming_LeaseLossDiscardsTailWithoutDestinationOrStateMutation(t *testing.T) {
+	dest := &fakeDestination{}
+	committer := &fakeCommitter{}
+	stateDest := newCDCStateDestination()
+	manager, err := NewCDCStateManager(stateDest, "0123456789abcdef", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTable(context.Background(), "public.items", "raw.items"))
+	require.NoError(t, manager.BeginRun(context.Background(), false))
+	stateWritesBeforeLoss := stateDest.cdcWrites
+
+	loop := newTestLoop(dest, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1 << 30,
+		Strategy:      config.StrategyMerge,
+		Committer:     committer,
+		StateManager:  manager,
+	}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+	loop.buffer(source.RecordBatchResult{
+		Batch: int64RecordBatch(t, "id", []int64{1, 2, 3}, nil),
+		CommitToken: source.CDCStateCommitToken{
+			SourceCommitToken: "token",
+			Position:          "00000000/00000010",
+		},
+	})
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	loss := errors.New("lease backend terminated")
+	cancel(errors.Join(source.ErrConnectorLeaseLost, loss))
+	records := make(chan source.RecordBatchResult)
+	close(records)
+
+	err = loop.run(ctx, records)
+	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+	require.ErrorIs(t, err, loss)
+	assert.Zero(t, writeCallCount(dest))
+	assert.Empty(t, dest.mergeCalls)
+	assert.Empty(t, dest.truncateCalls)
+	assert.Empty(t, committer.committed())
+	assert.Equal(t, stateWritesBeforeLoss, stateDest.cdcWrites)
+	assert.Zero(t, loop.buffered)
+	assert.False(t, loop.tokenDirty)
+
+	loop.cleanup(ctx)
+	assert.Empty(t, dest.dropCalls, "lease-loss cleanup must not mutate staging tables")
+}
+
+func TestStreaming_LeaseLossRefencesBetweenFlushMutations(t *testing.T) {
+	for _, stage := range []string{"write", "merge", "reset"} {
+		t.Run(stage, func(t *testing.T) {
+			lease := &streamingTestLease{done: make(chan struct{}), err: errors.New("lease lost during " + stage)}
+			base := &fakeDestination{}
+			dest := &stageBlockingDestination{
+				truncateCapableDestination: &truncateCapableDestination{fakeDestination: base},
+				stage:                      stage,
+				entered:                    make(chan struct{}),
+				release:                    make(chan struct{}),
+			}
+			committer := &fakeCommitter{}
+			loop := newTestLoop(dest, StreamingOptions{
+				FlushInterval: time.Hour,
+				FlushRecords:  1 << 30,
+				Strategy:      config.StrategyMerge,
+				Committer:     committer,
+			}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+			loop.buffer(source.RecordBatchResult{
+				Batch:       int64RecordBatch(t, "id", []int64{1, 2, 3}, nil),
+				CommitToken: "token",
+			})
+
+			done := make(chan error, 1)
+			go func() { done <- loop.flush(guardedStreamingContext(lease)) }()
+			<-dest.entered
+			close(lease.done)
+			close(dest.release)
+
+			err := <-done
+			require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+			assert.Empty(t, committer.committed())
+
+			base.mu.Lock()
+			calls := append([]string(nil), base.calls...)
+			base.mu.Unlock()
+			switch stage {
+			case "write":
+				assert.Equal(t, []string{"WriteParallel"}, calls)
+			case "merge":
+				assert.Equal(t, []string{"WriteParallel", "MergeTable"}, calls)
+			case "reset":
+				assert.Equal(t, []string{"WriteParallel", "MergeTable", "TruncateTable"}, calls)
+			}
+		})
+	}
+}
+
+func TestStreaming_LeaseLossDuringStatePersistSkipsSourceCommit(t *testing.T) {
+	lease := &streamingTestLease{done: make(chan struct{}), err: errors.New("lease lost during state persist")}
+	stateDest := &blockingStateDestination{
+		cdcStateDestination: newCDCStateDestination(),
+		entered:             make(chan struct{}),
+		release:             make(chan struct{}),
+	}
+	manager, err := NewCDCStateManager(stateDest, "0123456789abcdef", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTable(context.Background(), "public.items", "raw.items"))
+	require.NoError(t, manager.BeginRun(context.Background(), false))
+	stateDest.block = true
+
+	committer := &fakeCommitter{}
+	loop := newTestLoop(&truncateCapableDestination{fakeDestination: stateDest.fakeDestination}, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1 << 30,
+		Strategy:      config.StrategyMerge,
+		Committer:     committer,
+		StateManager:  manager,
+	}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+	loop.buffer(source.RecordBatchResult{
+		Batch: int64RecordBatch(t, "id", []int64{1}, nil),
+		CommitToken: source.CDCStateCommitToken{
+			SourceCommitToken: "token",
+			Position:          "00000000/00000010",
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- loop.flush(guardedStreamingContext(lease)) }()
+	<-stateDest.entered
+	close(lease.done)
+	close(stateDest.release)
+
+	err = <-done
+	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+	assert.Empty(t, committer.committed())
+}
+
+func TestStreamingFinalizesLegacySlotAfterDurableStateAndSourceCommit(t *testing.T) {
+	stateDest := newCDCStateDestination()
+	manager, err := NewCDCStateManager(stateDest, "streaming-legacy-cutover", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"))
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+
+	committer := &fakeCommitter{}
+	finalizer := &fakeLegacySlotFinalizer{committer: committer}
+	loop := newTestLoop(&truncateCapableDestination{fakeDestination: stateDest.fakeDestination}, StreamingOptions{
+		FlushInterval:   time.Hour,
+		FlushRecords:    1 << 30,
+		Strategy:        config.StrategyMerge,
+		Committer:       committer,
+		StateManager:    manager,
+		LegacyFinalizer: finalizer,
+	}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+	loop.buffer(source.RecordBatchResult{
+		Batch: int64RecordBatch(t, "id", []int64{1}, nil),
+		CommitToken: source.CDCStateCommitToken{
+			SourceCommitToken:    "source-token",
+			Position:             "00000000/00000010",
+			SnapshotPositions:    map[string]string{"public.items": "00000000/00000010"},
+			SnapshotIncarnations: map[string]string{"public.items": "100"},
+		},
+	})
+
+	require.NoError(t, loop.flush(t.Context()))
+	require.Equal(t, 1, finalizer.calls)
+	require.Len(t, committer.committed(), 1)
+	require.False(t, loop.tokenDirty)
+
+	loop.buffer(source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{
+		SourceCommitToken: "later-token",
+		Position:          "00000000/00000020",
+	}})
+	require.NoError(t, loop.flush(t.Context()))
+	require.Equal(t, 1, finalizer.calls)
+	require.Len(t, committer.committed(), 2)
+}
+
+func TestDrainAndReleaseUntilReturnsWhenProducerStalls(t *testing.T) {
+	var releases atomic.Int64
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: &releaseCountingRecordBatch{
+		RecordBatch: int64RecordBatch(t, "id", []int64{1}, nil),
+		releases:    &releases,
+	}}
+
+	closed := drainAndReleaseUntil(records, 20*time.Millisecond)
+	require.False(t, closed)
+	require.Equal(t, int64(1), releases.Load())
+}
+
+func TestStreaming_GracefulCancelThenLeaseLossCancelsDetachedFlush(t *testing.T) {
+	lease := &streamingTestLease{done: make(chan struct{}), err: errors.New("lease lost during final flush")}
+	base := &fakeDestination{}
+	dest := &stageBlockingDestination{
+		truncateCapableDestination: &truncateCapableDestination{fakeDestination: base},
+		stage:                      "write",
+		entered:                    make(chan struct{}),
+		release:                    make(chan struct{}),
+	}
+	committer := &fakeCommitter{}
+	loop := newTestLoop(dest, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  1 << 30,
+		Strategy:      config.StrategyMerge,
+		Committer:     committer,
+	}, map[string]*streamTableState{"": mergeTableState("raw.items")})
+	loop.buffer(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1}, nil), CommitToken: "token"})
+
+	guarded := guardedStreamingContext(lease)
+	ctx, cancel := context.WithCancel(guarded)
+	records := make(chan source.RecordBatchResult)
+	done := make(chan error, 1)
+	go func() { done <- loop.run(ctx, records) }()
+	cancel()
+	close(records)
+	<-dest.entered
+	close(lease.done)
+	close(dest.release)
+
+	err := <-done
+	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+	assert.Empty(t, committer.committed())
+	base.mu.Lock()
+	assert.Empty(t, base.mergeCalls)
+	assert.Empty(t, base.truncateCalls)
+	base.mu.Unlock()
+
+	loop.cleanup(ctx)
+	base.mu.Lock()
+	assert.Empty(t, base.dropCalls)
+	base.mu.Unlock()
 }
 
 func TestStreaming_ChannelCloseTriggersFinalFlush(t *testing.T) {

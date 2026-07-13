@@ -1,14 +1,159 @@
 package mysql
 
 import (
+	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestCanonicalMySQLTargetHonorsLowerCaseTableNames(t *testing.T) {
+	if got := canonicalMySQLTarget("Sales", "Orders", 0); got != destination.CDCTargetKey("Sales", "Orders") {
+		t.Fatalf("case-sensitive target = %q", got)
+	}
+	for _, mode := range []int{1, 2} {
+		if got := canonicalMySQLTarget("Sales", "Orders", mode); got != destination.CDCTargetKey("sales", "orders") {
+			t.Fatalf("mode %d target = %q", mode, got)
+		}
+	}
+	database, table := splitDatabaseTable("`Sales`.`Orders`")
+	if database != "Sales" || table != "Orders" {
+		t.Fatalf("quoted target = %q.%q", database, table)
+	}
+}
+
+func TestMySQLSiblingReferencePreservesDottedIdentifierBoundary(t *testing.T) {
+	database, table := splitDatabaseTable("`Sales`.`order.events`")
+	assert.Equal(t, "Sales", database)
+	assert.Equal(t, "order.events", table)
+	assert.Equal(t, "`Sales`.`order.events_old_123`", quoteMySQLTable(database, table+"_old_123"))
+}
+
+func TestMySQLSwapRejectsOverQualifiedNames(t *testing.T) {
+	dest := &MySQLDestination{}
+	err := dest.SwapTable(t.Context(), destination.SwapOptions{StagingTable: "app.staging", TargetTable: "server.app.orders"})
+	assert.ErrorContains(t, err, "mysql table name")
+}
+
+func TestMySQLSwapQuotedDotTargetKeepsBackupInOneComponent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "Sales"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'Sales' AND table_name = 'order.events'")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec("RENAME TABLE `Sales`\\.`order\\.events` TO `Sales`\\.`order\\.events_old_[0-9]+`, `Sales`\\.`staging\\.events` TO `Sales`\\.`order\\.events`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DROP TABLE IF EXISTS `Sales`\\.`order\\.events_old_[0-9]+`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	assert.NoError(t, dest.SwapTable(t.Context(), destination.SwapOptions{
+		StagingTable: "`Sales`.`staging.events`",
+		TargetTable:  "`Sales`.`order.events`",
+	}))
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLTableIncarnationUsesInnoDBTableID(t *testing.T) {
+	first := mysqlTableIncarnation("app", "events", 41)
+	assert.Equal(t, first, mysqlTableIncarnation("app", "events", 41))
+	assert.NotEqual(t, first, mysqlTableIncarnation("app", "events", 42))
+}
+
+func TestCDCTargetIncarnationReadsInnoDBDictionaryID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+
+	got, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	if err != nil || !exists {
+		t.Fatalf("CDCTargetIncarnation() = %q, exists=%v, err=%v", got, exists, err)
+	}
+	if want := mysqlTableIncarnation("app", "events", 42); got != want {
+		t.Fatalf("CDCTargetIncarnation() = %q, want %q", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCDCTruncatePreservesInnoDBPhysicalIdentityWithoutChangingBatchTruncate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db}
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `app`.`events`")).WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(regexp.QuoteMeta("TRUNCATE TABLE `app`.`events`")).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := dest.TruncateCDCTable(t.Context(), "app.events"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dest.TruncateTable(t.Context(), "app.events"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVitessManagedCDCStateFailsWithoutDurableIncarnation(t *testing.T) {
+	dest := NewVitessCompatibleDestination("vitess")
+	assert.ErrorContains(t, dest.ValidateManagedCDCState(), "do not expose a durable physical table incarnation")
+}
+
+func TestCDCTargetClaimTableUsesBinaryCollation(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "destination_table", DataType: schema.TypeString, MaxLength: 512},
+		{Name: "connector_id", DataType: schema.TypeString, MaxLength: 64},
+		{Name: "claimed_at", DataType: schema.TypeTimestampTZ},
+	}
+	sql := buildCreateTableSQL("cdc_targets", columns, []string{"destination_table"})
+	if !strings.Contains(sql, "`destination_table` VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin") {
+		t.Fatalf("CDC target DDL lacks binary claim key:\n%s", sql)
+	}
+}
+
+func TestLegacyCDCStateTablesFiltersCandidatesByManagedSchema(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db}
+	mock.ExpectQuery(regexp.QuoteMeta("FROM information_schema.columns")).WithArgs("cdc_state").WillReturnRows(
+		sqlmock.NewRows([]string{"table_schema"}).AddRow("managed"),
+	)
+	tables, err := dest.LegacyCDCStateTables(context.Background(), "cdc_state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 || tables[0] != "managed.cdc_state" {
+		t.Fatalf("tables = %v", tables)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestUriToDSN(t *testing.T) {
 	tests := []struct {
@@ -290,6 +435,38 @@ func TestBuildUpdateSet(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestBuildCDCUpdateSetPreservesOnlyMarkedColumns(t *testing.T) {
+	got := buildCDCUpdateSet(
+		[]string{"payload", "note", destination.CDCLSNColumn},
+		"target",
+		"source",
+		"source."+quoteColumn(destination.CDCUnchangedColsColumn),
+	)
+	assert.Contains(t, got, "target.`payload` = CASE WHEN JSON_CONTAINS(COALESCE(source.`_cdc_unchanged_cols`, '[]'), JSON_QUOTE(CONVERT(0x7061796c6f6164 USING utf8mb4))) THEN target.`payload` ELSE source.`payload` END")
+	assert.Contains(t, got, "target.`note` = CASE WHEN JSON_CONTAINS(COALESCE(source.`_cdc_unchanged_cols`, '[]'), JSON_QUOTE(CONVERT(0x6e6f7465 USING utf8mb4))) THEN target.`note` ELSE source.`note` END")
+	assert.Contains(t, got, "target.`_cdc_lsn` = source.`_cdc_lsn`")
+	assert.NotContains(t, got, "LOWER(")
+	assert.True(t, NewMySQLDestination().SupportsCDCUnchangedCols())
+}
+
+func TestBuildCDCUpdateSetUsesExactMarkerNames(t *testing.T) {
+	got := buildCDCUpdateSet([]string{"Foo", "foo"}, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
+	assert.Contains(t, got, "JSON_QUOTE(CONVERT(0x466f6f USING utf8mb4))")
+	assert.Contains(t, got, "JSON_QUOTE(CONVERT(0x666f6f USING utf8mb4))")
+	assert.NotContains(t, got, "LOWER(")
+}
+
+func TestBuildCDCUpdateSetUsesSQLModeIndependentIdentifierEncoding(t *testing.T) {
+	columns := []string{`a\b`, `quote's`, "line\nbreak", `literal\nsequence`}
+	got := buildCDCUpdateSet(columns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
+
+	for _, col := range columns {
+		assert.Contains(t, got, "JSON_QUOTE("+mysqlUTF8Expression(col)+")")
+	}
+	assert.NotContains(t, got, "JSON_QUOTE('")
+	assert.NotContains(t, got, `JSON_QUOTE('a\b')`)
 }
 
 func TestBuildMultiRowInsertSQL(t *testing.T) {
