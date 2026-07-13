@@ -1495,10 +1495,8 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 	return p.applyNamingConvention(sourceSchema, namingConv)
 }
 
-// applyPartitionNaming resolves partition_by/cluster_by to destination column
-// names: they name destination columns, so they get the same naming convention
-// that renamed the columns (no-op for direct naming). When partition_by is not
-// configured, the source-provided partition column is used as the fallback.
+// applyPartitionNaming normalizes partition_by/cluster_by to the destination column
+// naming (no-op for direct); partition_by falls back to the source partition column.
 func applyPartitionNaming(cfg *config.IngestConfig, tableSchema *schema.TableSchema, namingConv naming.NamingConvention) {
 	switch {
 	case cfg.PartitionBy != "":
