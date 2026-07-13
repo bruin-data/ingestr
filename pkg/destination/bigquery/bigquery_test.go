@@ -2108,16 +2108,16 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			want:        true,
 		},
 		{
-			name:        "want no partition but table is column-partitioned",
+			name:        "no partition configured leaves column-partitioned table as-is",
 			partitionBy: "",
 			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
-			want:        true,
+			want:        false,
 		},
 		{
-			name:        "want no partition but table is ingestion-time partitioned",
+			name:        "no partition configured leaves ingestion-time partitioned table as-is",
 			partitionBy: "",
 			meta:        &bigquery.TableMetadata{TimePartitioning: tp("")},
-			want:        true,
+			want:        false,
 		},
 		{
 			name:        "want column partition but table is ingestion-time partitioned",
@@ -2146,11 +2146,11 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			want:        true,
 		},
 
-		// --- partition: range partitioning always mismatches ---
+		// --- partition: range partitioning mismatches any configured column partition ---
 		{
-			name: "range partitioning, want none",
+			name: "range partitioning, none configured, left as-is",
 			meta: &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n"}},
-			want: true,
+			want: false,
 		},
 		{
 			name:        "range partitioning, want column partition",
@@ -2212,10 +2212,10 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			want:      true,
 		},
 		{
-			name:      "cluster: removed (table has, config none)",
+			name:      "cluster: none configured leaves clustered table as-is",
 			clusterBy: nil,
 			meta:      &bigquery.TableMetadata{Clustering: cl("a")},
-			want:      true,
+			want:      false,
 		},
 		{
 			name:      "cluster: subset fewer fields",
@@ -2271,6 +2271,57 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			d := &BigQueryDestination{partitionBy: tt.partitionBy, clusterBy: tt.clusterBy}
 			if got := d.partitionOrClusterMismatch(tt.meta); got != tt.want {
 				t.Fatalf("partitionOrClusterMismatch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRecreateSpecGuard(t *testing.T) {
+	tests := []struct {
+		name        string
+		partitionBy string
+		clusterBy   []string
+		meta        *bigquery.TableMetadata
+		wantErr     bool
+	}{
+		{
+			name:      "cluster change would drop live time partitioning",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "d1"}},
+			wantErr:   true,
+		},
+		{
+			name:      "cluster change would drop live range partitioning",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n"}},
+			wantErr:   true,
+		},
+		{
+			name:        "partition change would drop live clustering",
+			partitionBy: "d2",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "d1"}, Clustering: &bigquery.Clustering{Fields: []string{"a"}}},
+			wantErr:     true,
+		},
+		{
+			name:        "both halves configured",
+			partitionBy: "d2",
+			clusterBy:   []string{"b"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "d1"}, Clustering: &bigquery.Clustering{Fields: []string{"a"}}},
+			wantErr:     false,
+		},
+		{
+			name:        "live table has no other half to drop",
+			partitionBy: "d2",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "d1"}},
+			wantErr:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &BigQueryDestination{partitionBy: tt.partitionBy, clusterBy: tt.clusterBy}
+			err := d.recreateSpecGuard(tt.meta, "p.ds.events")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("recreateSpecGuard() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -2377,21 +2428,37 @@ func TestRestoreTargetFromAside(t *testing.T) {
 	dest, closeFn := newSwapMockDest(t, rec)
 	defer closeFn()
 
-	if err := dest.restoreTargetFromAside(context.Background(), "test-project", "ds", "events__ingestr_repartition_abc", "events"); err != nil {
+	if err := dest.restoreTargetFromAside(context.Background(), "test-project", "ds", "events__ingestr_repartition_abc", "events", time.Time{}); err != nil {
 		t.Fatalf("restoreTargetFromAside() error = %v", err)
 	}
 	queries, _ := rec.snapshot()
 	if len(queries) != 2 {
-		t.Fatalf("expected 2 queries (rename back, clear expiration), got %d: %v", len(queries), queries)
+		t.Fatalf("expected 2 queries (restore expiration, rename back), got %d: %v", len(queries), queries)
 	}
-	if !strings.Contains(queries[0], "RENAME TO `events`") {
-		t.Fatalf("first query should rename the aside table back to target, got: %s", queries[0])
+	if !strings.Contains(queries[0], "SET OPTIONS(expiration_timestamp = NULL)") {
+		t.Fatalf("first query must fix the expiration BEFORE the rename (a post-rename failure would leave the restored target expiring), got: %s", queries[0])
 	}
-	if !strings.Contains(queries[1], "SET OPTIONS(expiration_timestamp = NULL)") {
-		t.Fatalf("second query must CLEAR the expiration (survives rename), got: %s", queries[1])
+	if !strings.Contains(queries[0], "`events__ingestr_repartition_abc`") {
+		t.Fatalf("expiration must be fixed on the aside table, got: %s", queries[0])
 	}
-	if !strings.Contains(queries[1], "`events`") {
-		t.Fatalf("expiration must be cleared on the restored target, got: %s", queries[1])
+	if !strings.Contains(queries[1], "RENAME TO `events`") {
+		t.Fatalf("second query should rename the aside table back to target, got: %s", queries[1])
+	}
+}
+
+func TestRestoreTargetFromAsideKeepsOriginalExpiration(t *testing.T) {
+	rec := &swapRecorder{}
+	dest, closeFn := newSwapMockDest(t, rec)
+	defer closeFn()
+
+	expiration := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	if err := dest.restoreTargetFromAside(context.Background(), "test-project", "ds", "events__ingestr_repartition_abc", "events", expiration); err != nil {
+		t.Fatalf("restoreTargetFromAside() error = %v", err)
+	}
+	queries, _ := rec.snapshot()
+	want := fmt.Sprintf("SET OPTIONS(expiration_timestamp = TIMESTAMP_MICROS(%d))", expiration.UnixMicro())
+	if len(queries) != 2 || !strings.Contains(queries[0], want) {
+		t.Fatalf("expected the target's original expiration to be restored (%s), got: %v", want, queries)
 	}
 }
 
@@ -2401,7 +2468,7 @@ func TestRenameAsideSwapSuccessDropsOld(t *testing.T) {
 	defer closeFn()
 
 	swapCalled := false
-	err := dest.renameAsideSwap(context.Background(), "test-project", "ds", "events", func() error {
+	err := dest.renameAsideSwap(context.Background(), "test-project", "ds", "events", time.Time{}, func() error {
 		swapCalled = true
 		return nil
 	})
@@ -2427,7 +2494,7 @@ func TestRenameAsideSwapRestoresOnSwapFailure(t *testing.T) {
 	defer closeFn()
 
 	sentinel := errors.New("swap boom")
-	err := dest.renameAsideSwap(context.Background(), "test-project", "ds", "events", func() error {
+	err := dest.renameAsideSwap(context.Background(), "test-project", "ds", "events", time.Time{}, func() error {
 		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
