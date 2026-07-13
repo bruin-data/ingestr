@@ -988,19 +988,24 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 	)
 
 	hasRowData := "(source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1)"
+	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
 	updates := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
 		quoted := quoteColumn(col)
 		if destination.IsCDCColumn(col) {
 			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
-		} else {
+			continue
+		}
+		condition := hasRowData
+		if hasUnchangedCols {
 			unchanged := fmt.Sprintf(
 				"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
 				quoteColumn(destination.CDCUnchangedColsColumn),
 				strings.ReplaceAll(col, "'", "''"),
 			)
-			updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s AND NOT %s THEN source.%s ELSE target.%s END", quoted, hasRowData, unchanged, quoted, quoted)
+			condition = fmt.Sprintf("%s AND NOT %s", hasRowData, unchanged)
 		}
+		updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, condition, quoted, quoted)
 	}
 
 	return fmt.Sprintf(

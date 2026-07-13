@@ -521,7 +521,7 @@ func buildMergeSQL(targetTable, sourceExpr string, columns, primaryKeys, updateC
 	)
 	if len(updateColumns) > 0 {
 		updateSet := buildUpdateSet(updateColumns, "target", "source")
-		if destination.HasCDCDeletedColumn(columns) && len(targetColumns) != len(columns) {
+		if destination.HasCDCDeletedColumn(columns) && destination.HasCDCUnchangedColsColumn(columns) {
 			updateSet = buildCDCUpdateSet(updateColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
 		}
 		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s\n", updateSet)

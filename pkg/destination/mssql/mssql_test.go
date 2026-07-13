@@ -514,6 +514,19 @@ func TestBuildCDCMergeSQLKeepsCaseDistinctPayloadSeparateFromPrimaryKey(t *testi
 	}
 }
 
+func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerSkipsMarkerPredicate(t *testing.T) {
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	got := buildMergeSQL("dbo.items", "stage.items", []string{"id"}, columns, "")
+
+	if strings.Contains(got, destination.CDCUnchangedColsColumn) {
+		t.Fatalf("merge SQL references %s although staging has no such column:\n%s", destination.CDCUnchangedColsColumn, got)
+	}
+	if strings.Contains(got, "OPENJSON") {
+		t.Fatalf("merge SQL uses OPENJSON marker predicate without the marker column:\n%s", got)
+	}
+	assertContains(t, got, "target.[payload] = CASE WHEN (source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1) THEN source.[payload] ELSE target.[payload] END")
+}
+
 func TestFilterColumnsRetainsOrdinaryCaseInsensitiveMSSQLMatching(t *testing.T) {
 	if got := strings.Join(filterColumns([]string{"ID", "Name"}, []string{"id"}), ","); got != "Name" {
 		t.Fatalf("ordinary case-insensitive filter = %q, want Name", got)

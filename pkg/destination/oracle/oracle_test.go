@@ -455,6 +455,16 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 	assert.True(t, NewOracleDestination().SupportsCDCUnchangedCols())
 }
 
+func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerUsesPlainUpdateSet(t *testing.T) {
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
+
+	assert.NotContains(t, got, "_CDC_UNCHANGED_COLS")
+	assert.NotContains(t, got, "JSON_TABLE")
+	assert.Contains(t, got, `target."PAYLOAD" = source."PAYLOAD"`)
+}
+
 func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
 	columns := []string{"id", `"Foo"`, `"foo"`, destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
 	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
