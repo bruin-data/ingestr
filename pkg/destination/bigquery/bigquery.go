@@ -1206,20 +1206,19 @@ func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.
 			}
 			return fmt.Errorf("SQL copy job error (job %s): %w", jobRef(job), err)
 		}
-		return nil
-	}
-
-	// Use SQL CREATE OR REPLACE TABLE AS SELECT — Copy Jobs don't read from the
-	// streaming buffer, so they'd copy 0 rows after Storage Write API writes.
-	sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
-		quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
-	config.Debug("[DEST] Executing SQL swap: %s", sql)
-	job, err := d.runQueryJobWithRetry(ctx, sql, "SQL swap")
-	if err != nil {
-		if job == nil {
-			return fmt.Errorf("failed to start SQL swap job: %w", err)
+	} else {
+		// Use SQL CREATE OR REPLACE TABLE AS SELECT * — Copy Jobs don't read
+		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
+		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
+			quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
+		config.Debug("[DEST] Executing SQL swap: %s", sql)
+		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL swap")
+		if err != nil {
+			if job == nil {
+				return fmt.Errorf("failed to start SQL swap job: %w", err)
+			}
+			return fmt.Errorf("SQL swap job error (job %s): %w", jobRef(job), err)
 		}
-		return fmt.Errorf("SQL swap job error (job %s): %w", jobRef(job), err)
 	}
 	return nil
 }
