@@ -1,11 +1,39 @@
 package postgres_cdc
 
 import (
+	"context"
 	"testing"
 
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCaughtUpPositionKeepsItsExactSlot(t *testing.T) {
+	src := NewPostgresCDCSource()
+	src.recordCaughtUpLSN(pglogrepl.LSN(20), "current-slot", true)
+	src.recordCaughtUpLSN(pglogrepl.LSN(10), "stale-slot", false)
+
+	assert.Equal(t, pglogrepl.LSN(20), src.caughtUp.Committed())
+	assert.Equal(t, "current-slot", src.caughtUpSlot)
+	assert.True(t, src.caughtUpFromStream)
+
+	src.recordCaughtUpLSN(pglogrepl.LSN(30), "next-slot", false)
+	assert.Equal(t, pglogrepl.LSN(30), src.caughtUp.Committed())
+	assert.Equal(t, "next-slot", src.caughtUpSlot)
+	assert.False(t, src.caughtUpFromStream)
+}
+
+func TestFinalizeBatchSkipsFreshSnapshotPosition(t *testing.T) {
+	src := NewPostgresCDCSource()
+	src.replConn = &pgconn.PgConn{}
+	src.recordCaughtUpLSN(pglogrepl.LSN(20), "snapshot-slot", false)
+
+	require.NoError(t, src.FinalizeBatch(context.Background()))
+	assert.Equal(t, FormatLSN(pglogrepl.LSN(20)), src.CDCState().Position)
+	assert.Nil(t, src.keepaliveCancel)
+}
 
 func TestSchemes(t *testing.T) {
 	source := NewPostgresCDCSource()

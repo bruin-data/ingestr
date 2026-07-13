@@ -182,15 +182,14 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			}
 		}
 		if needsSnapshot && stopAfterBatchSnapshot(r.cdcConfig.Mode, opts.Streaming) {
-			r.source.recordCaughtUpLSN(startLSN)
-			r.source.startKeepalive(ctx, startLSN, startLSN)
+			r.source.recordCaughtUpLSN(startLSN, slotName, false)
 			return
 		}
 
 		for {
 			barrierNonce := ""
+			var barrierLSN pglogrepl.LSN
 			if r.cdcConfig.Mode == ModeBatch && !opts.Streaming {
-				var barrierLSN pglogrepl.LSN
 				var err error
 				barrierNonce, barrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
 				if err != nil {
@@ -199,7 +198,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				}
 				config.Debug("[CDC] Batch mode: emitted logical-decoding barrier at %s", barrierLSN)
 			}
-			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, slotName, results, opts)
+			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, barrierLSN, slotName, results, opts)
 			if err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)})
 				return
@@ -801,7 +800,7 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 // should cover but doesn't, and watches for mid-stream schema changes surfaced
 // by the decoder. Either way it flushes what it has and returns a signal so
 // the caller can rebuild the stream; a nil signal means normal termination.
-func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrierNonce string, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
+func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrierNonce string, barrierLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
 	config.Debug("[CDC] Multi-table streaming from LSN: %s", startLSN)
 
 	cdcConfigWithSlot := r.cdcConfig
@@ -837,6 +836,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	// idle commit token, so we only emit one when the caught-up position has
 	// actually advanced (instead of every 100ms idle tick).
 	var lastIdleToken pglogrepl.LSN
+	lastHeartbeat := time.Now()
 
 	// New-table discovery runs on a timer in streaming mode only: a batch run
 	// picks up new tables at its next start, where Connect has already
@@ -934,14 +934,14 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		if barrierNonce != "" && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
-				currentLSN := repl.CurrentLSN()
+				currentLSN := batchCaughtUpLSN(repl.CurrentLSN(), barrierLSN)
 				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", currentLSN)
 				if err := accum.flushAllContext(ctx, results, token); err != nil {
 					return nil, err
 				}
 				// Record the caught-up position so FinalizeBatch can confirm it
 				// to the slot once the destination write is durable.
-				r.source.recordCaughtUpLSN(currentLSN)
+				r.source.recordCaughtUpLSN(currentLSN, slotName, true)
 				// Stop the WAL receiver before the keepalive goroutine takes
 				// over the replication connection — they must never use it
 				// concurrently. Close is idempotent for the deferred call.
@@ -964,6 +964,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 			// Confirm the caught-up position so the slot advances over WAL that
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if opts.Streaming {
+				lastHeartbeat = maybeEmitStreamHeartbeat(ctx, repl, lastHeartbeat)
 				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
 			}
 			time.Sleep(100 * time.Millisecond)

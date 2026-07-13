@@ -165,8 +165,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			// Keep snapshot rows and post-snapshot partial-TOAST changes in
 			// separate destination merges. The slot retains the WAL for the
 			// next batch run, which resumes from this exact snapshot boundary.
-			r.source.recordCaughtUpLSN(snapshotLSN)
-			r.source.startKeepalive(ctx, snapshotLSN, snapshotLSN)
+			r.source.recordCaughtUpLSN(snapshotLSN, slotName, false)
 			return
 		}
 
@@ -198,8 +197,8 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 	for {
 		barrierNonce := ""
+		var barrierLSN pglogrepl.LSN
 		if mode == ModeBatch {
-			var barrierLSN pglogrepl.LSN
 			var err error
 			barrierNonce, barrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
 			if err != nil {
@@ -207,7 +206,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 			}
 			config.Debug("[CDC] Batch mode: emitted logical-decoding barrier at %s", barrierLSN)
 		}
-		err := r.runStream(ctx, startLSN, slotName, mode, barrierNonce, results, opts, snapshotBoundary)
+		err := r.runStream(ctx, startLSN, slotName, mode, barrierNonce, barrierLSN, results, opts, snapshotBoundary)
 		var schemaErr *SchemaChangedError
 		var reincarnationErr *TableReincarnatedError
 		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) && !errors.As(err, &reincarnationErr) {
@@ -235,7 +234,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 // runStream runs one replication stream until it terminates: batch mode caught
 // up, the context was cancelled, or the replicator failed.
-func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, mode CDCMode, barrierNonce string, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, mode CDCMode, barrierNonce string, barrierLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
@@ -265,8 +264,8 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 	if err == nil && mode == ModeBatch {
 		// Record the caught-up position so FinalizeBatch can confirm it to the
 		// slot once the destination write is durable.
-		caughtUp := repl.CurrentLSN()
-		r.source.recordCaughtUpLSN(caughtUp)
+		caughtUp := batchCaughtUpLSN(repl.CurrentLSN(), barrierLSN)
+		r.source.recordCaughtUpLSN(caughtUp, slotName, true)
 		// Keep the walsender alive while the destination drains the results
 		// channel. FinalizeBatch will stop it before sending the final
 		// WALFlush-bearing standby update.
@@ -442,6 +441,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, batchSi
 	// idle commit token, so we only emit one when the caught-up position has
 	// actually advanced (instead of every 100ms idle tick).
 	var lastIdleToken pglogrepl.LSN
+	lastHeartbeat := time.Now()
 
 	for {
 		select {
@@ -502,6 +502,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, batchSi
 			// Confirm the caught-up position so the slot advances over WAL that
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if streaming {
+				lastHeartbeat = maybeEmitStreamHeartbeat(ctx, repl, lastHeartbeat)
 				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
 			}
 			time.Sleep(100 * time.Millisecond)

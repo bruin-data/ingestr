@@ -36,6 +36,11 @@ const silenceProbeAfter = 30 * time.Second
 // responsive while leaving the deadline stable enough to avoid that race.
 const receiveTimeout = 1 * time.Second
 
+// streamHeartbeatInterval bounds slot lag while published tables are idle. The
+// heartbeat is decoded through pgoutput, so its LSN is an ordered, safe commit
+// point rather than the database-wide WAL head reported by a keepalive.
+const streamHeartbeatInterval = 10 * time.Second
+
 // streamPosition holds the LSN the pipeline has confirmed durable (flushed and
 // merged into the destination). The pipeline goroutine advances it via
 // CommitStream; the replicator goroutine reads it when sending standby status
@@ -131,8 +136,8 @@ func safeCommitLSN(repl lowWaterReporter, accum *batchAccumulator) pglogrepl.LSN
 
 // emitIdleCommitToken sends a bare CommitToken (no batch) on results when the
 // stream has caught up past lastEmitted. This lets the pipeline confirm the
-// replication slot over WAL that produced no rows for this slot (changes to
-// unpublished tables, keepalives advancing the received position). Without it,
+// replication slot over WAL that produced no rows for this slot. Logical
+// heartbeats advance the decoded position across unpublished-table WAL. Without it,
 // an idle or low-traffic stream never advances the slot's confirmed_flush_lsn,
 // so retained WAL and replica lag grow without bound even though the
 // destination is fully caught up. The safe position already excludes any change
@@ -150,6 +155,23 @@ func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batc
 		return safe
 	}
 	return lastEmitted
+}
+
+type streamHeartbeatEmitter interface {
+	EmitStreamHeartbeat(ctx context.Context) error
+}
+
+func maybeEmitStreamHeartbeat(ctx context.Context, repl any, last time.Time) time.Time {
+	now := time.Now()
+	if now.Sub(last) < streamHeartbeatInterval {
+		return last
+	}
+	emitter, ok := repl.(streamHeartbeatEmitter)
+	if !ok {
+		return now
+	}
+	_ = emitter.EmitStreamHeartbeat(ctx)
+	return now
 }
 
 func checkpointCommitToken(lsn pglogrepl.LSN) source.CDCStateCommitToken {

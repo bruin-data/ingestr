@@ -129,16 +129,16 @@ func TestPostgresCDCConnectorLeaseExclusiveAndReusable(t *testing.T) {
 	defer func() { _ = fifth.Close(ctx) }()
 	require.NoError(t, sixth.Connect(ctx, cdcURI))
 	defer func() { _ = sixth.Close(ctx) }()
-	fifthLease, err := fifth.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "connector-five", SlotSuffix: "auto-five"})
-	require.NoError(t, err)
-	sixthLease, err := sixth.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "connector-six", SlotSuffix: "auto-six"})
-	require.NoError(t, err)
 	prepareErrs := make(chan error, 2)
 	go func() { prepareErrs <- fifth.PrepareConnector(ctx) }()
 	go func() { prepareErrs <- sixth.PrepareConnector(ctx) }()
 	for range 2 {
 		require.NoError(t, <-prepareErrs, "publication reconciliation must serialize across connectors")
 	}
+	fifthLease, err := fifth.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "connector-five", SlotSuffix: "auto-five"})
+	require.NoError(t, err)
+	sixthLease, err := sixth.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "connector-six", SlotSuffix: "auto-six"})
+	require.NoError(t, err)
 	require.NoError(t, fifthLease.Release())
 	require.NoError(t, sixthLease.Release())
 
@@ -278,11 +278,11 @@ func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
 	src := postgres_cdc.NewPostgresCDCSource()
 	require.NoError(t, src.Connect(ctx, cdcURI))
 	defer func() { _ = src.Close(ctx) }()
-	lease, err := src.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "managed-publication-test", SlotSuffix: "publication-test"})
-	require.NoError(t, err)
 	var prepareErr error
 	out := captureStdout(t, func() { prepareErr = src.PrepareConnector(ctx) })
 	require.NoError(t, prepareErr)
+	lease, err := src.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "managed-publication-test", SlotSuffix: "publication-test"})
+	require.NoError(t, err)
 
 	// Each excluded table is reported with the reason it was skipped.
 	assert.Contains(t, out, "public.unlogged_items")
@@ -314,10 +314,10 @@ func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
 	src2 := postgres_cdc.NewPostgresCDCSource()
 	require.NoError(t, src2.Connect(ctx, cdcURI))
 	defer func() { _ = src2.Close(ctx) }()
+	require.NoError(t, src2.PrepareConnector(ctx))
 	lease2, err := src2.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "managed-publication-test", SlotSuffix: "publication-test"})
 	require.NoError(t, err)
 	defer func() { _ = lease2.Release() }()
-	require.NoError(t, src2.PrepareConnector(ctx))
 
 	tables = publicationTables(t, ctx, pool, "ingestr_publication")
 	assert.ElementsMatch(t, []string{"public.logged_items", "public.logged_items_2"}, tables)
@@ -328,10 +328,10 @@ func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
 	src3 := postgres_cdc.NewPostgresCDCSource()
 	require.NoError(t, src3.Connect(ctx, cdcURI))
 	defer func() { _ = src3.Close(ctx) }()
+	require.NoError(t, src3.PrepareConnector(ctx))
 	lease3, err := src3.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "managed-publication-test", SlotSuffix: "publication-test"})
 	require.NoError(t, err)
 	defer func() { _ = lease3.Release() }()
-	require.NoError(t, src3.PrepareConnector(ctx))
 	assert.Empty(t, publicationTables(t, ctx, pool, "ingestr_publication"))
 	infos, err = src3.GetTables(ctx)
 	require.NoError(t, err)
@@ -374,10 +374,10 @@ func TestPostgresCDC_ManagedPublicationHandlesPartitionedTables(t *testing.T) {
 	src := postgres_cdc.NewPostgresCDCSource()
 	require.NoError(t, src.Connect(ctx, cdcURI), "Connect must not fail when partitioned tables are present")
 	defer func() { _ = src.Close(ctx) }()
+	require.NoError(t, src.PrepareConnector(ctx))
 	lease, err := src.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: "managed-partition-publication-test", SlotSuffix: "partition-test"})
 	require.NoError(t, err)
 	defer func() { _ = lease.Release() }()
-	require.NoError(t, src.PrepareConnector(ctx))
 
 	tables := publicationTables(t, ctx, pool, "ingestr_publication")
 	assert.Contains(t, tables, "public.measurements_2024", "leaf partition should be published")
@@ -1494,19 +1494,9 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 		IncrementalStrategy: "merge",
 	}
 
-	// Baseline sync on an empty table: creates the replication slot and streams
-	// to the current LSN without snapshotting any rows onto the destination.
+	// Baseline sync on an empty table creates the replication slot and persists
+	// the snapshot position in destination-managed state.
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	slotName := cdcReplicationSlotName(sourceTable, publication, cfg.CDCSlotSuffix)
-	var resumeLSN string
-	err = sourcePool.QueryRow(ctx, `
-		SELECT confirmed_flush_lsn::text
-		FROM pg_replication_slots
-		WHERE slot_name = $1
-	`, slotName).Scan(&resumeLSN)
-	require.NoError(t, err)
-	require.NotEmpty(t, resumeLSN)
 
 	// Autocommit INSERT then partial UPDATE (separate transactions). The batch
 	// accumulator merges both into one downstream batch while the destination
@@ -1520,7 +1510,6 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 	_, err = sourcePool.Exec(ctx, `UPDATE public.test_intra_batch_toast SET result_data = 'completed' WHERE id = 1`)
 	require.NoError(t, err)
 
-	cfg.CDCResumeLSN = resumeLSN
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	var sourceConfig, destConfig string

@@ -326,9 +326,12 @@ func TestManagedPublicationMigrationWaitsForActiveConnectorLease(t *testing.T) {
 	_, err = pool.Exec(ctx, `CREATE TABLE public.publication_lock_test_2 (id bigint PRIMARY KEY)`)
 	require.NoError(t, err)
 	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, time.Second)
-	require.NoError(t, active.PrepareConnector(reconcileCtx), "non-destructive reconciliation deadlocked on its own shared migration lease")
+	err = active.PrepareConnector(reconcileCtx)
 	reconcileCancel()
+	require.ErrorContains(t, err, "prepare the connector before acquiring its lease")
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
 	require.NoError(t, lease.Release())
+	require.NoError(t, active.PrepareConnector(ctx))
 
 	_, err = pool.Exec(ctx, `DROP PUBLICATION ingestr_publication; CREATE PUBLICATION ingestr_publication FOR ALL TABLES`)
 	require.NoError(t, err)
@@ -336,6 +339,11 @@ func TestManagedPublicationMigrationWaitsForActiveConnectorLease(t *testing.T) {
 		ConnectorID: "active-publication-reader", SlotSuffix: "active-publication-reader",
 	})
 	require.NoError(t, err)
+	selfMigrationCtx, selfMigrationCancel := context.WithTimeout(ctx, time.Second)
+	err = active.PrepareConnector(selfMigrationCtx)
+	selfMigrationCancel()
+	require.ErrorContains(t, err, "prepare the connector before acquiring its lease")
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
 
 	blockedCtx, blockedCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	err = migrator.PrepareConnector(blockedCtx)

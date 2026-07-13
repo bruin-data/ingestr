@@ -469,6 +469,29 @@ func TestBuildCDCUpdateSetUsesSQLModeIndependentIdentifierEncoding(t *testing.T)
 	assert.NotContains(t, got, `JSON_QUOTE('a\b')`)
 }
 
+func TestCDCMergeWithoutUnchangedColsMarkerUsesNormalUpdate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	dest := &MySQLDestination{db: db}
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err = dest.MergeTable(t.Context(), destination.MergeOptions{
+		TargetTable:  "items",
+		StagingTable: "items_staging",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+	})
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestBuildMultiRowInsertSQL(t *testing.T) {
 	got := buildMultiRowInsertSQL("analytics.users", []string{"`id`", "`name`"}, 3)
 	want := "INSERT INTO `analytics`.`users` (`id`, `name`) VALUES (?, ?), (?, ?), (?, ?)"

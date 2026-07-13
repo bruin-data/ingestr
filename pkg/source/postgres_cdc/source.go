@@ -25,6 +25,8 @@ import (
 // server is configured lower (e.g. 10s) without flooding the connection.
 const keepaliveInterval = 5 * time.Second
 
+const finalizeConfirmationTimeout = 5 * time.Second
+
 // CDCMode represents the CDC operation mode
 type CDCMode string
 
@@ -79,10 +81,9 @@ type PostgresCDCSource struct {
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
 	pos *streamPosition
-	// caughtUp holds the LSN of the logical barrier decoded by a batch run. It is
-	// sent as a final standby status update by FinalizeBatch so the slot's
-	// confirmed_flush_lsn advances even when the run catches up before the
-	// replicator's 10s standby timer fires. Stays zero in streaming mode.
+	// caughtUp holds the position reached by a batch run. FinalizeBatch confirms
+	// it to the slot only when it came from an active replication stream;
+	// snapshot-only runs keep it solely as a destination checkpoint marker.
 	caughtUp *streamPosition
 
 	// lag tracks the server's WAL head for replication-lag reporting.
@@ -94,9 +95,9 @@ type PostgresCDCSource struct {
 	// wal_sender_timeout causes PG to kill the walsender; the later
 	// FinalizeBatch's SendStandbyStatusUpdate then succeeds at the TCP layer
 	// but the slot's confirmed_flush_lsn never advances.
-	keepaliveMu   sync.Mutex
-	keepaliveStop chan struct{}
-	keepaliveDone chan struct{}
+	keepaliveMu     sync.Mutex
+	keepaliveCancel context.CancelFunc
+	keepaliveDone   chan struct{}
 
 	// keylessWarned dedupes the append-only notice per table: GetTables runs
 	// more than once per run (pipeline setup, ReadAll, stream rebuilds).
@@ -107,11 +108,14 @@ type PostgresCDCSource struct {
 	snapshotPositions    map[string]string
 	snapshotIncarnations map[string]string
 	snapshotSchemas      map[string]string
+	caughtUpSlot         string
+	caughtUpFromStream   bool
 
-	connectorLeaseMu  sync.Mutex
-	connectorLease    *postgresCDCLease
-	connectorIdentity source.ConnectorIdentity
-	legacySlots       map[string]bool
+	connectorLeaseMu   sync.Mutex
+	connectorLease     *postgresCDCLease
+	connectorPreparing bool
+	connectorIdentity  source.ConnectorIdentity
+	legacySlots        map[string]bool
 }
 
 func NewPostgresCDCSource() *PostgresCDCSource {
@@ -203,6 +207,9 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.snapshotPositions = make(map[string]string)
 	s.snapshotIncarnations = make(map[string]string)
 	s.snapshotSchemas = make(map[string]string)
+	s.caughtUp = newStreamPosition()
+	s.caughtUpSlot = ""
+	s.caughtUpFromStream = false
 	s.stateMu.Unlock()
 
 	// Create query pool for regular SQL operations
@@ -294,6 +301,23 @@ func (s *PostgresCDCSource) PrepareConnector(ctx context.Context) error {
 	if !s.managedPublication {
 		return nil
 	}
+	s.connectorLeaseMu.Lock()
+	switch {
+	case s.connectorLease != nil:
+		s.connectorLeaseMu.Unlock()
+		return fmt.Errorf("cannot prepare managed PostgreSQL publication %q while this source holds a connector lease; prepare the connector before acquiring its lease", s.cdcConfig.Publication)
+	case s.connectorPreparing:
+		s.connectorLeaseMu.Unlock()
+		return fmt.Errorf("managed PostgreSQL publication %q preparation is already in progress", s.cdcConfig.Publication)
+	default:
+		s.connectorPreparing = true
+		s.connectorLeaseMu.Unlock()
+	}
+	defer func() {
+		s.connectorLeaseMu.Lock()
+		s.connectorPreparing = false
+		s.connectorLeaseMu.Unlock()
+	}()
 	return s.reconcileManagedPublication(ctx)
 }
 
@@ -381,30 +405,30 @@ func (s *PostgresCDCSource) Close(ctx context.Context) error {
 	return nil
 }
 
-// startKeepalive spawns a goroutine that pings the walsender every
-// keepaliveInterval with WALWritePosition=lsn (no WALFlush, so the slot does
-// not advance from these pings). It is meant to be called once the readers
-// have stopped pulling from the replication connection (after streamLoop
-// returns) so the destination-write phase can run for longer than
-// wal_sender_timeout without the walsender being killed server-side.
+// startKeepalive spawns a goroutine that drains the replication connection and
+// pings the walsender every keepaliveInterval with WALWritePosition=lsn (no
+// WALFlush, so the slot does not advance from these pings). It is meant to be
+// called once the readers have stopped pulling from the replication connection
+// so the destination-write phase can outlast wal_sender_timeout without either
+// side of the CopyBoth stream blocking.
 //
 // Calling startKeepalive a second time without an intervening stop is a no-op.
-// The returned goroutine exits on ctx cancellation, stopKeepalive, or the
-// first standby-send error (a dead conn surfaces as an error here and the
-// follow-up FinalizeBatch send will fail in the same way; the run still
-// completes — the slot just stays where it was, same as before).
+// Scoped reader cancellation is intentionally ignored: the goroutine exits
+// when FinalizeBatch or Close calls stopKeepalive, or on the first protocol
+// error. This keeps the connection alive across the handoff from strategy
+// execution to batch finalization.
 func (s *PostgresCDCSource) startKeepalive(ctx context.Context, caughtUp, durable pglogrepl.LSN) {
 	if s.replConn == nil || caughtUp == 0 {
 		return
 	}
 	s.keepaliveMu.Lock()
-	if s.keepaliveStop != nil {
+	if s.keepaliveCancel != nil {
 		s.keepaliveMu.Unlock()
 		return
 	}
-	stop := make(chan struct{})
+	keepaliveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
-	s.keepaliveStop = stop
+	s.keepaliveCancel = cancel
 	s.keepaliveDone = done
 	s.keepaliveMu.Unlock()
 
@@ -412,8 +436,11 @@ func (s *PostgresCDCSource) startKeepalive(ctx context.Context, caughtUp, durabl
 		defer close(done)
 		send := func() bool {
 			status := standbyUpdate(false, caughtUp, 0, durable)
-			err := sendStandbyStatusUpdate(ctx, s.replConn, status)
+			err := sendStandbyStatusUpdate(keepaliveCtx, s.replConn, status)
 			if err != nil {
+				if keepaliveCtx.Err() != nil {
+					return false
+				}
 				config.Debug("[CDC] Keepalive standby status failed (replication connection lost): %v", err)
 				return false
 			}
@@ -427,18 +454,29 @@ func (s *PostgresCDCSource) startKeepalive(ctx context.Context, caughtUp, durabl
 		if !send() {
 			return
 		}
-		ticker := time.NewTicker(keepaliveInterval)
-		defer ticker.Stop()
+		nextStatus := time.Now().Add(keepaliveInterval)
 		for {
-			select {
-			case <-ctx.Done():
+			if keepaliveCtx.Err() != nil {
 				return
-			case <-stop:
-				return
-			case <-ticker.C:
+			}
+			untilStatus := time.Until(nextStatus)
+			if untilStatus <= 0 {
 				if !send() {
 					return
 				}
+				nextStatus = time.Now().Add(keepaliveInterval)
+				continue
+			}
+			receiveCtx, receiveCancel := context.WithTimeout(keepaliveCtx, untilStatus)
+			_, err := s.replConn.ReceiveMessage(receiveCtx)
+			receiveTimedOut := errors.Is(receiveCtx.Err(), context.DeadlineExceeded)
+			receiveCancel()
+			if keepaliveCtx.Err() != nil {
+				return
+			}
+			if err != nil && !receiveTimedOut {
+				config.Debug("[CDC] Keepalive replication drain failed: %v", err)
+				return
 			}
 		}
 	}()
@@ -448,20 +486,15 @@ func (s *PostgresCDCSource) startKeepalive(ctx context.Context, caughtUp, durabl
 // Safe to call multiple times.
 func (s *PostgresCDCSource) stopKeepalive() {
 	s.keepaliveMu.Lock()
-	stop := s.keepaliveStop
+	cancel := s.keepaliveCancel
 	done := s.keepaliveDone
-	s.keepaliveStop = nil
+	s.keepaliveCancel = nil
 	s.keepaliveDone = nil
 	s.keepaliveMu.Unlock()
-	if stop == nil {
+	if cancel == nil {
 		return
 	}
-	select {
-	case <-stop:
-		// already closed
-	default:
-		close(stop)
-	}
+	cancel()
 	if done != nil {
 		<-done
 	}
@@ -546,12 +579,11 @@ func (s *PostgresCDCSource) CDCState() source.CDCStateCommitToken {
 	for table, fingerprint := range s.snapshotSchemas {
 		schemas[table] = fingerprint
 	}
-	s.stateMu.Unlock()
-
 	var position string
 	if s.caughtUp != nil && s.caughtUp.Committed() > 0 {
 		position = FormatLSN(s.caughtUp.Committed())
 	}
+	s.stateMu.Unlock()
 	return source.CDCStateCommitToken{Position: position, SnapshotPositions: snapshots, SnapshotIncarnations: incarnations, SnapshotSchemas: schemas}
 }
 
@@ -586,11 +618,18 @@ func (s *PostgresCDCSource) ReplicationLag() (source.LagSnapshot, bool) {
 	}, true
 }
 
-// recordCaughtUpLSN records the LSN a batch run has streamed up to. It is sent
-// to the slot by FinalizeBatch once the destination write is durable.
-func (s *PostgresCDCSource) recordCaughtUpLSN(lsn pglogrepl.LSN) {
-	if s.caughtUp != nil {
+// recordCaughtUpLSN records the LSN a batch run has reached. Positions decoded
+// from an active replication stream are sent to the slot by FinalizeBatch once
+// the destination write is durable. Snapshot-only positions are state markers:
+// their connection has not entered CopyBoth mode and must not receive standby
+// status updates.
+func (s *PostgresCDCSource) recordCaughtUpLSN(lsn pglogrepl.LSN, slotName string, fromStream bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.caughtUp != nil && lsn > s.caughtUp.Committed() {
 		s.caughtUp.Commit(lsn)
+		s.caughtUpSlot = slotName
+		s.caughtUpFromStream = fromStream
 	}
 }
 
@@ -605,7 +644,18 @@ func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if s.replConn == nil || s.caughtUp == nil {
+	s.stateMu.Lock()
+	var lsn pglogrepl.LSN
+	if s.caughtUp != nil {
+		lsn = s.caughtUp.Committed()
+	}
+	slotName := s.caughtUpSlot
+	fromStream := s.caughtUpFromStream
+	s.stateMu.Unlock()
+	if lsn == 0 || !fromStream {
+		return nil
+	}
+	if s.replConn == nil {
 		return nil
 	}
 	// Stop the keepalive goroutine before sending so we are the sole writer
@@ -613,9 +663,8 @@ func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
 	// WALWritePosition (it cannot have advanced the slot); the final send
 	// below carries WALFlush=lsn which actually moves confirmed_flush_lsn.
 	s.stopKeepalive()
-	lsn := s.caughtUp.Committed()
-	if lsn == 0 {
-		return nil
+	if slotName == "" {
+		return fmt.Errorf("cannot confirm final standby status at LSN %s without a replication slot name", lsn)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
@@ -632,8 +681,53 @@ func (s *PostgresCDCSource) FinalizeBatch(ctx context.Context) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	if err := s.waitForConfirmedFlushLSN(ctx, slotName, lsn); err != nil {
+		return err
+	}
 	config.Debug("[CDC] Sent final standby status confirming LSN %s", lsn)
 	return nil
+}
+
+func (s *PostgresCDCSource) waitForConfirmedFlushLSN(ctx context.Context, slotName string, lsn pglogrepl.LSN) error {
+	if s.queryPool == nil || s.replConn == nil {
+		return fmt.Errorf("cannot confirm final standby status without open PostgreSQL connections")
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, finalizeConfirmationTimeout)
+	defer cancel()
+	nextPoll := time.Now()
+
+	for {
+		if !time.Now().Before(nextPoll) {
+			var confirmed bool
+			err := s.queryPool.QueryRow(waitCtx, `
+				SELECT COALESCE(confirmed_flush_lsn >= $1::pg_lsn, false)
+				FROM pg_replication_slots
+				WHERE slot_name = $2
+			`, lsn.String(), slotName).Scan(&confirmed)
+			if err != nil {
+				if waitCtx.Err() != nil {
+					return fmt.Errorf("timed out waiting for PostgreSQL to confirm final standby status at LSN %s: %w", lsn, waitCtx.Err())
+				}
+				return fmt.Errorf("failed to verify final standby status at LSN %s: %w", lsn, err)
+			}
+			if confirmed {
+				return nil
+			}
+			nextPoll = time.Now().Add(receiveTimeout)
+		}
+
+		receiveCtx, receiveCancel := context.WithDeadline(waitCtx, nextPoll)
+		_, receiveErr := s.replConn.ReceiveMessage(receiveCtx)
+		receiveTimedOut := pgconn.Timeout(receiveErr)
+		receiveCancel()
+		if waitCtx.Err() != nil {
+			return fmt.Errorf("timed out waiting for PostgreSQL to confirm final standby status at LSN %s: %w", lsn, waitCtx.Err())
+		}
+		if receiveErr != nil && !receiveTimedOut {
+			return fmt.Errorf("failed to drain PostgreSQL replication connection while confirming LSN %s: %w", lsn, receiveErr)
+		}
+	}
 }
 
 func (s *PostgresCDCSource) markLegacySlotInUse(slotName string) {

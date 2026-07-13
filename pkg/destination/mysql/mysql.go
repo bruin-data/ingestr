@@ -729,6 +729,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 	isCDC := destination.HasCDCDeletedColumn(columns)
+	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteColumn)
@@ -756,7 +757,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 
 	if len(nonPKColumns) > 0 {
 		updateSet := buildUpdateSet(nonPKColumns, "target", "source")
-		if isCDC {
+		if isCDC && hasUnchangedCols {
 			updateSet = buildCDCUpdateSet(nonPKColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
 		}
 		updateSQL := fmt.Sprintf(

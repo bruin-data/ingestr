@@ -45,6 +45,9 @@ func (s *PostgresCDCSource) AcquireConnectorLease(ctx context.Context, opts sour
 
 	s.connectorLeaseMu.Lock()
 	defer s.connectorLeaseMu.Unlock()
+	if s.connectorPreparing {
+		return nil, fmt.Errorf("cannot acquire PostgreSQL connector lease while managed publication %q preparation is in progress", s.cdcConfig.Publication)
+	}
 	if s.connectorLease != nil {
 		return nil, fmt.Errorf("connector lease is already held by this source")
 	}

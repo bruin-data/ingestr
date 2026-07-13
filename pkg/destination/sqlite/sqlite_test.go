@@ -183,6 +183,44 @@ func TestCDCMergePreservesUnchangedPayloadAndAppliesExplicitNull(t *testing.T) {
 	}
 }
 
+func TestCDCMergeWithoutUnchangedColsMarkerUpdatesNormally(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "cdc-without-unchanged-cols.db")
+	if err := d.Connect(t.Context(), "sqlite://"+path); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close(t.Context()) }()
+
+	for _, statement := range []string{
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, payload TEXT, _cdc_lsn TEXT, _cdc_deleted INTEGER, _cdc_synced_at TEXT)`,
+		`CREATE TABLE items_staging (id INTEGER, payload TEXT, _cdc_lsn TEXT, _cdc_deleted INTEGER, _cdc_synced_at TEXT)`,
+		`INSERT INTO items VALUES (1, 'before', '00000000/00000001/0000000000000002', 0, '2026-01-01')`,
+		`INSERT INTO items_staging VALUES (1, 'after', '00000000/00000002/0000000000000002', 0, '2026-01-02')`,
+	} {
+		if err := d.Exec(t.Context(), statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := d.MergeTable(t.Context(), destination.MergeOptions{
+		TargetTable:  "items",
+		StagingTable: "items_staging",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var payload string
+	if err := d.db.QueryRowContext(t.Context(), `SELECT payload FROM items WHERE id = 1`).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload != "after" {
+		t.Fatalf("payload = %q, want after", payload)
+	}
+}
+
 func TestBuildCDCUpdateSetSQLiteUsesExactMarkerNames(t *testing.T) {
 	got := buildCDCUpdateSetSQLite([]string{"Foo", "foo"}, "target", "source", `source."_cdc_unchanged_cols"`)
 	if !strings.Contains(got, "value = 'Foo' COLLATE BINARY") || !strings.Contains(got, "value = 'foo' COLLATE BINARY") {

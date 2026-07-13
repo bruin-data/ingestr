@@ -462,6 +462,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 	isCDC := destination.HasCDCDeletedColumn(columns)
+	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier)
@@ -495,7 +496,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		updateTarget := quotedTargetTable
 		joinTarget := quotedTargetTable
 		updateSet := buildUpdateSetSQLite(nonPKColumns, "source")
-		if isCDC {
+		if isCDC && hasUnchangedCols {
 			updateTarget += " AS target"
 			joinTarget = "target"
 			updateSet = buildCDCUpdateSetSQLite(nonPKColumns, "target", "source", "source."+destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))

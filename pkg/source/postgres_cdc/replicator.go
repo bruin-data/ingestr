@@ -168,6 +168,13 @@ func (r *Replicator) BarrierReached() bool {
 	return r.barrierSeen
 }
 
+func (r *Replicator) EmitStreamHeartbeat(ctx context.Context) error {
+	if r.source.serverVersion < 140000 {
+		return nil
+	}
+	return emitStreamHeartbeat(ctx, r.source.queryPool)
+}
+
 func (r *Replicator) handleLogicalMessage(data []byte) (bool, error) {
 	message, err := parseLogicalDecodingMessage(data, false, false)
 	if err != nil || message == nil {
@@ -175,6 +182,8 @@ func (r *Replicator) handleLogicalMessage(data []byte) (bool, error) {
 	}
 	if matchesBatchBarrier(message, r.barrierNonce) {
 		r.barrierSeen = true
+	}
+	if matchesBatchBarrier(message, r.barrierNonce) || matchesStreamHeartbeat(message) {
 		if message.LSN > r.clientXLogPos {
 			r.clientXLogPos = message.LSN
 		}

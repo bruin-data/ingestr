@@ -1,12 +1,38 @@
 package postgres_cdc
 
 import (
+	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestAcquireConnectorLeaseRejectsConcurrentPublicationPreparation(t *testing.T) {
+	src := NewPostgresCDCSource()
+	src.queryPool = &pgxpool.Pool{}
+	src.cdcConfig.Publication = defaultPublicationName
+	src.connectorPreparing = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := src.AcquireConnectorLease(context.Background(), source.ConnectorLeaseOptions{ConnectorID: "connector"})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "preparation is in progress") {
+			t.Fatalf("AcquireConnectorLease() error = %v, want preparation-in-progress error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("connector lease acquisition blocked during publication preparation")
+	}
+}
 
 func TestMigrationCandidatesAreDeduplicatedInPriorityOrder(t *testing.T) {
 	want := []string{"current-source-old-dest", "old-source-new-dest", "old-source-old-dest"}

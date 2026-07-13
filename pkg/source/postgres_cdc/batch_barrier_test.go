@@ -91,9 +91,36 @@ func TestMultiTableReplicatorParsesV2MessageInsideStream(t *testing.T) {
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 }
 
+func TestStreamHeartbeatAdvancesDecodedPositionWithoutCompletingBatch(t *testing.T) {
+	data := logicalMessageData(false, 30, streamHeartbeatPrefix, "heartbeat", nil)
+
+	single := &Replicator{barrierNonce: "batch", clientXLogPos: 10}
+	handled, err := single.handleLogicalMessage(data)
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.False(t, single.BarrierReached())
+	assert.Equal(t, pglogrepl.LSN(30), single.CurrentLSN())
+
+	multi := &MultiTableReplicator{
+		decoder:       NewMultiTableDecoder(nil),
+		barrierNonce:  "batch",
+		clientXLogPos: 10,
+	}
+	handled, err = multi.handleLogicalMessage(data)
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.False(t, multi.BarrierReached())
+	assert.Equal(t, pglogrepl.LSN(30), multi.CurrentLSN())
+}
+
 func TestBatchBarrierVersionRequirement(t *testing.T) {
 	require.ErrorContains(t, validateBatchBarrierSupport(130000), "requires PostgreSQL 14 or newer")
 	require.NoError(t, validateBatchBarrierSupport(140000))
+}
+
+func TestBatchCaughtUpLSNIncludesEmittedBarrierEnd(t *testing.T) {
+	assert.Equal(t, pglogrepl.LSN(30), batchCaughtUpLSN(20, 30))
+	assert.Equal(t, pglogrepl.LSN(30), batchCaughtUpLSN(30, 20))
 }
 
 func TestReadersRejectPre14BatchBeforeSnapshot(t *testing.T) {

@@ -168,6 +168,13 @@ func (r *MultiTableReplicator) BarrierReached() bool {
 	return r.barrierSeen
 }
 
+func (r *MultiTableReplicator) EmitStreamHeartbeat(ctx context.Context) error {
+	if r.source.serverVersion < 140000 {
+		return nil
+	}
+	return emitStreamHeartbeat(ctx, r.source.queryPool)
+}
+
 func (r *MultiTableReplicator) handleLogicalMessage(data []byte) (bool, error) {
 	message, err := parseLogicalDecodingMessage(data, r.protocolV2, r.decoder.InStream())
 	if err != nil || message == nil {
@@ -175,6 +182,8 @@ func (r *MultiTableReplicator) handleLogicalMessage(data []byte) (bool, error) {
 	}
 	if matchesBatchBarrier(message, r.barrierNonce) {
 		r.barrierSeen = true
+	}
+	if matchesBatchBarrier(message, r.barrierNonce) || matchesStreamHeartbeat(message) {
 		if message.LSN > r.clientXLogPos {
 			r.clientXLogPos = message.LSN
 		}
