@@ -1067,6 +1067,101 @@ func (d *BigQueryDestination) queryTableRowCount(ctx context.Context, project, d
 	}
 }
 
+// SwapTable swaps a staging table with the target table.
+func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	ctx = annotation.WithStep(ctx, annotation.StepSwap)
+	stagingTable := opts.StagingTable
+	targetTable := opts.TargetTable
+	stagingProject, stagingDataset, stagingTableName, err := d.parseTable(stagingTable)
+	if err != nil {
+		return fmt.Errorf("invalid staging table name: %w", err)
+	}
+
+	targetProject, targetDataset, targetTableName, err := d.parseTable(targetTable)
+	if err != nil {
+		return fmt.Errorf("invalid target table name: %w", err)
+	}
+
+	// Replace only PrepareTables the staging side, so the target dataset may
+	// not exist yet. BigQuery's CREATE OR REPLACE TABLE and Copy jobs do NOT
+	// auto-create the dataset — they fail with "Not found: Dataset ...".
+	if err := d.ensureDatasetExists(ctx, targetProject, targetDataset); err != nil {
+		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
+	}
+
+	// BigQuery can't ALTER partitioning/clustering, so a target whose spec differs
+	// must be recreated; detect once here (safe: replace overwrites the target anyway).
+	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTableName)
+	mismatch := false
+	var targetExpiration time.Time
+	if d.partitionBy != "" || len(d.clusterBy) > 0 {
+		if meta, err := targetRef.Metadata(ctx); err == nil {
+			mismatch = d.partitionOrClusterMismatch(meta)
+			targetExpiration = meta.ExpirationTime
+			if mismatch {
+				if err := d.recreateSpecGuard(meta, targetTable); err != nil {
+					return err
+				}
+			}
+		} else if !isNotFoundError(err) {
+			return fmt.Errorf("failed to check target table metadata: %w", err)
+		}
+	}
+
+	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTableName)
+
+	config.Debug("[DEST] Swapping tables: %s → %s", stagingTable, targetTable)
+
+	// Copy jobs can't dedup.
+	if d.effectiveLoadMethod() == loadMethodLoadJob && len(opts.PrimaryKeys) == 0 {
+		doCopy := func() error {
+			return d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+		}
+		var swapErr error
+		if mismatch {
+			// Partition/cluster changed: rename the target aside, copy into a fresh
+			// target with the new spec, then drop the old (restoring it on failure).
+			swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, doCopy)
+		} else {
+			swapErr = doCopy()
+		}
+		if swapErr != nil {
+			return swapErr
+		}
+		config.Debug("[DEST] Copy completed, deleting staging table")
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := stagingRef.Delete(cleanupCtx); err != nil {
+			config.Debug("[DEST] Failed to delete staging table: %v", err)
+		}
+		return nil
+	}
+
+	// CTAS path. CREATE OR REPLACE can't change an existing table's spec, so on a
+	// mismatch rename the target aside, CTAS into a fresh target, drop the old.
+	ctas := func() error {
+		return d.runCTASSwap(ctx, opts, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+	}
+	var swapErr error
+	if mismatch {
+		swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, ctas)
+	} else {
+		swapErr = ctas()
+	}
+	if swapErr != nil {
+		return swapErr
+	}
+
+	config.Debug("[DEST] Copy completed, deleting staging table")
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := stagingRef.Delete(cleanupCtx); err != nil {
+		config.Debug("[DEST] Failed to delete staging table: %v", err)
+	}
+
+	return nil
+}
+
 // repartitionAsideSuffix returns a unique suffix for moving a table aside.
 func repartitionAsideSuffix() string {
 	var b [8]byte
@@ -1220,101 +1315,6 @@ func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.
 			return fmt.Errorf("SQL swap job error (job %s): %w", jobRef(job), err)
 		}
 	}
-	return nil
-}
-
-// SwapTable swaps a staging table with the target table.
-func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
-	ctx = annotation.WithStep(ctx, annotation.StepSwap)
-	stagingTable := opts.StagingTable
-	targetTable := opts.TargetTable
-	stagingProject, stagingDataset, stagingTableName, err := d.parseTable(stagingTable)
-	if err != nil {
-		return fmt.Errorf("invalid staging table name: %w", err)
-	}
-
-	targetProject, targetDataset, targetTableName, err := d.parseTable(targetTable)
-	if err != nil {
-		return fmt.Errorf("invalid target table name: %w", err)
-	}
-
-	// Replace only PrepareTables the staging side, so the target dataset may
-	// not exist yet. BigQuery's CREATE OR REPLACE TABLE and Copy jobs do NOT
-	// auto-create the dataset — they fail with "Not found: Dataset ...".
-	if err := d.ensureDatasetExists(ctx, targetProject, targetDataset); err != nil {
-		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
-	}
-
-	// BigQuery can't ALTER partitioning/clustering, so a target whose spec differs
-	// must be recreated; detect once here (safe: replace overwrites the target anyway).
-	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTableName)
-	mismatch := false
-	var targetExpiration time.Time
-	if d.partitionBy != "" || len(d.clusterBy) > 0 {
-		if meta, err := targetRef.Metadata(ctx); err == nil {
-			mismatch = d.partitionOrClusterMismatch(meta)
-			targetExpiration = meta.ExpirationTime
-			if mismatch {
-				if err := d.recreateSpecGuard(meta, targetTable); err != nil {
-					return err
-				}
-			}
-		} else if !isNotFoundError(err) {
-			return fmt.Errorf("failed to check target table metadata: %w", err)
-		}
-	}
-
-	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTableName)
-
-	config.Debug("[DEST] Swapping tables: %s → %s", stagingTable, targetTable)
-
-	// Copy jobs can't dedup.
-	if d.effectiveLoadMethod() == loadMethodLoadJob && len(opts.PrimaryKeys) == 0 {
-		doCopy := func() error {
-			return d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
-		}
-		var swapErr error
-		if mismatch {
-			// Partition/cluster changed: rename the target aside, copy into a fresh
-			// target with the new spec, then drop the old (restoring it on failure).
-			swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, doCopy)
-		} else {
-			swapErr = doCopy()
-		}
-		if swapErr != nil {
-			return swapErr
-		}
-		config.Debug("[DEST] Copy completed, deleting staging table")
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := stagingRef.Delete(cleanupCtx); err != nil {
-			config.Debug("[DEST] Failed to delete staging table: %v", err)
-		}
-		return nil
-	}
-
-	// CTAS path. CREATE OR REPLACE can't change an existing table's spec, so on a
-	// mismatch rename the target aside, CTAS into a fresh target, drop the old.
-	ctas := func() error {
-		return d.runCTASSwap(ctx, opts, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
-	}
-	var swapErr error
-	if mismatch {
-		swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, ctas)
-	} else {
-		swapErr = ctas()
-	}
-	if swapErr != nil {
-		return swapErr
-	}
-
-	config.Debug("[DEST] Copy completed, deleting staging table")
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := stagingRef.Delete(cleanupCtx); err != nil {
-		config.Debug("[DEST] Failed to delete staging table: %v", err)
-	}
-
 	return nil
 }
 
