@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2029,5 +2030,419 @@ func TestIsNotFoundError_Wrapped(t *testing.T) {
 	wrapped := errors.Join(errors.New("other"), err)
 	if !isNotFoundError(wrapped) {
 		t.Fatalf("expected isNotFoundError to return true for wrapped error: %v", wrapped)
+	}
+}
+
+func TestPartitionOrClusterMismatch(t *testing.T) {
+	tp := func(field string) *bigquery.TimePartitioning { return &bigquery.TimePartitioning{Field: field} }
+	cl := func(fields ...string) *bigquery.Clustering { return &bigquery.Clustering{Fields: fields} }
+
+	tests := []struct {
+		name        string
+		partitionBy string
+		clusterBy   []string
+		meta        *bigquery.TableMetadata
+		want        bool
+	}{
+		// --- partition: neither side partitioned ---
+		{
+			name: "no partition either side",
+			meta: &bigquery.TableMetadata{},
+			want: false,
+		},
+		{
+			name: "no partition, empty TimePartitioning pointer is nil",
+			meta: &bigquery.TableMetadata{TimePartitioning: nil},
+			want: false,
+		},
+
+		// --- partition: field name matching ---
+		{
+			name:        "same partition field",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        false,
+		},
+		{
+			name:        "same partition field, config uppercase",
+			partitionBy: "D1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        false,
+		},
+		{
+			name:        "same partition field, table uppercase",
+			partitionBy: "created_at",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("CREATED_AT")},
+			want:        false,
+		},
+		{
+			name:        "same partition field, mixed case",
+			partitionBy: "EventDate",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("eventdate")},
+			want:        false,
+		},
+		{
+			name:        "partition field changed",
+			partitionBy: "d2",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        true,
+		},
+		{
+			name:        "partition field differs only by underscore",
+			partitionBy: "created_at",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("createdat")},
+			want:        true,
+		},
+		{
+			name:        "partition field is prefix of other",
+			partitionBy: "date",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("date2")},
+			want:        true,
+		},
+
+		// --- partition: presence vs absence ---
+		{
+			name:        "want partition but table has none",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{},
+			want:        true,
+		},
+		{
+			name:        "want no partition but table is column-partitioned",
+			partitionBy: "",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1")},
+			want:        true,
+		},
+		{
+			name:        "want no partition but table is ingestion-time partitioned",
+			partitionBy: "",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("")},
+			want:        true,
+		},
+		{
+			name:        "want column partition but table is ingestion-time partitioned",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("")},
+			want:        true,
+		},
+
+		// --- partition: type compared against what ingestr creates (DAY default) ---
+		{
+			name:        "same field, table has explicit DAY type",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "d1", Type: bigquery.DayPartitioningType}},
+			want:        false,
+		},
+		{
+			name:        "same field, table has HOUR type",
+			partitionBy: "ts",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.HourPartitioningType}},
+			want:        true,
+		},
+		{
+			name:        "same field, table has MONTH type",
+			partitionBy: "ts",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.MonthPartitioningType}},
+			want:        true,
+		},
+
+		// --- partition: range partitioning always mismatches ---
+		{
+			name: "range partitioning, want none",
+			meta: &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n"}},
+			want: true,
+		},
+		{
+			name:        "range partitioning, want column partition",
+			partitionBy: "d1",
+			meta:        &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n"}},
+			want:        true,
+		},
+		{
+			name:        "range partitioning wins even if time field would match",
+			partitionBy: "d1",
+			meta: &bigquery.TableMetadata{
+				TimePartitioning:  tp("d1"),
+				RangePartitioning: &bigquery.RangePartitioning{Field: "n"},
+			},
+			want: true,
+		},
+
+		// --- clustering only (partition matched on both sides as none) ---
+		{
+			name:      "cluster: neither side clustered",
+			clusterBy: nil,
+			meta:      &bigquery.TableMetadata{},
+			want:      false,
+		},
+		{
+			name:      "cluster: table has empty Clustering, config none",
+			clusterBy: nil,
+			meta:      &bigquery.TableMetadata{Clustering: &bigquery.Clustering{}},
+			want:      false,
+		},
+		{
+			name:      "cluster: same single field",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a")},
+			want:      false,
+		},
+		{
+			name:      "cluster: same multi field same order",
+			clusterBy: []string{"a", "b", "c"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "b", "c")},
+			want:      false,
+		},
+		{
+			name:      "cluster: case-insensitive match",
+			clusterBy: []string{"Country", "REGION"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("country", "region")},
+			want:      false,
+		},
+		{
+			name:      "cluster: order changed",
+			clusterBy: []string{"a", "b"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("b", "a")},
+			want:      true,
+		},
+		{
+			name:      "cluster: added (config has, table none)",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{},
+			want:      true,
+		},
+		{
+			name:      "cluster: removed (table has, config none)",
+			clusterBy: nil,
+			meta:      &bigquery.TableMetadata{Clustering: cl("a")},
+			want:      true,
+		},
+		{
+			name:      "cluster: subset fewer fields",
+			clusterBy: []string{"a"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "b")},
+			want:      true,
+		},
+		{
+			name:      "cluster: same fields but extra config field",
+			clusterBy: []string{"a", "b", "c"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "b")},
+			want:      true,
+		},
+		{
+			name:      "cluster: one field differs",
+			clusterBy: []string{"a", "b"},
+			meta:      &bigquery.TableMetadata{Clustering: cl("a", "x")},
+			want:      true,
+		},
+
+		// --- combined partition + clustering ---
+		{
+			name:        "combined: partition and cluster both match",
+			partitionBy: "d1",
+			clusterBy:   []string{"a", "b"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("a", "b")},
+			want:        false,
+		},
+		{
+			name:        "combined: partition matches, cluster differs",
+			partitionBy: "d1",
+			clusterBy:   []string{"a", "b"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("a")},
+			want:        true,
+		},
+		{
+			name:        "combined: partition differs, cluster matches",
+			partitionBy: "d2",
+			clusterBy:   []string{"a"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("a")},
+			want:        true,
+		},
+		{
+			name:        "combined: both differ",
+			partitionBy: "d2",
+			clusterBy:   []string{"a"},
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("d1"), Clustering: cl("b")},
+			want:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &BigQueryDestination{partitionBy: tt.partitionBy, clusterBy: tt.clusterBy}
+			if got := d.partitionOrClusterMismatch(tt.meta); got != tt.want {
+				t.Fatalf("partitionOrClusterMismatch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type swapRecorder struct {
+	mu      sync.Mutex
+	queries []string
+	drops   []string
+}
+
+func (r *swapRecorder) addQuery(q string) {
+	r.mu.Lock()
+	r.queries = append(r.queries, q)
+	r.mu.Unlock()
+}
+
+func (r *swapRecorder) addDrop(t string) { r.mu.Lock(); r.drops = append(r.drops, t); r.mu.Unlock() }
+
+func (r *swapRecorder) snapshot() ([]string, []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.queries...), append([]string(nil), r.drops...)
+}
+
+// newSwapMockDest returns a BigQueryDestination backed by a mock BigQuery API
+// that records executed query SQL and table deletes, so rename-aside helpers can
+// be tested without a live BigQuery.
+func newSwapMockDest(t *testing.T, rec *swapRecorder) (*BigQueryDestination, func()) {
+	t.Helper()
+	lastSeg := func(path, marker string) string {
+		i := strings.LastIndex(path, marker)
+		if i < 0 {
+			return ""
+		}
+		seg := path[i+len(marker):]
+		if j := strings.IndexAny(seg, "/?"); j >= 0 {
+			seg = seg[:j]
+		}
+		return seg
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			var req struct {
+				JobReference struct {
+					JobID string `json:"jobId"`
+				} `json:"jobReference"`
+				Configuration struct {
+					Query struct {
+						Query string `json:"query"`
+					} `json:"query"`
+				} `json:"configuration"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			rec.addQuery(req.Configuration.Query.Query)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{"projectId": "test-project", "jobId": req.JobReference.JobID, "location": "US"},
+				"status":       map[string]string{"state": "DONE"},
+				"statistics":   map[string]interface{}{"query": map[string]string{"statementType": "SCRIPT"}},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jobReference": map[string]string{"projectId": "test-project", "jobId": lastSeg(r.URL.Path, "/jobs/"), "location": "US"},
+				"status":       map[string]string{"state": "DONE"},
+				"statistics":   map[string]interface{}{"query": map[string]string{"statementType": "SCRIPT"}},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jobComplete": true, "totalRows": "0", "schema": map[string]interface{}{"fields": []interface{}{}}})
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/tables/"):
+			rec.addDrop(lastSeg(r.URL.Path, "/tables/"))
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	client, err := bigquery.NewClient(context.Background(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		server.Close()
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	return dest, func() { _ = client.Close(); server.Close() }
+}
+
+func TestRepartitionAsideSuffix(t *testing.T) {
+	a := repartitionAsideSuffix()
+	if len(a) != 16 {
+		t.Fatalf("suffix len = %d, want 16 hex chars (got %q)", len(a), a)
+	}
+	for _, c := range a {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Fatalf("suffix %q has non-hex char %q", a, c)
+		}
+	}
+	if b := repartitionAsideSuffix(); a == b {
+		t.Fatalf("two suffixes collided: %q", a)
+	}
+}
+
+func TestRestoreTargetFromAside(t *testing.T) {
+	rec := &swapRecorder{}
+	dest, closeFn := newSwapMockDest(t, rec)
+	defer closeFn()
+
+	if err := dest.restoreTargetFromAside(context.Background(), "test-project", "ds", "events__ingestr_repartition_abc", "events"); err != nil {
+		t.Fatalf("restoreTargetFromAside() error = %v", err)
+	}
+	queries, _ := rec.snapshot()
+	if len(queries) != 2 {
+		t.Fatalf("expected 2 queries (rename back, clear expiration), got %d: %v", len(queries), queries)
+	}
+	if !strings.Contains(queries[0], "RENAME TO `events`") {
+		t.Fatalf("first query should rename the aside table back to target, got: %s", queries[0])
+	}
+	if !strings.Contains(queries[1], "SET OPTIONS(expiration_timestamp = NULL)") {
+		t.Fatalf("second query must CLEAR the expiration (survives rename), got: %s", queries[1])
+	}
+	if !strings.Contains(queries[1], "`events`") {
+		t.Fatalf("expiration must be cleared on the restored target, got: %s", queries[1])
+	}
+}
+
+func TestRenameAsideSwapSuccessDropsOld(t *testing.T) {
+	rec := &swapRecorder{}
+	dest, closeFn := newSwapMockDest(t, rec)
+	defer closeFn()
+
+	swapCalled := false
+	err := dest.renameAsideSwap(context.Background(), "test-project", "ds", "events", func() error {
+		swapCalled = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("renameAsideSwap() error = %v", err)
+	}
+	if !swapCalled {
+		t.Fatal("swap closure was not called")
+	}
+	queries, drops := rec.snapshot()
+	// rename aside + set expiration
+	if len(queries) < 2 || !strings.Contains(queries[0], "RENAME TO") {
+		t.Fatalf("expected a rename-aside query, got: %v", queries)
+	}
+	if len(drops) != 1 || !strings.HasPrefix(drops[0], "events__ingestr_repartition_") {
+		t.Fatalf("expected the aside table to be dropped on success, drops = %v", drops)
+	}
+}
+
+func TestRenameAsideSwapRestoresOnSwapFailure(t *testing.T) {
+	rec := &swapRecorder{}
+	dest, closeFn := newSwapMockDest(t, rec)
+	defer closeFn()
+
+	sentinel := errors.New("swap boom")
+	err := dest.renameAsideSwap(context.Background(), "test-project", "ds", "events", func() error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected the swap error to propagate, got %v", err)
+	}
+	queries, drops := rec.snapshot()
+	if len(drops) != 0 {
+		t.Fatalf("must NOT drop the old table when swap fails, drops = %v", drops)
+	}
+	// Must restore: a RENAME TO `events` and a clear-expiration must appear.
+	joined := strings.Join(queries, "\n")
+	if !strings.Contains(joined, "RENAME TO `events`") {
+		t.Fatalf("expected a restore rename back to target, queries = %v", queries)
+	}
+	if !strings.Contains(joined, "SET OPTIONS(expiration_timestamp = NULL)") {
+		t.Fatalf("restore must clear the expiration, queries = %v", queries)
 	}
 }

@@ -450,8 +450,20 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.IncrementalKey = tableSchema.IncrementalKey
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
 
-	if resolvedConfig.PartitionBy == "" && tableSchema.PartitionBy != "" {
-		resolvedConfig.PartitionBy = tableSchema.PartitionBy
+	// partition_by/cluster_by name destination columns, so apply the same naming
+	// convention that renamed the columns (e.g. snake_case); no-op for direct naming.
+	switch {
+	case resolvedConfig.PartitionBy != "":
+		resolvedConfig.PartitionBy = namingConv.Normalize(resolvedConfig.PartitionBy)
+	case tableSchema.PartitionBy != "":
+		resolvedConfig.PartitionBy = namingConv.Normalize(tableSchema.PartitionBy)
+	}
+	if len(resolvedConfig.ClusterBy) > 0 {
+		clusterBy := make([]string, len(resolvedConfig.ClusterBy))
+		for i, col := range resolvedConfig.ClusterBy {
+			clusterBy[i] = namingConv.Normalize(col)
+		}
+		resolvedConfig.ClusterBy = clusterBy
 	}
 
 	// Primary key columns must be NOT NULL
