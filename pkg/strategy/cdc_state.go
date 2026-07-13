@@ -31,8 +31,6 @@ const (
 	cdcStateKindSnapshot      = "snapshot"
 	cdcStateKindDestination   = "destination"
 	cdcStateKindRun           = "run"
-	cdcStateKindLineage       = "lineage"
-	cdcStateKindAdoption      = "adoption"
 	cdcStateStatusInProgress  = "in_progress"
 	zeroCDCPosition           = "00000000/00000000"
 	cdcStatePruneThreshold    = 100
@@ -145,14 +143,6 @@ func NewCDCStateManager(dest destination.Destination, connectorID, _ string, sta
 	manager.targetClaimer = claimer
 	manager.targetTable = managedCDCStateTableName(dest, cdcTargetTableName, stagingDataset)
 	return manager, nil
-}
-
-func NewLegacyCDCStateManager(dest destination.Destination, connectorID, anchorTable, stagingDataset string) (*CDCStateManager, error) {
-	return newCDCStateManager(dest, connectorID, legacyManagedCDCStateTableName(dest, anchorTable, cdcStateTableName, stagingDataset))
-}
-
-func NewLegacyCDCStateManagerAtTable(dest destination.Destination, connectorID, stateTable string) (*CDCStateManager, error) {
-	return newCDCStateManager(dest, connectorID, stateTable)
 }
 
 func newCDCStateManager(dest destination.Destination, connectorID, stateTable string) (*CDCStateManager, error) {
@@ -343,7 +333,7 @@ func (m *CDCStateManager) ClaimLateDiscoveredTarget(
 		targetOptions.Table = destTable
 		createdIncarnation, err := preparer.ClaimAndPrepareEmptyCDCTarget(ctx, m.targetTable, destination.CDCTargetClaim{
 			DestinationTable: destTable,
-			ConnectorID:      m.claimConnectorID(),
+			ConnectorID:      m.connectorID,
 			SourceTable:      sourceTable,
 		}, targetOptions)
 		if err != nil {
@@ -495,7 +485,7 @@ func (m *CDCStateManager) claimTarget(ctx context.Context, sourceTable, destTabl
 		}
 		if err := m.targetClaimer.ClaimCDCTarget(ctx, m.targetTable, destination.CDCTargetClaim{
 			DestinationTable: destTable,
-			ConnectorID:      m.claimConnectorID(),
+			ConnectorID:      m.connectorID,
 			SourceTable:      sourceTable,
 		}); err != nil {
 			return fmt.Errorf("failed to claim CDC destination table %q: %w", destTable, err)
@@ -565,17 +555,6 @@ func (m *CDCStateManager) HasPendingLateSnapshotBoundary(sourceTable string) boo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lateTargetModes[sourceTable] != lateTargetNone
-}
-
-func (m *CDCStateManager) claimConnectorID() string {
-	if len(m.runs) == 1 {
-		runID := onlyCDCStateRun(m.runs)
-		lineage := m.states[cdcStateKey{runID: runID, kind: cdcStateKindLineage}]
-		if lineage.complete && lineage.incarnation != "" {
-			return lineage.incarnation
-		}
-	}
-	return m.connectorID
 }
 
 func (m *CDCStateManager) registerTable(ctx context.Context, sourceTable, destTable, incarnation, schemaFingerprint string) error {
@@ -658,10 +637,6 @@ func (m *CDCStateManager) RegisterTableForReadState(sourceTable, destTable, inca
 // ResumePosition requires a complete marker for the latest generation of the
 // source table. The later complete connector checkpoint is then safe to use.
 func (m *CDCStateManager) ResumePosition(ctx context.Context, sourceTable string) (string, error) {
-	return m.resumePosition(ctx, sourceTable, "")
-}
-
-func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable, adoptingConnectorID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -672,17 +647,10 @@ func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable, adopt
 		return "", err
 	}
 
-	if len(m.runs) == 0 {
-		return m.resumeLegacyPosition(ctx, sourceTable)
-	}
 	if len(m.runs) != 1 {
 		return "", nil
 	}
 	runID := onlyCDCStateRun(m.runs)
-	adoption := m.states[cdcStateKey{runID: runID, kind: cdcStateKindAdoption}]
-	if adoption.complete && adoption.incarnation != "" && adoption.incarnation != adoptingConnectorID {
-		return "", fmt.Errorf("CDC state ID %q was adopted by connector %q", m.connectorID, adoption.incarnation)
-	}
 	snapshot := m.states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
 	if !snapshot.complete {
 		return "", nil
@@ -730,135 +698,6 @@ func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable, adopt
 	return snapshot.position, nil
 }
 
-type validatedCDCAdoptionState struct {
-	sourceTable            string
-	destinationTable       string
-	position               string
-	incarnation            string
-	schemaFingerprint      string
-	destinationIncarnation string
-	snapshotEpoch          uint64
-}
-
-// AdoptValidatedState reserves a predecessor connector and imports its fully
-// validated v2 snapshots under this connector ID. The predecessor reservation
-// is written first, so a crash can only force an idempotent retry by the same
-// successor, never a second adoption.
-func (m *CDCStateManager) AdoptValidatedState(ctx context.Context, previous *CDCStateManager, sourceTables []string) (map[string]string, error) {
-	if previous == nil || previous.connectorID == m.connectorID {
-		return nil, nil
-	}
-	states := make([]validatedCDCAdoptionState, 0, len(sourceTables))
-	positions := make(map[string]string)
-	for _, sourceTable := range sourceTables {
-		position, err := previous.resumePosition(ctx, sourceTable, m.connectorID)
-		if err != nil {
-			return nil, err
-		}
-		if position == "" {
-			continue
-		}
-		previous.mu.Lock()
-		state := validatedCDCAdoptionState{
-			sourceTable:            sourceTable,
-			destinationTable:       previous.destTables[sourceTable],
-			position:               position,
-			incarnation:            previous.knownIncarnations[sourceTable],
-			schemaFingerprint:      previous.knownSchemas[sourceTable],
-			destinationIncarnation: previous.knownDestinations[sourceTable],
-		}
-		if len(previous.runs) == 1 {
-			runID := onlyCDCStateRun(previous.runs)
-			state.snapshotEpoch = previous.states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}].snapshotEpoch
-		}
-		previous.mu.Unlock()
-		states = append(states, state)
-		positions[sourceTable] = position
-	}
-	if len(states) == 0 {
-		return nil, nil
-	}
-
-	claimConnectorID, err := previous.reserveAdoption(ctx, m.connectorID)
-	if err != nil {
-		return nil, err
-	}
-	if err := m.importAdoptedState(ctx, claimConnectorID, states); err != nil {
-		return nil, err
-	}
-	return positions, nil
-}
-
-func (m *CDCStateManager) reserveAdoption(ctx context.Context, successorID string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.load(ctx); err != nil {
-		return "", err
-	}
-	if len(m.runs) != 1 {
-		return "", fmt.Errorf("CDC state ID %q is not an uncontested v2 generation", m.connectorID)
-	}
-	runID := onlyCDCStateRun(m.runs)
-	existing := m.states[cdcStateKey{runID: runID, kind: cdcStateKindAdoption}]
-	if existing.complete {
-		if existing.incarnation != successorID {
-			return "", fmt.Errorf("CDC state ID %q was already adopted by connector %q", m.connectorID, existing.incarnation)
-		}
-		return m.claimConnectorID(), nil
-	}
-	claimConnectorID := m.claimConnectorID()
-	position := encodeCDCStatePositionWithSchema(zeroCDCPosition, successorID, "", 0)
-	event := m.newStateWriteEventForRun(runID, "", "", cdcStateKindAdoption, m.generation, destination.CDCStateStatusComplete, position)
-	if err := m.writeStateEvents(ctx, []cdcStateWriteEvent{event}); err != nil {
-		return "", fmt.Errorf("failed to reserve CDC state adoption: %w", err)
-	}
-	return claimConnectorID, nil
-}
-
-func (m *CDCStateManager) importAdoptedState(ctx context.Context, claimConnectorID string, states []validatedCDCAdoptionState) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.prepareTable(ctx); err != nil {
-		return err
-	}
-	if err := m.load(ctx); err != nil {
-		return err
-	}
-	generation := m.generation + 1
-	runID, err := newCDCStateRunID()
-	if err != nil {
-		return err
-	}
-	m.generation = generation
-	m.runID = runID
-	m.runs = make(map[string]struct{})
-	m.states = make(map[cdcStateKey]reducedCDCState)
-	m.entries = nil
-	m.knownComplete = make(map[string]string)
-	m.knownIncarnations = make(map[string]string)
-	m.knownSchemas = make(map[string]string)
-	m.knownDestinations = make(map[string]string)
-
-	events := []cdcStateWriteEvent{
-		m.newStateWriteEventForRun(runID, "", "", cdcStateKindRun, generation, cdcStateStatusInProgress, zeroCDCPosition),
-		m.newStateWriteEventForRun(runID, "", "", cdcStateKindLineage, generation, destination.CDCStateStatusComplete,
-			encodeCDCStatePositionWithSchema(zeroCDCPosition, claimConnectorID, "", 0)),
-	}
-	for _, state := range states {
-		position := encodeCDCStatePositionWithSchema(state.position, state.incarnation, state.schemaFingerprint, state.snapshotEpoch)
-		events = append(
-			events,
-			m.newStateWriteEventForRun(runID, state.sourceTable, state.destinationTable, cdcStateKindSnapshot, generation, destination.CDCStateStatusComplete, position),
-			m.newStateWriteEventForRun(runID, state.sourceTable, state.destinationTable, cdcStateKindDestination, generation, destination.CDCStateStatusComplete,
-				encodeCDCDestinationState(state.position, state.destinationIncarnation, state.snapshotEpoch)),
-		)
-	}
-	if err := m.writeStateEvents(ctx, events); err != nil {
-		return fmt.Errorf("failed to import adopted CDC state: %w", err)
-	}
-	return nil
-}
-
 func (m *CDCStateManager) currentDestinationIncarnation(ctx context.Context, sourceTable string) (string, bool, error) {
 	if m.incarnation == nil {
 		return "", false, nil
@@ -873,11 +712,11 @@ func (m *CDCStateManager) currentDestinationIncarnation(ctx context.Context, sou
 	return cdcDestinationIncarnationDigest(incarnation), true, nil
 }
 
-// CanBootstrapLegacy reports whether this connector has never started a v2
-// state generation. Once v2 state exists, an empty resume position can mean a
-// crashed or conflicting run and must force a snapshot instead of trusting a
-// potentially partial destination table.
-func (m *CDCStateManager) CanBootstrapLegacy(ctx context.Context) (bool, error) {
+// StateEmpty reports whether this connector has no state events at all. Once
+// state exists, an empty resume position can mean a crashed or conflicting run
+// and must force a snapshot instead of trusting a potentially partial
+// destination table.
+func (m *CDCStateManager) StateEmpty(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -885,100 +724,6 @@ func (m *CDCStateManager) CanBootstrapLegacy(ctx context.Context) (bool, error) 
 		return false, err
 	}
 	return len(m.entries) == 0, nil
-}
-
-func (m *CDCStateManager) resumeLegacyPosition(ctx context.Context, sourceTable string) (string, error) {
-	if m.currentIncarnations[sourceTable] != "" {
-		return "", nil
-	}
-	position, err := m.completedLegacyPosition(ctx, sourceTable)
-	if err != nil || position == "" {
-		return position, err
-	}
-	m.knownComplete[sourceTable] = position
-	return position, nil
-}
-
-// LegacySnapshotRequiresReplacement reports whether a complete v1 marker is
-// sufficient to authorize replacing an existing target, but not to resume its
-// cursor. V1 did not persist source-table incarnations, so adoption must always
-// take a fresh snapshot whose v2 completion binds the current incarnation.
-func (m *CDCStateManager) LegacySnapshotRequiresReplacement(ctx context.Context, sourceTable string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.currentIncarnations[sourceTable] == "" {
-		return false, nil
-	}
-	if err := m.load(ctx); err != nil {
-		return false, err
-	}
-	if len(m.runs) != 0 {
-		return false, nil
-	}
-	position, err := m.completedLegacyPosition(ctx, sourceTable)
-	return position != "", err
-}
-
-func (m *CDCStateManager) completedLegacyPosition(ctx context.Context, sourceTable string) (string, error) {
-	destinationTable := m.destTables[sourceTable]
-	var snapshotPosition, checkpointPosition string
-	inProgressSnapshots := 0
-	seenEvents := make(map[string]struct{}, len(m.entries))
-	for _, entry := range m.entries {
-		if entry.Generation != m.generation {
-			continue
-		}
-		if _, v2 := cdcStateRunID(entry.EventID, m.connectorID); v2 {
-			continue
-		}
-		if _, duplicate := seenEvents[entry.EventID]; duplicate {
-			continue
-		}
-		seenEvents[entry.EventID] = struct{}{}
-		if entry.StateKind == cdcStateKindSnapshot && entry.SourceTable == sourceTable && entry.Status == cdcStateStatusInProgress {
-			inProgressSnapshots++
-			continue
-		}
-		if entry.Status != destination.CDCStateStatusComplete {
-			continue
-		}
-		switch entry.StateKind {
-		case cdcStateKindSnapshot:
-			if entry.SourceTable != sourceTable {
-				continue
-			}
-			if entry.DestinationTable != destinationTable {
-				return "", fmt.Errorf("legacy CDC state ID %q maps source table %q to destination %q, not %q", m.connectorID, sourceTable, entry.DestinationTable, destinationTable)
-			}
-			if !cdcStatePositionValid(entry.Position) {
-				return "", nil
-			}
-			if snapshotPosition == "" || compareCDCPositions(entry.Position, snapshotPosition) > 0 {
-				snapshotPosition = entry.Position
-			}
-		case cdcStateKindCheckpoint:
-			if !cdcStatePositionValid(entry.Position) {
-				return "", nil
-			}
-			if checkpointPosition == "" || compareCDCPositions(entry.Position, checkpointPosition) > 0 {
-				checkpointPosition = entry.Position
-			}
-		}
-	}
-	if inProgressSnapshots != 1 || snapshotPosition == "" {
-		return "", nil
-	}
-	destSchema, err := m.dest.GetTableSchema(ctx, destinationTable)
-	if err != nil {
-		return "", fmt.Errorf("failed to verify CDC destination table %q: %w", destinationTable, err)
-	}
-	if destSchema == nil {
-		return "", nil
-	}
-	if checkpointPosition != "" && compareCDCPositions(checkpointPosition, snapshotPosition) > 0 {
-		return checkpointPosition, nil
-	}
-	return snapshotPosition, nil
 }
 
 // BeginRun appends an in-progress marker for every registered source table at
@@ -1005,7 +750,6 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 		m.knownIncarnations = make(map[string]string)
 		m.knownDestinations = make(map[string]string)
 	}
-	claimConnectorID := m.claimConnectorID()
 	m.boundDestinations = make(map[string]string)
 	m.snapshotEpochs = make(map[string]uint64)
 	m.generation++
@@ -1023,13 +767,6 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	}
 	if err := m.writeStateEvents(ctx, []cdcStateWriteEvent{runEvent}); err != nil {
 		return err
-	}
-	if claimConnectorID != m.connectorID {
-		lineageEvent := m.newStateWriteEvent("", "", cdcStateKindLineage, m.generation, destination.CDCStateStatusComplete,
-			encodeCDCStatePositionWithSchema(zeroCDCPosition, claimConnectorID, "", 0))
-		if err := m.writeStateEvents(ctx, []cdcStateWriteEvent{lineageEvent}); err != nil {
-			return err
-		}
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err

@@ -124,12 +124,6 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 		// If resume strategy says no snapshot needed, verify the slot actually exists
 		if !needsSnapshot {
 			var slotCandidates []string
-			if r.cdcConfig.SlotName == "" {
-				for _, suffix := range priorSlotSuffixes(opts.CDCPreviousSlotSuffix, opts.CDCPreviousSlotSuffixes) {
-					candidate := generateMultiTableSlotName(r.cdcConfig.Publication, suffix)
-					slotCandidates = append(slotCandidates, candidate)
-				}
-			}
 			if r.cdcConfig.SlotName == "" && opts.CDCLegacySlotSuffix != "" {
 				candidate := generateLegacyMultiTableSlotName(r.cdcConfig.Publication, opts.CDCLegacySlotSuffix)
 				if legacySlotNameUnambiguous(candidate, opts.CDCLegacySlotSuffix) {

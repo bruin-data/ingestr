@@ -115,10 +115,6 @@ func TestQuotedDotsRemainPlacementOnlyAcrossStagingPaths(t *testing.T) {
 		})
 	}
 
-	legacy := legacyManagedCDCStateTableName(targetDest, target, "cdc_state", "")
-	if got := tablename.SplitRaw(legacy); len(got) != 2 || got[0] != `"appUser"` || got[1] != "cdc_state" {
-		t.Fatalf("legacy staging state placement changed: %q", legacy)
-	}
 }
 
 func TestQuotedCatalogAndStagingSchemaRemainPlacementComponents(t *testing.T) {
@@ -314,23 +310,6 @@ func TestManagedCDCStateTableName_IsStableAcrossTargetSchemaPolicies(t *testing.
 	}
 }
 
-func TestLegacyManagedCDCStateTableName_PreservesTargetSchema(t *testing.T) {
-	dest := &fakeManagedStagingPolicyProvider{
-		fakeDestination: &fakeDestination{},
-		policy: destination.ReplaceStagingPolicy{
-			DefaultPlacement:    destination.ReplaceStagingTargetSchema,
-			DefaultTargetSchema: "app",
-		},
-	}
-
-	if got := legacyManagedCDCStateTableName(dest, "analytics.orders", "cdc_state", ""); got != "analytics.cdc_state" {
-		t.Fatalf("legacyManagedCDCStateTableName() = %q, want analytics.cdc_state", got)
-	}
-	if got := legacyManagedCDCStateTableName(dest, `"appUser".orders`, "cdc_state", ""); got != `"appUser".cdc_state` {
-		t.Fatalf("legacyManagedCDCStateTableName() = %q, want quoted target schema", got)
-	}
-}
-
 func TestManagedCDCStateTableName_IgnoresTransientStagingDataset(t *testing.T) {
 	dest := &fakeManagedStagingPolicyProvider{
 		fakeDestination: &fakeDestination{},
@@ -363,13 +342,3 @@ func TestManagedCDCStateTableName_UsesConfiguredCatalog(t *testing.T) {
 	}
 }
 
-func TestLegacyManagedCDCStateTableName_PreservesExplicitTargetCatalog(t *testing.T) {
-	dest := &fakeManagedCDCStateCatalogProvider{
-		fakeManagedStagingPolicyProvider: &fakeManagedStagingPolicyProvider{fakeDestination: &fakeDestination{}},
-		catalog:                          "projectA",
-	}
-
-	if got := legacyManagedCDCStateTableName(dest, "projectB.dataset.orders", "cdc_state", ""); got != "projectB._bruin_staging.cdc_state" {
-		t.Fatalf("legacyManagedCDCStateTableName() = %q, want projectB._bruin_staging.cdc_state", got)
-	}
-}

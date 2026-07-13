@@ -1,7 +1,6 @@
 package mysql
 
 import (
-	"context"
 	"errors"
 	"regexp"
 	"strings"
@@ -130,28 +129,6 @@ func TestCDCTargetClaimTableUsesBinaryCollation(t *testing.T) {
 	sql := buildCreateTableSQL("cdc_targets", columns, []string{"destination_table"})
 	if !strings.Contains(sql, "`destination_table` VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin") {
 		t.Fatalf("CDC target DDL lacks binary claim key:\n%s", sql)
-	}
-}
-
-func TestLegacyCDCStateTablesFiltersCandidatesByManagedSchema(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	dest := &MySQLDestination{db: db}
-	mock.ExpectQuery(regexp.QuoteMeta("FROM information_schema.columns")).WithArgs("cdc_state").WillReturnRows(
-		sqlmock.NewRows([]string{"table_schema"}).AddRow("managed"),
-	)
-	tables, err := dest.LegacyCDCStateTables(context.Background(), "cdc_state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tables) != 1 || tables[0] != "managed.cdc_state" {
-		t.Fatalf("tables = %v", tables)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
 	}
 }
 

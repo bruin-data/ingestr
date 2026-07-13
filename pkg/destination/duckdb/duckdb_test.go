@@ -145,20 +145,6 @@ func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 	require.NotEqual(t, first, recreated)
 }
 
-func TestLegacyCDCStateTablesSkipsUnrelatedTables(t *testing.T) {
-	dest, _ := connectTestDuckDB(t, t.Context())
-	if err := dest.Exec(t.Context(), `CREATE TABLE cdc_state (id BIGINT)`); err != nil {
-		t.Fatal(err)
-	}
-	tables, err := dest.LegacyCDCStateTables(t.Context(), "cdc_state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tables) != 0 {
-		t.Fatalf("unrelated legacy candidates = %v", tables)
-	}
-}
-
 func TestParseDuckDBPath(t *testing.T) {
 	tests := []struct {
 		name        string

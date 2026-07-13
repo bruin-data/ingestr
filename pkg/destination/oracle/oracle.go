@@ -746,23 +746,6 @@ func (d *OracleDestination) ManagedStagingPolicy() destination.ReplaceStagingPol
 	return d.ReplaceStagingPolicy()
 }
 
-func (d *OracleDestination) LegacyCDCStateTables(ctx context.Context, stateTable string) ([]string, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT OWNER FROM ALL_TABLES WHERE TABLE_NAME = UPPER(:1) ORDER BY OWNER", stateTable)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var tables []string
-	for rows.Next() {
-		var owner string
-		if err := rows.Scan(&owner); err != nil {
-			return nil, err
-		}
-		tables = append(tables, oracleResolvedIdentifierReference(owner)+"."+stateTable)
-	}
-	return tables, rows.Err()
-}
-
 func (d *OracleDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	maxLSN, err := d.queryMaxCDCLSN(ctx, oracleMaxCDCLSNQuery(table))
 	if err != nil {

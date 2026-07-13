@@ -209,8 +209,6 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		CDCResumeIncarnation:            job.Config.CDCResumeIncarnation,
 		CDCResumeSchemaFingerprint:      job.Config.CDCResumeSchemaFingerprint,
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix, // Destination-aware slot suffix
-		CDCPreviousSlotSuffix:           job.Config.CDCPreviousSlotSuffix,
-		CDCPreviousSlotSuffixes:         job.Config.CDCPreviousSlotSuffixes,
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		CDCSnapshotReplace:              isCDC && supportsCDCSnapshotReplace(job.Destination),
 		FullRefresh:                     job.Config.FullRefresh,
@@ -424,8 +422,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			PageSize:                job.Config.PageSize,
 			Limit:                   job.Config.SQLLimit,
 			CDCSlotSuffix:           job.Config.CDCSlotSuffix,
-			CDCPreviousSlotSuffix:   job.Config.CDCPreviousSlotSuffix,
-			CDCPreviousSlotSuffixes: job.Config.CDCPreviousSlotSuffixes,
 			CDCLegacySlotSuffix:     job.Config.CDCLegacySlotSuffix,
 			CDCSnapshotReplace:      anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
 			FullRefresh:             job.Config.FullRefresh,

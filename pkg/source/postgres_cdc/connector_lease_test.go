@@ -2,7 +2,6 @@ package postgres_cdc
 
 import (
 	"context"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -31,19 +30,6 @@ func TestAcquireConnectorLeaseRejectsConcurrentPublicationPreparation(t *testing
 		}
 	case <-time.After(time.Second):
 		t.Fatal("connector lease acquisition blocked during publication preparation")
-	}
-}
-
-func TestMigrationCandidatesAreDeduplicatedInPriorityOrder(t *testing.T) {
-	want := []string{"current-source-old-dest", "old-source-new-dest", "old-source-old-dest"}
-	got := priorConnectorIDs("current-source-old-dest", []string{
-		"current-source-old-dest", "old-source-new-dest", "old-source-old-dest", "old-source-new-dest", "",
-	})
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("priorConnectorIDs() = %#v, want %#v", got, want)
-	}
-	if got := priorSlotSuffixes("only-legacy", nil); !reflect.DeepEqual(got, []string{"only-legacy"}) {
-		t.Fatalf("singular compatibility suffix was lost: %#v", got)
 	}
 }
 
@@ -94,25 +80,18 @@ func TestPublicationLeaseKeyIsDatabaseScoped(t *testing.T) {
 }
 
 func TestResolvedConnectorIdentityUsesEffectiveDatabaseAndCDCConfig(t *testing.T) {
-	base := resolvedConnectorIdentity("system-1", "DB.EXAMPLE", 5432, "orders", CDCConfig{Publication: "orders_pub"})
-	alias := resolvedConnectorIdentity("system-1", "db.example", 5432, "orders", CDCConfig{Publication: "orders_pub"})
-	if base != alias {
-		t.Fatalf("host case changed resolved identity: %#v != %#v", base, alias)
-	}
-	otherDatabase := resolvedConnectorIdentity("system-1", "db.example", 5432, "customers", CDCConfig{Publication: "orders_pub"})
+	base := resolvedConnectorIdentity("system-1", "orders", CDCConfig{Publication: "orders_pub"})
+	otherDatabase := resolvedConnectorIdentity("system-1", "customers", CDCConfig{Publication: "orders_pub"})
 	if base.Database == otherDatabase.Database || base.Connector == otherDatabase.Connector {
 		t.Fatal("different effective databases shared a resolved identity")
 	}
-	otherSlot := resolvedConnectorIdentity("system-1", "db.example", 5432, "orders", CDCConfig{Publication: "orders_pub", SlotName: "other"})
+	otherSlot := resolvedConnectorIdentity("system-1", "orders", CDCConfig{Publication: "orders_pub", SlotName: "other"})
 	if base.Database != otherSlot.Database || base.Connector == otherSlot.Connector {
 		t.Fatal("slot must scope connector identity without changing database identity")
 	}
-	otherAlias := resolvedConnectorIdentity("system-1", "localhost", 15432, "orders", CDCConfig{Publication: "orders_pub"})
-	if base.Database != otherAlias.Database || base.Connector != otherAlias.Connector {
-		t.Fatal("host aliases for the same server changed primary connector identity")
-	}
-	if base.PreviousDatabase == otherAlias.PreviousDatabase || base.PreviousConnector == otherAlias.PreviousConnector {
-		t.Fatal("previous host-derived identity must remain available for migration")
+	otherSystem := resolvedConnectorIdentity("system-2", "orders", CDCConfig{Publication: "orders_pub"})
+	if base.Database == otherSystem.Database || base.Connector == otherSystem.Connector {
+		t.Fatal("different server system IDs shared a resolved identity")
 	}
 	var _ source.ConnectorIdentityProvider = NewPostgresCDCSource()
 }

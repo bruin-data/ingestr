@@ -78,10 +78,6 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			var slotCandidates []string
 			if slotName == "" {
 				slotName = generateSlotName(r.tableName, r.cdcConfig.Publication, opts.CDCSlotSuffix)
-				for _, suffix := range priorSlotSuffixes(opts.CDCPreviousSlotSuffix, opts.CDCPreviousSlotSuffixes) {
-					candidate := generateSlotName(r.tableName, r.cdcConfig.Publication, suffix)
-					slotCandidates = append(slotCandidates, candidate)
-				}
 				if opts.CDCLegacySlotSuffix != "" {
 					candidate := generateLegacySlotName(r.tableName, r.cdcConfig.Publication, opts.CDCLegacySlotSuffix)
 					if legacySlotNameUnambiguous(candidate, opts.CDCLegacySlotSuffix) {

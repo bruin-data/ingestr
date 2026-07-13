@@ -88,8 +88,6 @@ type IngestConfig struct {
 	CDCResumeIncarnation       string
 	CDCResumeSchemaFingerprint string
 	CDCSlotSuffix              string // For CDC sources: suffix appended to auto-generated slot names (derived from connector identity)
-	CDCPreviousSlotSuffix      string // For CDC upgrades: immediately previous host-derived 20-hex suffix
-	CDCPreviousSlotSuffixes    []string
 	CDCLegacySlotSuffix        string // For CDC upgrades: legacy 6-hex suffix derived from the raw destination URI
 
 	Stream        bool          // Continuous ingestion: flush buffered records on an interval or record-count trigger

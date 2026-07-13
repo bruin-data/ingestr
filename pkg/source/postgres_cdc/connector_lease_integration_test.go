@@ -100,7 +100,7 @@ func TestConnectorLeaseTransfersOnlyAfterReplicationConnectionCloses(t *testing.
 	require.NoError(t, err)
 }
 
-func TestConnectorLeaseFinalizesOnlyUnusedMigrationSlots(t *testing.T) {
+func TestConnectorLeaseFinalizesOnlyUnusedLegacySlots(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -115,46 +115,41 @@ func TestConnectorLeaseFinalizesOnlyUnusedMigrationSlots(t *testing.T) {
 	_, err = pool.Exec(ctx, `CREATE TABLE public.migration_slots (id bigint PRIMARY KEY)`)
 	require.NoError(t, err)
 
-	previousSuffixes := []string{"prior_current_source", "prior_host_canonical", "prior_host_raw"}
-	previousSlots := make([]string, 0, len(previousSuffixes))
-	for _, suffix := range previousSuffixes {
-		slotName := generateSlotName("public.migration_slots", defaultPublicationName, suffix)
+	legacySlot := generateLegacySlotName("public.migration_slots", defaultPublicationName, "abc123")
+	unrelatedSlot := "ingestr_unrelated_connector_slot"
+	for _, slotName := range []string{legacySlot, unrelatedSlot} {
 		_, err = pool.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", slotName)
 		require.NoError(t, err)
-		previousSlots = append(previousSlots, slotName)
 	}
-	unrelatedSlot := "ingestr_unrelated_connector_slot"
-	_, err = pool.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", unrelatedSlot)
-	require.NoError(t, err)
 
-	src := NewPostgresCDCSource()
-	require.NoError(t, src.Connect(ctx, strings.Replace(connString, "postgres://", "postgres+cdc://", 1)))
-	defer func() { _ = src.Close(context.Background()) }()
-	_, err = src.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{
-		ConnectorID: "current", PreviousConnectorIDs: []string{"current-source-old-dest", "old-source-new-dest", "old-source-old-dest"},
-		SlotSuffix: "current_slot", PreviousSlotSuffixes: previousSuffixes, SourceTable: "public.migration_slots",
-	})
-	require.NoError(t, err)
-	competitor := NewPostgresCDCSource()
-	require.NoError(t, competitor.Connect(ctx, strings.Replace(connString, "postgres://", "postgres+cdc://", 1)))
-	defer func() { _ = competitor.Close(context.Background()) }()
-	_, err = competitor.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{
-		ConnectorID: "old-source-old-dest", SlotSuffix: "competitor", SourceTable: "public.migration_slots",
-	})
-	require.ErrorContains(t, err, "already running")
-	src.markLegacySlotInUse(previousSlots[1])
-	require.NoError(t, src.FinalizeLegacySlot(ctx))
-
-	for i, slotName := range previousSlots {
+	slotExists := func(slotName string) bool {
 		var exists bool
 		require.NoError(t, pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, slotName).Scan(&exists))
-		require.Equal(t, i == 1, exists, slotName)
+		return exists
 	}
-	var unrelatedExists bool
-	require.NoError(t, pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, unrelatedSlot).Scan(&unrelatedExists))
-	require.True(t, unrelatedExists)
-	_, err = pool.Exec(ctx, "SELECT pg_drop_replication_slot($1)", previousSlots[1])
+
+	inUse := NewPostgresCDCSource()
+	require.NoError(t, inUse.Connect(ctx, strings.Replace(connString, "postgres://", "postgres+cdc://", 1)))
+	lease, err := inUse.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{
+		ConnectorID: "current", SlotSuffix: "current_slot", LegacySlotSuffix: "abc123", SourceTable: "public.migration_slots",
+	})
 	require.NoError(t, err)
+	inUse.markLegacySlotInUse(legacySlot)
+	require.NoError(t, inUse.FinalizeLegacySlot(ctx))
+	require.True(t, slotExists(legacySlot), "in-use legacy slot was dropped")
+	require.NoError(t, lease.Release())
+	require.NoError(t, inUse.Close(context.Background()))
+
+	abandoned := NewPostgresCDCSource()
+	require.NoError(t, abandoned.Connect(ctx, strings.Replace(connString, "postgres://", "postgres+cdc://", 1)))
+	defer func() { _ = abandoned.Close(context.Background()) }()
+	_, err = abandoned.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{
+		ConnectorID: "current", SlotSuffix: "current_slot", LegacySlotSuffix: "abc123", SourceTable: "public.migration_slots",
+	})
+	require.NoError(t, err)
+	require.NoError(t, abandoned.FinalizeLegacySlot(ctx))
+	require.False(t, slotExists(legacySlot), "abandoned legacy slot survived finalization")
+	require.True(t, slotExists(unrelatedSlot), "unrelated slot was dropped")
 	_, err = pool.Exec(ctx, "SELECT pg_drop_replication_slot($1)", unrelatedSlot)
 	require.NoError(t, err)
 }
@@ -436,7 +431,6 @@ func TestConnectorLeaseFencesHostnameAliases(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, firstIdentity.Database, secondIdentity.Database)
 	require.Equal(t, firstIdentity.Connector, secondIdentity.Connector)
-	require.NotEqual(t, firstIdentity.PreviousDatabase, secondIdentity.PreviousDatabase)
 
 	firstLease, err := first.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{ConnectorID: firstIdentity.Connector, SlotSuffix: "alias-fence"})
 	require.NoError(t, err)

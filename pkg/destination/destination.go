@@ -262,22 +262,11 @@ type CDCTargetIdentityProvider interface {
 	CanonicalCDCTarget(ctx context.Context, table string) (string, error)
 }
 
-// CDCTargetIdentityCandidatesProvider also returns older deterministic
-// identities that may have been used before destination metadata converged.
-type CDCTargetIdentityCandidatesProvider interface {
-	CanonicalCDCTargetCandidates(ctx context.Context, table string) (current string, previous []string, err error)
-}
-
 // CDCTargetIncarnationProvider returns an opaque identity for the current
 // physical table. The identity must change when the table is dropped,
 // recreated, or otherwise replaced outside the CDC run.
 type CDCTargetIncarnationProvider interface {
 	CDCTargetIncarnation(ctx context.Context, table string) (incarnation string, exists bool, err error)
-}
-
-// LegacyCDCStateLocator finds existing v1 state tables without creating them.
-type LegacyCDCStateLocator interface {
-	LegacyCDCStateTables(ctx context.Context, stateTable string) ([]string, error)
 }
 
 // ManagedCDCStateValidator checks destination-specific durability requirements

@@ -6,8 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,11 +56,6 @@ func (s *PostgresCDCSource) AcquireConnectorLease(ctx context.Context, opts sour
 		return nil, fmt.Errorf("failed to open PostgreSQL session for connector lease: %w", err)
 	}
 	keys := []int64{connectorLeaseKey("connector:" + opts.ConnectorID)}
-	for _, connectorID := range priorConnectorIDs(opts.PreviousConnectorID, opts.PreviousConnectorIDs) {
-		if connectorID != opts.ConnectorID {
-			keys = append(keys, connectorLeaseKey("connector:"+connectorID))
-		}
-	}
 	slotName := s.cdcConfig.SlotName
 	type slotCandidate struct {
 		name        string
@@ -72,23 +65,14 @@ func (s *PostgresCDCSource) AcquireConnectorLease(ctx context.Context, opts sour
 	}
 	var legacySlots []slotCandidate
 	if slotName == "" {
-		previousSuffixes := priorSlotSuffixes(opts.PreviousSlotSuffix, opts.PreviousSlotSuffixes)
 		if opts.SourceTable == "" {
 			slotName = generateMultiTableSlotName(s.cdcConfig.Publication, opts.SlotSuffix)
-			for _, suffix := range previousSuffixes {
-				name := generateMultiTableSlotName(s.cdcConfig.Publication, suffix)
-				legacySlots = append(legacySlots, slotCandidate{name: name, suffix: suffix, unambiguous: true})
-			}
 			if opts.LegacySlotSuffix != "" {
 				name := generateLegacyMultiTableSlotName(s.cdcConfig.Publication, opts.LegacySlotSuffix)
 				legacySlots = append(legacySlots, slotCandidate{name: name, suffix: opts.LegacySlotSuffix, unambiguous: legacySlotNameUnambiguous(name, opts.LegacySlotSuffix)})
 			}
 		} else {
 			slotName = generateSlotName(opts.SourceTable, s.cdcConfig.Publication, opts.SlotSuffix)
-			for _, suffix := range previousSuffixes {
-				name := generateSlotName(opts.SourceTable, s.cdcConfig.Publication, suffix)
-				legacySlots = append(legacySlots, slotCandidate{name: name, suffix: suffix, unambiguous: true})
-			}
 			if opts.LegacySlotSuffix != "" {
 				name := generateLegacySlotName(opts.SourceTable, s.cdcConfig.Publication, opts.LegacySlotSuffix)
 				legacySlots = append(legacySlots, slotCandidate{name: name, suffix: opts.LegacySlotSuffix, unambiguous: legacySlotNameUnambiguous(name, opts.LegacySlotSuffix)})
@@ -294,19 +278,12 @@ func (l *postgresCDCLease) finishRelease(err error) error {
 	return err
 }
 
-func resolvedConnectorIdentity(systemID, host string, port uint16, database string, cfg CDCConfig) source.ConnectorIdentity {
-	previousDatabaseIdentity := strings.Join([]string{
-		"postgres", net.JoinHostPort(strings.ToLower(host), strconv.Itoa(int(port))), database,
-	}, "\x00")
+func resolvedConnectorIdentity(systemID, database string, cfg CDCConfig) source.ConnectorIdentity {
 	databaseIdentity := strings.Join([]string{"postgres", systemID, database}, "\x00")
 	return source.ConnectorIdentity{
 		Database: databaseIdentity,
 		Connector: strings.Join([]string{
 			databaseIdentity, cfg.Publication, cfg.SlotName,
-		}, "\x00"),
-		PreviousDatabase: previousDatabaseIdentity,
-		PreviousConnector: strings.Join([]string{
-			previousDatabaseIdentity, cfg.Publication, cfg.SlotName,
 		}, "\x00"),
 	}
 }
@@ -314,29 +291,6 @@ func resolvedConnectorIdentity(systemID, host string, port uint16, database stri
 func connectorLeaseKey(connectorID string) int64 {
 	sum := sha256.Sum256([]byte("ingestr:postgres_cdc:" + connectorID))
 	return int64(binary.BigEndian.Uint64(sum[:8]))
-}
-
-func priorConnectorIDs(singular string, plural []string) []string {
-	return dedupeMigrationCandidates(plural, singular)
-}
-
-func priorSlotSuffixes(singular string, plural []string) []string {
-	return dedupeMigrationCandidates(plural, singular)
-}
-
-func dedupeMigrationCandidates(plural []string, singular string) []string {
-	candidates := append([]string(nil), plural...)
-	candidates = append(candidates, singular)
-	seen := map[string]bool{"": true}
-	result := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		if seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
-		result = append(result, candidate)
-	}
-	return result
 }
 
 func publicationLeaseKey(database, publication string) int64 {

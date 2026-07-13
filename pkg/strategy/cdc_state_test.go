@@ -126,81 +126,6 @@ func completedV2StateManager(t *testing.T, dest *cdcStateDestination, connectorI
 	return manager
 }
 
-func TestCDCStateAdoptsValidatedV2StateAndCarriesClaimLineage(t *testing.T) {
-	dest := newCDCStateDestination()
-	previous := completedV2StateManager(t, dest, "previous-connector")
-	current, err := NewCDCStateManager(dest, "current-connector", "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, current.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-
-	positions, err := current.AdoptValidatedState(t.Context(), previous, []string{"public.orders"})
-	require.NoError(t, err)
-	require.Equal(t, "00000000/00000020", positions["public.orders"])
-	position, err := current.ResumePosition(t.Context(), "public.orders")
-	require.NoError(t, err)
-	require.Equal(t, "00000000/00000020", position)
-	require.NoError(t, current.ClaimTarget(t.Context(), "public.orders", "raw.orders"))
-
-	require.NoError(t, current.BeginRun(t.Context(), false))
-	restarted, err := NewCDCStateManager(dest, "current-connector", "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, restarted.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-	_, err = restarted.ResumePosition(t.Context(), "public.orders")
-	require.NoError(t, err)
-	require.NoError(t, restarted.ClaimTarget(t.Context(), "public.orders", "raw.orders"))
-
-	oldRestart, err := NewCDCStateManager(dest, "previous-connector", "raw.orders", "")
-	require.NoError(t, err)
-	oldRestart.RegisterTableForReadState("public.orders", "raw.orders", "100", "schema-a")
-	_, err = oldRestart.ResumePosition(t.Context(), "public.orders")
-	require.ErrorContains(t, err, "was adopted by connector")
-}
-
-func TestCDCStateAdoptionReservationRejectsCompetingSuccessor(t *testing.T) {
-	dest := newCDCStateDestination()
-	previous := completedV2StateManager(t, dest, "previous-connector")
-	current, err := NewCDCStateManager(dest, "current-a", "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, current.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-	_, err = current.AdoptValidatedState(t.Context(), previous, []string{"public.orders"})
-	require.NoError(t, err)
-
-	previousRestart, err := NewCDCStateManager(dest, "previous-connector", "raw.orders", "")
-	require.NoError(t, err)
-	previousRestart.RegisterTableForReadState("public.orders", "raw.orders", "100", "schema-a")
-	competitor, err := NewCDCStateManager(dest, "current-b", "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, competitor.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-	_, err = competitor.AdoptValidatedState(t.Context(), previousRestart, []string{"public.orders"})
-	require.ErrorContains(t, err, "was adopted by connector")
-}
-
-func TestCDCStateAdoptionRetriesAfterCrashBetweenReservationAndImport(t *testing.T) {
-	dest := newCDCStateDestination()
-	previous := completedV2StateManager(t, dest, "previous-connector")
-	dest.stateMu.Lock()
-	dest.failWrite = dest.cdcWrites + 2
-	dest.stateMu.Unlock()
-	failed, err := NewCDCStateManager(dest, "current-connector", "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, failed.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-	_, err = failed.AdoptValidatedState(t.Context(), previous, []string{"public.orders"})
-	require.ErrorContains(t, err, "failed to import adopted CDC state")
-
-	dest.stateMu.Lock()
-	dest.failWrite = 0
-	dest.stateMu.Unlock()
-	previousRetry, err := NewCDCStateManager(dest, "previous-connector", "raw.orders", "")
-	require.NoError(t, err)
-	previousRetry.RegisterTableForReadState("public.orders", "raw.orders", "100", "schema-a")
-	retry, err := NewCDCStateManager(dest, "current-connector", "raw.orders", "")
-	require.NoError(t, err)
-	require.NoError(t, retry.RegisterTableState(t.Context(), "public.orders", "raw.orders", "100", "schema-a"))
-	positions, err := retry.AdoptValidatedState(t.Context(), previousRetry, []string{"public.orders"})
-	require.NoError(t, err)
-	require.Equal(t, "00000000/00000020", positions["public.orders"])
-}
-
 func (d *cdcStateDestination) ClaimCDCTarget(_ context.Context, _ string, claim destination.CDCTargetClaim) error {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
@@ -248,9 +173,9 @@ func (d *cdcStateDestination) TruncateCDCTableIfIncarnation(_ context.Context, t
 	return nil
 }
 
-func TestLegacyStateReadRegistrationDoesNotPrepareTable(t *testing.T) {
+func TestStateReadRegistrationDoesNotPrepareTable(t *testing.T) {
 	dest := newCDCStateDestination()
-	manager, err := NewLegacyCDCStateManager(dest, "legacy-connector", "raw.orders", "")
+	manager, err := NewCDCStateManager(dest, "read-only-connector", "raw.orders", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,64 +189,8 @@ func TestLegacyStateReadRegistrationDoesNotPrepareTable(t *testing.T) {
 		t.Fatalf("ResumePosition() = %q, want empty", position)
 	}
 	if got := len(dest.prepareCalls); got != 0 {
-		t.Fatalf("legacy read probe prepared %d tables, want zero", got)
+		t.Fatalf("read-only registration prepared %d tables, want zero", got)
 	}
-}
-
-func TestLegacyStateWithCurrentSourceIncarnationForcesReplacement(t *testing.T) {
-	dest := newCDCStateDestination()
-	manager, err := NewLegacyCDCStateManager(dest, "legacy-connector", "raw.orders", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dest.states[manager.stateTable] = []storedCDCState{
-		{connectorID: manager.connectorID, entry: destination.CDCStateEntry{
-			EventID: "legacy-progress", SourceTable: "public.orders", DestinationTable: "raw.orders",
-			StateKind: cdcStateKindSnapshot, Generation: 1, Status: cdcStateStatusInProgress, Position: zeroCDCPosition,
-		}},
-		{connectorID: manager.connectorID, entry: destination.CDCStateEntry{
-			EventID: "legacy-complete", SourceTable: "public.orders", DestinationTable: "raw.orders",
-			StateKind: cdcStateKindSnapshot, Generation: 1, Status: destination.CDCStateStatusComplete, Position: "00000000/00000010",
-		}},
-	}
-	manager.RegisterTableForReadIncarnation("public.orders", "raw.orders", "source-100")
-	if position, err := manager.ResumePosition(t.Context(), "public.orders"); err != nil || position != "" {
-		t.Fatalf("legacy state resumed without an incarnation: %q, %v", position, err)
-	}
-	replace, err := manager.LegacySnapshotRequiresReplacement(t.Context(), "public.orders")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !replace {
-		t.Fatal("completed legacy state did not authorize a replacement snapshot")
-	}
-}
-
-func TestLegacyNamespaceMigrationRequiresMatchingDestinationMapping(t *testing.T) {
-	dest := newCDCStateDestination()
-	matching, err := NewLegacyCDCStateManager(dest, "pre-namespace-connector", "landing_a.orders", "")
-	require.NoError(t, err)
-	dest.states[matching.stateTable] = []storedCDCState{
-		{connectorID: matching.connectorID, entry: destination.CDCStateEntry{
-			EventID: "legacy-progress", SourceTable: "public.orders", DestinationTable: "landing_a.public_orders",
-			StateKind: cdcStateKindSnapshot, Generation: 1, Status: cdcStateStatusInProgress, Position: zeroCDCPosition,
-		}},
-		{connectorID: matching.connectorID, entry: destination.CDCStateEntry{
-			EventID: "legacy-complete", SourceTable: "public.orders", DestinationTable: "landing_a.public_orders",
-			StateKind: cdcStateKindSnapshot, Generation: 1, Status: destination.CDCStateStatusComplete, Position: "00000000/00000010",
-		}},
-	}
-
-	matching.RegisterTableForReadState("public.orders", "landing_a.public_orders", "source-100", "schema-a")
-	replace, err := matching.LegacySnapshotRequiresReplacement(t.Context(), "public.orders")
-	require.NoError(t, err)
-	require.True(t, replace, "matching pre-namespace state should authorize a migration snapshot")
-
-	mismatched, err := NewLegacyCDCStateManager(dest, "pre-namespace-connector", "landing_b.orders", "")
-	require.NoError(t, err)
-	mismatched.RegisterTableForReadState("public.orders", "landing_b.public_orders", "source-100", "schema-a")
-	_, err = mismatched.LegacySnapshotRequiresReplacement(t.Context(), "public.orders")
-	require.ErrorContains(t, err, `maps source table "public.orders" to destination "landing_a.public_orders", not "landing_b.public_orders"`)
 }
 
 func TestCDCStateRequiresMatchingSourceTableIncarnation(t *testing.T) {
@@ -878,148 +747,7 @@ func TestCDCStateMissingDestinationDoesNotResume(t *testing.T) {
 	}
 }
 
-func TestCDCStateCompletedLegacyGenerationResumesAndMigrates(t *testing.T) {
-	ctx := context.Background()
-	dest := newCDCStateDestination()
-	const connectorID = "0123456789abcdef"
-	dest.states["_bruin_staging.cdc_state"] = []storedCDCState{
-		{connectorID: connectorID, entry: destination.CDCStateEntry{
-			EventID:          connectorID + "-legacy-in-progress",
-			SourceTable:      "public.orders",
-			DestinationTable: "raw.orders",
-			StateKind:        cdcStateKindSnapshot,
-			Generation:       7,
-			Status:           cdcStateStatusInProgress,
-			Position:         zeroCDCPosition,
-		}},
-		{connectorID: connectorID, entry: destination.CDCStateEntry{
-			EventID:          connectorID + "-legacy-in-progress",
-			SourceTable:      "public.orders",
-			DestinationTable: "raw.orders",
-			StateKind:        cdcStateKindSnapshot,
-			Generation:       7,
-			Status:           cdcStateStatusInProgress,
-			Position:         zeroCDCPosition,
-		}},
-		{connectorID: connectorID, entry: destination.CDCStateEntry{
-			EventID:          connectorID + "-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			SourceTable:      "public.orders",
-			DestinationTable: "raw.orders",
-			StateKind:        cdcStateKindSnapshot,
-			Generation:       7,
-			Status:           destination.CDCStateStatusComplete,
-			Position:         "00000000/00000070",
-		}},
-		{connectorID: connectorID, entry: destination.CDCStateEntry{
-			EventID:    connectorID + "-legacy-checkpoint",
-			StateKind:  cdcStateKindCheckpoint,
-			Generation: 7,
-			Status:     destination.CDCStateStatusComplete,
-			Position:   "00000000/00000075",
-		}},
-	}
-
-	manager, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.RegisterTable(ctx, "public.orders", "raw.orders"); err != nil {
-		t.Fatal(err)
-	}
-	position, err := manager.ResumePosition(ctx, "public.orders")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if position != "00000000/00000075" {
-		t.Fatalf("legacy resume position = %s, want 00000000/00000075", position)
-	}
-	canBootstrap, err := manager.CanBootstrapLegacy(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if canBootstrap {
-		t.Fatal("existing legacy entries allowed target-MAX bootstrap")
-	}
-	if err := manager.BeginRun(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	if manager.generation != 8 {
-		t.Fatalf("replacement generation = %d, want 8", manager.generation)
-	}
-	if err := manager.Persist(ctx, source.CDCStateCommitToken{Position: "00000000/00000080", SnapshotPositions: map[string]string{
-		"public.orders": "00000000/00000080",
-	}}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCDCStateMigratesExplicitProjectV1StateIntoConfiguredProject(t *testing.T) {
-	ctx := context.Background()
-	dest := newCDCStateDestination()
-	dest.catalog = "configured-project"
-	const connectorID = "0123456789abcdef"
-	const targetTable = "legacy-project.raw.orders"
-	const sourceTable = "public.orders"
-	const position = "00000000/00000075"
-
-	legacy, err := NewLegacyCDCStateManager(dest, connectorID, targetTable, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dest.states[legacy.stateTable] = []storedCDCState{
-		{connectorID: connectorID, entry: destination.CDCStateEntry{
-			EventID: connectorID + "-legacy-in-progress", SourceTable: sourceTable, DestinationTable: targetTable,
-			StateKind: cdcStateKindSnapshot, Generation: 7, Status: cdcStateStatusInProgress, Position: zeroCDCPosition,
-		}},
-		{connectorID: connectorID, entry: destination.CDCStateEntry{
-			EventID: connectorID + "-legacy-complete", SourceTable: sourceTable, DestinationTable: targetTable,
-			StateKind: cdcStateKindSnapshot, Generation: 7, Status: destination.CDCStateStatusComplete, Position: position,
-		}},
-	}
-	if legacy.stateTable != "legacy-project._bruin_staging.cdc_state" {
-		t.Fatalf("legacy state table = %q", legacy.stateTable)
-	}
-	if err := legacy.RegisterTable(ctx, sourceTable, targetTable); err != nil {
-		t.Fatal(err)
-	}
-	got, err := legacy.ResumePosition(ctx, sourceTable)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != position {
-		t.Fatalf("legacy resume position = %q, want %q", got, position)
-	}
-
-	current, err := NewCDCStateManager(dest, connectorID, targetTable, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current.stateTable != "configured-project._bruin_staging.cdc_state" {
-		t.Fatalf("current state table = %q", current.stateTable)
-	}
-	if err := current.RegisterTable(ctx, sourceTable, targetTable); err != nil {
-		t.Fatal(err)
-	}
-	if err := current.BeginRun(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := current.Persist(ctx, source.CDCStateCommitToken{SnapshotPositions: map[string]string{sourceTable: got}}); err != nil {
-		t.Fatal(err)
-	}
-
-	restarted, err := NewCDCStateManager(dest, connectorID, "another-project.other.table", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.RegisterTable(ctx, sourceTable, targetTable); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := restarted.ResumePosition(ctx, sourceTable); err != nil || got != position {
-		t.Fatalf("migrated resume position = %q, err = %v", got, err)
-	}
-}
-
-func TestCDCStateIncompleteLegacyGenerationBlocksResumeAndRawBootstrap(t *testing.T) {
+func TestCDCStateIncompleteForeignGenerationBlocksResumeAndRawBootstrap(t *testing.T) {
 	ctx := context.Background()
 	dest := newCDCStateDestination()
 	const connectorID = "0123456789abcdef"
@@ -1050,59 +778,12 @@ func TestCDCStateIncompleteLegacyGenerationBlocksResumeAndRawBootstrap(t *testin
 	if position != "" {
 		t.Fatalf("incomplete legacy generation resumed at %s", position)
 	}
-	canBootstrap, err := manager.CanBootstrapLegacy(ctx)
+	stateEmpty, err := manager.StateEmpty(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canBootstrap {
-		t.Fatal("incomplete legacy generation allowed target-MAX bootstrap")
-	}
-}
-
-func TestCDCStateConflictingLegacyGenerationBlocksResume(t *testing.T) {
-	ctx := context.Background()
-	dest := newCDCStateDestination()
-	const connectorID = "0123456789abcdef"
-	for _, eventID := range []string{"legacy-run-a", "legacy-run-b"} {
-		dest.states["_bruin_staging.cdc_state"] = append(dest.states["_bruin_staging.cdc_state"], storedCDCState{
-			connectorID: connectorID,
-			entry: destination.CDCStateEntry{
-				EventID:          connectorID + "-" + eventID,
-				SourceTable:      "public.orders",
-				DestinationTable: "raw.orders",
-				StateKind:        cdcStateKindSnapshot,
-				Generation:       7,
-				Status:           cdcStateStatusInProgress,
-				Position:         zeroCDCPosition,
-			},
-		})
-	}
-	dest.states["_bruin_staging.cdc_state"] = append(dest.states["_bruin_staging.cdc_state"], storedCDCState{
-		connectorID: connectorID,
-		entry: destination.CDCStateEntry{
-			EventID:          connectorID + "-legacy-complete",
-			SourceTable:      "public.orders",
-			DestinationTable: "raw.orders",
-			StateKind:        cdcStateKindSnapshot,
-			Generation:       7,
-			Status:           destination.CDCStateStatusComplete,
-			Position:         "00000000/00000070",
-		},
-	})
-
-	manager, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.RegisterTable(ctx, "public.orders", "raw.orders"); err != nil {
-		t.Fatal(err)
-	}
-	position, err := manager.ResumePosition(ctx, "public.orders")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if position != "" {
-		t.Fatalf("conflicting legacy generation resumed at %s", position)
+	if stateEmpty {
+		t.Fatal("incomplete generation classified the connector state as empty")
 	}
 }
 
@@ -1350,7 +1031,7 @@ func TestCDCStateLocationSurvivesMultiSchemaAddRemoveEmptyAndReappear(t *testing
 	}
 }
 
-func TestCDCStateIncompleteV2RunBlocksLegacyBootstrap(t *testing.T) {
+func TestCDCStateIncompleteRunMarksStateNonEmpty(t *testing.T) {
 	ctx := context.Background()
 	dest := newCDCStateDestination()
 	manager, err := NewCDCStateManager(dest, "0123456789abcdef", "raw.orders", "")
@@ -1360,12 +1041,12 @@ func TestCDCStateIncompleteV2RunBlocksLegacyBootstrap(t *testing.T) {
 	if err := manager.RegisterTable(ctx, "public.orders", "raw.orders"); err != nil {
 		t.Fatal(err)
 	}
-	canBootstrap, err := manager.CanBootstrapLegacy(ctx)
+	stateEmpty, err := manager.StateEmpty(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !canBootstrap {
-		t.Fatal("fresh connector cannot bootstrap legacy state")
+	if !stateEmpty {
+		t.Fatal("fresh connector state must be empty")
 	}
 	if err := manager.BeginRun(ctx, false); err != nil {
 		t.Fatal(err)
@@ -1378,12 +1059,12 @@ func TestCDCStateIncompleteV2RunBlocksLegacyBootstrap(t *testing.T) {
 	if err := restarted.RegisterTable(ctx, "public.orders", "raw.orders"); err != nil {
 		t.Fatal(err)
 	}
-	canBootstrap, err = restarted.CanBootstrapLegacy(ctx)
+	stateEmpty, err = restarted.StateEmpty(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canBootstrap {
-		t.Fatal("incomplete v2 run allowed legacy target bootstrap")
+	if stateEmpty {
+		t.Fatal("incomplete run classified the connector state as empty")
 	}
 }
 

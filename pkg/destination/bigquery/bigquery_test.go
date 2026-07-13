@@ -291,41 +291,6 @@ func TestCanonicalCDCTargetAllowsMissingFirstLoadDataset(t *testing.T) {
 	require.EqualValues(t, 1, metadataCalls.Load(), "missing dataset case behavior should be cached for the first run")
 }
 
-func TestCanonicalCDCTargetCandidatesConvergeAfterMissingDatasetBecomesCaseInsensitive(t *testing.T) {
-	var exists atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if !exists.Load() {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"not found","status":"NOT_FOUND"}}`))
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"datasetReference":  map[string]string{"projectId": "test-project", "datasetId": "New_DataSet"},
-			"isCaseInsensitive": true,
-		})
-	}))
-	defer server.Close()
-
-	newDest := func() *BigQueryDestination {
-		client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.Close() })
-		return &BigQueryDestination{client: client}
-	}
-
-	first, previous, err := newDest().CanonicalCDCTargetCandidates(t.Context(), "test-project.New_DataSet.Orders")
-	require.NoError(t, err)
-	require.Empty(t, previous)
-	require.Equal(t, destination.CDCTargetKey("test-project", "New_DataSet", "Orders"), first)
-
-	exists.Store(true)
-	current, previous, err := newDest().CanonicalCDCTargetCandidates(t.Context(), "test-project.New_DataSet.Orders")
-	require.NoError(t, err)
-	require.Equal(t, destination.CDCTargetKey("test-project", "new_dataset", "orders"), current)
-	require.Equal(t, []string{first}, previous)
-}
-
 func TestCanonicalCDCTargetDoesNotMaskDatasetMetadataErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

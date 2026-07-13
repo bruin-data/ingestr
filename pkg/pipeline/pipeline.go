@@ -146,36 +146,21 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	destinationTarget := ""
 	if isPostgresCDCSource(p.config.SourceURI) {
-		p.previousCDCConnectorID = ""
-		p.previousCDCConnectorIDs = nil
 		destinationTarget = managedCDCDestinationTarget(p.config, dest)
-		destinationIdentity, previousDestinationIdentities, err := managedCDCDestinationIdentities(ctx, dest, destinationTarget)
+		destinationIdentity, err := managedCDCDestinationIdentity(ctx, dest, destinationTarget)
 		if err != nil {
 			return fmt.Errorf("failed to resolve PostgreSQL CDC destination identity: %w", err)
 		}
-		p.cdcConnectorID, p.previousCDCConnectorIDs = resolvedCDCStateConnectorIDCandidatesForDestinations(p.config, postgresCDCIdentity, destinationIdentity, previousDestinationIdentities)
-		if len(p.previousCDCConnectorIDs) > 0 {
-			p.previousCDCConnectorID = p.previousCDCConnectorIDs[0]
-		}
+		p.cdcConnectorID = resolvedCDCStateConnectorID(p.config, postgresCDCIdentity, destinationIdentity)
 	} else if isCDCSource(p.config.SourceURI) {
 		p.cdcConnectorID = genericCDCConnectorID(p.config)
 	}
 
 	var cdcStateManager *strategy.CDCStateManager
-	legacyReplacementAuthorized := false
 
 	// For CDC sources, compute a destination-aware slot suffix
 	if isCDCSource(p.config.SourceURI) {
 		p.config.CDCSlotSuffix = cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI) + "\x00" + p.cdcConnectorID)
-		p.config.CDCPreviousSlotSuffix = ""
-		p.config.CDCPreviousSlotSuffixes = nil
-		for _, connectorID := range p.allPreviousCDCConnectorIDs() {
-			p.config.CDCPreviousSlotSuffixes = append(p.config.CDCPreviousSlotSuffixes,
-				cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI)+"\x00"+connectorID))
-		}
-		if len(p.config.CDCPreviousSlotSuffixes) > 0 {
-			p.config.CDCPreviousSlotSuffix = p.config.CDCPreviousSlotSuffixes[0]
-		}
 		p.config.CDCLegacySlotSuffix = legacyCDCSlotSuffix(p.config.DestURI)
 		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
 	}
@@ -200,14 +185,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			}
 		}
 		lease, err := leaser.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{
-			ConnectorID:          p.cdcConnectorID,
-			PreviousConnectorID:  p.previousCDCConnectorID,
-			PreviousConnectorIDs: p.legacyCDCConnectorIDs(),
-			SlotSuffix:           p.config.CDCSlotSuffix,
-			PreviousSlotSuffix:   p.config.CDCPreviousSlotSuffix,
-			PreviousSlotSuffixes: p.config.CDCPreviousSlotSuffixes,
-			LegacySlotSuffix:     p.config.CDCLegacySlotSuffix,
-			SourceTable:          p.config.SourceTable,
+			ConnectorID:      p.cdcConnectorID,
+			SlotSuffix:       p.config.CDCSlotSuffix,
+			LegacySlotSuffix: p.config.CDCLegacySlotSuffix,
+			SourceTable:      p.config.SourceTable,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to acquire PostgreSQL CDC connector lease: %w", err)
@@ -281,60 +262,21 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err != nil {
 			return err
 		}
-		if resumeLSN == "" {
-			previousManagers, err := p.previousV2CDCStateManagers(dest)
-			if err != nil {
-				return err
-			}
-			for _, previousManager := range previousManagers {
-				previousManager.RegisterTableForReadState(p.config.SourceTable, p.config.DestTable, sourceIncarnation, sourceSchemaFingerprint)
-				adopted, err := cdcStateManager.AdoptValidatedState(ctx, previousManager, []string{p.config.SourceTable})
-				if err != nil {
-					return fmt.Errorf("failed to adopt previous v2 CDC state: %w", err)
-				}
-				if len(adopted) > 0 {
-					resumeLSN, err = cdcStateManager.ResumePosition(ctx, p.config.SourceTable)
-					if err != nil {
-						return err
-					}
-					break
-				}
-			}
-		}
-		if resumeLSN == "" {
-			canProbeLegacy, err := cdcStateManager.CanBootstrapLegacy(ctx)
-			if err != nil {
-				return err
-			}
-			legacyManagers, err := p.legacyCDCStateManagers(ctx, dest, p.config.DestTable)
-			if err != nil {
-				return err
-			}
-			for _, legacyManager := range legacyManagers {
-				if !canProbeLegacy || resumeLSN != "" {
-					break
-				}
-				legacyManager.RegisterTableForReadState(p.config.SourceTable, p.config.DestTable, sourceIncarnation, sourceSchemaFingerprint)
-				requiresReplacement, err := legacyManager.LegacySnapshotRequiresReplacement(ctx, p.config.SourceTable)
-				if err != nil {
-					return fmt.Errorf("failed to validate v1 CDC state: %w", err)
-				}
-				if requiresReplacement {
-					legacyReplacementAuthorized = true
-					break
-				}
-			}
-			if !canProbeLegacy {
-				legacyReplacementAuthorized = true
-			}
-		}
 		if resumeLSN != "" {
 			p.config.CDCResumeLSN = resumeLSN
 			p.config.CDCResumeIncarnation = sourceIncarnation
 			p.config.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
 			config.Debug("[PIPELINE] Found destination-managed CDC state, resuming from: %s", resumeLSN)
 		} else {
-			if !legacyReplacementAuthorized {
+			// Once any state exists, replacement snapshots are authorized: this
+			// connector already owns the target. With no state at all, a target
+			// that contains CDC data belongs to an unmanaged (pre-state) run or
+			// to a lost state table, so fail closed.
+			stateEmpty, err := cdcStateManager.StateEmpty(ctx)
+			if err != nil {
+				return err
+			}
+			if stateEmpty {
 				if err := rejectUnprovenLegacyCDCTarget(ctx, dest, p.config.SourceTable, p.config.DestTable); err != nil {
 					return err
 				}
@@ -1416,76 +1358,22 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	// For CDC sources, query per-table max LSNs for resume
 	var cdcResumeLSNs map[string]string
-	legacyReplacementTables := make(map[string]bool)
 	if cdcStateManager != nil && !p.config.FullRefresh {
 		cdcResumeLSNs = make(map[string]string)
-		sourceTableNames := make([]string, 0, len(tables))
-		hasCurrentResume := false
-		for _, table := range tables {
-			sourceTableNames = append(sourceTableNames, table.Name)
-			position, err := cdcStateManager.ResumePosition(ctx, table.Name)
-			if err != nil {
-				return err
-			}
-			hasCurrentResume = hasCurrentResume || position != ""
-		}
-		if !hasCurrentResume {
-			previousManagers, err := p.previousV2CDCStateManagers(p.dest)
-			if err != nil {
-				return err
-			}
-			for _, previousManager := range previousManagers {
-				for _, table := range tables {
-					previousManager.RegisterTableForReadState(table.Name, tableDestNames[table.Name], table.Incarnation, table.SchemaFingerprint)
-				}
-				adopted, err := cdcStateManager.AdoptValidatedState(ctx, previousManager, sourceTableNames)
-				if err != nil {
-					return fmt.Errorf("failed to adopt previous v2 CDC state: %w", err)
-				}
-				if len(adopted) > 0 {
-					break
-				}
-			}
-		}
-		var legacyManagers []*strategy.CDCStateManager
-		canProbeLegacy, err := cdcStateManager.CanBootstrapLegacy(ctx)
+		stateEmpty, err := cdcStateManager.StateEmpty(ctx)
 		if err != nil {
 			return err
-		}
-		if canProbeLegacy {
-			legacyManagers, err = p.legacyCDCStateManagers(ctx, p.dest, anchorTable)
-			if err != nil {
-				return err
-			}
-		}
-		for _, legacyManager := range legacyManagers {
-			for _, table := range tables {
-				legacyManager.RegisterTableForReadState(table.Name, tableDestNames[table.Name], table.Incarnation, table.SchemaFingerprint)
-			}
 		}
 		for _, table := range tables {
 			resumeLSN, err := cdcStateManager.ResumePosition(ctx, table.Name)
 			if err != nil {
 				return err
 			}
-			for _, legacyManager := range legacyManagers {
-				if resumeLSN != "" {
-					break
-				}
-				requiresReplacement, err := legacyManager.LegacySnapshotRequiresReplacement(ctx, table.Name)
-				if err != nil {
-					return fmt.Errorf("failed to validate v1 CDC state for %s: %w", table.Name, err)
-				}
-				if requiresReplacement {
-					legacyReplacementTables[table.Name] = true
-					break
-				}
-			}
 			if resumeLSN != "" {
 				cdcResumeLSNs[table.Name] = resumeLSN
 				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
 			} else {
-				if !legacyReplacementTables[table.Name] && canProbeLegacy {
+				if stateEmpty {
 					if err := rejectUnprovenLegacyCDCTarget(ctx, p.dest, table.Name, tableDestNames[table.Name]); err != nil {
 						return err
 					}
@@ -2455,40 +2343,7 @@ func isPostgresCDCSource(rawURI string) bool {
 	return scheme == "postgres+cdc" || scheme == "postgresql+cdc"
 }
 
-func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.ConnectorIdentity) string {
-	return resolvedCDCStateConnectorIDForDestination(cfg, identity, "")
-}
-
-func resolvedCDCStateConnectorIDCandidates(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) (string, []string) {
-	return resolvedCDCStateConnectorIDCandidatesForDestinations(cfg, identity, destinationIdentity, nil)
-}
-
-func resolvedCDCStateConnectorIDCandidatesForDestinations(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string, previousDestinationIdentities []string) (string, []string) {
-	current := resolvedCDCStateConnectorIDForDestination(cfg, identity, destinationIdentity)
-	sourceIdentities := []source.ConnectorIdentity{identity}
-	if identity.PreviousDatabase != "" && identity.PreviousConnector != "" {
-		sourceIdentities = append(sourceIdentities, source.ConnectorIdentity{
-			Database: identity.PreviousDatabase, Connector: identity.PreviousConnector,
-		})
-	}
-	destinationIdentities := append([]string{destinationIdentity}, previousDestinationIdentities...)
-	destinationIdentities = append(destinationIdentities, "")
-	seen := map[string]bool{"": true, current: true}
-	var previous []string
-	for _, sourceIdentity := range sourceIdentities {
-		for _, candidateDestination := range destinationIdentities {
-			candidate := resolvedCDCStateConnectorIDForDestination(cfg, sourceIdentity, candidateDestination)
-			if seen[candidate] {
-				continue
-			}
-			seen[candidate] = true
-			previous = append(previous, candidate)
-		}
-	}
-	return current, previous
-}
-
-func resolvedCDCStateConnectorIDForDestination(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) string {
+func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) string {
 	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
 		if stateID := parsed.Query().Get("state_id"); stateID != "" {
 			seed := "explicit:" + stateID + "\x00" + identity.Database
@@ -2516,20 +2371,11 @@ func resolvedCDCStateConnectorIDForDestination(cfg *config.IngestConfig, identit
 }
 
 func managedCDCDestinationIdentity(ctx context.Context, dest destination.Destination, target string) (string, error) {
-	current, _, err := managedCDCDestinationIdentities(ctx, dest, target)
-	return current, err
-}
-
-func managedCDCDestinationIdentities(ctx context.Context, dest destination.Destination, target string) (string, []string, error) {
-	if provider, ok := dest.(destination.CDCTargetIdentityCandidatesProvider); ok {
-		return provider.CanonicalCDCTargetCandidates(ctx, target)
-	}
 	provider, ok := dest.(destination.CDCTargetIdentityProvider)
 	if !ok {
-		return target, nil, nil
+		return target, nil
 	}
-	current, err := provider.CanonicalCDCTarget(ctx, target)
-	return current, nil, err
+	return provider.CanonicalCDCTarget(ctx, target)
 }
 
 func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Destination) string {
@@ -2548,75 +2394,6 @@ func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Dest
 	return destination.DefaultMultiTableName(destSchema, namespaceTable)
 }
 
-func (p *Pipeline) legacyCDCConnectorIDs() []string {
-	candidates := append(p.allPreviousCDCConnectorIDs(), legacyCDCStateConnectorID(p.config))
-	seen := map[string]bool{p.cdcConnectorID: true, "": true}
-	result := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		if seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
-		result = append(result, candidate)
-	}
-	return result
-}
-
-func (p *Pipeline) allPreviousCDCConnectorIDs() []string {
-	candidates := append([]string(nil), p.previousCDCConnectorIDs...)
-	candidates = append(candidates, p.previousCDCConnectorID)
-	seen := map[string]bool{p.cdcConnectorID: true, "": true}
-	result := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		if seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
-		result = append(result, candidate)
-	}
-	return result
-}
-
-func (p *Pipeline) legacyCDCStateManagers(ctx context.Context, dest destination.Destination, anchorTable string) ([]*strategy.CDCStateManager, error) {
-	var locatedTables []string
-	if locator, ok := dest.(destination.LegacyCDCStateLocator); ok {
-		var err error
-		locatedTables, err = locator.LegacyCDCStateTables(ctx, "cdc_state")
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover legacy CDC state tables: %w", err)
-		}
-	}
-	var managers []*strategy.CDCStateManager
-	for _, connectorID := range p.legacyCDCConnectorIDs() {
-		manager, err := strategy.NewLegacyCDCStateManager(dest, connectorID, anchorTable, p.config.StagingDataset)
-		if err != nil {
-			return nil, err
-		}
-		managers = append(managers, manager)
-		for _, stateTable := range locatedTables {
-			manager, err := strategy.NewLegacyCDCStateManagerAtTable(dest, connectorID, stateTable)
-			if err != nil {
-				return nil, err
-			}
-			managers = append(managers, manager)
-		}
-	}
-	return managers, nil
-}
-
-func (p *Pipeline) previousV2CDCStateManagers(dest destination.Destination) ([]*strategy.CDCStateManager, error) {
-	connectorIDs := p.allPreviousCDCConnectorIDs()
-	managers := make([]*strategy.CDCStateManager, 0, len(connectorIDs))
-	for _, connectorID := range connectorIDs {
-		manager, err := strategy.NewCDCStateManager(dest, connectorID, "", p.config.StagingDataset)
-		if err != nil {
-			return nil, err
-		}
-		managers = append(managers, manager)
-	}
-	return managers, nil
-}
-
 func genericCDCConnectorID(cfg *config.IngestConfig) string {
 	identity := strings.Join([]string{
 		canonicalCDCStateURI(cfg.SourceURI),
@@ -2626,43 +2403,6 @@ func genericCDCConnectorID(cfg *config.IngestConfig) string {
 	}, "\x00")
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:8])
-}
-
-func legacyCDCStateConnectorID(cfg *config.IngestConfig) string {
-	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
-		if stateID := parsed.Query().Get("state_id"); stateID != "" {
-			sum := sha256.Sum256([]byte("explicit:" + stateID))
-			return fmt.Sprintf("%x", sum[:8])
-		}
-	}
-
-	identity := strings.Join([]string{
-		legacyCanonicalCDCStateURI(cfg.SourceURI),
-		legacyCanonicalCDCStateURI(cfg.DestURI),
-		cfg.SourceTable,
-		cfg.DestTable,
-	}, "\x00")
-	sum := sha256.Sum256([]byte(identity))
-	return fmt.Sprintf("%x", sum[:8])
-}
-
-func legacyCanonicalCDCStateURI(rawURI string) string {
-	parsed, err := url.Parse(rawURI)
-	if err != nil {
-		return rawURI
-	}
-	if parsed.User != nil {
-		parsed.User = url.User(parsed.User.Username())
-	}
-	query := parsed.Query()
-	for _, key := range []string{
-		"state_id", "mode", "binary", "discover_interval",
-		"password", "pass", "token", "secret", "api_key", "private_key",
-	} {
-		query.Del(key)
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
 }
 
 func canonicalCDCStateURI(rawURI string) string {

@@ -267,7 +267,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
 	s.serverVersion = serverVersion
-	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, pgConfig.ConnConfig.Host, pgConfig.ConnConfig.Port, database, cdcConfig)
+	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, database, cdcConfig)
 
 	return nil
 }

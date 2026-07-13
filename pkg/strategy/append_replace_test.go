@@ -183,7 +183,6 @@ func TestAppendStrategy_CDCForwardsResumeAndAppliesSnapshotBoundary(t *testing.T
 	job.SourceSchema = job.Schema
 	job.Config.CDCResumeLSN = "00000000/0000002A"
 	job.Config.CDCSlotSuffix = "abc123"
-	job.Config.CDCPreviousSlotSuffix = "previous123"
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
 	src.readCh = mustClosedRecords(source.RecordBatchResult{Truncate: true})
 
@@ -195,9 +194,6 @@ func TestAppendStrategy_CDCForwardsResumeAndAppliesSnapshotBoundary(t *testing.T
 	}
 	if src.readOpts.CDCSlotSuffix != job.Config.CDCSlotSuffix {
 		t.Fatalf("CDCSlotSuffix = %q, want %q", src.readOpts.CDCSlotSuffix, job.Config.CDCSlotSuffix)
-	}
-	if src.readOpts.CDCPreviousSlotSuffix != job.Config.CDCPreviousSlotSuffix {
-		t.Fatalf("CDCPreviousSlotSuffix = %q, want %q", src.readOpts.CDCPreviousSlotSuffix, job.Config.CDCPreviousSlotSuffix)
 	}
 	if !src.readOpts.CDCSnapshotReplace {
 		t.Fatal("snapshot replacement not enabled for truncate-capable CDC destination")
@@ -535,7 +531,6 @@ func TestReplaceStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.FullRefresh = true
 	job.Config.CDCSlotSuffix = "current-destination-slot"
-	job.Config.CDCPreviousSlotSuffix = "previous-destination-slot"
 	job.Config.CDCLegacySlotSuffix = "legacy-destination-slot"
 	src.readCh = mustClosedRecords()
 
@@ -552,10 +547,9 @@ func TestReplaceStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	if src.readOpts.CDCSlotSuffix != job.Config.CDCSlotSuffix {
 		t.Fatalf("ReadOptions.CDCSlotSuffix = %q, want leased slot suffix %q", src.readOpts.CDCSlotSuffix, job.Config.CDCSlotSuffix)
 	}
-	if src.readOpts.CDCPreviousSlotSuffix != job.Config.CDCPreviousSlotSuffix || src.readOpts.CDCLegacySlotSuffix != job.Config.CDCLegacySlotSuffix {
-		t.Fatalf("full-refresh slot migration metadata = (%q, %q), want (%q, %q)",
-			src.readOpts.CDCPreviousSlotSuffix, src.readOpts.CDCLegacySlotSuffix,
-			job.Config.CDCPreviousSlotSuffix, job.Config.CDCLegacySlotSuffix)
+	if src.readOpts.CDCLegacySlotSuffix != job.Config.CDCLegacySlotSuffix {
+		t.Fatalf("full-refresh legacy slot suffix = %q, want %q",
+			src.readOpts.CDCLegacySlotSuffix, job.Config.CDCLegacySlotSuffix)
 	}
 	if src.readOpts.CDCResumeLSN != "" {
 		t.Fatalf("full refresh unexpectedly supplied resume LSN %q, which could select a previous or legacy slot", src.readOpts.CDCResumeLSN)
@@ -571,7 +565,6 @@ func TestReplaceStrategy_ExecuteMultiTable_FullRefreshUsesLeasedSlotSuffix(t *te
 		Config: &config.IngestConfig{
 			FullRefresh:           true,
 			CDCSlotSuffix:         "current-destination-slot",
-			CDCPreviousSlotSuffix: "previous-destination-slot",
 			CDCLegacySlotSuffix:   "legacy-destination-slot",
 		},
 		Source:         src,
@@ -583,7 +576,6 @@ func TestReplaceStrategy_ExecuteMultiTable_FullRefreshUsesLeasedSlotSuffix(t *te
 	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job))
 	require.True(t, src.readOpts.FullRefresh)
 	require.Equal(t, job.Config.CDCSlotSuffix, src.readOpts.CDCSlotSuffix)
-	require.Equal(t, job.Config.CDCPreviousSlotSuffix, src.readOpts.CDCPreviousSlotSuffix)
 	require.Equal(t, job.Config.CDCLegacySlotSuffix, src.readOpts.CDCLegacySlotSuffix)
 	require.Empty(t, src.readOpts.CDCResumeLSNs, "full refresh must not select a previous or legacy slot")
 }

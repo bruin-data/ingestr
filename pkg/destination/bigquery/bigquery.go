@@ -2787,25 +2787,6 @@ func (d *BigQueryDestination) canonicalCDCTarget(ctx context.Context, project, d
 	return destination.CDCTargetKey(project, dataset, table), nil
 }
 
-func (d *BigQueryDestination) CanonicalCDCTargetCandidates(ctx context.Context, table string) (string, []string, error) {
-	project, dataset, tableName, err := d.parseTable(table)
-	if err != nil {
-		return "", nil, err
-	}
-	if dataset == "" {
-		dataset = d.datasetID
-	}
-	provisional := destination.CDCTargetKey(project, dataset, tableName)
-	current, err := d.canonicalCDCTarget(ctx, project, dataset, tableName)
-	if err != nil {
-		return "", nil, err
-	}
-	if current == provisional {
-		return current, nil, nil
-	}
-	return current, []string{provisional}, nil
-}
-
 func (d *BigQueryDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
 	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {

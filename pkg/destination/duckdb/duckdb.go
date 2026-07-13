@@ -1237,42 +1237,6 @@ func (d *DuckDBDestination) SupportsCDCUnchangedCols() bool     { return true }
 // GetScheme returns the primary URI scheme for DuckDB.
 func (d *DuckDBDestination) GetScheme() string { return "duckdb" }
 
-func (d *DuckDBDestination) LegacyCDCStateTables(ctx context.Context, stateTable string) ([]string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	query := fmt.Sprintf(`SELECT table_schema
-		FROM information_schema.columns
-		WHERE table_name = '%s'
-		GROUP BY table_schema
-		HAVING COUNT(DISTINCT CASE WHEN column_name IN
-			('event_id', 'state_version', 'connector_id', 'source_table', 'destination_table',
-			 'state_kind', 'state_generation', 'state_status', '_cdc_lsn', 'recorded_at')
-			THEN column_name END) = 10
-		ORDER BY table_schema`, strings.ReplaceAll(stateTable, "'", "''"))
-	stmt, err := d.conn.NewStatement()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery(query); err != nil {
-		return nil, err
-	}
-	reader, _, err := stmt.ExecuteQuery(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Release()
-	var tables []string
-	for reader.Next() {
-		batch := reader.RecordBatch()
-		schemas := batch.Column(0).(*array.String)
-		for row := 0; row < int(batch.NumRows()); row++ {
-			tables = append(tables, strings.Clone(schemas.Value(row))+"."+stateTable)
-		}
-	}
-	return tables, reader.Err()
-}
-
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	d.mu.Lock()

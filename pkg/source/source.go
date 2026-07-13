@@ -118,8 +118,6 @@ type ReadOptions struct {
 	CDCResumeIncarnation            string              // Source table incarnation that authorized CDCResumeLSN
 	CDCResumeSchemaFingerprint      string              // Source schema fingerprint that authorized CDCResumeLSN
 	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
-	CDCPreviousSlotSuffix           string              // Optional: immediately previous auto-slot suffix used during migration
-	CDCPreviousSlotSuffixes         []string            // Optional: all prior auto-slot suffixes used during migration
 	CDCLegacySlotSuffix             string              // Optional: prior auto-slot suffix used only for upgrade resume
 	CDCSnapshotReplace              bool                // Consumer can apply a full-snapshot replacement boundary
 	FullRefresh                     bool
@@ -210,10 +208,8 @@ type ConnectorLease interface {
 }
 
 type ConnectorIdentity struct {
-	Database          string
-	Connector         string
-	PreviousDatabase  string
-	PreviousConnector string
+	Database  string
+	Connector string
 }
 
 // ConnectorIdentityProvider exposes the effective source identity after the
@@ -234,14 +230,10 @@ type ConnectorPreflightValidator interface {
 }
 
 type ConnectorLeaseOptions struct {
-	ConnectorID          string
-	PreviousConnectorID  string
-	PreviousConnectorIDs []string
-	SlotSuffix           string
-	PreviousSlotSuffix   string
-	PreviousSlotSuffixes []string
-	LegacySlotSuffix     string
-	SourceTable          string
+	ConnectorID      string
+	SlotSuffix       string
+	LegacySlotSuffix string
+	SourceTable      string
 }
 
 // ConnectorLeaser is implemented by sources that can serialize connector runs

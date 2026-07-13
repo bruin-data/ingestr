@@ -267,8 +267,6 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
-		CDCPreviousSlotSuffix:           job.Config.CDCPreviousSlotSuffix,
-		CDCPreviousSlotSuffixes:         job.Config.CDCPreviousSlotSuffixes,
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
@@ -450,8 +448,6 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			PageSize:                job.Config.PageSize,
 			Limit:                   job.Config.SQLLimit,
 			CDCSlotSuffix:           job.Config.CDCSlotSuffix,
-			CDCPreviousSlotSuffix:   job.Config.CDCPreviousSlotSuffix,
-			CDCPreviousSlotSuffixes: job.Config.CDCPreviousSlotSuffixes,
 			CDCLegacySlotSuffix:     job.Config.CDCLegacySlotSuffix,
 			FullRefresh:             job.Config.FullRefresh,
 		},

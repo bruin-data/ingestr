@@ -1056,32 +1056,6 @@ func (d *MySQLDestination) ManagedStagingPolicy() destination.ReplaceStagingPoli
 	return d.ReplaceStagingPolicy()
 }
 
-func (d *MySQLDestination) LegacyCDCStateTables(ctx context.Context, stateTable string) ([]string, error) {
-	query := `SELECT table_schema
-		FROM information_schema.columns
-		WHERE table_name = ?
-		GROUP BY table_schema
-		HAVING COUNT(DISTINCT CASE WHEN column_name IN
-			('event_id', 'state_version', 'connector_id', 'source_table', 'destination_table',
-			 'state_kind', 'state_generation', 'state_status', '_cdc_lsn', 'recorded_at')
-			THEN column_name END) = 10
-		ORDER BY table_schema`
-	rows, err := d.db.QueryContext(ctx, query, stateTable)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var tables []string
-	for rows.Next() {
-		var schemaName string
-		if err := rows.Scan(&schemaName); err != nil {
-			return nil, err
-		}
-		tables = append(tables, schemaName+"."+stateTable)
-	}
-	return tables, rows.Err()
-}
-
 func (d *MySQLDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *MySQLDestination) SupportsAppendStrategy() bool       { return true }
 func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }

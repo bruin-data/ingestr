@@ -787,13 +787,8 @@ func TestRunMissingSourceTableDoesNotClaimDestination(t *testing.T) {
 
 type mockLegacyBootstrapDestination struct {
 	mockManagedCDCStateDestination
-	maxLSN       string
-	entries      []destination.CDCStateEntry
-	legacyTables []string
-}
-
-func (m *mockLegacyBootstrapDestination) LegacyCDCStateTables(_ context.Context, _ string) ([]string, error) {
-	return append([]string(nil), m.legacyTables...), nil
+	maxLSN  string
+	entries []destination.CDCStateEntry
 }
 
 func (m *mockLegacyBootstrapDestination) GetMaxCDCLSN(_ context.Context, _ string) (string, error) {
@@ -835,25 +830,6 @@ func (m *mockLegacyBootstrapDestination) LoadCDCState(_ context.Context, _, _ st
 
 func (m *mockLegacyBootstrapDestination) DeleteCDCStateEvents(_ context.Context, _, _ string, _ []string) error {
 	return nil
-}
-
-func TestLegacyCDCStateManagersIncludeDiscoveredFormerAnchorSchemas(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.SourceURI = "postgres+cdc://user@source/db"
-	cfg.DestURI = "oracle://user@destination/db"
-	cfg.SourceTable = "public.*"
-	cfg.DestTable = ""
-	dest := &mockLegacyBootstrapDestination{legacyTables: []string{"A.cdc_state", "B.cdc_state"}}
-	p := &Pipeline{config: cfg, dest: dest, cdcConnectorID: "current", previousCDCConnectorID: "previous"}
-
-	managers, err := p.legacyCDCStateManagers(t.Context(), dest, "B.customers")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := len(p.legacyCDCConnectorIDs()) * 3
-	if len(managers) != want {
-		t.Fatalf("legacy managers = %d, want %d (anchor plus two discovered locations per connector ID)", len(managers), want)
-	}
 }
 
 type mockValidatedManagedCDCStateDestination struct {
@@ -2274,20 +2250,20 @@ func TestCDCStateConnectorID(t *testing.T) {
 	rotated := *base
 	rotated.SourceURI = "postgres+cdc://user:new@db.example/app?mode=stream&publication=pub&binary=true"
 	rotated.DestURI = "postgres://loader:new@warehouse.example/analytics"
-	if got, want := resolvedCDCStateConnectorID(&rotated, resolved), resolvedCDCStateConnectorID(base, resolved); got != want {
+	if got, want := resolvedCDCStateConnectorID(&rotated, resolved, ""), resolvedCDCStateConnectorID(base, resolved, ""); got != want {
 		t.Fatalf("credential/runtime option changes changed connector ID: got %s want %s", got, want)
 	}
 
 	aliased := *base
 	aliased.SourceURI = "postgresql+cdc://other@DB.EXAMPLE:5432/app?publication=pub&mode=stream"
 	aliased.DestURI = "postgresql://different@WAREHOUSE.EXAMPLE:5432/analytics"
-	if got, want := resolvedCDCStateConnectorID(&aliased, resolved), resolvedCDCStateConnectorID(base, resolved); got != want {
+	if got, want := resolvedCDCStateConnectorID(&aliased, resolved, ""), resolvedCDCStateConnectorID(base, resolved, ""); got != want {
 		t.Fatalf("scheme/default-port aliases changed connector ID: got %s want %s", got, want)
 	}
 
 	otherSlotIdentity := resolved
 	otherSlotIdentity.Connector += "another_slot"
-	if resolvedCDCStateConnectorID(base, otherSlotIdentity) == resolvedCDCStateConnectorID(base, resolved) {
+	if resolvedCDCStateConnectorID(base, otherSlotIdentity, "") == resolvedCDCStateConnectorID(base, resolved, "") {
 		t.Fatal("different replication slots must not share CDC state")
 	}
 
@@ -2295,30 +2271,30 @@ func TestCDCStateConnectorID(t *testing.T) {
 	explicitA.SourceURI += "&state_id=connector-a"
 	explicitRotated := explicitA
 	explicitRotated.SourceURI = "postgres+cdc://other:new@db.example/app?state_id=connector-a&mode=stream&binary=true&discover_interval=10s"
-	if got, want := resolvedCDCStateConnectorID(&explicitRotated, resolved), resolvedCDCStateConnectorID(&explicitA, resolved); got != want {
+	if got, want := resolvedCDCStateConnectorID(&explicitRotated, resolved, ""), resolvedCDCStateConnectorID(&explicitA, resolved, ""); got != want {
 		t.Fatalf("explicit state identity changed within one source database: got %s want %s", got, want)
 	}
 	explicitPort := explicitA
 	explicitPort.SourceURI = "postgresql+cdc://other@DB.EXAMPLE:5432/app?state_id=connector-a"
-	if got, want := resolvedCDCStateConnectorID(&explicitPort, resolved), resolvedCDCStateConnectorID(&explicitA, resolved); got != want {
+	if got, want := resolvedCDCStateConnectorID(&explicitPort, resolved, ""), resolvedCDCStateConnectorID(&explicitA, resolved, ""); got != want {
 		t.Fatalf("explicit state identity changed for default port alias: got %s want %s", got, want)
 	}
 
 	otherDatabaseIdentity := resolved
 	otherDatabaseIdentity.Database = "postgres\x00db.example:5432\x00other_db"
 	otherDatabaseIdentity.Connector = otherDatabaseIdentity.Database + "\x00pub\x00"
-	if resolvedCDCStateConnectorID(&explicitA, otherDatabaseIdentity) == resolvedCDCStateConnectorID(&explicitA, resolved) {
+	if resolvedCDCStateConnectorID(&explicitA, otherDatabaseIdentity, "") == resolvedCDCStateConnectorID(&explicitA, resolved, "") {
 		t.Fatal("matching explicit state_id values on different source databases must not share identity")
 	}
 	explicitB := explicitA
 	explicitB.SourceURI = strings.Replace(explicitA.SourceURI, "connector-a", "connector-b", 1)
-	suffixA := cdcSlotSuffix(canonicalCDCStateURI(explicitA.DestURI) + "\x00" + resolvedCDCStateConnectorID(&explicitA, resolved))
-	suffixB := cdcSlotSuffix(canonicalCDCStateURI(explicitB.DestURI) + "\x00" + resolvedCDCStateConnectorID(&explicitB, resolved))
+	suffixA := cdcSlotSuffix(canonicalCDCStateURI(explicitA.DestURI) + "\x00" + resolvedCDCStateConnectorID(&explicitA, resolved, ""))
+	suffixB := cdcSlotSuffix(canonicalCDCStateURI(explicitB.DestURI) + "\x00" + resolvedCDCStateConnectorID(&explicitB, resolved, ""))
 	if suffixA == suffixB {
 		t.Fatal("distinct explicit state identities share an automatic slot suffix")
 	}
-	rotatedSuffix := cdcSlotSuffix(canonicalCDCStateURI(rotated.DestURI) + "\x00" + resolvedCDCStateConnectorID(&rotated, resolved))
-	baseSuffix := cdcSlotSuffix(canonicalCDCStateURI(base.DestURI) + "\x00" + resolvedCDCStateConnectorID(base, resolved))
+	rotatedSuffix := cdcSlotSuffix(canonicalCDCStateURI(rotated.DestURI) + "\x00" + resolvedCDCStateConnectorID(&rotated, resolved, ""))
+	baseSuffix := cdcSlotSuffix(canonicalCDCStateURI(base.DestURI) + "\x00" + resolvedCDCStateConnectorID(base, resolved, ""))
 	if rotatedSuffix != baseSuffix {
 		t.Fatal("credential rotation changed the automatic slot suffix")
 	}
@@ -2327,7 +2303,7 @@ func TestCDCStateConnectorID(t *testing.T) {
 	implicitDestAlice.DestURI = "postgres://alice@warehouse.example"
 	implicitDestBob := implicitDestAlice
 	implicitDestBob.DestURI = "postgres://bob@warehouse.example"
-	if resolvedCDCStateConnectorID(&implicitDestAlice, resolved) == resolvedCDCStateConnectorID(&implicitDestBob, resolved) {
+	if resolvedCDCStateConnectorID(&implicitDestAlice, resolved, "") == resolvedCDCStateConnectorID(&implicitDestBob, resolved, "") {
 		t.Fatal("destination URIs with different implicit PostgreSQL databases share a connector ID")
 	}
 }
@@ -2340,12 +2316,12 @@ func TestCDCStateConnectorIDDistinguishesEffectiveUnqualifiedDestination(t *test
 		DestTable:   "orders",
 	}
 	identity := source.ConnectorIdentity{Database: "source-db", Connector: "source-connector"}
-	first := resolvedCDCStateConnectorIDForDestination(cfg, identity, "analytics\x00alice\x00orders")
-	second := resolvedCDCStateConnectorIDForDestination(cfg, identity, "analytics\x00bob\x00orders")
+	first := resolvedCDCStateConnectorID(cfg, identity, "analytics\x00alice\x00orders")
+	second := resolvedCDCStateConnectorID(cfg, identity, "analytics\x00bob\x00orders")
 	if first == second {
 		t.Fatal("different effective destination schemas share a connector ID")
 	}
-	if first == resolvedCDCStateConnectorID(cfg, identity) {
+	if first == resolvedCDCStateConnectorID(cfg, identity, "") {
 		t.Fatal("effective destination namespace was not added to the connector ID")
 	}
 
@@ -2365,8 +2341,8 @@ func TestCDCStateConnectorIDDistinguishesEffectiveUnqualifiedDestination(t *test
 	qualifiedA.DestTable = "raw.orders"
 	qualifiedB := *cfg
 	qualifiedB.DestTable = `"raw"."orders"`
-	first = resolvedCDCStateConnectorIDForDestination(&qualifiedA, identity, "canonical-target")
-	second = resolvedCDCStateConnectorIDForDestination(&qualifiedB, identity, "canonical-target")
+	first = resolvedCDCStateConnectorID(&qualifiedA, identity, "canonical-target")
+	second = resolvedCDCStateConnectorID(&qualifiedB, identity, "canonical-target")
 	require.Equal(t, first, second, "equivalent qualified targets must share a connector ID")
 }
 
@@ -2381,7 +2357,7 @@ func TestMultiTableCDCConnectorIDIncludesNormalizedDestinationNamespace(t *testi
 	targetA := managedCDCDestinationTarget(base, dest)
 	canonicalA, err := managedCDCDestinationIdentity(t.Context(), dest, targetA)
 	require.NoError(t, err)
-	idA := resolvedCDCStateConnectorIDForDestination(base, identity, canonicalA)
+	idA := resolvedCDCStateConnectorID(base, identity, canonicalA)
 	require.Equal(t, "Landing_A.__ingestr_cdc_namespace__", targetA)
 	require.Equal(t, "landing_a.__ingestr_cdc_namespace__", canonicalA)
 
@@ -2390,7 +2366,7 @@ func TestMultiTableCDCConnectorIDIncludesNormalizedDestinationNamespace(t *testi
 	targetEquivalent := managedCDCDestinationTarget(&equivalent, dest)
 	canonicalEquivalent, err := managedCDCDestinationIdentity(t.Context(), dest, targetEquivalent)
 	require.NoError(t, err)
-	require.Equal(t, idA, resolvedCDCStateConnectorIDForDestination(&equivalent, identity, canonicalEquivalent),
+	require.Equal(t, idA, resolvedCDCStateConnectorID(&equivalent, identity, canonicalEquivalent),
 		"equivalent destination namespaces must share connector state and slot identity")
 
 	other := *base
@@ -2398,146 +2374,12 @@ func TestMultiTableCDCConnectorIDIncludesNormalizedDestinationNamespace(t *testi
 	targetB := managedCDCDestinationTarget(&other, dest)
 	canonicalB, err := managedCDCDestinationIdentity(t.Context(), dest, targetB)
 	require.NoError(t, err)
-	idB := resolvedCDCStateConnectorIDForDestination(&other, identity, canonicalB)
+	idB := resolvedCDCStateConnectorID(&other, identity, canonicalB)
 	require.NotEqual(t, idA, idB, "different dest_schema mappings must not share connector state or slots")
 	require.NotEqual(t,
 		cdcSlotSuffix(canonicalCDCStateURI(base.DestURI)+"\x00"+idA),
 		cdcSlotSuffix(canonicalCDCStateURI(other.DestURI)+"\x00"+idB),
 		"different dest_schema mappings must not share automatic PostgreSQL slots")
-
-	legacyID := resolvedCDCStateConnectorID(base, identity)
-	require.NotEqual(t, legacyID, idA, "namespace-aware identity must migrate from the pre-namespace identity")
-	p := &Pipeline{config: base, cdcConnectorID: idA, previousCDCConnectorID: legacyID}
-	require.Contains(t, p.legacyCDCConnectorIDs(), legacyID, "matching pre-namespace state must remain discoverable for migration")
-}
-
-func TestCDCConnectorIdentityMigrationCandidatesCoverSourceAndDestinationChanges(t *testing.T) {
-	cfg := &config.IngestConfig{
-		SourceURI: "postgres+cdc://reader@source/app?publication=pub",
-		DestURI:   "postgres://loader@warehouse/analytics",
-	}
-	identity := source.ConnectorIdentity{
-		Database:          "system-database",
-		Connector:         "system-connector",
-		PreviousDatabase:  "host-database",
-		PreviousConnector: "host-connector",
-	}
-	destinationIdentity := "canonical-namespace"
-
-	current, previous := resolvedCDCStateConnectorIDCandidates(cfg, identity, destinationIdentity)
-	require.Equal(t, resolvedCDCStateConnectorIDForDestination(cfg, identity, destinationIdentity), current)
-	require.Equal(t, []string{
-		resolvedCDCStateConnectorID(cfg, identity),
-		resolvedCDCStateConnectorIDForDestination(cfg, source.ConnectorIdentity{Database: "host-database", Connector: "host-connector"}, destinationIdentity),
-		resolvedCDCStateConnectorID(cfg, source.ConnectorIdentity{Database: "host-database", Connector: "host-connector"}),
-	}, previous)
-
-	p := &Pipeline{config: cfg, cdcConnectorID: current, previousCDCConnectorIDs: previous}
-	for _, candidate := range previous {
-		require.Contains(t, p.legacyCDCConnectorIDs(), candidate)
-	}
-}
-
-func TestCDCConnectorIdentityCandidatesIncludeProvisionalDestinationCartesianProduct(t *testing.T) {
-	cfg := &config.IngestConfig{
-		SourceURI: "postgres+cdc://reader@source/app?publication=pub",
-		DestURI:   "bigquery://project/New_DataSet",
-	}
-	identity := source.ConnectorIdentity{
-		Database:          "system-database",
-		Connector:         "system-connector",
-		PreviousDatabase:  "host-database",
-		PreviousConnector: "host-connector",
-	}
-	currentDestination := destination.CDCTargetKey("project", "new_dataset", "orders")
-	provisionalDestination := destination.CDCTargetKey("project", "New_DataSet", "Orders")
-
-	current, previous := resolvedCDCStateConnectorIDCandidatesForDestinations(cfg, identity, currentDestination, []string{provisionalDestination})
-	require.Equal(t, resolvedCDCStateConnectorIDForDestination(cfg, identity, currentDestination), current)
-	for _, sourceIdentity := range []source.ConnectorIdentity{
-		identity,
-		{Database: identity.PreviousDatabase, Connector: identity.PreviousConnector},
-	} {
-		require.Contains(t, previous, resolvedCDCStateConnectorIDForDestination(cfg, sourceIdentity, provisionalDestination))
-		require.Contains(t, previous, resolvedCDCStateConnectorIDForDestination(cfg, sourceIdentity, ""))
-	}
-}
-
-func TestCDCConnectorIdentityMigrationCandidatesDeduplicateEquivalentIdentity(t *testing.T) {
-	cfg := &config.IngestConfig{
-		SourceURI:   "postgres+cdc://reader@source/app?publication=pub",
-		DestURI:     "postgres://loader@warehouse/analytics",
-		SourceTable: "public.orders",
-		DestTable:   "orders",
-	}
-	identity := source.ConnectorIdentity{
-		Database: "database", Connector: "connector",
-		PreviousDatabase: "database", PreviousConnector: "connector",
-	}
-	current, previous := resolvedCDCStateConnectorIDCandidates(cfg, identity, cfg.DestTable)
-	require.Equal(t, resolvedCDCStateConnectorID(cfg, identity), current)
-	require.Empty(t, previous)
-}
-
-func TestLegacyCDCConnectorIDsPreferPreviousServerIdentity(t *testing.T) {
-	cfg := &config.IngestConfig{
-		SourceURI: "postgres+cdc://user@db.example/app",
-		DestURI:   "sqlite:///tmp/dest.db",
-	}
-	p := New(cfg)
-	p.cdcConnectorID = "current"
-	p.previousCDCConnectorID = "previous-host-derived"
-	ids := p.legacyCDCConnectorIDs()
-	require.NotEmpty(t, ids)
-	require.Equal(t, "previous-host-derived", ids[0])
-	require.NotContains(t, ids, "current")
-
-	p.previousCDCConnectorID = "current"
-	ids = p.legacyCDCConnectorIDs()
-	require.NotContains(t, ids, "current")
-}
-
-func TestLegacyCDCStateConnectorIDMatchesV1Derivation(t *testing.T) {
-	base := &config.IngestConfig{
-		SourceURI:   "postgresql+cdc://reader:secret@DB.EXAMPLE:5432/app?publication=pub&mode=batch&pool_max_conns=2",
-		DestURI:     "postgres://loader:secret@WAREHOUSE.EXAMPLE:5432/analytics?application_name=ingestr",
-		SourceTable: "public.orders",
-		DestTable:   "raw.orders",
-	}
-	wantIdentity := strings.Join([]string{
-		"postgresql+cdc://reader@DB.EXAMPLE:5432/app?pool_max_conns=2&publication=pub",
-		"postgres://loader@WAREHOUSE.EXAMPLE:5432/analytics?application_name=ingestr",
-		"public.orders",
-		"raw.orders",
-	}, "\x00")
-	want := sha256.Sum256([]byte(wantIdentity))
-	if got := legacyCDCStateConnectorID(base); got != fmt.Sprintf("%x", want[:8]) {
-		t.Fatalf("legacy connector ID = %s, want exact v1 derivation %x", got, want[:8])
-	}
-
-	rotatedPassword := *base
-	rotatedPassword.SourceURI = strings.Replace(rotatedPassword.SourceURI, "reader:secret", "reader:new", 1)
-	rotatedPassword.DestURI = strings.Replace(rotatedPassword.DestURI, "loader:secret", "loader:new", 1)
-	if legacyCDCStateConnectorID(&rotatedPassword) != legacyCDCStateConnectorID(base) {
-		t.Fatal("v1 connector identity changed after password rotation")
-	}
-	otherUser := *base
-	otherUser.SourceURI = strings.Replace(otherUser.SourceURI, "reader:secret", "other:secret", 1)
-	if legacyCDCStateConnectorID(&otherUser) == legacyCDCStateConnectorID(base) {
-		t.Fatal("v1 connector identity incorrectly discarded the username")
-	}
-
-	explicit := *base
-	explicit.SourceURI += "&state_id=orders-east"
-	explicitWant := sha256.Sum256([]byte("explicit:orders-east"))
-	if got := legacyCDCStateConnectorID(&explicit); got != fmt.Sprintf("%x", explicitWant[:8]) {
-		t.Fatalf("legacy explicit connector ID = %s, want %x", got, explicitWant[:8])
-	}
-	explicitOtherDB := explicit
-	explicitOtherDB.SourceURI = "postgres+cdc://other@elsewhere/other?state_id=orders-east"
-	if legacyCDCStateConnectorID(&explicitOtherDB) != legacyCDCStateConnectorID(&explicit) {
-		t.Fatal("v1 explicit state_id was unexpectedly database-scoped")
-	}
 }
 
 func TestDroppedColumnsPKFiltering(t *testing.T) {

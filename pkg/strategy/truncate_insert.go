@@ -104,8 +104,6 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
-		CDCPreviousSlotSuffix:           job.Config.CDCPreviousSlotSuffix,
-		CDCPreviousSlotSuffixes:         job.Config.CDCPreviousSlotSuffixes,
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
@@ -185,8 +183,6 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
-		CDCPreviousSlotSuffix:           job.Config.CDCPreviousSlotSuffix,
-		CDCPreviousSlotSuffixes:         job.Config.CDCPreviousSlotSuffixes,
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
