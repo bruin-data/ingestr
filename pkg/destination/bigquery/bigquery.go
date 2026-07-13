@@ -408,7 +408,7 @@ func partitionByClause(column string, isDateColumn bool) string {
 
 // partitionOrClusterMismatch reports whether the table's partition/cluster spec
 // differs from the configured one. An empty configured spec means "leave as-is".
-func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata) bool {
+func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata, clusterBy []string) bool {
 	if d.partitionBy != "" {
 		if meta.RangePartitioning != nil {
 			return true
@@ -423,16 +423,16 @@ func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMet
 		}
 	}
 
-	if len(d.clusterBy) > 0 {
+	if len(clusterBy) > 0 {
 		var existingCluster []string
 		if meta.Clustering != nil {
 			existingCluster = meta.Clustering.Fields
 		}
-		if len(existingCluster) != len(d.clusterBy) {
+		if len(existingCluster) != len(clusterBy) {
 			return true
 		}
 		for i := range existingCluster {
-			if !strings.EqualFold(existingCluster[i], d.clusterBy[i]) {
+			if !strings.EqualFold(existingCluster[i], clusterBy[i]) {
 				return true
 			}
 		}
@@ -442,14 +442,26 @@ func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMet
 
 // recreateSpecGuard refuses a recreate that would silently drop a live spec half
 // the user didn't configure (recreate keeps only the configured partition/cluster).
-func (d *BigQueryDestination) recreateSpecGuard(meta *bigquery.TableMetadata, table string) error {
+func (d *BigQueryDestination) recreateSpecGuard(meta *bigquery.TableMetadata, table string, clusterBy []string) error {
 	if d.partitionBy == "" && (meta.TimePartitioning != nil || meta.RangePartitioning != nil) {
 		return fmt.Errorf("changing the clustering of %s requires recreating it, which would drop its existing partitioning; pass partition_by to keep (or change) it", table)
 	}
-	if len(d.clusterBy) == 0 && meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
+	if len(clusterBy) == 0 && meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		return fmt.Errorf("changing the partitioning of %s requires recreating it, which would drop its existing clustering (%s); pass cluster_by to keep (or change) it", table, strings.Join(meta.Clustering.Fields, ", "))
 	}
 	return nil
+}
+
+// effectiveClusterBy resolves the clustering ingestr would apply: the configured
+// cluster_by, or the default primary-key clustering when none is configured.
+func (d *BigQueryDestination) effectiveClusterBy(opts destination.SwapOptions) []string {
+	if len(d.clusterBy) > 0 {
+		return d.clusterBy
+	}
+	if opts.Schema == nil {
+		return nil
+	}
+	return defaultClusteringFromPrimaryKeys(BuildBigQuerySchema(opts.Schema), opts.Schema.PrimaryKeys)
 }
 
 // effectivePartitionType returns the time-partitioning type, resolving the unset
@@ -1092,14 +1104,17 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	// BigQuery can't ALTER partitioning/clustering, so a target whose spec differs
 	// must be recreated; detect once here (safe: replace overwrites the target anyway).
 	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTableName)
+	// Resolve the clustering ingestr would apply — including the default PK
+	// clustering — so the mismatch check, guard, and CTAS all agree with the table.
+	clusterBy := d.effectiveClusterBy(opts)
 	mismatch := false
 	var targetExpiration time.Time
-	if d.partitionBy != "" || len(d.clusterBy) > 0 {
+	if d.partitionBy != "" || len(clusterBy) > 0 {
 		if meta, err := targetRef.Metadata(ctx); err == nil {
-			mismatch = d.partitionOrClusterMismatch(meta)
+			mismatch = d.partitionOrClusterMismatch(meta, clusterBy)
 			targetExpiration = meta.ExpirationTime
 			if mismatch {
-				if err := d.recreateSpecGuard(meta, targetTable); err != nil {
+				if err := d.recreateSpecGuard(meta, targetTable, clusterBy); err != nil {
 					return err
 				}
 			}
@@ -1140,7 +1155,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 	// CTAS path. CREATE OR REPLACE can't change an existing table's spec, so on a
 	// mismatch rename the target aside, CTAS into a fresh target, drop the old.
 	ctas := func() error {
-		return d.runCTASSwap(ctx, opts, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+		return d.runCTASSwap(ctx, opts, clusterBy, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
 	}
 	var swapErr error
 	if mismatch {
@@ -1207,6 +1222,14 @@ func (d *BigQueryDestination) renameAsideSwap(ctx context.Context, project, data
 // renameTargetAside renames target → a unique aside name and sets a 24h
 // expiration on it so it self-cleans if a later drop never runs.
 func (d *BigQueryDestination) renameTargetAside(ctx context.Context, project, dataset, table string) (string, error) {
+	// BigQuery can't RENAME a table that has a primary-key constraint; drop it
+	// first (it's informational/not-enforced; the recreated target's spec comes
+	// from the swap, as in any replace).
+	dropPKSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s DROP PRIMARY KEY IF EXISTS",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
+	if _, err := d.runQueryJobWithRetry(ctx, dropPKSQL, "drop target primary key"); err != nil {
+		return "", fmt.Errorf("failed to drop primary key before renaming %q aside: %w", table, err)
+	}
 	for range 3 {
 		oldName := table + "__ingestr_repartition_" + repartitionAsideSuffix()
 		renameSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s RENAME TO %s",
@@ -1275,19 +1298,19 @@ func (d *BigQueryDestination) tableExists(ctx context.Context, project, dataset,
 
 // runCTASSwap creates/replaces the target from staging via CREATE OR REPLACE … AS
 // SELECT, applying partition/clustering. The CTAS swap step (direct or rename-aside).
-func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.SwapOptions, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName string) error {
+func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.SwapOptions, clusterBy []string, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName string) error {
 	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
 	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
-	if d.partitionBy != "" || len(d.clusterBy) > 0 {
+	if d.partitionBy != "" || len(clusterBy) > 0 {
 		// For partitioned/clustered tables, must use SQL to apply partitioning.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
 		if d.partitionBy != "" {
 			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
 		}
-		if len(d.clusterBy) > 0 {
-			clusterCols := make([]string, len(d.clusterBy))
-			for i, col := range d.clusterBy {
+		if len(clusterBy) > 0 {
+			clusterCols := make([]string, len(clusterBy))
+			for i, col := range clusterBy {
 				clusterCols[i] = quoteIdentifier(col)
 			}
 			sql += fmt.Sprintf("CLUSTER BY %s\n", strings.Join(clusterCols, ", "))

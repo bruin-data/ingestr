@@ -2269,7 +2269,7 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := &BigQueryDestination{partitionBy: tt.partitionBy, clusterBy: tt.clusterBy}
-			if got := d.partitionOrClusterMismatch(tt.meta); got != tt.want {
+			if got := d.partitionOrClusterMismatch(tt.meta, d.clusterBy); got != tt.want {
 				t.Fatalf("partitionOrClusterMismatch() = %v, want %v", got, tt.want)
 			}
 		})
@@ -2319,7 +2319,7 @@ func TestRecreateSpecGuard(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := &BigQueryDestination{partitionBy: tt.partitionBy, clusterBy: tt.clusterBy}
-			err := d.recreateSpecGuard(tt.meta, "p.ds.events")
+			err := d.recreateSpecGuard(tt.meta, "p.ds.events", d.clusterBy)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("recreateSpecGuard() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -2479,8 +2479,12 @@ func TestRenameAsideSwapSuccessDropsOld(t *testing.T) {
 		t.Fatal("swap closure was not called")
 	}
 	queries, drops := rec.snapshot()
-	// rename aside + set expiration
-	if len(queries) < 2 || !strings.Contains(queries[0], "RENAME TO") {
+	joined := strings.Join(queries, "\n")
+	// drop PK (so the rename is allowed) + rename aside + set expiration
+	if !strings.Contains(joined, "DROP PRIMARY KEY IF EXISTS") {
+		t.Fatalf("expected the primary key to be dropped before renaming, got: %v", queries)
+	}
+	if !strings.Contains(joined, "RENAME TO") {
 		t.Fatalf("expected a rename-aside query, got: %v", queries)
 	}
 	if len(drops) != 1 || !strings.HasPrefix(drops[0], "events__ingestr_repartition_") {
