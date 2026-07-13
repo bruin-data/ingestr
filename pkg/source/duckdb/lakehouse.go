@@ -11,7 +11,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 )
 
-const AttachAlias = "lake"
+const AttachAlias = "ducklake_catalog"
 
 type CatalogType string
 
