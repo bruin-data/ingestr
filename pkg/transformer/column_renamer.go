@@ -1,7 +1,9 @@
 package transformer
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -37,6 +39,19 @@ func (r *ColumnRenamer) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, e
 
 	cols := make([]arrow.Array, len(groups))
 	for i, group := range groups {
+		if group.field.Name == cdcUnchangedColsColumn {
+			col, err := r.transformUnchangedColumns(batch, groups, group)
+			if err != nil {
+				for _, col := range cols[:i] {
+					if col != nil {
+						col.Release()
+					}
+				}
+				return nil, err
+			}
+			cols[i] = col
+			continue
+		}
 		if !hasDuplicates || len(group.indices) == 1 {
 			cols[i] = batch.Column(group.indices[0])
 			cols[i].Retain()
@@ -134,10 +149,80 @@ func (r *ColumnRenamer) outputGroups(inputSchema *arrow.Schema) ([]columnRenameG
 }
 
 func (r *ColumnRenamer) outputName(name string) string {
+	if isCDCMetadataColumn(name) {
+		return name
+	}
 	if renamed, ok := r.mapping[name]; ok {
 		return renamed
 	}
 	return name
+}
+
+const cdcUnchangedColsColumn = "_cdc_unchanged_cols"
+
+func isCDCMetadataColumn(name string) bool {
+	switch strings.ToLower(name) {
+	case "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", cdcUnchangedColsColumn:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *ColumnRenamer) transformUnchangedColumns(batch arrow.RecordBatch, groups []columnRenameGroup, markerGroup columnRenameGroup) (arrow.Array, error) {
+	if len(markerGroup.indices) != 1 {
+		return nil, fmt.Errorf("CDC unchanged-column marker has %d source columns", len(markerGroup.indices))
+	}
+	markers, ok := batch.Column(markerGroup.indices[0]).(*array.String)
+	if !ok {
+		return nil, fmt.Errorf("CDC unchanged-column marker has Arrow type %s, want string", batch.Column(markerGroup.indices[0]).DataType())
+	}
+
+	builder := array.NewStringBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+	for row := 0; row < int(batch.NumRows()); row++ {
+		if markers.IsNull(row) {
+			builder.AppendNull()
+			continue
+		}
+
+		raw := markers.Value(row)
+		var sourceMarkers []string
+		if err := json.Unmarshal([]byte(raw), &sourceMarkers); err != nil {
+			return nil, fmt.Errorf("invalid CDC unchanged-column marker at row %d: %w", row, err)
+		}
+		marked := make(map[string]struct{}, len(sourceMarkers))
+		for _, name := range sourceMarkers {
+			marked[name] = struct{}{}
+		}
+
+		outputMarkers := make([]string, 0, len(sourceMarkers))
+		for _, group := range groups {
+			if isCDCMetadataColumn(group.field.Name) {
+				continue
+			}
+			allUnchanged := true
+			for _, sourceIndex := range group.indices {
+				if _, ok := marked[batch.Schema().Field(sourceIndex).Name]; !ok {
+					allUnchanged = false
+					break
+				}
+			}
+			if allUnchanged {
+				outputMarkers = append(outputMarkers, group.field.Name)
+			}
+		}
+
+		encoded, err := json.Marshal(outputMarkers)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode CDC unchanged-column marker at row %d: %w", row, err)
+		}
+		if strings.TrimSpace(raw) == "null" {
+			encoded = []byte("null")
+		}
+		builder.Append(string(encoded))
+	}
+	return builder.NewArray(), nil
 }
 
 func mergeArrowFields(existing, next arrow.Field) arrow.Field {

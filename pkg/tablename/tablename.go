@@ -44,6 +44,17 @@ type Capability struct {
 // characters are unescaped. Ported from the MSSQL source splitter so quoting
 // is handled in exactly one place.
 func Split(name string) []string {
+	parts := SplitRaw(name)
+	for i, p := range parts {
+		parts[i] = normalizePart(p)
+	}
+	return parts
+}
+
+// SplitRaw breaks name into the same components as Split while preserving
+// identifier delimiters and escaping. It is intended for code that must render
+// a derived identifier back into the same catalog or schema.
+func SplitRaw(name string) []string {
 	name = strings.TrimSpace(name)
 	var parts []string
 	var cur strings.Builder
@@ -85,7 +96,7 @@ func Split(name string) []string {
 	parts = append(parts, cur.String())
 
 	for i, p := range parts {
-		parts[i] = normalizePart(p)
+		parts[i] = strings.TrimSpace(p)
 	}
 	return parts
 }

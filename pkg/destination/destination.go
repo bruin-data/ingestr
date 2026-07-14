@@ -2,6 +2,10 @@ package destination
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,6 +138,9 @@ type MultiTableWriteOptions struct {
 	StagingBucket    string
 	LoaderFileSize   int
 	LoaderFileFormat string
+	// CancelSource stops the producer when a per-table writer fails. The writer
+	// drains records after invoking it so producer-owned resources can unwind.
+	CancelSource context.CancelFunc
 }
 
 // CDCResumeProvider is an optional interface that destinations can implement
@@ -142,6 +149,149 @@ type MultiTableWriteOptions struct {
 type CDCResumeProvider interface {
 	// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table, or empty string if none found.
 	GetMaxCDCLSN(ctx context.Context, table string) (string, error)
+}
+
+const CDCStateStatusComplete = "complete"
+
+// CDCStateEntry is one append-only event from the shared destination CDC state
+// table. Consumers reduce entries by source table, state kind, and generation.
+type CDCStateEntry struct {
+	EventID          string
+	SourceTable      string
+	DestinationTable string
+	StateKind        string
+	Generation       int64
+	Status           string
+	Position         string
+	RecordedAt       time.Time
+}
+
+// CDCStateReader loads all state events for one logical connector from the
+// destination's shared managed-state table.
+type CDCStateReader interface {
+	LoadCDCState(ctx context.Context, table, connectorID string) ([]CDCStateEntry, error)
+}
+
+// CDCStateFence identifies every run sentinel at a connector's latest run
+// generation. Multiple event IDs mean ownership of that generation conflicts.
+type CDCStateFence struct {
+	Generation  int64
+	RunEventIDs []string
+}
+
+// CDCStateFenceReader loads only the latest-generation run sentinels needed to
+// fence checkpoint writes, without scanning snapshot or checkpoint events.
+type CDCStateFenceReader interface {
+	LoadCDCStateFence(ctx context.Context, table, connectorID string) (CDCStateFence, error)
+}
+
+// CDCStateWriter persists CDC state using destination-specific durability
+// guarantees that may be stronger than ordinary data writes.
+type CDCStateWriter interface {
+	WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
+}
+
+type CDCTargetClaim struct {
+	DestinationTable string
+	ConnectorID      string
+	SourceTable      string
+}
+
+func (c CDCTargetClaim) OwnerID() (string, error) {
+	if c.ConnectorID == "" || c.SourceTable == "" {
+		return "", fmt.Errorf("CDC target claim requires non-empty connector and source table identifiers")
+	}
+	return CDCTargetOwnerID(c.ConnectorID, c.SourceTable), nil
+}
+
+func CDCTargetOwnerID(connectorID, sourceTable string) string {
+	sum := sha256.Sum256([]byte(connectorID + "\x00" + sourceTable))
+	return hex.EncodeToString(sum[:])
+}
+
+// CDCTargetKey encodes identifier components without collisions between dots
+// inside quoted identifiers and qualification separators.
+func CDCTargetKey(components ...string) string {
+	var key strings.Builder
+	for _, component := range components {
+		encoded := hex.EncodeToString([]byte(component))
+		key.WriteString(strconv.Itoa(len(encoded)))
+		key.WriteByte(':')
+		key.WriteString(encoded)
+	}
+	return key.String()
+}
+
+func CDCTargetKeyDigest(components ...string) string {
+	sum := sha256.Sum256([]byte(CDCTargetKey(components...)))
+	return hex.EncodeToString(sum[:])
+}
+
+// CDCTargetClaimer durably assigns one canonical destination table to one CDC
+// connector. Claims are permanent, idempotent for the current owner, and must
+// atomically reject a different connector even across concurrent processes.
+type CDCTargetClaimer interface {
+	ClaimCDCTarget(ctx context.Context, claimTable string, claim CDCTargetClaim) error
+}
+
+// CDCLateTargetClaimPreparer atomically reserves an absent CDC target and
+// creates it empty. If the target already exists or the reservation conflicts,
+// neither the target nor its claim may be changed.
+type CDCLateTargetClaimPreparer interface {
+	ClaimAndPrepareEmptyCDCTarget(ctx context.Context, claimTable string, claim CDCTargetClaim, opts PrepareOptions) (incarnation string, err error)
+}
+
+// CDCConditionalTruncater empties a CDC target only when its current physical
+// identity is exactly the expected incarnation. The comparison and truncate
+// must be protected by one destination-level transaction or lock.
+type CDCConditionalTruncater interface {
+	TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error
+}
+
+// CDCTargetIncarnationInitializer establishes destination-specific physical
+// identity metadata after a target claim succeeds. It must not be called while
+// validating an unclaimed target.
+type CDCTargetIncarnationInitializer interface {
+	EnsureCDCTargetIncarnation(ctx context.Context, table string) (incarnation string, exists bool, err error)
+}
+
+// CDCTargetIdentityProvider resolves a configured target to the destination's
+// canonical physical namespace. Managed CDC uses it to distinguish unqualified
+// targets that resolve differently under different connection identities.
+type CDCTargetIdentityProvider interface {
+	CanonicalCDCTarget(ctx context.Context, table string) (string, error)
+}
+
+// CDCTargetIncarnationProvider returns an opaque identity for the current
+// physical table. The identity must change when the table is dropped,
+// recreated, or otherwise replaced outside the CDC run.
+type CDCTargetIncarnationProvider interface {
+	CDCTargetIncarnation(ctx context.Context, table string) (incarnation string, exists bool, err error)
+}
+
+// ManagedCDCStateValidator checks destination-specific durability requirements
+// before a managed CDC run acquires a lease or mutates destination state.
+type ManagedCDCStateValidator interface {
+	ValidateManagedCDCState() error
+}
+
+// ManagedCDCTargetValidator checks requirements that depend on the resolved
+// destination table, such as a database-scoped SQL compatibility level.
+type ManagedCDCTargetValidator interface {
+	ValidateManagedCDCTarget(ctx context.Context, table string) error
+}
+
+// CDCStatePruner removes superseded events belonging to one connector. State
+// managers append replacement events before pruning, so cleanup is retryable
+// and never participates in the durability decision for a checkpoint.
+type CDCStatePruner interface {
+	DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error
+}
+
+// CDCStatePruneBatchSizer advertises how many exact event IDs a destination
+// can accept in one state-pruning phase. Implementations may chunk internally.
+type CDCStatePruneBatchSizer interface {
+	CDCStatePruneBatchSize() int
 }
 
 // CDCMergeAware is an optional interface that destinations can implement
@@ -193,6 +343,12 @@ type TruncateCapable interface {
 	TruncateTable(ctx context.Context, table string) error
 }
 
+// CDCTruncateCapable empties a CDC target without replacing its physical table
+// identity. Native TRUNCATE implementations may otherwise use drop/create.
+type CDCTruncateCapable interface {
+	TruncateCDCTable(ctx context.Context, table string) error
+}
+
 // ConcurrentFlusher is an optional interface for destinations whose
 // write+merge cycles for *different* tables can safely run concurrently
 // (connection-pool backed databases, where each cycle uses its own
@@ -233,4 +389,10 @@ type ReplaceStagingPolicyProvider interface {
 // staging tables should live when the user did not configure a staging dataset.
 type ManagedStagingPolicyProvider interface {
 	ManagedStagingPolicy() ReplaceStagingPolicy
+}
+
+// ManagedCDCStateCatalogProvider supplies the connected catalog/project when
+// a CDC state table has no target anchor from which to derive one.
+type ManagedCDCStateCatalogProvider interface {
+	ManagedCDCStateCatalog() string
 }

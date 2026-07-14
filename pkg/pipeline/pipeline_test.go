@@ -2,26 +2,436 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	internalregistry "github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/stretchr/testify/require"
 )
 
 type mockDestination struct {
 	destination.Destination
 	tableSchema *schema.TableSchema
 	scheme      string
+}
+
+type mockConnectorLease struct {
+	done chan struct{}
+	err  error
+}
+
+type preflightTimingSource struct {
+	connected bool
+	closed    bool
+	prepared  bool
+}
+
+func (s *preflightTimingSource) Schemes() []string { return []string{"postgres+cdc"} }
+func (s *preflightTimingSource) Connect(context.Context, string) error {
+	s.connected = true
+	return nil
+}
+
+func (s *preflightTimingSource) Close(ctx context.Context) error {
+	s.closed = true
+	if ctx.Err() != nil {
+		return fmt.Errorf("close received cancelled context: %w", ctx.Err())
+	}
+	return nil
+}
+
+func (s *preflightTimingSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
+	return nil, errors.New("GetTable must not be called after preflight failure")
+}
+func (s *preflightTimingSource) HandlesIncrementality() bool { return false }
+func (s *preflightTimingSource) ConnectorIdentity(context.Context) (source.ConnectorIdentity, error) {
+	return source.ConnectorIdentity{Database: "db", Connector: "connector"}, nil
+}
+
+func (s *preflightTimingSource) ValidateConnectorPreflight(context.Context, source.ConnectorPreflightOptions) error {
+	return errors.New("PostgreSQL 14 or newer is required")
+}
+
+func (s *preflightTimingSource) PrepareConnector(context.Context) error {
+	s.prepared = true
+	return nil
+}
+
+type preflightTimingDestination struct {
+	mockDestination
+	connected bool
+}
+
+func (d *preflightTimingDestination) Connect(context.Context, string) error {
+	d.connected = true
+	return nil
+}
+
+type postgresCDCAdmissionSource struct {
+	preflightTimingSource
+}
+
+func (s *postgresCDCAdmissionSource) ValidateConnectorPreflight(context.Context, source.ConnectorPreflightOptions) error {
+	return nil
+}
+
+type postgresCDCAdmissionDestination struct {
+	mockDestination
+	connected bool
+	closed    bool
+}
+
+type postgresCDCTargetValidationDestination struct {
+	mockManagedCDCStateDestination
+	connected bool
+	closed    bool
+	target    string
+}
+
+type invalidStrategyTimingSource struct {
+	connectCalls   int
+	prepareCalls   int
+	leaseCalls     int
+	getTableCalls  int
+	getTablesCalls int
+}
+
+func (s *invalidStrategyTimingSource) Schemes() []string { return []string{"postgres+cdc"} }
+
+func (s *invalidStrategyTimingSource) Connect(context.Context, string) error {
+	s.connectCalls++
+	return nil
+}
+
+func (s *invalidStrategyTimingSource) Close(context.Context) error { return nil }
+
+func (s *invalidStrategyTimingSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
+	s.getTableCalls++
+	return nil, errors.New("GetTable must not run for an invalid PostgreSQL CDC strategy")
+}
+
+func (s *invalidStrategyTimingSource) HandlesIncrementality() bool { return true }
+
+func (s *invalidStrategyTimingSource) ConnectorIdentity(context.Context) (source.ConnectorIdentity, error) {
+	return source.ConnectorIdentity{Database: "db", Connector: "connector"}, nil
+}
+
+func (s *invalidStrategyTimingSource) PrepareConnector(context.Context) error {
+	s.prepareCalls++
+	return nil
+}
+
+func (s *invalidStrategyTimingSource) AcquireConnectorLease(context.Context, source.ConnectorLeaseOptions) (source.ConnectorLease, error) {
+	s.leaseCalls++
+	return &mockConnectorLease{done: make(chan struct{})}, nil
+}
+
+func (s *invalidStrategyTimingSource) IsMultiTable() bool { return true }
+
+func (s *invalidStrategyTimingSource) GetTables(context.Context) ([]source.SourceTableInfo, error) {
+	s.getTablesCalls++
+	return nil, errors.New("GetTables must not run for an invalid PostgreSQL CDC strategy")
+}
+
+func (s *invalidStrategyTimingSource) ReadAll(context.Context, source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	return nil, errors.New("ReadAll must not run for an invalid PostgreSQL CDC strategy")
+}
+
+type invalidStrategyTimingDestination struct {
+	mockManagedCDCStateDestination
+	connectCalls     int
+	prepareCalls     int
+	stateWriteCalls  int
+	stateLoadCalls   int
+	targetClaimCalls int
+}
+
+func (d *invalidStrategyTimingDestination) Connect(context.Context, string) error {
+	d.connectCalls++
+	return nil
+}
+
+func (d *invalidStrategyTimingDestination) PrepareTable(context.Context, destination.PrepareOptions) error {
+	d.prepareCalls++
+	return nil
+}
+
+func (d *invalidStrategyTimingDestination) WriteCDCState(context.Context, <-chan source.RecordBatchResult, destination.WriteOptions) error {
+	d.stateWriteCalls++
+	return nil
+}
+
+func (d *invalidStrategyTimingDestination) LoadCDCState(context.Context, string, string) ([]destination.CDCStateEntry, error) {
+	d.stateLoadCalls++
+	return nil, nil
+}
+
+func (d *invalidStrategyTimingDestination) ClaimCDCTarget(context.Context, string, destination.CDCTargetClaim) error {
+	d.targetClaimCalls++
+	return nil
+}
+
+func (d *postgresCDCTargetValidationDestination) Connect(context.Context, string) error {
+	d.connected = true
+	return nil
+}
+
+func (d *postgresCDCTargetValidationDestination) Close(context.Context) error {
+	d.closed = true
+	return nil
+}
+
+func (d *postgresCDCTargetValidationDestination) ValidateManagedCDCTarget(_ context.Context, table string) error {
+	d.target = table
+	return errors.New("compatibility level 120 does not support OPENJSON")
+}
+
+func (d *postgresCDCAdmissionDestination) Connect(context.Context, string) error {
+	d.connected = true
+	return nil
+}
+
+func (d *postgresCDCAdmissionDestination) Close(context.Context) error {
+	d.closed = true
+	return nil
+}
+
+func TestSourcePreflightRunsBeforeDestinationAndMutatingPreparation(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, oldSource)
+
+	src := &preflightTimingSource{}
+	dest := &preflightTimingDestination{}
+	internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, func() interface{} { return src })
+	internalregistry.Default.RegisterDestination([]string{"preflight-dest"}, func() interface{} { return dest })
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db?mode=batch"
+	cfg.DestURI = "preflight-dest://destination/db"
+	cfg.SourceTable = "public.items"
+	cfg.DestTable = "raw.items"
+
+	err = New(cfg).Run(context.Background())
+	require.ErrorContains(t, err, "source connector preflight failed")
+	require.True(t, src.connected)
+	require.True(t, src.closed)
+	require.False(t, src.prepared, "publication preparation ran before preflight")
+	require.False(t, dest.connected, "destination connected before source preflight")
+}
+
+func TestPostgresCDCRejectsUnsupportedStrategiesBeforeConnectorAndStateWork(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, oldSource)
+
+	tests := []struct {
+		name        string
+		strategy    config.IncrementalStrategy
+		sourceTable string
+		explicit    bool
+	}{
+		{name: "single table explicit delete insert", strategy: config.StrategyDeleteInsert, sourceTable: "public.items", explicit: true},
+		{name: "single table effective scd2", strategy: config.StrategySCD2, sourceTable: "public.items"},
+		{name: "multi table effective delete insert", strategy: config.StrategyDeleteInsert},
+		{name: "multi table explicit scd2", strategy: config.StrategySCD2, explicit: true},
+		{name: "single table explicit truncate insert", strategy: config.StrategyTruncateInsert, sourceTable: "public.items", explicit: true},
+		{name: "multi table effective truncate insert", strategy: config.StrategyTruncateInsert},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &invalidStrategyTimingSource{}
+			dest := &invalidStrategyTimingDestination{}
+			sourceFactoryCalls := 0
+			destinationFactoryCalls := 0
+			internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, func() interface{} {
+				sourceFactoryCalls++
+				return src
+			})
+			internalregistry.Default.RegisterDestination([]string{"invalid-strategy-timing"}, func() interface{} {
+				destinationFactoryCalls++
+				return dest
+			})
+
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://source/db?mode=batch"
+			cfg.DestURI = "invalid-strategy-timing://destination/db"
+			cfg.SourceTable = tt.sourceTable
+			cfg.DestTable = "raw.items"
+			cfg.IncrementalStrategy = tt.strategy
+			cfg.IncrementalStrategyExplicit = tt.explicit
+
+			err := New(cfg).Run(t.Context())
+			require.ErrorContains(t, err, `incremental-strategy`)
+			require.ErrorContains(t, err, string(tt.strategy))
+			require.Zero(t, sourceFactoryCalls)
+			require.Zero(t, destinationFactoryCalls)
+			require.Zero(t, src.connectCalls)
+			require.Zero(t, src.prepareCalls, "connector publication preparation ran for an invalid strategy")
+			require.Zero(t, src.leaseCalls, "connector lease was acquired for an invalid strategy")
+			require.Zero(t, src.getTableCalls)
+			require.Zero(t, src.getTablesCalls)
+			require.Zero(t, dest.connectCalls)
+			require.Zero(t, dest.prepareCalls, "managed state tables were prepared for an invalid strategy")
+			require.Zero(t, dest.stateWriteCalls, "managed state was written for an invalid strategy")
+			require.Zero(t, dest.stateLoadCalls, "predecessor state adoption was probed for an invalid strategy")
+			require.Zero(t, dest.targetClaimCalls, "destination target was claimed for an invalid strategy")
+		})
+	}
+}
+
+func TestPostgresCDCManagedStrategyDefaultsRemainValid(t *testing.T) {
+	tests := []struct {
+		name        string
+		strategy    config.IncrementalStrategy
+		explicit    bool
+		fullRefresh bool
+	}{
+		{name: "default replace rewrites to merge", strategy: config.StrategyReplace},
+		{name: "empty strategy resolves later"},
+		{name: "explicit replace rewrites to merge", strategy: config.StrategyReplace, explicit: true},
+		{name: "full refresh overrides scd2 with replace", strategy: config.StrategySCD2, explicit: true, fullRefresh: true},
+		{name: "full refresh permits truncate insert override", strategy: config.StrategyTruncateInsert, explicit: true, fullRefresh: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://source/db?mode=batch"
+			cfg.IncrementalStrategy = tt.strategy
+			cfg.IncrementalStrategyExplicit = tt.explicit
+			cfg.FullRefresh = tt.fullRefresh
+			require.NoError(t, validateManagedChangeConfig(cfg))
+		})
+	}
+}
+
+func TestPostgresCDCFailsClosedBeforeConnectorPreparationForUnsafeDestination(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, oldSource)
+
+	src := &postgresCDCAdmissionSource{}
+	dest := &postgresCDCAdmissionDestination{mockDestination: mockDestination{scheme: "unsafe-cdc-dest"}}
+	internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, func() interface{} { return src })
+	internalregistry.Default.RegisterDestination([]string{"unsafe-cdc-dest"}, func() interface{} { return dest })
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db?mode=batch"
+	cfg.DestURI = "unsafe-cdc-dest://destination/db"
+	cfg.SourceTable = "public.items"
+	cfg.DestTable = "raw.items"
+
+	err = New(cfg).Run(context.Background())
+	require.ErrorContains(t, err, "cannot safely run PostgreSQL CDC")
+	require.ErrorContains(t, err, "destination-managed state")
+	require.True(t, src.connected)
+	require.True(t, src.closed)
+	require.True(t, dest.connected)
+	require.True(t, dest.closed)
+	require.False(t, src.prepared, "connector preparation ran before destination safety validation")
+}
+
+func TestPostgresCDCTargetValidationRunsBeforeConnectorPreparation(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, oldSource)
+
+	src := &postgresCDCAdmissionSource{}
+	dest := &postgresCDCTargetValidationDestination{}
+	dest.scheme = "target-preflight-dest"
+	internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, func() interface{} { return src })
+	internalregistry.Default.RegisterDestination([]string{"target-preflight-dest"}, func() interface{} { return dest })
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db?mode=batch"
+	cfg.DestURI = "target-preflight-dest://destination/db"
+	cfg.SourceTable = "public.items"
+	cfg.DestTable = "legacy.dbo.items"
+
+	err = New(cfg).Run(context.Background())
+	require.ErrorContains(t, err, "compatibility level 120")
+	require.Equal(t, cfg.DestTable, dest.target)
+	require.True(t, dest.connected)
+	require.True(t, dest.closed)
+	require.False(t, src.prepared, "connector preparation ran before target compatibility validation")
+}
+
+func (l *mockConnectorLease) Done() <-chan struct{} { return l.done }
+func (l *mockConnectorLease) Err() error            { return l.err }
+func (l *mockConnectorLease) Release() error        { return nil }
+
+func TestConnectorLeaseContextCancelsWithLossCause(t *testing.T) {
+	loss := errors.New("lease backend terminated")
+	lease := &mockConnectorLease{done: make(chan struct{}), err: loss}
+	ctx, stop := connectorLeaseContext(context.Background(), lease)
+	defer stop()
+	close(lease.done)
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("lease loss did not cancel pipeline context")
+	}
+	if !errors.Is(context.Cause(ctx), loss) {
+		t.Fatalf("pipeline cancellation cause = %v, want %v", context.Cause(ctx), loss)
+	}
+	if !errors.Is(context.Cause(ctx), source.ErrConnectorLeaseLost) {
+		t.Fatalf("pipeline cancellation cause = %v, want connector lease sentinel", context.Cause(ctx))
+	}
+}
+
+func TestConnectorLeaseContextNormalStopLeavesRunContextActive(t *testing.T) {
+	lease := &mockConnectorLease{done: make(chan struct{})}
+	ctx, stop := connectorLeaseContext(context.Background(), lease)
+	stop()
+	require.NoError(t, ctx.Err())
+	require.NoError(t, context.Cause(ctx))
+}
+
+func TestConnectorLeaseContextKeepsGuardAfterParentCancellation(t *testing.T) {
+	loss := errors.New("lease backend terminated during shutdown")
+	lease := &mockConnectorLease{done: make(chan struct{}), err: loss}
+	parent, cancelParent := context.WithCancel(context.Background())
+	ctx, stop := connectorLeaseContext(parent, lease)
+	defer stop()
+
+	cancelParent()
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.Nil(t, source.ConnectorLeaseLoss(ctx))
+
+	close(lease.done)
+	require.Eventually(t, func() bool {
+		return errors.Is(source.ConnectorLeaseLoss(ctx), loss)
+	}, time.Second, time.Millisecond)
+}
+
+func TestResourceCloseContextDetachesCancellationAndPreservesValues(t *testing.T) {
+	type contextKey string
+	parent, cancelParent := context.WithCancel(context.WithValue(context.Background(), contextKey("key"), "value"))
+	cancelParent()
+	ctx, cancel := resourceCloseContext(parent)
+	defer cancel()
+	require.NoError(t, ctx.Err())
+	require.Equal(t, "value", ctx.Value(contextKey("key")))
+	_, hasDeadline := ctx.Deadline()
+	require.True(t, hasDeadline)
 }
 
 func (m *mockDestination) GetTableSchema(_ context.Context, _ string) (*schema.TableSchema, error) {
@@ -41,6 +451,476 @@ type mockCDCResumeDestination struct {
 
 func (m *mockCDCResumeDestination) GetMaxCDCLSN(_ context.Context, _ string) (string, error) {
 	return "", nil
+}
+
+type mockManagedCDCStateDestination struct {
+	mockCDCResumeDestination
+}
+
+func (m *mockManagedCDCStateDestination) SupportsCDCMerge() bool { return true }
+
+func (m *mockManagedCDCStateDestination) SupportsCDCUnchangedCols() bool { return true }
+
+type mockUnsafeToastCDCStateDestination struct {
+	mockManagedCDCStateDestination
+}
+
+func (m *mockUnsafeToastCDCStateDestination) SupportsCDCUnchangedCols() bool { return false }
+
+func (m *mockManagedCDCStateDestination) CDCTargetIncarnation(_ context.Context, table string) (string, bool, error) {
+	return "incarnation:" + table, true, nil
+}
+
+type canonicalIdentityDestination struct {
+	mockManagedCDCStateDestination
+	identity string
+	calls    int
+	targets  []string
+}
+
+func (d *canonicalIdentityDestination) CanonicalCDCTarget(_ context.Context, target string) (string, error) {
+	d.calls++
+	d.targets = append(d.targets, target)
+	if d.identity == "" {
+		return strings.ToLower(target), nil
+	}
+	return d.identity, nil
+}
+
+func (d *canonicalIdentityDestination) DestTableName(destSchema, sourceTable string) string {
+	return destSchema + "." + strings.ReplaceAll(sourceTable, ".", "_")
+}
+
+func (m *mockManagedCDCStateDestination) ClaimCDCTarget(_ context.Context, _ string, _ destination.CDCTargetClaim) error {
+	return nil
+}
+
+type claimCountingManagedDestination struct {
+	mockManagedCDCStateDestination
+	claimCalls int
+}
+
+func (d *claimCountingManagedDestination) ClaimCDCTarget(_ context.Context, _ string, _ destination.CDCTargetClaim) error {
+	d.claimCalls++
+	return nil
+}
+
+type staticMultiTableSource struct {
+	tables []source.SourceTableInfo
+}
+
+type emptyInitialManagedDestination struct {
+	mockManagedCDCStateDestination
+}
+
+func (d *emptyInitialManagedDestination) PrepareTable(context.Context, destination.PrepareOptions) error {
+	return nil
+}
+
+func (d *emptyInitialManagedDestination) WriteCDCState(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return nil
+}
+
+type constantMultiTableNamer struct{}
+
+func (constantMultiTableNamer) DestTableName(string, string) string {
+	return "project.landing.shared"
+}
+
+type caseFoldingManagedDestination struct {
+	mockManagedCDCStateDestination
+	owners map[string]string
+}
+
+func (d *caseFoldingManagedDestination) DestTableName(destSchema, sourceTable string) string {
+	return destSchema + "." + strings.ReplaceAll(sourceTable, ".", "_")
+}
+
+func (d *caseFoldingManagedDestination) PrepareTable(context.Context, destination.PrepareOptions) error {
+	return nil
+}
+
+func (d *caseFoldingManagedDestination) ClaimCDCTarget(_ context.Context, _ string, claim destination.CDCTargetClaim) error {
+	target := strings.ToLower(claim.DestinationTable)
+	owner := destination.CDCTargetOwnerID(claim.ConnectorID, claim.SourceTable)
+	if existing := d.owners[target]; existing != "" && existing != owner {
+		return fmt.Errorf("destination table %q is already claimed", target)
+	}
+	d.owners[target] = owner
+	return nil
+}
+
+func (s *staticMultiTableSource) Schemes() []string { return []string{"postgres+cdc"} }
+func (s *staticMultiTableSource) Connect(context.Context, string) error {
+	return nil
+}
+func (s *staticMultiTableSource) Close(context.Context) error { return nil }
+func (s *staticMultiTableSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
+	return nil, errors.New("single-table lookup is not supported")
+}
+func (s *staticMultiTableSource) HandlesIncrementality() bool { return true }
+func (s *staticMultiTableSource) IsMultiTable() bool          { return true }
+func (s *staticMultiTableSource) GetTables(context.Context) ([]source.SourceTableInfo, error) {
+	return append([]source.SourceTableInfo(nil), s.tables...), nil
+}
+
+func (s *staticMultiTableSource) ReadAll(context.Context, source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	return nil, errors.New("ReadAll must not run after a destination mapping collision")
+}
+
+func TestRunMultiTableRejectsDestinationCollisionBeforeClaim(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: "a.b_c", DestSchema: "landing", Schema: &schema.TableSchema{}},
+		{Name: "a_b.c", DestSchema: "landing", Schema: &schema.TableSchema{}},
+	}
+	dest := &claimCountingManagedDestination{}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db"
+	cfg.NoLoadTimestamp = true
+	cfg.Progress = config.ProgressLog
+	p := &Pipeline{config: cfg, dest: dest, cdcConnectorID: "connector"}
+
+	err := p.runMultiTable(t.Context(), &staticMultiTableSource{tables: tables})
+	require.ErrorContains(t, err, "multi-table destination collision")
+	require.ErrorContains(t, err, "a.b_c")
+	require.ErrorContains(t, err, "a_b.c")
+	require.ErrorContains(t, err, "landing.a_b_c")
+	require.Zero(t, dest.claimCalls, "collision was detected after a durable target claim")
+}
+
+func TestRunMultiTableStreamingPostgresCDCDoesNotExitOnEmptyInitialTableSet(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db"
+	cfg.Stream = true
+	cfg.IncrementalStrategy = config.StrategyMerge
+	cfg.NoLoadTimestamp = true
+	cfg.FlushInterval = time.Hour
+	cfg.FlushRecords = 1
+	p := &Pipeline{config: cfg, dest: &emptyInitialManagedDestination{}, cdcConnectorID: "connector"}
+
+	err := p.runMultiTable(t.Context(), &staticMultiTableSource{})
+	require.ErrorContains(t, err, "ReadAll must not run", "streaming CDC must reach ReadAll so a table appearing after the first GetTables call can be announced")
+}
+
+func TestMultiTableDestinationNamesChecksDestinationOverrideCollisions(t *testing.T) {
+	tables := []source.SourceTableInfo{{Name: "public.orders"}, {Name: "sales.orders"}}
+
+	_, err := multiTableDestinationNames(tables, "", constantMultiTableNamer{})
+	require.ErrorContains(t, err, "multi-table destination collision")
+	require.ErrorContains(t, err, "project.landing.shared")
+}
+
+func TestMultiTableDestinationNamesShortensLongFinalComponents(t *testing.T) {
+	schemaPrefix := strings.Repeat("s", 40)
+	tablePrefix := strings.Repeat("t", 40)
+	tables := []source.SourceTableInfo{
+		{Name: schemaPrefix + "." + tablePrefix + "_one", DestSchema: "landing"},
+		{Name: schemaPrefix + "." + tablePrefix + "_two", DestSchema: "landing"},
+	}
+
+	first, err := multiTableDestinationNames(tables, "postgres", nil)
+	require.NoError(t, err)
+	second, err := multiTableDestinationNames(tables, "postgres", nil)
+	require.NoError(t, err)
+	require.Equal(t, first, second, "destination mapping changed across restart")
+	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
+	for _, table := range tables {
+		mapped := first[table.Name]
+		require.True(t, strings.HasPrefix(mapped, "landing."))
+		parts := tablename.Split(mapped)
+		require.Len(t, parts, 2)
+		require.LessOrEqual(t, len(parts[1]), destination.MaxIdentifierLength("postgres"))
+	}
+}
+
+func TestMultiTableDestinationNamesShortensMultibyteFinalComponents(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: strings.Repeat("é", 20) + "." + strings.Repeat("界", 14) + "一", DestSchema: "landing"},
+		{Name: strings.Repeat("é", 20) + "." + strings.Repeat("界", 14) + "二", DestSchema: "landing"},
+	}
+
+	first, err := multiTableDestinationNames(tables, "postgres", nil)
+	require.NoError(t, err)
+	second, err := multiTableDestinationNames(tables, "postgres", nil)
+	require.NoError(t, err)
+	require.Equal(t, first, second, "multibyte destination mapping changed across restart")
+	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
+	for _, table := range tables {
+		mapped := first[table.Name]
+		require.True(t, utf8.ValidString(mapped))
+		parts := tablename.Split(mapped)
+		require.Len(t, parts, 2)
+		require.LessOrEqual(t, len(parts[1]), destination.MaxIdentifierLength("postgres"))
+	}
+}
+
+func TestRunMultiTableRejectsPhysicalAliasClaimsBeforeEvolution(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: "public.Orders", DestSchema: "landing", Schema: &schema.TableSchema{}},
+		{Name: "public.orders", DestSchema: "landing", Schema: &schema.TableSchema{}},
+	}
+	dest := &caseFoldingManagedDestination{owners: make(map[string]string)}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db"
+	cfg.NoLoadTimestamp = true
+	cfg.Progress = config.ProgressLog
+	p := &Pipeline{config: cfg, dest: dest, cdcConnectorID: "connector"}
+
+	err := p.runMultiTable(t.Context(), &staticMultiTableSource{tables: tables})
+	require.ErrorContains(t, err, "already claimed")
+	require.Empty(t, p.schemaComparison, "physical alias reached schema evolution")
+}
+
+type missingTableCDCSource struct {
+	connected bool
+	closed    bool
+	lease     *mockConnectorLease
+}
+
+func (s *missingTableCDCSource) Schemes() []string { return []string{"postgres+cdc"} }
+func (s *missingTableCDCSource) Connect(context.Context, string) error {
+	s.connected = true
+	return nil
+}
+
+func (s *missingTableCDCSource) Close(context.Context) error {
+	s.closed = true
+	return nil
+}
+
+func (s *missingTableCDCSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
+	return nil, errors.New("GetTable must not run for a confirmed missing source table")
+}
+func (s *missingTableCDCSource) HandlesIncrementality() bool { return true }
+func (s *missingTableCDCSource) ConnectorIdentity(context.Context) (source.ConnectorIdentity, error) {
+	return source.ConnectorIdentity{Database: "source_db", Connector: "source-instance"}, nil
+}
+
+func (s *missingTableCDCSource) AcquireConnectorLease(context.Context, source.ConnectorLeaseOptions) (source.ConnectorLease, error) {
+	return s.lease, nil
+}
+
+func (s *missingTableCDCSource) TableExists(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+type missingSourceManagedDestination struct {
+	mockManagedCDCStateDestination
+	connected     bool
+	closed        bool
+	prepareTables []string
+	claimCalls    int
+}
+
+func (d *missingSourceManagedDestination) Connect(context.Context, string) error {
+	d.connected = true
+	return nil
+}
+
+func (d *missingSourceManagedDestination) Close(context.Context) error {
+	d.closed = true
+	return nil
+}
+
+func (d *missingSourceManagedDestination) PrepareTable(_ context.Context, opts destination.PrepareOptions) error {
+	d.prepareTables = append(d.prepareTables, opts.Table)
+	return nil
+}
+
+func (d *missingSourceManagedDestination) ClaimCDCTarget(context.Context, string, destination.CDCTargetClaim) error {
+	d.claimCalls++
+	return nil
+}
+
+func (d *missingSourceManagedDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.WriteParallel(ctx, records, opts)
+}
+
+func (d *missingSourceManagedDestination) WriteParallel(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return nil
+}
+
+func TestRunMissingSourceTableDoesNotClaimDestination(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, oldSource)
+
+	src := &missingTableCDCSource{lease: &mockConnectorLease{done: make(chan struct{})}}
+	dest := &missingSourceManagedDestination{}
+	internalregistry.Default.RegisterSource([]string{"postgres+cdc"}, func() interface{} { return src })
+	internalregistry.Default.RegisterDestination([]string{"missing-source-managed"}, func() interface{} { return dest })
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/source_db?mode=batch"
+	cfg.SourceTable = "public.typo_orders"
+	cfg.DestURI = "missing-source-managed://destination/database"
+	cfg.DestTable = "landing.orders"
+
+	err = New(cfg).Run(t.Context())
+	require.ErrorContains(t, err, `source table "public.typo_orders" does not exist`)
+	require.True(t, src.connected)
+	require.True(t, src.closed)
+	require.True(t, dest.connected)
+	require.True(t, dest.closed)
+	require.Zero(t, dest.claimCalls, "missing source table poisoned the durable target registry")
+	require.Len(t, dest.prepareTables, 1, "missing source table should only invalidate resumable state")
+	require.Contains(t, dest.prepareTables[0], "cdc_state")
+	for _, table := range dest.prepareTables {
+		require.NotContains(t, table, "cdc_targets", "missing source table prepared the durable target registry")
+	}
+}
+
+type mockLegacyBootstrapDestination struct {
+	mockManagedCDCStateDestination
+	maxLSN  string
+	entries []destination.CDCStateEntry
+}
+
+func (m *mockLegacyBootstrapDestination) GetMaxCDCLSN(_ context.Context, _ string) (string, error) {
+	return m.maxLSN, nil
+}
+
+func (m *mockLegacyBootstrapDestination) PrepareTable(_ context.Context, _ destination.PrepareOptions) error {
+	return nil
+}
+
+func (m *mockLegacyBootstrapDestination) WriteCDCState(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+	for result := range records {
+		if result.Err != nil {
+			return result.Err
+		}
+		if result.Batch == nil {
+			continue
+		}
+		batch := result.Batch
+		for i := 0; i < int(batch.NumRows()); i++ {
+			m.entries = append(m.entries, destination.CDCStateEntry{
+				EventID:          batch.Column(0).(*array.String).Value(i),
+				SourceTable:      batch.Column(3).(*array.String).Value(i),
+				DestinationTable: batch.Column(4).(*array.String).Value(i),
+				StateKind:        batch.Column(5).(*array.String).Value(i),
+				Generation:       batch.Column(6).(*array.Int64).Value(i),
+				Status:           batch.Column(7).(*array.String).Value(i),
+				Position:         batch.Column(8).(*array.String).Value(i),
+			})
+		}
+		batch.Release()
+	}
+	return nil
+}
+
+func (m *mockLegacyBootstrapDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
+	return append([]destination.CDCStateEntry(nil), m.entries...), nil
+}
+
+func (m *mockLegacyBootstrapDestination) DeleteCDCStateEvents(_ context.Context, _, _ string, _ []string) error {
+	return nil
+}
+
+type mockValidatedManagedCDCStateDestination struct {
+	mockManagedCDCStateDestination
+	validationErr error
+}
+
+func (m *mockValidatedManagedCDCStateDestination) ValidateManagedCDCState() error {
+	return m.validationErr
+}
+
+type mockUnprunableCDCStateDestination struct {
+	mockCDCResumeDestination
+}
+
+type mockUnfencedCDCStateDestination struct {
+	mockCDCResumeDestination
+}
+
+type mockUnclaimableCDCStateDestination struct {
+	mockCDCResumeDestination
+}
+
+func (m *mockUnprunableCDCStateDestination) TruncateTable(_ context.Context, _ string) error {
+	return nil
+}
+
+func (m *mockUnprunableCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
+func (m *mockUnfencedCDCStateDestination) TruncateTable(_ context.Context, _ string) error {
+	return nil
+}
+
+func (m *mockUnfencedCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
+func (m *mockUnfencedCDCStateDestination) DeleteCDCStateEvents(_ context.Context, _, _ string, _ []string) error {
+	return nil
+}
+
+func (m *mockUnclaimableCDCStateDestination) TruncateTable(_ context.Context, _ string) error {
+	return nil
+}
+
+func (m *mockUnclaimableCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
+func (m *mockUnclaimableCDCStateDestination) LoadCDCStateFence(_ context.Context, _, _ string) (destination.CDCStateFence, error) {
+	return destination.CDCStateFence{}, nil
+}
+
+func (m *mockUnclaimableCDCStateDestination) DeleteCDCStateEvents(_ context.Context, _, _ string, _ []string) error {
+	return nil
+}
+
+func (m *mockManagedCDCStateDestination) TruncateTable(_ context.Context, _ string) error {
+	return nil
+}
+
+func (m *mockManagedCDCStateDestination) LoadCDCState(_ context.Context, _, _ string) ([]destination.CDCStateEntry, error) {
+	return nil, nil
+}
+
+func (m *mockManagedCDCStateDestination) LoadCDCStateFence(_ context.Context, _, _ string) (destination.CDCStateFence, error) {
+	return destination.CDCStateFence{}, nil
+}
+
+func (m *mockLegacyBootstrapDestination) LoadCDCStateFence(_ context.Context, _, _ string) (destination.CDCStateFence, error) {
+	var fence destination.CDCStateFence
+	for _, entry := range m.entries {
+		if entry.StateKind != "run" {
+			continue
+		}
+		if entry.Generation > fence.Generation {
+			fence.Generation = entry.Generation
+			fence.RunEventIDs = fence.RunEventIDs[:0]
+		}
+		if entry.Generation == fence.Generation {
+			fence.RunEventIDs = append(fence.RunEventIDs, entry.EventID)
+		}
+	}
+	return fence, nil
+}
+
+func (m *mockManagedCDCStateDestination) DeleteCDCStateEvents(_ context.Context, _, _ string, _ []string) error {
+	return nil
 }
 
 type mockSchemaEvolutionDestination struct {
@@ -80,6 +960,79 @@ func TestValidateChangeTrackingDestinationAcceptsResumeProvider(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected resume provider to pass validation, got %v", err)
+	}
+}
+
+func TestRejectUnprovenLegacyCDCTarget(t *testing.T) {
+	ctx := context.Background()
+	dest := &mockLegacyBootstrapDestination{
+		mockManagedCDCStateDestination: mockManagedCDCStateDestination{
+			mockCDCResumeDestination: mockCDCResumeDestination{mockDestination: mockDestination{
+				tableSchema: &schema.TableSchema{},
+			}},
+		},
+		maxLSN: "00000000/0000002A",
+	}
+	err := rejectUnprovenLegacyCDCTarget(ctx, dest, "public.orders", "raw.orders")
+	if err == nil || !strings.Contains(err.Error(), "--full-refresh") {
+		t.Fatalf("expected fail-closed full-refresh error, got %v", err)
+	}
+	if len(dest.entries) != 0 {
+		t.Fatalf("raw target LSN was certified into managed state: %+v", dest.entries)
+	}
+
+	dest.maxLSN = ""
+	if err := rejectUnprovenLegacyCDCTarget(ctx, dest, "public.orders", "raw.orders"); err != nil {
+		t.Fatalf("empty target must allow a snapshot: %v", err)
+	}
+}
+
+func TestManagedCDCStateDestinationRequiresReaderFencePrunerAndTruncate(t *testing.T) {
+	if supportsDestinationManagedCDCState(&mockDestination{}) {
+		t.Fatal("destination without CDC capabilities must not use managed CDC state")
+	}
+	if supportsDestinationManagedCDCState(&mockCDCResumeDestination{}) {
+		t.Fatal("legacy resume-only destination must not use managed CDC state")
+	}
+	if supportsDestinationManagedCDCState(&mockUnprunableCDCStateDestination{}) {
+		t.Fatal("destination without connector-scoped pruning must not use managed CDC state")
+	}
+	if supportsDestinationManagedCDCState(&mockUnfencedCDCStateDestination{}) {
+		t.Fatal("destination without compact ownership fencing must not use managed CDC state")
+	}
+	if !supportsDestinationManagedCDCState(&mockManagedCDCStateDestination{}) {
+		t.Fatal("destination with state-read, state-prune, and truncate capabilities must use managed CDC state")
+	}
+}
+
+func TestValidateDestinationManagedCDCState(t *testing.T) {
+	unsupported := &mockDestination{scheme: "unsupported"}
+	if err := validateDestinationManagedCDCState(unsupported); err == nil || !strings.Contains(err.Error(), "destination-managed state") {
+		t.Fatalf("destination without managed state validation error = %v", err)
+	}
+	legacyOnly := &mockCDCResumeDestination{mockDestination: mockDestination{scheme: "legacy-only"}}
+	if err := validateDestinationManagedCDCState(legacyOnly); err == nil || !strings.Contains(err.Error(), "cannot safely run PostgreSQL CDC") {
+		t.Fatalf("legacy resume-only destination validation error = %v", err)
+	}
+	unclaimable := &mockUnclaimableCDCStateDestination{}
+	if !supportsDestinationManagedCDCState(unclaimable) {
+		t.Fatal("state-capable destination should reach managed CDC validation")
+	}
+	if err := validateDestinationManagedCDCState(unclaimable); err == nil || !strings.Contains(err.Error(), "atomic destination-table claims") {
+		t.Fatalf("unclaimable destination validation error = %v", err)
+	}
+	if err := validateDestinationManagedCDCState(&mockManagedCDCStateDestination{}); err != nil {
+		t.Fatalf("destination without validator was rejected: %v", err)
+	}
+	if err := validateDestinationManagedCDCState(&mockUnsafeToastCDCStateDestination{}); err == nil || !strings.Contains(err.Error(), "unchanged TOAST") {
+		t.Fatalf("destination without unchanged-TOAST merge support validation error = %v", err)
+	}
+	if err := validateDestinationManagedCDCState(&mockValidatedManagedCDCStateDestination{}); err != nil {
+		t.Fatalf("valid managed CDC destination was rejected: %v", err)
+	}
+	err := validateDestinationManagedCDCState(&mockValidatedManagedCDCStateDestination{validationErr: errors.New("consistency ONE is unsafe")})
+	if err == nil || !strings.Contains(err.Error(), "consistency ONE is unsafe") {
+		t.Fatalf("validation error = %v, want consistency rejection", err)
 	}
 }
 
@@ -1260,9 +2213,9 @@ func TestCDCSlotSuffix(t *testing.T) {
 		t.Errorf("cdcSlotSuffix not deterministic: %q != %q", s1, s2)
 	}
 
-	// 6 hex characters
-	if len(s1) != 6 {
-		t.Errorf("cdcSlotSuffix length = %d, want 6", len(s1))
+	// 20 hex characters
+	if len(s1) != 20 {
+		t.Errorf("cdcSlotSuffix length = %d, want 20", len(s1))
 	}
 
 	// Different URIs produce different suffixes
@@ -1270,6 +2223,164 @@ func TestCDCSlotSuffix(t *testing.T) {
 	if s1 == s3 {
 		t.Errorf("cdcSlotSuffix(%q) == cdcSlotSuffix(%q), want different", "sqlite:///tmp/a.db", "sqlite:///tmp/b.db")
 	}
+	if cdcSlotSuffix("postgres://warehouse/db?application_name=cdc3463") == cdcSlotSuffix("postgres://warehouse/db?application_name=cdc9341") {
+		t.Fatal("80-bit slot suffix retained a known 24-bit collision")
+	}
+	legacy := legacyCDCSlotSuffix("sqlite:///tmp/a.db")
+	if len(legacy) != 6 {
+		t.Fatalf("legacy slot suffix length = %d, want 6", len(legacy))
+	}
+	wantLegacy := sha256.Sum256([]byte("sqlite:///tmp/a.db"))
+	if legacy != fmt.Sprintf("%x", wantLegacy[:3]) {
+		t.Fatalf("legacy slot suffix = %q, want raw-destination 24-bit hash", legacy)
+	}
+}
+
+func TestCDCStateConnectorID(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI:   "postgres+cdc://user:old@db.example/app?publication=pub&mode=batch",
+		DestURI:     "postgres://loader:old@warehouse.example/analytics",
+		SourceTable: "public.orders",
+		DestTable:   "raw.orders",
+	}
+	resolved := source.ConnectorIdentity{
+		Database:  "postgres\x00db.example:5432\x00app",
+		Connector: "postgres\x00db.example:5432\x00app\x00pub\x00",
+	}
+
+	rotated := *base
+	rotated.SourceURI = "postgres+cdc://user:new@db.example/app?mode=stream&publication=pub&binary=true"
+	rotated.DestURI = "postgres://loader:new@warehouse.example/analytics"
+	if got, want := resolvedCDCStateConnectorID(&rotated, resolved, ""), resolvedCDCStateConnectorID(base, resolved, ""); got != want {
+		t.Fatalf("credential/runtime option changes changed connector ID: got %s want %s", got, want)
+	}
+
+	aliased := *base
+	aliased.SourceURI = "postgresql+cdc://other@DB.EXAMPLE:5432/app?publication=pub&mode=stream"
+	aliased.DestURI = "postgresql://different@WAREHOUSE.EXAMPLE:5432/analytics"
+	if got, want := resolvedCDCStateConnectorID(&aliased, resolved, ""), resolvedCDCStateConnectorID(base, resolved, ""); got != want {
+		t.Fatalf("scheme/default-port aliases changed connector ID: got %s want %s", got, want)
+	}
+
+	otherSlotIdentity := resolved
+	otherSlotIdentity.Connector += "another_slot"
+	if resolvedCDCStateConnectorID(base, otherSlotIdentity, "") == resolvedCDCStateConnectorID(base, resolved, "") {
+		t.Fatal("different replication slots must not share CDC state")
+	}
+
+	explicitA := *base
+	explicitA.SourceURI += "&state_id=connector-a"
+	explicitRotated := explicitA
+	explicitRotated.SourceURI = "postgres+cdc://other:new@db.example/app?state_id=connector-a&mode=stream&binary=true&discover_interval=10s"
+	if got, want := resolvedCDCStateConnectorID(&explicitRotated, resolved, ""), resolvedCDCStateConnectorID(&explicitA, resolved, ""); got != want {
+		t.Fatalf("explicit state identity changed within one source database: got %s want %s", got, want)
+	}
+	explicitPort := explicitA
+	explicitPort.SourceURI = "postgresql+cdc://other@DB.EXAMPLE:5432/app?state_id=connector-a"
+	if got, want := resolvedCDCStateConnectorID(&explicitPort, resolved, ""), resolvedCDCStateConnectorID(&explicitA, resolved, ""); got != want {
+		t.Fatalf("explicit state identity changed for default port alias: got %s want %s", got, want)
+	}
+
+	otherDatabaseIdentity := resolved
+	otherDatabaseIdentity.Database = "postgres\x00db.example:5432\x00other_db"
+	otherDatabaseIdentity.Connector = otherDatabaseIdentity.Database + "\x00pub\x00"
+	if resolvedCDCStateConnectorID(&explicitA, otherDatabaseIdentity, "") == resolvedCDCStateConnectorID(&explicitA, resolved, "") {
+		t.Fatal("matching explicit state_id values on different source databases must not share identity")
+	}
+	explicitB := explicitA
+	explicitB.SourceURI = strings.Replace(explicitA.SourceURI, "connector-a", "connector-b", 1)
+	suffixA := cdcSlotSuffix(canonicalCDCStateURI(explicitA.DestURI) + "\x00" + resolvedCDCStateConnectorID(&explicitA, resolved, ""))
+	suffixB := cdcSlotSuffix(canonicalCDCStateURI(explicitB.DestURI) + "\x00" + resolvedCDCStateConnectorID(&explicitB, resolved, ""))
+	if suffixA == suffixB {
+		t.Fatal("distinct explicit state identities share an automatic slot suffix")
+	}
+	rotatedSuffix := cdcSlotSuffix(canonicalCDCStateURI(rotated.DestURI) + "\x00" + resolvedCDCStateConnectorID(&rotated, resolved, ""))
+	baseSuffix := cdcSlotSuffix(canonicalCDCStateURI(base.DestURI) + "\x00" + resolvedCDCStateConnectorID(base, resolved, ""))
+	if rotatedSuffix != baseSuffix {
+		t.Fatal("credential rotation changed the automatic slot suffix")
+	}
+
+	implicitDestAlice := *base
+	implicitDestAlice.DestURI = "postgres://alice@warehouse.example"
+	implicitDestBob := implicitDestAlice
+	implicitDestBob.DestURI = "postgres://bob@warehouse.example"
+	if resolvedCDCStateConnectorID(&implicitDestAlice, resolved, "") == resolvedCDCStateConnectorID(&implicitDestBob, resolved, "") {
+		t.Fatal("destination URIs with different implicit PostgreSQL databases share a connector ID")
+	}
+}
+
+func TestCDCStateConnectorIDDistinguishesEffectiveUnqualifiedDestination(t *testing.T) {
+	cfg := &config.IngestConfig{
+		SourceURI:   "postgres+cdc://reader@source/app",
+		DestURI:     "postgres://loader@warehouse/analytics",
+		SourceTable: "public.orders",
+		DestTable:   "orders",
+	}
+	identity := source.ConnectorIdentity{Database: "source-db", Connector: "source-connector"}
+	first := resolvedCDCStateConnectorID(cfg, identity, "analytics\x00alice\x00orders")
+	second := resolvedCDCStateConnectorID(cfg, identity, "analytics\x00bob\x00orders")
+	if first == second {
+		t.Fatal("different effective destination schemas share a connector ID")
+	}
+	if first == resolvedCDCStateConnectorID(cfg, identity, "") {
+		t.Fatal("effective destination namespace was not added to the connector ID")
+	}
+
+	dest := &canonicalIdentityDestination{identity: "canonical-target"}
+	got, err := managedCDCDestinationIdentity(t.Context(), dest, cfg.DestTable)
+	require.NoError(t, err)
+	require.Equal(t, "canonical-target", got)
+	require.Equal(t, 1, dest.calls)
+
+	cfg.DestTable = "raw.orders"
+	got, err = managedCDCDestinationIdentity(t.Context(), dest, cfg.DestTable)
+	require.NoError(t, err)
+	require.Equal(t, "canonical-target", got)
+	require.Equal(t, 2, dest.calls)
+
+	qualifiedA := *cfg
+	qualifiedA.DestTable = "raw.orders"
+	qualifiedB := *cfg
+	qualifiedB.DestTable = `"raw"."orders"`
+	first = resolvedCDCStateConnectorID(&qualifiedA, identity, "canonical-target")
+	second = resolvedCDCStateConnectorID(&qualifiedB, identity, "canonical-target")
+	require.Equal(t, first, second, "equivalent qualified targets must share a connector ID")
+}
+
+func TestMultiTableCDCConnectorIDIncludesNormalizedDestinationNamespace(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI: "postgres+cdc://reader@source/app?publication=pub&dest_schema=Landing_A",
+		DestURI:   "postgres://loader@warehouse/analytics",
+	}
+	identity := source.ConnectorIdentity{Database: "source-db", Connector: "source-connector"}
+	dest := &canonicalIdentityDestination{}
+
+	targetA := managedCDCDestinationTarget(base, dest)
+	canonicalA, err := managedCDCDestinationIdentity(t.Context(), dest, targetA)
+	require.NoError(t, err)
+	idA := resolvedCDCStateConnectorID(base, identity, canonicalA)
+	require.Equal(t, "Landing_A.__ingestr_cdc_namespace__", targetA)
+	require.Equal(t, "landing_a.__ingestr_cdc_namespace__", canonicalA)
+
+	equivalent := *base
+	equivalent.SourceURI = strings.Replace(base.SourceURI, "Landing_A", "landing_a", 1)
+	targetEquivalent := managedCDCDestinationTarget(&equivalent, dest)
+	canonicalEquivalent, err := managedCDCDestinationIdentity(t.Context(), dest, targetEquivalent)
+	require.NoError(t, err)
+	require.Equal(t, idA, resolvedCDCStateConnectorID(&equivalent, identity, canonicalEquivalent),
+		"equivalent destination namespaces must share connector state and slot identity")
+
+	other := *base
+	other.SourceURI = strings.Replace(base.SourceURI, "Landing_A", "landing_b", 1)
+	targetB := managedCDCDestinationTarget(&other, dest)
+	canonicalB, err := managedCDCDestinationIdentity(t.Context(), dest, targetB)
+	require.NoError(t, err)
+	idB := resolvedCDCStateConnectorID(&other, identity, canonicalB)
+	require.NotEqual(t, idA, idB, "different dest_schema mappings must not share connector state or slots")
+	require.NotEqual(t,
+		cdcSlotSuffix(canonicalCDCStateURI(base.DestURI)+"\x00"+idA),
+		cdcSlotSuffix(canonicalCDCStateURI(other.DestURI)+"\x00"+idB),
+		"different dest_schema mappings must not share automatic PostgreSQL slots")
 }
 
 func TestDroppedColumnsPKFiltering(t *testing.T) {
@@ -1806,6 +2917,83 @@ func TestApplyColumnMapping_DedupesCanonicalColumns(t *testing.T) {
 	if got := src.Columns[1].DataType; got != schema.TypeInt64 {
 		t.Fatalf("user_id type = %v, want %v", got, schema.TypeInt64)
 	}
+}
+
+func TestNormalizeMultiTableInfoComposesNamingAndShortening(t *testing.T) {
+	const longSource = "configurationDataWithANameThatExceedsThePostgresDestinationIdentifierLimitByFar"
+	p := &Pipeline{
+		config: &config.IngestConfig{SchemaNaming: "snake_case"},
+		dest:   &mockDestination{scheme: "postgres"},
+	}
+	original := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, IsPrimaryKey: true},
+			{Name: "configData", DataType: schema.TypeJSON, Nullable: true},
+			{Name: longSource, DataType: schema.TypeString, Nullable: true},
+			{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+			{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+			{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			{Name: destination.CDCUnchangedColsColumn, DataType: schema.TypeString},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+
+	normalized, renamer, err := p.normalizeMultiTableInfo(context.Background(), source.SourceTableInfo{
+		Name: "public.items", Schema: original, PrimaryKeys: []string{"id"},
+	}, "public.items")
+	require.NoError(t, err)
+	require.NotNil(t, renamer)
+	require.Equal(t, "configData", original.Columns[1].Name, "normalization must not mutate the source-owned schema")
+	require.Equal(t, "config_data", normalized.Schema.Columns[1].Name)
+	require.Equal(t, destination.CDCUnchangedColsColumn, normalized.Schema.Columns[len(normalized.Schema.Columns)-1].Name)
+
+	finalLong := renamer.Mapping()[longSource]
+	require.NotEmpty(t, finalLong)
+	require.LessOrEqual(t, len(finalLong), destination.MaxIdentifierLength("postgres"))
+	require.Equal(t, finalLong, normalized.Schema.Columns[2].Name)
+
+	dataBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	dataBuilder.AppendNull()
+	longBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	longBuilder.AppendNull()
+	markerBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	markerBuilder.Append(fmt.Sprintf(`["configData","%s"]`, longSource))
+	data := dataBuilder.NewArray()
+	longData := longBuilder.NewArray()
+	markers := markerBuilder.NewArray()
+	dataBuilder.Release()
+	longBuilder.Release()
+	markerBuilder.Release()
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{
+		{Name: "configData", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: longSource, Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: destination.CDCUnchangedColsColumn, Type: arrow.BinaryTypes.String},
+	}, nil), []arrow.Array{data, longData, markers}, 1)
+	data.Release()
+	longData.Release()
+	markers.Release()
+	defer batch.Release()
+
+	transformed, err := renamer.Transform(batch)
+	require.NoError(t, err)
+	defer transformed.Release()
+	require.Equal(t, "config_data", transformed.Schema().Field(0).Name)
+	require.Equal(t, finalLong, transformed.Schema().Field(1).Name)
+	require.Equal(t, fmt.Sprintf(`["config_data","%s"]`, finalLong), transformed.Column(2).(*array.String).Value(0))
+}
+
+func TestNormalizeMultiTableInfoRejectsCDCMetadataCollision(t *testing.T) {
+	p := &Pipeline{
+		config: &config.IngestConfig{SchemaNaming: "snake_case"},
+		dest:   &mockDestination{scheme: "postgres"},
+	}
+	table := source.SourceTableInfo{Name: "public.items", Schema: &schema.TableSchema{Columns: []schema.Column{
+		{Name: "_cdcLSN", DataType: schema.TypeString},
+		{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+	}}}
+
+	_, _, err := p.normalizeMultiTableInfo(context.Background(), table, "public.items")
+	require.ErrorContains(t, err, "reserved CDC metadata column")
 }
 
 // Case 7: realistic evolve scenario.

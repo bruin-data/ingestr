@@ -82,14 +82,18 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		return fmt.Errorf("schema is required")
 	}
 
-	schemaName, _ := parseSchemaTable(opts.Table)
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, opts.Table)
+	if err != nil {
+		return err
+	}
+	resolvedTable := schemaName + "." + tableName
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(opts.Table))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(resolvedTable))
 		if _, err := d.pool.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -98,15 +102,21 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(destination.QuoteTableName(resolvedTable), opts.Schema.Columns, opts.PrimaryKeys)
 	if _, err := d.pool.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	config.Debug("[DEST] CREATE TABLE took %v", time.Since(startCreate))
+	if opts.DropFirst {
+		// pgx caches the SELECT description that CopyFrom uses to choose binary
+		// encoders. Recreating a staging table under the same name with a changed
+		// column type leaves that cached OID stale on pooled connections.
+		d.pool.Reset()
+	}
 
 	if !opts.DropFirst && len(opts.PrimaryKeys) > 0 {
-		if err := d.ensurePrimaryKey(ctx, opts.Table, opts.PrimaryKeys); err != nil {
+		if err := d.ensurePrimaryKey(ctx, resolvedTable, opts.PrimaryKeys); err != nil {
 			return fmt.Errorf("failed to ensure primary key: %w", err)
 		}
 	}
@@ -115,10 +125,13 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 }
 
 func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string, primaryKeys []string) error {
-	quoted := destination.QuoteTableName(table)
-	schemaName, tableName := parseSchemaTable(table)
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return err
+	}
+	quoted := destination.QuoteTableName(schemaName + "." + tableName)
 	var hasPK bool
-	err := d.pool.QueryRow(ctx, `
+	err = d.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM information_schema.table_constraints
 			WHERE table_schema = $1 AND table_name = $2
@@ -187,6 +200,9 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 	for result := range records {
 		batchNum++
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
 		}
 
@@ -274,6 +290,9 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 				myBatch := int(atomic.AddInt64(&batchNum, 1))
 
 				if result.Err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
 					results <- writeResult{batchNum: myBatch, err: result.Err}
 					return
 				}
@@ -547,15 +566,20 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
 
-	targetSchema, targetName := parseSchemaTable(targetTable)
-	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+	targetSchema, targetName, err := d.resolveSchemaTable(ctx, d.pool, targetTable)
+	if err != nil {
+		return err
+	}
+	stagingSchema, stagingName, err := d.resolveSchemaTable(ctx, d.pool, stagingTable)
+	if err != nil {
+		return err
+	}
+	targetRef := quotePostgresTable(targetSchema, targetName)
+	stagingRef := quotePostgresTable(stagingSchema, stagingName)
 
 	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("postgres"))
-	oldTable := oldName
-	if targetSchema != "" {
-		oldTable = targetSchema + "." + oldName
-	}
+	oldRef := quotePostgresTable(targetSchema, oldName)
 
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
@@ -574,28 +598,28 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
 		setSchemaSQL := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s",
-			destination.QuoteTableName(stagingTable),
+			stagingRef,
 			destination.QuoteIdentifier(targetSchema))
 		if _, err = tx.Exec(ctx, setSchemaSQL); err != nil {
 			config.LogFailedQuery(setSchemaSQL, err)
 			return fmt.Errorf("failed to move staging table to target schema: %w", err)
 		}
-		stagingTable = targetSchema + "." + stagingName
+		stagingRef = quotePostgresTable(targetSchema, stagingName)
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName)))
+	_, err = tx.Exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", targetRef, destination.QuoteIdentifier(oldName)))
 	if err != nil {
 		return fmt.Errorf("failed to rename existing target table %s: %w", targetTable, err)
 	}
 
-	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))
+	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingRef, destination.QuoteIdentifier(targetName))
 	if _, err = tx.Exec(ctx, renameSQL); err != nil {
 		config.LogFailedQuery(renameSQL, err)
 		return fmt.Errorf("failed to rename staging to target: %w", err)
 	}
 
-	if _, err = tx.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable))); err != nil {
-		return fmt.Errorf("failed to drop old table %s: %w", oldTable, err)
+	if _, err = tx.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", oldRef)); err != nil {
+		return fmt.Errorf("failed to drop old table %s.%s: %w", targetSchema, oldName, err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -606,12 +630,49 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 	return nil
 }
 
+func quotePostgresTable(schemaName, tableName string) string {
+	if schemaName == "" {
+		return destination.QuoteIdentifier(tableName)
+	}
+	return destination.QuoteIdentifier(schemaName) + "." + destination.QuoteIdentifier(tableName)
+}
+
 func parseSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
+	parts := tablename.Split(table)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}
 	return "public", table
+}
+
+type postgresTableResolver interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (d *PostgresDestination) resolveSchemaTable(ctx context.Context, queryer postgresTableResolver, table string) (string, string, error) {
+	parts, err := validatePostgresClaimTarget(table)
+	if err != nil {
+		return "", "", err
+	}
+	if len(parts) == 2 {
+		return parts[0], parts[1], nil
+	}
+
+	var schemaName, tableName string
+	err = queryer.QueryRow(ctx, `
+		SELECT COALESCE(n.nspname, current_schema(), ''),
+		       COALESCE(c.relname, (parse_ident($1, false))[1])
+		FROM (SELECT to_regclass($1) AS oid) AS requested
+		LEFT JOIN pg_catalog.pg_class AS c ON c.oid = requested.oid
+		LEFT JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+	`, table).Scan(&schemaName, &tableName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve PostgreSQL target %q: %w", table, err)
+	}
+	if schemaName == "" {
+		return "", "", fmt.Errorf("PostgreSQL target %q has no effective schema in the current search path", table)
+	}
+	return schemaName, tableName, nil
 }
 
 func (d *PostgresDestination) Exec(ctx context.Context, sql string, args ...any) error {
@@ -1018,6 +1079,254 @@ func (d *PostgresDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return *maxLSN, nil
 }
 
+func (d *PostgresDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf(`
+		SELECT "event_id", "source_table", "destination_table", "state_kind", "state_generation", "state_status", "_cdc_lsn"
+		FROM %s WHERE "connector_id" = $1`, destination.QuoteTableName(table))
+	rows, err := d.pool.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (d *PostgresDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return "", err
+	}
+	var databaseName string
+	if err := d.pool.QueryRow(ctx, "SELECT current_database()").Scan(&databaseName); err != nil {
+		return "", fmt.Errorf("failed to resolve PostgreSQL database identity: %w", err)
+	}
+	return destination.CDCTargetKey(databaseName, schemaName, tableName), nil
+}
+
+func (d *PostgresDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	return d.postgresTargetIncarnation(ctx, d.pool, table)
+}
+
+func (d *PostgresDestination) postgresTargetIncarnation(ctx context.Context, queryer postgresTableResolver, table string) (string, bool, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, queryer, table)
+	if err != nil {
+		return "", false, err
+	}
+	resolvedTable := destination.QuoteTableName(schemaName + "." + tableName)
+	var databaseOID, relationOID, relationKind string
+	err = queryer.QueryRow(ctx, `
+		SELECT d.oid::text, c.oid::text, c.relkind::text
+		FROM pg_catalog.pg_class AS c
+		CROSS JOIN pg_catalog.pg_database AS d
+		WHERE d.datname = current_database()
+		  AND c.oid = to_regclass($1)
+	`, resolvedTable).Scan(&databaseOID, &relationOID, &relationKind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read PostgreSQL CDC target incarnation for %q: %w", table, err)
+	}
+	return destination.CDCTargetKey(databaseOID, relationOID, relationKind), true, nil
+}
+
+func (d *PostgresDestination) ClaimAndPrepareEmptyCDCTarget(
+	ctx context.Context,
+	claimTable string,
+	claim destination.CDCTargetClaim,
+	opts destination.PrepareOptions,
+) (string, error) {
+	if opts.Schema == nil {
+		return "", fmt.Errorf("schema is required")
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return "", err
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, claim.DestinationTable)
+	if err != nil {
+		return "", err
+	}
+	var schemaExists bool
+	if err := tx.QueryRow(ctx, "SELECT to_regnamespace($1) IS NOT NULL", schemaName).Scan(&schemaExists); err != nil {
+		return "", err
+	}
+	if !schemaExists {
+		return "", fmt.Errorf("PostgreSQL target schema %q does not exist", schemaName)
+	}
+	canonicalTarget := destination.CDCTargetKey(schemaName, tableName)
+	insert := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ($1, $2, NOW()) ON CONFLICT ("destination_table") DO NOTHING`, destination.QuoteTableName(claimTable))
+	if _, err := tx.Exec(ctx, insert, canonicalTarget, ownerID); err != nil {
+		return "", err
+	}
+	var owner string
+	query := fmt.Sprintf(`SELECT "connector_id" FROM %s WHERE "destination_table" = $1`, destination.QuoteTableName(claimTable))
+	if err := tx.QueryRow(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return "", err
+	}
+	if owner != ownerID {
+		return "", fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	createSQL := strings.Replace(
+		buildCreateTableSQL(destination.QuoteTableName(schemaName+"."+tableName), opts.Schema.Columns, opts.PrimaryKeys),
+		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
+	)
+	if _, err := tx.Exec(ctx, createSQL); err != nil {
+		return "", fmt.Errorf("failed to exclusively create CDC target: %w", err)
+	}
+	incarnation, exists, err := d.postgresTargetIncarnation(ctx, tx, schemaName+"."+tableName)
+	if err != nil {
+		return "", err
+	}
+	if !exists || incarnation == "" {
+		return "", fmt.Errorf("created PostgreSQL CDC target has no physical incarnation")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return incarnation, nil
+}
+
+func (d *PostgresDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	resolved := schemaName + "." + tableName
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+destination.QuoteTableName(resolved)+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+		return err
+	}
+	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed", table)
+	}
+	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (d *PostgresDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	if _, err := validatePostgresClaimTarget(claim.DestinationTable); err != nil {
+		return err
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, claim.DestinationTable)
+	if err != nil {
+		return err
+	}
+	canonicalTarget := destination.CDCTargetKey(schemaName, tableName)
+	insert := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ($1, $2, NOW()) ON CONFLICT ("destination_table") DO NOTHING`, destination.QuoteTableName(claimTable))
+	if _, err := tx.Exec(ctx, insert, canonicalTarget, ownerID); err != nil {
+		return err
+	}
+	var owner string
+	query := fmt.Sprintf(`SELECT "connector_id" FROM %s WHERE "destination_table" = $1`, destination.QuoteTableName(claimTable))
+	if err := tx.QueryRow(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return tx.Commit(ctx)
+}
+
+func validatePostgresClaimTarget(table string) ([]string, error) {
+	if err := tablename.TwoLevel("postgres").CheckName(table); err != nil {
+		return nil, err
+	}
+	parts := tablename.Split(table)
+	maxLength := destination.MaxIdentifierLength("postgres")
+	for _, part := range parts {
+		if len(part) > maxLength {
+			return nil, fmt.Errorf("PostgreSQL CDC target identifier %q exceeds the %d-byte limit", part, maxLength)
+		}
+	}
+	return parts, nil
+}
+
+func (d *PostgresDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	query := fmt.Sprintf(`
+		SELECT DISTINCT "event_id", "state_generation"
+		FROM %s
+		WHERE "connector_id" = $1 AND "state_kind" = 'run'
+		  AND "state_generation" = (
+			SELECT MAX("state_generation") FROM %s
+			WHERE "connector_id" = $1 AND "state_kind" = 'run'
+		  )
+		ORDER BY "event_id"`, destination.QuoteTableName(table), destination.QuoteTableName(table))
+	rows, err := d.pool.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer rows.Close()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *PostgresDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, eventID)
+	}
+	query := fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = $1 AND "event_id" IN (%s)`, destination.QuoteTableName(table), strings.Join(placeholders, ", "))
+	_, err := d.pool.Exec(ctx, query, args...)
+	return err
+}
+
 func (d *PostgresDestination) SupportsCDCUnchangedCols() bool { return true }
 
 func (d *PostgresDestination) SupportsCDCMerge() bool {
@@ -1026,7 +1335,10 @@ func (d *PostgresDestination) SupportsCDCMerge() bool {
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseSchemaTable(table)
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return nil, err
+	}
 
 	query := `
 		SELECT column_name, data_type, is_nullable,

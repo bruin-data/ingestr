@@ -84,8 +84,11 @@ type IngestConfig struct {
 	StagingDataset string
 	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
-	CDCResumeLSN  string // For CDC sources: resume from this LSN (auto-detected from destination)
-	CDCSlotSuffix string // For CDC sources: suffix appended to auto-generated slot names (derived from dest URI)
+	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
+	CDCResumeIncarnation       string
+	CDCResumeSchemaFingerprint string
+	CDCSlotSuffix              string // For CDC sources: suffix appended to auto-generated slot names (derived from connector identity)
+	CDCLegacySlotSuffix        string // For CDC upgrades: legacy 6-hex suffix derived from the raw destination URI
 
 	Stream        bool          // Continuous ingestion: flush buffered records on an interval or record-count trigger
 	FlushInterval time.Duration // Streaming mode: flush at least this often

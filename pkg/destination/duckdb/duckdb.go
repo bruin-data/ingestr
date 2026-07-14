@@ -31,6 +31,7 @@ import (
 
 type DuckDBDestination struct {
 	filePath string
+	catalog  string
 	mu       sync.Mutex
 
 	db   adbc.Database
@@ -241,6 +242,8 @@ func (d *DuckDBDestination) WriteParallel(ctx context.Context, records <-chan so
 }
 
 func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	defer drainAndReleaseDuckDBRecords(records)
+
 	config.Debug("[DUCKDB] Starting write to %s", opts.Table)
 	startTotal := time.Now()
 
@@ -279,6 +282,9 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	var rowsSinceCheckpoint int64
 	for res := range records {
 		if res.Err != nil {
+			if res.Batch != nil {
+				res.Batch.Release()
+			}
 			return res.Err
 		}
 		if res.Batch == nil {
@@ -322,6 +328,22 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
 	config.Debug("[DUCKDB] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
 	return nil
+}
+
+func drainAndReleaseDuckDBRecords(records <-chan source.RecordBatchResult) {
+	for {
+		select {
+		case result, ok := <-records:
+			if !ok {
+				return
+			}
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
+		default:
+			return
+		}
+	}
 }
 
 // ingestConnections decides how many connections to spread an ingest over.
@@ -588,6 +610,12 @@ var _ array.RecordReader = (*channelRecordReader)(nil)
 
 func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+	if err := tablename.DuckDB.CheckName(opts.StagingTable); err != nil {
+		return err
+	}
+	if err := tablename.DuckDB.CheckName(opts.TargetTable); err != nil {
+		return err
+	}
 
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
@@ -613,7 +641,7 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("duckdb"))
 		// The renamed-away target keeps the target's catalog+schema.
-		oldTable := tablename.TableName{Catalog: targetTn.Catalog, Schema: targetTn.Schema, Table: oldName}.String()
+		oldTable := tablename.TableName{Catalog: targetTn.Catalog, Schema: targetTn.Schema, Table: oldName}
 
 		if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName))); err != nil {
 			config.Debug("[DUCKDB] No existing table to rename (this is OK for first run)")
@@ -623,7 +651,7 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
 
-		_ = d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable)))
+		_ = d.exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteDuckTable(oldTable)))
 	} else {
 		// Cross-schema swap: DuckDB's ALTER TABLE RENAME doesn't support cross-schema.
 		// Recreate the target with the staging table's recorded schema (preserving
@@ -675,6 +703,17 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 
 	config.Debug("[DUCKDB] Table swap completed in %v", time.Since(startSwap))
 	return nil
+}
+
+func quoteDuckTable(tn tablename.TableName) string {
+	result := destination.QuoteIdentifier(tn.Table)
+	if tn.Schema != "" {
+		result = destination.QuoteIdentifier(tn.Schema) + "." + result
+	}
+	if tn.Catalog != "" {
+		result = destination.QuoteIdentifier(tn.Catalog) + "." + result
+	}
+	return result
 }
 
 func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -1246,6 +1285,271 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	}
 
 	return "", nil
+}
+
+func (d *DuckDBDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	connectorLiteral := strings.ReplaceAll(connectorID, "'", "''")
+	query := fmt.Sprintf(`SELECT "event_id", "source_table", "destination_table", "state_kind", "state_generation", "state_status", "_cdc_lsn" FROM %s WHERE "connector_id" = '%s'`,
+		destination.QuoteTableName(table), connectorLiteral)
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery(query); err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") || strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer reader.Release()
+
+	var entries []destination.CDCStateEntry
+	for reader.Next() {
+		batch := reader.RecordBatch()
+		eventIDs, eventOK := batch.Column(0).(*array.String)
+		sourceTables, sourceOK := batch.Column(1).(*array.String)
+		destinationTables, destinationOK := batch.Column(2).(*array.String)
+		kinds, kindOK := batch.Column(3).(*array.String)
+		statuses, statusOK := batch.Column(5).(*array.String)
+		positions, positionOK := batch.Column(6).(*array.String)
+		if !eventOK || !sourceOK || !destinationOK || !kindOK || !statusOK || !positionOK {
+			return nil, fmt.Errorf("unexpected DuckDB CDC state column types")
+		}
+		for row := 0; row < int(batch.NumRows()); row++ {
+			generation, ok := int64ValueAt(batch.Column(4), row)
+			if !ok {
+				return nil, fmt.Errorf("unexpected DuckDB CDC state generation type %s", batch.Column(4).DataType())
+			}
+			entries = append(entries, destination.CDCStateEntry{
+				EventID:          strings.Clone(eventIDs.Value(row)),
+				SourceTable:      strings.Clone(sourceTables.Value(row)),
+				DestinationTable: strings.Clone(destinationTables.Value(row)),
+				StateKind:        strings.Clone(kinds.Value(row)),
+				Generation:       generation,
+				Status:           strings.Clone(statuses.Value(row)),
+				Position:         strings.Clone(positions.Value(row)),
+			})
+		}
+	}
+	return entries, reader.Err()
+}
+
+func (d *DuckDBDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	tn := duckTable(claim.DestinationTable)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if tn.Catalog == "" {
+		if d.catalog == "" {
+			catalog, err := d.currentCatalog(ctx)
+			if err != nil {
+				return err
+			}
+			d.catalog = catalog
+		}
+		tn.Catalog = d.catalog
+	}
+	canonicalTarget := canonicalDuckDBTarget(tn)
+	targetLiteral := strings.ReplaceAll(canonicalTarget, "'", "''")
+	connectorLiteral := strings.ReplaceAll(ownerID, "'", "''")
+	query := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ('%s', '%s', CURRENT_TIMESTAMP)
+		ON CONFLICT ("destination_table") DO UPDATE SET "claimed_at" = "claimed_at" RETURNING "connector_id"`, destination.QuoteTableName(claimTable), targetLiteral, connectorLiteral)
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery(query); err != nil {
+		return err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		return err
+	}
+	defer reader.Release()
+	if !reader.Next() || reader.RecordBatch().NumRows() != 1 {
+		return fmt.Errorf("CDC target claim for %q returned no owner", canonicalTarget)
+	}
+	owners, ok := reader.RecordBatch().Column(0).(*array.String)
+	if !ok {
+		return fmt.Errorf("unexpected DuckDB CDC target owner type")
+	}
+	owner := strings.Clone(owners.Value(0))
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return reader.Err()
+}
+
+func (d *DuckDBDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
+	tn := duckTable(table)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if tn.Catalog == "" {
+		if d.catalog == "" {
+			catalog, err := d.currentCatalog(ctx)
+			if err != nil {
+				return "", err
+			}
+			d.catalog = catalog
+		}
+		tn.Catalog = d.catalog
+	}
+	return canonicalDuckDBTarget(tn), nil
+}
+
+func canonicalDuckDBTarget(tn tablename.TableName) string {
+	return destination.CDCTargetKey(strings.ToLower(tn.Catalog), strings.ToLower(canonicalDuckDBSchema(tn.Schema)), strings.ToLower(tn.Table))
+}
+
+func (d *DuckDBDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	tn := duckTable(table)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if tn.Catalog == "" {
+		if d.catalog == "" {
+			catalog, err := d.currentCatalog(ctx)
+			if err != nil {
+				return "", false, err
+			}
+			d.catalog = catalog
+		}
+		tn.Catalog = d.catalog
+	}
+	tn.Schema = canonicalDuckDBSchema(tn.Schema)
+	literal := func(value string) string { return strings.ReplaceAll(value, "'", "''") }
+	query := fmt.Sprintf(`SELECT CAST(database_oid AS VARCHAR), CAST(table_oid AS VARCHAR)
+		FROM duckdb_tables()
+		WHERE lower(database_name) = lower('%s') AND lower(schema_name) = lower('%s') AND lower(table_name) = lower('%s')`,
+		literal(tn.Catalog), literal(tn.Schema), literal(tn.Table))
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery(query); err != nil {
+		return "", false, err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read DuckDB CDC target incarnation for %s: %w", table, err)
+	}
+	defer reader.Release()
+	if !reader.Next() {
+		if err := reader.Err(); err != nil {
+			return "", false, err
+		}
+		return "", false, nil
+	}
+	batch := reader.RecordBatch()
+	if batch.NumRows() == 0 {
+		return "", false, nil
+	}
+	databaseOIDs, databaseOK := batch.Column(0).(*array.String)
+	tableOIDs, tableOK := batch.Column(1).(*array.String)
+	if !databaseOK || !tableOK {
+		return "", false, fmt.Errorf("unexpected DuckDB CDC target incarnation column types")
+	}
+	return destination.CDCTargetKey(databaseOIDs.Value(0), tableOIDs.Value(0)), true, nil
+}
+
+func (d *DuckDBDestination) currentCatalog(ctx context.Context) (string, error) {
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery("SELECT current_database()"); err != nil {
+		return "", err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Release()
+	if !reader.Next() || reader.RecordBatch().NumRows() != 1 {
+		return "", fmt.Errorf("DuckDB current database query returned no result")
+	}
+	values, ok := reader.RecordBatch().Column(0).(*array.String)
+	if !ok {
+		return "", fmt.Errorf("unexpected DuckDB current database type")
+	}
+	return strings.Clone(values.Value(0)), reader.Err()
+}
+
+func (d *DuckDBDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	connectorLiteral := strings.ReplaceAll(connectorID, "'", "''")
+	quotedTable := destination.QuoteTableName(table)
+	query := fmt.Sprintf(`SELECT DISTINCT "event_id", "state_generation" FROM %s WHERE "connector_id" = '%s' AND "state_kind" = 'run' AND "state_generation" = (SELECT MAX("state_generation") FROM %s WHERE "connector_id" = '%s' AND "state_kind" = 'run') ORDER BY "event_id"`, quotedTable, connectorLiteral, quotedTable, connectorLiteral)
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery(query); err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") || strings.Contains(err.Error(), "not found") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer reader.Release()
+
+	var fence destination.CDCStateFence
+	for reader.Next() {
+		batch := reader.RecordBatch()
+		eventIDs, ok := batch.Column(0).(*array.String)
+		if !ok {
+			return destination.CDCStateFence{}, fmt.Errorf("unexpected DuckDB CDC fence event ID type %s", batch.Column(0).DataType())
+		}
+		for row := 0; row < int(batch.NumRows()); row++ {
+			generation, ok := int64ValueAt(batch.Column(1), row)
+			if !ok {
+				return destination.CDCStateFence{}, fmt.Errorf("unexpected DuckDB CDC fence generation type %s", batch.Column(1).DataType())
+			}
+			fence.Generation = generation
+			fence.RunEventIDs = append(fence.RunEventIDs, strings.Clone(eventIDs.Value(row)))
+		}
+	}
+	return fence, reader.Err()
+}
+
+func (d *DuckDBDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = "?"
+		args = append(args, eventID)
+	}
+	query := fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = ? AND "event_id" IN (%s)`, destination.QuoteTableName(table), strings.Join(placeholders, ", "))
+	return d.Exec(ctx, query, args...)
 }
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.

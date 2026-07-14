@@ -36,6 +36,9 @@ func (s *DeleteInsertStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if hasCDCColumns(job.Schema) {
+		return fmt.Errorf("delete+insert strategy is not supported for CDC records; use merge or replace")
+	}
 	if !job.Destination.SupportsDeleteInsertStrategy() {
 		return fmt.Errorf("destination %s does not support delete+insert strategy", job.Destination.GetScheme())
 	}
