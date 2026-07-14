@@ -450,9 +450,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.IncrementalKey = tableSchema.IncrementalKey
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
 
-	if resolvedConfig.PartitionBy == "" && tableSchema.PartitionBy != "" {
-		resolvedConfig.PartitionBy = tableSchema.PartitionBy
-	}
+	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
 
 	// Primary key columns must be NOT NULL
 	pkSet := make(map[string]bool, len(ingestSchema.PrimaryKeys))
@@ -1495,6 +1493,24 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 		return err
 	}
 	return p.applyNamingConvention(sourceSchema, namingConv)
+}
+
+// applyPartitionNaming normalizes partition_by/cluster_by to the destination column
+// naming (no-op for direct); partition_by falls back to the source partition column.
+func applyPartitionNaming(cfg *config.IngestConfig, tableSchema *schema.TableSchema, namingConv naming.NamingConvention) {
+	switch {
+	case cfg.PartitionBy != "":
+		cfg.PartitionBy = namingConv.Normalize(cfg.PartitionBy)
+	case tableSchema.PartitionBy != "":
+		cfg.PartitionBy = namingConv.Normalize(tableSchema.PartitionBy)
+	}
+	if len(cfg.ClusterBy) > 0 {
+		clusterBy := make([]string, len(cfg.ClusterBy))
+		for i, col := range cfg.ClusterBy {
+			clusterBy[i] = namingConv.Normalize(col)
+		}
+		cfg.ClusterBy = clusterBy
+	}
 }
 
 // resolveNamingConvention determines which naming convention applies, resolving

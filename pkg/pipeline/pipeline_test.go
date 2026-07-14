@@ -11,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -1850,4 +1851,71 @@ func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
 	got := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
+}
+
+func TestApplyPartitionNaming(t *testing.T) {
+	tests := []struct {
+		name            string
+		convention      naming.Convention
+		partitionBy     string
+		clusterBy       []string
+		schemaPartition string
+		wantPartitionBy string
+		wantClusterBy   []string
+	}{
+		{
+			name:            "configured partition_by normalized to snake_case",
+			convention:      naming.SnakeCase,
+			partitionBy:     "updatedAt",
+			wantPartitionBy: "updated_at",
+		},
+		{
+			name:            "configured partition_by untouched under direct naming",
+			convention:      naming.Direct,
+			partitionBy:     "updatedAt",
+			wantPartitionBy: "updatedAt",
+		},
+		{
+			name:            "source-provided partition column normalized as fallback",
+			convention:      naming.SnakeCase,
+			schemaPartition: "eventDate",
+			wantPartitionBy: "event_date",
+		},
+		{
+			name:            "configured partition_by wins over source-provided",
+			convention:      naming.SnakeCase,
+			partitionBy:     "createdAt",
+			schemaPartition: "eventDate",
+			wantPartitionBy: "created_at",
+		},
+		{
+			name:          "cluster_by columns normalized to snake_case",
+			convention:    naming.SnakeCase,
+			clusterBy:     []string{"countryCode", "region"},
+			wantClusterBy: []string{"country_code", "region"},
+		},
+		{
+			name:          "cluster_by untouched under direct naming",
+			convention:    naming.Direct,
+			clusterBy:     []string{"countryCode"},
+			wantClusterBy: []string{"countryCode"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.PartitionBy = tt.partitionBy
+			cfg.ClusterBy = tt.clusterBy
+			tableSchema := &schema.TableSchema{PartitionBy: tt.schemaPartition}
+
+			applyPartitionNaming(cfg, tableSchema, naming.Get(tt.convention))
+
+			if cfg.PartitionBy != tt.wantPartitionBy {
+				t.Fatalf("PartitionBy = %q, want %q", cfg.PartitionBy, tt.wantPartitionBy)
+			}
+			if fmt.Sprint(cfg.ClusterBy) != fmt.Sprint(tt.wantClusterBy) {
+				t.Fatalf("ClusterBy = %v, want %v", cfg.ClusterBy, tt.wantClusterBy)
+			}
+		})
+	}
 }
