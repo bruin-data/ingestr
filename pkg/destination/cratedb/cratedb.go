@@ -24,8 +24,9 @@ import (
 const maxUnnestBatch = 50000
 
 type CrateDBDestination struct {
-	pool *pgxpool.Pool
-	uri  string
+	pool                    *pgxpool.Pool
+	uri                     string
+	cdcStateRefreshOverride func(context.Context, string) error
 }
 
 func NewCrateDBDestination() *CrateDBDestination {
@@ -113,7 +114,7 @@ func (d *CrateDBDestination) ensureSchemaExists(_ context.Context, _ string) err
 }
 
 func (d *CrateDBDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	return d.writeInternal(ctx, records, opts, 1)
+	return d.writeInternal(ctx, records, opts, 1, false)
 }
 
 func (d *CrateDBDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -121,10 +122,10 @@ func (d *CrateDBDestination) WriteParallel(ctx context.Context, records <-chan s
 	if parallelism <= 0 {
 		parallelism = 4
 	}
-	return d.writeInternal(ctx, records, opts, parallelism)
+	return d.writeInternal(ctx, records, opts, parallelism, false)
 }
 
-func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, parallelism int) error {
+func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, parallelism int, requireRefresh bool) error {
 	config.Debug("[CRATEDB] Starting write to %s with %d workers", opts.Table, parallelism)
 	startTotal := time.Now()
 
@@ -187,7 +188,13 @@ func (d *CrateDBDestination) writeInternal(ctx context.Context, records <-chan s
 		return fmt.Errorf("write failed: %w", firstErr)
 	}
 
-	d.refreshTable(ctx, opts.Table)
+	if requireRefresh {
+		if err := d.refreshCDCStateTable(ctx, opts.Table); err != nil {
+			return fmt.Errorf("failed to refresh CDC state table %s: %w", opts.Table, err)
+		}
+	} else {
+		d.refreshTable(ctx, opts.Table)
+	}
 
 	config.Debug("[CRATEDB] Total: %d rows written in %v (%.0f rows/sec)",
 		totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
@@ -622,16 +629,30 @@ func (d *CrateDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *CrateDBDestination) SupportsAtomicSwap() bool           { return false }
 
 func (d *CrateDBDestination) refreshTable(ctx context.Context, table string) {
-	sql := fmt.Sprintf("REFRESH TABLE %s", destination.QuoteTableName(table))
-	if _, err := d.pool.Exec(ctx, sql); err != nil {
+	if err := d.refreshTableRequired(ctx, table); err != nil {
 		config.Debug("[CRATEDB] REFRESH TABLE %s failed: %v (non-fatal)", table, err)
 	}
+}
+
+func (d *CrateDBDestination) refreshCDCStateTable(ctx context.Context, table string) error {
+	if d.cdcStateRefreshOverride != nil {
+		return d.cdcStateRefreshOverride(ctx, table)
+	}
+	return d.refreshTableRequired(ctx, table)
+}
+
+func (d *CrateDBDestination) refreshTableRequired(ctx context.Context, table string) error {
+	sql := fmt.Sprintf("REFRESH TABLE %s", destination.QuoteTableName(table))
+	if _, err := d.pool.Exec(ctx, sql); err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- helpers ---
 
 func parseSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
+	parts := tablename.Split(table)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}

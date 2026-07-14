@@ -3,9 +3,12 @@ package multitable
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/bruin-data/ingestr/pkg/source"
 )
+
+const routerDrainTimeout = time.Second
 
 // Router distributes batches from a single input channel to per-table channels.
 // Each table gets its own buffered channel, allowing concurrent consumers.
@@ -41,7 +44,7 @@ func NewRouter(tables []string, bufferSize int) *Router {
 // Route starts routing batches from the input channel to per-table channels.
 // This method should be called once and runs asynchronously.
 // It closes all table channels when the input channel is exhausted or an error occurs.
-func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResult) {
+func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResult, drainOnCancel bool) {
 	r.mu.Lock()
 	if r.started {
 		r.mu.Unlock()
@@ -51,13 +54,18 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 	r.mu.Unlock()
 
 	go func() {
-		defer r.closeAllChannels()
+		aborted := false
+		defer func() { r.closeChannels(aborted) }()
 		defer close(r.done)
 
 		for {
 			select {
 			case <-ctx.Done():
+				aborted = true
 				r.setError(ctx.Err())
+				if drainOnCancel {
+					r.drainInput(input)
+				}
 				return
 			case result, ok := <-input:
 				if !ok {
@@ -65,20 +73,31 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 				}
 
 				if result.Err != nil {
+					aborted = true
 					r.setError(result.Err)
 					r.broadcastError(result.Err)
+					releaseResult(result)
+					if drainOnCancel {
+						r.drainInput(input)
+					}
 					return
 				}
 
 				ch, ok := r.tableChannels[result.TableName]
 				if !ok {
+					releaseResult(result)
 					continue
 				}
 
 				select {
 				case ch <- result:
 				case <-ctx.Done():
+					aborted = true
 					r.setError(ctx.Err())
+					releaseResult(result)
+					if drainOnCancel {
+						r.drainInput(input)
+					}
 					return
 				}
 			}
@@ -123,10 +142,37 @@ func (r *Router) broadcastError(err error) {
 	}
 }
 
-func (r *Router) closeAllChannels() {
+func (r *Router) closeChannels(drain bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, ch := range r.tableChannels {
 		close(ch)
+		if drain {
+			for result := range ch {
+				releaseResult(result)
+			}
+		}
+	}
+}
+
+func (r *Router) drainInput(input <-chan source.RecordBatchResult) {
+	timer := time.NewTimer(routerDrainTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case result, ok := <-input:
+			if !ok {
+				return
+			}
+			releaseResult(result)
+		case <-timer.C:
+			return
+		}
+	}
+}
+
+func releaseResult(result source.RecordBatchResult) {
+	if result.Batch != nil {
+		result.Batch.Release()
 	}
 }

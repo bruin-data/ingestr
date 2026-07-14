@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,15 +13,121 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type postgresResolverStub struct {
+	query  string
+	schema string
+	table  string
+}
+
+func (s *postgresResolverStub) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
+	s.query = query
+	return postgresResolverRow{schema: s.schema, table: s.table}
+}
+
+type postgresResolverRow struct {
+	schema string
+	table  string
+}
+
+func (r postgresResolverRow) Scan(dest ...any) error {
+	*dest[0].(*string) = r.schema
+	*dest[1].(*string) = r.table
+	return nil
+}
+
+func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
+	dest := NewPostgresDestination()
+	resolver := &postgresResolverStub{schema: "tenant_a", table: "orders"}
+
+	schemaName, tableName, err := dest.resolveSchemaTable(t.Context(), resolver, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schemaName != "tenant_a" || tableName != "orders" {
+		t.Fatalf("resolveSchemaTable() = %q.%q", schemaName, tableName)
+	}
+	if !strings.Contains(resolver.query, "to_regclass($1)") || !strings.Contains(resolver.query, "current_schema()") {
+		t.Fatalf("resolver query does not honor existing table resolution and search_path: %s", resolver.query)
+	}
+}
+
+func TestClaimCDCTargetRejectsInvalidNameBeforeTransaction(t *testing.T) {
+	dest := NewPostgresDestination()
+	claim := func(table string) destination.CDCTargetClaim {
+		return destination.CDCTargetClaim{DestinationTable: table, ConnectorID: "connector-a", SourceTable: "public.orders"}
+	}
+
+	for _, table := range []string{
+		"db.public.orders",
+		strings.Repeat("s", 64) + ".orders",
+		"public." + strings.Repeat("t", 64),
+	} {
+		t.Run(table, func(t *testing.T) {
+			err := dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim(table))
+			if err == nil {
+				t.Fatal("ClaimCDCTarget() returned nil, want validation error before transaction")
+			}
+		})
+	}
+}
+
+func TestValidatePostgresClaimTargetAcceptsIdentifierLimit(t *testing.T) {
+	wantSchema := strings.Repeat("s", 63)
+	wantTable := strings.Repeat("t", 63)
+	parts, err := validatePostgresClaimTarget(wantSchema + "." + wantTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parts, []string{wantSchema, wantTable}) {
+		t.Fatalf("validatePostgresClaimTarget() = %v", parts)
+	}
+}
+
+func TestResolvedMultiTableNameFitsPostgresClaimLimit(t *testing.T) {
+	sourceTable := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
+	resolved := destination.ResolveMultiTableName("postgres", nil, "landing", sourceTable)
+	parts, err := validatePostgresClaimTarget(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 || parts[0] != "landing" || len(parts[1]) > destination.MaxIdentifierLength("postgres") {
+		t.Fatalf("resolved PostgreSQL multi-table target = %q (%v)", resolved, parts)
+	}
+}
 
 func TestBuildDeleteInsertLockSQL(t *testing.T) {
 	got := buildDeleteInsertLockSQL(`"public"."orders"`)
 	want := `LOCK TABLE "public"."orders" IN EXCLUSIVE MODE`
 	if got != want {
 		t.Fatalf("buildDeleteInsertLockSQL() = %q, want %q", got, want)
+	}
+}
+
+func TestParseSchemaTableCanonicalizesQuotedComponents(t *testing.T) {
+	schemaName, tableName := parseSchemaTable(`"public"."orders"`)
+	if schemaName != "public" || tableName != "orders" {
+		t.Fatalf("parseSchemaTable() = %q.%q", schemaName, tableName)
+	}
+}
+
+func TestQuotePostgresTablePreservesDottedIdentifierBoundary(t *testing.T) {
+	got := quotePostgresTable("tenant", "order.events_old_123")
+	if got != `"tenant"."order.events_old_123"` {
+		t.Fatalf("quotePostgresTable() = %q", got)
+	}
+}
+
+func TestPostgresSwapRejectsOverQualifiedNames(t *testing.T) {
+	dest := NewPostgresDestination()
+	err := dest.SwapTable(t.Context(), destination.SwapOptions{StagingTable: "public.staging", TargetTable: "database.public.orders"})
+	if err == nil || !strings.Contains(err.Error(), "postgres table name") {
+		t.Fatalf("SwapTable() error = %v", err)
 	}
 }
 

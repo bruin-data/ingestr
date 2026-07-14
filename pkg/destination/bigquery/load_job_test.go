@@ -23,6 +23,30 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
+func TestWriteLoadJobChunksReleasesBatchAttachedToError(t *testing.T) {
+	allocator := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { allocator.AssertSize(t, 0) })
+	wantErr := errors.New("source failed")
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: makeCheckedRecordBatch(allocator, 1), Err: wantErr}
+	close(records)
+
+	_, _, err := (&BigQueryDestination{}).writeLoadJobChunks(
+		t.Context(),
+		records,
+		loadJobFormatJSONL,
+		0,
+		nil,
+		func(int) (stagedLoadChunk, io.WriteCloser, error) {
+			t.Fatal("error result unexpectedly opened a load chunk")
+			return stagedLoadChunk{}, nil, nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("writeLoadJobChunks() error = %v, want %v", err, wantErr)
+	}
+}
+
 type nopWriteCloser struct {
 	io.Writer
 }

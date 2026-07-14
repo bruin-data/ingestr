@@ -26,6 +26,7 @@ type CassandraDestination struct {
 	session           *gocql.Session
 	keyspace          string
 	replicationFactor int
+	consistency       gocql.Consistency
 }
 
 func NewCassandraDestination() *CassandraDestination {
@@ -56,6 +57,7 @@ func (d *CassandraDestination) Connect(ctx context.Context, uri string) error {
 	d.session = session
 	d.keyspace = cfg.Keyspace
 	d.replicationFactor = cfg.ReplicationFactor
+	d.consistency = cfg.Consistency
 	config.Debug("[CASSANDRA DEST] Connected to cluster, release_version=%s", version)
 	return nil
 }
@@ -132,11 +134,7 @@ func (d *CassandraDestination) ensureKeyspace(ctx context.Context, keyspace stri
 		return fmt.Errorf("failed to check Cassandra keyspace %q: %w", keyspace, err)
 	}
 
-	createSQL := fmt.Sprintf(
-		"CREATE KEYSPACE %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': %d}",
-		cassandrautil.QuoteIdentifier(keyspace),
-		d.replicationFactor,
-	)
+	createSQL := buildCreateKeyspaceSQL(keyspace, d.replicationFactor)
 	if err := d.Exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create Cassandra keyspace %q: %w", keyspace, err)
 	}
@@ -145,6 +143,14 @@ func (d *CassandraDestination) ensureKeyspace(ctx context.Context, keyspace stri
 	}
 	config.Debug("[CASSANDRA DEST] Created keyspace: %s", keyspace)
 	return nil
+}
+
+func buildCreateKeyspaceSQL(keyspace string, replicationFactor int) string {
+	return fmt.Sprintf(
+		"CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': %d}",
+		cassandrautil.QuoteIdentifier(keyspace),
+		replicationFactor,
+	)
 }
 
 func buildCreateTableSQL(tableRef string, columns []schema.Column, primaryKeys []string) (string, error) {
@@ -191,6 +197,10 @@ func (d *CassandraDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *CassandraDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.writeParallel(ctx, records, opts, nil)
+}
+
+func (d *CassandraDestination) writeParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions, consistency *gocql.Consistency) error {
 	parallelism := opts.Parallelism
 	if parallelism <= 0 {
 		parallelism = 4
@@ -234,7 +244,7 @@ func (d *CassandraDestination) WriteParallel(ctx context.Context, records <-chan
 					continue
 				}
 
-				rows, err := d.writeRecordBatch(ctx, tableRef, record)
+				rows, err := d.writeRecordBatch(ctx, tableRef, record, consistency)
 				record.Release()
 				results <- writeResult{batchNum: myBatch, rows: rows, err: err}
 				if err != nil {
@@ -270,7 +280,7 @@ func (d *CassandraDestination) WriteParallel(ctx context.Context, records <-chan
 	return nil
 }
 
-func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef string, record arrow.RecordBatch) (int64, error) {
+func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef string, record arrow.RecordBatch, consistency *gocql.Consistency) (int64, error) {
 	if record.NumRows() == 0 {
 		return 0, nil
 	}
@@ -299,7 +309,11 @@ func (d *CassandraDestination) writeRecordBatch(ctx context.Context, tableRef st
 		for col := 0; col < int(record.NumCols()); col++ {
 			values[col] = arrowToCassandra(record.Column(col), row)
 		}
-		if err := d.session.Query(insertSQL, values...).ExecContext(ctx); err != nil {
+		query := d.session.Query(insertSQL, values...)
+		if consistency != nil {
+			query.Consistency(*consistency)
+		}
+		if err := query.ExecContext(ctx); err != nil {
 			return int64(row), fmt.Errorf("failed to insert Cassandra row: %w", err)
 		}
 	}

@@ -103,6 +103,8 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
+		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
+		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
@@ -180,6 +182,8 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
+		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
+		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 

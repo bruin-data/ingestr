@@ -21,13 +21,28 @@ func Write(
 	records <-chan source.RecordBatchResult,
 	opts destination.MultiTableWriteOptions,
 ) error {
+	_, err := WriteWithResult(ctx, dest, records, opts)
+	return err
+}
+
+type WriteResult struct {
+	TruncatedTables map[string]bool
+}
+
+func WriteWithResult(
+	ctx context.Context,
+	dest destination.Destination,
+	records <-chan source.RecordBatchResult,
+	opts destination.MultiTableWriteOptions,
+) (WriteResult, error) {
+	result := WriteResult{TruncatedTables: make(map[string]bool)}
 	tables := make([]string, 0, len(opts.TableConfigs))
 	for table := range opts.TableConfigs {
 		tables = append(tables, table)
 	}
 
 	if len(tables) == 0 {
-		return nil
+		return result, nil
 	}
 
 	config.Debug("[MULTITABLE] Starting multi-table write for %d tables", len(tables))
@@ -38,12 +53,22 @@ func Write(
 	// a failed table's full channel blocks the shared router goroutine.
 	writeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var cancelOnce sync.Once
+	cancelInput := func() {
+		cancelOnce.Do(func() {
+			cancel()
+			if opts.CancelSource != nil {
+				opts.CancelSource()
+			}
+		})
+	}
 
 	router := NewRouter(tables, 8)
-	router.Route(writeCtx, records)
+	router.Route(writeCtx, records, opts.CancelSource != nil)
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(tables))
+	var resultMu sync.Mutex
 
 	parallelism := opts.Parallelism
 	if parallelism <= 0 {
@@ -60,7 +85,7 @@ func Write(
 				return
 			}
 
-			err := dest.WriteParallel(writeCtx, ch, destination.WriteOptions{
+			truncated, err := destination.WriteWithTruncateBoundariesAfterCancel(writeCtx, dest, ch, destination.WriteOptions{
 				Table:            tableConfig.DestTable,
 				Schema:           tableConfig.Schema,
 				PrimaryKeys:      tableConfig.PrimaryKeys,
@@ -69,9 +94,14 @@ func Write(
 				StagingBucket:    opts.StagingBucket,
 				LoaderFileSize:   opts.LoaderFileSize,
 				LoaderFileFormat: opts.LoaderFileFormat,
-			})
+			}, cancelInput)
+			if truncated {
+				resultMu.Lock()
+				result.TruncatedTables[table] = true
+				resultMu.Unlock()
+			}
 			if err != nil {
-				cancel()
+				cancelInput()
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
@@ -94,12 +124,12 @@ func Write(
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("multi-table write failed: %v", errs)
+		return result, fmt.Errorf("multi-table write failed: %v", errs)
 	}
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return result, ctx.Err()
 	}
 
 	config.Debug("[MULTITABLE] Multi-table write completed in %v", time.Since(startTotal))
-	return nil
+	return result, nil
 }

@@ -67,6 +67,84 @@ func TestSchemes(t *testing.T) {
 	}
 }
 
+func TestWriteCancellationReleasesQueuedRecords(t *testing.T) {
+	t.Setenv("INGESTR_DUCKDB_CHECKPOINT_ROWS", "-1")
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+
+	newBatch := func(value int64) arrow.RecordBatch {
+		builder := array.NewInt64Builder(mem)
+		builder.Append(value)
+		values := builder.NewArray()
+		builder.Release()
+		batch := array.NewRecordBatch(
+			arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil),
+			[]arrow.Array{values},
+			1,
+		)
+		values.Release()
+		return batch
+	}
+
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: newBatch(1), Err: context.Canceled}
+	records <- source.RecordBatchResult{Batch: newBatch(2)}
+	close(records)
+
+	err := (&DuckDBDestination{}).WriteParallel(t.Context(), records, destination.WriteOptions{Table: "state"})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestClaimCDCTargetCanonicalizesCurrentCatalog(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	claimSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "destination_table", DataType: schema.TypeString, MaxLength: 512, Nullable: false},
+		{Name: "connector_id", DataType: schema.TypeString, MaxLength: 64, Nullable: false},
+		{Name: "claimed_at", DataType: schema.TypeTimestampTZ, Nullable: false},
+	}}
+	require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:       "_bruin_staging.cdc_targets",
+		Schema:      claimSchema,
+		PrimaryKeys: []string{"destination_table"},
+	}))
+	claim := func(table, connector string) destination.CDCTargetClaim {
+		return destination.CDCTargetClaim{DestinationTable: table, ConnectorID: connector, SourceTable: "public.orders"}
+	}
+	require.NoError(t, dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim("orders", "connector-a")))
+
+	qualifiedTarget := dest.catalog + ".main.orders"
+	err := dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim(qualifiedTarget, "connector-b"))
+	require.ErrorContains(t, err, "already claimed")
+	require.NoError(t, dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim(qualifiedTarget, "connector-a")))
+	require.NoError(t, dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim("customers", "connector-b")))
+}
+
+func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	if err := dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`); err != nil {
+		t.Fatal(err)
+	}
+
+	first, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NotEmpty(t, first)
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO events VALUES (1)`))
+	stable, exists, err := dest.CDCTargetIncarnation(t.Context(), "main.events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, first, stable)
+	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE events`))
+	_, exists, err = dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.False(t, exists)
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	recreated, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NotEqual(t, first, recreated)
+}
+
 func TestParseDuckDBPath(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -688,6 +766,36 @@ func TestWrite_BasicData(t *testing.T) {
 	}
 }
 
+func TestIngestConnections_UsePreparedTableConstraints(t *testing.T) {
+	t.Setenv("INGESTR_DUCKDB_INGEST_CONNS", "4")
+
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt64}},
+		PrimaryKeys: []string{"id"},
+	}
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       "target",
+		Schema:      tableSchema,
+		DropFirst:   true,
+		PrimaryKeys: []string{"id"},
+	}))
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:  "target",
+		Schema: tableSchema,
+	}))
+	assert.Equal(t, 1, dest.ingestConnections(destination.WriteOptions{Table: "target"}))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:     "staging",
+		Schema:    tableSchema,
+		DropFirst: true,
+	}))
+	assert.Equal(t, 4, dest.ingestConnections(destination.WriteOptions{Table: "staging"}))
+}
+
 func TestMergeTable(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
@@ -1239,6 +1347,42 @@ func TestSwapTableCleansUpOldTables(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), id)
 	assert.Equal(t, "New", string(append([]byte(nil), nameRaw...)))
+}
+
+func TestSwapTableQuotedDotTargetPreservesSiblingBoundaries(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS "order"`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE "order"."sentinel" (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO "order"."sentinel" VALUES (99)`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE "main"."order.events" (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO "main"."order.events" VALUES (1)`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE "main"."staging_for_order_events" (id BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO "main"."staging_for_order_events" VALUES (2)`))
+
+	require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+		StagingTable: `"main"."staging_for_order_events"`,
+		TargetTable:  `"main"."order.events"`,
+	}))
+
+	require.NoError(t, dest.Close(ctx))
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	var targetID, sentinelID int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM "main"."order.events"`).Scan(&targetID))
+	require.Equal(t, int64(2), targetID)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM "order"."sentinel"`).Scan(&sentinelID))
+	require.Equal(t, int64(99), sentinelID)
+	var oldCount int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name LIKE 'order.events_old_%'`).Scan(&oldCount))
+	require.Zero(t, oldCount)
+}
+
+func TestDuckDBSwapRejectsOverQualifiedNames(t *testing.T) {
+	dest := NewDuckDBDestination()
+	err := dest.SwapTable(t.Context(), destination.SwapOptions{StagingTable: "main.staging", TargetTable: "server.catalog.schema.orders"})
+	require.ErrorContains(t, err, "duckdb table name")
 }
 
 func TestDropTable(t *testing.T) {

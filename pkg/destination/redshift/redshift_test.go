@@ -7,7 +7,14 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/stretchr/testify/require"
 )
+
+func TestValidateManagedCDCStateFailsClosed(t *testing.T) {
+	dest := NewRedshiftDestination()
+
+	require.ErrorContains(t, dest.ValidateManagedCDCState(), "does not support destination-managed PostgreSQL CDC state")
+}
 
 type testRecord struct {
 	cols  []arrow.Array

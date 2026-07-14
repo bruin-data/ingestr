@@ -3,6 +3,7 @@ package redshift
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -33,9 +34,16 @@ func (d *RedshiftDestination) Connect(ctx context.Context, uri string) error {
 	return d.PostgresDestination.Connect(ctx, intredshift.NormalizeURI(uri))
 }
 
+func (d *RedshiftDestination) ValidateManagedCDCState() error {
+	return errors.New("redshift does not support destination-managed PostgreSQL CDC state")
+}
+
 func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
 		}
 		record := result.Batch

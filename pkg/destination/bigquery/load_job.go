@@ -30,7 +30,10 @@ import (
 	"google.golang.org/api/option"
 )
 
-var queryJobJitter = randomQueryJobJitter
+var (
+	queryJobJitter         = randomQueryJobJitter
+	loadJobStartRetryDelay = func(attempt int) time.Duration { return time.Duration(attempt) * time.Second }
+)
 
 const (
 	stagedGCSObjectChunkSize   = 32 * 1024 * 1024
@@ -391,13 +394,14 @@ func (d *BigQueryDestination) swapTableWithCopyJob(
 	copier := targetRef.CopierFrom(stagingRef)
 	copier.CreateDisposition = gcbq.CreateIfNeeded
 	copier.WriteDisposition = gcbq.WriteTruncate
+	jobID := "ingestr_copy_" + strings.TrimPrefix(newBigQueryQueryJobID(), "ingestr_")
 
-	job, err := copier.Run(ctx)
+	job, err := d.startCopyJobWithRetry(ctx, copier, jobID, stagingRef, targetRef)
 	if err != nil {
 		return fmt.Errorf("failed to start copy job: %w", err)
 	}
 
-	status, err := job.Wait(ctx)
+	status, err := d.waitForBigQueryJob(ctx, job)
 	if err != nil {
 		return fmt.Errorf("copy job failed (job %s): %w", jobRef(job), err)
 	}
@@ -406,6 +410,64 @@ func (d *BigQueryDestination) swapTableWithCopyJob(
 	}
 
 	return nil
+}
+
+func (d *BigQueryDestination) startCopyJobWithRetry(ctx context.Context, copier *gcbq.Copier, jobID string, sourceRef, targetRef *gcbq.Table) (*gcbq.Job, error) {
+	if err := d.beginCDCJob(ctx, jobID); err != nil {
+		return nil, err
+	}
+	for attempt := 1; ; attempt++ {
+		copier.JobID = jobID
+		copier.ProjectID = d.projectID
+		if d.location != "" {
+			copier.Location = d.location
+		}
+		job, err := copier.Run(ctx)
+		if err == nil {
+			return job, nil
+		}
+		if ctx.Err() != nil {
+			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+		}
+		if isBigQueryDuplicateJobError(err) {
+			job, recoverErr := d.recoverDuplicateCopyJob(ctx, jobID, sourceRef, targetRef)
+			if recoverErr == nil {
+				return job, nil
+			}
+			err = recoverErr
+		}
+		if !isRetryableLoadJobError(err) && !isNotFoundError(err) {
+			_ = d.resolveCDCJob(context.Background(), jobID)
+			return nil, err
+		}
+		config.Debug("[DEST] Retrying ambiguous copy job start with stable job ID %s: %v", jobID, err)
+		if err := sleepWithContextForLoadJob(ctx, loadJobStartRetryDelay(min(attempt, loadJobMaxAttempts))); err != nil {
+			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+		}
+	}
+}
+
+func (d *BigQueryDestination) recoverDuplicateCopyJob(ctx context.Context, jobID string, sourceRef, targetRef *gcbq.Table) (*gcbq.Job, error) {
+	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.location)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := job.Config()
+	if err != nil {
+		return nil, err
+	}
+	copyCfg, ok := cfg.(*gcbq.CopyConfig)
+	if !ok || copyCfg.Dst == nil || len(copyCfg.Srcs) != 1 {
+		return nil, fmt.Errorf("existing job %s is %T, not the expected single-source copy job", jobID, cfg)
+	}
+	if !sameBigQueryTable(copyCfg.Dst, targetRef) || !sameBigQueryTable(copyCfg.Srcs[0], sourceRef) {
+		return nil, fmt.Errorf("existing copy job %s does not match the requested source and destination", jobID)
+	}
+	return job, nil
+}
+
+func sameBigQueryTable(left, right *gcbq.Table) bool {
+	return left != nil && right != nil && left.ProjectID == right.ProjectID && left.DatasetID == right.DatasetID && left.TableID == right.TableID
 }
 
 func parseGCSBucketURI(uri string) (string, string, error) {
@@ -661,17 +723,20 @@ func (d *BigQueryDestination) runCombinedGCSLoadJob(
 	}
 
 	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
-	loader := tableRef.LoaderFrom(loadSource)
-	loader.CreateDisposition = gcbq.CreateNever
-	loader.WriteDisposition = gcbq.WriteAppend
+	jobID := loadJobAttemptID(newBigQueryLoadJobID(), 1)
 
 	config.Debug("[DEST] Starting combined load job for %d GCS chunk(s) into %s.%s", len(chunks), dataset, table)
-	job, err := loader.Run(ctx)
+	job, err := d.startLoadJobWithRetry(ctx, jobID, tableRef, func() (*gcbq.Loader, func(), error) {
+		loader := tableRef.LoaderFrom(loadSource)
+		loader.CreateDisposition = gcbq.CreateNever
+		loader.WriteDisposition = gcbq.WriteAppend
+		return loader, func() {}, nil
+	})
 	if err != nil {
 		return -1, fmt.Errorf("failed to start combined load job: %w", err)
 	}
 
-	status, err := job.Wait(ctx)
+	status, err := d.waitForBigQueryJob(ctx, job)
 	if err != nil {
 		return -1, fmt.Errorf("combined load job failed (job %s): %w", jobRef(job), err)
 	}
@@ -708,6 +773,7 @@ func (d *BigQueryDestination) runSingleLoadJob(
 	chunk stagedLoadChunk,
 ) (int64, error) {
 	maxAttempts := loadJobMaxAttempts
+	baseJobID := newBigQueryLoadJobID()
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		config.Debug(
@@ -719,40 +785,24 @@ func (d *BigQueryDestination) runSingleLoadJob(
 			attempt,
 			maxAttempts,
 		)
-		loadSource, cleanup, err := d.buildLoadSource(staged.format, chunk, staged.ignoreUnknownValues)
-		if err != nil {
-			return -1, err
-		}
-
 		tableRef := d.client.DatasetInProject(project, dataset).Table(table)
-		loader := tableRef.LoaderFrom(loadSource)
-		loader.CreateDisposition = gcbq.CreateNever
-		loader.WriteDisposition = gcbq.WriteAppend
-
-		job, err := loader.Run(ctx)
-		cleanup()
-		if err != nil {
-			if attempt < maxAttempts && isRetryableLoadJobError(err) {
-				backoff := time.Duration(attempt) * time.Second
-				config.Debug("[DEST] Retrying load job for chunk %d after start error: %v", chunk.index+1, err)
-				if err := sleepWithContextForLoadJob(ctx, backoff); err != nil {
-					return -1, err
-				}
-				continue
+		jobID := loadJobAttemptID(baseJobID, attempt)
+		job, err := d.startLoadJobWithRetry(ctx, jobID, tableRef, func() (*gcbq.Loader, func(), error) {
+			loadSource, cleanup, err := d.buildLoadSource(staged.format, chunk, staged.ignoreUnknownValues)
+			if err != nil {
+				return nil, nil, err
 			}
+			loader := tableRef.LoaderFrom(loadSource)
+			loader.CreateDisposition = gcbq.CreateNever
+			loader.WriteDisposition = gcbq.WriteAppend
+			return loader, cleanup, nil
+		})
+		if err != nil {
 			return -1, fmt.Errorf("failed to start load job for chunk %d: %w", chunk.index+1, err)
 		}
 
-		status, err := job.Wait(ctx)
+		status, err := d.waitForBigQueryJob(ctx, job)
 		if err != nil {
-			if attempt < maxAttempts && isRetryableLoadJobError(err) {
-				backoff := time.Duration(attempt) * time.Second
-				config.Debug("[DEST] Retrying load job for chunk %d after wait error: %v", chunk.index+1, err)
-				if err := sleepWithContextForLoadJob(ctx, backoff); err != nil {
-					return -1, err
-				}
-				continue
-			}
 			return -1, fmt.Errorf("load job failed for chunk %d (job %s): %w", chunk.index+1, jobRef(job), err)
 		}
 		if err := status.Err(); err != nil {
@@ -775,6 +825,78 @@ func (d *BigQueryDestination) runSingleLoadJob(
 	}
 
 	return -1, fmt.Errorf("load job error for chunk %d: exhausted retries", chunk.index+1)
+}
+
+type loadJobFactory func() (*gcbq.Loader, func(), error)
+
+func (d *BigQueryDestination) startLoadJobWithRetry(ctx context.Context, jobID string, tableRef *gcbq.Table, factory loadJobFactory) (*gcbq.Job, error) {
+	if err := d.beginCDCJob(ctx, jobID); err != nil {
+		return nil, err
+	}
+	for attempt := 1; ; attempt++ {
+		loader, cleanup, err := factory()
+		if err != nil {
+			_ = d.resolveCDCJob(context.Background(), jobID)
+			return nil, err
+		}
+		loader.JobID = jobID
+		loader.ProjectID = d.projectID
+		if d.location != "" {
+			loader.Location = d.location
+		}
+		job, err := loader.Run(ctx)
+		cleanup()
+		if err == nil {
+			return job, nil
+		}
+		if ctx.Err() != nil {
+			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+		}
+		if isBigQueryDuplicateJobError(err) {
+			job, recoverErr := d.recoverDuplicateLoadJob(ctx, jobID, tableRef)
+			if recoverErr == nil {
+				return job, nil
+			}
+			err = recoverErr
+		}
+		if !isRetryableLoadJobError(err) && !isNotFoundError(err) {
+			_ = d.resolveCDCJob(context.Background(), jobID)
+			return nil, err
+		}
+		config.Debug("[DEST] Retrying ambiguous load job start with stable job ID %s: %v", jobID, err)
+		if err := sleepWithContextForLoadJob(ctx, loadJobStartRetryDelay(min(attempt, loadJobMaxAttempts))); err != nil {
+			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+		}
+	}
+}
+
+func (d *BigQueryDestination) recoverDuplicateLoadJob(ctx context.Context, jobID string, tableRef *gcbq.Table) (*gcbq.Job, error) {
+	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.location)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := job.Config()
+	if err != nil {
+		return nil, err
+	}
+	loadCfg, ok := cfg.(*gcbq.LoadConfig)
+	if !ok || loadCfg.Dst == nil {
+		return nil, fmt.Errorf("existing job %s is %T, not a load job", jobID, cfg)
+	}
+	if loadCfg.Dst.ProjectID != tableRef.ProjectID || loadCfg.Dst.DatasetID != tableRef.DatasetID || loadCfg.Dst.TableID != tableRef.TableID {
+		return nil, fmt.Errorf("existing load job %s targets %s.%s.%s, expected %s.%s.%s", jobID,
+			loadCfg.Dst.ProjectID, loadCfg.Dst.DatasetID, loadCfg.Dst.TableID,
+			tableRef.ProjectID, tableRef.DatasetID, tableRef.TableID)
+	}
+	return job, nil
+}
+
+func newBigQueryLoadJobID() string {
+	return "ingestr_load_" + strings.TrimPrefix(newBigQueryQueryJobID(), "ingestr_")
+}
+
+func loadJobAttemptID(base string, attempt int) string {
+	return fmt.Sprintf("%s_%d", base, attempt)
 }
 
 // loadJobErrorDetails formats the per-row/per-field errors that BigQuery records
@@ -1092,6 +1214,9 @@ func (d *BigQueryDestination) writeLoadJobChunks(
 
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			stager.abort(result.Err)
 			return stager.chunks, stager.totalRows, result.Err
 		}

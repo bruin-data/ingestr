@@ -49,6 +49,19 @@ func (d *fakeBatchDialect) BatchAddColumnsSQL(table string, cols []schema.Column
 	return fmt.Sprintf("ALTER TABLE %s ADD COLUMNS (%s)", table, strings.Join(names, ", "))
 }
 
+// fakeBatchTypeDialect adds BatchColumnTypeAlterer support.
+type fakeBatchTypeDialect struct {
+	fakeDialect
+}
+
+func (d *fakeBatchTypeDialect) BatchAlterColumnTypesSQL(table string, cols []schema.Column) string {
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = fmt.Sprintf("%s TYPE %s", c.Name, d.TypeName(c))
+	}
+	return fmt.Sprintf("ALTER TABLE %s %s", table, strings.Join(parts, ", "))
+}
+
 func addColumnComparison() *schemaevolution.SchemaComparison {
 	return &schemaevolution.SchemaComparison{
 		HasChanges: true,
@@ -124,6 +137,28 @@ func TestBuildMigration_Batch(t *testing.T) {
 	assert.Contains(t, batchStmts[0], "col_c")
 
 	// Non-batch dialect produces one statement per column.
+	stmts, _ := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "my_table", comparison)
+	require.Len(t, stmts, 3)
+}
+
+func TestBuildMigration_BatchTypeChanges(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "a", OldColumn: &schema.Column{Name: "a", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "a", DataType: schema.TypeInt64, Nullable: true}},
+			{Type: schemaevolution.ChangeOverrideType, ColumnName: "b", NewColumn: schema.Column{Name: "b", DataType: schema.TypeString, Nullable: true}},
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "c", OldColumn: &schema.Column{Name: "c", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "c", DataType: schema.TypeInt64, Nullable: true}},
+		},
+	}
+
+	// Batch dialect combines all type changes into a single ALTER TABLE.
+	batchStmts, _ := destination.BuildMigration(&fakeBatchTypeDialect{fakeDialect{supportsAlter: true}}, "my_table", comparison)
+	require.Len(t, batchStmts, 1)
+	for _, col := range []string{"a", "b", "c"} {
+		assert.Contains(t, batchStmts[0], col)
+	}
+
+	// Non-batch dialect produces one ALTER per column.
 	stmts, _ := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "my_table", comparison)
 	require.Len(t, stmts, 3)
 }

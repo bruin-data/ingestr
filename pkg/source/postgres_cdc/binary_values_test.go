@@ -52,25 +52,43 @@ func TestConvertBinaryValueMatchesTextShapes(t *testing.T) {
 		require.IsType(t, time.Time{}, got)
 		assert.True(t, want.Equal(got.(time.Time)))
 
-		textGot := convertTextValue("2024-01-15 10:30:45.123456", schema.Column{DataType: schema.TypeTimestamp})
+		textGot, err := convertTextValue("2024-01-15 10:30:45.123456", schema.Column{DataType: schema.TypeTimestamp})
+		require.NoError(t, err)
 		assert.Equal(t, textGot.(time.Time).UnixMicro(), got.(time.Time).UnixMicro())
 	})
 
-	t.Run("timestamp infinity becomes nil", func(t *testing.T) {
-		assert.Nil(t, mustConvertBinary(t, be64(uint64(math.MaxInt64)), schema.Column{DataType: schema.TypeTimestampTZ}, oidTimestamptz))
+	t.Run("timestamp infinity is rejected", func(t *testing.T) {
+		got, err := convertBinaryValue(be64(uint64(math.MaxInt64)), schema.Column{DataType: schema.TypeTimestampTZ}, oidTimestamptz, pgtype.NewMap())
+		require.Error(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("date infinity is rejected", func(t *testing.T) {
+		got, err := convertBinaryValue(be32(uint32(math.MaxInt32)), schema.Column{DataType: schema.TypeDate}, oidDate, pgtype.NewMap())
+		require.Error(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("far future timestamp does not overflow duration", func(t *testing.T) {
+		want := time.Date(2500, 1, 15, 10, 30, 45, 123456000, time.UTC)
+		micros := (want.Unix()-pgEpoch.Unix())*1_000_000 + int64(want.Nanosecond()/1_000)
+		got := mustConvertBinary(t, be64(uint64(micros)), schema.Column{DataType: schema.TypeTimestampTZ}, oidTimestamptz)
+		assert.Equal(t, want, got)
 	})
 
 	t.Run("date", func(t *testing.T) {
 		days := uint32(8780) // 2024-01-15 is 8780 days after 2000-01-01
 		got := mustConvertBinary(t, be32(days), schema.Column{DataType: schema.TypeDate}, oidDate)
-		textGot := convertTextValue("2024-01-15", schema.Column{DataType: schema.TypeDate})
+		textGot, err := convertTextValue("2024-01-15", schema.Column{DataType: schema.TypeDate})
+		require.NoError(t, err)
 		assert.Equal(t, textGot, got)
 	})
 
 	t.Run("time of day", func(t *testing.T) {
 		micros := (10*3600 + 30*60 + 45) * int64(time.Second/time.Microsecond)
 		got := mustConvertBinary(t, be64(uint64(micros)), schema.Column{DataType: schema.TypeTime}, oidTime)
-		textGot := convertTextValue("10:30:45", schema.Column{DataType: schema.TypeTime})
+		textGot, err := convertTextValue("10:30:45", schema.Column{DataType: schema.TypeTime})
+		require.NoError(t, err)
 		assert.Equal(t, textGot, got)
 	})
 
@@ -127,7 +145,8 @@ func TestConvertBinaryValueMatchesTextShapes(t *testing.T) {
 		got := mustConvertBinary(t, data, schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeInt32}, 1007)
 		assert.Equal(t, []interface{}{int32(1), nil, int32(3)}, got)
 
-		textGot := convertTextValue("{1,NULL,3}", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeInt32})
+		textGot, err := convertTextValue("{1,NULL,3}", schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeInt32})
+		require.NoError(t, err)
 		assert.Equal(t, textGot, got)
 	})
 
@@ -160,7 +179,7 @@ func TestBuildPluginArgs(t *testing.T) {
 
 	t.Run("14+ multi-table gets v2 streaming", func(t *testing.T) {
 		args := buildPluginArgs(cfg, 160000, true)
-		assert.Equal(t, []string{"proto_version '2'", "publication_names 'pub'", "streaming 'true'"}, args)
+		assert.Equal(t, []string{"proto_version '2'", "publication_names 'pub'", "messages 'true'", "streaming 'true'"}, args)
 	})
 
 	t.Run("binary opt-in on 14+", func(t *testing.T) {
@@ -174,7 +193,7 @@ func TestBuildPluginArgs(t *testing.T) {
 		binCfg := cfg
 		binCfg.Binary = true
 		args := buildPluginArgs(binCfg, 160000, false)
-		assert.Equal(t, []string{"proto_version '1'", "publication_names 'pub'", "binary 'true'"}, args)
+		assert.Equal(t, []string{"proto_version '1'", "publication_names 'pub'", "messages 'true'", "binary 'true'"}, args)
 	})
 
 	t.Run("binary ignored on pre-14 server", func(t *testing.T) {
@@ -183,4 +202,19 @@ func TestBuildPluginArgs(t *testing.T) {
 		args := buildPluginArgs(binCfg, 130000, false)
 		assert.NotContains(t, args, "binary 'true'")
 	})
+}
+
+func TestMultiTableReplicatorUsesProtocolV2OnlyForStreamingRuns(t *testing.T) {
+	src := &PostgresCDCSource{serverVersion: 160000, lag: &lagState{}}
+	cfg := CDCConfig{Publication: "pub"}
+
+	batch, err := NewMultiTableReplicator(src, nil, cfg, 0, nil, false, "barrier")
+	require.NoError(t, err)
+	assert.False(t, batch.protocolV2)
+	assert.NotContains(t, buildPluginArgs(cfg, src.serverVersion, batch.streaming), "streaming 'true'")
+
+	stream, err := NewMultiTableReplicator(src, nil, cfg, 0, nil, true, "")
+	require.NoError(t, err)
+	assert.True(t, stream.protocolV2)
+	assert.Contains(t, buildPluginArgs(cfg, src.serverVersion, stream.streaming), "streaming 'true'")
 }

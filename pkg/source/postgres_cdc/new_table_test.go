@@ -106,6 +106,46 @@ func TestDiffNewTables(t *testing.T) {
 	assert.Empty(t, diffNewTables(current, map[string]struct{}{"users": {}}))
 }
 
+func TestNewlyObservedTablesOnlyReturnsTablesAddedAfterPipelinePreparation(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: "users", Incarnation: "10"},
+		{Name: "orders", Incarnation: "20"},
+		{Name: "products", Incarnation: "30"},
+	}
+	got := newlyObservedTables(tables, []string{"users", "orders"})
+	require.Equal(t, []source.SourceTableInfo{{Name: "products", Incarnation: "30"}}, got)
+	assert.Equal(t, tables, newlyObservedTables(tables, []string{}), "an empty prepared set must announce every table observed by ReadAll")
+	assert.Nil(t, newlyObservedTables(tables, nil))
+}
+
+func TestFilterKnownTablesFreezesBatchStartupSet(t *testing.T) {
+	tables := []source.SourceTableInfo{{Name: "users"}, {Name: "orders"}, {Name: "products"}}
+	require.Equal(t, []source.SourceTableInfo{{Name: "users"}, {Name: "orders"}}, filterKnownTables(tables, []string{"orders", "users"}))
+	assert.Empty(t, filterKnownTables(tables, []string{}))
+}
+
+func TestDiscoveryWaitsForCommittedTransactionSpool(t *testing.T) {
+	repl := &fakeReplicator{pendingLowWater: func() (pglogrepl.LSN, bool) { return 42, true }}
+	assert.False(t, discoveryReady(repl))
+	repl.pendingLowWater = func() (pglogrepl.LSN, bool) { return 0, false }
+	assert.True(t, discoveryReady(repl))
+}
+
+func TestDiffTableIncarnationsDetectsSameNameRecreation(t *testing.T) {
+	current := []source.SourceTableInfo{
+		{Name: "public.orders", Incarnation: "100"},
+		{Name: "public.customers", Incarnation: "200"},
+	}
+	added, recreated, err := diffTableIncarnations(current, map[string]string{
+		"public.orders":    "101",
+		"public.customers": "200",
+		"public.invoices":  "300",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"public.invoices"}, added)
+	require.Equal(t, []string{"public.orders"}, recreated)
+}
+
 func TestTablesWithoutResumeState(t *testing.T) {
 	tables := []source.SourceTableInfo{
 		{Name: "users"},
