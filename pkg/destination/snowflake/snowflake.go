@@ -444,7 +444,8 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+	castMap := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -457,7 +458,54 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	return nil
 }
 
-func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
+// castSourceCol returns the source column reference for a MERGE, wrapping it in a
+// CAST to the target type when staging and target disagree (see buildCastMap).
+func castSourceCol(col string, castMap map[string]string) string {
+	ref := "source." + quoteIdentifier(col)
+	if castMap != nil {
+		if targetType, ok := castMap[strings.ToUpper(col)]; ok {
+			return fmt.Sprintf("CAST(%s AS %s)", ref, targetType)
+		}
+	}
+	return ref
+}
+
+// buildCastMap compares the staging and target table schemas and returns, keyed
+// by upper-cased column name, the target type name for every column whose type
+// differs between the two. Snowflake's MERGE does not implicitly cast between
+// types (e.g. TIMESTAMP_TZ vs TIMESTAMP_NTZ), so the merge must cast the source
+// to the target type for these columns.
+func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, targetTable string) map[string]string {
+	targetSchema, err := d.GetTableSchema(ctx, targetTable)
+	if err != nil || targetSchema == nil {
+		return nil
+	}
+	stagingSchema, err := d.GetTableSchema(ctx, stagingTable)
+	if err != nil || stagingSchema == nil {
+		return nil
+	}
+
+	dialect := &Dialect{}
+	stagingTypes := make(map[string]string, len(stagingSchema.Columns))
+	for _, col := range stagingSchema.Columns {
+		stagingTypes[strings.ToUpper(col.Name)] = dialect.TypeName(col)
+	}
+
+	castMap := make(map[string]string)
+	for _, col := range targetSchema.Columns {
+		key := strings.ToUpper(col.Name)
+		targetType := dialect.TypeName(col)
+		if stagingType, ok := stagingTypes[key]; ok && stagingType != targetType {
+			castMap[key] = targetType
+		}
+	}
+	if len(castMap) == 0 {
+		return nil
+	}
+	return castMap
+}
+
+func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := quoteFQN(sfTable(stagingTable))
 	targetFull := quoteFQN(sfTable(targetTable))
@@ -488,10 +536,10 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			q := quoteIdentifier(col)
 			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
-					col, q, "target."+q, "source."+q, unchangedRef,
+					col, q, "target."+q, castSourceCol(col, castMap), unchangedRef,
 				))
 			} else {
-				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = %s", q, castSourceCol(col, castMap)))
 			}
 		}
 	}
@@ -504,7 +552,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	destSourceCols := make([]string, len(destColumns))
 	for i, col := range destColumns {
 		destQuoted[i] = quoteIdentifier(col)
-		destSourceCols[i] = "source." + quoteIdentifier(col)
+		destSourceCols[i] = castSourceCol(col, castMap)
 	}
 
 	quotedPKList := make([]string, len(primaryKeys))
