@@ -1,6 +1,8 @@
 package schemaevolution
 
 import (
+	"strings"
+
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -48,8 +50,10 @@ func BuildFinalSchema(destSchema *schema.TableSchema, comparison *SchemaComparis
 
 		case ChangeWidenType, ChangeOverrideType:
 			for i, col := range result.Columns {
-				if col.Name == change.ColumnName {
-					result.Columns[i] = change.NewColumn
+				if strings.EqualFold(col.Name, change.ColumnName) {
+					newCol := change.NewColumn
+					newCol.Name = col.Name
+					result.Columns[i] = newCol
 					break
 				}
 			}

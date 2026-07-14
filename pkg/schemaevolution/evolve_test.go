@@ -87,3 +87,34 @@ func TestBuildFinalSchema_AppliesApplicableChanges(t *testing.T) {
 		}
 	}
 }
+
+// The comparison's dest schema is read back from the destination (Snowflake
+// upper-cases identifiers) while change.ColumnName comes from the source schema
+// (lower case). BuildFinalSchema must match case-insensitively, otherwise the
+// type change is silently skipped and the staging schema built from the result
+// disagrees with the evolved destination.
+func TestBuildFinalSchema_CaseInsensitiveColumnMatch(t *testing.T) {
+	dest := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "DATE", DataType: schema.TypeTimestampTZ},
+		},
+	}
+	comparison := &SchemaComparison{
+		HasChanges: true,
+		Changes: []SchemaChange{
+			{
+				Type:       ChangeOverrideType,
+				ColumnName: "date", // lower case, as produced from the source schema
+				OldColumn:  &schema.Column{Name: "date", DataType: schema.TypeTimestampTZ},
+				NewColumn:  schema.Column{Name: "date", DataType: schema.TypeTimestamp},
+			},
+		},
+	}
+
+	final := BuildFinalSchema(dest, comparison)
+	require.Len(t, final.Columns, 1)
+	// Type change is applied despite the case difference...
+	assert.Equal(t, schema.TypeTimestamp, final.Columns[0].DataType)
+	// ...and the destination's identifier casing is preserved.
+	assert.Equal(t, "DATE", final.Columns[0].Name)
+}
