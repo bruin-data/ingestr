@@ -3,6 +3,7 @@ package snowflake
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -485,4 +486,100 @@ func TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure(t *testing.T) {
 	}
 
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBatchAlterColumnTypesSQL(t *testing.T) {
+	d := &Dialect{}
+	sql := d.BatchAlterColumnTypesSQL(`"DB"."PUBLIC"."USERS"`, []schema.Column{
+		{Name: "age", DataType: schema.TypeString},
+		{Name: "score", DataType: schema.TypeFloat64},
+	})
+	assert.Equal(
+		t,
+		`ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR, COLUMN "SCORE" SET DATA TYPE DOUBLE`,
+		sql,
+	)
+	assert.Empty(t, d.BatchAlterColumnTypesSQL(`"T"`, nil))
+}
+
+func TestParseSnowflakeAlterColumnTypesSQL_Single(t *testing.T) {
+	table, changes, ok := parseSnowflakeAlterColumnTypesSQL(`ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR`)
+	require.True(t, ok)
+	assert.Equal(t, `"DB"."PUBLIC"."USERS"`, table)
+	require.Len(t, changes, 1)
+	assert.Equal(t, "AGE", changes[0].column)
+	assert.Equal(t, "VARCHAR", changes[0].newType)
+}
+
+func TestParseSnowflakeAlterColumnTypesSQL_MultiClause(t *testing.T) {
+	table, changes, ok := parseSnowflakeAlterColumnTypesSQL(
+		`ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR, COLUMN "AMOUNT" SET DATA TYPE NUMBER(38,0)`,
+	)
+	require.True(t, ok)
+	assert.Equal(t, `"DB"."PUBLIC"."USERS"`, table)
+	require.Len(t, changes, 2)
+	assert.Equal(t, "AGE", changes[0].column)
+	assert.Equal(t, "VARCHAR", changes[0].newType)
+	assert.Equal(t, "AMOUNT", changes[1].column)
+	assert.Equal(t, "NUMBER(38,0)", changes[1].newType)
+}
+
+
+func TestParseSnowflakeAlterColumnTypesSQL_Invalid(t *testing.T) {
+	for _, sql := range []string{
+		`ALTER TABLE "DB"."PUBLIC"."USERS" ADD COLUMN "AGE" VARCHAR`,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" AS SELECT 1`,
+		`SELECT 1`,
+	} {
+		if _, _, ok := parseSnowflakeAlterColumnTypesSQL(sql); ok {
+			t.Errorf("expected parse to fail for %q", sql)
+		}
+	}
+}
+
+func TestIsSnowflakeAlterTypeRewriteCandidate(t *testing.T) {
+	alter := `ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR`
+	incompatible := errors.New("002108 (22000): SQL compilation error: cannot change column AGE from type NUMBER(38,0) to VARCHAR(16777216)")
+
+	assert.True(t, isSnowflakeAlterTypeRewriteCandidate(alter, incompatible))
+	assert.False(t, isSnowflakeAlterTypeRewriteCandidate(alter, nil))
+	assert.False(t, isSnowflakeAlterTypeRewriteCandidate(alter, errors.New("some other error")))
+	assert.False(t, isSnowflakeAlterTypeRewriteCandidate(`SELECT 1`, incompatible))
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL(t *testing.T) {
+	sql, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "AGE", "NAME"},
+		map[string]string{"AGE": "VARCHAR"},
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" AS SELECT "ID", CAST("AGE" AS VARCHAR) AS "AGE", "NAME" FROM "DB"."PUBLIC"."USERS"`,
+		sql,
+	)
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL_MultiColumn(t *testing.T) {
+	sql, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "AGE", "SCORE"},
+		map[string]string{"AGE": "VARCHAR", "SCORE": "DOUBLE"},
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" AS SELECT "ID", CAST("AGE" AS VARCHAR) AS "AGE", CAST("SCORE" AS DOUBLE) AS "SCORE" FROM "DB"."PUBLIC"."USERS"`,
+		sql,
+	)
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL_ColumnMissing(t *testing.T) {
+	_, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "NAME"},
+		map[string]string{"AGE": "VARCHAR"},
+	)
+	require.Error(t, err)
 }

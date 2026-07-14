@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -817,8 +818,135 @@ func (d *SnowflakeDestination) Exec(ctx context.Context, sql string, args ...int
 	_, err := d.db.ExecContext(ctx, sql, args...)
 	if err != nil {
 		config.LogFailedQuery(sql, err)
+		if isSnowflakeAlterTypeRewriteCandidate(sql, err) {
+			if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf("%w (rewrite fallback failed: %v)", err, rewriteErr)
+			}
+		}
 	}
 	return err
+}
+
+var (
+	snowflakeAlterColumnTypesRe = regexp.MustCompile(`(?is)^ALTER TABLE\s+(.+?)\s+ALTER COLUMN\s+(.+)$`)
+	snowflakeAlterClauseSepRe   = regexp.MustCompile(`(?i),\s+COLUMN\s+`)
+	snowflakeAlterClauseRe      = regexp.MustCompile(`(?is)^"?([^"\s]+)"?\s+SET DATA TYPE\s+(.+)$`)
+)
+
+type snowflakeAlterTypeChange struct {
+	column  string
+	newType string
+}
+
+// parseSnowflakeAlterColumnTypesSQL extracts the table and each column/target
+// type from an ALTER COLUMN SET DATA TYPE statement (single- or multi-clause) so
+// it can be rewritten as a single CREATE OR REPLACE TABLE.
+func parseSnowflakeAlterColumnTypesSQL(sql string) (table string, changes []snowflakeAlterTypeChange, ok bool) {
+	m := snowflakeAlterColumnTypesRe.FindStringSubmatch(strings.TrimSpace(sql))
+	if m == nil {
+		return "", nil, false
+	}
+	for _, clause := range snowflakeAlterClauseSepRe.Split(m[2], -1) {
+		c := snowflakeAlterClauseRe.FindStringSubmatch(strings.TrimSpace(clause))
+		if c == nil {
+			return "", nil, false
+		}
+		changes = append(changes, snowflakeAlterTypeChange{column: c[1], newType: strings.TrimSpace(c[2])})
+	}
+	return strings.TrimSpace(m[1]), changes, true
+}
+
+func isSnowflakeAlterTypeRewriteCandidate(sql string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, _, ok := parseSnowflakeAlterColumnTypesSQL(sql); !ok {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "cannot change column")
+}
+
+func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Context, originalSQL string) error {
+	tableFQN, changes, ok := parseSnowflakeAlterColumnTypesSQL(originalSQL)
+	if !ok {
+		return fmt.Errorf("not an ALTER COLUMN TYPE statement: %s", originalSQL)
+	}
+
+	columns, err := d.describeColumnNames(ctx, tableFQN)
+	if err != nil {
+		return err
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("no columns found for table %s", tableFQN)
+	}
+
+	typeChanges := make(map[string]string, len(changes))
+	for _, c := range changes {
+		typeChanges[strings.ToUpper(c.column)] = c.newType
+	}
+
+	rewrittenSQL, err := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges)
+	if err != nil {
+		return err
+	}
+
+	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s", tableFQN)
+	config.Debug("[DEST] Column type change SQL: %s", rewrittenSQL)
+	if _, err := d.db.ExecContext(ctx, rewrittenSQL); err != nil {
+		config.LogFailedQuery(rewrittenSQL, err)
+		return err
+	}
+	return nil
+}
+
+func (d *SnowflakeDestination) describeColumnNames(ctx context.Context, tableFQN string) ([]string, error) {
+	query := fmt.Sprintf(`DESCRIBE TABLE %s ->> SELECT "name" FROM $1`, tableFQN)
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return nil, fmt.Errorf("failed to describe table for rewrite: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan column name: %w", err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating columns: %w", err)
+	}
+	return columns, nil
+}
+
+// buildSnowflakeAlterColumnTypeRewriteSQL reprojects every column in ordinal
+// order, casting each changed column (keyed by upper-cased name) to its new
+// type.
+func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, typeChanges map[string]string) (string, error) {
+	if len(typeChanges) == 0 {
+		return "", errors.New("no column type changes provided")
+	}
+	selectExprs := make([]string, 0, len(columns))
+	found := make(map[string]bool, len(typeChanges))
+	for _, col := range columns {
+		if newType, ok := typeChanges[strings.ToUpper(col)]; ok {
+			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(col), newType, quoteIdentifier(col)))
+			found[strings.ToUpper(col)] = true
+			continue
+		}
+		selectExprs = append(selectExprs, quoteIdentifier(col))
+	}
+	for col := range typeChanges {
+		if !found[col] {
+			return "", fmt.Errorf("column %q not found in table %s", col, tableFQN)
+		}
+	}
+	return fmt.Sprintf("CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s", tableFQN, strings.Join(selectExprs, ", "), tableFQN), nil
 }
 
 func (d *SnowflakeDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
