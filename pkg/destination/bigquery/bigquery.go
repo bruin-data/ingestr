@@ -584,6 +584,73 @@ func partitionByClause(column string, isDateColumn bool) string {
 	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
 }
 
+// partitionOrClusterMismatch reports whether the table's partition/cluster spec
+// differs from the configured one. An empty configured spec means "leave as-is".
+func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata, clusterBy []string) bool {
+	if d.partitionBy != "" {
+		if meta.RangePartitioning != nil {
+			return true
+		}
+		if meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, d.partitionBy) {
+			return true
+		}
+		// Compare the partition type against what we would create; ingestr builds
+		// only Field, so the desired type is BigQuery's default.
+		if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(&bigquery.TimePartitioning{Field: d.partitionBy}) {
+			return true
+		}
+	}
+
+	if len(clusterBy) > 0 {
+		var existingCluster []string
+		if meta.Clustering != nil {
+			existingCluster = meta.Clustering.Fields
+		}
+		if len(existingCluster) != len(clusterBy) {
+			return true
+		}
+		for i := range existingCluster {
+			if !strings.EqualFold(existingCluster[i], clusterBy[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// recreateSpecGuard refuses a recreate that would silently drop a live spec half
+// the user didn't configure (recreate keeps only the configured partition/cluster).
+func (d *BigQueryDestination) recreateSpecGuard(meta *bigquery.TableMetadata, table string, clusterBy []string) error {
+	if d.partitionBy == "" && (meta.TimePartitioning != nil || meta.RangePartitioning != nil) {
+		return fmt.Errorf("changing the clustering of %s requires recreating it, which would drop its existing partitioning; pass partition_by to keep (or change) it", table)
+	}
+	if len(clusterBy) == 0 && meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
+		return fmt.Errorf("changing the partitioning of %s requires recreating it, which would drop its existing clustering (%s); pass cluster_by to keep (or change) it", table, strings.Join(meta.Clustering.Fields, ", "))
+	}
+	return nil
+}
+
+// effectiveClusterBy resolves the clustering ingestr would apply: the configured
+// cluster_by, or the default primary-key clustering when none is configured.
+func (d *BigQueryDestination) effectiveClusterBy(opts destination.SwapOptions) []string {
+	if len(d.clusterBy) > 0 {
+		return d.clusterBy
+	}
+	if opts.Schema == nil {
+		return nil
+	}
+	return defaultClusteringFromPrimaryKeys(BuildBigQuerySchema(opts.Schema), opts.Schema.PrimaryKeys)
+}
+
+// effectivePartitionType returns the time-partitioning type, resolving the unset
+// value to BigQuery's default (DAY) so a stored type compares equal to an unset one.
+func effectivePartitionType(tp *bigquery.TimePartitioning) bigquery.TimePartitioningType {
+	if tp == nil || tp.Type == "" {
+		return bigquery.DayPartitioningType
+	}
+	return tp.Type
+}
+
 type mergePartitionPruning struct {
 	Column string
 	IsDate bool
@@ -1281,14 +1348,47 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
 	}
 
+	// BigQuery can't ALTER partitioning/clustering, so a target whose spec differs
+	// must be recreated; detect once here (safe: replace overwrites the target anyway).
+	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTableName)
+	// Resolve the clustering ingestr would apply — including the default PK
+	// clustering — so the mismatch check, guard, and CTAS all agree with the table.
+	clusterBy := d.effectiveClusterBy(opts)
+	mismatch := false
+	var targetExpiration time.Time
+	if d.partitionBy != "" || len(clusterBy) > 0 {
+		if meta, err := targetRef.Metadata(ctx); err == nil {
+			mismatch = d.partitionOrClusterMismatch(meta, clusterBy)
+			targetExpiration = meta.ExpirationTime
+			if mismatch {
+				if err := d.recreateSpecGuard(meta, targetTable, clusterBy); err != nil {
+					return err
+				}
+			}
+		} else if !isNotFoundError(err) {
+			return fmt.Errorf("failed to check target table metadata: %w", err)
+		}
+	}
+
 	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTableName)
 
 	config.Debug("[DEST] Swapping tables: %s → %s", stagingTable, targetTable)
 
 	// Copy jobs can't dedup.
 	if d.effectiveLoadMethod() == loadMethodLoadJob && len(opts.PrimaryKeys) == 0 {
-		if err := d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName); err != nil {
-			return err
+		doCopy := func() error {
+			return d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+		}
+		var swapErr error
+		if mismatch {
+			// Partition/cluster changed: rename the target aside, copy into a fresh
+			// target with the new spec, then drop the old (restoring it on failure).
+			swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, doCopy)
+		} else {
+			swapErr = doCopy()
+		}
+		if swapErr != nil {
+			return swapErr
 		}
 		config.Debug("[DEST] Copy completed, deleting staging table")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1299,29 +1399,171 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return nil
 	}
 
+	// CTAS path. CREATE OR REPLACE can't change an existing table's spec, so on a
+	// mismatch rename the target aside, CTAS into a fresh target, drop the old.
+	ctas := func() error {
+		return d.runCTASSwap(ctx, opts, clusterBy, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+	}
+	var swapErr error
+	if mismatch {
+		swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, ctas)
+	} else {
+		swapErr = ctas()
+	}
+	if swapErr != nil {
+		return swapErr
+	}
+
+	config.Debug("[DEST] Copy completed, deleting staging table")
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := stagingRef.Delete(cleanupCtx); err != nil {
+		config.Debug("[DEST] Failed to delete staging table: %v", err)
+	}
+
+	return nil
+}
+
+// repartitionAsideSuffix returns a unique suffix for moving a table aside.
+func repartitionAsideSuffix() string {
+	var b [8]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// renameAsideSwap repartitions the target: rename it aside, run swap (recreating a
+// fresh target), then drop the old — or rename it back (with its expiration) on failure.
+func (d *BigQueryDestination) renameAsideSwap(ctx context.Context, project, dataset, target string, originalExpiration time.Time, swap func() error) error {
+	oldName, err := d.renameTargetAside(ctx, project, dataset, target)
+	if err != nil {
+		return fmt.Errorf("failed to rename target aside for repartitioning: %w", err)
+	}
+
+	if swapErr := swap(); swapErr != nil {
+		// The swap may have failed because ctx was canceled (Ctrl-C, timeout);
+		// the restore must still run or the target stays aside and self-deletes.
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		defer cancel()
+		// A canceled wait can report failure for a swap that committed server-side;
+		// if the new target exists, keep it (don't clobber) and let the aside expire.
+		if d.tableExists(restoreCtx, project, dataset, target) {
+			return fmt.Errorf("repartition swap reported an error but the new target exists and was kept; aside table %q expires in ~24h: %w", oldName, swapErr)
+		}
+		if restoreErr := d.restoreTargetFromAside(restoreCtx, project, dataset, oldName, target, originalExpiration); restoreErr != nil {
+			return fmt.Errorf("repartition swap failed (%w); restoring aside table %q also failed: %w", swapErr, oldName, restoreErr)
+		}
+		return swapErr
+	}
+
+	// Success: drop the aside table. Best-effort — the expiration set in
+	// renameTargetAside cleans it up if this drop never lands.
+	oldFQN := fmt.Sprintf("%s.%s.%s", project, dataset, oldName)
+	if err := d.DropTable(ctx, oldFQN); err != nil {
+		config.Debug("[DEST] failed to drop aside table %s (will expire): %v", oldFQN, err)
+	}
+	return nil
+}
+
+// renameTargetAside renames target → a unique aside name and sets a 24h
+// expiration on it so it self-cleans if a later drop never runs.
+func (d *BigQueryDestination) renameTargetAside(ctx context.Context, project, dataset, table string) (string, error) {
+	// BigQuery can't RENAME a table that has a primary-key constraint; drop it
+	// first (it's informational/not-enforced; the recreated target's spec comes
+	// from the swap, as in any replace).
+	dropPKSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s DROP PRIMARY KEY IF EXISTS",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
+	if _, err := d.runQueryJobWithRetry(ctx, dropPKSQL, "drop target primary key"); err != nil {
+		return "", fmt.Errorf("failed to drop primary key before renaming %q aside: %w", table, err)
+	}
+	for range 3 {
+		oldName := table + "__ingestr_repartition_" + repartitionAsideSuffix()
+		renameSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s RENAME TO %s",
+			quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table), quoteIdentifier(oldName))
+		if _, err := d.runQueryJobWithRetry(ctx, renameSQL, "rename target aside"); err != nil {
+			// RENAME isn't idempotent: a retried job can fail even though an earlier
+			// attempt committed, so probe (detached from ctx) whether it landed.
+			probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			landed := d.tableRenameLanded(probeCtx, project, dataset, table, oldName)
+			cancel()
+			if !landed {
+				if isAlreadyExistsError(err) {
+					continue // extremely unlikely with a random suffix; try a fresh one
+				}
+				return "", fmt.Errorf("failed to rename %q aside (if it is missing, it may live under %q — rename it back manually): %w", table, oldName, err)
+			}
+		}
+		// Self-clean safety net if the final drop never runs (e.g. a crash).
+		expireSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s SET OPTIONS(expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR))",
+			quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(oldName))
+		if _, err := d.runQueryJobWithRetry(ctx, expireSQL, "set aside expiration"); err != nil {
+			config.Debug("[DEST] failed to set expiration on aside table %s: %v", oldName, err)
+		}
+		return oldName, nil
+	}
+	return "", fmt.Errorf("could not rename %q aside after 3 attempts", table)
+}
+
+// restoreTargetFromAside restores the aside table's original expiration (fixed
+// first, since it survives the rename) and renames it back to target.
+func (d *BigQueryDestination) restoreTargetFromAside(ctx context.Context, project, dataset, oldName, table string, originalExpiration time.Time) error {
+	expiration := "NULL"
+	if !originalExpiration.IsZero() {
+		expiration = fmt.Sprintf("TIMESTAMP_MICROS(%d)", originalExpiration.UnixMicro())
+	}
+	clearSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s SET OPTIONS(expiration_timestamp = %s)",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(oldName), expiration)
+	if _, err := d.runQueryJobWithRetry(ctx, clearSQL, "restore aside expiration"); err != nil {
+		return fmt.Errorf("failed to restore expiration on aside table %q — it still expires in ~24h; clear its expiration and rename it back to %q manually: %w", oldName, table, err)
+	}
+	restoreSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s RENAME TO %s",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(oldName), quoteIdentifier(table))
+	if _, err := d.runQueryJobWithRetry(ctx, restoreSQL, "restore target from aside"); err != nil {
+		if d.tableRenameLanded(ctx, project, dataset, oldName, table) {
+			return nil
+		}
+		return fmt.Errorf("failed to rename aside table %q back to %q — rename it back manually: %w", oldName, table, err)
+	}
+	return nil
+}
+
+// tableRenameLanded reports whether a rename whose job errored actually committed
+// server-side (RENAME isn't idempotent, so a retried job can spuriously fail).
+func (d *BigQueryDestination) tableRenameLanded(ctx context.Context, project, dataset, from, to string) bool {
+	if !d.tableExists(ctx, project, dataset, to) {
+		return false
+	}
+	_, err := d.client.DatasetInProject(project, dataset).Table(from).Metadata(ctx)
+	return isNotFoundError(err)
+}
+
+func (d *BigQueryDestination) tableExists(ctx context.Context, project, dataset, table string) bool {
+	_, err := d.client.DatasetInProject(project, dataset).Table(table).Metadata(ctx)
+	return err == nil
+}
+
+// runCTASSwap creates/replaces the target from staging via CREATE OR REPLACE … AS
+// SELECT, applying partition/clustering. The CTAS swap step (direct or rename-aside).
+func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.SwapOptions, clusterBy []string, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName string) error {
 	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
 	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
-	if d.partitionBy != "" || len(d.clusterBy) > 0 {
-		// For partitioned/clustered tables, must use SQL to apply partitioning
+	if d.partitionBy != "" || len(clusterBy) > 0 {
+		// For partitioned/clustered tables, must use SQL to apply partitioning.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
-
 		if d.partitionBy != "" {
 			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
 		}
-
-		if len(d.clusterBy) > 0 {
-			clusterCols := make([]string, len(d.clusterBy))
-			for i, col := range d.clusterBy {
+		if len(clusterBy) > 0 {
+			clusterCols := make([]string, len(clusterBy))
+			for i, col := range clusterBy {
 				clusterCols[i] = quoteIdentifier(col)
 			}
 			sql += fmt.Sprintf("CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 		}
-
 		sql += "AS " + selectClause
-
 		config.Debug("[DEST] Executing SQL copy (partitioned): %s", sql)
-
 		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL copy")
 		if err != nil {
 			if job == nil {
@@ -1334,9 +1576,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
 			quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
-
 		config.Debug("[DEST] Executing SQL swap: %s", sql)
-
 		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL swap")
 		if err != nil {
 			if job == nil {
@@ -1345,14 +1585,6 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 			return fmt.Errorf("SQL swap job error (job %s): %w", jobRef(job), err)
 		}
 	}
-
-	config.Debug("[DEST] Copy completed, deleting staging table")
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := stagingRef.Delete(cleanupCtx); err != nil {
-		config.Debug("[DEST] Failed to delete staging table: %v", err)
-	}
-
 	return nil
 }
 
