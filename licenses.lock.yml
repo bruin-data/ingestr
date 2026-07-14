@@ -255,11 +255,6 @@ dependencies:
       licenses:
         - BSD-3-Clause
       status: allowed
-    - module: github.com/DataDog/zstd
-      version: v1.5.6
-      licenses:
-        - BSD-3-Clause
-      status: allowed
     - module: github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/attributes
       version: v0.29.1
       licenses:
@@ -269,6 +264,11 @@ dependencies:
       version: v1.4.7
       licenses:
         - Apache-2.0
+      status: allowed
+    - module: github.com/DataDog/zstd
+      version: v1.5.6
+      licenses:
+        - BSD-3-Clause
       status: allowed
     - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
       version: v1.6.0
@@ -357,7 +357,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/apache/arrow-adbc/go/adbc
-      version: v1.9.0
+      version: v1.11.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -1486,7 +1486,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/snowflakedb/gosnowflake
-      version: v1.18.1
+      version: v1.19.0
       licenses:
         - Apache-2.0
       status: allowed
