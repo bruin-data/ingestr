@@ -33,6 +33,33 @@ func TestSplit(t *testing.T) {
 	}
 }
 
+func TestSplitRawPreservesIdentifierReferences(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"double quotes", `"appUser"."order.events"`, []string{`"appUser"`, `"order.events"`}},
+		{"escaped double quote", `"app""User".orders`, []string{`"app""User"`, "orders"}},
+		{"brackets", `[Case Schema].[order.events]`, []string{`[Case Schema]`, `[order.events]`}},
+		{"backticks", "`Case Schema`.`order.events`", []string{"`Case Schema`", "`order.events`"}},
+		{"whitespace", ` "appUser" . orders `, []string{`"appUser"`, "orders"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SplitRaw(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("SplitRaw(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("SplitRaw(%q) = %v, want %v", tt.in, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestParse(t *testing.T) {
 	tests := []struct {
 		name     string

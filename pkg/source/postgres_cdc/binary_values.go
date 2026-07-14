@@ -95,9 +95,10 @@ func convertBinaryValue(data []byte, col schema.Column, oid uint32, m *pgtype.Ma
 		}
 		micros := int64(binary.BigEndian.Uint64(data))
 		if micros == pgTimestampInfinity || micros == pgTimestampNegInfinity {
-			return nil, nil
+			return nil, fmt.Errorf("binary timestamp: PostgreSQL infinity is not representable")
 		}
-		return pgEpoch.Add(time.Duration(micros) * time.Microsecond), nil
+		seconds, subsecondMicros := micros/1_000_000, micros%1_000_000
+		return time.Unix(pgEpoch.Unix()+seconds, subsecondMicros*1_000).UTC(), nil
 
 	case schema.TypeDate:
 		if len(data) != 4 {
@@ -105,7 +106,7 @@ func convertBinaryValue(data []byte, col schema.Column, oid uint32, m *pgtype.Ma
 		}
 		days := int32(binary.BigEndian.Uint32(data))
 		if days == math.MaxInt32 || days == math.MinInt32 {
-			return nil, nil
+			return nil, fmt.Errorf("binary date: PostgreSQL infinity is not representable")
 		}
 		return pgEpoch.AddDate(0, 0, int(days)), nil
 

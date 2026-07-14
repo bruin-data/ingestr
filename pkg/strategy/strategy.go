@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
@@ -64,6 +65,8 @@ type IngestionJob struct {
 
 	// EvolutionPlan holds the deferred schema evolution to apply on the destination.
 	EvolutionPlan *schemaevolution.EvolutionPlan
+
+	CDCStateManager *CDCStateManager
 }
 
 // GetRecords returns the transformed record stream for this job.
@@ -99,20 +102,35 @@ type WriteStrategy interface {
 // MultiTableIngestionJob represents an ingestion job for multiple tables.
 // Used by CDC sources that emit data from multiple tables concurrently.
 type MultiTableIngestionJob struct {
-	Config         *config.IngestConfig
-	Source         source.MultiTableSource
-	Destination    destination.Destination
-	Tables         []source.SourceTableInfo
-	TableDestNames map[string]string // source table → dest table mapping
-	Tracker        progress.Tracker
-	CDCResumeLSNs  map[string]string                         // Per-table CDC resume LSNs: source table → max LSN already processed
-	EvolutionPlans map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
+	Config          *config.IngestConfig
+	Source          source.MultiTableSource
+	Destination     destination.Destination
+	Tables          []source.SourceTableInfo
+	TableDestNames  map[string]string // source table → dest table mapping
+	Tracker         progress.Tracker
+	CDCResumeLSNs   map[string]string                         // Per-table CDC resume LSNs: source table → max LSN already processed
+	EvolutionPlans  map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
+	CDCStateManager *CDCStateManager
 
 	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
 	WhitespaceTrimmer *transformer.WhitespaceTrimmer
 
 	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
 	LoadTimestamp *transformer.LoadTimestamp
+
+	ColumnRenamers     map[string]*transformer.ColumnRenamer
+	NormalizeTableInfo func(context.Context, source.SourceTableInfo, string) (source.SourceTableInfo, *transformer.ColumnRenamer, error)
+	columnRenamersMu   sync.RWMutex
+}
+
+func cdcResumeMetadata(tables []source.SourceTableInfo) (map[string]string, map[string]string) {
+	incarnations := make(map[string]string, len(tables))
+	fingerprints := make(map[string]string, len(tables))
+	for _, table := range tables {
+		incarnations[table.Name] = table.Incarnation
+		fingerprints[table.Name] = table.SchemaFingerprint
+	}
+	return incarnations, fingerprints
 }
 
 // ApplyEvolutionFor applies the pending schema evolution plan for a source table.
@@ -202,14 +220,23 @@ func (j *MultiTableIngestionJob) GetDestTableName(sourceTable string) string {
 }
 
 func (j *MultiTableIngestionJob) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	if opts.KnownTables == nil {
+		opts.KnownTables = make([]string, 0, len(j.Tables))
+		for _, table := range j.Tables {
+			opts.KnownTables = append(opts.KnownTables, table.Name)
+		}
+	}
 	records, err := j.Source.ReadAll(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	return j.ApplyBatchTransformation(records), nil
+	return j.ApplyBatchTransformation(ctx, records), nil
 }
 
-func (j *MultiTableIngestionJob) ApplyBatchTransformation(records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+func (j *MultiTableIngestionJob) ApplyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+	if len(j.ColumnRenamers) > 0 || j.NormalizeTableInfo != nil {
+		records = j.applyColumnRenaming(ctx, records)
+	}
 	if j.WhitespaceTrimmer != nil {
 		records = transformer.Wrap(records, j.WhitespaceTrimmer)
 	}
@@ -221,6 +248,71 @@ func (j *MultiTableIngestionJob) ApplyLoadTimestamp(records <-chan source.Record
 		records = transformer.Wrap(records, j.LoadTimestamp)
 	}
 	return records
+}
+
+func (j *MultiTableIngestionJob) applyColumnRenaming(ctx context.Context, records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+	out := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(out)
+		for result := range records {
+			if result.Err == nil && result.TableInfo != nil && j.NormalizeTableInfo != nil {
+				destTable := multiTableDestName(j.Destination, *result.TableInfo)
+				normalized, renamer, err := j.NormalizeTableInfo(ctx, *result.TableInfo, destTable)
+				if err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+						result.Batch = nil
+					}
+					result.Err = fmt.Errorf("failed to normalize table %s: %w", result.TableInfo.Name, err)
+				} else {
+					result.TableInfo = &normalized
+					j.setColumnRenamer(normalized.Name, renamer)
+				}
+			}
+
+			if result.Err == nil && result.Batch != nil {
+				if renamer := j.columnRenamer(result.TableName); renamer != nil && renamer.HasRenames() {
+					transformed, err := renamer.Transform(result.Batch)
+					result.Batch.Release()
+					if err != nil {
+						result.Batch = nil
+						result.Err = fmt.Errorf("failed to rename columns for table %s: %w", result.TableName, err)
+					} else {
+						result.Batch = transformed
+					}
+				}
+			}
+
+			select {
+			case out <- result:
+			case <-ctx.Done():
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func (j *MultiTableIngestionJob) columnRenamer(table string) *transformer.ColumnRenamer {
+	j.columnRenamersMu.RLock()
+	defer j.columnRenamersMu.RUnlock()
+	return j.ColumnRenamers[table]
+}
+
+func (j *MultiTableIngestionJob) setColumnRenamer(table string, renamer *transformer.ColumnRenamer) {
+	j.columnRenamersMu.Lock()
+	defer j.columnRenamersMu.Unlock()
+	if renamer == nil || !renamer.HasRenames() {
+		delete(j.ColumnRenamers, table)
+		return
+	}
+	if j.ColumnRenamers == nil {
+		j.ColumnRenamers = make(map[string]*transformer.ColumnRenamer)
+	}
+	j.ColumnRenamers[table] = renamer
 }
 
 // MultiTableStrategy extends WriteStrategy for multi-table sources.
@@ -247,9 +339,11 @@ func Get(name config.IncrementalStrategy) (WriteStrategy, error) {
 // ApplyBatchTransformation wraps record batches with contract-based transformation if needed.
 // Also applies column renaming if a naming convention is configured.
 func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-chan source.RecordBatchResult) (<-chan source.RecordBatchResult, error) {
-	// Cast column types first (for --columns type overrides on known-schema sources)
+	// Cast column types first (for --columns type overrides on known-schema sources).
+	// Casting parses every value (decimals, dates), so it is the CPU-heaviest
+	// stage of the stream; fan it out across batches.
 	if j.TypeCaster != nil {
-		records = transformer.Wrap(records, j.TypeCaster)
+		records = transformer.WrapParallel(records, j.TypeCaster, transformer.ParallelWorkers())
 	}
 
 	// Apply column renaming (if configured)

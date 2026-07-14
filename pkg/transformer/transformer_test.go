@@ -1,6 +1,8 @@
 package transformer
 
 import (
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -268,5 +270,64 @@ func TestWrap(t *testing.T) {
 	assert.Equal(t, "added", result.Batch.ColumnName(1))
 
 	_, ok := <-output
+	assert.False(t, ok)
+}
+
+type delayedTransformer struct {
+	delays []time.Duration
+	calls  atomic.Int64
+}
+
+func (d *delayedTransformer) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+	n := d.calls.Add(1) - 1
+	if int(n) < len(d.delays) {
+		time.Sleep(d.delays[n])
+	}
+	batch.Retain()
+	return batch, nil
+}
+
+func (d *delayedTransformer) OutputSchema(in *arrow.Schema) *arrow.Schema { return in }
+
+func TestWrapParallel_PreservesOrderAndErrors(t *testing.T) {
+	allocator := memory.DefaultAllocator
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+
+	makeBatch := func(v int64) arrow.RecordBatch {
+		b := array.NewInt64Builder(allocator)
+		defer b.Release()
+		b.Append(v)
+		arr := b.NewArray()
+		defer arr.Release()
+		return array.NewRecordBatch(inputSchema, []arrow.Array{arr}, 1)
+	}
+
+	const n = 20
+	input := make(chan source.RecordBatchResult, n+1)
+	for i := range n {
+		input <- source.RecordBatchResult{Batch: makeBatch(int64(i))}
+	}
+	wantErr := errors.New("mid-stream failure")
+	input <- source.RecordBatchResult{Err: wantErr}
+	close(input)
+
+	// First batch is the slowest so out-of-order completion is guaranteed.
+	delays := make([]time.Duration, n)
+	delays[0] = 50 * time.Millisecond
+	out := WrapParallel(input, &delayedTransformer{delays: delays}, 4)
+
+	for i := range n {
+		result := <-out
+		require.NoError(t, result.Err)
+		require.NotNil(t, result.Batch)
+		got := result.Batch.Column(0).(*array.Int64).Value(0)
+		assert.Equal(t, int64(i), got)
+		result.Batch.Release()
+	}
+	result := <-out
+	assert.Equal(t, wantErr, result.Err)
+	_, ok := <-out
 	assert.False(t, ok)
 }

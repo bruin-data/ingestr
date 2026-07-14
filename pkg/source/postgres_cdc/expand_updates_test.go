@@ -134,14 +134,12 @@ func TestDecoderCommitEmitsKeyChangeDelete(t *testing.T) {
 	tableSchema := keyedTestSchema()
 	decoder := NewDecoder(tableSchema, "public", "test_table")
 	decoder.currentTxLSN = 42
-	decoder.pendingChanges = []Change{
-		{
-			Operation: "UPDATE",
-			LSN:       42,
-			Values:    []interface{}{int32(2), "moved"},
-			OldValues: []interface{}{int32(1), nil},
-		},
-	}
+	require.NoError(t, decoder.pendingChanges.Append(Change{
+		Operation: "UPDATE",
+		LSN:       42,
+		Values:    []interface{}{int32(2), "moved"},
+		OldValues: []interface{}{int32(1), nil},
+	}))
 
 	changes, err := decoder.handleCommit()
 	require.NoError(t, err)

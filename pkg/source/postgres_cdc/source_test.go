@@ -1,11 +1,39 @@
 package postgres_cdc
 
 import (
+	"context"
 	"testing"
 
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCaughtUpPositionKeepsItsExactSlot(t *testing.T) {
+	src := NewPostgresCDCSource()
+	src.recordCaughtUpLSN(pglogrepl.LSN(20), "current-slot", true)
+	src.recordCaughtUpLSN(pglogrepl.LSN(10), "stale-slot", false)
+
+	assert.Equal(t, pglogrepl.LSN(20), src.caughtUp.Committed())
+	assert.Equal(t, "current-slot", src.caughtUpSlot)
+	assert.True(t, src.caughtUpFromStream)
+
+	src.recordCaughtUpLSN(pglogrepl.LSN(30), "next-slot", false)
+	assert.Equal(t, pglogrepl.LSN(30), src.caughtUp.Committed())
+	assert.Equal(t, "next-slot", src.caughtUpSlot)
+	assert.False(t, src.caughtUpFromStream)
+}
+
+func TestFinalizeBatchSkipsFreshSnapshotPosition(t *testing.T) {
+	src := NewPostgresCDCSource()
+	src.replConn = &pgconn.PgConn{}
+	src.recordCaughtUpLSN(pglogrepl.LSN(20), "snapshot-slot", false)
+
+	require.NoError(t, src.FinalizeBatch(context.Background()))
+	assert.Equal(t, FormatLSN(pglogrepl.LSN(20)), src.CDCState().Position)
+	assert.Nil(t, src.keepaliveCancel)
+}
 
 func TestSchemes(t *testing.T) {
 	source := NewPostgresCDCSource()
@@ -23,6 +51,7 @@ func TestParseURIConfig(t *testing.T) {
 		wantPublication string
 		wantSlot        string
 		wantDestSchema  string
+		wantStateID     string
 		wantBinary      bool
 		wantErr         bool
 	}{
@@ -63,6 +92,12 @@ func TestParseURIConfig(t *testing.T) {
 			wantErr:         false,
 		},
 		{
+			name:            "with explicit state identity",
+			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&state_id=orders-east",
+			wantPublication: "my_pub",
+			wantStateID:     "orders-east",
+		},
+		{
 			name:            "binary opt-in",
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&binary=true",
 			wantPublication: "my_pub",
@@ -94,6 +129,7 @@ func TestParseURIConfig(t *testing.T) {
 			assert.Equal(t, tt.wantPublication, cfg.Publication)
 			assert.Equal(t, tt.wantSlot, cfg.SlotName)
 			assert.Equal(t, tt.wantDestSchema, cfg.DestSchema)
+			assert.Equal(t, tt.wantStateID, cfg.StateID)
 			assert.Equal(t, tt.wantBinary, cfg.Binary)
 
 			// Verify normalized URI doesn't contain CDC params
@@ -102,6 +138,7 @@ func TestParseURIConfig(t *testing.T) {
 			assert.NotContains(t, normalizedURI, "mode=")
 			assert.NotContains(t, normalizedURI, "dest_schema=")
 			assert.NotContains(t, normalizedURI, "binary=")
+			assert.NotContains(t, normalizedURI, "state_id=")
 			assert.NotContains(t, normalizedURI, "+cdc")
 		})
 	}
@@ -161,4 +198,8 @@ func TestBuildReplicationConnString(t *testing.T) {
 			assert.Contains(t, got, "replication=database")
 		})
 	}
+
+	poolURI := buildReplicationConnString("postgres://user:pass@localhost:5432/mydb?pool_max_conns=1&sslmode=disable")
+	assert.NotContains(t, poolURI, "pool_max_conns")
+	assert.Contains(t, poolURI, "sslmode=disable")
 }

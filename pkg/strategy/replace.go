@@ -266,10 +266,14 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
+		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
+		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
-	records, err := job.GetRecords(ctx, readOpts)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	records, err := job.GetRecords(readCtx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
 	}
@@ -301,6 +305,8 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 
 	if err := job.Destination.WriteParallel(ctx, records, writeOpts); err != nil {
+		cancelRead()
+		drainAndReleaseUntil(records, streamAbortDrainTimeout)
 		if useStaging {
 			if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
@@ -434,12 +440,16 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		parallelism = 4
 	}
 
-	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism: parallelism,
-			PageSize:    job.Config.PageSize,
-			Limit:       job.Config.SQLLimit,
-			FullRefresh: job.Config.FullRefresh,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			Limit:               job.Config.SQLLimit,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			FullRefresh:         job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})
@@ -458,6 +468,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		CancelSource:     cancelRead,
 	}); err != nil {
 		for _, stagingTable := range stagingTables {
 			if dropErr := job.Destination.DropTable(ctx, stagingTable); dropErr != nil {

@@ -31,6 +31,9 @@ type mergeTableParams struct {
 // prepareMergeTables ensures the destination table exists (without dropping it)
 // and creates a fresh staging table for it.
 func prepareMergeTables(ctx context.Context, dest destination.Destination, p mergeTableParams) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       p.DestTable,
 		Schema:      destination.DestinationTableSchema(p.Schema),
@@ -41,7 +44,13 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 	}); err != nil {
 		return fmt.Errorf("failed to prepare destination table %s: %w", p.DestTable, err)
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        p.StagingTable,
 		Schema:       p.Schema,
@@ -53,6 +62,9 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 		ExpiresAfter: destination.ManagedStagingTTL,
 	}); err != nil {
 		return fmt.Errorf("failed to prepare staging table %s: %w", p.StagingTable, err)
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
 	}
 
 	return nil
@@ -124,6 +136,11 @@ func warnIfCDCMergeUnsupported(dest destination.Destination) {
 	}
 }
 
+func supportsCDCSnapshotReplace(dest destination.Destination) bool {
+	_, ok := dest.(destination.TruncateCapable)
+	return ok
+}
+
 func (s *MergeStrategy) Name() config.IncrementalStrategy {
 	return config.StrategyMerge
 }
@@ -163,6 +180,11 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}); err != nil {
 		return err
 	}
+	if job.CDCStateManager != nil {
+		if err := job.CDCStateManager.BindDestinationIncarnation(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
+			return fmt.Errorf("failed to bind CDC destination before merge: %w", err)
+		}
+	}
 
 	// Read from source
 	parallelism := job.Config.ExtractParallelism
@@ -183,8 +205,12 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
-		CDCResumeLSN:                    job.Config.CDCResumeLSN,  // For CDC incremental resume
+		CDCResumeLSN:                    job.Config.CDCResumeLSN, // For CDC incremental resume
+		CDCResumeIncarnation:            job.Config.CDCResumeIncarnation,
+		CDCResumeSchemaFingerprint:      job.Config.CDCResumeSchemaFingerprint,
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix, // Destination-aware slot suffix
+		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
+		CDCSnapshotReplace:              isCDC && supportsCDCSnapshotReplace(job.Destination),
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
@@ -198,8 +224,9 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		records = job.Tracker.Wrap(records)
 	}
 
-	// Write to staging table using parallel writes
-	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
+	// Write to staging table using parallel writes. Source TRUNCATE controls
+	// split the input into ordered segments and clear earlier staged changes.
+	sourceTruncated, err := destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
 		Parallelism:      parallelism,
@@ -208,26 +235,59 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if err := job.ApplyEvolution(ctx); err != nil {
 		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
 	}
 
 	// Perform merge: UPDATE existing + INSERT new
 	// Note: We only use source columns here. Destination-only columns (removed columns)
 	// will naturally receive NULL for new rows and remain unchanged for existing rows.
 	config.Debug("[MERGE] Executing merge operation")
+	if isCDC && sourceTruncated {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := destination.ApplyCDCTruncate(ctx, job.Destination, job.Config.DestTable); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
 	}
 
 	// Drop staging table (skip when KeepStaging is set for test inspection).
 	if !job.Config.KeepStaging {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
 		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
 			config.Debug("[MERGE] Warning: failed to drop staging table: %v", err)
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
 		}
 	}
 
@@ -267,13 +327,35 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 			destTable := job.GetDestTableName(ti.Name)
 
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				errChan <- err
+				return
+			}
 			if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
 				errChan <- fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
 				return
 			}
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				errChan <- err
+				return
+			}
 
 			if isAppendOnlyCDCTable(ti) {
+				if err := source.ConnectorLeaseLoss(ctx); err != nil {
+					errChan <- err
+					return
+				}
 				if err := prepareAppendOnlyCDCTable(ctx, job.Destination, destTable, ti.Schema); err != nil {
+					errChan <- err
+					return
+				}
+				if job.CDCStateManager != nil {
+					if err := job.CDCStateManager.BindDestinationIncarnation(ctx, ti.Name, destTable); err != nil {
+						errChan <- fmt.Errorf("failed to bind CDC destination table %s: %w", ti.Name, err)
+						return
+					}
+				}
+				if err := source.ConnectorLeaseLoss(ctx); err != nil {
 					errChan <- err
 					return
 				}
@@ -298,6 +380,12 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				errChan <- err
 				return
 			}
+			if job.CDCStateManager != nil {
+				if err := job.CDCStateManager.BindDestinationIncarnation(ctx, ti.Name, destTable); err != nil {
+					errChan <- fmt.Errorf("failed to bind CDC destination table %s: %w", ti.Name, err)
+					return
+				}
+			}
 
 			mu.Lock()
 			stagingTables[ti.Name] = stagingTable
@@ -316,25 +404,40 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	for err := range errChan {
 		return err
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 
 	parallelism := job.Config.ExtractParallelism
 	if parallelism <= 0 {
 		parallelism = 4
 	}
 
-	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	resumeIncarnations, resumeSchemas := cdcResumeMetadata(job.Tables)
+	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism:   parallelism,
-			PageSize:      job.Config.PageSize,
-			Limit:         job.Config.SQLLimit,
-			CDCSlotSuffix: job.Config.CDCSlotSuffix,
-			FullRefresh:   job.Config.FullRefresh,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			Limit:               job.Config.SQLLimit,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			CDCSnapshotReplace:  anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			FullRefresh:         job.Config.FullRefresh,
 		},
-		CDCResumeLSNs: job.CDCResumeLSNs,
+		CDCResumeLSNs:               job.CDCResumeLSNs,
+		CDCResumeIncarnations:       resumeIncarnations,
+		CDCResumeSchemaFingerprints: resumeSchemas,
 	})
 	if err != nil {
-		for _, stagingTable := range stagingTables {
-			_ = job.Destination.DropTable(ctx, stagingTable)
+		if source.ConnectorLeaseLoss(ctx) == nil {
+			for _, stagingTable := range stagingTables {
+				if source.ConnectorLeaseLoss(ctx) != nil {
+					break
+				}
+				_ = job.Destination.DropTable(ctx, stagingTable)
+			}
 		}
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
 	}
@@ -343,18 +446,28 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		records = job.Tracker.Wrap(records)
 	}
 
-	if err := multitable.Write(ctx, job.Destination, records, destination.MultiTableWriteOptions{
+	writeResult, err := multitable.WriteWithResult(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
 		Parallelism:      parallelism,
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
-	}); err != nil {
-		for _, stagingTable := range stagingTables {
-			_ = job.Destination.DropTable(ctx, stagingTable)
+		CancelSource:     cancelRead,
+	})
+	if err != nil {
+		if source.ConnectorLeaseLoss(ctx) == nil {
+			for _, stagingTable := range stagingTables {
+				if source.ConnectorLeaseLoss(ctx) != nil {
+					break
+				}
+				_ = job.Destination.DropTable(ctx, stagingTable)
+			}
 		}
 		return fmt.Errorf("failed to write multi-table data: %w", err)
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
 	}
 
 	mergeErrChan := make(chan error, len(job.Tables))
@@ -371,15 +484,48 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				// Append-only change-log table: rows were written directly.
 				return
 			}
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				mergeErrChan <- err
+				return
+			}
+			if hasCDCColumns(ti.Schema) && writeResult.TruncatedTables[ti.Name] {
+				if err := source.ConnectorLeaseLoss(ctx); err != nil {
+					mergeErrChan <- err
+					return
+				}
+				if err := destination.ApplyCDCTruncate(ctx, job.Destination, destTable); err != nil {
+					mergeErrChan <- fmt.Errorf("failed to reset CDC target %s: %w", ti.Name, err)
+					return
+				}
+				if err := source.ConnectorLeaseLoss(ctx); err != nil {
+					mergeErrChan <- err
+					return
+				}
+			}
 
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				mergeErrChan <- err
+				return
+			}
 			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, ""); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				mergeErrChan <- err
+				return
+			}
 
 			if !job.Config.KeepStaging {
+				if err := source.ConnectorLeaseLoss(ctx); err != nil {
+					mergeErrChan <- err
+					return
+				}
 				if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
 					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+				}
+				if err := source.ConnectorLeaseLoss(ctx); err != nil {
+					mergeErrChan <- err
 				}
 			}
 		}(tableInfo)
@@ -396,9 +542,14 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	}
 
 	if mergeErr != nil {
-		for _, stagingTable := range stagingTables {
-			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-				config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+		if source.ConnectorLeaseLoss(ctx) == nil {
+			for _, stagingTable := range stagingTables {
+				if source.ConnectorLeaseLoss(ctx) != nil {
+					break
+				}
+				if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+				}
 			}
 		}
 		return mergeErr
