@@ -181,6 +181,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
+              { text: "FastSpring", link: "/supported-sources/fastspring.md" },
               { text: "Fireflies", link: "/supported-sources/fireflies.md" },
               { text: "Fluxx", link: "/supported-sources/fluxx.md" },
               { text: "football-data.org", link: "/supported-sources/football-data-org.md" },
