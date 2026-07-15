@@ -15,7 +15,6 @@ func TestParseURIConfig(t *testing.T) {
 	cfg, normalized, err := parseURIConfig("mssql+cdc://sa:pass@example:1433/app?encrypt=disable&mode=stream&dest_schema=raw&capture_instance=dbo_users&poll_interval=250ms")
 	require.NoError(t, err)
 
-	assert.Equal(t, ModeStream, cfg.Mode)
 	assert.Equal(t, "raw", cfg.DestSchema)
 	assert.Equal(t, "dbo_users", cfg.CaptureInstance)
 	assert.Equal(t, 250*time.Millisecond, cfg.PollInterval)
@@ -28,12 +27,6 @@ func TestParseURIConfig(t *testing.T) {
 	assert.Empty(t, u.Query().Get("dest_schema"))
 	assert.Empty(t, u.Query().Get("capture_instance"))
 	assert.Empty(t, u.Query().Get("poll_interval"))
-}
-
-func TestParseURIConfigRejectsInvalidMode(t *testing.T) {
-	_, _, err := parseURIConfig("mssql+cdc://sa:pass@example/app?mode=once")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid mode")
 }
 
 func TestStoredLSNHelpers(t *testing.T) {

@@ -27,14 +27,6 @@ const keepaliveInterval = 5 * time.Second
 
 const finalizeConfirmationTimeout = 5 * time.Second
 
-// CDCMode represents the CDC operation mode
-type CDCMode string
-
-const (
-	ModeBatch  CDCMode = "batch"  // Run once, exit when caught up
-	ModeStream CDCMode = "stream" // Continuous streaming mode
-)
-
 // defaultPublicationName is the publication ingestr creates and manages when the
 // URI does not specify one.
 const defaultPublicationName = "ingestr_publication"
@@ -46,7 +38,6 @@ const defaultDiscoverInterval = 30 * time.Second
 type CDCConfig struct {
 	Publication   string
 	SlotName      string
-	Mode          CDCMode
 	ResumeFromLSN string // If set, skip snapshot and resume streaming from this LSN
 	DestSchema    string // If set, prepend this schema to destination table names (e.g. "dataset" for BigQuery)
 	StateID       string // Optional explicit identity for destination-managed CDC state
@@ -142,7 +133,7 @@ var (
 )
 
 func (s *PostgresCDCSource) ValidateConnectorPreflight(ctx context.Context, opts source.ConnectorPreflightOptions) error {
-	if s.cdcConfig.Mode == ModeBatch && !opts.Streaming {
+	if !opts.Streaming {
 		if err := validateBatchBarrierSupport(s.serverVersion); err != nil {
 			return err
 		}
@@ -824,9 +815,7 @@ func (s *PostgresCDCSource) TableExists(ctx context.Context, table string) (bool
 }
 
 func parseURIConfig(uri string) (CDCConfig, string, error) {
-	cfg := CDCConfig{
-		Mode: ModeBatch,
-	}
+	var cfg CDCConfig
 
 	// Remove scheme suffix (+cdc)
 	normalizedURI := uri
@@ -847,17 +836,6 @@ func parseURIConfig(uri string) (CDCConfig, string, error) {
 	cfg.SlotName = query.Get("slot")
 	cfg.DestSchema = query.Get("dest_schema")
 	cfg.StateID = query.Get("state_id")
-
-	if mode := query.Get("mode"); mode != "" {
-		switch mode {
-		case "batch":
-			cfg.Mode = ModeBatch
-		case "stream":
-			cfg.Mode = ModeStream
-		default:
-			return cfg, "", fmt.Errorf("invalid mode: %s (must be 'batch' or 'stream')", mode)
-		}
-	}
 
 	if raw := query.Get("binary"); raw != "" {
 		switch raw {

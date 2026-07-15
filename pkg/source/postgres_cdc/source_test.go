@@ -50,7 +50,6 @@ func TestParseURIConfig(t *testing.T) {
 		uri             string
 		wantPublication string
 		wantSlot        string
-		wantMode        CDCMode
 		wantDestSchema  string
 		wantStateID     string
 		wantBinary      bool
@@ -61,7 +60,6 @@ func TestParseURIConfig(t *testing.T) {
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&slot=my_slot&mode=stream",
 			wantPublication: "my_pub",
 			wantSlot:        "my_slot",
-			wantMode:        ModeStream,
 			wantErr:         false,
 		},
 		{
@@ -69,7 +67,6 @@ func TestParseURIConfig(t *testing.T) {
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub",
 			wantPublication: "my_pub",
 			wantSlot:        "",
-			wantMode:        ModeBatch,
 			wantErr:         false,
 		},
 		{
@@ -77,7 +74,6 @@ func TestParseURIConfig(t *testing.T) {
 			uri:             "postgresql+cdc://user:pass@localhost:5432/mydb?publication=my_pub",
 			wantPublication: "my_pub",
 			wantSlot:        "",
-			wantMode:        ModeBatch,
 			wantErr:         false,
 		},
 		{
@@ -85,7 +81,6 @@ func TestParseURIConfig(t *testing.T) {
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&mode=batch",
 			wantPublication: "my_pub",
 			wantSlot:        "",
-			wantMode:        ModeBatch,
 			wantErr:         false,
 		},
 		{
@@ -93,7 +88,6 @@ func TestParseURIConfig(t *testing.T) {
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&dest_schema=my_dataset",
 			wantPublication: "my_pub",
 			wantSlot:        "",
-			wantMode:        ModeBatch,
 			wantDestSchema:  "my_dataset",
 			wantErr:         false,
 		},
@@ -101,29 +95,18 @@ func TestParseURIConfig(t *testing.T) {
 			name:            "with explicit state identity",
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&state_id=orders-east",
 			wantPublication: "my_pub",
-			wantMode:        ModeBatch,
 			wantStateID:     "orders-east",
-		},
-		{
-			name:            "invalid mode",
-			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&mode=invalid",
-			wantPublication: "",
-			wantSlot:        "",
-			wantMode:        "",
-			wantErr:         true,
 		},
 		{
 			name:            "binary opt-in",
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&binary=true",
 			wantPublication: "my_pub",
-			wantMode:        ModeBatch,
 			wantBinary:      true,
 		},
 		{
 			name:            "binary explicit off",
 			uri:             "postgres+cdc://user:pass@localhost:5432/mydb?publication=my_pub&binary=false",
 			wantPublication: "my_pub",
-			wantMode:        ModeBatch,
 			wantBinary:      false,
 		},
 		{
@@ -145,7 +128,6 @@ func TestParseURIConfig(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPublication, cfg.Publication)
 			assert.Equal(t, tt.wantSlot, cfg.SlotName)
-			assert.Equal(t, tt.wantMode, cfg.Mode)
 			assert.Equal(t, tt.wantDestSchema, cfg.DestSchema)
 			assert.Equal(t, tt.wantStateID, cfg.StateID)
 			assert.Equal(t, tt.wantBinary, cfg.Binary)

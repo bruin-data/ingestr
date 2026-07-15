@@ -39,7 +39,7 @@ CDC over Vitess opens two connections: the MySQL protocol connection for schema 
 
 ```shell
 ingestr ingest \
-  --source-uri "vitess+cdc://user:password@host:3306/keyspace?grpc_port=15991&mode=batch" \
+  --source-uri "vitess+cdc://user:password@host:3306/keyspace?grpc_port=15991" \
   --dest-uri "duckdb:///tmp/vitess_cdc.duckdb" \
   --source-table "keyspace.orders" \
   --dest-table "orders"

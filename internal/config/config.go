@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -163,6 +164,11 @@ func (c *IngestConfig) Validate() error {
 			return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q is not supported with --stream (only merge and append)", c.IncrementalStrategy)}
 		}
 	}
+	if c.IsCDCSource() {
+		if err := c.validateCDCMode(); err != nil {
+			return err
+		}
+	}
 	if c.IsChangeTrackingSource() && c.SQLLimit > 0 {
 		return &ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
 	}
@@ -241,6 +247,39 @@ func (c *IngestConfig) IsCDCSource() bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+cdc")
+}
+
+// validateCDCMode enforces the deprecation of the ?mode= CDC URI parameter.
+// Continuous ingestion is selected by --stream alone; mode= no longer has any
+// effect. mode=stream on its own used to leave the source reading forever while
+// the batch write path waited for a read that never ended, so it is rejected
+// rather than silently ignored.
+func (c *IngestConfig) validateCDCMode() error {
+	parsed, err := url.Parse(c.SourceURI)
+	if err != nil {
+		// Leave malformed URIs to the source's own parser, which reports better.
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(parsed.Query().Get("mode")))
+	switch mode {
+	case "":
+		return nil
+	case "batch":
+	case "stream":
+		if !c.Stream {
+			return &ValidationError{
+				Field:   "source-uri",
+				Message: "mode=stream is no longer supported; remove it and use --stream on sources that support continuous ingestion",
+			}
+		}
+	default:
+		return &ValidationError{
+			Field:   "source-uri",
+			Message: fmt.Sprintf("invalid mode: %s (must be 'batch' or 'stream')", mode),
+		}
+	}
+	output.Warnf("Warning: the ?mode= URI parameter is deprecated and ignored; continuous ingestion is controlled by --stream\n")
+	return nil
 }
 
 func (c *IngestConfig) IsChangeTrackingSource() bool {

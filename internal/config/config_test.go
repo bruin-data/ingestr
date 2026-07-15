@@ -121,6 +121,75 @@ func TestIngestConfigValidate_Stream(t *testing.T) {
 	}
 }
 
+func TestIngestConfigValidate_CDCMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		uri     string
+		stream  bool
+		wantErr string
+	}{
+		{
+			name: "no mode parameter",
+			uri:  "postgres+cdc://localhost:5432/db?publication=p",
+		},
+		{
+			name: "mode=batch is a no-op",
+			uri:  "postgres+cdc://localhost:5432/db?mode=batch",
+		},
+		{
+			name:    "mode=stream without --stream is rejected",
+			uri:     "postgres+cdc://localhost:5432/db?mode=stream",
+			wantErr: "mode=stream is no longer supported",
+		},
+		{
+			name:   "mode=stream with --stream is tolerated",
+			uri:    "postgres+cdc://localhost:5432/db?mode=stream",
+			stream: true,
+		},
+		{
+			name:    "unknown mode is rejected",
+			uri:     "mssql+cdc://example:1433/app?mode=once",
+			wantErr: "invalid mode",
+		},
+		{
+			name:    "mode is case-insensitive",
+			uri:     "mongodb+cdc://localhost:27017/app?mode=STREAM",
+			wantErr: "mode=stream is no longer supported",
+		},
+		{
+			name: "mode on a non-CDC source is ignored",
+			uri:  "postgres://localhost:5432/db?mode=stream",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = tt.uri
+			cfg.SourceTable = "public.users"
+			cfg.DestURI = "duckdb:///tmp/out.duckdb"
+			if tt.stream {
+				cfg.Stream = true
+				cfg.IncrementalStrategy = ""
+			}
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected validation error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestIngestConfigValidate_ChangeTrackingRejectsSQLLimit(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SourceURI = "mssql+ct://example:1433/app"
