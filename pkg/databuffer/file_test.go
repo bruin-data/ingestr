@@ -753,6 +753,180 @@ func TestCastRecordToSchema_UnknownToJSONEncodesScalarStrings(t *testing.T) {
 	assert.True(t, storageCol.IsNull(4))
 }
 
+func TestCastRecordToSchema_NestedArrowValuesBecomeJSON(t *testing.T) {
+	structType := arrow.StructOf(
+		arrow.Field{Name: "label", Type: arrow.BinaryTypes.String, Nullable: false},
+		arrow.Field{Name: "ids", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: true},
+		arrow.Field{Name: "attributes", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.BinaryTypes.String), Nullable: true},
+		arrow.Field{Name: "blob", Type: arrow.BinaryTypes.Binary, Nullable: true},
+	)
+	builder := array.NewStructBuilder(memory.DefaultAllocator, structType)
+	labelBuilder := builder.FieldBuilder(0).(*array.StringBuilder)
+	idsBuilder := builder.FieldBuilder(1).(*array.ListBuilder)
+	idBuilder := idsBuilder.ValueBuilder().(*array.Int64Builder)
+	attributesBuilder := builder.FieldBuilder(2).(*array.MapBuilder)
+	attributeKeyBuilder := attributesBuilder.KeyBuilder().(*array.StringBuilder)
+	attributeValueBuilder := attributesBuilder.ItemBuilder().(*array.StringBuilder)
+	blobBuilder := builder.FieldBuilder(3).(*array.BinaryBuilder)
+
+	builder.Append(true)
+	labelBuilder.Append("true")
+	idsBuilder.Append(true)
+	idBuilder.Append(1)
+	idBuilder.AppendNull()
+	attributesBuilder.Append(true)
+	attributeKeyBuilder.Append("active")
+	attributeValueBuilder.Append("true")
+	attributeKeyBuilder.Append("count")
+	attributeValueBuilder.Append("2")
+	blobBuilder.Append([]byte{0xff, 0x00})
+
+	builder.Append(true)
+	labelBuilder.Append("null")
+	idsBuilder.Append(true)
+	attributesBuilder.Append(true)
+	blobBuilder.Append([]byte{})
+
+	builder.AppendNull()
+	values := builder.NewStructArray()
+	builder.Release()
+	defer values.Release()
+
+	sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: structType, Nullable: true}}, nil)
+	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{values}, 3)
+	defer record.Release()
+
+	casted, err := CastRecordToSchema(record, targetSchema, true)
+	require.NoError(t, err)
+	defer casted.Release()
+
+	jsonValues := casted.Column(0).(array.ExtensionArray).Storage().(*array.String)
+	assert.Equal(t, `{"label":"true","ids":[1,null],"attributes":{"active":"true","count":"2"},"blob":"/wA="}`, jsonValues.Value(0))
+	assert.Equal(t, `{"label":"null","ids":[],"attributes":{},"blob":""}`, jsonValues.Value(1))
+	assert.True(t, jsonValues.IsNull(2))
+}
+
+func TestCastRecordToSchema_NestedArrowJSONPreservesSlicedOffsets(t *testing.T) {
+	builder := array.NewListBuilder(memory.DefaultAllocator, arrow.BinaryTypes.String)
+	items := builder.ValueBuilder().(*array.StringBuilder)
+	builder.Append(true)
+	items.Append("discard")
+	builder.Append(true)
+	items.Append("true")
+	items.Append("null")
+	builder.Append(false)
+	full := builder.NewListArray()
+	builder.Release()
+	defer full.Release()
+
+	sliced := array.NewSlice(full, 1, 3)
+	defer sliced.Release()
+	sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "items", Type: full.DataType(), Nullable: true}}, nil)
+	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "items", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{sliced}, 2)
+	defer record.Release()
+
+	casted, err := CastRecordToSchema(record, targetSchema, true)
+	require.NoError(t, err)
+	defer casted.Release()
+	jsonValues := casted.Column(0).(array.ExtensionArray).Storage().(*array.String)
+	assert.Equal(t, `["true","null"]`, jsonValues.Value(0))
+	assert.True(t, jsonValues.IsNull(1))
+}
+
+func TestCastRecordToSchema_PrimitiveVariableListsRemainArrays(t *testing.T) {
+	for _, sourceType := range []arrow.DataType{
+		arrow.ListOf(arrow.PrimitiveTypes.Int32),
+		arrow.LargeListOf(arrow.PrimitiveTypes.Int32),
+		arrow.ListViewOf(arrow.PrimitiveTypes.Int32),
+		arrow.LargeListViewOf(arrow.PrimitiveTypes.Int32),
+	} {
+		t.Run(sourceType.Name(), func(t *testing.T) {
+			builder := array.NewBuilder(memory.DefaultAllocator, sourceType)
+			require.NoError(t, builder.AppendValueFromString(`[0]`))
+			require.NoError(t, builder.AppendValueFromString(`[1,null,2]`))
+			builder.AppendNull()
+			require.NoError(t, builder.AppendValueFromString(`[]`))
+			full := builder.NewArray()
+			builder.Release()
+			defer full.Release()
+
+			sliced := array.NewSlice(full, 1, 4)
+			defer sliced.Release()
+			sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "numbers", Type: sourceType, Nullable: true}}, nil)
+			targetSchema := arrow.NewSchema([]arrow.Field{{Name: "numbers", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: true}}, nil)
+			record := array.NewRecordBatch(sourceSchema, []arrow.Array{sliced}, 3)
+			defer record.Release()
+
+			casted, err := CastRecordToSchema(record, targetSchema, true)
+			require.NoError(t, err)
+			defer casted.Release()
+			numbers := casted.Column(0).(*array.List)
+			assert.False(t, numbers.IsNull(0))
+			assert.True(t, numbers.IsNull(1))
+			assert.False(t, numbers.IsNull(2))
+			start, end := numbers.ValueOffsets(0)
+			assert.Equal(t, int64(0), start)
+			assert.Equal(t, int64(3), end)
+			start, end = numbers.ValueOffsets(2)
+			assert.Equal(t, int64(3), start)
+			assert.Equal(t, int64(3), end)
+			values := numbers.ListValues().(*array.Int64)
+			assert.Equal(t, int64(1), values.Value(0))
+			assert.True(t, values.IsNull(1))
+			assert.Equal(t, int64(2), values.Value(2))
+		})
+	}
+}
+
+func TestCastRecordToSchema_RejectsDuplicateArrowMapKeys(t *testing.T) {
+	builder := array.NewMapBuilder(memory.DefaultAllocator, arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64, false)
+	keys := builder.KeyBuilder().(*array.StringBuilder)
+	items := builder.ItemBuilder().(*array.Int64Builder)
+	builder.Append(true)
+	keys.Append("duplicate")
+	items.Append(1)
+	keys.Append("duplicate")
+	items.Append(2)
+	values := builder.NewMapArray()
+	builder.Release()
+	defer values.Release()
+
+	sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "attributes", Type: values.DataType(), Nullable: true}}, nil)
+	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "attributes", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{values}, 1)
+	defer record.Release()
+
+	_, err := CastRecordToSchema(record, targetSchema, true)
+	require.ErrorContains(t, err, `map contains duplicate JSON key "duplicate"`)
+}
+
+func TestCastRecordToSchema_NonStringArrowMapKeysUseEntries(t *testing.T) {
+	builder := array.NewMapBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Int64, arrow.BinaryTypes.String, false)
+	keys := builder.KeyBuilder().(*array.Int64Builder)
+	items := builder.ItemBuilder().(*array.StringBuilder)
+	builder.Append(true)
+	keys.Append(1)
+	items.Append("one")
+	builder.Append(true)
+	values := builder.NewMapArray()
+	builder.Release()
+	defer values.Release()
+
+	sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "attributes", Type: values.DataType(), Nullable: true}}, nil)
+	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "attributes", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{values}, 2)
+	defer record.Release()
+
+	casted, err := CastRecordToSchema(record, targetSchema, true)
+	require.NoError(t, err)
+	defer casted.Release()
+	jsonValues := casted.Column(0).(array.ExtensionArray).Storage().(*array.String)
+	assert.Equal(t, `[{"key":1,"value":"one"}]`, jsonValues.Value(0))
+	assert.Equal(t, `[]`, jsonValues.Value(1))
+}
+
 // ============================================================================
 // Unsafe Cast Tests (safe=false, user column overrides)
 // ============================================================================
