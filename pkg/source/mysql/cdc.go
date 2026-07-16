@@ -819,6 +819,12 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				return fmt.Errorf("MySQL CDC does not support PARTIAL_UPDATE_ROWS_EVENT; disable binlog_row_value_options=PARTIAL_JSON")
 			}
 			if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
+				// current < target here is normal, not an anomaly: non-data
+				// events (FORMAT_DESCRIPTION, PREVIOUS_GTIDS, artificial
+				// MariaDB events) carry LogPos=0 and don't advance current.
+				// The last emitted _cdc_lsn may then sit slightly before
+				// target, so the next run re-streams a short suffix of
+				// events; merge-by-LSN dedup makes that harmless.
 				return flushMySQLCDCChangeBuffers(buffers, results)
 			}
 		}
