@@ -935,7 +935,10 @@ func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Contex
 		typeChanges[strings.ToUpper(c.column)] = c.newType
 	}
 
-	rewrittenSQL, err := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges)
+	clusterBy := d.readClusterByClause(ctx, tableFQN)
+	warnRewriteDropsTableProperties(tableFQN, clusterBy != "")
+
+	rewrittenSQL, err := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, clusterBy)
 	if err != nil {
 		return err
 	}
@@ -943,10 +946,29 @@ func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Contex
 	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s", tableFQN)
 	config.Debug("[DEST] Column type change SQL: %s", rewrittenSQL)
 	if _, err := d.db.ExecContext(ctx, rewrittenSQL); err != nil {
+		if clusterBy != "" {
+			config.Debug("[DEST] rewrite with preserved clustering failed (%v); retrying without CLUSTER BY", err)
+			fallbackSQL, berr := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, "")
+			if berr == nil {
+				if _, ferr := d.db.ExecContext(ctx, fallbackSQL); ferr == nil {
+					output.Warnf("Snowflake: could not preserve the clustering key on %s during the type-change rewrite; clustering has been dropped and must be re-applied.\n", tableFQN)
+					return nil
+				}
+			}
+		}
 		config.LogFailedQuery(rewrittenSQL, err)
 		return err
 	}
 	return nil
+}
+
+func warnRewriteDropsTableProperties(tableFQN string, clusteringPreserved bool) {
+	props := []string{"column DEFAULT/NOT NULL constraints", "comments", "masking/row-access policies"}
+	if !clusteringPreserved {
+		props = append([]string{"clustering keys"}, props...)
+	}
+	output.Warnf("Snowflake: changing an incompatible column type on %s recreates the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
+		tableFQN, strings.Join(props, ", "))
 }
 
 func (d *SnowflakeDestination) describeColumnNames(ctx context.Context, tableFQN string) ([]string, error) {
@@ -975,7 +997,7 @@ func (d *SnowflakeDestination) describeColumnNames(ctx context.Context, tableFQN
 // buildSnowflakeAlterColumnTypeRewriteSQL reprojects every column in ordinal
 // order, casting each changed column (keyed by upper-cased name) to its new
 // type.
-func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, typeChanges map[string]string) (string, error) {
+func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, typeChanges map[string]string, clusterByClause string) (string, error) {
 	if len(typeChanges) == 0 {
 		return "", errors.New("no column type changes provided")
 	}
@@ -994,7 +1016,50 @@ func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, 
 			return "", fmt.Errorf("column %q not found in table %s", col, tableFQN)
 		}
 	}
-	return fmt.Sprintf("CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s", tableFQN, strings.Join(selectExprs, ", "), tableFQN), nil
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE OR REPLACE TABLE %s ", tableFQN)
+	if clusterByClause != "" {
+		b.WriteString(clusterByClause)
+		b.WriteByte(' ')
+	}
+	fmt.Fprintf(&b, "AS SELECT %s FROM %s", strings.Join(selectExprs, ", "), tableFQN)
+	return b.String(), nil
+}
+
+
+func clusterByClauseFor(clusteringKey string) string {
+	k := strings.TrimSpace(clusteringKey)
+	if k == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToUpper(k), "LINEAR(") && strings.HasSuffix(k, ")") {
+		inner := strings.TrimSpace(k[len("LINEAR(") : len(k)-1])
+		return "CLUSTER BY (" + inner + ")"
+	}
+	return "CLUSTER BY (" + k + ")"
+}
+
+func (d *SnowflakeDestination) readClusterByClause(ctx context.Context, tableFQN string) string {
+	tn := sfTable(strings.ReplaceAll(tableFQN, `"`, ""))
+	catalog := tn.Catalog
+	if catalog == "" {
+		catalog = strings.ToUpper(d.database)
+	}
+	infoTables := "INFORMATION_SCHEMA.TABLES"
+	if catalog != "" {
+		infoTables = quoteIdentifier(catalog) + ".INFORMATION_SCHEMA.TABLES"
+	}
+	query := fmt.Sprintf("SELECT CLUSTERING_KEY FROM %s WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", infoTables)
+
+	var key sql.NullString
+	if err := d.db.QueryRowContext(ctx, query, tn.Schema, tn.Table).Scan(&key); err != nil {
+		config.Debug("[DEST] could not read clustering key for %s: %v", tableFQN, err)
+		return ""
+	}
+	if !key.Valid {
+		return ""
+	}
+	return clusterByClauseFor(key.String)
 }
 
 func (d *SnowflakeDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {

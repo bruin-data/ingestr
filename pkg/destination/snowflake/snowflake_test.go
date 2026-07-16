@@ -563,6 +563,7 @@ func TestBuildSnowflakeAlterColumnTypeRewriteSQL(t *testing.T) {
 		`"DB"."PUBLIC"."USERS"`,
 		[]string{"ID", "AGE", "NAME"},
 		map[string]string{"AGE": "VARCHAR"},
+		"",
 	)
 	require.NoError(t, err)
 	assert.Equal(
@@ -577,6 +578,7 @@ func TestBuildSnowflakeAlterColumnTypeRewriteSQL_MultiColumn(t *testing.T) {
 		`"DB"."PUBLIC"."USERS"`,
 		[]string{"ID", "AGE", "SCORE"},
 		map[string]string{"AGE": "VARCHAR", "SCORE": "DOUBLE"},
+		"",
 	)
 	require.NoError(t, err)
 	assert.Equal(
@@ -586,11 +588,36 @@ func TestBuildSnowflakeAlterColumnTypeRewriteSQL_MultiColumn(t *testing.T) {
 	)
 }
 
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL_PreservesClustering(t *testing.T) {
+	sql, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "AGE"},
+		map[string]string{"AGE": "VARCHAR"},
+		"CLUSTER BY (ID)",
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" CLUSTER BY (ID) AS SELECT "ID", CAST("AGE" AS VARCHAR) AS "AGE" FROM "DB"."PUBLIC"."USERS"`,
+		sql,
+	)
+}
+
 func TestBuildSnowflakeAlterColumnTypeRewriteSQL_ColumnMissing(t *testing.T) {
 	_, err := buildSnowflakeAlterColumnTypeRewriteSQL(
 		`"DB"."PUBLIC"."USERS"`,
 		[]string{"ID", "NAME"},
 		map[string]string{"AGE": "VARCHAR"},
+		"",
 	)
 	require.Error(t, err)
+}
+
+func TestClusterByClauseFor(t *testing.T) {
+	assert.Equal(t, "", clusterByClauseFor(""))
+	assert.Equal(t, "", clusterByClauseFor("   "))
+	assert.Equal(t, "CLUSTER BY (C1, C2)", clusterByClauseFor("LINEAR(C1, C2)"))
+	assert.Equal(t, "CLUSTER BY (TO_DATE(TS))", clusterByClauseFor("LINEAR(TO_DATE(TS))"))
+	// Already-bare expression (no LINEAR wrapper) is wrapped as-is.
+	assert.Equal(t, "CLUSTER BY (C1)", clusterByClauseFor("C1"))
 }
