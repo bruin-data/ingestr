@@ -205,6 +205,35 @@ func TestPostgresValueGettersConvertsUUIDColumns(t *testing.T) {
 	}
 }
 
+func TestPostgresValueGetterPreservesDecimalPrecision(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+
+	dt := &arrow.Decimal128Type{Precision: 38, Scale: 4}
+	b := array.NewDecimal128Builder(mem, dt)
+	defer b.Release()
+	want, err := decimal128.FromString("123456789012345678901234567890.1234", dt.Precision, dt.Scale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Append(want)
+	b.AppendNull()
+	arr := b.NewArray()
+	defer arr.Release()
+
+	get := postgresValueGetter(arr)
+	got, ok := get(0).(pgtype.Numeric)
+	if !ok {
+		t.Fatalf("decimal getter returned %T, want pgtype.Numeric", get(0))
+	}
+	if !got.Valid || got.Exp != -dt.Scale || got.Int.Cmp(want.BigInt()) != 0 {
+		t.Fatalf("decimal getter returned %#v, want unscaled %s with exponent %d", got, want.BigInt(), -dt.Scale)
+	}
+	if got := get(1); got != nil {
+		t.Fatalf("decimal getter null = %#v, want nil", got)
+	}
+}
+
 func postgresTestValuesEqual(left, right any) bool {
 	switch l := left.(type) {
 	case []byte:
@@ -213,6 +242,13 @@ func postgresTestValuesEqual(left, right any) bool {
 	case time.Time:
 		r, ok := right.(time.Time)
 		return ok && l.Equal(r)
+	case pgtype.Numeric:
+		r, ok := right.(float64)
+		if !ok {
+			return false
+		}
+		converted, err := l.Float64Value()
+		return err == nil && converted.Valid && converted.Float64 == r
 	default:
 		return reflect.DeepEqual(left, right)
 	}
