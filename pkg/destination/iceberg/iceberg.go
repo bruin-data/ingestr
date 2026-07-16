@@ -88,7 +88,7 @@ func (d *Destination) PrepareTable(ctx context.Context, opts destination.Prepare
 	if opts.Schema == nil {
 		return errors.New("iceberg destination requires schema")
 	}
-	tableSchema := tableSchemaWithPrimaryKeys(opts.Schema, opts.PrimaryKeys)
+	tableSchema := prepareTableSchema(opts.Schema, opts.PrimaryKeys)
 
 	ident, err := parseIdentifier(opts.Table)
 	if err != nil {
@@ -507,12 +507,22 @@ func localFilesystemPath(location string) (string, bool) {
 	return parsed.Path, parsed.Path != ""
 }
 
-func tableSchemaWithPrimaryKeys(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
-	if len(primaryKeys) == 0 {
-		return s
-	}
+func prepareTableSchema(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
 	out := *s
-	out.PrimaryKeys = append([]string(nil), primaryKeys...)
+	out.Columns = append([]schema.Column(nil), s.Columns...)
+	out.PrimaryKeys = append([]string(nil), s.PrimaryKeys...)
+	if len(primaryKeys) > 0 {
+		out.PrimaryKeys = append([]string(nil), primaryKeys...)
+	}
+
+	identifierFields := make(map[string]struct{}, len(out.PrimaryKeys))
+	for _, primaryKey := range out.PrimaryKeys {
+		identifierFields[primaryKey] = struct{}{}
+	}
+	for i := range out.Columns {
+		_, identifier := identifierFields[out.Columns[i].Name]
+		out.Columns[i].Nullable = !identifier
+	}
 	return &out
 }
 
