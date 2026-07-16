@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -443,7 +444,11 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+	castMap, err := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	if err != nil {
+		return fmt.Errorf("failed to build merge cast map: %w", err)
+	}
+	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -456,7 +461,55 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	return nil
 }
 
-func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
+// castSourceCol casts the source column to the target type when they disagree (see buildCastMap).
+func castSourceCol(col string, castMap map[string]string) string {
+	ref := "source." + quoteIdentifier(col)
+	if castMap != nil {
+		if targetType, ok := castMap[strings.ToUpper(col)]; ok {
+			return fmt.Sprintf("CAST(%s AS %s)", ref, targetType)
+		}
+	}
+	return ref
+}
+
+// buildCastMap returns, by upper-cased column name, the target type for every
+// column whose staging and target types differ. Snowflake's MERGE does not
+// implicitly cast (e.g. TIMESTAMP_TZ vs TIMESTAMP_NTZ), so those need a CAST.
+func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, targetTable string) (map[string]string, error) {
+	targetSchema, err := d.GetTableSchema(ctx, targetTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read target schema for %s: %w", targetTable, err)
+	}
+	stagingSchema, err := d.GetTableSchema(ctx, stagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read staging schema for %s: %w", stagingTable, err)
+	}
+	// Without both schemas there is nothing to compare; let the merge surface any error.
+	if targetSchema == nil || stagingSchema == nil {
+		return nil, nil
+	}
+
+	dialect := &Dialect{}
+	stagingTypes := make(map[string]string, len(stagingSchema.Columns))
+	for _, col := range stagingSchema.Columns {
+		stagingTypes[strings.ToUpper(col.Name)] = dialect.TypeName(col)
+	}
+
+	castMap := make(map[string]string)
+	for _, col := range targetSchema.Columns {
+		key := strings.ToUpper(col.Name)
+		targetType := dialect.TypeName(col)
+		if stagingType, ok := stagingTypes[key]; ok && stagingType != targetType {
+			castMap[key] = targetType
+		}
+	}
+	if len(castMap) == 0 {
+		return nil, nil
+	}
+	return castMap, nil
+}
+
+func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := quoteFQN(sfTable(stagingTable))
 	targetFull := quoteFQN(sfTable(targetTable))
@@ -487,10 +540,10 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			q := quoteIdentifier(col)
 			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
-					col, q, "target."+q, "source."+q, unchangedRef,
+					col, q, "target."+q, castSourceCol(col, castMap), unchangedRef,
 				))
 			} else {
-				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = %s", q, castSourceCol(col, castMap)))
 			}
 		}
 	}
@@ -503,7 +556,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	destSourceCols := make([]string, len(destColumns))
 	for i, col := range destColumns {
 		destQuoted[i] = quoteIdentifier(col)
-		destSourceCols[i] = "source." + quoteIdentifier(col)
+		destSourceCols[i] = castSourceCol(col, castMap)
 	}
 
 	quotedPKList := make([]string, len(primaryKeys))
@@ -815,10 +868,211 @@ func (d *SnowflakeDestination) Exec(ctx context.Context, sql string, args ...int
 		ctx = sf.WithQueryTag(ctx, tag)
 	}
 	_, err := d.db.ExecContext(ctx, sql, args...)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
+	if err == nil {
+		return nil
 	}
+	if isSnowflakeAlterTypeRewriteCandidate(sql, err) {
+		if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
+			config.Debug("[DEST] recovered from unsupported ALTER COLUMN TYPE via CREATE OR REPLACE rewrite (original error: %v)", err)
+			return nil
+		} else {
+			config.LogFailedQuery(sql, err)
+			return fmt.Errorf("%w (rewrite fallback failed: %v)", err, rewriteErr)
+		}
+	}
+	config.LogFailedQuery(sql, err)
 	return err
+}
+
+var (
+	snowflakeAlterColumnTypesRe = regexp.MustCompile(`(?is)^ALTER TABLE\s+(.+?)\s+ALTER COLUMN\s+(.+)$`)
+	snowflakeAlterClauseSepRe   = regexp.MustCompile(`(?i),\s+COLUMN\s+`)
+	snowflakeAlterClauseRe      = regexp.MustCompile(`(?is)^"?([^"\s]+)"?\s+SET DATA TYPE\s+(.+)$`)
+)
+
+type snowflakeAlterTypeChange struct {
+	column  string
+	newType string
+}
+
+// parseSnowflakeAlterColumnTypesSQL extracts the table and each column/type from
+// a single- or multi-clause ALTER COLUMN SET DATA TYPE statement.
+func parseSnowflakeAlterColumnTypesSQL(sql string) (table string, changes []snowflakeAlterTypeChange, ok bool) {
+	m := snowflakeAlterColumnTypesRe.FindStringSubmatch(strings.TrimSpace(sql))
+	if m == nil {
+		return "", nil, false
+	}
+	for _, clause := range snowflakeAlterClauseSepRe.Split(m[2], -1) {
+		c := snowflakeAlterClauseRe.FindStringSubmatch(strings.TrimSpace(clause))
+		if c == nil {
+			return "", nil, false
+		}
+		changes = append(changes, snowflakeAlterTypeChange{column: c[1], newType: strings.TrimSpace(c[2])})
+	}
+	return strings.TrimSpace(m[1]), changes, true
+}
+
+func isSnowflakeAlterTypeRewriteCandidate(sql string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, _, ok := parseSnowflakeAlterColumnTypesSQL(sql); !ok {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "cannot change column")
+}
+
+func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Context, originalSQL string) error {
+	tableFQN, changes, ok := parseSnowflakeAlterColumnTypesSQL(originalSQL)
+	if !ok {
+		return fmt.Errorf("not an ALTER COLUMN TYPE statement: %s", originalSQL)
+	}
+
+	columns, err := d.describeColumnNames(ctx, tableFQN)
+	if err != nil {
+		return err
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("no columns found for table %s", tableFQN)
+	}
+
+	typeChanges := make(map[string]string, len(changes))
+	for _, c := range changes {
+		typeChanges[strings.ToUpper(c.column)] = c.newType
+	}
+
+	clusterBy := d.readClusterByClause(ctx, tableFQN)
+
+	rewrittenSQL, err := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, clusterBy)
+	if err != nil {
+		return err
+	}
+
+	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s", tableFQN)
+	config.Debug("[DEST] Column type change SQL: %s", rewrittenSQL)
+
+	clusteringDropped := false
+	if _, err := d.db.ExecContext(ctx, rewrittenSQL); err != nil {
+		if clusterBy == "" {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		// Clustering-preserving rewrite failed; retry without it so the type change still lands.
+		config.Debug("[DEST] rewrite with preserved clustering failed (%v); retrying without CLUSTER BY", err)
+		fallbackSQL, berr := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, "")
+		if berr != nil {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		if _, ferr := d.db.ExecContext(ctx, fallbackSQL); ferr != nil {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		clusteringDropped = true
+	}
+
+	warnRewriteDropsTableProperties(tableFQN, clusteringDropped)
+	return nil
+}
+
+// warnRewriteDropsTableProperties reports the properties lost when a type change
+// recreates the table via CREATE OR REPLACE. Called only after the rewrite succeeds.
+func warnRewriteDropsTableProperties(tableFQN string, clusteringDropped bool) {
+	props := []string{"column DEFAULT/NOT NULL constraints", "comments", "masking/row-access policies"}
+	if clusteringDropped {
+		props = append(props, "clustering keys")
+	}
+	output.Warnf("Snowflake: changing an incompatible column type on %s recreated the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
+		tableFQN, strings.Join(props, ", "))
+}
+
+func (d *SnowflakeDestination) describeColumnNames(ctx context.Context, tableFQN string) ([]string, error) {
+	query := fmt.Sprintf(`DESCRIBE TABLE %s ->> SELECT "name" FROM $1`, tableFQN)
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return nil, fmt.Errorf("failed to describe table for rewrite: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan column name: %w", err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating columns: %w", err)
+	}
+	return columns, nil
+}
+
+// buildSnowflakeAlterColumnTypeRewriteSQL reprojects all columns, casting each
+// changed column (keyed by upper-cased name) to its new type.
+func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, typeChanges map[string]string, clusterByClause string) (string, error) {
+	if len(typeChanges) == 0 {
+		return "", errors.New("no column type changes provided")
+	}
+	selectExprs := make([]string, 0, len(columns))
+	found := make(map[string]bool, len(typeChanges))
+	for _, col := range columns {
+		if newType, ok := typeChanges[strings.ToUpper(col)]; ok {
+			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(col), newType, quoteIdentifier(col)))
+			found[strings.ToUpper(col)] = true
+			continue
+		}
+		selectExprs = append(selectExprs, quoteIdentifier(col))
+	}
+	for col := range typeChanges {
+		if !found[col] {
+			return "", fmt.Errorf("column %q not found in table %s", col, tableFQN)
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE OR REPLACE TABLE %s ", tableFQN)
+	if clusterByClause != "" {
+		b.WriteString(clusterByClause)
+		b.WriteByte(' ')
+	}
+	fmt.Fprintf(&b, "AS SELECT %s FROM %s", strings.Join(selectExprs, ", "), tableFQN)
+	return b.String(), nil
+}
+
+func clusterByClauseFor(clusteringKey string) string {
+	k := strings.TrimSpace(clusteringKey)
+	if k == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToUpper(k), "LINEAR(") && strings.HasSuffix(k, ")") {
+		inner := strings.TrimSpace(k[len("LINEAR(") : len(k)-1])
+		return "CLUSTER BY (" + inner + ")"
+	}
+	return "CLUSTER BY (" + k + ")"
+}
+
+func (d *SnowflakeDestination) readClusterByClause(ctx context.Context, tableFQN string) string {
+	tn := sfTable(strings.ReplaceAll(tableFQN, `"`, ""))
+	catalog := tn.Catalog
+	if catalog == "" {
+		catalog = strings.ToUpper(d.database)
+	}
+	infoTables := "INFORMATION_SCHEMA.TABLES"
+	if catalog != "" {
+		infoTables = quoteIdentifier(catalog) + ".INFORMATION_SCHEMA.TABLES"
+	}
+	query := fmt.Sprintf("SELECT CLUSTERING_KEY FROM %s WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", infoTables)
+
+	var key sql.NullString
+	if err := d.db.QueryRowContext(ctx, query, tn.Schema, tn.Table).Scan(&key); err != nil {
+		config.Debug("[DEST] could not read clustering key for %s: %v", tableFQN, err)
+		return ""
+	}
+	if !key.Valid {
+		return ""
+	}
+	return clusterByClauseFor(key.String)
 }
 
 func (d *SnowflakeDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {

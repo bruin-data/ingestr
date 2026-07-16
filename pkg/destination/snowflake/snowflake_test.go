@@ -3,6 +3,7 @@ package snowflake
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ import (
 
 func TestBuildMergeSQL(t *testing.T) {
 	t.Run("non_cdc", func(t *testing.T) {
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "", nil)
 
 		assert.Contains(t, sql, `MERGE INTO "TARGET_SCHEMA"."TARGET_TBL" AS target`)
 		assert.Contains(t, sql, `FROM "STAGING_SCHEMA"."STAGING_TBL"`)
@@ -42,21 +43,21 @@ func TestBuildMergeSQL(t *testing.T) {
 	})
 
 	t.Run("non_cdc_with_incremental_key", func(t *testing.T) {
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "updated_at")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "updated_at", nil)
 
 		assert.Contains(t, sql, `ORDER BY "UPDATED_AT" DESC`)
 		assert.NotContains(t, sql, "ORDER BY (SELECT NULL)")
 	})
 
 	t.Run("non_cdc_all_pk_columns", func(t *testing.T) {
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id"}, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id"}, "", nil)
 		assert.NotContains(t, sql, "WHEN MATCHED THEN")
 		assert.Contains(t, sql, "WHEN NOT MATCHED THEN")
 	})
 
 	t.Run("cdc", func(t *testing.T) {
 		columns := []string{"id", "name", "value", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
 		// Composed source: data columns from the latest non-deleted change,
 		// CDC columns from the latest change overall.
@@ -74,7 +75,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		// The naming layer commonly uppercases columns for Snowflake; CDC
 		// detection must be case-insensitive.
 		columns := []string{"ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"ID"}, columns, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"ID"}, columns, "", nil)
 
 		assert.Contains(t, sql, `"__ingestr_has_active"`)
 		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
@@ -87,7 +88,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		// appended from the source schema in lower case. CDC detection must stay case-insensitive
 		// so the unchanged-column preservation (IFF/ARRAY_CONTAINS) is still emitted.
 		columns := []string{"ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_cdc_unchanged_cols"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
 		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `"CONFIG_DATA" = IFF(ARRAY_CONTAINS(TO_VARIANT('config_data'), TRY_PARSE_JSON(LOWER(source."_CDC_UNCHANGED_COLS"))), target."CONFIG_DATA", source."CONFIG_DATA")`)
@@ -100,7 +101,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		// Sources that materialize full change rows (e.g. SQL Server CDC) emit
 		// no _cdc_unchanged_cols; the merge must not reference it.
 		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
 		assert.NotContains(t, sql, "_CDC_UNCHANGED_COLS")
 		assert.Contains(t, sql, `target."NAME" = source."NAME"`)
@@ -108,7 +109,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 	t.Run("cdc_only_pk_and_metadata", func(t *testing.T) {
 		columns := []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
-		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "")
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
 		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
@@ -485,4 +486,138 @@ func TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure(t *testing.T) {
 	}
 
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBatchAlterColumnTypesSQL(t *testing.T) {
+	d := &Dialect{}
+	sql := d.BatchAlterColumnTypesSQL(`"DB"."PUBLIC"."USERS"`, []schema.Column{
+		{Name: "age", DataType: schema.TypeString},
+		{Name: "score", DataType: schema.TypeFloat64},
+	})
+	assert.Equal(
+		t,
+		`ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR, COLUMN "SCORE" SET DATA TYPE DOUBLE`,
+		sql,
+	)
+	assert.Empty(t, d.BatchAlterColumnTypesSQL(`"T"`, nil))
+}
+
+func TestBuildMergeSQL_CastsMismatchedSourceColumns(t *testing.T) {
+	// staging DATE is TIMESTAMP_TZ, target DATE was widened to TIMESTAMP_NTZ;
+	// Snowflake's MERGE won't implicitly cast, so source must be cast to target type.
+	castMap := map[string]string{"DATE": "TIMESTAMP_NTZ"}
+	sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "date"}, "", castMap)
+
+	assert.Contains(t, sql, `target."DATE" = CAST(source."DATE" AS TIMESTAMP_NTZ)`)
+	assert.Contains(t, sql, `VALUES (source."ID", CAST(source."DATE" AS TIMESTAMP_NTZ))`)
+	// Columns not in the cast map stay uncast.
+	assert.NotContains(t, sql, `CAST(source."ID"`)
+}
+
+func TestParseSnowflakeAlterColumnTypesSQL_Single(t *testing.T) {
+	table, changes, ok := parseSnowflakeAlterColumnTypesSQL(`ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR`)
+	require.True(t, ok)
+	assert.Equal(t, `"DB"."PUBLIC"."USERS"`, table)
+	require.Len(t, changes, 1)
+	assert.Equal(t, "AGE", changes[0].column)
+	assert.Equal(t, "VARCHAR", changes[0].newType)
+}
+
+func TestParseSnowflakeAlterColumnTypesSQL_MultiClause(t *testing.T) {
+	table, changes, ok := parseSnowflakeAlterColumnTypesSQL(
+		`ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR, COLUMN "AMOUNT" SET DATA TYPE NUMBER(38,0)`,
+	)
+	require.True(t, ok)
+	assert.Equal(t, `"DB"."PUBLIC"."USERS"`, table)
+	require.Len(t, changes, 2)
+	assert.Equal(t, "AGE", changes[0].column)
+	assert.Equal(t, "VARCHAR", changes[0].newType)
+	assert.Equal(t, "AMOUNT", changes[1].column)
+	assert.Equal(t, "NUMBER(38,0)", changes[1].newType)
+}
+
+func TestParseSnowflakeAlterColumnTypesSQL_Invalid(t *testing.T) {
+	for _, sql := range []string{
+		`ALTER TABLE "DB"."PUBLIC"."USERS" ADD COLUMN "AGE" VARCHAR`,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" AS SELECT 1`,
+		`SELECT 1`,
+	} {
+		if _, _, ok := parseSnowflakeAlterColumnTypesSQL(sql); ok {
+			t.Errorf("expected parse to fail for %q", sql)
+		}
+	}
+}
+
+func TestIsSnowflakeAlterTypeRewriteCandidate(t *testing.T) {
+	alter := `ALTER TABLE "DB"."PUBLIC"."USERS" ALTER COLUMN "AGE" SET DATA TYPE VARCHAR`
+	incompatible := errors.New("002108 (22000): SQL compilation error: cannot change column AGE from type NUMBER(38,0) to VARCHAR(16777216)")
+
+	assert.True(t, isSnowflakeAlterTypeRewriteCandidate(alter, incompatible))
+	assert.False(t, isSnowflakeAlterTypeRewriteCandidate(alter, nil))
+	assert.False(t, isSnowflakeAlterTypeRewriteCandidate(alter, errors.New("some other error")))
+	assert.False(t, isSnowflakeAlterTypeRewriteCandidate(`SELECT 1`, incompatible))
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL(t *testing.T) {
+	sql, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "AGE", "NAME"},
+		map[string]string{"AGE": "VARCHAR"},
+		"",
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" AS SELECT "ID", CAST("AGE" AS VARCHAR) AS "AGE", "NAME" FROM "DB"."PUBLIC"."USERS"`,
+		sql,
+	)
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL_MultiColumn(t *testing.T) {
+	sql, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "AGE", "SCORE"},
+		map[string]string{"AGE": "VARCHAR", "SCORE": "DOUBLE"},
+		"",
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" AS SELECT "ID", CAST("AGE" AS VARCHAR) AS "AGE", CAST("SCORE" AS DOUBLE) AS "SCORE" FROM "DB"."PUBLIC"."USERS"`,
+		sql,
+	)
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL_PreservesClustering(t *testing.T) {
+	sql, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "AGE"},
+		map[string]string{"AGE": "VARCHAR"},
+		"CLUSTER BY (ID)",
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		`CREATE OR REPLACE TABLE "DB"."PUBLIC"."USERS" CLUSTER BY (ID) AS SELECT "ID", CAST("AGE" AS VARCHAR) AS "AGE" FROM "DB"."PUBLIC"."USERS"`,
+		sql,
+	)
+}
+
+func TestBuildSnowflakeAlterColumnTypeRewriteSQL_ColumnMissing(t *testing.T) {
+	_, err := buildSnowflakeAlterColumnTypeRewriteSQL(
+		`"DB"."PUBLIC"."USERS"`,
+		[]string{"ID", "NAME"},
+		map[string]string{"AGE": "VARCHAR"},
+		"",
+	)
+	require.Error(t, err)
+}
+
+func TestClusterByClauseFor(t *testing.T) {
+	assert.Equal(t, "", clusterByClauseFor(""))
+	assert.Equal(t, "", clusterByClauseFor("   "))
+	assert.Equal(t, "CLUSTER BY (C1, C2)", clusterByClauseFor("LINEAR(C1, C2)"))
+	assert.Equal(t, "CLUSTER BY (TO_DATE(TS))", clusterByClauseFor("LINEAR(TO_DATE(TS))"))
+	// Already-bare expression (no LINEAR wrapper) is wrapped as-is.
+	assert.Equal(t, "CLUSTER BY (C1)", clusterByClauseFor("C1"))
 }

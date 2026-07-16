@@ -28,6 +28,17 @@ func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Colum
 		d.TypeName(newType))
 }
 
+func (d *Dialect) BatchAlterColumnTypesSQL(table string, cols []schema.Column) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	clauses := make([]string, 0, len(cols))
+	for _, col := range cols {
+		clauses = append(clauses, fmt.Sprintf("COLUMN %s SET DATA TYPE %s", d.QuoteIdentifier(col.Name), d.TypeName(col)))
+	}
+	return fmt.Sprintf("ALTER TABLE %s ALTER %s", table, strings.Join(clauses, ", "))
+}
+
 func (d *Dialect) SupportsAlterType() bool {
 	return true
 }
