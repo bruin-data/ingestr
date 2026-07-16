@@ -17,19 +17,25 @@ import (
 var postgresBinaryCopyHeader = []byte("PGCOPY\n\xff\r\n\x00\x00\x00\x00\x00\x00\x00\x00\x00")
 
 type arrowCopyReader struct {
-	record  arrow.RecordBatch
-	columns []arrowCopyColumn
-	row     int
-	buffer  []byte
-	offset  int
-	started bool
-	done    bool
-	err     error
+	record         arrow.RecordBatch
+	columns        []arrowCopyColumn
+	row            int
+	buffer         []byte
+	offset         int
+	started        bool
+	done           bool
+	includeHeader  bool
+	includeTrailer bool
+	err            error
 }
 
 type arrowCopyColumn func(int, []byte) ([]byte, bool, error)
 
 func newArrowCopyReader(record arrow.RecordBatch, tableSchema *schema.TableSchema, typeMap *pgtype.Map, oids []uint32) (*arrowCopyReader, bool) {
+	return newArrowCopyReaderWithBoundaries(record, tableSchema, typeMap, oids, true, true)
+}
+
+func newArrowCopyReaderWithBoundaries(record arrow.RecordBatch, tableSchema *schema.TableSchema, typeMap *pgtype.Map, oids []uint32, includeHeader, includeTrailer bool) (*arrowCopyReader, bool) {
 	if len(oids) != int(record.NumCols()) {
 		return nil, false
 	}
@@ -73,8 +79,10 @@ func newArrowCopyReader(record arrow.RecordBatch, tableSchema *schema.TableSchem
 	}
 
 	return &arrowCopyReader{
-		record:  record,
-		columns: columns,
+		record:         record,
+		columns:        columns,
+		includeHeader:  includeHeader,
+		includeTrailer: includeTrailer,
 	}, true
 }
 
@@ -338,10 +346,10 @@ func (r *arrowCopyReader) fill(target []byte) {
 		r.buffer = r.buffer[:0]
 	}
 	r.offset = 0
-	if !r.started {
+	if !r.started && r.includeHeader {
 		r.buffer = append(r.buffer, postgresBinaryCopyHeader...)
-		r.started = true
 	}
+	r.started = true
 
 	for r.row < int(r.record.NumRows()) && len(r.buffer) < fillLimit {
 		r.appendRow(r.row)
@@ -352,7 +360,9 @@ func (r *arrowCopyReader) fill(target []byte) {
 	}
 
 	if r.row == int(r.record.NumRows()) {
-		r.buffer = binary.BigEndian.AppendUint16(r.buffer, uint16(0xffff))
+		if r.includeTrailer {
+			r.buffer = binary.BigEndian.AppendUint16(r.buffer, uint16(0xffff))
+		}
 		r.done = true
 	}
 }
