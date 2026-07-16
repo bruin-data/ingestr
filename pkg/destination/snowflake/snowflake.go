@@ -444,7 +444,10 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	castMap := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	castMap, err := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	if err != nil {
+		return fmt.Errorf("failed to build merge cast map: %w", err)
+	}
 	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
@@ -475,14 +478,19 @@ func castSourceCol(col string, castMap map[string]string) string {
 // differs between the two. Snowflake's MERGE does not implicitly cast between
 // types (e.g. TIMESTAMP_TZ vs TIMESTAMP_NTZ), so the merge must cast the source
 // to the target type for these columns.
-func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, targetTable string) map[string]string {
+func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, targetTable string) (map[string]string, error) {
 	targetSchema, err := d.GetTableSchema(ctx, targetTable)
-	if err != nil || targetSchema == nil {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("failed to read target schema for %s: %w", targetTable, err)
 	}
 	stagingSchema, err := d.GetTableSchema(ctx, stagingTable)
-	if err != nil || stagingSchema == nil {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("failed to read staging schema for %s: %w", stagingTable, err)
+	}
+	// A missing table (nil schema) leaves the merge to fail with a clearer error
+	// on its own; without both schemas there is nothing to compare.
+	if targetSchema == nil || stagingSchema == nil {
+		return nil, nil
 	}
 
 	dialect := &Dialect{}
@@ -500,9 +508,9 @@ func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, t
 		}
 	}
 	if len(castMap) == 0 {
-		return nil
+		return nil, nil
 	}
-	return castMap
+	return castMap, nil
 }
 
 func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string) string {
@@ -864,16 +872,19 @@ func (d *SnowflakeDestination) Exec(ctx context.Context, sql string, args ...int
 		ctx = sf.WithQueryTag(ctx, tag)
 	}
 	_, err := d.db.ExecContext(ctx, sql, args...)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
-		if isSnowflakeAlterTypeRewriteCandidate(sql, err) {
-			if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
-				return nil
-			} else {
-				return fmt.Errorf("%w (rewrite fallback failed: %v)", err, rewriteErr)
-			}
+	if err == nil {
+		return nil
+	}
+	if isSnowflakeAlterTypeRewriteCandidate(sql, err) {
+		if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
+			config.Debug("[DEST] recovered from unsupported ALTER COLUMN TYPE via CREATE OR REPLACE rewrite (original error: %v)", err)
+			return nil
+		} else {
+			config.LogFailedQuery(sql, err)
+			return fmt.Errorf("%w (rewrite fallback failed: %v)", err, rewriteErr)
 		}
 	}
+	config.LogFailedQuery(sql, err)
 	return err
 }
 
@@ -936,7 +947,6 @@ func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Contex
 	}
 
 	clusterBy := d.readClusterByClause(ctx, tableFQN)
-	warnRewriteDropsTableProperties(tableFQN, clusterBy != "")
 
 	rewrittenSQL, err := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, clusterBy)
 	if err != nil {
@@ -945,29 +955,44 @@ func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Contex
 
 	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s", tableFQN)
 	config.Debug("[DEST] Column type change SQL: %s", rewrittenSQL)
+
+	clusteringDropped := false
 	if _, err := d.db.ExecContext(ctx, rewrittenSQL); err != nil {
-		if clusterBy != "" {
-			config.Debug("[DEST] rewrite with preserved clustering failed (%v); retrying without CLUSTER BY", err)
-			fallbackSQL, berr := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, "")
-			if berr == nil {
-				if _, ferr := d.db.ExecContext(ctx, fallbackSQL); ferr == nil {
-					output.Warnf("Snowflake: could not preserve the clustering key on %s during the type-change rewrite; clustering has been dropped and must be re-applied.\n", tableFQN)
-					return nil
-				}
-			}
+		if clusterBy == "" {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
 		}
-		config.LogFailedQuery(rewrittenSQL, err)
-		return err
+		// The rewrite that re-applies the clustering key failed; retry once
+		// without it so the type change still lands, then flag that clustering
+		// was dropped.
+		config.Debug("[DEST] rewrite with preserved clustering failed (%v); retrying without CLUSTER BY", err)
+		fallbackSQL, berr := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, "")
+		if berr != nil {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		if _, ferr := d.db.ExecContext(ctx, fallbackSQL); ferr != nil {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		clusteringDropped = true
 	}
+
+	warnRewriteDropsTableProperties(tableFQN, clusteringDropped)
 	return nil
 }
 
-func warnRewriteDropsTableProperties(tableFQN string, clusteringPreserved bool) {
+// warnRewriteDropsTableProperties reports the properties lost when an
+// incompatible type change recreates the table via CREATE OR REPLACE. It is
+// called only after the rewrite has succeeded. Clustering is re-applied by the
+// rewrite when present, so it is listed only when clusteringDropped is true
+// (the fallback path that recreated the table without its clustering key).
+func warnRewriteDropsTableProperties(tableFQN string, clusteringDropped bool) {
 	props := []string{"column DEFAULT/NOT NULL constraints", "comments", "masking/row-access policies"}
-	if !clusteringPreserved {
-		props = append([]string{"clustering keys"}, props...)
+	if clusteringDropped {
+		props = append(props, "clustering keys")
 	}
-	output.Warnf("Snowflake: changing an incompatible column type on %s recreates the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
+	output.Warnf("Snowflake: changing an incompatible column type on %s recreated the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
 		tableFQN, strings.Join(props, ", "))
 }
 
@@ -1025,7 +1050,6 @@ func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, 
 	fmt.Fprintf(&b, "AS SELECT %s FROM %s", strings.Join(selectExprs, ", "), tableFQN)
 	return b.String(), nil
 }
-
 
 func clusterByClauseFor(clusteringKey string) string {
 	k := strings.TrimSpace(clusteringKey)
