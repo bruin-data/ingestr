@@ -461,8 +461,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	return nil
 }
 
-// castSourceCol returns the source column reference for a MERGE, wrapping it in a
-// CAST to the target type when staging and target disagree (see buildCastMap).
+// castSourceCol casts the source column to the target type when they disagree (see buildCastMap).
 func castSourceCol(col string, castMap map[string]string) string {
 	ref := "source." + quoteIdentifier(col)
 	if castMap != nil {
@@ -473,11 +472,9 @@ func castSourceCol(col string, castMap map[string]string) string {
 	return ref
 }
 
-// buildCastMap compares the staging and target table schemas and returns, keyed
-// by upper-cased column name, the target type name for every column whose type
-// differs between the two. Snowflake's MERGE does not implicitly cast between
-// types (e.g. TIMESTAMP_TZ vs TIMESTAMP_NTZ), so the merge must cast the source
-// to the target type for these columns.
+// buildCastMap returns, by upper-cased column name, the target type for every
+// column whose staging and target types differ. Snowflake's MERGE does not
+// implicitly cast (e.g. TIMESTAMP_TZ vs TIMESTAMP_NTZ), so those need a CAST.
 func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, targetTable string) (map[string]string, error) {
 	targetSchema, err := d.GetTableSchema(ctx, targetTable)
 	if err != nil {
@@ -487,8 +484,7 @@ func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, t
 	if err != nil {
 		return nil, fmt.Errorf("failed to read staging schema for %s: %w", stagingTable, err)
 	}
-	// A missing table (nil schema) leaves the merge to fail with a clearer error
-	// on its own; without both schemas there is nothing to compare.
+	// Without both schemas there is nothing to compare; let the merge surface any error.
 	if targetSchema == nil || stagingSchema == nil {
 		return nil, nil
 	}
@@ -899,9 +895,8 @@ type snowflakeAlterTypeChange struct {
 	newType string
 }
 
-// parseSnowflakeAlterColumnTypesSQL extracts the table and each column/target
-// type from an ALTER COLUMN SET DATA TYPE statement (single- or multi-clause) so
-// it can be rewritten as a single CREATE OR REPLACE TABLE.
+// parseSnowflakeAlterColumnTypesSQL extracts the table and each column/type from
+// a single- or multi-clause ALTER COLUMN SET DATA TYPE statement.
 func parseSnowflakeAlterColumnTypesSQL(sql string) (table string, changes []snowflakeAlterTypeChange, ok bool) {
 	m := snowflakeAlterColumnTypesRe.FindStringSubmatch(strings.TrimSpace(sql))
 	if m == nil {
@@ -962,9 +957,7 @@ func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Contex
 			config.LogFailedQuery(rewrittenSQL, err)
 			return err
 		}
-		// The rewrite that re-applies the clustering key failed; retry once
-		// without it so the type change still lands, then flag that clustering
-		// was dropped.
+		// Clustering-preserving rewrite failed; retry without it so the type change still lands.
 		config.Debug("[DEST] rewrite with preserved clustering failed (%v); retrying without CLUSTER BY", err)
 		fallbackSQL, berr := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, "")
 		if berr != nil {
@@ -982,11 +975,8 @@ func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Contex
 	return nil
 }
 
-// warnRewriteDropsTableProperties reports the properties lost when an
-// incompatible type change recreates the table via CREATE OR REPLACE. It is
-// called only after the rewrite has succeeded. Clustering is re-applied by the
-// rewrite when present, so it is listed only when clusteringDropped is true
-// (the fallback path that recreated the table without its clustering key).
+// warnRewriteDropsTableProperties reports the properties lost when a type change
+// recreates the table via CREATE OR REPLACE. Called only after the rewrite succeeds.
 func warnRewriteDropsTableProperties(tableFQN string, clusteringDropped bool) {
 	props := []string{"column DEFAULT/NOT NULL constraints", "comments", "masking/row-access policies"}
 	if clusteringDropped {
@@ -1019,9 +1009,8 @@ func (d *SnowflakeDestination) describeColumnNames(ctx context.Context, tableFQN
 	return columns, nil
 }
 
-// buildSnowflakeAlterColumnTypeRewriteSQL reprojects every column in ordinal
-// order, casting each changed column (keyed by upper-cased name) to its new
-// type.
+// buildSnowflakeAlterColumnTypeRewriteSQL reprojects all columns, casting each
+// changed column (keyed by upper-cased name) to its new type.
 func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, typeChanges map[string]string, clusterByClause string) (string, error) {
 	if len(typeChanges) == 0 {
 		return "", errors.New("no column type changes provided")
