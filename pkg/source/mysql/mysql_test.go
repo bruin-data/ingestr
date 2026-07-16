@@ -45,6 +45,43 @@ func TestIsVitessServer(t *testing.T) {
 	}
 }
 
+func TestMapMySQLToDataTypeUnsignedWidening(t *testing.T) {
+	cases := []struct {
+		columnType    string
+		want          schema.DataType
+		wantPrecision int
+	}{
+		{"tinyint", schema.TypeInt16, 0},
+		{"tinyint unsigned", schema.TypeInt16, 0},
+		{"smallint", schema.TypeInt16, 0},
+		{"smallint unsigned", schema.TypeInt32, 0},
+		{"smallint(5) unsigned", schema.TypeInt32, 0},
+		{"mediumint unsigned", schema.TypeInt32, 0},
+		{"int", schema.TypeInt32, 0},
+		{"int unsigned", schema.TypeInt64, 0},
+		{"int(10) unsigned", schema.TypeInt64, 0},
+		{"int unsigned zerofill", schema.TypeInt64, 0},
+		{"UNSIGNED INT", schema.TypeInt64, 0},
+		{"bigint", schema.TypeInt64, 0},
+		{"bigint unsigned", schema.TypeDecimal, 20},
+		{"bigint(20) unsigned", schema.TypeDecimal, 20},
+		{"UNSIGNED BIGINT", schema.TypeDecimal, 20},
+	}
+
+	for _, tc := range cases {
+		dt, precision, scale, _ := MapMySQLToDataType(tc.columnType)
+		if dt != tc.want {
+			t.Errorf("MapMySQLToDataType(%q) = %v, want %v", tc.columnType, dt, tc.want)
+		}
+		if precision != tc.wantPrecision {
+			t.Errorf("MapMySQLToDataType(%q) precision = %d, want %d", tc.columnType, precision, tc.wantPrecision)
+		}
+		if scale != 0 {
+			t.Errorf("MapMySQLToDataType(%q) scale = %d, want 0", tc.columnType, scale)
+		}
+	}
+}
+
 func TestBuildSelectQueryPreservesColumnCasing(t *testing.T) {
 	columns := []schema.Column{
 		{Name: "RowPointer"},

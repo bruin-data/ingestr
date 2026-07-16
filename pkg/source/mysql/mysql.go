@@ -180,6 +180,7 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 			DataType:  dt,
 			Nullable:  isNullable == "YES",
 			ArrayType: arrayType,
+			Unsigned:  strings.Contains(strings.ToUpper(columnType), "UNSIGNED"),
 		}
 
 		if numericPrecision.Valid {

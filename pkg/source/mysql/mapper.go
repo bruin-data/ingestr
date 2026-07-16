@@ -25,29 +25,42 @@ func MapMySQLToDataType(mysqlType string) (schema.DataType, int, int, schema.Dat
 		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
 	}
 
+	// UNSIGNED can appear as a suffix ("bigint unsigned", from
+	// INFORMATION_SCHEMA.COLUMN_TYPE) or a prefix ("UNSIGNED BIGINT", from
+	// driver column type names). ZEROFILL implies UNSIGNED.
+	unsigned := strings.Contains(upperType, "UNSIGNED") || strings.Contains(upperType, "ZEROFILL")
+
 	// Extract base type (remove parenthetical parameters like display width)
-	baseType := upperType
-	if idx := strings.Index(upperType, "("); idx != -1 {
-		baseType = upperType[:idx]
-	}
-	// Also handle "UNSIGNED" suffix
+	baseType, _, _ := strings.Cut(upperType, "(")
+	baseType = strings.TrimSuffix(baseType, " ZEROFILL")
 	baseType = strings.TrimSuffix(baseType, " UNSIGNED")
+	baseType = strings.TrimPrefix(baseType, "UNSIGNED ")
 
 	switch baseType {
 	// Boolean
 	case "BOOLEAN", "BOOL":
 		return schema.TypeBoolean, 0, 0, schema.TypeUnknown
 
-	// Integer types
+	// Integer types, widened when unsigned so the full value range fits
 	case "TINYINT":
 		return schema.TypeInt16, 0, 0, schema.TypeUnknown
 	case "SMALLINT":
+		if unsigned {
+			return schema.TypeInt32, 0, 0, schema.TypeUnknown
+		}
 		return schema.TypeInt16, 0, 0, schema.TypeUnknown
 	case "MEDIUMINT":
 		return schema.TypeInt32, 0, 0, schema.TypeUnknown
 	case "INT", "INTEGER":
+		if unsigned {
+			return schema.TypeInt64, 0, 0, schema.TypeUnknown
+		}
 		return schema.TypeInt32, 0, 0, schema.TypeUnknown
 	case "BIGINT":
+		if unsigned {
+			// BIGINT UNSIGNED exceeds int64; DECIMAL(20,0) holds the full range.
+			return schema.TypeDecimal, 20, 0, schema.TypeUnknown
+		}
 		return schema.TypeInt64, 0, 0, schema.TypeUnknown
 
 	// Floating point
