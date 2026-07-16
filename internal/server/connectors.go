@@ -318,6 +318,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("eventhubs", "Azure Event Hubs", []string{"eventhubs", "eventhub", "azure-event-hubs", "azureeventhubs"}, true, false),
 		genericURIConnector("fabric", "Microsoft Fabric", []string{"fabric"}, true, true),
 		genericURIConnector("facebookads", "Facebook Ads", []string{"facebookads"}, true, false),
+		genericURIConnector("fastspring", "FastSpring", []string{"fastspring"}, true, false),
 		genericURIConnector("fireflies", "Fireflies", []string{"fireflies"}, true, false),
 		genericURIConnector("fluxx", "Fluxx", []string{"fluxx"}, true, false),
 		genericURIConnector("footballdata", "Football Data", []string{"footballdata"}, true, false),
