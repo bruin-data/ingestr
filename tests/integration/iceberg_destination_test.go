@@ -186,6 +186,10 @@ func exerciseIcebergDestination(t *testing.T, ctx context.Context, destURI, tabl
 	assert.True(t, summary.fields["name"])
 	assert.True(t, summary.fields["active"])
 	assert.True(t, summary.fields["score"])
+	assert.True(t, summary.requiredFields["id"], "primary key should remain required")
+	assert.False(t, summary.requiredFields["name"], "inferred destination columns should be nullable")
+	assert.False(t, summary.requiredFields["active"], "inferred destination columns should be nullable")
+	assert.False(t, summary.requiredFields["score"], "inferred destination columns should be nullable")
 
 	appendRows := writeIcebergJSONL(
 		t, "append.jsonl",
@@ -197,6 +201,7 @@ func exerciseIcebergDestination(t *testing.T, ctx context.Context, destURI, tabl
 	summary = loadIcebergTableSummary(t, ctx, destURI, tableName)
 	assert.EqualValues(t, 4, summary.rows)
 	assert.True(t, summary.fields["age"], "append should evolve the Iceberg table schema")
+	assert.False(t, summary.requiredFields["age"], "new inferred columns should be nullable")
 
 	replacement := writeIcebergJSONL(
 		t, "replacement.jsonl",
@@ -478,9 +483,10 @@ func startIcebergMinioContainer(t *testing.T, ctx context.Context, networkName s
 }
 
 type icebergTableSummary struct {
-	rows        int64
-	fields      map[string]bool
-	primaryKeys []string
+	rows           int64
+	fields         map[string]bool
+	requiredFields map[string]bool
+	primaryKeys    []string
 }
 
 func loadIcebergTableSummary(t *testing.T, ctx context.Context, destURI, tableName string) icebergTableSummary {
@@ -504,8 +510,10 @@ func loadIcebergTableSummary(t *testing.T, ctx context.Context, destURI, tableNa
 	}
 
 	fields := make(map[string]bool)
+	requiredFields := make(map[string]bool)
 	for _, field := range tbl.Schema().Fields() {
 		fields[field.Name] = true
+		requiredFields[field.Name] = field.Required
 	}
 
 	idNames := make([]string, 0, len(tbl.Schema().IdentifierFieldIDs))
@@ -516,9 +524,10 @@ func loadIcebergTableSummary(t *testing.T, ctx context.Context, destURI, tableNa
 	}
 
 	return icebergTableSummary{
-		rows:        rows,
-		fields:      fields,
-		primaryKeys: idNames,
+		rows:           rows,
+		fields:         fields,
+		requiredFields: requiredFields,
+		primaryKeys:    idNames,
 	}
 }
 

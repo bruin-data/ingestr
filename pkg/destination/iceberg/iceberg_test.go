@@ -500,7 +500,34 @@ func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
 	require.ErrorIs(t, err, writeErr)
 }
 
-func TestDestinationReplaceAddsNewRequiredColumns(t *testing.T) {
+func TestDestinationMakesNonIdentifierColumnsOptional(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.optional_events"
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "event_name", DataType: schema.TypeString, Nullable: false},
+		},
+	}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() { require.NoError(t, dest.Close(ctx)) }()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	}))
+
+	gotSchema, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.False(t, icebergColumn(t, gotSchema, "id").Nullable)
+	require.True(t, icebergColumn(t, gotSchema, "event_name").Nullable)
+	require.False(t, tableSchema.Columns[1].Nullable, "PrepareTable must not mutate the caller schema")
+}
+
+func TestDestinationReplaceAddsNewOptionalColumns(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.required_events"
 	initialSchema := &schema.TableSchema{
@@ -537,7 +564,7 @@ func TestDestinationReplaceAddsNewRequiredColumns(t *testing.T) {
 
 	gotSchema, err := dest.GetTableSchema(ctx, tableName)
 	require.NoError(t, err)
-	require.False(t, icebergColumn(t, gotSchema, "event_name").Nullable)
+	require.True(t, icebergColumn(t, gotSchema, "event_name").Nullable)
 }
 
 func TestDestinationReplaceWriteFailureDoesNotMutateExistingMetadata(t *testing.T) {
