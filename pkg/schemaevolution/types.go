@@ -51,6 +51,7 @@ const (
 	ChangeWidenType
 	ChangeOverrideType // User-specified type override
 	ChangeRemoveColumn // Column exists in destination but not in source
+	ChangeRelaxNullability
 )
 
 // SchemaChange represents a single schema change operation.

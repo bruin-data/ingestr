@@ -162,7 +162,17 @@ func evolveDestinationTable(ctx context.Context, dest destination.Destination, d
 		return fmt.Errorf("failed to parse column overrides: %w", err)
 	}
 
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, &schemaevolution.CompareOptions{Overrides: overrides})
+	primaryKeys := cfg.PrimaryKeys
+	if len(primaryKeys) == 0 {
+		primaryKeys = sourceSchema.PrimaryKeys
+	}
+	compareOptions := &schemaevolution.CompareOptions{
+		Overrides: overrides, PrimaryKeys: primaryKeys,
+	}
+	if normalizer, ok := dest.(destination.SchemaEvolutionColumnNormalizer); ok {
+		compareOptions.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
+	}
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
 	if err != nil {
 		return fmt.Errorf("failed to compare schemas: %w", err)
 	}

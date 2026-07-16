@@ -418,6 +418,60 @@ func TestDestinationApplySchemaEvolutionPromotesColumnType(t *testing.T) {
 	require.True(t, icebergColumn(t, gotSchema, "id").Nullable)
 }
 
+func TestDestinationApplySchemaEvolutionPromotesArrayElementType(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.promoted_array_events"
+	initial := schema.Column{Name: "values", DataType: schema.TypeArray, ArrayType: schema.TypeInt32, Nullable: true}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() { require.NoError(t, dest.Close(ctx)) }()
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: tableName, Schema: &schema.TableSchema{Columns: []schema.Column{initial}},
+	}))
+
+	_, err := dest.ApplySchemaEvolution(ctx, tableName, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type: schemaevolution.ChangeWidenType, ColumnName: "values", OldColumn: &initial,
+			NewColumn: schema.Column{Name: "values", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true},
+		}},
+	})
+	require.NoError(t, err)
+
+	got, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.Equal(t, schema.TypeInt64, icebergColumn(t, got, "values").ArrayType)
+}
+
+func TestDestinationApplySchemaEvolutionRelaxesRequiredColumns(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.relaxed_events"
+	relaxed := schema.Column{Name: "relaxed", DataType: schema.TypeString, Nullable: false}
+	removed := schema.Column{Name: "removed", DataType: schema.TypeString, Nullable: false}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() { require.NoError(t, dest.Close(ctx)) }()
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: tableName, Schema: &schema.TableSchema{Columns: []schema.Column{relaxed, removed}},
+	}))
+
+	_, err := dest.ApplySchemaEvolution(ctx, tableName, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "relaxed", OldColumn: &relaxed},
+			{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "removed", OldColumn: &removed},
+		},
+	})
+	require.NoError(t, err)
+
+	got, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.True(t, icebergColumn(t, got, "relaxed").Nullable)
+	require.True(t, icebergColumn(t, got, "removed").Nullable)
+}
+
 func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.failed_append_events"

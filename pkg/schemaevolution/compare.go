@@ -1,6 +1,7 @@
 package schemaevolution
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/naming"
@@ -9,7 +10,9 @@ import (
 
 // CompareOptions contains optional parameters for schema comparison.
 type CompareOptions struct {
-	Overrides ColumnOverrides
+	Overrides       ColumnOverrides
+	PrimaryKeys     []string
+	NormalizeColumn func(schema.Column) schema.Column
 }
 
 // Compare compares source and destination schemas and returns the differences.
@@ -23,8 +26,16 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}
 
 	var overrides ColumnOverrides
+	normalizeColumn := func(col schema.Column) schema.Column { return col }
+	primaryKeys := make(map[string]struct{})
 	if opts != nil {
 		overrides = opts.Overrides
+		if opts.NormalizeColumn != nil {
+			normalizeColumn = opts.NormalizeColumn
+		}
+		for _, key := range opts.PrimaryKeys {
+			primaryKeys[strings.ToLower(key)] = struct{}{}
+		}
 	}
 
 	destColumnMap := make(map[string]schema.Column)
@@ -39,32 +50,57 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 
 	var changes []SchemaChange
 
-	for _, srcCol := range source.Columns {
-		lowerName := strings.ToLower(srcCol.Name)
-		destCol, exists := destColumnMap[lowerName]
+	for _, sourceColumn := range source.Columns {
+		srcCol := normalizeColumn(sourceColumn)
+		lowerName := strings.ToLower(sourceColumn.Name)
+		destColumn, exists := destColumnMap[lowerName]
+		destCol := normalizeColumn(destColumn)
 
 		// Check for user override first
-		if override, hasOverride := overrides.Get(srcCol.Name); hasOverride {
-			newCol := override.ApplyToColumn(srcCol)
-			newCol.Nullable = true
+		if override, hasOverride := overrides.Get(sourceColumn.Name); hasOverride {
+			newCol := override.ApplyToColumn(sourceColumn)
+			comparisonCol := normalizeColumn(newCol)
+			if exists {
+				newCol.Name = destColumn.Name
+				comparisonCol.Name = destCol.Name
+				_, isPrimaryKey := primaryKeys[lowerName]
+				relaxNullability := sourceColumn.Nullable && !destColumn.Nullable && !isPrimaryKey
+				newCol.Nullable = destColumn.Nullable || relaxNullability
+				if relaxNullability {
+					old := destColumn
+					relaxed := destColumn
+					relaxed.Nullable = true
+					changes = append(changes, SchemaChange{
+						Type: ChangeRelaxNullability, ColumnName: destColumn.Name,
+						OldColumn: &old, NewColumn: relaxed,
+					})
+				}
+			} else {
+				newCol.Nullable = true
+			}
 
 			// If destination exists and matches override, no change needed
-			if exists && destCol.DataType == newCol.DataType {
-				switch newCol.DataType {
+			if exists && destCol.DataType == comparisonCol.DataType {
+				switch comparisonCol.DataType {
 				case schema.TypeDecimal:
-					// For decimal, check integer digits and scale separately
-					destIntDigits := destCol.Precision - destCol.Scale
-					newIntDigits := newCol.Precision - newCol.Scale
-					if destIntDigits >= newIntDigits && destCol.Scale >= newCol.Scale {
+					precision, scale, err := MergeDecimalPrecisionChecked(
+						normalizedDecimal(comparisonCol), normalizedDecimal(destCol),
+					)
+					if err != nil {
+						return nil, fmt.Errorf("column %s: %w", destColumn.Name, err)
+					}
+					if precision == normalizedDecimal(destCol).Precision && scale == destCol.Scale {
 						continue
 					}
+					newCol.Precision = precision
+					newCol.Scale = scale
 				case schema.TypeString:
 					// Only evolve when the override widens the length; never
 					// narrow an existing column (that would truncate data).
-					if !stringNeedsWidening(newCol.MaxLength, destCol.MaxLength) {
+					if !stringNeedsWidening(comparisonCol.MaxLength, destCol.MaxLength) {
 						continue
 					}
-					newCol.MaxLength = WidenedStringLength(newCol.MaxLength, destCol.MaxLength)
+					newCol.MaxLength = WidenedStringLength(comparisonCol.MaxLength, destCol.MaxLength)
 				default:
 					continue
 				}
@@ -77,12 +113,12 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 
 			var oldCol *schema.Column
 			if exists {
-				oldCol = &destCol
+				oldCol = &destColumn
 			}
 
 			changes = append(changes, SchemaChange{
 				Type:       changeType,
-				ColumnName: srcCol.Name,
+				ColumnName: newCol.Name,
 				OldColumn:  oldCol,
 				NewColumn:  newCol,
 			})
@@ -92,39 +128,35 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 		if !exists {
 			changes = append(changes, SchemaChange{
 				Type:       ChangeAddColumn,
-				ColumnName: srcCol.Name,
+				ColumnName: sourceColumn.Name,
 				OldColumn:  nil,
-				NewColumn:  makeNullable(srcCol),
+				NewColumn:  makeNullable(sourceColumn),
 			})
 			continue
 		}
+		_, isPrimaryKey := primaryKeys[lowerName]
+		if sourceColumn.Nullable && !destColumn.Nullable && !isPrimaryKey {
+			old := destColumn
+			newCol := sourceColumn
+			newCol.Name = destColumn.Name
+			changes = append(changes, SchemaChange{
+				Type: ChangeRelaxNullability, ColumnName: destColumn.Name,
+				OldColumn: &old, NewColumn: newCol,
+			})
+		}
 
 		if needsWidening(srcCol, destCol) {
-			widenedType, _ := GetWidenedType(srcCol.DataType, destCol.DataType)
-			newCol := srcCol
-			newCol.DataType = widenedType
-			newCol.Nullable = true
-
-			// For decimal precision/scale widening, keep TypeDecimal but merge precision
-			isDecimalPrecisionWidening := srcCol.DataType == schema.TypeDecimal && destCol.DataType == schema.TypeDecimal
-			if isDecimalPrecisionWidening {
-				newCol.Precision, newCol.Scale = MergeDecimalPrecision(srcCol, destCol)
+			newCol, err := widenedColumn(srcCol, destCol)
+			if err != nil {
+				return nil, fmt.Errorf("column %s: %w", destColumn.Name, err)
 			}
+			newCol.Nullable = destColumn.Nullable || (sourceColumn.Nullable && !isPrimaryKey)
 
-			// For string length widening, keep TypeString but grow the length.
-			isStringLengthWidening := widenedType == schema.TypeString &&
-				destCol.DataType == schema.TypeString &&
-				stringNeedsWidening(srcCol.MaxLength, destCol.MaxLength)
-			if isStringLengthWidening {
-				newCol.MaxLength = WidenedStringLength(srcCol.MaxLength, destCol.MaxLength)
-			}
-
-			// Only add change if type is different OR precision/length needs widening
-			if widenedType != destCol.DataType || isDecimalPrecisionWidening || isStringLengthWidening {
+			if !sameColumnTypeShape(newCol, destCol) {
 				changes = append(changes, SchemaChange{
 					Type:       ChangeWidenType,
-					ColumnName: srcCol.Name,
-					OldColumn:  &destCol,
+					ColumnName: destColumn.Name,
+					OldColumn:  &destColumn,
 					NewColumn:  newCol,
 				})
 			}
@@ -156,6 +188,71 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}, nil
 }
 
+func widenedColumn(src, dest schema.Column) (schema.Column, error) {
+	result := src
+	result.Name = dest.Name
+	result.DataType, _ = GetWidenedType(src.DataType, dest.DataType)
+	result.Nullable = src.Nullable || dest.Nullable
+	if result.DataType == schema.TypeArray && src.DataType == schema.TypeArray && dest.DataType == schema.TypeArray {
+		result.ArrayType, _ = GetWidenedType(src.ArrayType, dest.ArrayType)
+		if result.ArrayType == schema.TypeDecimal && (isFloatingType(src.ArrayType) || isFloatingType(dest.ArrayType)) {
+			result.ArrayType = schema.TypeString
+			result.Precision = 0
+			result.Scale = 0
+			result.MaxLength = 0
+			return result, nil
+		}
+		if result.ArrayType == dest.ArrayType {
+			result.Precision = dest.Precision
+			result.Scale = dest.Scale
+			result.MaxLength = dest.MaxLength
+		}
+		if result.ArrayType == schema.TypeDecimal {
+			var err error
+			result.Precision, result.Scale, err = mergeDecimalTypesChecked(
+				arrayElementColumn(src), arrayElementColumn(dest),
+			)
+			if err != nil {
+				return schema.Column{}, err
+			}
+		}
+		if result.ArrayType == schema.TypeString {
+			if src.ArrayType == schema.TypeString && dest.ArrayType == schema.TypeString {
+				result.MaxLength = WidenedStringLength(src.MaxLength, dest.MaxLength)
+			} else {
+				result.MaxLength = 0
+			}
+		}
+		return result, nil
+	}
+	if result.DataType == schema.TypeDecimal && (isFloatingType(src.DataType) || isFloatingType(dest.DataType)) {
+		result.DataType = schema.TypeString
+		result.Precision = 0
+		result.Scale = 0
+		result.MaxLength = 0
+		return result, nil
+	}
+	if result.DataType == schema.TypeDecimal {
+		var err error
+		result.Precision, result.Scale, err = mergeDecimalTypesChecked(src, dest)
+		if err != nil {
+			return schema.Column{}, err
+		}
+	}
+	if result.DataType == schema.TypeString {
+		if src.DataType == schema.TypeString && dest.DataType == schema.TypeString {
+			result.MaxLength = WidenedStringLength(src.MaxLength, dest.MaxLength)
+		} else {
+			result.MaxLength = 0
+		}
+	}
+	return result, nil
+}
+
+func isFloatingType(dataType schema.DataType) bool {
+	return dataType == schema.TypeFloat32 || dataType == schema.TypeFloat64
+}
+
 func makeNullable(col schema.Column) schema.Column {
 	col.Nullable = true
 	return col
@@ -165,11 +262,100 @@ func needsWidening(src, dest schema.Column) bool {
 	if src.DataType == dest.DataType {
 		switch src.DataType {
 		case schema.TypeDecimal:
-			return src.Precision > dest.Precision || src.Scale > dest.Scale
+			return decimalNeedsWidening(src, dest)
 		case schema.TypeString:
 			return stringNeedsWidening(src.MaxLength, dest.MaxLength)
+		case schema.TypeArray:
+			if src.ArrayType != dest.ArrayType {
+				return true
+			}
+			switch src.ArrayType {
+			case schema.TypeDecimal:
+				return decimalNeedsWidening(src, dest)
+			case schema.TypeString:
+				return stringNeedsWidening(src.MaxLength, dest.MaxLength)
+			default:
+				return false
+			}
 		default:
 			return false
+		}
+	}
+	return true
+}
+
+func decimalNeedsWidening(src, dest schema.Column) bool {
+	src = normalizedDecimal(src)
+	dest = normalizedDecimal(dest)
+	return src.Precision-src.Scale > dest.Precision-dest.Scale || src.Scale > dest.Scale
+}
+
+func arrayElementColumn(col schema.Column) schema.Column {
+	return schema.Column{
+		DataType:  col.ArrayType,
+		Precision: col.Precision,
+		Scale:     col.Scale,
+		MaxLength: col.MaxLength,
+	}
+}
+
+func mergeDecimalTypesChecked(src, dest schema.Column) (int, int, error) {
+	srcDecimal, srcOK := decimalRepresentation(src)
+	destDecimal, destOK := decimalRepresentation(dest)
+	if !srcOK || !destOK {
+		if src.DataType == schema.TypeDecimal {
+			return src.Precision, src.Scale, nil
+		}
+		return dest.Precision, dest.Scale, nil
+	}
+	return MergeDecimalPrecisionChecked(srcDecimal, destDecimal)
+}
+
+func decimalRepresentation(col schema.Column) (schema.Column, bool) {
+	if col.DataType == schema.TypeDecimal {
+		return normalizedDecimal(col), true
+	}
+	var digits int
+	switch col.DataType {
+	case schema.TypeInt8:
+		digits = 3
+	case schema.TypeInt16:
+		digits = 5
+	case schema.TypeInt32:
+		digits = 10
+	case schema.TypeInt64:
+		digits = 19
+	default:
+		return schema.Column{}, false
+	}
+	return schema.Column{DataType: schema.TypeDecimal, Precision: digits}, true
+}
+
+func normalizedDecimal(col schema.Column) schema.Column {
+	if col.Precision == 0 {
+		col.Precision = 38
+	}
+	return col
+}
+
+func sameColumnTypeShape(a, b schema.Column) bool {
+	if a.DataType != b.DataType {
+		return false
+	}
+	switch a.DataType {
+	case schema.TypeDecimal:
+		return a.Precision == b.Precision && a.Scale == b.Scale
+	case schema.TypeString:
+		return a.MaxLength == b.MaxLength
+	case schema.TypeArray:
+		if a.ArrayType != b.ArrayType {
+			return false
+		}
+		switch a.ArrayType {
+		case schema.TypeDecimal:
+			return a.Precision == b.Precision && a.Scale == b.Scale
+		case schema.TypeString:
+			return a.MaxLength == b.MaxLength
 		}
 	}
 	return true

@@ -1132,16 +1132,20 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 }
 
 func mapSQLiteTypeToSchema(colType string) schema.DataType {
-	colType = strings.ToUpper(colType)
+	colType = strings.ToUpper(strings.TrimSpace(colType))
 
 	switch {
-	case colType == "INTEGER" || colType == "INT" || colType == "BIGINT" || colType == "SMALLINT" || colType == "TINYINT":
-		return schema.TypeInt64
-	case colType == "REAL" || colType == "DOUBLE" || colType == "FLOAT":
-		return schema.TypeFloat64
-	case colType == "TEXT" || colType == "VARCHAR" || strings.HasPrefix(colType, "VARCHAR"):
+	case colType == "BOOLEAN" || colType == "BOOL":
+		return schema.TypeBoolean
+	case colType == "INTERVAL":
 		return schema.TypeString
-	case colType == "BLOB":
+	case strings.Contains(colType, "INT"):
+		return schema.TypeInt64
+	case strings.Contains(colType, "REAL") || strings.Contains(colType, "FLOA") || strings.Contains(colType, "DOUB"):
+		return schema.TypeFloat64
+	case strings.Contains(colType, "CHAR") || strings.Contains(colType, "CLOB") || strings.Contains(colType, "TEXT"):
+		return schema.TypeString
+	case strings.Contains(colType, "BLOB"):
 		return schema.TypeBinary
 	case colType == "NUMERIC" || strings.HasPrefix(colType, "DECIMAL"):
 		return schema.TypeDecimal

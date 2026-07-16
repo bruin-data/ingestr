@@ -11,12 +11,13 @@ import (
 
 // ColumnOverride represents a user-specified column type override.
 type ColumnOverride struct {
-	Name      string
-	RenameTo  string
-	DataType  schema.DataType
-	Precision int
-	Scale     int
-	MaxLength int
+	Name           string
+	RenameTo       string
+	DataType       schema.DataType
+	Precision      int
+	Scale          int
+	ScaleSpecified bool
+	MaxLength      int
 }
 
 // ColumnOverrides is a map of column name (lowercase) to its override.
@@ -217,21 +218,28 @@ func parseColumnOverride(pair string) (ColumnOverride, error) {
 
 		switch dataType {
 		case schema.TypeDecimal:
-			// Handle precision/scale for decimal
-			if len(params) >= 1 {
-				p, err := strconv.Atoi(strings.TrimSpace(params[0]))
-				if err != nil {
-					return ColumnOverride{}, fmt.Errorf("invalid precision in '%s': %w", typeSpec, err)
-				}
-				override.Precision = p
+			if len(params) < 1 || len(params) > 2 {
+				return ColumnOverride{}, fmt.Errorf("invalid decimal parameters in '%s': expected decimal(precision) or decimal(precision,scale)", typeSpec)
 			}
-			if len(params) >= 2 {
+			p, err := strconv.Atoi(strings.TrimSpace(params[0]))
+			if err != nil {
+				return ColumnOverride{}, fmt.Errorf("invalid precision in '%s': %w", typeSpec, err)
+			}
+			if p < 1 || p > 38 {
+				return ColumnOverride{}, fmt.Errorf("invalid precision in '%s': must be between 1 and 38", typeSpec)
+			}
+			override.Precision = p
+			if len(params) == 2 {
 				s, err := strconv.Atoi(strings.TrimSpace(params[1]))
 				if err != nil {
 					return ColumnOverride{}, fmt.Errorf("invalid scale in '%s': %w", typeSpec, err)
 				}
+				if s < 0 || s > p {
+					return ColumnOverride{}, fmt.Errorf("invalid scale in '%s': must be between 0 and precision %d", typeSpec, p)
+				}
 				override.Scale = s
 			}
+			override.ScaleSpecified = true
 		case schema.TypeString:
 			// Sized string types take exactly one length parameter, e.g. varchar(50).
 			if len(params) != 1 {
@@ -315,7 +323,7 @@ func (o ColumnOverride) ApplyToColumn(col schema.Column) schema.Column {
 	if o.Precision > 0 {
 		col.Precision = o.Precision
 	}
-	if o.Scale > 0 {
+	if o.ScaleSpecified || o.Scale > 0 {
 		col.Scale = o.Scale
 	}
 	if o.MaxLength > 0 {

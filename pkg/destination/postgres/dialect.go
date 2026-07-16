@@ -41,6 +41,11 @@ func (d *Dialect) SupportsAlterType() bool {
 	return true
 }
 
+func (d *Dialect) RelaxColumnNullabilitySQL(table, colName string) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL",
+		destination.QuoteTableName(table), d.QuoteIdentifier(colName))
+}
+
 func (d *Dialect) TypeName(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:

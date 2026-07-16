@@ -42,6 +42,13 @@ type BatchColumnTypeAlterer interface {
 	BatchAlterColumnTypesSQL(table string, cols []schema.Column) string
 }
 
+// NullabilityRelaxer renders DDL that changes an existing required column to
+// optional. Dialects without this capability must fail evolution before data
+// is written whenever nullable source rows could reach a required column.
+type NullabilityRelaxer interface {
+	RelaxColumnNullabilitySQL(table, colName string) string
+}
+
 // BuildMigration turns an abstract schema comparison into the concrete DDL
 // statements (and human-readable warnings) for a dialect. It is dialect-
 // agnostic orchestration shared by SQL destinations; the dialect supplies the
@@ -85,6 +92,14 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 					warnings = append(warnings, fmt.Sprintf("column %q: %s", change.ColumnName, warning))
 				}
 			}
+
+		case schemaevolution.ChangeRelaxNullability:
+			appendNullabilityRelaxation(dialect, table, change.ColumnName, &statements, &warnings)
+
+		case schemaevolution.ChangeRemoveColumn:
+			if change.OldColumn != nil && !change.OldColumn.Nullable {
+				appendNullabilityRelaxation(dialect, table, change.ColumnName, &statements, &warnings)
+			}
 		}
 	}
 
@@ -103,9 +118,45 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 	return statements, warnings
 }
 
+func appendNullabilityRelaxation(dialect Dialect, table, column string, statements, warnings *[]string) {
+	if relaxer, ok := dialect.(NullabilityRelaxer); ok {
+		if sql := relaxer.RelaxColumnNullabilitySQL(table, column); sql != "" {
+			*statements = append(*statements, sql)
+			return
+		}
+	}
+	*warnings = append(*warnings, fmt.Sprintf(
+		"column %q nullability relaxation skipped: %s does not expose nullability evolution",
+		column, dialect.Name(),
+	))
+}
+
 // ApplyEvolution renders the abstract schema-change plan into dialect-specific
 // DDL and executes each statement against the destination.
 func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
+	if comparison != nil {
+		for _, change := range comparison.Changes {
+			if change.Type == schemaevolution.ChangeWidenType || change.Type == schemaevolution.ChangeOverrideType {
+				if !dialect.SupportsAlterType() || dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn) == "" {
+					return nil, fmt.Errorf(
+						"apply schema evolution: column %q requires a type change, which generic %s DDL does not support",
+						change.ColumnName, dialect.Name(),
+					)
+				}
+			}
+			needsRelaxation := change.Type == schemaevolution.ChangeRelaxNullability ||
+				(change.Type == schemaevolution.ChangeRemoveColumn && change.OldColumn != nil && !change.OldColumn.Nullable)
+			if needsRelaxation {
+				relaxer, ok := dialect.(NullabilityRelaxer)
+				if !ok || relaxer.RelaxColumnNullabilitySQL(table, change.ColumnName) == "" {
+					return nil, fmt.Errorf(
+						"apply schema evolution: column %q requires nullability relaxation, which generic %s DDL does not support",
+						change.ColumnName, dialect.Name(),
+					)
+				}
+			}
+		}
+	}
 	statements, warnings := BuildMigration(dialect, table, comparison)
 	for _, stmt := range statements {
 		if err := dest.Exec(ctx, stmt); err != nil {

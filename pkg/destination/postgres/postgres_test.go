@@ -89,6 +89,50 @@ func TestValidatePostgresClaimTargetAcceptsIdentifierLimit(t *testing.T) {
 	}
 }
 
+func TestMapPostgresColumnTypePreservesArrayElementType(t *testing.T) {
+	tests := []struct {
+		udt  string
+		want schema.DataType
+	}{
+		{"_bool", schema.TypeBoolean},
+		{"_int2", schema.TypeInt16},
+		{"_int4", schema.TypeInt32},
+		{"_int8", schema.TypeInt64},
+		{"_float4", schema.TypeFloat32},
+		{"_float8", schema.TypeFloat64},
+		{"_numeric", schema.TypeDecimal},
+		{"_text", schema.TypeString},
+		{"_varchar", schema.TypeString},
+		{"_bpchar", schema.TypeString},
+		{"_bytea", schema.TypeBinary},
+		{"_date", schema.TypeDate},
+		{"_time", schema.TypeTime},
+		{"_timestamp", schema.TypeTimestamp},
+		{"_timestamptz", schema.TypeTimestampTZ},
+		{"_interval", schema.TypeInterval},
+		{"_json", schema.TypeJSON},
+		{"_jsonb", schema.TypeJSON},
+		{"_uuid", schema.TypeUUID},
+		{"_custom_enum", schema.TypeString},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.udt, func(t *testing.T) {
+			dataType, arrayType := mapPostgresColumnType("ARRAY", tt.udt)
+			if dataType != schema.TypeArray || arrayType != tt.want {
+				t.Fatalf("mapPostgresColumnType(ARRAY, %q) = (%v, %v), want (%v, %v)", tt.udt, dataType, arrayType, schema.TypeArray, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapPostgresColumnTypeScalarHasNoArrayElement(t *testing.T) {
+	dataType, arrayType := mapPostgresColumnType("integer", "int4")
+	if dataType != schema.TypeInt32 || arrayType != schema.TypeUnknown {
+		t.Fatalf("mapPostgresColumnType(integer, int4) = (%v, %v), want (%v, %v)", dataType, arrayType, schema.TypeInt32, schema.TypeUnknown)
+	}
+}
+
 func TestResolvedMultiTableNameFitsPostgresClaimLimit(t *testing.T) {
 	sourceTable := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
 	resolved := destination.ResolveMultiTableName("postgres", nil, "landing", sourceTable)
@@ -166,6 +210,14 @@ func TestPostgresValueGetterMatchesArrowutilValue(t *testing.T) {
 				t.Fatalf("%s[%d]: postgresValueGetter = %#v (%T), arrowutil.Value = %#v (%T)", arr.DataType(), i, got, got, want, want)
 			}
 		}
+	}
+}
+
+func TestDialectRelaxColumnNullabilitySQL(t *testing.T) {
+	got := (&Dialect{}).RelaxColumnNullabilitySQL("public.events", "Payload")
+	want := `ALTER TABLE "public"."events" ALTER COLUMN "Payload" DROP NOT NULL`
+	if got != want {
+		t.Fatalf("RelaxColumnNullabilitySQL() = %q, want %q", got, want)
 	}
 }
 
