@@ -579,18 +579,26 @@ func streamMsgID(msg kafkago.Message) string {
 	if len(msg.Key) > 0 {
 		return keyedMsgID(msg.Topic, msg.Partition, string(msg.Key))
 	}
-	// Same (topic, partition, offset) identity as physicalMsgID, but kept as the
-	// raw plaintext form — frozen for backward compatibility with already-persisted
+	// Same physicalCoordinate identity as physicalMsgID, but kept as the raw
+	// plaintext form — frozen for backward compatibility with already-persisted
 	// keyless msg_id primary keys, not an intentional design difference. Do not
 	// switch to shake128ID: that would rotate every persisted keyless id.
-	return msg.Topic + ":" + strconv.Itoa(msg.Partition) + ":" + strconv.FormatInt(msg.Offset, 10)
+	return physicalCoordinate(msg.Topic, msg.Partition, msg.Offset)
+}
+
+// physicalCoordinate is the unique location of a message within a topic. The
+// colon separators keep the encoding injective — Kafka topic names cannot
+// contain ':', so no (topic, partition, offset) tuple can alias another (e.g.
+// partition 1/offset 10 vs partition 11/offset 0 both resolving to "110").
+func physicalCoordinate(topic string, partition int, offset int64) string {
+	return topic + ":" + strconv.Itoa(partition) + ":" + strconv.FormatInt(offset, 10)
 }
 
 // physicalMsgID identifies a single physical message by its unique coordinate
 // (topic, partition, offset). Used for the batch _kafka_msg_id, where every
 // message — keyed or keyless — must get a distinct id.
 func physicalMsgID(topic string, partition int, offset int64) string {
-	return shake128ID(topic + strconv.Itoa(partition) + strconv.FormatInt(offset, 10))
+	return shake128ID(physicalCoordinate(topic, partition, offset))
 }
 
 // keyedMsgID identifies a message by its key (topic, partition, key), offset

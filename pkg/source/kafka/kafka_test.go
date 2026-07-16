@@ -196,10 +196,9 @@ func TestPhysicalMsgID(t *testing.T) {
 		t.Errorf("physicalMsgID length = %d, want 20", len(id1))
 	}
 
-	// Verify it matches SHAKE-128 base64 of (topic + partition + offset) — the
-	// message's unique coordinate. This mirrors dlt's Kafka source, which keys
-	// on topic-partition-offset.
-	expected := shake128Base64(fmt.Sprintf("%s%d%d", "my-topic", 0, 100))
+	// Verify it matches SHAKE-128 base64 of the injective "topic:partition:offset"
+	// coordinate — the message's unique location within the topic.
+	expected := shake128Base64("my-topic:0:100")
 	if id1 != expected {
 		t.Errorf("physicalMsgID = %q, want %q", id1, expected)
 	}
@@ -209,6 +208,13 @@ func TestPhysicalMsgID(t *testing.T) {
 	idOff := physicalMsgID("my-topic", 0, 101)
 	if id1 == idOff {
 		t.Error("physicalMsgID collision for different offsets")
+	}
+
+	// The input encoding must be injective across the (partition, offset) split:
+	// partition 1/offset 10 and partition 11/offset 0 are different messages and
+	// must not produce the same id (a separator-less encoding would collide here).
+	if a, b := physicalMsgID("t", 1, 10), physicalMsgID("t", 11, 0); a == b {
+		t.Errorf("physicalMsgID collision across partition/offset boundary: %q", a)
 	}
 
 	if id3 := physicalMsgID("my-topic", 1, 100); id1 == id3 {
