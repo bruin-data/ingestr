@@ -1,7 +1,12 @@
 package mysql
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +15,36 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
+
+func TestBufferedReadConnPreservesBytes(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+
+	want := bytes.Repeat([]byte("mysql-row-packet"), 10_000)
+	go func() {
+		for offset := 0; offset < len(want); {
+			end := min(offset+997, len(want))
+			_, _ = server.Write(want[offset:end])
+			offset = end
+		}
+		_ = server.Close()
+	}()
+
+	conn := &bufferedReadConn{
+		Conn:   client,
+		reader: bufio.NewReaderSize(client, mysqlReadBufferSize),
+	}
+	got, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("buffered connection returned %d bytes, want %d", len(got), len(want))
+	}
+}
 
 func TestIsVitessServer(t *testing.T) {
 	cases := []struct {
@@ -87,5 +122,64 @@ func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
 	want := "SELECT `id`, `created_at` FROM `shop`.`orders` WHERE `updated_at` >= '2026-01-01 00:00:00' AND `updated_at` <= '2026-01-31 00:00:00' AND `created_at` >= '2026-01-08 00:00:00' AND `created_at` < '2026-01-15 00:00:00'"
 	if query != want {
 		t.Fatalf("query = %q, want %q", query, want)
+	}
+}
+
+func TestQueryRowsUsesPreparedStatement(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectPrepare("SELECT 1").
+		WillBeClosed().
+		ExpectQuery().
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+
+	rows, closeStmt, err := queryRows(t.Context(), db, "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got int
+	if !rows.Next() {
+		t.Fatal("prepared query returned no rows")
+	}
+	if err := rows.Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closeStmt()
+	if got != 1 {
+		t.Fatalf("prepared query value = %d, want 1", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueryRowsFallsBackWhenPrepareIsUnsupported(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectPrepare("SELECT 1").WillReturnError(errors.New("prepare unsupported"))
+	mock.ExpectQuery("SELECT 1").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+
+	rows, closeStmt, err := queryRows(t.Context(), db, "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStmt()
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		t.Fatal("fallback query returned no rows")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

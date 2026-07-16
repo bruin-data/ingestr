@@ -740,6 +740,16 @@ var pow10 = [19]int64{
 // the target scale. Anything else (exponents, rounding, huge values) reports
 // false so the caller can use decimal128.FromString.
 func parseDecimal128Fast(s string, precision, scale int32) (decimal128.Num, bool) {
+	return parseDecimal128Text(s, precision, scale)
+}
+
+// ParseDecimal128BytesFast parses a plain decimal byte slice without converting
+// it to a string. It returns false for inputs that require the general parser.
+func ParseDecimal128BytesFast(s []byte, precision, scale int32) (decimal128.Num, bool) {
+	return parseDecimal128Text(s, precision, scale)
+}
+
+func parseDecimal128Text[T ~string | ~[]byte](s T, precision, scale int32) (decimal128.Num, bool) {
 	if scale < 0 || int(scale) >= len(pow10) {
 		return decimal128.Num{}, false
 	}
