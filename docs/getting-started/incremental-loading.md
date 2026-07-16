@@ -187,6 +187,23 @@ The behavior is the same for any rows matching the source-side filter. ingestr d
 > [!CAUTION]
 > For the cases where there's a primary key match, the `merge` strategy will **update** the existing rows in the destination table with the new values from the source table. Use with caution, as it can lead to data loss if not used properly, as well as data processing charges if your data warehouse charges for updates.
 
+### Limiting the destination scan
+
+On BigQuery, `--incremental-predicate` appends a destination-specific SQL condition to the `MERGE` join. The destination table is aliased as `t` and the staging query as `s`. This can prune old partitions that cannot contain matching rows:
+
+```bash
+ingestr ingest \
+    --source-uri 'duckdb:///tmp/source.duckdb' \
+    --source-table 'updates' \
+    --dest-uri 'bigquery://my-project/analytics' \
+    --dest-table 'events' \
+    --incremental-strategy merge \
+    --primary-key id \
+    --incremental-predicate "t.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+```
+
+The predicate does not filter source rows. It only limits which destination rows can match them. Use a predicate only when every destination row that may match the incoming primary keys is inside the selected range; otherwise, the merge can insert a duplicate instead of updating the older row.
+
 ## Delete+Insert
 Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination. When you provide `--interval-start` or `--interval-end`, ingestr also passes those bounds to the source read, so sources that support interval filtering may return only that slice before the destination replacement happens.
 

@@ -61,6 +61,7 @@ def ingest(
     source_table: Optional[str] = None,
     dest_table: Optional[str] = None,
     incremental_key: Optional[str] = None,
+    incremental_predicate: Optional[str] = None,
     incremental_strategy: Optional[str] = None,
     interval_start: Optional[Union[str, date, datetime]] = None,
     interval_end: Optional[Union[str, date, datetime]] = None,
@@ -101,6 +102,7 @@ def ingest(
         source_table=source_table,
         dest_table=dest_table,
         incremental_key=incremental_key,
+        incremental_predicate=incremental_predicate,
         incremental_strategy=incremental_strategy,
         interval_start=interval_start,
         interval_end=interval_end,
@@ -140,6 +142,7 @@ def build_ingest_args(
     source_table: Optional[str] = None,
     dest_table: Optional[str] = None,
     incremental_key: Optional[str] = None,
+    incremental_predicate: Optional[str] = None,
     incremental_strategy: Optional[str] = None,
     interval_start: Optional[Union[str, date, datetime]] = None,
     interval_end: Optional[Union[str, date, datetime]] = None,
@@ -177,6 +180,7 @@ def build_ingest_args(
     _append_option(args, "source-table", source_table)
     _append_option(args, "dest-table", dest_table)
     _append_option(args, "incremental-key", incremental_key)
+    _append_option(args, "incremental-predicate", incremental_predicate)
     _append_option(args, "incremental-strategy", incremental_strategy)
     _append_option(args, "interval-start", interval_start)
     _append_option(args, "interval-end", interval_end)

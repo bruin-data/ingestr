@@ -47,6 +47,7 @@ type IngestConfig struct {
 	IncrementalStrategy         IncrementalStrategy
 	IncrementalStrategyExplicit bool
 	IncrementalKey              string
+	IncrementalPredicate        string
 	IntervalStart               *time.Time
 	IntervalEnd                 *time.Time
 
@@ -141,6 +142,11 @@ func (c *IngestConfig) Validate() error {
 	}
 	if c.NoInference && strings.TrimSpace(c.Columns) == "" {
 		return &ValidationError{Field: "columns", Message: "is required when no-inference is enabled"}
+	}
+	if strings.TrimSpace(c.IncrementalPredicate) != "" {
+		if c.FullRefresh {
+			return &ValidationError{Field: "incremental-predicate", Message: "cannot be combined with --full-refresh"}
+		}
 	}
 	if c.Stream {
 		if c.FullRefresh {

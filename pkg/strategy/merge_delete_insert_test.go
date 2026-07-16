@@ -35,6 +35,7 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyMerge
 	job.Config.PrimaryKeys = []string{"id"}
+	job.Config.IncrementalPredicate = "t.updated_at >= DATE '2026-07-01'"
 	job.Config.LoaderFileSize = 222
 	src.readCh = mustClosedRecords()
 
@@ -79,6 +80,9 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	}
 	if dest.mergeCalls[0].IncrementalKey != "id" {
 		t.Fatalf("MergeOptions.IncrementalKey = %q, want id", dest.mergeCalls[0].IncrementalKey)
+	}
+	if dest.mergeCalls[0].IncrementalPredicate != job.Config.IncrementalPredicate {
+		t.Fatalf("MergeOptions.IncrementalPredicate = %q, want %q", dest.mergeCalls[0].IncrementalPredicate, job.Config.IncrementalPredicate)
 	}
 	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
 		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)

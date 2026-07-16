@@ -60,13 +60,14 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	}
 
 	st := &streamTableState{
-		destTable:      job.Config.DestTable,
-		schema:         job.Schema,
-		primaryKeys:    job.Config.PrimaryKeys,
-		incrementalKey: job.Schema.IncrementalKey,
-		isCDC:          hasCDCColumns(job.Schema),
-		partitionBy:    job.Config.PartitionBy,
-		clusterBy:      job.Config.ClusterBy,
+		destTable:            job.Config.DestTable,
+		schema:               job.Schema,
+		primaryKeys:          job.Config.PrimaryKeys,
+		incrementalKey:       job.Schema.IncrementalKey,
+		incrementalPredicate: job.Config.IncrementalPredicate,
+		isCDC:                hasCDCColumns(job.Schema),
+		partitionBy:          job.Config.PartitionBy,
+		clusterBy:            job.Config.ClusterBy,
 	}
 	if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {
 		return err
@@ -393,16 +394,17 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 // streamTableState tracks one destination table's buffered batches across
 // flush cycles. stagingTable is empty in append mode.
 type streamTableState struct {
-	destTable         string
-	stagingTable      string
-	schema            *schema.TableSchema
-	primaryKeys       []string
-	incrementalKey    string
-	isCDC             bool
-	partitionBy       string
-	clusterBy         []string
-	incarnation       string
-	schemaFingerprint string
+	destTable            string
+	stagingTable         string
+	schema               *schema.TableSchema
+	primaryKeys          []string
+	incrementalKey       string
+	incrementalPredicate string
+	isCDC                bool
+	partitionBy          string
+	clusterBy            []string
+	incarnation          string
+	schemaFingerprint    string
 
 	pending     []arrow.RecordBatch
 	pendingRows int64
@@ -937,7 +939,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
-			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey); err != nil {
+			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate); err != nil {
 				return fmt.Errorf("streaming flush: failed to merge table %s: %w", displayName, err)
 			}
 			if err := connectorLeaseLoss(ctx); err != nil {

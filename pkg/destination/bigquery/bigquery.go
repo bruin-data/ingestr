@@ -2021,7 +2021,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	}
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning)
+	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate)
 
 	config.Debug("[MERGE] Executing MERGE statement")
 	config.Debug("[MERGE] SQL: %s", mergeSQL)
@@ -2351,6 +2351,10 @@ func (d *BigQueryDestination) buildMergeSQL(project, targetDataset, targetTable,
 }
 
 func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning) string {
+	return d.buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nonNullablePKs, pruning, "")
+}
+
+func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
@@ -2365,6 +2369,9 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 	}
 	if partitionPredicate := mergePartitionTargetPredicate(pruning); partitionPredicate != "" {
 		onConditions = append(onConditions, partitionPredicate)
+	}
+	if incrementalPredicate = strings.TrimSpace(incrementalPredicate); incrementalPredicate != "" {
+		onConditions = append(onConditions, "("+incrementalPredicate+")")
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -2627,6 +2634,10 @@ func (d *BigQueryDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as BigQuery supports the merge strategy via native MERGE.
 func (d *BigQueryDestination) SupportsMergeStrategy() bool { return true }
+
+// SupportsIncrementalPredicate returns true as BigQuery appends
+// MergeOptions.IncrementalPredicate to the MERGE join condition.
+func (d *BigQueryDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as BigQuery supports the delete+insert strategy.
 func (d *BigQueryDestination) SupportsDeleteInsertStrategy() bool { return true }

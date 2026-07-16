@@ -2655,6 +2655,18 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("incremental_predicate_is_added_to_on_clause", func(t *testing.T) {
+		sql := dest.buildMergeSQLWithPredicate(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, []string{"id", "event_date", "name"}, nil, "",
+			map[string]bool{"id": true}, nil, "t.`event_date` >= DATE '2026-07-01'",
+		)
+
+		if !contains(sql, "ON t.`id` = s.`id` AND (t.`event_date` >= DATE '2026-07-01')\n") {
+			t.Fatalf("sql missing incremental predicate in ON clause:\n%s", sql)
+		}
+	})
+
 	t.Run("mixed_required_and_nullable_pks", func(t *testing.T) {
 		sql := dest.buildMergeSQLWithPartitionPruning(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",

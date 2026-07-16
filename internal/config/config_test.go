@@ -35,6 +35,47 @@ func TestIngestConfigValidate_NoInferenceWithColumns(t *testing.T) {
 	}
 }
 
+func TestIngestConfigValidate_IncrementalPredicateDefersStrategyValidation(t *testing.T) {
+	newCfg := func() *IngestConfig {
+		cfg := DefaultConfig()
+		cfg.SourceURI = "duckdb:///tmp/source.duckdb"
+		cfg.SourceTable = "users"
+		cfg.DestURI = "bigquery://project/dataset"
+		cfg.IncrementalPredicate = "t.event_date >= DATE '2026-07-01'"
+		return cfg
+	}
+
+	cfg := newCfg()
+	cfg.IncrementalStrategy = StrategyAppend
+	cfg.IncrementalStrategyExplicit = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	cfg = newCfg()
+	cfg.IncrementalStrategy = StrategyMerge
+	cfg.IncrementalStrategyExplicit = true
+	cfg.FullRefresh = true
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "incremental-predicate") {
+		t.Fatalf("expected incremental-predicate validation error with full-refresh, got %v", err)
+	}
+
+	cfg = newCfg()
+	cfg.IncrementalStrategy = StrategyMerge
+	cfg.IncrementalStrategyExplicit = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	// Sources can resolve an explicit caller strategy to merge, so the pipeline
+	// validates the strategy after source-table resolution.
+	cfg = newCfg()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestIngestConfigValidate_Stream(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
