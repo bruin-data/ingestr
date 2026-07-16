@@ -39,8 +39,8 @@ import (
 
 const (
 	mysqlStressLateSeedRows = 2000
-	mysqlStressTypesTable    = "mstress_types"
-	mysqlStressPKOffset      = int64(1_000_000_000)
+	mysqlStressTypesTable   = "mstress_types"
+	mysqlStressPKOffset     = int64(1_000_000_000)
 	// Lenient floor: even constrained CI machines snapshot far faster; a miss
 	// indicates a real regression in the snapshot path.
 	mysqlStressMinSnapshotRowsPerSec = 1000.0
