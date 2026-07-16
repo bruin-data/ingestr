@@ -187,7 +187,8 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	opts.ExtractPartitionBy = partitionColumn.Name
 	opts.ExtractPartitionKind = kind
 	opts.ExtractPartitionDataType = partitionColumn.DataType
-	if opts.IntervalStart == nil || opts.IntervalEnd == nil {
+	fullNumericExtract := kind == ExtractPartitionKindNumeric && strings.TrimSpace(opts.IncrementalKey) == ""
+	if !fullNumericExtract && (opts.IntervalStart == nil || opts.IntervalEnd == nil) {
 		return nil, fmt.Errorf("extract partitioning requires interval start and end")
 	}
 	if opts.ExtractPartitionAuto {
@@ -205,10 +206,6 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 			return nil, fmt.Errorf("extract partition interval must be a positive integer for numeric partition column %q", opts.ExtractPartitionBy)
 		}
 	}
-	if kind == ExtractPartitionKindNumeric && strings.TrimSpace(opts.IncrementalKey) == "" {
-		return nil, fmt.Errorf("numeric extract partitioning requires an incremental key to discover bounded partition ranges")
-	}
-
 	jobsToRun, err := extractPartitionJobs(ctx, opts, discover)
 	if err != nil {
 		return nil, err
@@ -226,7 +223,7 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	out := make(chan RecordBatchResult, parallelism)
+	out := make(chan RecordBatchResult, extractPartitionReadBufferSize)
 	jobs := make(chan extractPartitionJob)
 
 	var wg sync.WaitGroup
@@ -323,10 +320,12 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 
 func extractPartitionJobs(ctx context.Context, opts ReadOptions, discover ExtractPartitionBoundsFunc) ([]extractPartitionJob, error) {
 	bounds := ExtractPartitionBounds{
-		Start:    *opts.IntervalStart,
-		End:      *opts.IntervalEnd,
-		Kind:     opts.ExtractPartitionKind,
-		HasRange: true,
+		Kind: opts.ExtractPartitionKind,
+	}
+	if opts.IntervalStart != nil && opts.IntervalEnd != nil {
+		bounds.Start = *opts.IntervalStart
+		bounds.End = *opts.IntervalEnd
+		bounds.HasRange = true
 	}
 	if opts.ExtractPartitionBoundsDiscoveryEnabled() {
 		if discover == nil {
