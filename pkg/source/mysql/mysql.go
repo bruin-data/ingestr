@@ -1,9 +1,16 @@
 package mysql
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
+	"io"
+	"math"
+	"net"
 	"strings"
 	"time"
 
@@ -15,14 +22,26 @@ import (
 	"github.com/bruin-data/ingestr/pkg/mysqluri"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
+
+const mysqlReadBufferSize = 1024 * 1024
+
+type bufferedReadConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedReadConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
 
 type MySQLSource struct {
 	db          *sql.DB
 	uri         string
 	database    string
 	sessionInit []string
+	restoreGC   func()
 	// vitessBackend is set by VitessSource. When false, Connect rejects servers
 	// that identify as Vitess so mysql:// URIs fail fast against Vitess/PlanetScale.
 	vitessBackend bool
@@ -42,10 +61,31 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to parse MySQL URI: %w", err)
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	driverConfig, err := mysqldriver.ParseDSN(dsn)
 	if err != nil {
-		return fmt.Errorf("failed to open MySQL connection: %w", err)
+		return fmt.Errorf("failed to parse MySQL DSN: %w", err)
 	}
+	driverConfig.DialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			if err := tcpConn.SetKeepAlive(true); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+		}
+		return &bufferedReadConn{
+			Conn:   conn,
+			reader: bufio.NewReaderSize(conn, mysqlReadBufferSize),
+		}, nil
+	}
+	connector, err := mysqldriver.NewConnector(driverConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create MySQL connector: %w", err)
+	}
+	db := sql.OpenDB(connector)
 
 	// Configure connection pool
 	db.SetMaxOpenConns(10)
@@ -70,6 +110,7 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 	s.db = db
 	s.uri = uri
 	s.database = database
+	s.replaceGCRestore(beginMySQLArrowGCOptimization())
 	return nil
 }
 
@@ -89,10 +130,19 @@ func isVitessServer(ctx context.Context, db *sql.DB) (bool, error) {
 }
 
 func (s *MySQLSource) Close(ctx context.Context) error {
+	var err error
 	if s.db != nil {
-		return s.db.Close()
+		err = s.db.Close()
 	}
-	return nil
+	s.replaceGCRestore(nil)
+	return err
+}
+
+func (s *MySQLSource) replaceGCRestore(next func()) {
+	if s.restoreGC != nil {
+		s.restoreGC()
+	}
+	s.restoreGC = next
 }
 
 func (s *MySQLSource) HandlesIncrementality() bool {
@@ -253,6 +303,7 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
 }
 
 // querier returns something to run a query on plus a cleanup func. When the
@@ -314,6 +365,13 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 		defer close(results)
 
 		query := buildSelectQuery(table, columns, opts)
+		usedDirect, err := s.readQueryDirect(ctx, query, columns, arrowSchema, batchSize, startTotal, results)
+		if usedDirect {
+			if err != nil {
+				results <- source.RecordBatchResult{Err: err}
+			}
+			return
+		}
 
 		q, cleanup, err := s.querier(ctx)
 		if err != nil {
@@ -323,11 +381,12 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 		defer cleanup()
 
 		startQuery := time.Now()
-		rows, err := q.QueryContext(ctx, query)
+		rows, closeStmt, err := queryRows(ctx, q, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
 			return
 		}
+		defer closeStmt()
 		defer func() { _ = rows.Close() }()
 		config.Debug("[SOURCE] Query started in %v", time.Since(startQuery))
 
@@ -359,21 +418,118 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 	return results, nil
 }
 
-func (s *MySQLSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.NativeSQLTimeFormat)
+var errDirectDriverRowsUnsupported = errors.New("direct driver rows unsupported")
 
+func (s *MySQLSource) readQueryDirect(ctx context.Context, query string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, results chan<- source.RecordBatchResult) (bool, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return true, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	for _, statement := range s.sessionInit {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			return true, fmt.Errorf("failed to apply session setting %q: %w", statement, err)
+		}
+	}
+
+	startQuery := time.Now()
+	err = conn.Raw(func(rawConn any) error {
+		preparer, ok := rawConn.(driver.ConnPrepareContext)
+		if !ok {
+			return errDirectDriverRowsUnsupported
+		}
+		statement, err := preparer.PrepareContext(ctx, query)
+		if err != nil {
+			return errDirectDriverRowsUnsupported
+		}
+		defer func() { _ = statement.Close() }()
+
+		queryer, ok := statement.(driver.StmtQueryContext)
+		if !ok {
+			return errDirectDriverRowsUnsupported
+		}
+		rows, err := queryer.QueryContext(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		config.Debug("[SOURCE] Query started in %v", time.Since(startQuery))
+
+		batchNum := 0
+		totalRows := int64(0)
+		dataCapacities := make([]int, len(columns))
+		allocator := newMySQLArrowAllocator()
+		for {
+			startBatch := time.Now()
+			record, count, err := driverRowsToArrowRecordBatchWithAllocator(rows, arrowSchema, columns, batchSize, dataCapacities, allocator)
+			if err != nil {
+				return err
+			}
+			if count == 0 {
+				break
+			}
+
+			batchNum++
+			totalRows += count
+			config.Debug("[SOURCE] Batch %d: %d rows read in %v (total: %d)", batchNum, count, time.Since(startBatch), totalRows)
+			select {
+			case results <- source.RecordBatchResult{Batch: record}:
+			case <-ctx.Done():
+				record.Release()
+				return ctx.Err()
+			}
+		}
+		config.Debug("[SOURCE] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
+		return nil
+	})
+	if errors.Is(err, errDirectDriverRowsUnsupported) {
+		return false, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("failed to query: %w", err)
+	}
+	return true, nil
+}
+
+func (s *MySQLSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
 	q, cleanup, err := s.querier(ctx)
 	if err != nil {
 		return source.ExtractPartitionBounds{}, err
 	}
 	defer cleanup()
 
+	if opts.IncrementalKey == "" && mysqlColumnIsNonNullable(opts.Schema, opts.ExtractPartitionBy) {
+		query := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", quoteColumn(opts.ExtractPartitionBy), quoteColumn(opts.ExtractPartitionBy), quoteTable(table))
+		var minValue, maxValue any
+		if err := q.QueryRowContext(ctx, query).Scan(&minValue, &maxValue); err != nil {
+			return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
+		}
+		if minValue == nil || maxValue == nil {
+			return source.ExtractPartitionBounds{}, nil
+		}
+		return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, 1, 1)
+	}
+
+	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteColumn, quoteTable, source.NativeSQLTimeFormat)
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
 	if err := q.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
 	}
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+}
+
+func mysqlColumnIsNonNullable(tableSchema *schema.TableSchema, columnName string) bool {
+	if tableSchema == nil {
+		return false
+	}
+	for _, column := range tableSchema.Columns {
+		if strings.EqualFold(column.Name, columnName) {
+			return !column.Nullable
+		}
+	}
+	return false
 }
 
 func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -395,11 +551,12 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		}
 		defer cleanup()
 
-		rows, err := q.QueryContext(ctx, query)
+		rows, closeStmt, err := queryRows(ctx, q, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
 		}
+		defer closeStmt()
 		defer func() { _ = rows.Close() }()
 
 		colTypes, err := rows.ColumnTypes()
@@ -437,6 +594,21 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	}()
 
 	return results, nil
+}
+
+func queryRows(ctx context.Context, q rowQuerier, query string) (*sql.Rows, func(), error) {
+	stmt, err := q.PrepareContext(ctx, query)
+	if err != nil {
+		rows, queryErr := q.QueryContext(ctx, query)
+		return rows, func() {}, queryErr
+	}
+
+	rows, err := stmt.QueryContext(ctx)
+	if err != nil {
+		_ = stmt.Close()
+		return nil, func() {}, err
+	}
+	return rows, func() { _ = stmt.Close() }, nil
 }
 
 func parseMySQLTableName(database string, table string) (string, string) {
@@ -522,12 +694,15 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 
 	for i, field := range arrowSchema.Fields() {
 		builders[i] = array.NewBuilder(mem, field.Type)
+		if batchSize > 0 {
+			builders[i].Reserve(batchSize)
+		}
 	}
 
 	// Prepare scan destinations
 	scanDest := make([]interface{}, len(columns))
-	for i := range columns {
-		scanDest[i] = new(interface{})
+	for i, column := range columns {
+		scanDest[i] = mysqlScanDestination(column.DataType)
 	}
 
 	var rowCount int64
@@ -540,8 +715,7 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 		}
 
 		for i, dest := range scanDest {
-			val := *dest.(*interface{})
-			arrowconv.AppendValue(builders[i], convertValue(val))
+			appendMySQLScannedValue(builders[i], dest)
 		}
 		rowCount++
 
@@ -567,6 +741,7 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	arrays := make([]arrow.Array, len(builders))
 	for i, b := range builders {
 		arrays[i] = b.NewArray()
+		b.Release()
 	}
 
 	record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
@@ -578,11 +753,464 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	return record, rowCount, nil
 }
 
-func convertValue(val interface{}) interface{} {
-	switch v := val.(type) {
-	case []byte:
-		return string(v)
+func driverRowsToArrowRecordBatch(rows driver.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, dataCapacities []int) (arrow.RecordBatch, int64, error) {
+	return driverRowsToArrowRecordBatchWithAllocator(rows, arrowSchema, columns, batchSize, dataCapacities, newMySQLArrowAllocator())
+}
+
+func driverRowsToArrowRecordBatchWithAllocator(rows driver.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, dataCapacities []int, mem memory.Allocator) (arrow.RecordBatch, int64, error) {
+	builders := make([]array.Builder, len(columns))
+	for i, field := range arrowSchema.Fields() {
+		builders[i] = array.NewBuilder(mem, field.Type)
+		if batchSize > 0 {
+			builders[i].Reserve(batchSize)
+		}
+		if i < len(dataCapacities) {
+			reserveMySQLBuilderData(builders[i], dataCapacities[i])
+		}
+	}
+	releaseBuilders := func() {
+		for _, builder := range builders {
+			builder.Release()
+		}
+	}
+	appenders := make([]func(driver.Value), len(builders))
+	for i, builder := range builders {
+		appenders[i] = mysqlValueAppender(builder, batchSize > 0)
+	}
+
+	values := make([]driver.Value, len(columns))
+	var rowCount int64
+	for batchSize <= 0 || rowCount < int64(batchSize) {
+		err := rows.Next(values)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			releaseBuilders()
+			return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+		}
+		for i, value := range values {
+			appenders[i](value)
+		}
+		rowCount++
+	}
+
+	if rowCount == 0 {
+		releaseBuilders()
+		return nil, 0, nil
+	}
+
+	arrays := make([]arrow.Array, len(builders))
+	for i, builder := range builders {
+		if i < len(dataCapacities) {
+			dataCapacities[i] = mysqlBuilderDataLen(builder)
+		}
+		arrays[i] = builder.NewArray()
+		builder.Release()
+	}
+	record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
+	for _, values := range arrays {
+		values.Release()
+	}
+	return record, rowCount, nil
+}
+
+func mysqlValueAppender(builder array.Builder, preallocated bool) func(driver.Value) {
+	appendFallback := func(value driver.Value) {
+		appendMySQLValue(builder, value)
+	}
+	switch b := builder.(type) {
+	case *array.BooleanBuilder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if integer, ok := value.(int64); ok {
+				appendValue(integer != 0)
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.Int8Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if integer, ok := value.(int64); ok && integer >= math.MinInt8 && integer <= math.MaxInt8 {
+				appendValue(int8(integer))
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.Int16Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if integer, ok := value.(int64); ok && integer >= math.MinInt16 && integer <= math.MaxInt16 {
+				appendValue(int16(integer))
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.Int32Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if integer, ok := value.(int64); ok && integer >= math.MinInt32 && integer <= math.MaxInt32 {
+				appendValue(int32(integer))
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.Int64Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if integer, ok := value.(int64); ok {
+				appendValue(integer)
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.Float32Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			switch number := value.(type) {
+			case nil:
+				appendNull()
+			case float32:
+				appendValue(number)
+			case float64:
+				appendValue(float32(number))
+			default:
+				appendFallback(value)
+			}
+		}
+	case *array.Float64Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			switch number := value.(type) {
+			case nil:
+				appendNull()
+			case float32:
+				appendValue(float64(number))
+			case float64:
+				appendValue(number)
+			default:
+				appendFallback(value)
+			}
+		}
+	case *array.Decimal128Builder:
+		decimalType := b.Type().(*arrow.Decimal128Type)
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+				return
+			}
+			if raw, ok := value.([]byte); ok {
+				trimmed := bytes.TrimSpace(raw)
+				if len(trimmed) == 0 {
+					appendNull()
+					return
+				}
+				if number, ok := arrowconv.ParseDecimal128BytesFast(trimmed, decimalType.Precision, decimalType.Scale); ok {
+					appendValue(number)
+					return
+				}
+			}
+			appendFallback(value)
+		}
+	case *array.Date32Builder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if date, ok := value.(time.Time); ok {
+				appendValue(arrow.Date32FromTime(date))
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.TimestampBuilder:
+		appendValue := b.Append
+		appendNull := b.AppendNull
+		if preallocated {
+			appendValue = b.UnsafeAppend
+			appendNull = func() { b.UnsafeAppendBoolToBitmap(false) }
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				appendNull()
+			} else if timestamp, ok := value.(time.Time); ok {
+				appendValue(arrow.Timestamp(timestamp.UnixMicro()))
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.StringBuilder:
+		appendBytes := b.BinaryBuilder.Append
+		if preallocated {
+			appendBytes = func(value []byte) {
+				if b.DataLen()+len(value) <= b.DataCap() {
+					b.UnsafeAppend(value)
+					return
+				}
+				b.BinaryBuilder.Append(value)
+			}
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				b.AppendNull()
+			} else if bytes, ok := value.([]byte); ok {
+				appendBytes(bytes)
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.BinaryBuilder:
+		appendBytes := b.Append
+		if preallocated {
+			appendBytes = func(value []byte) {
+				if b.DataLen()+len(value) <= b.DataCap() {
+					b.UnsafeAppend(value)
+					return
+				}
+				b.Append(value)
+			}
+		}
+		return func(value driver.Value) {
+			if value == nil {
+				b.AppendNull()
+			} else if bytes, ok := value.([]byte); ok {
+				appendBytes(bytes)
+			} else {
+				appendFallback(value)
+			}
+		}
+	case *array.ExtensionBuilder:
+		if extType, ok := b.Type().(arrow.ExtensionType); ok && extType.ExtensionName() == schema.JSONExtensionName {
+			if storage, ok := b.StorageBuilder().(*array.StringBuilder); ok {
+				appendBytes := storage.BinaryBuilder.Append
+				if preallocated {
+					appendBytes = func(value []byte) {
+						if storage.DataLen()+len(value) <= storage.DataCap() {
+							storage.UnsafeAppend(value)
+							return
+						}
+						storage.BinaryBuilder.Append(value)
+					}
+				}
+				return func(value driver.Value) {
+					if value == nil {
+						b.AppendNull()
+					} else if bytes, ok := value.([]byte); ok {
+						appendBytes(bytes)
+					} else {
+						appendFallback(value)
+					}
+				}
+			}
+		}
+	}
+	return appendFallback
+}
+
+func reserveMySQLBuilderData(builder array.Builder, capacity int) {
+	if capacity <= 0 {
+		return
+	}
+	switch b := builder.(type) {
+	case *array.StringBuilder:
+		b.ReserveData(capacity)
+	case *array.BinaryBuilder:
+		b.ReserveData(capacity)
+	case *array.ExtensionBuilder:
+		if storage, ok := b.StorageBuilder().(*array.StringBuilder); ok {
+			storage.ReserveData(capacity)
+		}
+	}
+}
+
+func mysqlBuilderDataLen(builder array.Builder) int {
+	switch b := builder.(type) {
+	case *array.StringBuilder:
+		return b.DataLen()
+	case *array.BinaryBuilder:
+		return b.DataLen()
+	case *array.ExtensionBuilder:
+		if storage, ok := b.StorageBuilder().(*array.StringBuilder); ok {
+			return storage.DataLen()
+		}
+	}
+	return 0
+}
+
+func mysqlScanDestination(dataType schema.DataType) interface{} {
+	switch dataType {
+	case schema.TypeDecimal, schema.TypeString, schema.TypeBinary, schema.TypeTime, schema.TypeJSON, schema.TypeUUID:
+		return new(sql.RawBytes)
 	default:
-		return val
+		return new(interface{})
+	}
+}
+
+func appendMySQLScannedValue(builder array.Builder, dest interface{}) {
+	if raw, ok := dest.(*sql.RawBytes); ok {
+		if *raw == nil {
+			builder.AppendNull()
+			return
+		}
+		appendMySQLBytes(builder, *raw)
+		return
+	}
+	appendMySQLValue(builder, *dest.(*interface{}))
+}
+
+func appendMySQLValue(builder array.Builder, val interface{}) {
+	if val == nil {
+		builder.AppendNull()
+		return
+	}
+
+	switch b := builder.(type) {
+	case *array.BooleanBuilder:
+		if value, ok := val.(int64); ok {
+			b.Append(value != 0)
+			return
+		}
+	case *array.Int8Builder:
+		if value, ok := val.(int64); ok {
+			if value >= math.MinInt8 && value <= math.MaxInt8 {
+				b.Append(int8(value))
+			} else {
+				b.AppendNull()
+			}
+			return
+		}
+	case *array.Int16Builder:
+		if value, ok := val.(int64); ok {
+			if value >= math.MinInt16 && value <= math.MaxInt16 {
+				b.Append(int16(value))
+			} else {
+				b.AppendNull()
+			}
+			return
+		}
+	case *array.Int32Builder:
+		if value, ok := val.(int64); ok {
+			if value >= math.MinInt32 && value <= math.MaxInt32 {
+				b.Append(int32(value))
+			} else {
+				b.AppendNull()
+			}
+			return
+		}
+	case *array.Int64Builder:
+		if value, ok := val.(int64); ok {
+			b.Append(value)
+			return
+		}
+	case *array.Float32Builder:
+		switch value := val.(type) {
+		case float32:
+			b.Append(value)
+			return
+		case float64:
+			b.Append(float32(value))
+			return
+		}
+	case *array.Float64Builder:
+		switch value := val.(type) {
+		case float32:
+			b.Append(float64(value))
+			return
+		case float64:
+			b.Append(value)
+			return
+		}
+	case *array.Date32Builder:
+		if value, ok := val.(time.Time); ok {
+			b.Append(arrow.Date32FromTime(value))
+			return
+		}
+	case *array.TimestampBuilder:
+		if value, ok := val.(time.Time); ok {
+			b.Append(arrow.Timestamp(value.UnixMicro()))
+			return
+		}
+	}
+
+	if bytes, ok := val.([]byte); ok {
+		appendMySQLBytes(builder, bytes)
+		return
+	}
+	arrowconv.AppendValue(builder, val)
+}
+
+func appendMySQLBytes(builder array.Builder, bytes []byte) {
+	switch b := builder.(type) {
+	case *array.StringBuilder:
+		b.BinaryBuilder.Append(bytes)
+	case *array.BinaryBuilder:
+		b.Append(bytes)
+	case *array.ExtensionBuilder:
+		extType, ok := b.Type().(arrow.ExtensionType)
+		storage, storageOK := b.StorageBuilder().(*array.StringBuilder)
+		if ok && storageOK && extType.ExtensionName() == schema.JSONExtensionName {
+			storage.BinaryBuilder.Append(bytes)
+			return
+		}
+		arrowconv.AppendValue(builder, string(bytes))
+	default:
+		arrowconv.AppendValue(builder, string(bytes))
 	}
 }

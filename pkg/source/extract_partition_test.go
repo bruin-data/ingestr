@@ -3,7 +3,6 @@ package source
 import (
 	"context"
 	"math/big"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -671,9 +670,7 @@ func TestReadExtractPartitionsDiscoversNumericBounds(t *testing.T) {
 	}
 }
 
-func TestReadExtractPartitionsRejectsNumericBoundsWithoutIncrementalKey(t *testing.T) {
-	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+func TestReadExtractPartitionsDiscoversFullNumericBoundsWithoutIncrementalKey(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
 			{Name: "id", DataType: schema.TypeInt64},
@@ -681,27 +678,33 @@ func TestReadExtractPartitionsRejectsNumericBoundsWithoutIncrementalKey(t *testi
 	}
 
 	discoverCalled := false
-	_, err := ReadExtractPartitions(context.Background(), ReadOptions{
-		IntervalStart:                   &intervalStart,
-		IntervalEnd:                     &intervalEnd,
+	records, err := ReadExtractPartitions(context.Background(), ReadOptions{
 		ExtractPartitionBy:              "id",
 		ExtractPartitionNumericInterval: 10,
 		Parallelism:                     1,
 	}, tableSchema, func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
-		t.Fatal("read should not be called")
-		return nil, nil
+		ch := make(chan RecordBatchResult)
+		close(ch)
+		return ch, nil
 	}, func(ctx context.Context, opts ReadOptions) (ExtractPartitionBounds, error) {
 		discoverCalled = true
-		return ExtractPartitionBounds{}, nil
+		return ExtractPartitionBounds{
+			NumericStart: 1,
+			NumericEnd:   20,
+			Kind:         ExtractPartitionKindNumeric,
+			HasRange:     true,
+		}, nil
 	})
-	if err == nil {
-		t.Fatal("expected error")
+	if err != nil {
+		t.Fatalf("ReadExtractPartitions() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "incremental key") {
-		t.Fatalf("error = %v, want incremental key message", err)
+	for result := range records {
+		if result.Err != nil {
+			t.Fatalf("unexpected read error: %v", result.Err)
+		}
 	}
-	if discoverCalled {
-		t.Fatal("bounds discovery should not be called")
+	if !discoverCalled {
+		t.Fatal("bounds discovery should be called")
 	}
 }
 

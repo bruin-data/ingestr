@@ -30,6 +30,10 @@ type PostgresDestination struct {
 	uri  string
 }
 
+type postgresStatementDescriber interface {
+	Prepare(context.Context, string, string, []uint32) (*pgconn.StatementDescription, error)
+}
+
 func NewPostgresDestination() *PostgresDestination {
 	return &PostgresDestination{}
 }
@@ -51,6 +55,7 @@ func (d *PostgresDestination) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
 	}
+	configureCopyDataWriteCoalescing(config)
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -212,7 +217,6 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		}
 
 		numRows := record.NumRows()
-		numCols := record.NumCols()
 
 		if numRows == 0 {
 			record.Release()
@@ -222,29 +226,7 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		config.Debug("[DEST] Batch %d: received %d rows", batchNum, numRows)
 
 		startCopy := time.Now()
-
-		// Build column names
-		columns := make([]string, numCols)
-		for i := 0; i < int(numCols); i++ {
-			columns[i] = record.ColumnName(i)
-		}
-
-		// Use CopyFromSlice for streaming conversion without materializing all rows
-		// Pre-allocate row buffer and reuse it for each row to reduce allocations
-		tableIdent := parseTableIdentifier(opts.Table)
-		getters := postgresValueGetters(record, opts.Schema)
-		rowBuf := make([]any, numCols)
-		copyCount, err := d.pool.CopyFrom(
-			ctx,
-			tableIdent,
-			columns,
-			pgx.CopyFromSlice(int(numRows), func(i int) ([]any, error) {
-				for j := 0; j < int(numCols); j++ {
-					rowBuf[j] = getters[j](i)
-				}
-				return rowBuf, nil
-			}),
-		)
+		copyCount, err := d.copyRecord(ctx, record, opts)
 
 		record.Release()
 
@@ -278,7 +260,6 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 
 	results := make(chan writeResult, parallelism*2)
 	var wg sync.WaitGroup
-
 	batchNum := int64(0)
 
 	for i := 0; i < parallelism; i++ {
@@ -303,37 +284,13 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 				}
 
 				numRows := record.NumRows()
-				numCols := record.NumCols()
-
 				if numRows == 0 {
 					record.Release()
 					continue
 				}
 
 				startBatch := time.Now()
-
-				// Build column names
-				columns := make([]string, numCols)
-				for i := 0; i < int(numCols); i++ {
-					columns[i] = record.ColumnName(i)
-				}
-
-				// Use CopyFromSlice for streaming conversion
-				// Pre-allocate row buffer and reuse it for each row
-				tableIdent := parseTableIdentifier(opts.Table)
-				getters := postgresValueGetters(record, opts.Schema)
-				rowBuf := make([]any, numCols)
-				copyCount, err := d.pool.CopyFrom(
-					ctx,
-					tableIdent,
-					columns,
-					pgx.CopyFromSlice(int(numRows), func(i int) ([]any, error) {
-						for j := 0; j < int(numCols); j++ {
-							rowBuf[j] = getters[j](i)
-						}
-						return rowBuf, nil
-					}),
-				)
+				copyCount, err := d.copyRecord(ctx, record, opts)
 				record.Release()
 
 				results <- writeResult{
@@ -369,6 +326,57 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 
 	config.Debug("[DEST] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
+}
+
+func (d *PostgresDestination) copyRecord(ctx context.Context, record arrow.RecordBatch, opts destination.WriteOptions) (int64, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Release()
+	pgxConn := conn.Conn()
+
+	columns := make([]string, record.NumCols())
+	quotedColumns := make([]string, record.NumCols())
+	for i := range columns {
+		columns[i] = record.ColumnName(i)
+		quotedColumns[i] = destination.QuoteIdentifier(columns[i])
+	}
+
+	tableIdent := parseTableIdentifier(opts.Table)
+
+	selectSQL := fmt.Sprintf("select %s from %s", strings.Join(quotedColumns, ", "), tableIdent.Sanitize())
+	description, err := describePostgresStatement(ctx, pgxConn.PgConn(), selectSQL)
+	if err != nil {
+		return 0, err
+	}
+	oids := make([]uint32, len(description.Fields))
+	for i := range description.Fields {
+		oids[i] = description.Fields[i].DataTypeOID
+	}
+
+	reader, ok := newArrowCopyReader(record, opts.Schema, pgxConn.TypeMap(), oids)
+	if !ok {
+		getters := postgresValueGetters(record, opts.Schema)
+		values := make([]any, record.NumCols())
+		return pgxConn.CopyFrom(ctx, tableIdent, columns, pgx.CopyFromSlice(int(record.NumRows()), func(row int) ([]any, error) {
+			for column := range values {
+				values[column] = getters[column](row)
+			}
+			return values, nil
+		}))
+	}
+
+	copySQL := fmt.Sprintf("copy %s (%s) from stdin binary", tableIdent.Sanitize(), strings.Join(quotedColumns, ", "))
+	tag, err := pgxConn.PgConn().CopyFrom(ctx, reader, copySQL)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func describePostgresStatement(ctx context.Context, describer postgresStatementDescriber, sql string) (*pgconn.StatementDescription, error) {
+	return describer.Prepare(ctx, "", sql, nil)
 }
 
 func postgresValueGetters(record arrow.RecordBatch, tableSchema *schema.TableSchema) []func(int) any {
@@ -485,7 +493,11 @@ func postgresValueGetterForType(col arrow.Array, dataType schema.DataType) func(
 			if a.IsNull(i) {
 				return nil
 			}
-			return a.Value(i).ToFloat64(dt.Scale)
+			return pgtype.Numeric{
+				Int:   a.Value(i).BigInt(),
+				Exp:   -dt.Scale,
+				Valid: true,
+			}
 		}
 	case *array.Date32:
 		return func(i int) any {

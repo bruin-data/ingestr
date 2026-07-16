@@ -467,3 +467,17 @@ func TestParseDecimal128Fast_FallsBack(t *testing.T) {
 		}
 	}
 }
+
+func TestParseDecimal128BytesFast(t *testing.T) {
+	inputs := []string{"0", "-1", "+5", "15716.10", ".5", "5.", "00042.10"}
+	for _, input := range inputs {
+		fromBytes, ok := ParseDecimal128BytesFast([]byte(input), 15, 2)
+		if !ok {
+			t.Fatalf("ParseDecimal128BytesFast(%q) unexpectedly fell back", input)
+		}
+		fromString, ok := parseDecimal128Fast(input, 15, 2)
+		if !ok || fromBytes != fromString {
+			t.Fatalf("byte parse for %q = %v; string parse = %v, %v", input, fromBytes, fromString, ok)
+		}
+	}
+}

@@ -206,10 +206,16 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	if c.ExtractPartitionInterval < 0 || c.ExtractPartitionNumericInterval < 0 {
 		return &ValidationError{Field: "extract-partition-interval", Message: "must be positive"}
 	}
-	if c.IntervalStart == nil {
+	if c.IntervalStart == nil && c.IntervalEnd != nil {
+		return &ValidationError{Field: "interval-start", Message: "is required when interval-end is set"}
+	}
+	if c.IntervalEnd == nil && c.IntervalStart != nil {
+		return &ValidationError{Field: "interval-end", Message: "is required when interval-start is set"}
+	}
+	if c.IncrementalKey != "" && c.IntervalStart == nil {
 		return &ValidationError{Field: "interval-start", Message: "is required when extract partitioning is enabled"}
 	}
-	if c.IntervalEnd == nil {
+	if c.IncrementalKey != "" && c.IntervalEnd == nil {
 		return &ValidationError{Field: "interval-end", Message: "is required when extract partitioning is enabled"}
 	}
 	if c.SQLLimit > 0 {

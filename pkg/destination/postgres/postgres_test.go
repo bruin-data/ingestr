@@ -16,8 +16,22 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type postgresStatementDescriberStub struct {
+	name      string
+	sql       string
+	paramOIDs []uint32
+}
+
+func (s *postgresStatementDescriberStub) Prepare(_ context.Context, name, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+	s.name = name
+	s.sql = sql
+	s.paramOIDs = paramOIDs
+	return &pgconn.StatementDescription{}, nil
+}
 
 type postgresResolverStub struct {
 	query  string
@@ -54,6 +68,24 @@ func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
 	}
 	if !strings.Contains(resolver.query, "to_regclass($1)") || !strings.Contains(resolver.query, "current_schema()") {
 		t.Fatalf("resolver query does not honor existing table resolution and search_path: %s", resolver.query)
+	}
+}
+
+func TestDescribePostgresStatementUsesAnonymousPreparedStatement(t *testing.T) {
+	describer := &postgresStatementDescriberStub{}
+	const sql = `select "id" from "public"."events"`
+
+	if _, err := describePostgresStatement(t.Context(), describer, sql); err != nil {
+		t.Fatal(err)
+	}
+	if describer.name != "" {
+		t.Fatalf("prepared statement name = %q, want anonymous statement", describer.name)
+	}
+	if describer.sql != sql {
+		t.Fatalf("prepared statement SQL = %q, want %q", describer.sql, sql)
+	}
+	if describer.paramOIDs != nil {
+		t.Fatalf("prepared statement parameter OIDs = %v, want nil", describer.paramOIDs)
 	}
 }
 
@@ -257,6 +289,35 @@ func TestPostgresValueGettersConvertsUUIDColumns(t *testing.T) {
 	}
 }
 
+func TestPostgresValueGetterPreservesDecimalPrecision(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+
+	dt := &arrow.Decimal128Type{Precision: 38, Scale: 4}
+	b := array.NewDecimal128Builder(mem, dt)
+	defer b.Release()
+	want, err := decimal128.FromString("123456789012345678901234567890.1234", dt.Precision, dt.Scale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Append(want)
+	b.AppendNull()
+	arr := b.NewArray()
+	defer arr.Release()
+
+	get := postgresValueGetter(arr)
+	got, ok := get(0).(pgtype.Numeric)
+	if !ok {
+		t.Fatalf("decimal getter returned %T, want pgtype.Numeric", get(0))
+	}
+	if !got.Valid || got.Exp != -dt.Scale || got.Int.Cmp(want.BigInt()) != 0 {
+		t.Fatalf("decimal getter returned %#v, want unscaled %s with exponent %d", got, want.BigInt(), -dt.Scale)
+	}
+	if got := get(1); got != nil {
+		t.Fatalf("decimal getter null = %#v, want nil", got)
+	}
+}
+
 func postgresTestValuesEqual(left, right any) bool {
 	switch l := left.(type) {
 	case []byte:
@@ -265,6 +326,13 @@ func postgresTestValuesEqual(left, right any) bool {
 	case time.Time:
 		r, ok := right.(time.Time)
 		return ok && l.Equal(r)
+	case pgtype.Numeric:
+		r, ok := right.(float64)
+		if !ok {
+			return false
+		}
+		converted, err := l.Float64Value()
+		return err == nil && converted.Valid && converted.Float64 == r
 	default:
 		return reflect.DeepEqual(left, right)
 	}

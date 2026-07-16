@@ -230,6 +230,15 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 			},
 		},
 		{
+			name: "valid full numeric bounds discovery",
+			mutate: func(c *IngestConfig) {
+				c.IntervalStart = nil
+				c.IntervalEnd = nil
+				c.ExtractPartitionInterval = 0
+				c.ExtractPartitionAuto = true
+			},
+		},
+		{
 			name:    "mixed interval modes rejected",
 			mutate:  func(c *IngestConfig) { c.ExtractPartitionAuto = true },
 			wantErr: "extract-partition-interval",
@@ -246,12 +255,12 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 		},
 		{
 			name:    "missing interval start",
-			mutate:  func(c *IngestConfig) { c.IntervalStart = nil },
+			mutate:  func(c *IngestConfig) { c.IncrementalKey = "updated_at"; c.IntervalStart = nil },
 			wantErr: "interval-start",
 		},
 		{
 			name:    "missing interval end",
-			mutate:  func(c *IngestConfig) { c.IntervalEnd = nil },
+			mutate:  func(c *IngestConfig) { c.IncrementalKey = "updated_at"; c.IntervalEnd = nil },
 			wantErr: "interval-end",
 		},
 		{
