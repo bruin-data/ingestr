@@ -42,7 +42,7 @@ Pointing a `mysql://` URI at a Vitess or PlanetScale server fails fast with a me
 ## Change data capture
 CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes for standard MySQL and MariaDB, which stream the binary log. It produces the `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resumes from the destination table's maximum `_cdc_lsn` on subsequent runs. (Vitess and PlanetScale have their own CDC schemes — see [Vitess](/supported-sources/vitess.md) and [PlanetScale](/supported-sources/planetscale.md).)
 
-This path reads a consistent snapshot first, then streams the binary log, resuming from the destination table's maximum `_cdc_lsn` on subsequent runs.
+This path reads a consistent snapshot first, then streams the binary log, resuming from the destination table's maximum `_cdc_lsn` on subsequent runs. MySQL CDC runs in batch mode only: each invocation catches up and exits, so re-run it (for example on a schedule) to keep the destination up to date. The continuous `--stream` mode is not supported for MySQL.
 
 If the saved `_cdc_lsn` is invalid or no longer available in MySQL binary logs, the run fails instead of taking a partial snapshot. Run with `--full-refresh` to rebuild the destination from a fresh snapshot.
 
@@ -74,3 +74,7 @@ CDC URI parameters:
 - `flavor`: `mysql` or `mariadb`; inferred from the URI scheme unless overridden.
 
 Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
+
+### Tutorial
+
+For a step-by-step walkthrough — from enabling the binary log to capturing live inserts, updates, and deletes into DuckDB — see [Replicate MySQL to DuckDB with CDC](/tutorials/cdc-mysql-duckdb.md).
