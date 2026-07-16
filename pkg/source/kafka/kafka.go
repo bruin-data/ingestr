@@ -530,7 +530,7 @@ func messageToItem(msg kafkago.Message) map[string]interface{} {
 		"data": string(msg.Value),
 	}
 
-	msgID := generateMsgID(msg.Topic, msg.Partition, msg.Offset, keyStr)
+	msgID := physicalMsgID(msg.Topic, msg.Partition, msg.Offset)
 
 	return map[string]interface{}{
 		"_kafka":        kafkaMeta,
@@ -577,17 +577,33 @@ func messageToEnvelope(msg kafkago.Message) map[string]interface{} {
 // redeliveries, so at-least-once dedup still works.
 func streamMsgID(msg kafkago.Message) string {
 	if len(msg.Key) > 0 {
-		return generateMsgID(msg.Topic, msg.Partition, msg.Offset, string(msg.Key))
+		return keyedMsgID(msg.Topic, msg.Partition, string(msg.Key))
 	}
-	return fmt.Sprintf("%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
+	// Same (topic, partition, offset) identity as physicalMsgID, but kept as the
+	// raw plaintext form — frozen for backward compatibility with already-persisted
+	// keyless msg_id primary keys, not an intentional design difference. Do not
+	// switch to shake128ID: that would rotate every persisted keyless id.
+	return msg.Topic + ":" + strconv.Itoa(msg.Partition) + ":" + strconv.FormatInt(msg.Offset, 10)
 }
 
-func generateMsgID(topic string, partition int, offset int64, key interface{}) string {
-	keyStr := "None"
-	if key != nil {
-		keyStr = fmt.Sprintf("%v", key)
-	}
-	input := fmt.Sprintf("%s%d%s", topic, partition, keyStr)
+// physicalMsgID identifies a single physical message by its unique coordinate
+// (topic, partition, offset). Used for the batch _kafka_msg_id, where every
+// message — keyed or keyless — must get a distinct id.
+func physicalMsgID(topic string, partition int, offset int64) string {
+	return shake128ID(topic + strconv.Itoa(partition) + strconv.FormatInt(offset, 10))
+}
+
+// keyedMsgID identifies a message by its key (topic, partition, key), offset
+// deliberately excluded so redeliveries and updates for a key share one id.
+// Used by the streaming envelope's keyed branch for last-value-per-key
+// (changelog/compaction) merge semantics.
+func keyedMsgID(topic string, partition int, key string) string {
+	return shake128ID(topic + strconv.Itoa(partition) + key)
+}
+
+// shake128ID returns a Python-compatible SHAKE-128 digest of input: 15 bytes
+// base64-encoded without padding (20 chars).
+func shake128ID(input string) string {
 	h := sha3.NewShake128()
 	h.Write([]byte(input))
 	digest := make([]byte, 15)
