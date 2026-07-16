@@ -30,6 +30,10 @@ type PostgresDestination struct {
 	uri  string
 }
 
+type postgresStatementDescriber interface {
+	Prepare(context.Context, string, string, []uint32) (*pgconn.StatementDescription, error)
+}
+
 func NewPostgresDestination() *PostgresDestination {
 	return &PostgresDestination{}
 }
@@ -342,7 +346,7 @@ func (d *PostgresDestination) copyRecord(ctx context.Context, record arrow.Recor
 	tableIdent := parseTableIdentifier(opts.Table)
 
 	selectSQL := fmt.Sprintf("select %s from %s", strings.Join(quotedColumns, ", "), tableIdent.Sanitize())
-	description, err := pgxConn.Prepare(ctx, selectSQL, selectSQL)
+	description, err := describePostgresStatement(ctx, pgxConn.PgConn(), selectSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -369,6 +373,10 @@ func (d *PostgresDestination) copyRecord(ctx context.Context, record arrow.Recor
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+func describePostgresStatement(ctx context.Context, describer postgresStatementDescriber, sql string) (*pgconn.StatementDescription, error) {
+	return describer.Prepare(ctx, "", sql, nil)
 }
 
 func postgresValueGetters(record arrow.RecordBatch, tableSchema *schema.TableSchema) []func(int) any {

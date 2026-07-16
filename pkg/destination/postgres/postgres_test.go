@@ -16,8 +16,22 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type postgresStatementDescriberStub struct {
+	name      string
+	sql       string
+	paramOIDs []uint32
+}
+
+func (s *postgresStatementDescriberStub) Prepare(_ context.Context, name, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+	s.name = name
+	s.sql = sql
+	s.paramOIDs = paramOIDs
+	return &pgconn.StatementDescription{}, nil
+}
 
 type postgresResolverStub struct {
 	query  string
@@ -54,6 +68,24 @@ func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
 	}
 	if !strings.Contains(resolver.query, "to_regclass($1)") || !strings.Contains(resolver.query, "current_schema()") {
 		t.Fatalf("resolver query does not honor existing table resolution and search_path: %s", resolver.query)
+	}
+}
+
+func TestDescribePostgresStatementUsesAnonymousPreparedStatement(t *testing.T) {
+	describer := &postgresStatementDescriberStub{}
+	const sql = `select "id" from "public"."events"`
+
+	if _, err := describePostgresStatement(t.Context(), describer, sql); err != nil {
+		t.Fatal(err)
+	}
+	if describer.name != "" {
+		t.Fatalf("prepared statement name = %q, want anonymous statement", describer.name)
+	}
+	if describer.sql != sql {
+		t.Fatalf("prepared statement SQL = %q, want %q", describer.sql, sql)
+	}
+	if describer.paramOIDs != nil {
+		t.Fatalf("prepared statement parameter OIDs = %v, want nil", describer.paramOIDs)
 	}
 }
 
