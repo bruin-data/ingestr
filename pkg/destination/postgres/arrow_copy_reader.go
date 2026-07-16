@@ -134,7 +134,7 @@ func directArrowCopyColumn(column arrow.Array, oid uint32) (arrowCopyColumn, boo
 		}), true
 	case *array.Decimal128:
 		decimalType := values.DataType().(*arrow.Decimal128Type)
-		if oid != pgtype.NumericOID || decimalType.Scale < 0 || decimalType.Scale%4 != 0 {
+		if oid != pgtype.NumericOID || decimalType.Scale < 0 {
 			return nil, false
 		}
 		return fixedArrowCopyColumn(values, func(row int, dst []byte) []byte {
@@ -238,7 +238,7 @@ func appendPostgresNumeric(dst []byte, value decimal128.Num, scale int32) []byte
 		value = value.Negate()
 	}
 
-	var digits [10]uint16
+	var digits [11]uint16
 	hi := uint64(value.HighBits())
 	lo := value.LowBits()
 	digitCount := 0
@@ -251,7 +251,24 @@ func appendPostgresNumeric(dst []byte, value decimal128.Num, scale int32) []byte
 		lo = quotientLow
 	}
 
-	fractionalDigits := int(scale / 4)
+	if remainder := scale % 4; remainder != 0 {
+		multiplier := uint32(10)
+		for i := remainder + 1; i < 4; i++ {
+			multiplier *= 10
+		}
+		var carry uint32
+		for i := 0; i < digitCount; i++ {
+			product := uint32(digits[i])*multiplier + carry
+			digits[i] = uint16(product % 10_000)
+			carry = product / 10_000
+		}
+		if carry != 0 {
+			digits[digitCount] = uint16(carry)
+			digitCount++
+		}
+	}
+
+	fractionalDigits := int((scale + 3) / 4)
 	for digitCount < fractionalDigits {
 		digitCount++
 	}

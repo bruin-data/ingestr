@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,8 +126,15 @@ func TestDirectArrowCopyColumnsMatchPGXBinaryEncoding(t *testing.T) {
 		array arrow.Array
 		oid   uint32
 	}{
+		{name: "numeric scale 0", array: buildDirectDecimalArray(t, mem, 0, []string{"0", "1", "-1", strings.Repeat("9", 38)}), oid: pgtype.NumericOID},
+		{name: "numeric scale 1", array: buildDirectDecimalArray(t, mem, 1, []string{"0.0", "0.1", "-12.3", strings.Repeat("9", 37) + ".9"}), oid: pgtype.NumericOID},
+		{name: "numeric scale 2", array: buildDirectDecimalArray(t, mem, 2, []string{"0.00", "0.01", "-123.45", "123456789012345678901234567890123456.78"}), oid: pgtype.NumericOID},
+		{name: "numeric scale 3", array: buildDirectDecimalArray(t, mem, 3, []string{"0.000", "0.001", "-123.456", "99999999999999999999999999999999999.999"}), oid: pgtype.NumericOID},
 		{name: "numeric scale 4", array: buildDirectDecimalArray(t, mem, 4, []string{"0.0000", "0.0001", "-0.0001", "123456789012345678901234567890.1234", "-999999999999999999999999999999.9999"}), oid: pgtype.NumericOID},
+		{name: "numeric scale 6", array: buildDirectDecimalArray(t, mem, 6, []string{"0.000000", "0.000001", "-123.456789", "12345678901234567890123456789012.345678"}), oid: pgtype.NumericOID},
 		{name: "numeric scale 8", array: buildDirectDecimalArray(t, mem, 8, []string{"0.00000000", "0.00000001", "-0.00010000", "123456789012345678901234567890.12345678"}), oid: pgtype.NumericOID},
+		{name: "numeric scale 37", array: buildDirectDecimalArray(t, mem, 37, []string{"0." + strings.Repeat("0", 36) + "1", "-0." + strings.Repeat("9", 37)}), oid: pgtype.NumericOID},
+		{name: "numeric scale 38", array: buildDirectDecimalArray(t, mem, 38, []string{"0." + strings.Repeat("0", 37) + "1", "-0." + strings.Repeat("9", 38)}), oid: pgtype.NumericOID},
 		{name: "date32", array: buildDirectDate32Array(mem), oid: pgtype.DateOID},
 		{name: "date64", array: buildDirectDate64Array(mem), oid: pgtype.DateOID},
 		{name: "time microseconds", array: buildDirectTime64Array(mem, arrow.Microsecond), oid: pgtype.TimeOID},
@@ -167,17 +175,6 @@ func TestDirectArrowCopyColumnsMatchPGXBinaryEncoding(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestDirectArrowCopyColumnFallsBackForNonAlignedDecimalScale(t *testing.T) {
-	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
-	t.Cleanup(func() { mem.AssertSize(t, 0) })
-
-	values := buildDirectDecimalArray(t, mem, 2, []string{"123.45"})
-	defer values.Release()
-	if _, ok := directArrowCopyColumn(values, pgtype.NumericOID); ok {
-		t.Fatal("directArrowCopyColumn accepted a decimal scale requiring normalization")
 	}
 }
 
