@@ -286,7 +286,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	writeOpts := destination.WriteOptions{
 		Table:            writeTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     useStaging,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
@@ -463,7 +463,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 
 	if err := multitable.Write(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     useStaging,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

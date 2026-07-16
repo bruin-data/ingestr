@@ -108,7 +108,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

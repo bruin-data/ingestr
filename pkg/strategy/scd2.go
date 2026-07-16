@@ -133,7 +133,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           extendedSchema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

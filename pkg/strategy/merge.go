@@ -230,7 +230,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	sourceTruncated, err := destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
@@ -449,7 +449,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 	writeResult, err := multitable.WriteWithResult(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
