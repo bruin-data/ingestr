@@ -137,7 +137,7 @@ func IngestCommand() *cli.Command {
 			&cli.IntFlag{
 				Name:    "extract-parallelism",
 				Usage:   "The number of parallel jobs to run for extracting data from the source",
-				Value:   5,
+				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
 			&cli.StringFlag{

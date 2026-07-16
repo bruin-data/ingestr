@@ -314,11 +314,13 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 	}
 
 	if len(longTextColumns) > 0 {
-		if jsonColumns, err := mariadbJSONColumns(ctx, db, schemaName, tableName); err == nil {
-			for i := range columns {
-				if columns[i].DataType == schema.TypeString && longTextColumns[columns[i].Name] && jsonColumns[columns[i].Name] {
-					columns[i].DataType = schema.TypeJSON
-				}
+		jsonColumns, err := mariadbJSONColumns(ctx, db, schemaName, tableName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect MariaDB JSON columns: %w", err)
+		}
+		for i := range columns {
+			if columns[i].DataType == schema.TypeString && longTextColumns[columns[i].Name] && jsonColumns[columns[i].Name] {
+				columns[i].DataType = schema.TypeJSON
 			}
 		}
 	}
