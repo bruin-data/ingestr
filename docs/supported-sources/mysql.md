@@ -74,3 +74,7 @@ CDC URI parameters:
 - `flavor`: `mysql` or `mariadb`; inferred from the URI scheme unless overridden.
 
 Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
+
+### Tutorial
+
+For a step-by-step walkthrough — from enabling the binary log to capturing live inserts, updates, and deletes into DuckDB — see [Replicate MySQL to DuckDB with CDC](/tutorials/cdc-mysql-duckdb.md).

@@ -57,6 +57,31 @@ WITH (TRACK_COLUMNS_UPDATED = OFF);
 
 Change Tracking returns net row changes since the last loaded version. For inserts and updates, ingestr joins the changed primary keys back to the source table and loads the current row. For deletes, SQL Server only returns the primary key, so ingestr marks the destination row as deleted with `_cdc_deleted = true` while preserving existing destination values for other columns. If a row is updated and then deleted between two ingestr runs, Change Tracking cannot reconstruct the intermediate updated values.
 
+## Change Data Capture
+
+For full row-level change history — not just which rows changed — ingestr can read SQL Server's log-based **Change Data Capture** with the `mssql+cdc://`, `sqlserver+cdc://`, `azuresql+cdc://`, and `azure-sql+cdc://` URI schemes.
+
+```sh
+ingestr ingest \
+    --source-uri "mssql+cdc://user:password@host:1433/shop?encrypt=disable" \
+    --source-table "dbo.customers" \
+    --dest-uri "duckdb:///warehouse.duckdb" \
+    --dest-table "dbo.customers"
+```
+
+This path reads a consistent snapshot first, then reads the CDC change tables SQL Server's capture job populates from the transaction log. It produces the `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resumes from the destination table's maximum `_cdc_lsn` on subsequent runs. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key; deletes are soft (`_cdc_deleted = true`). Run with `--full-refresh` to rebuild from a fresh snapshot, or `--stream` to ingest continuously instead of once per invocation.
+
+Requirements:
+- The **SQL Server Agent** must be running — it drives the capture job that copies changes from the log into the CDC tables.
+- CDC must be enabled on the database (`sys.sp_cdc_enable_db`) and on each source table (`sys.sp_cdc_enable_table`), which creates a capture instance.
+- Source tables must have a primary key.
+- The connecting user needs `SELECT` on the table and its capture instance.
+
+CDC URI parameters:
+- `capture_instance`: optional capture-instance name; defaults to the single instance registered for the table.
+
+For a full walkthrough — enabling CDC and replicating a table into DuckDB — see [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md).
+
 ## Tips & Tricks
 
 If you're using Azure SQL Server, you can use `az cli` to generate access tokens to connect to SQL server. 
