@@ -82,6 +82,11 @@ type Column struct {
 	MaxLength    int
 	IsPrimaryKey bool
 	ArrayType    DataType
+	// Unsigned marks integer columns whose source type is unsigned. DataType is
+	// already widened to fit the unsigned range; sources whose wire format
+	// delivers raw signed values (e.g. MySQL binlog rows) use this to
+	// reinterpret them.
+	Unsigned bool
 }
 
 type TableSchema struct {
