@@ -155,7 +155,7 @@ func drainStreamLoop(t *testing.T, steps []replStep) (batchCount int, totalRows 
 	results := make(chan source.RecordBatchResult, len(steps)+1)
 	accum := testAccumulator(10000)
 
-	err := streamLoop(context.Background(), repl, ModeBatch, 10000, accum, results, false)
+	err := streamLoop(context.Background(), repl, 10000, accum, results, false)
 	require.NoError(t, err)
 	close(results)
 
@@ -189,7 +189,7 @@ func TestStreamLoopLeaseLossDiscardsAccumulatorWithoutMaterializing(t *testing.T
 	accum := testAccumulator(10000)
 	results := make(chan source.RecordBatchResult, 1)
 
-	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, ModeStream, 10000, accum, results, true)
+	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, 10000, accum, results, true)
 	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
 	assert.Empty(t, accum.changes)
 	assert.Empty(t, accum.minLSN)
@@ -237,8 +237,8 @@ func TestStreamLoopEmitsIdleCommitToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		// ModeStream ignores the scripted barrier and runs until cancellation.
-		done <- streamLoop(ctx, repl, ModeStream, 10000, accum, results, true)
+		// Streaming ignores the scripted barrier and runs until cancellation.
+		done <- streamLoop(ctx, repl, 10000, accum, results, true)
 	}()
 
 	var idleToken pglogrepl.LSN
@@ -300,7 +300,7 @@ func TestStreamModeKeepaliveHeadNeverBecomesCommitToken(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		_ = streamLoop(ctx, repl, ModeStream, 10000, accum, results, true)
+		_ = streamLoop(ctx, repl, 10000, accum, results, true)
 		close(results)
 	}()
 
@@ -341,7 +341,7 @@ func TestBatchWaitsForBarrierAfterKeepaliveAndDelayedChanges(t *testing.T) {
 		{hadActivity: true, lsn: 30, barrier: true},
 	}}
 	results := make(chan source.RecordBatchResult, 1)
-	err := streamLoop(context.Background(), repl, ModeBatch, 100, testAccumulator(100), results, false)
+	err := streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false)
 	require.NoError(t, err)
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 	res := <-results

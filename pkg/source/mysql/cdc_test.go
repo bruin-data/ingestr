@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +23,6 @@ func TestParseMySQLCDCURI(t *testing.T) {
 	cfg, normalized, connInfo, err := parseMySQLCDCURI("mysql+cdc://user:pass@example:3307/app?charset=utf8mb4&mode=batch&dest_schema=raw&server_id=123&flavor=mysql")
 	require.NoError(t, err)
 
-	assert.Equal(t, MySQLCDCModeBatch, cfg.Mode)
 	assert.Equal(t, "raw", cfg.DestSchema)
 	assert.Equal(t, uint32(123), cfg.ServerID)
 	assert.Equal(t, gomysql.MySQLFlavor, cfg.Flavor)
@@ -43,10 +43,9 @@ func TestParseMySQLCDCURI(t *testing.T) {
 }
 
 func TestParseMySQLCDCURICarriesReplicationConnectionOptions(t *testing.T) {
-	cfg, normalized, connInfo, err := parseMySQLCDCURI("mysql+cdc://user:pass@example:3307/app?charset=utf8mb4,utf8&mode=batch&tls=skip-verify&readTimeout=7s")
+	_, normalized, connInfo, err := parseMySQLCDCURI("mysql+cdc://user:pass@example:3307/app?charset=utf8mb4,utf8&mode=batch&tls=skip-verify&readTimeout=7s")
 	require.NoError(t, err)
 
-	assert.Equal(t, MySQLCDCModeBatch, cfg.Mode)
 	assert.Equal(t, "example", connInfo.Host)
 	assert.Equal(t, uint16(3307), connInfo.Port)
 	assert.Equal(t, "user", connInfo.User)
@@ -61,18 +60,6 @@ func TestParseMySQLCDCURICarriesReplicationConnectionOptions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "skip-verify", u.Query().Get("tls"))
 	assert.Equal(t, "7s", u.Query().Get("readTimeout"))
-}
-
-func TestParseMySQLCDCURIRejectsInvalidMode(t *testing.T) {
-	_, _, _, err := parseMySQLCDCURI("mysql+cdc://user:pass@example/app?mode=once")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid mode")
-}
-
-func TestParseMySQLCDCURIRejectsStreamMode(t *testing.T) {
-	_, _, _, err := parseMySQLCDCURI("mysql+cdc://user:pass@example/app?mode=stream")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stream mode is not supported")
 }
 
 func TestParseMariaDBCDCURIUsesMariaDBFlavor(t *testing.T) {
@@ -353,6 +340,106 @@ func assertNoCDCResult(t *testing.T, results <-chan source.RecordBatchResult) {
 	}
 }
 
+func TestConvertMySQLCDCBinlogValueUnsigned(t *testing.T) {
+	cases := []struct {
+		name  string
+		value interface{}
+		col   schema.Column
+		want  interface{}
+	}{
+		{"tinyint unsigned wraps", int8(-1), schema.Column{DataType: schema.TypeInt16, Unsigned: true}, int16(255)},
+		{"smallint unsigned wraps", int16(-1), schema.Column{DataType: schema.TypeInt32, Unsigned: true}, int32(65535)},
+		{"mediumint unsigned sign-extended", int32(-1), schema.Column{DataType: schema.TypeInt32, Unsigned: true}, int32(16777215)},
+		{"int unsigned wraps", int32(-1), schema.Column{DataType: schema.TypeInt64, Unsigned: true}, int64(4294967295)},
+		{"bigint unsigned wraps", int64(-1), schema.Column{DataType: schema.TypeDecimal, Unsigned: true}, "18446744073709551615"},
+		{"unsigned positive passthrough", int32(42), schema.Column{DataType: schema.TypeInt64, Unsigned: true}, int64(42)},
+		{"signed untouched", int64(-1), schema.Column{DataType: schema.TypeInt64}, int64(-1)},
+		{"nil untouched", nil, schema.Column{DataType: schema.TypeInt64, Unsigned: true}, nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, convertMySQLCDCBinlogValue(tc.value, tc.col))
+		})
+	}
+}
+
+func mysqlCDCTestSchema() *schema.TableSchema {
+	return addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+}
+
+func TestMySQLRowsEventToChanges(t *testing.T) {
+	tableSchema := mysqlCDCTestSchema()
+	pos := gomysql.Position{Name: "mysql-bin.000001", Pos: 500}
+
+	inserts, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeInsert, [][]interface{}{
+		{int64(1), "a"},
+		{int64(2), "b"},
+	}, tableSchema, tableSchema, pos)
+	require.NoError(t, err)
+	require.Len(t, inserts, 2)
+	assert.False(t, inserts[0].deleted)
+	assert.Equal(t, []interface{}{int64(1), "a"}, inserts[0].values)
+	assert.Less(t, inserts[0].lsn, inserts[1].lsn, "row sequence must keep LSNs ordered within an event")
+
+	deletes, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeDelete, [][]interface{}{
+		{int64(1), "a"},
+	}, tableSchema, tableSchema, pos)
+	require.NoError(t, err)
+	require.Len(t, deletes, 1)
+	assert.True(t, deletes[0].deleted)
+
+	updates, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeUpdate, [][]interface{}{
+		{int64(1), "a"},
+		{int64(1), "a2"},
+	}, tableSchema, tableSchema, pos)
+	require.NoError(t, err)
+	require.Len(t, updates, 1)
+	assert.False(t, updates[0].deleted)
+	assert.Equal(t, []interface{}{int64(1), "a2"}, updates[0].values)
+}
+
+func TestMySQLRowsEventToChangesPKChangeEmitsDeleteAndInsert(t *testing.T) {
+	tableSchema := mysqlCDCTestSchema()
+	pos := gomysql.Position{Name: "mysql-bin.000001", Pos: 500}
+
+	changes, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeUpdate, [][]interface{}{
+		{int64(1), "a"},
+		{int64(9), "a"},
+	}, tableSchema, tableSchema, pos)
+	require.NoError(t, err)
+	require.Len(t, changes, 2)
+	assert.True(t, changes[0].deleted, "old primary key must be tombstoned")
+	assert.Equal(t, []interface{}{int64(1), "a"}, changes[0].values)
+	assert.False(t, changes[1].deleted)
+	assert.Equal(t, []interface{}{int64(9), "a"}, changes[1].values)
+	assert.Less(t, changes[0].lsn, changes[1].lsn)
+}
+
+func TestMySQLRowsEventToChangesRejectsColumnCountMismatch(t *testing.T) {
+	tableSchema := mysqlCDCTestSchema()
+	pos := gomysql.Position{Name: "mysql-bin.000001", Pos: 500}
+
+	_, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeInsert, [][]interface{}{
+		{int64(1), "a", "extra-column"},
+	}, tableSchema, tableSchema, pos)
+	require.Error(t, err, "a wider row image means the table gained a column; positional mapping is unsafe")
+	assert.Contains(t, err.Error(), "--full-refresh")
+
+	_, err = mysqlRowsEventToChanges(replication.EnumRowsEventTypeInsert, [][]interface{}{
+		{int64(1)},
+	}, tableSchema, tableSchema, pos)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--full-refresh")
+}
+
 func TestPrimaryKeyChanged(t *testing.T) {
 	assert.False(t, primaryKeyChanged([]interface{}{int64(1), "a"}, []interface{}{int64(1), "b"}, []int{0}))
 	assert.True(t, primaryKeyChanged([]interface{}{int64(1), "a"}, []interface{}{int64(2), "a"}, []int{0}))
@@ -374,6 +461,8 @@ func TestBeginMySQLConsistentSnapshotLocksAroundPosition(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
+	mock.ExpectExec("SET time_zone = '\\+00:00'").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").
@@ -402,6 +491,8 @@ func TestBeginMySQLConsistentSnapshotUnlocksOnPositionError(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
+	mock.ExpectExec("SET time_zone = '\\+00:00'").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").

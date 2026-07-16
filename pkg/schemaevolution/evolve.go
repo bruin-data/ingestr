@@ -26,8 +26,8 @@ type SchemaEvolver interface {
 
 // ApplicableComparison returns the subset of changes that will actually be
 // reflected in the destination schema given whether the destination supports
-// column type changes. Add/remove changes always apply; type changes only
-// apply when supportsTypeChanges is true.
+// column type changes. Add/remove/nullability changes always apply; type
+// changes only apply when supportsTypeChanges is true.
 func ApplicableComparison(comparison *SchemaComparison, supportsTypeChanges bool) *SchemaComparison {
 	if comparison == nil || !comparison.HasChanges {
 		return &SchemaComparison{}

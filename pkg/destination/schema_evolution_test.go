@@ -1,6 +1,7 @@
 package destination_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,6 +12,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeExecDestination struct {
+	destination.Destination
+	statements []string
+}
+
+func (d *fakeExecDestination) Exec(_ context.Context, stmt string, _ ...interface{}) error {
+	d.statements = append(d.statements, stmt)
+	return nil
+}
 
 // fakeDialect is a minimal destination.Dialect for exercising BuildMigration.
 type fakeDialect struct {
@@ -77,9 +88,85 @@ func widenComparison() *schemaevolution.SchemaComparison {
 		Changes: []schemaevolution.SchemaChange{
 			{Type: schemaevolution.ChangeAddColumn, ColumnName: "added", NewColumn: schema.Column{Name: "added", DataType: schema.TypeString, Nullable: true}},
 			{Type: schemaevolution.ChangeWidenType, ColumnName: "val", OldColumn: &schema.Column{Name: "val", DataType: schema.TypeInt32}, NewColumn: schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}},
-			{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "gone", OldColumn: &schema.Column{Name: "gone", DataType: schema.TypeString}},
+			{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "gone", OldColumn: &schema.Column{Name: "gone", DataType: schema.TypeString, Nullable: true}},
 		},
 	}
+}
+
+type fakeNullableDialect struct{ fakeDialect }
+
+func (d *fakeNullableDialect) RelaxColumnNullabilitySQL(table, colName string) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL", table, d.QuoteIdentifier(colName))
+}
+
+func TestBuildMigrationRelaxesNullabilityAndSoftRemovedRequiredColumns(t *testing.T) {
+	required := schema.Column{Name: "removed", DataType: schema.TypeString, Nullable: false}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{
+		{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "optional"},
+		{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "removed", OldColumn: &required},
+	}}
+	statements, warnings := destination.BuildMigration(&fakeNullableDialect{}, "events", comparison)
+	require.Empty(t, warnings)
+	require.Equal(t, []string{
+		`ALTER TABLE events ALTER COLUMN "optional" DROP NOT NULL`,
+		`ALTER TABLE events ALTER COLUMN "removed" DROP NOT NULL`,
+	}, statements)
+}
+
+func TestBuildMigrationWarnsWhenNullabilityRelaxationIsUnsupported(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeRelaxNullability, ColumnName: "optional",
+	}}}
+	statements, warnings := destination.BuildMigration(&fakeDialect{}, "events", comparison)
+	require.Empty(t, statements)
+	require.Len(t, warnings, 1)
+	require.Contains(t, warnings[0], "does not expose nullability evolution")
+}
+
+func TestApplyEvolutionRejectsUnsupportedNullabilityBeforeExecutingDDL(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{
+		{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col", NewColumn: schema.Column{Name: "new_col", DataType: schema.TypeString}},
+		{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "optional"},
+	}}
+	dest := &fakeExecDestination{}
+	_, err := destination.ApplyEvolution(context.Background(), dest, &fakeDialect{}, "events", comparison)
+	require.ErrorContains(t, err, "requires nullability relaxation")
+	require.Empty(t, dest.statements, "validation must fail before an earlier add-column statement executes")
+}
+
+func TestApplyEvolutionExecutesSupportedNullabilityRelaxation(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeRelaxNullability, ColumnName: "optional",
+	}}}
+	dest := &fakeExecDestination{}
+	_, err := destination.ApplyEvolution(context.Background(), dest, &fakeNullableDialect{}, "events", comparison)
+	require.NoError(t, err)
+	require.Equal(t, []string{`ALTER TABLE events ALTER COLUMN "optional" DROP NOT NULL`}, dest.statements)
+}
+
+func TestApplyEvolutionRejectsUnsupportedTypeChangeBeforeExecutingDDL(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{
+		{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col", NewColumn: schema.Column{Name: "new_col", DataType: schema.TypeString}},
+		{Type: schemaevolution.ChangeWidenType, ColumnName: "value", NewColumn: schema.Column{Name: "value", DataType: schema.TypeInt64}},
+	}}
+	dest := &fakeExecDestination{}
+	_, err := destination.ApplyEvolution(context.Background(), dest, &fakeDialect{supportsAlter: false}, "events", comparison)
+	require.ErrorContains(t, err, "requires a type change")
+	require.Empty(t, dest.statements, "validation must reject the complete migration before ADD COLUMN executes")
+}
+
+type emptyAlterDialect struct{ fakeDialect }
+
+func (*emptyAlterDialect) AlterColumnTypeSQL(string, string, schema.Column) string { return "" }
+
+func TestApplyEvolutionRejectsEmptyTypeAlterationBeforeExecutingDDL(t *testing.T) {
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeOverrideType, ColumnName: "value", NewColumn: schema.Column{Name: "value", DataType: schema.TypeString},
+	}}}
+	dest := &fakeExecDestination{}
+	_, err := destination.ApplyEvolution(context.Background(), dest, &emptyAlterDialect{fakeDialect{supportsAlter: true}}, "events", comparison)
+	require.ErrorContains(t, err, "requires a type change")
+	require.Empty(t, dest.statements)
 }
 
 func TestBuildMigration_NoChanges(t *testing.T) {

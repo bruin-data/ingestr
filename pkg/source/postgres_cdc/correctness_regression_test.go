@@ -190,9 +190,3 @@ func TestResumeMetadataRejectsStateAuthorizedForPreviousTable(t *testing.T) {
 	assert.True(t, resumeMetadataChanged("100", "schema-a", "100", "schema-b"))
 	assert.False(t, resumeMetadataChanged("100", "schema-a", "100", "schema-a"))
 }
-
-func TestBatchSnapshotStopsBeforePostSnapshotWALMerge(t *testing.T) {
-	assert.True(t, stopAfterBatchSnapshot(ModeBatch, false))
-	assert.False(t, stopAfterBatchSnapshot(ModeBatch, true))
-	assert.False(t, stopAfterBatchSnapshot(ModeStream, false))
-}

@@ -711,7 +711,7 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	if !l.cfg.NoLoadTimestamp {
 		newSchema = withLoadTimestampColumn(newSchema)
 	}
-	if st.schema.SameColumnShape(newSchema) {
+	if st.schema.SameColumnShape(newSchema) && sameColumnNullability(st.schema, newSchema) {
 		return nil
 	}
 
@@ -755,6 +755,18 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	}
 	output.Statusf("[STREAM] %s | Schema change applied for %s (dest: %s)\n", time.Now().Format("15:04:05"), ti.Name, st.destTable)
 	return nil
+}
+
+func sameColumnNullability(left, right *schema.TableSchema) bool {
+	if left == nil || right == nil || len(left.Columns) != len(right.Columns) {
+		return left == right
+	}
+	for i := range left.Columns {
+		if left.Columns[i].Nullable != right.Columns[i].Nullable {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *flushLoop) buffer(res source.RecordBatchResult) {

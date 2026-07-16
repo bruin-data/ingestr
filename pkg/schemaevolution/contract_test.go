@@ -149,6 +149,47 @@ func TestApplyContract_DiscardValue(t *testing.T) {
 	assert.Equal(t, "amount", result.Violations[0].ColumnName)
 }
 
+func TestApplyContractDiscardValueAllowsNullabilityRelaxation(t *testing.T) {
+	comparison := &SchemaComparison{HasChanges: true, Changes: []SchemaChange{
+		{Type: ChangeRelaxNullability, ColumnName: "optional"},
+		{Type: ChangeWidenType, ColumnName: "amount"},
+	}}
+	result := ApplyContract(SchemaContract{Mode: ContractDiscardValue}, comparison)
+	require.Len(t, result.Allowed, 1)
+	require.Equal(t, ChangeRelaxNullability, result.Allowed[0].Type)
+	require.Len(t, result.Violations, 1)
+	require.Equal(t, ChangeWidenType, result.Violations[0].ChangeType)
+}
+
+func TestApplyContractDiscardRowAllowsNullabilityRelaxation(t *testing.T) {
+	comparison := &SchemaComparison{HasChanges: true, Changes: []SchemaChange{
+		{Type: ChangeRelaxNullability, ColumnName: "optional"},
+		{Type: ChangeWidenType, ColumnName: "amount"},
+	}}
+	result := ApplyContract(SchemaContract{Mode: ContractDiscardRow}, comparison)
+	require.Len(t, result.Allowed, 1)
+	require.Equal(t, ChangeRelaxNullability, result.Allowed[0].Type)
+	require.Len(t, result.Violations, 1)
+	require.Equal(t, ChangeWidenType, result.Violations[0].ChangeType)
+}
+
+func TestApplyContract_DiscardValueDoesNotViolateConfiguredPrimaryKeyNullability(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "age", DataType: schema.TypeString, Nullable: true},
+	}}
+	dest := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "age", DataType: schema.TypeInt64, Nullable: true},
+	}}
+	comparison, err := Compare(source, dest, &CompareOptions{PrimaryKeys: []string{"id"}})
+	require.NoError(t, err)
+
+	result := ApplyContract(SchemaContract{Mode: ContractDiscardValue}, comparison)
+	require.Len(t, result.Violations, 1)
+	assert.Equal(t, "age", result.Violations[0].ColumnName)
+}
+
 func TestApplyContract_NoChanges(t *testing.T) {
 	comparison := &SchemaComparison{
 		HasChanges: false,

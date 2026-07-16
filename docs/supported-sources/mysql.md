@@ -52,7 +52,7 @@ Example:
 
 ```shell
 ingestr ingest \
-  --source-uri "mysql+cdc://user:password@host:3306/dbname?mode=batch&server_id=18888" \
+  --source-uri "mysql+cdc://user:password@host:3306/dbname?server_id=18888" \
   --dest-uri "sqlite:///tmp/mysql_cdc.db" \
   --source-table "orders" \
   --dest-table "orders"

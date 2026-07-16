@@ -23,12 +23,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type MongoDBCDCMode string
-
 const (
-	MongoDBCDCModeBatch  MongoDBCDCMode = "batch"
-	MongoDBCDCModeStream MongoDBCDCMode = "stream"
-
 	defaultMongoDBCDCAwaitTime        = time.Second
 	defaultMongoDBCDCSchemaSampleSize = 1000
 	defaultMongoDBCDCStreamBatchSize  = 10000
@@ -46,7 +41,6 @@ var mongodbCDCColumns = []schema.Column{
 }
 
 type MongoDBCDCConfig struct {
-	Mode             MongoDBCDCMode
 	DestSchema       string
 	MaxAwaitTime     time.Duration
 	SchemaSampleSize int
@@ -329,7 +323,6 @@ func (t *MongoDBCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-
 
 func parseMongoDBCDCURI(rawURI string) (MongoDBCDCConfig, string, error) {
 	cfg := MongoDBCDCConfig{
-		Mode:             MongoDBCDCModeBatch,
 		MaxAwaitTime:     defaultMongoDBCDCAwaitTime,
 		SchemaSampleSize: defaultMongoDBCDCSchemaSampleSize,
 	}
@@ -352,16 +345,6 @@ func parseMongoDBCDCURI(rawURI string) (MongoDBCDCConfig, string, error) {
 
 	query := parsed.Query()
 	cfg.DestSchema = query.Get("dest_schema")
-	if mode := strings.ToLower(strings.TrimSpace(query.Get("mode"))); mode != "" {
-		switch mode {
-		case string(MongoDBCDCModeBatch):
-			cfg.Mode = MongoDBCDCModeBatch
-		case string(MongoDBCDCModeStream):
-			cfg.Mode = MongoDBCDCModeStream
-		default:
-			return cfg, "", fmt.Errorf("invalid mode: %s (must be 'batch' or 'stream')", mode)
-		}
-	}
 	if maxAwait := strings.TrimSpace(query.Get("max_await_time")); maxAwait != "" {
 		d, err := time.ParseDuration(maxAwait)
 		if err != nil {
@@ -564,14 +547,9 @@ func (s *MongoDBCDCSource) readNamespace(ctx context.Context, ns mongoNamespace,
 	go func() {
 		defer close(results)
 
-		mode := s.cdcConfig.Mode
-		if opts.Streaming {
-			mode = MongoDBCDCModeStream
-		}
-
 		hasResume := strings.TrimSpace(opts.CDCResumeLSN) != "" && !opts.FullRefresh
 		var commandStart primitive.Timestamp
-		if mode == MongoDBCDCModeBatch || !hasResume {
+		if !opts.Streaming || !hasResume {
 			opTime, err := s.currentOperationTime(ctx)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err, TableName: resultTable}
@@ -581,7 +559,7 @@ func (s *MongoDBCDCSource) readNamespace(ctx context.Context, ns mongoNamespace,
 		}
 
 		var batchTarget *primitive.Timestamp
-		if mode == MongoDBCDCModeBatch {
+		if !opts.Streaming {
 			target := commandStart
 			batchTarget = &target
 		}
@@ -603,7 +581,7 @@ func (s *MongoDBCDCSource) readNamespace(ctx context.Context, ns mongoNamespace,
 			}
 		}
 
-		if err := s.streamCollection(ctx, ns, outputSchema, opts, mode, start, batchTarget, results, resultTable); err != nil {
+		if err := s.streamCollection(ctx, ns, outputSchema, opts, start, batchTarget, results, resultTable); err != nil {
 			results <- source.RecordBatchResult{Err: err, TableName: resultTable}
 		}
 	}()
@@ -660,7 +638,7 @@ func (s *MongoDBCDCSource) snapshotCollection(ctx context.Context, ns mongoNames
 	return buffer.flush(ctx, results)
 }
 
-func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespace, tableSchema *schema.TableSchema, opts source.ReadOptions, mode MongoDBCDCMode, start mongoCDCStart, batchTarget *primitive.Timestamp, results chan<- source.RecordBatchResult, resultTable string) error {
+func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespace, tableSchema *schema.TableSchema, opts source.ReadOptions, start mongoCDCStart, batchTarget *primitive.Timestamp, results chan<- source.RecordBatchResult, resultTable string) error {
 	collection := s.client.Database(ns.Database).Collection(ns.Collection)
 	maxAwaitTime := s.cdcConfig.MaxAwaitTime
 	if opts.Streaming {
@@ -776,7 +754,7 @@ func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespa
 			return fmt.Errorf("MongoDB change stream error for %s.%s: %w", ns.Database, ns.Collection, err)
 		}
 
-		if mode == MongoDBCDCModeBatch {
+		if !opts.Streaming {
 			return buffer.flush(ctx, results)
 		}
 

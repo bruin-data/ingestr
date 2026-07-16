@@ -130,6 +130,64 @@ func TestFlushLoopRefreshHonorsFreezeContract(t *testing.T) {
 	assert.Empty(t, dest.execCalls)
 }
 
+func TestEvolveDestinationTableDoesNotRelaxPrimaryKeyNullability(t *testing.T) {
+	dest := &fakeDestination{tableSchemas: map[string]*schema.TableSchema{"dest_items": {Columns: []schema.Column{{
+		Name: "ID", DataType: schema.TypeInt64, Nullable: false,
+	}}}}}
+	sourceSchema := &schema.TableSchema{
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+		PrimaryKeys: []string{"id"},
+	}
+
+	err := evolveDestinationTable(context.Background(), dest, "dest_items", sourceSchema, &config.IngestConfig{
+		PrimaryKeys: []string{"id"},
+	})
+	require.NoError(t, err)
+	require.Empty(t, dest.execCalls)
+}
+
+type normalizingFakeDestination struct {
+	*fakeDestination
+}
+
+func (d *normalizingFakeDestination) NormalizeSchemaEvolutionColumn(col schema.Column) schema.Column {
+	if col.DataType == schema.TypeBoolean {
+		col.DataType = schema.TypeInt64
+	}
+	return col
+}
+
+func TestEvolveDestinationTableUsesDestinationTypeNormalization(t *testing.T) {
+	dest := &normalizingFakeDestination{fakeDestination: &fakeDestination{
+		tableSchemas: map[string]*schema.TableSchema{"dest_items": {Columns: []schema.Column{{
+			Name: "active", DataType: schema.TypeInt64,
+		}}}},
+	}}
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "active", DataType: schema.TypeBoolean}}}
+
+	err := evolveDestinationTable(context.Background(), dest, "dest_items", sourceSchema, &config.IngestConfig{})
+	require.NoError(t, err)
+	require.Empty(t, dest.execCalls)
+}
+
+func TestFlushLoopRefreshDetectsNullabilityOnlyChange(t *testing.T) {
+	loop, dest, st := streamSchemaChangeFixture(&schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32, Nullable: false},
+		{Name: "status", DataType: schema.TypeString, Nullable: false},
+	}})
+	st.schema.Columns[1].Nullable = false
+	newSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt32, Nullable: false},
+		{Name: "status", DataType: schema.TypeString, Nullable: true},
+	}}
+
+	err := loop.ensureTable(context.Background(), source.SourceTableInfo{Name: "public.items", Schema: newSchema})
+	require.NoError(t, err)
+	require.Len(t, dest.execCalls, 1)
+	require.True(t, st.schema.Columns[1].Nullable)
+	require.Len(t, dest.prepareCalls, 1)
+}
+
 // Staging-only CDC columns are not persisted on the destination; a refresh
 // must not try to ADD them there, and the CDC metadata columns must not be
 // flagged as type changes.

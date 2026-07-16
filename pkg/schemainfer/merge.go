@@ -38,6 +38,10 @@ var typePriority = map[arrow.Type]int{
 // MergeArrowTypes merges two Arrow types using promotion rules.
 // When types conflict, the result is promoted to a type that can hold both.
 func MergeArrowTypes(existing, new arrow.DataType) (arrow.DataType, error) {
+	if nestedArrowTypeUsesJSON(existing) || nestedArrowTypeUsesJSON(new) {
+		return schema.JSONArrowType, nil
+	}
+
 	// Same type - no merge needed
 	if arrow.TypeEqual(existing, new) {
 		return existing, nil
@@ -49,6 +53,22 @@ func MergeArrowTypes(existing, new arrow.DataType) (arrow.DataType, error) {
 	}
 	if isUnknownType(new) {
 		return existing, nil
+	}
+
+	existingList, existingIsList := existing.(arrow.VarLenListLikeType)
+	newList, newIsList := new.(arrow.VarLenListLikeType)
+	if existingIsList || newIsList {
+		if !existingIsList || !newIsList {
+			return schema.JSONArrowType, nil
+		}
+		elem, err := MergeArrowTypes(existingList.Elem(), newList.Elem())
+		if err != nil {
+			return nil, err
+		}
+		if nestedArrowTypeUsesJSON(elem) || isJSONType(elem) {
+			return schema.JSONArrowType, nil
+		}
+		return arrow.ListOf(elem), nil
 	}
 
 	// Handle JSON extension types - two JSON types merge to JSON
@@ -268,12 +288,21 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		} else {
 			col.DataType = schema.TypeTimestamp
 		}
-	case arrow.LIST, arrow.LARGE_LIST:
-		col.DataType = schema.TypeArray
-		if listType, ok := dt.(*arrow.ListType); ok {
-			elemCol := ArrowFieldToColumn("", listType.Elem(), true)
-			col.ArrayType = elemCol.DataType
+	case arrow.LIST, arrow.LARGE_LIST, arrow.LIST_VIEW, arrow.LARGE_LIST_VIEW:
+		listType, ok := dt.(arrow.ListLikeType)
+		if !ok {
+			col.DataType = schema.TypeJSON
+			break
 		}
+		elemCol := ArrowFieldToColumn("", listType.Elem(), true)
+		if elemCol.DataType == schema.TypeJSON || elemCol.DataType == schema.TypeArray || elemCol.DataType == schema.TypeUnknown {
+			col.DataType = schema.TypeJSON
+			break
+		}
+		col.DataType = schema.TypeArray
+		col.ArrayType = elemCol.DataType
+	case arrow.FIXED_SIZE_LIST, arrow.STRUCT, arrow.MAP:
+		col.DataType = schema.TypeJSON
 	case arrow.EXTENSION:
 		// Check if it's a JSON extension type
 		if isJSONType(dt) {
@@ -289,6 +318,18 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 	}
 
 	return col
+}
+
+func nestedArrowTypeUsesJSON(dt arrow.DataType) bool {
+	switch dt.ID() {
+	case arrow.STRUCT, arrow.MAP, arrow.FIXED_SIZE_LIST:
+		return true
+	case arrow.LIST, arrow.LARGE_LIST, arrow.LIST_VIEW, arrow.LARGE_LIST_VIEW:
+		listType, ok := dt.(arrow.ListLikeType)
+		return !ok || nestedArrowTypeUsesJSON(listType.Elem()) || isJSONType(listType.Elem())
+	default:
+		return false
+	}
 }
 
 // ArrowTypeToDataType converts an Arrow DataType to internal schema.DataType.

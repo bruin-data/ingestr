@@ -37,7 +37,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 	go func() {
 		defer close(results)
-		if r.cdcConfig.Mode == ModeBatch && !opts.Streaming {
+		if !opts.Streaming {
 			if err := validateBatchBarrierSupport(r.source.serverVersion); err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
@@ -157,7 +157,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				return
 			}
 		}
-		if stopAfterBatchSnapshot(r.cdcConfig.Mode, opts.Streaming) {
+		if !opts.Streaming {
 			// Keep snapshot rows and post-snapshot partial-TOAST changes in
 			// separate destination merges. The slot retains the WAL for the
 			// next batch run, which resumes from this exact snapshot boundary.
@@ -175,26 +175,16 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 	return results, nil
 }
 
-func stopAfterBatchSnapshot(mode CDCMode, streaming bool) bool {
-	return mode == ModeBatch && !streaming
-}
-
 func resumeMetadataChanged(expectedIncarnation, expectedFingerprint, currentIncarnation, currentFingerprint string) bool {
 	return expectedIncarnation != "" && expectedIncarnation != currentIncarnation ||
 		expectedFingerprint != "" && expectedFingerprint != currentFingerprint
 }
 
 func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) error {
-	// --stream forces continuous mode regardless of the URI ?mode= param.
-	mode := r.cdcConfig.Mode
-	if opts.Streaming {
-		mode = ModeStream
-	}
-
 	for {
 		barrierNonce := ""
 		var barrierLSN pglogrepl.LSN
-		if mode == ModeBatch {
+		if !opts.Streaming {
 			var err error
 			barrierNonce, barrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
 			if err != nil {
@@ -202,7 +192,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 			}
 			config.Debug("[CDC] Batch mode: emitted logical-decoding barrier at %s", barrierLSN)
 		}
-		err := r.runStream(ctx, startLSN, slotName, mode, barrierNonce, barrierLSN, results, opts, snapshotBoundary)
+		err := r.runStream(ctx, startLSN, slotName, barrierNonce, barrierLSN, results, opts, snapshotBoundary)
 		var schemaErr *SchemaChangedError
 		var reincarnationErr *TableReincarnatedError
 		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) && !errors.As(err, &reincarnationErr) {
@@ -228,9 +218,9 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 	}
 }
 
-// runStream runs one replication stream until it terminates: batch mode caught
+// runStream runs one replication stream until it terminates: a batch run caught
 // up, the context was cancelled, or the replicator failed.
-func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, mode CDCMode, barrierNonce string, barrierLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, barrierNonce string, barrierLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
@@ -256,8 +246,8 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 
 	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
 
-	err = streamLoop(ctx, repl, mode, batchSize, accum, results, opts.Streaming)
-	if err == nil && mode == ModeBatch {
+	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
+	if err == nil && !opts.Streaming {
 		// Record the caught-up position so FinalizeBatch can confirm it to the
 		// slot once the destination write is durable.
 		caughtUp := batchCaughtUpLSN(repl.CurrentLSN(), barrierLSN)
@@ -427,7 +417,7 @@ type singleTableChangeFilter interface {
 //
 // When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
 // pipeline can confirm the replication slot only after the data is durable.
-func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
+func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
 	var token tokenFunc
 	if streaming {
 		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
@@ -477,7 +467,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, mode CDCMode, batchSi
 			return err
 		}
 
-		if mode == ModeBatch && repl.BarrierReached() {
+		if !streaming && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
 				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", repl.CurrentLSN())

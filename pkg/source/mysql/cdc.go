@@ -29,15 +29,14 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
-type MySQLCDCMode string
-
 const (
-	MySQLCDCModeBatch MySQLCDCMode = "batch"
-	// mysqlCDCModeStream is defined for completeness but is not yet supported.
-	mysqlCDCModeStream MySQLCDCMode = "stream"
-
 	defaultMySQLCDCHeartbeat       = 1 * time.Second
 	defaultMySQLCDCStreamBatchSize = 10000
+	// mysqlCDCStreamStallTimeout bounds how long the catch-up loop waits without
+	// receiving any event. Heartbeats arrive every defaultMySQLCDCHeartbeat on a
+	// healthy connection, so a stall this long means the connection is broken
+	// (the syncer reconnects silently and indefinitely by default).
+	mysqlCDCStreamStallTimeout = 60 * time.Second
 )
 
 var mysqlCDCColumns = []schema.Column{
@@ -47,7 +46,6 @@ var mysqlCDCColumns = []schema.Column{
 }
 
 type MySQLCDCConfig struct {
-	Mode       MySQLCDCMode
 	DestSchema string
 	ServerID   uint32
 	Flavor     string
@@ -345,7 +343,6 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 
 func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, error) {
 	cfg := MySQLCDCConfig{
-		Mode:     MySQLCDCModeBatch,
 		ServerID: randomMySQLServerID(),
 		Flavor:   gomysql.MySQLFlavor,
 	}
@@ -376,16 +373,6 @@ func parseMySQLCDCURI(rawURI string) (MySQLCDCConfig, string, mysqlCDCConnInfo, 
 			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("invalid flavor: %w", err)
 		}
 		cfg.Flavor = flavor
-	}
-	if mode := strings.ToLower(strings.TrimSpace(query.Get("mode"))); mode != "" {
-		switch mode {
-		case string(MySQLCDCModeBatch):
-			cfg.Mode = MySQLCDCModeBatch
-		case string(mysqlCDCModeStream):
-			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("MySQL CDC stream mode is not supported; use mode=batch")
-		default:
-			return cfg, "", mysqlCDCConnInfo{}, fmt.Errorf("invalid mode: %s (must be 'batch')", mode)
-		}
 	}
 	if rawServerID := strings.TrimSpace(query.Get("server_id")); rawServerID != "" {
 		serverID, err := strconv.ParseUint(rawServerID, 10, 32)
@@ -716,6 +703,13 @@ func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMe
 }
 
 func beginMySQLConsistentSnapshot(ctx context.Context, conn mysqlCDCSnapshotConn) (gomysql.Position, error) {
+	// The binlog stream decodes TIMESTAMP columns as UTC epoch instants. Pin the
+	// snapshot session to UTC so the driver (loc=UTC) reads the same instants;
+	// otherwise snapshot rows shift by the server's time zone offset.
+	if _, err := conn.ExecContext(ctx, "SET time_zone = '+00:00'"); err != nil {
+		return gomysql.Position{}, fmt.Errorf("failed to set MySQL snapshot session time zone to UTC: %w", err)
+	}
+
 	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
 		return gomysql.Position{}, fmt.Errorf("failed to lock MySQL tables for snapshot: %w", err)
 	}
@@ -760,7 +754,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	if start.Name == "" {
 		return nil
 	}
-	if s.cdcConfig.Mode == MySQLCDCModeBatch && start.Compare(target) >= 0 {
+	if start.Compare(target) >= 0 {
 		return nil
 	}
 
@@ -781,9 +775,17 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		schemaByTable[table.Name] = table.Schema
 	}
 
+	// Termination relies exclusively on events delivered through GetEvent:
+	// positions of delivered events reaching target, or a heartbeat (the server
+	// only sends one when it has nothing newer, and the stream is FIFO, so a
+	// heartbeat means every earlier event was already consumed). The syncer's
+	// GetNextPosition is deliberately not consulted — it is updated by the
+	// producer goroutine before the event is delivered, so using it can skip
+	// events that are parsed but not yet consumed.
 	current := start
 	batchSize := mysqlCDCStreamBatchSize(opts)
 	buffers := make(map[string]*mysqlCDCChangeBuffer, len(tables))
+	lastDelivery := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -791,7 +793,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		default:
 		}
 
-		if s.cdcConfig.Mode == MySQLCDCModeBatch && current.Compare(target) >= 0 {
+		if current.Compare(target) >= 0 {
 			return flushMySQLCDCChangeBuffers(buffers, results)
 		}
 
@@ -800,23 +802,36 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		cancel()
 		if err != nil {
 			if eventCtx.Err() != nil {
-				current = nextMySQLPosition(syncer, current)
+				if time.Since(lastDelivery) >= mysqlCDCStreamStallTimeout {
+					return fmt.Errorf("MySQL binlog stream stalled at %s while catching up to %s: no events or heartbeats received for %s; check connectivity to the server", current, target, mysqlCDCStreamStallTimeout)
+				}
 				continue
 			}
 			return fmt.Errorf("failed to read MySQL binlog event: %w", err)
 		}
 		if event == nil {
-			current = nextMySQLPosition(syncer, current)
 			continue
 		}
+		lastDelivery = time.Now()
 
-		if event.Header != nil && event.Header.EventType == replication.PARTIAL_UPDATE_ROWS_EVENT {
-			return fmt.Errorf("MySQL CDC does not support PARTIAL_UPDATE_ROWS_EVENT; disable binlog_row_value_options=PARTIAL_JSON")
+		if event.Header != nil {
+			if event.Header.EventType == replication.PARTIAL_UPDATE_ROWS_EVENT {
+				return fmt.Errorf("MySQL CDC does not support PARTIAL_UPDATE_ROWS_EVENT; disable binlog_row_value_options=PARTIAL_JSON")
+			}
+			if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
+				// current < target here is normal, not an anomaly: non-data
+				// events (FORMAT_DESCRIPTION, PREVIOUS_GTIDS, artificial
+				// MariaDB events) carry LogPos=0 and don't advance current.
+				// The last emitted _cdc_lsn may then sit slightly before
+				// target, so the next run re-streams a short suffix of
+				// events; merge-by-LSN dedup makes that harmless.
+				return flushMySQLCDCChangeBuffers(buffers, results)
+			}
 		}
 
-		eventPos := mysqlEventPosition(event, current, syncer)
+		eventPos := mysqlEventPosition(event, current)
 		current = eventPos
-		if s.cdcConfig.Mode == MySQLCDCModeBatch && eventPos.Compare(target) > 0 {
+		if eventPos.Compare(target) > 0 {
 			return flushMySQLCDCChangeBuffers(buffers, results)
 		}
 
@@ -839,7 +854,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		if outputSchema == nil {
 			continue
 		}
-		changes, err := mysqlRowsEventToChanges(rowsEvent, meta.FullSchema, outputSchema, eventPos)
+		changes, err := mysqlRowsEventToChanges(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos)
 		if err != nil {
 			return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 		}
@@ -878,7 +893,7 @@ func (s *MySQLCDCSource) binlogSyncerConfig() replication.BinlogSyncerConfig {
 	}
 }
 
-func mysqlRowsEventToChanges(event *replication.RowsEvent, fullSchema *schema.TableSchema, outputSchema *schema.TableSchema, pos gomysql.Position) ([]mysqlCDCChange, error) {
+func mysqlRowsEventToChanges(eventType replication.EnumRowsEventType, rows [][]interface{}, fullSchema *schema.TableSchema, outputSchema *schema.TableSchema, pos gomysql.Position) ([]mysqlCDCChange, error) {
 	fullSourceColumns := sourceColumnsWithoutMySQLCDC(fullSchema)
 	outputSourceColumns := sourceColumnsWithoutMySQLCDC(outputSchema)
 	indexes, err := sourceIndexes(fullSourceColumns, outputSourceColumns)
@@ -887,13 +902,12 @@ func mysqlRowsEventToChanges(event *replication.RowsEvent, fullSchema *schema.Ta
 	}
 
 	pkIndexes := primaryKeyIndexes(fullSourceColumns, outputSchema.PrimaryKeys)
-	eventType := event.Type()
-	changes := make([]mysqlCDCChange, 0, len(event.Rows))
+	changes := make([]mysqlCDCChange, 0, len(rows))
 	rowSeq := 0
 
 	switch eventType {
 	case replication.EnumRowsEventTypeInsert:
-		for _, row := range event.Rows {
+		for _, row := range rows {
 			values, err := projectMySQLCDCRow(row, fullSourceColumns, outputSourceColumns, indexes)
 			if err != nil {
 				return nil, err
@@ -902,7 +916,7 @@ func mysqlRowsEventToChanges(event *replication.RowsEvent, fullSchema *schema.Ta
 			rowSeq++
 		}
 	case replication.EnumRowsEventTypeDelete:
-		for _, row := range event.Rows {
+		for _, row := range rows {
 			values, err := projectMySQLCDCRow(row, fullSourceColumns, outputSourceColumns, indexes)
 			if err != nil {
 				return nil, err
@@ -911,12 +925,12 @@ func mysqlRowsEventToChanges(event *replication.RowsEvent, fullSchema *schema.Ta
 			rowSeq++
 		}
 	case replication.EnumRowsEventTypeUpdate:
-		if len(event.Rows)%2 != 0 {
+		if len(rows)%2 != 0 {
 			return nil, fmt.Errorf("update rows event has odd row count")
 		}
-		for i := 0; i < len(event.Rows); i += 2 {
-			before := event.Rows[i]
-			after := event.Rows[i+1]
+		for i := 0; i < len(rows); i += 2 {
+			before := rows[i]
+			after := rows[i+1]
 			if primaryKeyChanged(before, after, pkIndexes) {
 				beforeValues, err := projectMySQLCDCRow(before, fullSourceColumns, outputSourceColumns, indexes)
 				if err != nil {
@@ -940,8 +954,12 @@ func mysqlRowsEventToChanges(event *replication.RowsEvent, fullSchema *schema.Ta
 }
 
 func projectMySQLCDCRow(row []interface{}, fullSourceColumns []schema.Column, outputSourceColumns []schema.Column, indexes []int) ([]interface{}, error) {
-	if len(row) < len(fullSourceColumns) {
-		return nil, fmt.Errorf("row image has %d columns, expected %d; set binlog_row_image=FULL", len(row), len(fullSourceColumns))
+	// The binlog row is matched to the table schema by position, so any column
+	// count mismatch means the mapping cannot be trusted: a column added or
+	// dropped since the schema was read (or a non-FULL row image) would silently
+	// shift values into the wrong columns.
+	if len(row) != len(fullSourceColumns) {
+		return nil, fmt.Errorf("binlog row image has %d columns but the table schema has %d; the table structure changed since the sync started, or binlog_row_image is not FULL; run with --full-refresh to rebuild the destination safely", len(row), len(fullSourceColumns))
 	}
 
 	values := make([]interface{}, len(outputSourceColumns))
@@ -950,9 +968,36 @@ func projectMySQLCDCRow(row []interface{}, fullSourceColumns []schema.Column, ou
 			values[i] = nil
 			continue
 		}
-		values[i] = convertMySQLCDCValue(row[sourceIdx], outputSourceColumns[i])
+		values[i] = convertMySQLCDCBinlogValue(row[sourceIdx], outputSourceColumns[i])
 	}
 	return values, nil
+}
+
+// convertMySQLCDCBinlogValue converts a value decoded from a binlog row image.
+// The binlog stores integers without signedness, and go-mysql always decodes
+// them as signed, so values for unsigned columns are reinterpreted here. The
+// column's DataType is already widened by MapMySQLToDataType to fit the
+// unsigned range.
+func convertMySQLCDCBinlogValue(value interface{}, col schema.Column) interface{} {
+	if col.Unsigned {
+		switch v := value.(type) {
+		case int8:
+			return int16(uint8(v))
+		case int16:
+			return int32(uint16(v))
+		case int32:
+			if col.DataType == schema.TypeInt32 {
+				// MEDIUMINT UNSIGNED: go-mysql sign-extends the 3-byte value.
+				return int32(uint32(v) & 0xFFFFFF)
+			}
+			return int64(uint32(v))
+		case int64:
+			// BIGINT UNSIGNED: the column is DECIMAL(20,0); the decimal string
+			// preserves values above MaxInt64.
+			return strconv.FormatUint(uint64(v), 10)
+		}
+	}
+	return convertMySQLCDCValue(value, col)
 }
 
 func convertMySQLCDCValue(value interface{}, col schema.Column) interface{} {
@@ -1355,23 +1400,12 @@ func minMySQLPosition(positions map[string]gomysql.Position) gomysql.Position {
 	return min
 }
 
-func nextMySQLPosition(syncer *replication.BinlogSyncer, fallback gomysql.Position) gomysql.Position {
-	pos := syncer.GetNextPosition()
-	if pos.Name == "" {
-		return fallback
-	}
-	return pos
-}
-
-func mysqlEventPosition(event *replication.BinlogEvent, current gomysql.Position, syncer *replication.BinlogSyncer) gomysql.Position {
+func mysqlEventPosition(event *replication.BinlogEvent, current gomysql.Position) gomysql.Position {
 	if rotate, ok := event.Event.(*replication.RotateEvent); ok {
 		return gomysql.Position{Name: string(rotate.NextLogName), Pos: uint32(rotate.Position)}
 	}
 
 	pos := current
-	if pos.Name == "" {
-		pos = nextMySQLPosition(syncer, current)
-	}
 	if event.Header.LogPos > 0 {
 		pos.Pos = event.Header.LogPos
 	}

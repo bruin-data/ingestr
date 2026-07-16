@@ -93,7 +93,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 
 	go func() {
 		defer close(results)
-		if r.cdcConfig.Mode == ModeBatch && !opts.Streaming {
+		if !opts.Streaming {
 			if err := validateBatchBarrierSupport(r.source.serverVersion); err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
@@ -175,7 +175,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				}
 			}
 		}
-		if needsSnapshot && stopAfterBatchSnapshot(r.cdcConfig.Mode, opts.Streaming) {
+		if needsSnapshot && !opts.Streaming {
 			r.source.recordCaughtUpLSN(startLSN, slotName, false)
 			return
 		}
@@ -183,7 +183,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 		for {
 			barrierNonce := ""
 			var barrierLSN pglogrepl.LSN
-			if r.cdcConfig.Mode == ModeBatch && !opts.Streaming {
+			if !opts.Streaming {
 				var err error
 				barrierNonce, barrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
 				if err != nil {

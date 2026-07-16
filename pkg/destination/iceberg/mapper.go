@@ -106,6 +106,16 @@ func icebergArrowType(col schema.Column) arrow.DataType {
 }
 
 func icebergTypeForColumn(col schema.Column) (iceberggo.Type, error) {
+	if col.DataType == schema.TypeArray {
+		arrowSchema := arrow.NewSchema([]arrow.Field{{
+			Name: col.Name, Type: icebergArrowType(col), Nullable: col.Nullable,
+		}}, nil)
+		iceSchema, err := icebergtable.ArrowSchemaToIcebergWithFreshIDs(arrowSchema, false)
+		if err != nil {
+			return nil, err
+		}
+		return iceSchema.Field(0).Type, nil
+	}
 	return icebergtable.ArrowTypeToIceberg(icebergArrowType(col), false)
 }
 

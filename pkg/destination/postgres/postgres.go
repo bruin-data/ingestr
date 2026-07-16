@@ -1364,10 +1364,12 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
+		columnType, arrayType := mapPostgresColumnType(dataType, udtName)
 		col := schema.Column{
-			Name:     colName,
-			DataType: mapPostgresTypeToSchema(dataType, udtName),
-			Nullable: isNullable == "YES",
+			Name:      colName,
+			DataType:  columnType,
+			ArrayType: arrayType,
+			Nullable:  isNullable == "YES",
 		}
 
 		if numPrecision != nil {
@@ -1399,22 +1401,22 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 }
 
 func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
-	switch dataType {
-	case "boolean":
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "boolean", "bool":
 		return schema.TypeBoolean
-	case "smallint":
+	case "smallint", "int2":
 		return schema.TypeInt16
-	case "integer":
+	case "integer", "int", "int4":
 		return schema.TypeInt32
-	case "bigint":
+	case "bigint", "int8":
 		return schema.TypeInt64
-	case "real":
+	case "real", "float4":
 		return schema.TypeFloat32
-	case "double precision":
+	case "double precision", "float8":
 		return schema.TypeFloat64
 	case "numeric", "decimal":
 		return schema.TypeDecimal
-	case "character varying", "varchar", "character", "char", "text":
+	case "character varying", "varchar", "character", "char", "text", "bpchar", "name":
 		return schema.TypeString
 	case "bytea":
 		return schema.TypeBinary
@@ -1424,7 +1426,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		return schema.TypeTime
 	case "timestamp", "timestamp without time zone":
 		return schema.TypeTimestamp
-	case "timestamp with time zone":
+	case "timestamp with time zone", "timestamptz":
 		return schema.TypeTimestampTZ
 	case "interval":
 		return schema.TypeInterval
@@ -1432,7 +1434,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		return schema.TypeJSON
 	case "uuid":
 		return schema.TypeUUID
-	case "ARRAY":
+	case "array":
 		return schema.TypeArray
 	default:
 		if strings.HasPrefix(udtName, "_") {
@@ -1440,6 +1442,20 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		}
 		return schema.TypeString
 	}
+}
+
+func mapPostgresColumnType(dataType, udtName string) (schema.DataType, schema.DataType) {
+	columnType := mapPostgresTypeToSchema(dataType, udtName)
+	if columnType != schema.TypeArray {
+		return columnType, schema.TypeUnknown
+	}
+
+	elementTypeName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(udtName)), "_")
+	elementType := mapPostgresTypeToSchema(elementTypeName, elementTypeName)
+	if elementType == schema.TypeArray {
+		elementType = schema.TypeString
+	}
+	return columnType, elementType
 }
 
 // quoteColumns returns column names wrapped in double quotes.

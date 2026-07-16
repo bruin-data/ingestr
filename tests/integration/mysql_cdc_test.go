@@ -35,6 +35,9 @@ func setupMySQLCDCContainer(t *testing.T, ctx context.Context) (testcontainers.C
 				"--log-bin=mysql-bin",
 				"--binlog-format=ROW",
 				"--binlog-row-image=FULL",
+				// Non-UTC server time zone: snapshot and binlog rows must still
+				// agree on TIMESTAMP instants.
+				"--default-time-zone=+03:00",
 			}
 			return nil
 		}),
@@ -97,6 +100,7 @@ func TestMySQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 
 	const initialRows = 10000
 	const newID = initialRows + 1
+	const pathAgreementID = initialRows + 2
 
 	ctx := context.Background()
 	sourceContainer, sourceURI := setupMySQLCDCContainer(t, ctx)
@@ -110,10 +114,15 @@ func TestMySQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 		id INT NOT NULL PRIMARY KEY,
 		name VARCHAR(100) NOT NULL,
 		value INT NULL,
+		big_unsigned BIGINT UNSIGNED NULL,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	)`)
 	require.NoError(t, err)
 	insertMySQLCDCItems(t, ctx, sourceDB, 1, initialRows)
+	// Row 5 arrives via the snapshot; a row with identical values arrives later
+	// via the binlog. The destination must agree on both paths.
+	_, err = sourceDB.ExecContext(ctx, `UPDATE items SET big_unsigned = 18446744073709551615, updated_at = '2026-01-02 03:04:05' WHERE id = 5`)
+	require.NoError(t, err)
 
 	tmpDir, err := os.MkdirTemp("", "mysql_cdc_sqlite_*")
 	require.NoError(t, err)
@@ -154,15 +163,25 @@ func TestMySQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sourceDB.ExecContext(ctx, `DELETE FROM items WHERE id = 3`)
 	require.NoError(t, err)
+	_, err = sourceDB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO items (id, name, value, big_unsigned, updated_at) VALUES (%d, 'twin', 500, 18446744073709551615, '2026-01-02 03:04:05')`, pathAgreementID))
+	require.NoError(t, err)
 
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	require.NoError(t, pipeline.New(cfg).Run(ctxWithTimeout))
 
-	assert.Equal(t, initialRows+1, queryCount(`SELECT COUNT(*) FROM items_dest`))
+	assert.Equal(t, initialRows+2, queryCount(`SELECT COUNT(*) FROM items_dest`))
 	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id = 1 AND value = 150 AND "_cdc_deleted" = false`), "plain update should be applied")
 	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id = 2 AND value = 200 AND "_cdc_deleted" = true`), "delete should be soft-applied")
 	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id = 3 AND name = 'item3_final' AND value = 999 AND "_cdc_deleted" = true`), "update then delete should keep last values")
 	assert.Equal(t, 1, queryCount(fmt.Sprintf(`SELECT COUNT(*) FROM items_dest WHERE id = %d AND name = 'item%d' AND value = 400 AND "_cdc_deleted" = false`, newID, newID)), "insert should be applied")
 	assert.Greater(t, queryCount(`SELECT COUNT(DISTINCT "_cdc_lsn") FROM items_dest`), firstDistinctLSNs)
+
+	agreementIDs := fmt.Sprintf("(5, %d)", pathAgreementID)
+	// datetime() normalizes the destination's text representations (the merge
+	// path stores a trailing Z, the create path does not); the instants must
+	// still agree.
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(DISTINCT datetime(updated_at)) FROM items_dest WHERE id IN `+agreementIDs), "snapshot and binlog rows must agree on TIMESTAMP instants despite the non-UTC server time zone")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(DISTINCT big_unsigned) FROM items_dest WHERE id IN `+agreementIDs), "snapshot and binlog rows must agree on BIGINT UNSIGNED values")
+	assert.Equal(t, 2, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id IN `+agreementIDs+` AND big_unsigned > 9.3e18`), "BIGINT UNSIGNED must keep its unsigned range instead of clamping to MaxInt64 or wrapping negative")
 }

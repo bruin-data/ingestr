@@ -125,7 +125,7 @@ func TestBatchCaughtUpLSNIncludesEmittedBarrierEnd(t *testing.T) {
 
 func TestReadersRejectPre14BatchBeforeSnapshot(t *testing.T) {
 	src := &PostgresCDCSource{serverVersion: 130000}
-	cfg := CDCConfig{Mode: ModeBatch}
+	cfg := CDCConfig{}
 
 	single := NewCDCReader(src, "public.t", testStreamSchema(), cfg)
 	records, err := single.Read(context.Background(), source.ReadOptions{})
