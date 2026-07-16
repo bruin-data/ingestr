@@ -13,6 +13,7 @@ import (
 	gopath "path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -47,9 +48,10 @@ type connConfig struct {
 	clientSecret string
 	hostname     string
 	sitePath     string
-	library      string // optional document library name; empty => default ("Documents")
-	maxFileSize  int64  // optional max bytes per downloaded file; 0 => unlimited
-	maxFiles     int    // optional max files a glob may match; 0 => unlimited
+	library      string        // optional document library name; empty => default ("Documents")
+	maxFileSize  int64         // optional max bytes per downloaded file; 0 => unlimited
+	maxFiles     int           // optional max files a glob may match; 0 => unlimited
+	httpTimeout  time.Duration // per-request HTTP timeout; 0 => defaultDownloadTimeout
 }
 
 // tableSpec is the parsed form of a source-table string.
@@ -240,6 +242,13 @@ func parseURI(uri string) (connConfig, error) {
 			return connConfig{}, fmt.Errorf("invalid max_files %q: must be a non-negative integer (0 = unlimited)", v)
 		}
 		cfg.maxFiles = n
+	}
+	if v := strings.TrimSpace(q.Get("download_timeout")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return connConfig{}, fmt.Errorf("invalid download_timeout %q: must be a non-negative Go duration such as 30m, 10m, or 600s", v)
+		}
+		cfg.httpTimeout = d
 	}
 
 	missing := make([]string, 0, 5)
