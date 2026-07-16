@@ -110,7 +110,7 @@ func (s *MySQLSource) Connect(ctx context.Context, uri string) error {
 	s.db = db
 	s.uri = uri
 	s.database = database
-	s.restoreGC = beginMySQLArrowGCOptimization()
+	s.replaceGCRestore(beginMySQLArrowGCOptimization())
 	return nil
 }
 
@@ -134,11 +134,15 @@ func (s *MySQLSource) Close(ctx context.Context) error {
 	if s.db != nil {
 		err = s.db.Close()
 	}
+	s.replaceGCRestore(nil)
+	return err
+}
+
+func (s *MySQLSource) replaceGCRestore(next func()) {
 	if s.restoreGC != nil {
 		s.restoreGC()
-		s.restoreGC = nil
 	}
-	return err
+	s.restoreGC = next
 }
 
 func (s *MySQLSource) HandlesIncrementality() bool {

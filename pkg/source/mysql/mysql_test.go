@@ -46,6 +46,24 @@ func TestBufferedReadConnPreservesBytes(t *testing.T) {
 	}
 }
 
+func TestReplaceGCRestoreReleasesPreviousLease(t *testing.T) {
+	source := NewMySQLSource()
+	firstCalls := 0
+	secondCalls := 0
+
+	source.replaceGCRestore(func() { firstCalls++ })
+	source.replaceGCRestore(func() { secondCalls++ })
+	if firstCalls != 1 || secondCalls != 0 {
+		t.Fatalf("replacing restore called first %d times and second %d times", firstCalls, secondCalls)
+	}
+
+	source.replaceGCRestore(nil)
+	source.replaceGCRestore(nil)
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("clearing restore called first %d times and second %d times", firstCalls, secondCalls)
+	}
+}
+
 func TestIsVitessServer(t *testing.T) {
 	cases := []struct {
 		version string
