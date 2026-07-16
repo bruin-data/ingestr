@@ -130,6 +130,7 @@ comma := ,
 #   make test-conformance-only BACKENDS=snowflake
 #   make test-conformance-only BACKENDS=snowflake,postgres
 test-conformance-only:
+	@if [ -z "$(BACKENDS)" ]; then echo "$(ERROR_COLOR)==> BACKENDS is required, e.g. make test-conformance-only BACKENDS=snowflake$(NO_COLOR)"; exit 1; fi
 	@echo "$(OK_COLOR)==> Running destination standards tests for: $(BACKENDS)$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) \
 		INTEGRATION_BACKENDS=$(BACKENDS) go test -tags integration -v -timeout 15m ./tests/integration \
