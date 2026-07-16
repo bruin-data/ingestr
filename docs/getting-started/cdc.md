@@ -48,7 +48,7 @@ On every run after the first, a CDC connector resumes from the last durable posi
 
 ### One-shot vs. streaming
 
-By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs. Pass the `--stream` CLI flag to run continuously instead: ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery, and the `merge` strategy makes replays idempotent. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
+By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs, and the way to run MySQL CDC. Continuous streaming is available for `postgres+cdc`, `mssql+cdc`, and `mongodb+cdc`: pass the `--stream` CLI flag and ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery, and the `merge` strategy makes replays idempotent. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
 
 ### Multi-table CDC
 

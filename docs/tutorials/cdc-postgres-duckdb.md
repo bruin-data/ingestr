@@ -2,7 +2,7 @@
 
 This walkthrough takes you from a running PostgreSQL database to a DuckDB file that stays in sync through [Change Data Capture](/getting-started/cdc.md): an initial snapshot, then live inserts, updates, and deletes. It assumes you already have a PostgreSQL server you can connect to and [ingestr installed](/getting-started/quickstart.md#installation).
 
-For the full reference on the connector's options, see [Postgres → Change Data Capture](/supported-sources/postgres.md#change-data-capture-postgres-cdc).
+For the full reference on the connector's options, see [Postgres → Change Data Capture](/supported-sources/postgres.md#change-data-capture-postgrescdc).
 
 ## 1. Prepare the source
 
