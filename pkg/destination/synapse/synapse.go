@@ -415,10 +415,6 @@ func (d *SynapseDestination) MergeTable(ctx context.Context, opts destination.Me
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalKey string) string {
-	return buildMergeSQLWithPredicate(targetTable, stagingTable, primaryKeys, quotedColumns, nonPKColumns, incrementalKey, "")
-}
-
 func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalKey, incrementalPredicate string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {

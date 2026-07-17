@@ -484,10 +484,6 @@ func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.Mer
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
-	return buildMergeSQLWithPredicate(targetTable, stagingTable, primaryKeys, quotedColumns, nonPKColumns, "")
-}
-
 func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalPredicate string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
