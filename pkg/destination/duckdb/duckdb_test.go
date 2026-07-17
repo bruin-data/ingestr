@@ -836,10 +836,11 @@ func TestMergeTable(t *testing.T) {
 
 	// Perform merge
 	err = dest.MergeTable(ctx, destination.MergeOptions{
-		StagingTable: "staging_table",
-		TargetTable:  "target_table",
-		PrimaryKeys:  []string{"id"},
-		Columns:      []string{"id", "name", "value"},
+		StagingTable:         "staging_table",
+		TargetTable:          "target_table",
+		PrimaryKeys:          []string{"id"},
+		Columns:              []string{"id", "name", "value"},
+		IncrementalPredicate: "target.value >= 100",
 	})
 	require.NoError(t, err)
 

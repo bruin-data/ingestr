@@ -280,7 +280,7 @@ WHEN MATCHED THEN UPDATE SET %s
 WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 		targetFQN,
 		dedupSource,
-		strings.Join(onConditions, " AND "),
+		destination.MergeJoinCondition(strings.Join(onConditions, " AND "), opts.IncrementalPredicate),
 		strings.Join(updateSets, ", "),
 		strings.Join(insertCols, ", "),
 		strings.Join(insertVals, ", "),
@@ -423,6 +423,7 @@ func (d *TrinoDestination) BeginTransaction(ctx context.Context) (destination.Tr
 func (d *TrinoDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *TrinoDestination) SupportsAppendStrategy() bool       { return true }
 func (d *TrinoDestination) SupportsMergeStrategy() bool        { return true }
+func (d *TrinoDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *TrinoDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *TrinoDestination) SupportsAtomicSwap() bool           { return false }

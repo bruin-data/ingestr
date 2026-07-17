@@ -203,10 +203,11 @@ func TestCDCMergeWithoutUnchangedColsMarkerUpdatesNormally(t *testing.T) {
 	}
 
 	err := d.MergeTable(t.Context(), destination.MergeOptions{
-		TargetTable:  "items",
-		StagingTable: "items_staging",
-		PrimaryKeys:  []string{"id"},
-		Columns:      []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		TargetTable:          "items",
+		StagingTable:         "items_staging",
+		PrimaryKeys:          []string{"id"},
+		Columns:              []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		IncrementalPredicate: "target.id >= 1",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -16,6 +16,45 @@ func TestValidateManagedCDCStateFailsClosed(t *testing.T) {
 	require.ErrorContains(t, dest.ValidateManagedCDCState(), "does not support destination-managed PostgreSQL CDC state")
 }
 
+func TestBuildPredicateMergeStatements(t *testing.T) {
+	statements := buildPredicateMergeStatements(
+		"stage.events",
+		"public.events",
+		[]string{"id"},
+		[]string{"id", "event_date"},
+		`target."event_date" >= CURRENT_DATE - 7`,
+	)
+
+	require.Len(t, statements, 2)
+	require.Contains(t, statements[0], `INSERT INTO "public"."events" ("id", "event_date") SELECT source."id", source."event_date" FROM`)
+	require.Contains(t, statements[0], `NOT EXISTS (SELECT 1 FROM "public"."events" AS target WHERE target."id" = source."id" AND (target."event_date" >= CURRENT_DATE - 7))`)
+	require.Contains(t, statements[1], `UPDATE "public"."events" AS target SET "event_date" = source."event_date" FROM`)
+	require.Contains(t, statements[1], `WHERE target."id" = source."id" AND (target."event_date" >= CURRENT_DATE - 7)`)
+	for _, stmt := range statements {
+		require.NotContains(t, stmt, "MERGE INTO")
+	}
+}
+
+func TestBuildPredicateMergeStatementsCDC(t *testing.T) {
+	statements := buildPredicateMergeStatements(
+		"stage.events",
+		"public.events",
+		[]string{"id"},
+		[]string{"id", "event_date", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+		`target."event_date" >= CURRENT_DATE - 7`,
+	)
+
+	require.Len(t, statements, 3)
+	require.Contains(t, statements[0], `source."_cdc_deleted" = false AND NOT EXISTS`)
+	require.Contains(t, statements[1], `UPDATE`)
+	require.Contains(t, statements[1], `source."_cdc_deleted" = false`)
+	require.Contains(t, statements[2], `SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at"`)
+	require.Contains(t, statements[2], `source."_cdc_deleted" = true`)
+	for _, stmt := range statements {
+		require.Contains(t, stmt, `(target."event_date" >= CURRENT_DATE - 7)`)
+	}
+}
+
 type testRecord struct {
 	cols  []arrow.Array
 	names []string

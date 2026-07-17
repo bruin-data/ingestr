@@ -739,7 +739,10 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}()
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
-	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
+	onCondition := destination.MergeJoinCondition(
+		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		opts.IncrementalPredicate,
+	)
 
 	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
 	// latest change per PK wins (LSN strings are fixed-width and sort
@@ -822,7 +825,10 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		return nil
 	}
 
-	if len(nonPKColumns) > 0 {
+	runUpdate := func() error {
+		if len(nonPKColumns) == 0 {
+			return nil
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
@@ -835,21 +841,40 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		if err := d.exec(ctx, updateSQL); err != nil {
 			return fmt.Errorf("failed to update existing records: %w", err)
 		}
+		return nil
 	}
 
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-		quotedTargetTable,
-		strings.Join(destQuoted, ", "),
-		strings.Join(destQuoted, ", "),
-		insertSource,
-		quotedTargetTable,
-		onCondition,
-	)
-	config.Debug("[DUCKDB MERGE] Executing INSERT: %s", insertSQL)
+	runInsert := func() error {
+		insertSQL := fmt.Sprintf(
+			`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			insertSource,
+			quotedTargetTable,
+			onCondition,
+		)
+		config.Debug("[DUCKDB MERGE] Executing INSERT: %s", insertSQL)
 
-	if err := d.exec(ctx, insertSQL); err != nil {
-		return fmt.Errorf("failed to insert new records: %w", err)
+		if err := d.exec(ctx, insertSQL); err != nil {
+			return fmt.Errorf("failed to insert new records: %w", err)
+		}
+		return nil
+	}
+
+	// With a predicate, the INSERT runs first so its anti-join sees the
+	// pre-update target: an UPDATE that moves a matched row out of the
+	// predicate window would otherwise make the INSERT re-add it as a
+	// duplicate. CDC keeps the original order because its INSERT also
+	// materializes delete tombstones, which the UPDATE must not overwrite.
+	steps := []func() error{runUpdate, runInsert}
+	if !isCDC && strings.TrimSpace(opts.IncrementalPredicate) != "" {
+		steps = []func() error{runInsert, runUpdate}
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 
 	if isCDC {
@@ -1228,6 +1253,7 @@ func (t *duckdbTransaction) Rollback(ctx context.Context) error {
 func (d *DuckDBDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *DuckDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DuckDBDestination) SupportsMergeStrategy() bool        { return true }
+func (d *DuckDBDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }

@@ -49,6 +49,20 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.NotContains(t, sql, "ORDER BY (SELECT NULL)")
 	})
 
+	t.Run("incremental predicate", func(t *testing.T) {
+		sql := buildMergeSQLWithPredicate(
+			"staging_schema.staging_tbl",
+			"target_schema.target_tbl",
+			[]string{"id"},
+			[]string{"id", "event_date"},
+			"",
+			nil,
+			"target.\"EVENT_DATE\" >= DATEADD(day, -7, CURRENT_DATE())",
+		)
+
+		assert.Contains(t, sql, `ON target."ID" = source."ID" AND (target."EVENT_DATE" >= DATEADD(day, -7, CURRENT_DATE()))`)
+	})
+
 	t.Run("non_cdc_all_pk_columns", func(t *testing.T) {
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id"}, "", nil)
 		assert.NotContains(t, sql, "WHEN MATCHED THEN")

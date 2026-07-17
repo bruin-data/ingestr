@@ -488,6 +488,19 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 	}
 }
 
+func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
+	got := buildMergeSQLWithPredicate(
+		"dbo.items",
+		"stage.items",
+		[]string{"id"},
+		[]string{"id", "event_date"},
+		"",
+		"target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date))",
+	)
+
+	assertContains(t, got, "ON target.[id] = source.[id] AND (target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date)))")
+}
+
 func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
 	columns := []string{"id", "Foo", "foo", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
 	got := buildMergeSQL("dbo.items", "stage.items", []string{"id"}, columns, "")
