@@ -26,7 +26,7 @@ func replaceShouldDedup(dest destination.Destination, primaryKeys []string) bool
 		dest.GetScheme() != "clickhouse"
 }
 
-func sourcePrimaryKeysSafeForReplaceFastPath(job *IngestionJob) bool {
+func effectivePrimaryKeysGuaranteedUnique(job *IngestionJob) bool {
 	return sourcePrimaryKeysGuaranteedUnique(job) &&
 		!primaryKeyValuesMayChange(job)
 }
@@ -225,7 +225,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 
 	// Deduplicated replace: Load a PK-free staging table so duplicate keys can land.
 	dedup := useStaging &&
-		!sourcePrimaryKeysSafeForReplaceFastPath(job) &&
+		!effectivePrimaryKeysGuaranteedUnique(job) &&
 		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
 	stagingPrimaryKeys := job.Config.PrimaryKeys
 	if dedup {

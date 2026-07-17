@@ -74,16 +74,19 @@ type Transaction interface {
 
 // MergeOptions contains parameters for merge operations.
 type MergeOptions struct {
-	StagingTable         string
-	TargetTable          string
-	PrimaryKeys          []string
-	Columns              []string
-	IncrementalKey       string
-	IncrementalPredicate string
-	Schema               *schema.TableSchema
-	CommitToken          source.DurableID
-	CDCResumeLSN         string
-	SkipCDCResume        bool
+	StagingTable string
+	TargetTable  string
+	PrimaryKeys  []string
+	// StagingPrimaryKeysUnique allows destinations to skip per-key staging
+	// deduplication when the caller guarantees the effective keys are unique.
+	StagingPrimaryKeysUnique bool
+	Columns                  []string
+	IncrementalKey           string
+	IncrementalPredicate     string
+	Schema                   *schema.TableSchema
+	CommitToken              source.DurableID
+	CDCResumeLSN             string
+	SkipCDCResume            bool
 	// CDCExpectedIncarnation fences a managed CDC merge to the physical target
 	// that was bound before the source read began.
 	CDCExpectedIncarnation string

@@ -913,15 +913,17 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		}
 	} else {
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
-		// DISTINCT ON dedupes staging by PK so the same target row isn't
-		// affected twice in one statement, which Postgres rejects with
-		// SQLSTATE 21000. When an incremental key is set the latest row per PK
-		// wins; otherwise the winner is arbitrary.
+		// Unless the caller guarantees staging PK uniqueness, DISTINCT ON
+		// prevents the same target row from being affected twice in one
+		// statement, which Postgres rejects with SQLSTATE 21000. When an
+		// incremental key is set the latest row per PK wins; otherwise the
+		// winner is arbitrary.
 		pkList := strings.Join(quotedPKs, ", ")
 		orderBy := pkList
 		if opts.IncrementalKey != "" {
 			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
 		}
+		stagingSelect := buildMergeStagingSelect(quotedStagingTable, pkList, destQuoted, orderBy, opts.StagingPrimaryKeysUnique)
 
 		var upsertSQL string
 		if strings.TrimSpace(opts.IncrementalPredicate) != "" {
@@ -933,16 +935,14 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 				nonPKColumns,
 				orderBy,
 				opts.IncrementalPredicate,
+				opts.StagingPrimaryKeysUnique,
 			)
 		} else {
 			upsertSQL = fmt.Sprintf(
-				`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
+				`INSERT INTO %s (%s) %s ON CONFLICT (%s) DO UPDATE SET %s`,
 				quotedTargetTable,
 				strings.Join(destQuoted, ", "),
-				pkList,
-				strings.Join(destQuoted, ", "),
-				quotedStagingTable,
-				orderBy,
+				stagingSelect,
 				pkList,
 				buildConflictUpdateSet(nonPKColumns),
 			)
@@ -1614,7 +1614,15 @@ func buildConflictUpdateSet(columns []string) string {
 	return strings.Join(sets, ", ")
 }
 
-func buildPredicateMergeSQL(quotedTargetTable, quotedStagingTable string, primaryKeys, destQuoted, nonPKColumns []string, orderBy, incrementalPredicate string) string {
+func buildMergeStagingSelect(quotedStagingTable, pkList string, destQuoted []string, orderBy string, primaryKeysUnique bool) string {
+	columns := strings.Join(destQuoted, ", ")
+	if primaryKeysUnique {
+		return fmt.Sprintf("SELECT %s FROM %s", columns, quotedStagingTable)
+	}
+	return fmt.Sprintf("SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s", pkList, columns, quotedStagingTable, orderBy)
+}
+
+func buildPredicateMergeSQL(quotedTargetTable, quotedStagingTable string, primaryKeys, destQuoted, nonPKColumns []string, orderBy, incrementalPredicate string, primaryKeysUnique bool) string {
 	pkList := strings.Join(quoteColumns(primaryKeys), ", ")
 	matchCondition := destination.MergeJoinCondition(
 		buildJoinCondition(primaryKeys, "target", "source"),
@@ -1624,20 +1632,18 @@ func buildPredicateMergeSQL(quotedTargetTable, quotedStagingTable string, primar
 	for i, col := range destQuoted {
 		sourceColumns[i] = "source." + col
 	}
+	stagingSelect := buildMergeStagingSelect(quotedStagingTable, pkList, destQuoted, orderBy, primaryKeysUnique)
 
 	return fmt.Sprintf(
 		`WITH source AS (
-			SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s
+			%s
 		), updated AS (
 			UPDATE %s AS target SET %s FROM source WHERE %s RETURNING 1
 		)
 		INSERT INTO %s (%s)
 		SELECT %s FROM source
 		WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-		pkList,
-		strings.Join(destQuoted, ", "),
-		quotedStagingTable,
-		orderBy,
+		stagingSelect,
 		quotedTargetTable,
 		buildCDCConflictUpdateSet(nonPKColumns, "target", "source", ""),
 		matchCondition,
