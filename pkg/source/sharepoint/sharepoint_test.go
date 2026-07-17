@@ -339,6 +339,7 @@ func TestParseURI(t *testing.T) {
 	assert.Equal(t, "", cfg.library)          // optional, defaults to the Documents library
 	assert.EqualValues(t, 0, cfg.maxFileSize) // unlimited by default
 	assert.Equal(t, defaultMaxFiles, cfg.maxFiles)
+	assert.EqualValues(t, 0, cfg.httpTimeout)
 
 	cfg, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=example.sharepoint.com&library=Finance%20Docs")
 	require.NoError(t, err)
@@ -353,6 +354,16 @@ func TestParseURI(t *testing.T) {
 	_, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&max_file_size=-1")
 	require.Error(t, err)
 	_, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&max_files=abc")
+	require.Error(t, err)
+
+	// configurable download timeout (Go duration)
+	cfg, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&download_timeout=30m")
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, cfg.httpTimeout)
+
+	_, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&download_timeout=abc")
+	require.Error(t, err)
+	_, err = parseURI("sharepoint://?tenant_id=t&client_id=c&client_secret=s&site=sites/Example&hostname=h&download_timeout=-5m")
 	require.Error(t, err)
 
 	_, err = parseURI("sharepoint://?tenant_id=t")

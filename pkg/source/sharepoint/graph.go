@@ -29,6 +29,8 @@ var graphScopes = []string{"https://graph.microsoft.com/.default"}
 // Microsoft's expected format: ISV|CompanyName|AppName/Version.
 const userAgent = "ISV|Bruin|ingestr/1.0"
 
+const defaultDownloadTimeout = 10 * time.Minute
+
 // graphClient talks to the Microsoft Graph API for a single SharePoint site.
 // Authentication uses the OAuth2 client-credentials flow via azidentity, which
 // caches and refreshes the access token internally.
@@ -66,8 +68,13 @@ func newGraphClient(cfg connConfig) (*graphClient, error) {
 		return nil, fmt.Errorf("failed to create SharePoint client credential: %w", err)
 	}
 
+	timeout := cfg.httpTimeout
+	if timeout <= 0 {
+		timeout = defaultDownloadTimeout
+	}
+
 	client := httpclient.New(
-		httpclient.WithTimeout(120*time.Second),
+		httpclient.WithTimeout(timeout),
 		httpclient.WithRetry(5, 2*time.Second, 30*time.Second),
 		httpclient.WithUserAgent(userAgent),
 		httpclient.WithDebug(config.DebugMode),
