@@ -309,6 +309,11 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Adapty</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Airtable</td>
         <td>✅</td>
         <td>-</td>

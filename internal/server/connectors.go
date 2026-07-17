@@ -278,6 +278,7 @@ func GetConnectors() []ConnectorType {
 	connectors = append(
 		connectors,
 		genericURIConnector("adjust", "Adjust", []string{"adjust"}, true, false),
+		genericURIConnector("adapty", "Adapty", []string{"adapty"}, true, false),
 		genericURIConnector("airtable", "Airtable", []string{"airtable"}, true, false),
 		genericURIConnector("allium", "Allium", []string{"allium"}, true, false),
 		genericURIConnector("amplitude", "Amplitude", []string{"amplitude"}, true, false),

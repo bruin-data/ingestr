@@ -24,6 +24,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 ## Analytics, feedback, and media
 
+- [Adapty](/supported-sources/adapty.md)
 - [G2](/supported-sources/g2.md)
 - [Google Analytics](/supported-sources/google_analytics.md)
 - [Mixpanel](/supported-sources/mixpanel.md)
