@@ -120,6 +120,7 @@ type ReadOptions struct {
 	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
 	CDCLegacySlotSuffix             string              // Optional: prior auto-slot suffix used only for upgrade resume
 	CDCSnapshotReplace              bool                // Consumer can apply a full-snapshot replacement boundary
+	CDCStableDataBatches            bool                // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool
 	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
@@ -137,6 +138,10 @@ func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
 	return defaultSize
 }
 
+// DurableID is an exact, replay-stable payload or checkpoint identity. The
+// empty value means that the result has no durable identity.
+type DurableID string
+
 type RecordBatchResult struct {
 	Batch     arrow.RecordBatch
 	Err       error
@@ -151,6 +156,31 @@ type RecordBatchResult struct {
 	// to and including the batch that carried it. Nil means no feedback needed.
 	CommitToken any
 
+	// DurableCommitID identifies the exact data payload carried by this result.
+	// It must be stable when that payload is replayed across processes and
+	// reconnects. Cumulative watermarks and connection-local acknowledgement
+	// handles must leave it empty.
+	DurableCommitID DurableID
+
+	// DurableCommitPosition is the resumable source position made durable by
+	// DurableCommitID. It is separate because a payload identity may include a
+	// kind/table prefix that is not a valid source cursor.
+	DurableCommitPosition string
+
+	// DurableCheckpointID and DurableCheckpointPosition identify a global
+	// source low-watermark that is safe to persist for tables without rows in
+	// the current flush. They may differ from this batch's payload identity.
+	// DurableCheckpointTable limits the checkpoint to one source table; an
+	// empty value means the checkpoint is safe for every table in the stream.
+	DurableCheckpointID       DurableID
+	DurableCheckpointPosition string
+	DurableCheckpointTable    string
+
+	// SnapshotReset marks the start of a fresh snapshot attempt for TableName.
+	// Consumers must empty the destination table before accepting subsequent
+	// snapshot rows so an interrupted older attempt cannot contaminate it.
+	SnapshotReset bool
+
 	// TableInfo announces a table that appeared after the read started (e.g. a
 	// table created on the source mid-stream). Consumers that prepared their
 	// per-table state upfront use it to provision the destination before any
@@ -164,18 +194,22 @@ type RecordBatchResult struct {
 }
 
 type CDCSnapshotInvalidation struct {
-	TableName   string
-	Incarnation string
+	TableName         string
+	Incarnation       string
+	SchemaFingerprint string
 }
 
 // CDCStateCommitToken carries destination-managed CDC state alongside the
 // source's native acknowledgement token. Position is the latest globally safe
-// source position. SnapshotPositions marks source tables whose full snapshot is
-// included in all preceding results; the matching incarnation and schema maps
-// bind those snapshots to the exact source table shape.
+// source position. DataBatchID is an optional source-stable identity for the
+// exact data batch carried by the result. SnapshotPositions marks source tables
+// whose full snapshot is included in all preceding results; the matching
+// incarnation and schema maps bind those snapshots to the exact source table
+// shape.
 type CDCStateCommitToken struct {
 	SourceCommitToken    any
 	Position             string
+	DataBatchID          DurableID
 	SnapshotPositions    map[string]string
 	SnapshotIncarnations map[string]string
 	SnapshotSchemas      map[string]string
@@ -289,6 +323,12 @@ type SourceTable interface {
 
 type PrimaryKeyUniquenessProvider interface {
 	PrimaryKeysUnique() bool
+}
+
+// SnapshotResetEmitter identifies sources whose record stream can begin a
+// fresh snapshot with SnapshotReset control records.
+type SnapshotResetEmitter interface {
+	EmitsSnapshotResets() bool
 }
 
 // PartitionedTable is an optional interface that a SourceTable can implement

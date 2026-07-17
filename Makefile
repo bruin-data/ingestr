@@ -123,6 +123,19 @@ test-conformance:
 	@echo "$(OK_COLOR)==> Running destination standards tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -timeout 10m ./tests/integration -run TestDestinations_
 
+comma := ,
+# Run destination conformance for only the given backend(s), skipping the Docker
+# setup for every other backend. Backends with no container (snowflake, bigquery)
+# need no Docker at all. Comma-separate for multiple. Examples:
+#   make test-conformance-only BACKENDS=snowflake
+#   make test-conformance-only BACKENDS=snowflake,postgres
+test-conformance-only:
+	@if [ -z "$(BACKENDS)" ]; then echo "$(ERROR_COLOR)==> BACKENDS is required, e.g. make test-conformance-only BACKENDS=snowflake$(NO_COLOR)"; exit 1; fi
+	@echo "$(OK_COLOR)==> Running destination standards tests for: $(BACKENDS)$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) \
+		INTEGRATION_BACKENDS=$(BACKENDS) go test -tags integration -v -timeout 15m ./tests/integration \
+		-run 'TestDestinations_.*/($(subst $(comma),|,$(BACKENDS)))'
+
 
 # Format code and run linters (for local development)
 format: generate

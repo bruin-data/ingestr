@@ -160,6 +160,26 @@ ingestr performs several validations on custom aggregation pipelines:
 - Consider using `$limit` to restrict the number of documents processed
 - For large datasets, MongoDB's `allowDiskUse: true` option is automatically enabled for aggregation pipelines
 
+## Change data capture
+
+ingestr can keep a destination in sync with a MongoDB collection through [change streams](https://www.mongodb.com/docs/manual/changeStreams/) using the `mongodb+cdc://` and `mongodb+srv+cdc://` URI schemes.
+
+```bash
+ingestr ingest \
+  --source-uri "mongodb+cdc://user:password@localhost:27017/" \
+  --source-table "shop.customers" \
+  --dest-uri "duckdb:///warehouse.duckdb" \
+  --dest-table "shop.customers"
+```
+
+This path reads a consistent snapshot of the collection first, then follows the change stream for inserts, updates, and deletes. It produces the `_cdc_lsn` (a change-stream resume token), `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resumes from the stored token on subsequent runs. Incremental runs use the `merge` strategy so changes are applied by `_id`; deletes are soft (`_cdc_deleted = true`, and because MongoDB delete events carry only the `_id`, the row's other values are left untouched). Run with `--full-refresh` to rebuild from a fresh snapshot, or `--stream` to ingest continuously instead of once per invocation.
+
+Requirements:
+- Change streams require a **replica set** (or sharded cluster); they aren't available on a standalone `mongod`. Atlas clusters already satisfy this.
+- As a schema-less source, MongoDB CDC infers the destination schema from the documents it reads (see [schema inference](/getting-started/core-concepts.md)); nested documents and arrays land as JSON.
+
+For a full walkthrough — initializing a replica set and replicating a collection into DuckDB — see [Replicate MongoDB to DuckDB with CDC](/tutorials/cdc-mongodb-duckdb.md).
+
 ## Using MongoDB Atlas as a source
 
 MongoDB Atlas can be used as a source to extract data using the SRV connection string format.

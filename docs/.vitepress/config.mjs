@@ -66,6 +66,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             text: "Incremental Loading",
             link: "/getting-started/incremental-loading.md",
           },
+          {
+            text: "Change Data Capture (CDC)",
+            link: "/getting-started/cdc.md",
+          },
           { text: "Data Masking", link: "/getting-started/data-masking.md" },
           { text: "Migration Guide", link: "/getting-started/migration-to-v1.md" },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
@@ -125,13 +129,38 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               {
                 text: "Microsoft SQL Server",
                 link: "/supported-sources/mssql.md",
+                collapsed: true,
+                items: [
+                  { text: "CDC to DuckDB Tutorial", link: "/tutorials/cdc-sqlserver-duckdb.md" },
+                ],
               },
-              { text: "MongoDB", link: "/supported-sources/mongodb.md" },
+              {
+                text: "MongoDB",
+                link: "/supported-sources/mongodb.md",
+                collapsed: true,
+                items: [
+                  { text: "CDC to DuckDB Tutorial", link: "/tutorials/cdc-mongodb-duckdb.md" },
+                ],
+              },
               { text: "MotherDuck", link: "/supported-sources/motherduck.md" },
-              { text: "MySQL", link: "/supported-sources/mysql.md" },
+              {
+                text: "MySQL",
+                link: "/supported-sources/mysql.md",
+                collapsed: true,
+                items: [
+                  { text: "CDC to DuckDB Tutorial", link: "/tutorials/cdc-mysql-duckdb.md" },
+                ],
+              },
               { text: "Oracle", link: "/supported-sources/oracle.md" },
               { text: "PlanetScale", link: "/supported-sources/planetscale.md" },
-              { text: "Postgres", link: "/supported-sources/postgres.md" },
+              {
+                text: "Postgres",
+                link: "/supported-sources/postgres.md",
+                collapsed: true,
+                items: [
+                  { text: "CDC to DuckDB Tutorial", link: "/tutorials/cdc-postgres-duckdb.md" },
+                ],
+              },
               { text: "RabbitMQ", link: "/supported-sources/rabbitmq.md" },
               { text: "SAP Hana", link: "/supported-sources/sap-hana.md" },
               { text: "Snowflake", link: "/supported-sources/snowflake.md" },

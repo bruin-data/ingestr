@@ -3,6 +3,7 @@ package destination
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,26 @@ import (
 type boundaryWriteDestination struct {
 	Destination
 	write func(context.Context, <-chan source.RecordBatchResult, WriteOptions) error
+}
+
+type conditionalBoundaryDestination struct {
+	*boundaryWriteDestination
+	currentIncarnation string
+	unconditionalCalls atomic.Int64
+	conditionalCalls   atomic.Int64
+}
+
+func (d *conditionalBoundaryDestination) TruncateCDCTable(context.Context, string) error {
+	d.unconditionalCalls.Add(1)
+	return nil
+}
+
+func (d *conditionalBoundaryDestination) TruncateCDCTableIfIncarnation(_ context.Context, _, expected string) error {
+	d.conditionalCalls.Add(1)
+	if expected != d.currentIncarnation {
+		return errors.New("target incarnation changed")
+	}
+	return nil
 }
 
 func (d *boundaryWriteDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error {
@@ -156,6 +177,34 @@ func TestWriteWithTruncateBoundariesReturnsWhenCanceledProducerNeverCloses(t *te
 	}
 	if got := releases.Load(); got != 1 {
 		t.Fatalf("batch release count = %d, want 1", got)
+	}
+}
+
+func TestWriteWithTruncateBoundariesRefusesRecreatedManagedTarget(t *testing.T) {
+	dest := &conditionalBoundaryDestination{
+		boundaryWriteDestination: &boundaryWriteDestination{write: func(_ context.Context, records <-chan source.RecordBatchResult, _ WriteOptions) error {
+			for result := range records {
+				releaseCDCResult(result)
+			}
+			return nil
+		}},
+		currentIncarnation: "replacement-uuid",
+	}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Truncate: true, CDCWALTruncate: true}
+	close(records)
+
+	_, err := WriteWithTruncateBoundaries(context.Background(), dest, records, WriteOptions{
+		Table: "items", CDCExpectedIncarnation: "bound-original-uuid",
+	})
+	if err == nil || !strings.Contains(err.Error(), "target incarnation changed") {
+		t.Fatalf("WriteWithTruncateBoundaries() error = %v, want incarnation change", err)
+	}
+	if got := dest.unconditionalCalls.Load(); got != 0 {
+		t.Fatalf("unconditional truncate calls = %d, want 0", got)
+	}
+	if got := dest.conditionalCalls.Load(); got != 1 {
+		t.Fatalf("conditional truncate calls = %d, want 1", got)
 	}
 }
 
