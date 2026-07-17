@@ -865,10 +865,9 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate. CDC keeps the original order because its INSERT also
-	// materializes delete tombstones, which the UPDATE must not overwrite.
+	// duplicate.
 	steps := []func() error{runUpdate, runInsert}
-	if !isCDC && strings.TrimSpace(opts.IncrementalPredicate) != "" {
+	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
 	}
 	for _, step := range steps {

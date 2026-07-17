@@ -1176,6 +1176,47 @@ func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+func TestMergeTable_CDCWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	err := dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		);
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		);
+		INSERT INTO target_table VALUES (1, 'before', '00000000000000000001', false, CURRENT_TIMESTAMP);
+		INSERT INTO staging_table VALUES (1, 'after', '00000000000000000002', false, CURRENT_TIMESTAMP)
+	`)
+	require.NoError(t, err)
+
+	err = dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable:         "staging_table",
+		TargetTable:          "target_table",
+		PrimaryKeys:          []string{"id"},
+		Columns:              []string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		IncrementalPredicate: "target.name = 'before'",
+	})
+	require.NoError(t, err)
+
+	db := openDuckDB(t, ctx, path)
+	var count int
+	var nameRaw []byte
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(name) FROM target_table WHERE id = 1").Scan(&count, &nameRaw))
+	assert.Equal(t, 1, count)
+	assert.Equal(t, "after", string(nameRaw))
+}
+
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
