@@ -141,6 +141,8 @@ scenarios:
     destination: snowflake
 
 tools:
+  # Keep the standard five-run plus warmup sweep from spending hours on known
+  # slow combinations. The 1k and 100k sizes remain fully covered.
   gong:
     binary: bin/ingestr
 
@@ -156,9 +158,18 @@ tools:
     skip:
       - source_type: mongodb
         destination_type: mssql
+      - source_type: mongodb
+        sizes: ["10m"]
+      - destination_type: mssql
+        sizes: ["10m"]
 
   sling:
     requires: sling
+    skip:
+      - destination_type: mssql
+        sizes: ["1m", "10m"]
+      - source_type: mongodb
+        sizes: ["10m"]
 
   dlt:
     script: scripts/bench_dlt.py
@@ -171,6 +182,12 @@ tools:
       - source: local_mongodb
         destination_type: mssql
         backend: default
+    skip:
+      - destination_type: mssql
+        sizes: ["1m", "10m"]
+      - source_type: mongodb
+        destination_type: postgres
+        sizes: ["10m"]
 
   airbyte:
     script: scripts/bench_airbyte.py
@@ -181,6 +198,7 @@ tools:
       - destination_type: bigquery
       - destination_type: snowflake
       - destination_type: mssql
+      - sizes: ["10m"]
 
   spark:
     script: scripts/bench_spark.py
@@ -191,3 +209,5 @@ tools:
       - source_type: mongodb
       - destination_type: bigquery
       - destination_type: snowflake
+      - destination_type: duckdb
+        sizes: ["1m", "10m"]
