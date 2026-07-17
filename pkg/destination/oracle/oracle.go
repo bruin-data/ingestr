@@ -457,7 +457,7 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 		upsertSource = dedupSource(" WHERE " + quoteColumn(destination.CDCDeletedColumn) + " = 0")
 	}
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns)
+	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -473,12 +473,12 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	if isCDC {
 		markDeletedSQL := fmt.Sprintf(
-			`MERGE INTO %s target
+			`MERGE INTO %s
 USING %s
 ON (%s)
 WHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s
 WHERE source.%s = 1`,
-			quoteTable(opts.TargetTable),
+			mergeTargetExpr(opts.TargetTable, opts.IncrementalPredicate),
 			dedupSource(""),
 			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
 			quoteColumn(destination.CDCDeletedColumn),
@@ -494,7 +494,7 @@ WHERE source.%s = 1`,
 			return fmt.Errorf("failed to mark deleted records: %w", err)
 		}
 
-		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQL(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys)
+		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQLWithPredicate(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys, opts.IncrementalPredicate)
 		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
 		if _, err := tx.ExecContext(ctx, insertDeletedSQL); err != nil {
 			config.LogFailedQuery(insertDeletedSQL, err)
@@ -511,11 +511,26 @@ WHERE source.%s = 1`,
 }
 
 func buildMergeSQL(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string) string {
+	return buildMergeSQLWithPredicate(targetTable, sourceExpr, columns, primaryKeys, updateColumns, "")
+}
+
+// mergeTargetExpr filters the merge target through an inline view when a
+// predicate is set. Oracle raises ORA-38104 if the predicate were placed in
+// the ON clause and referenced a column updated by WHEN MATCHED.
+func mergeTargetExpr(targetTable, incrementalPredicate string) string {
+	predicate := strings.TrimSpace(incrementalPredicate)
+	if predicate == "" {
+		return quoteTable(targetTable) + " target"
+	}
+	return fmt.Sprintf("(SELECT * FROM %s target WHERE %s) target", quoteTable(targetTable), predicate)
+}
+
+func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	var b strings.Builder
 	fmt.Fprintf(
-		&b, "MERGE INTO %s target\nUSING %s\nON (%s)\n",
-		quoteTable(targetTable),
+		&b, "MERGE INTO %s\nUSING %s\nON (%s)\n",
+		mergeTargetExpr(targetTable, incrementalPredicate),
 		sourceExpr,
 		buildJoinCondition(primaryKeys, "target", "source"),
 	)
@@ -535,6 +550,10 @@ func buildMergeSQL(targetTable, sourceExpr string, columns, primaryKeys, updateC
 }
 
 func buildCDCDeleteTombstoneInsertSQL(targetTable, sourceExpr string, columns, primaryKeys []string) string {
+	return buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr, columns, primaryKeys, "")
+}
+
+func buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.%s = 1 AND NOT EXISTS (SELECT 1 FROM %s target WHERE %s)",
@@ -544,7 +563,7 @@ func buildCDCDeleteTombstoneInsertSQL(targetTable, sourceExpr string, columns, p
 		sourceExpr,
 		quoteColumn(destination.CDCDeletedColumn),
 		quoteTable(targetTable),
-		buildJoinCondition(primaryKeys, "target", "source"),
+		destination.MergeJoinCondition(buildJoinCondition(primaryKeys, "target", "source"), incrementalPredicate),
 	)
 }
 
@@ -728,6 +747,7 @@ func (t *oracleTransaction) Rollback(ctx context.Context) error {
 func (d *OracleDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *OracleDestination) SupportsAppendStrategy() bool       { return true }
 func (d *OracleDestination) SupportsMergeStrategy() bool        { return true }
+func (d *OracleDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *OracleDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *OracleDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *OracleDestination) SupportsAtomicSwap() bool           { return true }

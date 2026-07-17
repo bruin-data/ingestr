@@ -123,6 +123,25 @@ var (
 var _ destination.CDCStatePruneBatchSizer = (*bigquery.BigQueryDestination)(nil)
 
 var (
+	_ destination.IncrementalPredicateSupport = (*bigquery.BigQueryDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*databricks.DatabricksDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*duckdb.DuckDBDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*duckdb.DuckLakeDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*fabric.FabricDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*mssql.MSSQLDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*mysql.MySQLDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*oracle.OracleDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*planetscale.Destination)(nil)
+	_ destination.IncrementalPredicateSupport = (*postgres.PostgresDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*redshift.RedshiftDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*snowflake.SnowflakeDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*sqlite.SQLiteDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*synapse.SynapseDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*trino.TrinoDestination)(nil)
+	_ destination.IncrementalPredicateSupport = (*vitess.Destination)(nil)
+)
+
+var (
 	_ destination.Destination = (*athena.AthenaDestination)(nil)
 	_ destination.Destination = (*bigquery.BigQueryDestination)(nil)
 	_ destination.Destination = (*cassandra.CassandraDestination)(nil)

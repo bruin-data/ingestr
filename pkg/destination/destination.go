@@ -163,6 +163,14 @@ type IncrementalPredicateSupport interface {
 	SupportsIncrementalPredicate() bool
 }
 
+func MergeJoinCondition(condition, incrementalPredicate string) string {
+	predicate := strings.TrimSpace(incrementalPredicate)
+	if predicate == "" {
+		return condition
+	}
+	return condition + " AND (" + predicate + ")"
+}
+
 // SchemaEvolutionColumnNormalizer lets a destination compare logical source
 // types using the canonical types it can recover from its physical schema.
 type SchemaEvolutionColumnNormalizer interface {

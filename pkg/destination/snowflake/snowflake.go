@@ -448,7 +448,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	if err != nil {
 		return fmt.Errorf("failed to build merge cast map: %w", err)
 	}
-	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap)
+	mergeSQL := buildMergeSQLWithPredicate(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap, opts.IncrementalPredicate)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -510,6 +510,10 @@ func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, t
 }
 
 func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string) string {
+	return buildMergeSQLWithPredicate(stagingTable, targetTable, primaryKeys, allColumns, incrementalKey, castMap, "")
+}
+
+func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := quoteFQN(sfTable(stagingTable))
 	targetFull := quoteFQN(sfTable(targetTable))
@@ -518,7 +522,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
-	onClause := strings.Join(onConditions, " AND ")
+	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate)
 
 	pkMap := make(map[string]bool)
 	for _, pk := range primaryKeys {
@@ -1109,6 +1113,7 @@ func (t *snowflakeTransaction) Rollback(ctx context.Context) error {
 func (d *SnowflakeDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *SnowflakeDestination) SupportsAppendStrategy() bool       { return true }
 func (d *SnowflakeDestination) SupportsMergeStrategy() bool        { return true }
+func (d *SnowflakeDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *SnowflakeDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *SnowflakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true }

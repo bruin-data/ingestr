@@ -415,6 +415,28 @@ WHEN MATCHED THEN UPDATE SET target."NAME" = source."NAME", target."UPDATED_AT" 
 WHEN NOT MATCHED THEN INSERT ("ID", "NAME", "UPDATED_AT") VALUES (source."ID", source."NAME", source."UPDATED_AT")`, got)
 }
 
+func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
+	source := oracleDedupSource(
+		[]string{"id", "event_date"},
+		[]string{"id"},
+		quoteTable("users_staging"),
+		"1",
+		"",
+		"source",
+	)
+	got := buildMergeSQLWithPredicate(
+		"users",
+		source,
+		[]string{"id", "event_date"},
+		[]string{"id"},
+		[]string{"event_date"},
+		`target."EVENT_DATE" >= TRUNC(SYSDATE) - 7`,
+	)
+
+	assert.Contains(t, got, `MERGE INTO (SELECT * FROM "USERS" target WHERE target."EVENT_DATE" >= TRUNC(SYSDATE) - 7) target`)
+	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
+}
+
 func TestBuildCDCDeleteTombstoneInsertSQL(t *testing.T) {
 	source := oracleDedupSource(
 		[]string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},

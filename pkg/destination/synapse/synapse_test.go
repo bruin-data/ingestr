@@ -15,3 +15,19 @@ func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
 		t.Fatalf("delete SQL missing interval predicate: %s", sql)
 	}
 }
+
+func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
+	sql := buildMergeSQLWithPredicate(
+		"dbo.events",
+		"stage.events",
+		[]string{"id"},
+		[]string{"[id]", "[event_date]"},
+		[]string{"event_date"},
+		"",
+		"target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date))",
+	)
+
+	if !strings.Contains(sql, "ON target.[id] = source.[id] AND (target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date)))") {
+		t.Fatalf("merge SQL missing incremental predicate: %s", sql)
+	}
+}

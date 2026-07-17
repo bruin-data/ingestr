@@ -376,7 +376,7 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	for i, pk := range opts.PrimaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
-	onClause := strings.Join(onConditions, " AND ")
+	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), opts.IncrementalPredicate)
 
 	pkMap := make(map[string]bool)
 	for _, pk := range opts.PrimaryKeys {
@@ -533,6 +533,7 @@ func (d *DatabricksDestination) BeginTransaction(ctx context.Context) (destinati
 func (d *DatabricksDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *DatabricksDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DatabricksDestination) SupportsMergeStrategy() bool        { return true }
+func (d *DatabricksDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *DatabricksDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DatabricksDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *DatabricksDestination) SupportsAtomicSwap() bool           { return true }

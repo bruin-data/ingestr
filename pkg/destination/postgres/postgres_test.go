@@ -77,6 +77,33 @@ func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
 	}
 }
 
+func TestBuildPredicateMergeSQLUsesPredicateForUpdateAndInsertMatch(t *testing.T) {
+	predicate := `target."event_date" >= CURRENT_DATE - INTERVAL '7 days'`
+	sql := buildPredicateMergeSQL(
+		`"public"."events"`,
+		`"staging"."events"`,
+		[]string{"id"},
+		quoteColumns([]string{"id", "event_date", "value"}),
+		[]string{"event_date", "value"},
+		`"id"`,
+		predicate,
+	)
+
+	matchCondition := `target."id" = source."id" AND (` + predicate + `)`
+	if count := strings.Count(sql, matchCondition); count != 2 {
+		t.Fatalf("predicate match condition appears %d times, want 2:\n%s", count, sql)
+	}
+	if !strings.Contains(sql, `UPDATE "public"."events" AS target`) {
+		t.Fatalf("expected target update in predicate merge SQL:\n%s", sql)
+	}
+	if !strings.Contains(sql, `WHERE NOT EXISTS (SELECT 1 FROM "public"."events" AS target WHERE `+matchCondition+`)`) {
+		t.Fatalf("expected guarded insert in predicate merge SQL:\n%s", sql)
+	}
+	if strings.Contains(sql, "ON CONFLICT") {
+		t.Fatalf("predicate merge SQL must not use ON CONFLICT:\n%s", sql)
+	}
+}
+
 func TestDescribePostgresStatementUsesAnonymousPreparedStatement(t *testing.T) {
 	describer := &postgresStatementDescriberStub{}
 	const sql = `select "id" from "public"."events"`

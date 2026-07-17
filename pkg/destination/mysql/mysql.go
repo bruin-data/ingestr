@@ -754,8 +754,15 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	if isCDC {
 		upsertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
 	}
+	matchCondition := destination.MergeJoinCondition(
+		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		opts.IncrementalPredicate,
+	)
 
-	if len(nonPKColumns) > 0 {
+	runUpdate := func() error {
+		if len(nonPKColumns) == 0 {
+			return nil
+		}
 		updateSet := buildUpdateSet(nonPKColumns, "target", "source")
 		if isCDC && hasUnchangedCols {
 			updateSet = buildCDCUpdateSet(nonPKColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
@@ -764,7 +771,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			`UPDATE %s AS target INNER JOIN %s ON %s SET %s`,
 			quoteTable(opts.TargetTable),
 			upsertSource,
-			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+			matchCondition,
 			updateSet,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
@@ -773,22 +780,40 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			config.LogFailedQuery(updateSQL, err)
 			return fmt.Errorf("failed to update existing records: %w", err)
 		}
+		return nil
 	}
 
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-		quoteTable(opts.TargetTable),
-		strings.Join(quotedTargetColumns, ", "),
-		strings.Join(quotedTargetColumns, ", "),
-		upsertSource,
-		quoteTable(opts.TargetTable),
-		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
-	)
-	config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
+	runInsert := func() error {
+		insertSQL := fmt.Sprintf(
+			`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			quoteTable(opts.TargetTable),
+			strings.Join(quotedTargetColumns, ", "),
+			strings.Join(quotedTargetColumns, ", "),
+			upsertSource,
+			quoteTable(opts.TargetTable),
+			matchCondition,
+		)
+		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
-	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert new records: %w", err)
+		if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+			config.LogFailedQuery(insertSQL, err)
+			return fmt.Errorf("failed to insert new records: %w", err)
+		}
+		return nil
+	}
+
+	// With a predicate, the INSERT runs first so its anti-join sees the
+	// pre-update target: an UPDATE that moves a matched row out of the
+	// predicate window would otherwise make the INSERT re-add it as a
+	// duplicate. The subsequent UPDATE of just-inserted rows is a no-op.
+	steps := []func() error{runUpdate, runInsert}
+	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
+		steps = []func() error{runInsert, runUpdate}
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 
 	if isCDC {
@@ -798,7 +823,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			"UPDATE %s AS target INNER JOIN %s ON %s SET target.`_cdc_deleted` = 1, target.`_cdc_lsn` = source.`_cdc_lsn`, target.`_cdc_synced_at` = source.`_cdc_synced_at` WHERE source.`_cdc_deleted` = 1",
 			quoteTable(opts.TargetTable),
 			dedupSource(""),
-			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+			matchCondition,
 		)
 		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
 
@@ -1059,6 +1084,7 @@ func (d *MySQLDestination) ManagedStagingPolicy() destination.ReplaceStagingPoli
 func (d *MySQLDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *MySQLDestination) SupportsAppendStrategy() bool       { return true }
 func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }
+func (d *MySQLDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }

@@ -160,6 +160,16 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 		return fmt.Errorf("merge requires at least one primary key")
 	}
 
+	// Redshift MERGE only accepts equality predicates between source and target
+	// columns in its ON clause, so predicate merges run as UPDATE + anti-join INSERT.
+	if predicate := strings.TrimSpace(opts.IncrementalPredicate); predicate != "" {
+		if err := d.mergeWithPredicate(ctx, opts, predicate); err != nil {
+			return err
+		}
+		config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	mergeSQL := d.buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -171,14 +181,78 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 	return nil
 }
 
+func (d *RedshiftDestination) mergeWithPredicate(ctx context.Context, opts destination.MergeOptions, predicate string) error {
+	statements := buildPredicateMergeStatements(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, predicate)
+
+	tx, err := d.BeginTransaction(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, stmt := range statements {
+		config.Debug("[MERGE] Executing predicate merge statement: %s", stmt)
+		if err := tx.Exec(ctx, stmt); err != nil {
+			config.LogFailedQuery(stmt, err)
+			return fmt.Errorf("failed to execute predicate merge statement: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+type mergeParts struct {
+	dedupSource    string
+	joinCondition  string
+	updateSets     []string
+	destQuoted     []string
+	destSourceCols []string
+	hasCDCDeleted  bool
+}
+
 func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string) string {
+	parts := buildMergeParts(stagingTable, primaryKeys, allColumns)
+	var sql strings.Builder
+	fmt.Fprintf(&sql, "MERGE INTO %s AS target\n", destination.QuoteTableName(targetTable))
+	fmt.Fprintf(&sql, "USING %s AS source\n", parts.dedupSource)
+	fmt.Fprintf(&sql, "ON %s\n", parts.joinCondition)
+
+	if parts.hasCDCDeleted {
+		if len(parts.updateSets) > 0 {
+			sql.WriteString(`WHEN MATCHED AND source."_cdc_deleted" = false THEN` + "\n")
+			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(parts.updateSets, ", "))
+		}
+
+		sql.WriteString(`WHEN MATCHED AND source."_cdc_deleted" = true THEN` + "\n")
+		sql.WriteString(`  UPDATE SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at"` + "\n")
+
+		sql.WriteString(`WHEN NOT MATCHED AND source."_cdc_deleted" = false THEN` + "\n")
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(parts.destQuoted, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(parts.destSourceCols, ", "))
+	} else {
+		if len(parts.updateSets) > 0 {
+			sql.WriteString("WHEN MATCHED THEN\n")
+			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(parts.updateSets, ", "))
+		}
+
+		sql.WriteString("WHEN NOT MATCHED THEN\n")
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(parts.destQuoted, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(parts.destSourceCols, ", "))
+	}
+
+	return sql.String()
+}
+
+func buildMergeParts(stagingTable string, primaryKeys, allColumns []string) mergeParts {
 	destColumns := destination.DestinationColumns(allColumns)
 
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf(`target.%s = source.%s`, destination.QuoteIdentifier(pk), destination.QuoteIdentifier(pk))
 	}
-	onClause := strings.Join(onConditions, " AND ")
 
 	pkMap := make(map[string]bool)
 	for _, pk := range primaryKeys {
@@ -232,38 +306,61 @@ func (d *RedshiftDestination) buildMergeSQL(stagingTable, targetTable string, pr
 		destination.QuoteTableName(stagingTable),
 	)
 
-	var sql strings.Builder
-	fmt.Fprintf(&sql, "MERGE INTO %s AS target\n", destination.QuoteTableName(targetTable))
-	fmt.Fprintf(&sql, "USING %s AS source\n", dedupSource)
-	fmt.Fprintf(&sql, "ON %s\n", onClause)
-
-	if hasCDCDeleted {
-		if len(updateSets) > 0 {
-			sql.WriteString(`WHEN MATCHED AND source."_cdc_deleted" = false THEN` + "\n")
-			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
-		}
-
-		sql.WriteString(`WHEN MATCHED AND source."_cdc_deleted" = true THEN` + "\n")
-		sql.WriteString(`  UPDATE SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at"` + "\n")
-
-		sql.WriteString(`WHEN NOT MATCHED AND source."_cdc_deleted" = false THEN` + "\n")
-		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
-		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
-	} else {
-		if len(updateSets) > 0 {
-			sql.WriteString("WHEN MATCHED THEN\n")
-			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
-		}
-
-		sql.WriteString("WHEN NOT MATCHED THEN\n")
-		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
-		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
+	return mergeParts{
+		dedupSource:    dedupSource,
+		joinCondition:  strings.Join(onConditions, " AND "),
+		updateSets:     updateSets,
+		destQuoted:     destQuoted,
+		destSourceCols: destSourceCols,
+		hasCDCDeleted:  hasCDCDeleted,
 	}
+}
 
-	return sql.String()
+// buildPredicateMergeStatements emulates a predicate-scoped MERGE with
+// UPDATE ... FROM plus an anti-join INSERT, because Redshift's MERGE only
+// accepts source/target equality predicates in its ON clause. The INSERT
+// runs first so its anti-join sees the pre-update target: an UPDATE that
+// moves a matched row out of the predicate window would otherwise make the
+// INSERT re-add that row as a duplicate.
+func buildPredicateMergeStatements(stagingTable, targetTable string, primaryKeys, allColumns []string, predicate string) []string {
+	parts := buildMergeParts(stagingTable, primaryKeys, allColumns)
+	target := destination.QuoteTableName(targetTable)
+	matchCondition := destination.MergeJoinCondition(parts.joinCondition, predicate)
+
+	var statements []string
+	if parts.hasCDCDeleted {
+		statements = append(statements, fmt.Sprintf(
+			"INSERT INTO %s (%s) SELECT %s FROM %s AS source WHERE source.\"_cdc_deleted\" = false AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)",
+			target, strings.Join(parts.destQuoted, ", "), strings.Join(parts.destSourceCols, ", "), parts.dedupSource, target, matchCondition,
+		))
+		if len(parts.updateSets) > 0 {
+			statements = append(statements, fmt.Sprintf(
+				"UPDATE %s AS target SET %s FROM %s AS source WHERE %s AND source.\"_cdc_deleted\" = false",
+				target, strings.Join(parts.updateSets, ", "), parts.dedupSource, matchCondition,
+			))
+		}
+		statements = append(statements, fmt.Sprintf(
+			`UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s AS source WHERE %s AND source."_cdc_deleted" = true`,
+			target, parts.dedupSource, matchCondition,
+		))
+	} else {
+		statements = append(statements, fmt.Sprintf(
+			"INSERT INTO %s (%s) SELECT %s FROM %s AS source WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)",
+			target, strings.Join(parts.destQuoted, ", "), strings.Join(parts.destSourceCols, ", "), parts.dedupSource, target, matchCondition,
+		))
+		if len(parts.updateSets) > 0 {
+			statements = append(statements, fmt.Sprintf(
+				"UPDATE %s AS target SET %s FROM %s AS source WHERE %s",
+				target, strings.Join(parts.updateSets, ", "), parts.dedupSource, matchCondition,
+			))
+		}
+	}
+	return statements
 }
 
 func (d *RedshiftDestination) SupportsCDCUnchangedCols() bool { return true }
+
+func (d *RedshiftDestination) SupportsIncrementalPredicate() bool { return true }
 
 func (d *RedshiftDestination) SupportsCDCMerge() bool {
 	return true

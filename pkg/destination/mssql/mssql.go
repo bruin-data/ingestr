@@ -657,7 +657,7 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		}
 	}
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, opts.IncrementalPredicate)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -882,6 +882,10 @@ func buildInsertSQL(targetTable, colList, selectClause string) string {
 }
 
 func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
+	return buildMergeSQLWithPredicate(targetTable, stagingTable, primaryKeys, columns, incrementalKey, "")
+}
+
+func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey, incrementalPredicate string) string {
 	quotedColumns := quoteColumns(columns)
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
@@ -892,6 +896,7 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []stri
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
 	}
+	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate)
 
 	stagingCols := strings.Join(quotedColumns, ", ")
 	insertCols := strings.Join(quotedTargetColumns, ", ")
@@ -904,7 +909,7 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []stri
 	pkPartition := strings.Join(quotedPKs, ", ")
 
 	if isCDC {
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onConditions, stagingCols, insertCols, sourceCols, pkPartition)
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onClause, stagingCols, insertCols, sourceCols, pkPartition)
 	}
 
 	var updateSet string
@@ -939,7 +944,7 @@ ON %s
 WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		dedupSource,
-		strings.Join(onConditions, " AND "),
+		onClause,
 		updateSet,
 		insertCols,
 		strings.Join(sourceCols, ", "),
@@ -955,7 +960,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns, onConditions []string, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -1016,7 +1021,7 @@ WHEN MATCHED THEN UPDATE SET %s
 WHEN NOT MATCHED AND %s THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		composedSource,
-		strings.Join(onConditions, " AND "),
+		onClause,
 		strings.Join(updates, ", "),
 		hasRowData,
 		insertCols,
@@ -1202,6 +1207,7 @@ func (t *mssqlTransaction) Rollback(ctx context.Context) error {
 func (d *MSSQLDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *MSSQLDestination) SupportsAppendStrategy() bool       { return true }
 func (d *MSSQLDestination) SupportsMergeStrategy() bool        { return true }
+func (d *MSSQLDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MSSQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MSSQLDestination) SupportsAtomicSwap() bool           { return true }

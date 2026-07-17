@@ -856,7 +856,10 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Step 1: Upsert latest non-deleted rows (data changes).
 		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
 		// la."_cdc_unchanged_cols" is read once per row, not once per column.
-		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
+		onTargetCondition := destination.MergeJoinCondition(
+			buildJoinCondition(opts.PrimaryKeys, "target", "la"),
+			opts.IncrementalPredicate,
+		)
 		unchangedRef := ""
 		if hasUnchangedCols {
 			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
@@ -890,7 +893,10 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		// Step 2: Mark deletes only when the latest change is a delete
 		onLatestCondition := buildJoinCondition(opts.PrimaryKeys, "deleted", "latest")
-		onDeleteTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
+		onDeleteTargetCondition := destination.MergeJoinCondition(
+			buildJoinCondition(opts.PrimaryKeys, "target", "deleted"),
+			opts.IncrementalPredicate,
+		)
 		updateDeletedSQL := fmt.Sprintf(
 			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
 			latestAll,
@@ -916,17 +922,31 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		if opts.IncrementalKey != "" {
 			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
 		}
-		upsertSQL := fmt.Sprintf(
-			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
-			quotedTargetTable,
-			strings.Join(destQuoted, ", "),
-			pkList,
-			strings.Join(destQuoted, ", "),
-			quotedStagingTable,
-			orderBy,
-			pkList,
-			buildConflictUpdateSet(nonPKColumns),
-		)
+
+		var upsertSQL string
+		if strings.TrimSpace(opts.IncrementalPredicate) != "" {
+			upsertSQL = buildPredicateMergeSQL(
+				quotedTargetTable,
+				quotedStagingTable,
+				opts.PrimaryKeys,
+				destQuoted,
+				nonPKColumns,
+				orderBy,
+				opts.IncrementalPredicate,
+			)
+		} else {
+			upsertSQL = fmt.Sprintf(
+				`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
+				quotedTargetTable,
+				strings.Join(destQuoted, ", "),
+				pkList,
+				strings.Join(destQuoted, ", "),
+				quotedStagingTable,
+				orderBy,
+				pkList,
+				buildConflictUpdateSet(nonPKColumns),
+			)
+		}
 		config.Debug("[MERGE] Executing upsert: %s", upsertSQL)
 
 		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
@@ -1137,6 +1157,8 @@ func (d *PostgresDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as PostgreSQL supports the merge strategy.
 func (d *PostgresDestination) SupportsMergeStrategy() bool { return true }
+
+func (d *PostgresDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as PostgreSQL supports the delete+insert strategy.
 func (d *PostgresDestination) SupportsDeleteInsertStrategy() bool { return true }
@@ -1590,6 +1612,41 @@ func buildConflictUpdateSet(columns []string) string {
 		sets[i] = fmt.Sprintf(`%s = EXCLUDED.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
+}
+
+func buildPredicateMergeSQL(quotedTargetTable, quotedStagingTable string, primaryKeys, destQuoted, nonPKColumns []string, orderBy, incrementalPredicate string) string {
+	pkList := strings.Join(quoteColumns(primaryKeys), ", ")
+	matchCondition := destination.MergeJoinCondition(
+		buildJoinCondition(primaryKeys, "target", "source"),
+		incrementalPredicate,
+	)
+	sourceColumns := make([]string, len(destQuoted))
+	for i, col := range destQuoted {
+		sourceColumns[i] = "source." + col
+	}
+
+	return fmt.Sprintf(
+		`WITH source AS (
+			SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s
+		), updated AS (
+			UPDATE %s AS target SET %s FROM source WHERE %s RETURNING 1
+		)
+		INSERT INTO %s (%s)
+		SELECT %s FROM source
+		WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+		pkList,
+		strings.Join(destQuoted, ", "),
+		quotedStagingTable,
+		orderBy,
+		quotedTargetTable,
+		buildCDCConflictUpdateSet(nonPKColumns, "target", "source", ""),
+		matchCondition,
+		quotedTargetTable,
+		strings.Join(destQuoted, ", "),
+		strings.Join(sourceColumns, ", "),
+		quotedTargetTable,
+		matchCondition,
+	)
 }
 
 func buildCDCConflictUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {

@@ -490,15 +490,18 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		updateSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
 		insertSource = dedupSource("")
 	}
+	matchCondition := destination.MergeJoinCondition(
+		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
+		opts.IncrementalPredicate,
+	)
 
-	// UPDATE existing records using SQLite syntax
-	if len(nonPKColumns) > 0 {
-		updateTarget := quotedTargetTable
-		joinTarget := quotedTargetTable
+	runUpdate := func() error {
+		if len(nonPKColumns) == 0 {
+			return nil
+		}
+		updateTarget := quotedTargetTable + " AS target"
 		updateSet := buildUpdateSetSQLite(nonPKColumns, "source")
 		if isCDC && hasUnchangedCols {
-			updateTarget += " AS target"
-			joinTarget = "target"
 			updateSet = buildCDCUpdateSetSQLite(nonPKColumns, "target", "source", "source."+destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
 		}
 		updateSQL := fmt.Sprintf(
@@ -506,7 +509,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			updateTarget,
 			updateSet,
 			updateSource,
-			buildJoinConditionSQLite(opts.PrimaryKeys, joinTarget, "source"),
+			matchCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -514,33 +517,50 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			config.LogFailedQuery(updateSQL, err)
 			return fmt.Errorf("failed to update existing records: %w", err)
 		}
+		return nil
 	}
 
-	// INSERT new records
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-		quotedTargetTable,
-		strings.Join(quotedTargetColumns, ", "),
-		strings.Join(quotedTargetColumns, ", "),
-		insertSource,
-		quotedTargetTable,
-		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
-	)
-	config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
+	runInsert := func() error {
+		insertSQL := fmt.Sprintf(
+			`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			quotedTargetTable,
+			strings.Join(quotedTargetColumns, ", "),
+			strings.Join(quotedTargetColumns, ", "),
+			insertSource,
+			quotedTargetTable,
+			matchCondition,
+		)
+		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
-	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert new records: %w", err)
+		if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+			config.LogFailedQuery(insertSQL, err)
+			return fmt.Errorf("failed to insert new records: %w", err)
+		}
+		return nil
+	}
+
+	// With a predicate, the INSERT runs first so its anti-join sees the
+	// pre-update target: an UPDATE that moves a matched row out of the
+	// predicate window would otherwise make the INSERT re-add it as a
+	// duplicate.
+	steps := []func() error{runUpdate, runInsert}
+	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
+		steps = []func() error{runInsert, runUpdate}
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 
 	if isCDC {
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			`UPDATE %s SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
+			`UPDATE %s AS target SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
 			quotedTargetTable,
 			dedupSource(""),
-			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
+			matchCondition,
 		)
 		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
 
@@ -736,6 +756,8 @@ func (d *SQLiteDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as SQLite supports the merge strategy.
 func (d *SQLiteDestination) SupportsMergeStrategy() bool { return true }
+
+func (d *SQLiteDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as SQLite supports the delete+insert strategy.
 func (d *SQLiteDestination) SupportsDeleteInsertStrategy() bool { return true }

@@ -453,7 +453,7 @@ func TestCDCMergeWithoutUnchangedColsMarkerUsesNormalUpdate(t *testing.T) {
 
 	dest := &MySQLDestination{db: db}
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -464,6 +464,30 @@ func TestCDCMergeWithoutUnchangedColsMarkerUsesNormalUpdate(t *testing.T) {
 		StagingTable: "items_staging",
 		PrimaryKeys:  []string{"id"},
 		Columns:      []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+	})
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCDCMergeWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	dest := &MySQLDestination{db: db}
+	mock.ExpectBegin()
+	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`id` >= 1) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err = dest.MergeTable(t.Context(), destination.MergeOptions{
+		TargetTable:          "items",
+		StagingTable:         "items_staging",
+		PrimaryKeys:          []string{"id"},
+		Columns:              []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		IncrementalPredicate: "target.`id` >= 1",
 	})
 	assert.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())

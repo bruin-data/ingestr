@@ -189,7 +189,7 @@ The behavior is the same for any rows matching the source-side filter. ingestr d
 
 ### Limiting the destination scan
 
-On BigQuery, `--incremental-predicate` appends a destination-specific SQL condition to the `MERGE` join. The destination table is aliased as `t` and the staging query as `s`. This can prune old partitions that cannot contain matching rows:
+`--incremental-predicate` appends a destination-specific SQL condition to the target match for supported SQL destinations. This can prune old partitions that cannot contain matching rows:
 
 ```bash
 ingestr ingest \
@@ -202,7 +202,11 @@ ingestr ingest \
     --incremental-predicate "t.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
 ```
 
-The predicate does not filter source rows. It only limits which destination rows can match them. Use a predicate only when every destination row that may match the incoming primary keys is inside the selected range; otherwise, the merge can insert a duplicate instead of updating the older row.
+The destination alias is `t` for BigQuery and Trino, and `target` for Snowflake, Redshift, Databricks, Microsoft SQL Server, Azure Synapse, Microsoft Fabric, Oracle, MySQL, PlanetScale, Vitess, PostgreSQL, SQLite, DuckDB, and DuckLake. Source aliases are destination-specific; predicates should normally reference only destination columns.
+
+The predicate does not filter source rows. It only limits which destination rows can match or be updated. Use a predicate only when every destination row that may match the incoming primary keys is inside the selected range. Otherwise, the merge can insert a duplicate or a constrained destination can reject the insert.
+
+Destinations whose merge implementation has no target-side SQL match condition do not accept this option. This includes ClickHouse, StarRocks, CrateDB, Cassandra, DynamoDB, MongoDB, Iceberg, OneLake, and discard.
 
 ## Delete+Insert
 Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination. When you provide `--interval-start` or `--interval-end`, ingestr also passes those bounds to the source read, so sources that support interval filtering may return only that slice before the destination replacement happens.
