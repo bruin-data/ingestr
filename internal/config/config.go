@@ -67,6 +67,7 @@ type IngestConfig struct {
 	LoaderFileSize                  int
 	LoaderFileFormat                string
 	ExtractParallelism              int
+	DestinationParallelism          int
 	ExtractPartitionBy              string
 	ExtractPartitionInterval        time.Duration
 	ExtractPartitionNumericInterval int64
@@ -101,6 +102,33 @@ type IngestConfig struct {
 	// "-- @bruin.config: {...}" comment to destination queries (QUERY_TAG on
 	// Snowflake) for warehouse cost attribution. Empty disables annotations.
 	QueryAnnotations string
+}
+
+// DefaultExtractParallelism is the default of the --extract-parallelism CLI
+// flag. EffectiveDestinationParallelism compares against it to tell "user left
+// the default" apart from an explicit choice, which cmd records by setting
+// DestinationParallelism.
+const DefaultExtractParallelism = 5
+
+const defaultPostgresWriteParallelism = 8
+
+func (c *IngestConfig) EffectiveDestinationParallelism() int {
+	if c.DestinationParallelism > 0 {
+		return c.DestinationParallelism
+	}
+	parallelism := c.ExtractParallelism
+	if parallelism <= 0 {
+		parallelism = 4
+	}
+	if parallelism == DefaultExtractParallelism && isPostgresURI(c.DestURI) {
+		return defaultPostgresWriteParallelism
+	}
+	return parallelism
+}
+
+func isPostgresURI(uri string) bool {
+	scheme, _, _ := strings.Cut(strings.ToLower(uri), "://")
+	return scheme == "postgres" || scheme == "postgresql" || scheme == "postgresql+psycopg2"
 }
 
 func DefaultConfig() *IngestConfig {

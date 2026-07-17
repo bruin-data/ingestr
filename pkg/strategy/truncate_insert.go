@@ -120,7 +120,7 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            targetTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
@@ -199,7 +199,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

@@ -88,7 +88,7 @@ func (p *Pipeline) maybeStartPreStage(
 		StagingBucket:       p.config.StagingBucket,
 		LoaderFileSize:      p.config.LoaderFileSize,
 		LoaderFileFormat:    p.config.LoaderFileFormat,
-		Parallelism:         p.config.ExtractParallelism,
+		Parallelism:         p.config.EffectiveDestinationParallelism(),
 	})
 	if err != nil {
 		if !errors.Is(err, destination.ErrPreStageUnsupported) {

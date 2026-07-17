@@ -137,7 +137,7 @@ func IngestCommand() *cli.Command {
 			&cli.IntFlag{
 				Name:    "extract-parallelism",
 				Usage:   "The number of parallel jobs to run for extracting data from the source",
-				Value:   5,
+				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
 			&cli.StringFlag{
@@ -284,6 +284,9 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
+	if c.IsSet("extract-parallelism") {
+		cfg.DestinationParallelism = cfg.ExtractParallelism
+	}
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")
 	cfg.DisablePreStaging = c.Bool("disable-prestaging")
 	cfg.SQLLimit = int(c.Int("sql-limit"))

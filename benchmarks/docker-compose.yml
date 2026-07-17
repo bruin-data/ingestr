@@ -33,21 +33,36 @@ services:
       POSTGRES_DB: bench_dest
     ports:
       - "5441:5432"
+    tmpfs:
+      - /var/lib/postgresql/data:size=8g
+    volumes:
+      - ./sql/postgres_fast_sink.sql:/docker-entrypoint-initdb.d/postgres_fast_sink.sql:ro
     command: >
       postgres
-      -c shared_buffers=512MB
-      -c work_mem=256MB
-      -c maintenance_work_mem=512MB
+      -c unix_socket_directories=/var/run/postgresql
+      -c shared_buffers=6GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=128MB
       -c max_wal_size=2GB
+      -c min_wal_size=80MB
+      -c checkpoint_timeout=1h
       -c checkpoint_completion_target=0.9
       -c wal_level=minimal
       -c max_wal_senders=0
+      -c max_connections=32
+      -c autovacuum=off
+      -c bgwriter_lru_maxpages=0
+      -c synchronous_commit=off
+      -c fsync=off
+      -c full_page_writes=off
+      -c jit=off
+      -c track_io_timing=on
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bench_user -d bench_dest"]
       interval: 3s
       timeout: 3s
       retries: 10
-    shm_size: '1g'
+    shm_size: '6g'
 
   bench-mssql-dest:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -80,10 +95,18 @@ services:
     ports:
       - "3307:3306"
     command: >
-      --innodb-buffer-pool-size=512M
-      --innodb-log-file-size=256M
+      --innodb-buffer-pool-size=6G
+      --innodb-redo-log-capacity=2G
+      --innodb-log-buffer-size=256M
       --innodb-flush-log-at-trx-commit=0
       --innodb-doublewrite=0
+      --innodb-flush-method=O_DIRECT
+      --innodb-adaptive-hash-index=OFF
+      --performance-schema=OFF
+      --skip-log-bin
+      --skip-name-resolve
+      --max-connections=32
+      --net-buffer-length=1M
       --local-infile=1
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_pass"]

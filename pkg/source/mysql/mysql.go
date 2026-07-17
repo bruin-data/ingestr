@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -121,6 +122,53 @@ func uriToDSN(uri string) (string, string, error) {
 	return mysqluri.ToDSN(uri)
 }
 
+// mariadbJSONColumns returns the columns of a table that MariaDB created for
+// the JSON type alias. MariaDB stores JSON columns as LONGTEXT with an
+// implicit `json_valid(column)` check constraint, so INFORMATION_SCHEMA
+// reports them as longtext; without this detection they would be ingested as
+// plain strings and double-encoded by JSON-aware destinations.
+func mariadbJSONColumns(ctx context.Context, db *sql.DB, schemaName, tableName string) (map[string]bool, error) {
+	var version string
+	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
+		return nil, err
+	}
+	if !strings.Contains(strings.ToLower(version), "mariadb") {
+		return nil, nil
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT CHECK_CLAUSE
+		FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS
+		WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?
+	`, schemaName, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	jsonColumns := map[string]bool{}
+	for rows.Next() {
+		var clause string
+		if err := rows.Scan(&clause); err != nil {
+			return nil, err
+		}
+		if column, ok := mariadbJSONValidColumn(clause); ok {
+			jsonColumns[column] = true
+		}
+	}
+	return jsonColumns, rows.Err()
+}
+
+var mariadbJSONValidRegex = regexp.MustCompile("(?i)^json_valid\\(`([^`]+)`\\)$")
+
+func mariadbJSONValidColumn(clause string) (string, bool) {
+	matches := mariadbJSONValidRegex.FindStringSubmatch(strings.TrimSpace(clause))
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
 func isVitessServer(ctx context.Context, db *sql.DB) (bool, error) {
 	var version string
 	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
@@ -215,12 +263,17 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	longTextColumns := map[string]bool{}
 	for rows.Next() {
 		var columnName, columnType, isNullable string
 		var numericPrecision, numericScale, charMaxLen sql.NullInt64
 
 		if err := rows.Scan(&columnName, &columnType, &isNullable, &numericPrecision, &numericScale, &charMaxLen); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		if strings.HasPrefix(strings.ToUpper(columnType), "LONGTEXT") {
+			longTextColumns[columnName] = true
 		}
 
 		dt, precision, scale, arrayType := MapMySQLToDataType(columnType)
@@ -258,6 +311,18 @@ func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table stri
 
 	if len(columns) == 0 {
 		return nil, fmt.Errorf("table %s not found or has no columns", table)
+	}
+
+	if len(longTextColumns) > 0 {
+		jsonColumns, err := mariadbJSONColumns(ctx, db, schemaName, tableName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect MariaDB JSON columns: %w", err)
+		}
+		for i := range columns {
+			if columns[i].DataType == schema.TypeString && longTextColumns[columns[i].Name] && jsonColumns[columns[i].Name] {
+				columns[i].DataType = schema.TypeJSON
+			}
+		}
 	}
 
 	// Get primary keys

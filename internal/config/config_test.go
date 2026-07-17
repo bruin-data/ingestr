@@ -6,6 +6,53 @@ import (
 	"time"
 )
 
+func TestEffectiveDestinationParallelism(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  IngestConfig
+		want int
+	}{
+		{
+			name: "postgres default",
+			cfg:  IngestConfig{DestURI: "postgres://localhost/db", ExtractParallelism: 5},
+			want: 8,
+		},
+		{
+			name: "postgres alias default",
+			cfg:  IngestConfig{DestURI: "postgresql+psycopg2://localhost/db", ExtractParallelism: 5},
+			want: 8,
+		},
+		{
+			name: "explicit destination value",
+			cfg:  IngestConfig{DestURI: "postgres://localhost/db", ExtractParallelism: 5, DestinationParallelism: 5},
+			want: 5,
+		},
+		{
+			name: "non-default postgres extraction",
+			cfg:  IngestConfig{DestURI: "postgres://localhost/db", ExtractParallelism: 3},
+			want: 3,
+		},
+		{
+			name: "other destination",
+			cfg:  IngestConfig{DestURI: "duckdb:///tmp/test.db", ExtractParallelism: 5},
+			want: 5,
+		},
+		{
+			name: "fallback",
+			cfg:  IngestConfig{DestURI: "postgres://localhost/db"},
+			want: 4,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.cfg.EffectiveDestinationParallelism(); got != test.want {
+				t.Fatalf("EffectiveDestinationParallelism() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func TestIngestConfigValidate_NoInferenceRequiresColumns(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SourceURI = "mongodb://localhost:27017/db"

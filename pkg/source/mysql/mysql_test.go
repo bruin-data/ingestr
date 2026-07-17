@@ -238,3 +238,24 @@ func TestQueryRowsFallsBackWhenPrepareIsUnsupported(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMariaDBJSONValidColumn(t *testing.T) {
+	cases := []struct {
+		clause string
+		column string
+		ok     bool
+	}{
+		{"json_valid(`json_val`)", "json_val", true},
+		{"JSON_VALID(`payload`)", "payload", true},
+		{" json_valid(`j`) ", "j", true},
+		{"json_valid(`a`) and length(`a`) > 0", "", false},
+		{"length(`json_val`) > 0", "", false},
+		{"json_valid(json_val)", "", false},
+	}
+	for _, tc := range cases {
+		column, ok := mariadbJSONValidColumn(tc.clause)
+		if ok != tc.ok || column != tc.column {
+			t.Fatalf("mariadbJSONValidColumn(%q) = %q, %v; want %q, %v", tc.clause, column, ok, tc.column, tc.ok)
+		}
+	}
+}

@@ -907,7 +907,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		writeOpts := destination.WriteOptions{
 			Table:            st.destTable,
 			Schema:           st.schema,
-			Parallelism:      l.parallelism(),
+			Parallelism:      l.cfg.EffectiveDestinationParallelism(),
 			StagingBucket:    l.cfg.StagingBucket,
 			LoaderFileSize:   l.cfg.LoaderFileSize,
 			LoaderFileFormat: l.cfg.LoaderFileFormat,
@@ -1234,13 +1234,6 @@ func (l *flushLoop) abortLeaseLoss(records <-chan source.RecordBatchResult, loss
 			return loss
 		}
 	}
-}
-
-func (l *flushLoop) parallelism() int {
-	if l.cfg.ExtractParallelism > 0 {
-		return l.cfg.ExtractParallelism
-	}
-	return 4
 }
 
 func loadTimestampColumn(s *schema.TableSchema) (schema.Column, bool) {

@@ -21,15 +21,21 @@ import (
 )
 
 type postgresStatementDescriberStub struct {
-	name      string
-	sql       string
-	paramOIDs []uint32
+	name         string
+	sql          string
+	paramOIDs    []uint32
+	prepareCalls int
+	description  *pgconn.StatementDescription
 }
 
 func (s *postgresStatementDescriberStub) Prepare(_ context.Context, name, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
 	s.name = name
 	s.sql = sql
 	s.paramOIDs = paramOIDs
+	s.prepareCalls++
+	if s.description != nil {
+		return s.description, nil
+	}
 	return &pgconn.StatementDescription{}, nil
 }
 
@@ -86,6 +92,47 @@ func TestDescribePostgresStatementUsesAnonymousPreparedStatement(t *testing.T) {
 	}
 	if describer.paramOIDs != nil {
 		t.Fatalf("prepared statement parameter OIDs = %v, want nil", describer.paramOIDs)
+	}
+}
+
+func TestPostgresCopyPlanCacheReusesDescriptionForRecordSchema(t *testing.T) {
+	builder := array.NewInt32Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	values := builder.NewArray()
+	builder.Release()
+	defer values.Release()
+
+	recordSchema := arrow.NewSchema([]arrow.Field{{Name: "event id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	record := array.NewRecordBatch(recordSchema, []arrow.Array{values}, 1)
+	defer record.Release()
+
+	describer := &postgresStatementDescriberStub{
+		description: &pgconn.StatementDescription{
+			Fields: []pgconn.FieldDescription{{DataTypeOID: pgtype.Int4OID}},
+		},
+	}
+	cache := make(postgresCopyPlanCache)
+
+	first, err := cache.get(t.Context(), describer, record, "analytics.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := cache.get(t.Context(), describer, record, "analytics.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first != second {
+		t.Fatal("copy plan cache returned a different plan for the same Arrow schema")
+	}
+	if describer.prepareCalls != 1 {
+		t.Fatalf("Prepare() calls = %d, want 1", describer.prepareCalls)
+	}
+	if !reflect.DeepEqual(first.oids, []uint32{pgtype.Int4OID}) {
+		t.Fatalf("copy plan OIDs = %v, want [%d]", first.oids, pgtype.Int4OID)
+	}
+	if first.copySQL != `copy "analytics"."events" ("event id") from stdin binary` {
+		t.Fatalf("copy plan SQL = %q", first.copySQL)
 	}
 }
 
