@@ -38,7 +38,7 @@ Every row a CDC merge writes carries three metadata columns in the destination:
 | `_cdc_deleted` | `true` when the source row was deleted. Deletes are **soft**: the row is kept in the destination and flagged rather than physically removed. |
 | `_cdc_synced_at` | When ingestr applied the change to the destination. |
 
-Merging needs a key: to keep a one-row-per-key mirror of a table, ingestr needs a primary key or an equivalent replica-identity index. What happens without one depends on the connector. In PostgreSQL, a keyless table with `REPLICA IDENTITY FULL` is still ingested — just as an append-only change log rather than a mirror: a delete is appended as a new row with `_cdc_deleted = true`, and an update shows up as a delete followed by an insert. Because nothing gets merged, a retry can replay events into these tables, and they keep the internal `_cdc_unchanged_cols` column. When ingestr manages the publication, it leaves out PostgreSQL tables that have no usable replica identity at all; if you manage the publication yourself, give such tables a usable replica identity before they start publishing updates or deletes.
+Merging needs a key: to keep a one-row-per-key mirror of a table, ingestr needs a primary key or an equivalent replica-identity index. What happens without one depends on the connector — most connectors simply **skip keyless tables with a warning**. PostgreSQL is the exception: a keyless table with `REPLICA IDENTITY FULL` is still ingested — just as an append-only change log rather than a mirror: a delete is appended as a new row with `_cdc_deleted = true`, and an update shows up as a delete followed by an insert. Because nothing gets merged, a retry can replay events into these tables, and they keep the internal `_cdc_unchanged_cols` column. When ingestr manages the publication, it leaves out PostgreSQL tables that have no usable replica identity at all; if you manage the publication yourself, give such tables a usable replica identity before they start publishing updates or deletes.
 
 ### Deletes
 
@@ -61,6 +61,8 @@ You can add, alter, or drop columns on a replicated PostgreSQL table without res
 3. Evolve the destination table so it can hold the new shape.
 4. Recreate the staging table.
 5. Resume logical replication, taking care not to skip past the transaction that revealed the change.
+
+Keep in mind that the replacement snapshot in step 2 is a full copy of the table, not a delta — on a large table every detected schema change costs a re-snapshot. If you're running a DDL-heavy migration, it can be cheaper to batch the changes together, or pause the stream and let the next run pick them up at once.
 
 New columns are added to the destination when it supports schema evolution, and compatible type or nullability changes are applied where the destination allows them. Dropped columns are never deleted from the destination — they stay behind as nullable columns — and a rename looks like a drop plus an add, so you end up with both the old column and the new one. If the destination can't replace the table safely, the run fails rather than pressing on with a wrong schema; a `freeze` schema contract rejects the change too, which is exactly what freezing is for.
 
