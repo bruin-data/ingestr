@@ -233,6 +233,22 @@ func TestMetricRowsPreserveNestedData(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, ltvRows, 3)
 	assert.Equal(t, "net_revenue", ltvRows[2]["accounting_type"])
+
+	for _, tt := range []struct {
+		table   string
+		payload map[string]any
+	}{
+		{table: "analytics", payload: map[string]any{"data": nil}},
+		{table: "cohorts", payload: map[string]any{}},
+		{table: "funnel", payload: map[string]any{"data": nil}},
+	} {
+		rows, err := metricRows(tt.table, tableParams{}, "2025-01-02", tt.payload)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	}
+
+	_, err = metricRows("analytics", tableParams{}, "2025-01-02", map[string]any{"data": "invalid"})
+	assert.ErrorContains(t, err, "data is not an object")
 }
 
 func TestDecodeJSONUseNumber(t *testing.T) {
@@ -243,17 +259,18 @@ func TestDecodeJSONUseNumber(t *testing.T) {
 	assert.Error(t, decodeJSONUseNumber([]byte(`{} {}`), &payload))
 }
 
-func TestResolveDateRangeAppliesLookback(t *testing.T) {
+func TestResolveDateRangePreservesExplicitInterval(t *testing.T) {
 	start := time.Date(2025, 1, 10, 16, 30, 0, 0, time.FixedZone("offset", 2*60*60))
 	end := time.Date(2025, 1, 12, 23, 0, 0, 0, time.UTC)
+	originalStart := start
 	src := &AdaptySource{lookbackDays: 3, location: time.UTC}
 	opts := source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}
 
 	gotStart, gotEnd, err := src.resolveDateRange(&opts)
 	require.NoError(t, err)
-	assert.Equal(t, "2025-01-07", gotStart.Format(adaptyDateLayout))
+	assert.Equal(t, "2025-01-10", gotStart.Format(adaptyDateLayout))
 	assert.Equal(t, "2025-01-12", gotEnd.Format(adaptyDateLayout))
-	assert.Equal(t, gotStart, *opts.IntervalStart)
+	assert.Equal(t, originalStart, *opts.IntervalStart)
 }
 
 func TestReadAnalyticsHTTP(t *testing.T) {
@@ -309,7 +326,7 @@ func TestReadPaywallsPaginatesAndFiltersUpdatedAt(t *testing.T) {
 
 		switch request.URL.Query().Get("page[number]") {
 		case "1":
-			_, _ = w.Write([]byte(`{"data":[{"paywall_id":"old","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z","products":[]},{"paywall_id":"included","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-03T00:00:00Z","products":[]}],"meta":{"pagination":{"count":3,"page":1,"pages":2}}}`))
+			_, _ = w.Write([]byte(`{"data":[{"paywall_id":"old","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z","products":[]},{"paywall_id":"included","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-03T00:00:00Z","products":[]}]}`))
 		case "2":
 			_, _ = w.Write([]byte(`{"data":[{"paywall_id":"new","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-05T00:00:00Z","products":[]}],"meta":{"pagination":{"count":3,"page":2,"pages":2}}}`))
 		default:

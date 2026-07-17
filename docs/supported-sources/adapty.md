@@ -13,7 +13,7 @@ adapty://?api_key=<secret-api-key>&lookback_days=30&timezone=UTC
 Parameters:
 
 - `api_key`: Required. The app-specific secret API key from **App Settings → General → API keys**.
-- `lookback_days`: Optional. Number of days to re-fetch before an incremental analytics interval. Defaults to `30`; use `0` to disable lookback.
+- `lookback_days`: Optional. Number of days loaded when no analytics interval is supplied. Defaults to `30`; use `0` to load only today.
 - `timezone`: Optional. IANA timezone used by Adapty to group analytics dates. Defaults to `UTC`.
 
 Use the secret API key, not a public SDK key. The connector sends it as `Authorization: Api-Key <secret-api-key>`.
@@ -31,7 +31,7 @@ Use the secret API key, not a public SDK key. The connector sends it as `Authori
 | `placements` | `placement_type` | `replace` | Exported paywall or onboarding placement configuration. |
 | `paywalls` | – | `merge` on `paywall_id`, incremental key `updated_at` | All paginated paywalls, including their state, deletion marker, and nested products. |
 
-The six analytics tables are requested one calendar day at a time and receive an ingestr-managed `date` column. When no interval is supplied, they load the last 30 days by default. `lookback_days` expands an incremental interval so mutable subscription and revenue aggregates are refreshed safely.
+The six analytics tables are requested one calendar day at a time and receive an ingestr-managed `date` column. When no interval is supplied, they load the last 30 days by default. Explicit incremental intervals are loaded exactly as supplied so their `delete+insert` boundaries remain aligned.
 
 The paywall API does not accept an `updated_at` filter. ingestr scans its paginated list and applies the incremental interval client-side. Adapty returns archived and deleted paywalls with `state` and `is_deleted`, allowing merge loads to retain lifecycle changes.
 

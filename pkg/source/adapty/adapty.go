@@ -499,8 +499,7 @@ func (s *AdaptySource) resolveDateRange(opts *source.ReadOptions) (time.Time, ti
 	end := now
 
 	if opts.IntervalStart != nil {
-		start = dayInLocation(*opts.IntervalStart, location).AddDate(0, 0, -s.lookbackDays)
-		*opts.IntervalStart = start
+		start = dayInLocation(*opts.IntervalStart, location)
 	}
 	if opts.IntervalEnd != nil {
 		end = dayInLocation(*opts.IntervalEnd, location)
@@ -598,7 +597,11 @@ func setStrings(target map[string]any, key string, values []string) {
 func metricRows(table string, params tableParams, date string, payload map[string]any) ([]map[string]any, error) {
 	switch table {
 	case "analytics":
-		data, ok := payload["data"].(map[string]any)
+		rawData, exists := payload["data"]
+		if !exists || rawData == nil {
+			return nil, nil
+		}
+		data, ok := rawData.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("unexpected analytics response: data is not an object")
 		}
@@ -621,7 +624,11 @@ func metricRows(table string, params tableParams, date string, payload map[strin
 		}
 		return rows, nil
 	case "cohorts", "funnel":
-		data, ok := payload["data"].([]any)
+		rawData, exists := payload["data"]
+		if !exists || rawData == nil {
+			return nil, nil
+		}
+		data, ok := rawData.([]any)
 		if !ok {
 			return nil, fmt.Errorf("unexpected %s response: data is not an array", table)
 		}
@@ -770,7 +777,7 @@ func (s *AdaptySource) readPaywalls(ctx context.Context, opts source.ReadOptions
 					return
 				}
 			}
-			if payload.Meta.Pagination.Pages <= page || len(payload.Data) < pageSize {
+			if len(payload.Data) < pageSize || (payload.Meta.Pagination.Pages > 0 && payload.Meta.Pagination.Pages <= page) {
 				return
 			}
 		}
