@@ -389,6 +389,54 @@ func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	require.Empty(t, icebergPartitionFieldNames(ctx, t, dest, tableName))
 }
 
+func TestDestinationDirectReplaceDeduplicatesPrimaryKeys(t *testing.T) {
+	withSpillRunRows(t, 2)
+
+	ctx := context.Background()
+	tableName := "lake.analytics.deduplicated_replace"
+	tableSchema := mergeTestSchema()
+	tableSchema.PrimaryKeys = []string{"id"}
+	dest := newHadoopDestination(t)
+
+	writeTableRows(t, dest, tableName, tableSchema, false, [][]any{
+		{int64(99), "old-snapshot", 99.0, int64(99)},
+	})
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		DropFirst:   true,
+		PrimaryKeys: []string{"id"},
+	}))
+
+	first, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{
+		{int64(1), "v1-old", 10.0, int64(1)},
+		{int64(2), "v2", 20.0, int64(2)},
+		{int64(1), "v1-latest", 11.0, int64(3)},
+	})
+	require.NoError(t, err)
+	second, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{
+		{int64(3), "v3-latest", 31.0, int64(4)},
+		{int64(3), "v3-old", 30.0, int64(5)},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(append(first, second...)...), destination.WriteOptions{
+		Table:                  tableName,
+		Schema:                 tableSchema,
+		PrimaryKeys:            []string{"id"},
+		DeduplicatePrimaryKeys: true,
+		IncrementalKey:         "score",
+	}))
+
+	rows := readTableRows(t, dest, tableName)
+	byID := singleRowByKey(t, rows, "id")
+	require.Len(t, byID, 3)
+	require.Equal(t, "v1-latest", rows.Value(byID[int64(1)], "name"))
+	require.Equal(t, "v3-latest", rows.Value(byID[int64(3)], "name"))
+	require.NotContains(t, byID, int64(99), "replace must remove the previous snapshot")
+}
+
 func TestDestinationStrategySupport(t *testing.T) {
 	dest := NewDestination()
 
@@ -400,7 +448,9 @@ func TestDestinationStrategySupport(t *testing.T) {
 	require.True(t, dest.SupportsCDCMerge())
 	require.True(t, dest.SupportsCDCUnchangedCols())
 	require.False(t, dest.SupportsAtomicSwap())
+	require.True(t, dest.SupportsDirectReplaceDeduplication())
 
+	require.ErrorContains(t, dest.SwapTable(context.Background(), destination.SwapOptions{}), "does not support atomic table swap")
 	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{PrimaryKeys: []string{"id"}}), "not connected")
 	require.ErrorContains(t, dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{IncrementalKey: "id"}), "not connected")
 	require.ErrorContains(t, dest.SCD2Table(context.Background(), destination.SCD2Options{PrimaryKeys: []string{"id"}}), "not connected")

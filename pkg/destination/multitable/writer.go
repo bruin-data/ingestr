@@ -86,14 +86,16 @@ func WriteWithResult(
 			}
 
 			truncated, err := destination.WriteWithTruncateBoundariesAfterCancel(writeCtx, dest, ch, destination.WriteOptions{
-				Table:            tableConfig.DestTable,
-				Schema:           tableConfig.Schema,
-				PrimaryKeys:      tableConfig.PrimaryKeys,
-				Parallelism:      parallelism,
-				StagingTable:     opts.StagingTable,
-				StagingBucket:    opts.StagingBucket,
-				LoaderFileSize:   opts.LoaderFileSize,
-				LoaderFileFormat: opts.LoaderFileFormat,
+				Table:                  tableConfig.DestTable,
+				Schema:                 tableConfig.Schema,
+				PrimaryKeys:            tableConfig.PrimaryKeys,
+				Parallelism:            parallelism,
+				StagingTable:           opts.StagingTable,
+				StagingBucket:          opts.StagingBucket,
+				LoaderFileSize:         opts.LoaderFileSize,
+				LoaderFileFormat:       opts.LoaderFileFormat,
+				DeduplicatePrimaryKeys: tableConfig.DeduplicatePrimaryKeys,
+				IncrementalKey:         tableConfig.IncrementalKey,
 			}, cancelInput)
 			if truncated {
 				resultMu.Lock()

@@ -26,6 +26,11 @@ func replaceShouldDedup(dest destination.Destination, primaryKeys []string) bool
 		dest.GetScheme() != "clickhouse"
 }
 
+func supportsDirectReplaceDeduplication(dest destination.Destination) bool {
+	deduplicator, ok := dest.(destination.DirectReplaceDeduplicator)
+	return ok && deduplicator.SupportsDirectReplaceDeduplication()
+}
+
 func sourcePrimaryKeysSafeForReplaceFastPath(job *IngestionJob) bool {
 	return sourcePrimaryKeysGuaranteedUnique(job) &&
 		!primaryKeyValuesMayChange(job)
@@ -223,12 +228,14 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
 	}
 
-	// Deduplicated replace: Load a PK-free staging table so duplicate keys can land.
-	dedup := useStaging &&
-		!sourcePrimaryKeysSafeForReplaceFastPath(job) &&
+	shouldDedup := !sourcePrimaryKeysSafeForReplaceFastPath(job) &&
 		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
+	stagedDedup := useStaging && shouldDedup
+	directDedup := !useStaging && shouldDedup && supportsDirectReplaceDeduplication(job.Destination)
+
+	// Staged dedup loads into a PK-free table so duplicate keys can land.
 	stagingPrimaryKeys := job.Config.PrimaryKeys
-	if dedup {
+	if stagedDedup {
 		stagingPrimaryKeys = nil
 	}
 
@@ -293,6 +300,11 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
 	}
+	if directDedup {
+		writeOpts.PrimaryKeys = job.Config.PrimaryKeys
+		writeOpts.DeduplicatePrimaryKeys = true
+		writeOpts.IncrementalKey = job.Config.IncrementalKey
+	}
 	if useStaging {
 		if atomicWriter, ok := job.Destination.(destination.AtomicCommitWriter); ok && atomicWriter.SupportsAtomicCommitWrites() {
 			writeOpts.AtomicCommit = true
@@ -335,7 +347,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		}
 		swapTable := writeTable
 		swapPrimaryKeys := job.Config.PrimaryKeys
-		if dedup {
+		if stagedDedup {
 			normalised, err := deduplicateStaging(ctx, job.Destination, writeTable, targetTable,
 				job.Config.StagingDataset, job.Config.IncrementalKey, job.Schema,
 				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy)
@@ -384,6 +396,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 	}
 
 	useStaging := job.Destination.SupportsAtomicSwap()
+	directDedup := !useStaging && supportsDirectReplaceDeduplication(job.Destination)
 	config.Debug("[STRATEGY] Multi-table replace with %d tables, staging=%v", len(job.Tables), useStaging)
 
 	stagingTables := make(map[string]string)
@@ -404,10 +417,10 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 				writeTable = replaceStagingTableName(job.Destination, destTable, job.Config.StagingDataset)
 			}
 
-			prepareOpts := destination.PrepareOptions{
-				Table:     writeTable,
-				Schema:    ti.Schema,
-				DropFirst: true,
+			dedup := directDedup && replaceShouldDedup(job.Destination, ti.PrimaryKeys)
+			prepareOpts := destination.PrepareOptions{Table: writeTable, Schema: ti.Schema, DropFirst: true}
+			if dedup {
+				prepareOpts.PrimaryKeys = ti.PrimaryKeys
 			}
 			if useStaging {
 				prepareOpts.ExpiresAfter = destination.ManagedStagingTTL
@@ -420,10 +433,13 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 
 			mu.Lock()
 			stagingTables[ti.Name] = writeTable
-			tableConfigs[ti.Name] = destination.TableWriteConfig{
-				DestTable: writeTable,
-				Schema:    ti.Schema,
+			tableConfig := destination.TableWriteConfig{DestTable: writeTable, Schema: ti.Schema}
+			if dedup {
+				tableConfig.PrimaryKeys = ti.PrimaryKeys
+				tableConfig.DeduplicatePrimaryKeys = true
+				tableConfig.IncrementalKey = ti.Schema.IncrementalKey
 			}
+			tableConfigs[ti.Name] = tableConfig
 			mu.Unlock()
 		}(tableInfo)
 	}

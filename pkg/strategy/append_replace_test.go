@@ -337,6 +337,34 @@ func TestReplaceStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+type directReplaceDedupDestination struct {
+	*fakeDestination
+}
+
+func (d *directReplaceDedupDestination) SupportsAtomicSwap() bool { return false }
+func (d *directReplaceDedupDestination) SupportsDirectReplaceDeduplication() bool {
+	return true
+}
+
+func TestReplaceStrategy_Execute_RequestsDirectReplaceDeduplication(t *testing.T) {
+	job, src, base := minimalJob()
+	dest := &directReplaceDedupDestination{fakeDestination: base}
+	job.Destination = dest
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&ReplaceStrategy{}).Execute(t.Context(), job))
+
+	require.Len(t, base.prepareCalls, 1)
+	require.Equal(t, job.Config.DestTable, base.prepareCalls[0].Table)
+	require.Equal(t, job.Config.PrimaryKeys, base.prepareCalls[0].PrimaryKeys)
+	require.Len(t, base.writeCalls, 1)
+	require.Equal(t, job.Config.PrimaryKeys, base.writeCalls[0].PrimaryKeys)
+	require.True(t, base.writeCalls[0].DeduplicatePrimaryKeys)
+	require.Equal(t, job.Config.IncrementalKey, base.writeCalls[0].IncrementalKey)
+	require.Empty(t, base.mergeCalls)
+	require.Empty(t, base.swapCalls)
+}
+
 func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	src.primaryKeysUnique = true
@@ -578,6 +606,33 @@ func TestReplaceStrategy_ExecuteMultiTable_FullRefreshUsesLeasedSlotSuffix(t *te
 	require.Equal(t, job.Config.CDCSlotSuffix, src.readOpts.CDCSlotSuffix)
 	require.Equal(t, job.Config.CDCLegacySlotSuffix, src.readOpts.CDCLegacySlotSuffix)
 	require.Empty(t, src.readOpts.CDCResumeLSNs, "full refresh must not select a previous or legacy slot")
+}
+
+func TestReplaceStrategy_ExecuteMultiTable_RequestsDirectReplaceDeduplication(t *testing.T) {
+	table := newTableInfo("public.orders")
+	table.Schema.IncrementalKey = "id"
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: table.Name}
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
+	base := &fakeDestination{}
+	dest := &directReplaceDedupDestination{fakeDestination: base}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         src,
+		Destination:    dest,
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "landing.orders"},
+	}
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job))
+	require.Len(t, base.prepareCalls, 1)
+	require.Equal(t, table.PrimaryKeys, base.prepareCalls[0].PrimaryKeys)
+	require.Len(t, base.writeCalls, 1)
+	require.Equal(t, table.PrimaryKeys, base.writeCalls[0].PrimaryKeys)
+	require.True(t, base.writeCalls[0].DeduplicatePrimaryKeys)
+	require.Equal(t, table.Schema.IncrementalKey, base.writeCalls[0].IncrementalKey)
+	require.Empty(t, base.swapCalls)
 }
 
 func TestReplaceStrategy_Execute_WriteFails_DropsStaging(t *testing.T) {
