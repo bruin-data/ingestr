@@ -459,13 +459,17 @@ func (s *NATSSource) CommitStream(_ context.Context, token any) error {
 		return fmt.Errorf("nats: unexpected commit token type %T", token)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	msgs := make([]*natsgo.Msg, 0)
 	for seq, msg := range s.pending {
 		if seq <= tok.MaxPendingSeq {
-			if err := msg.Ack(); err != nil {
-				return fmt.Errorf("failed to ack NATS message: %w", err)
-			}
+			msgs = append(msgs, msg)
 			delete(s.pending, seq)
+		}
+	}
+	s.mu.Unlock()
+	for _, msg := range msgs {
+		if err := msg.Ack(); err != nil {
+			return fmt.Errorf("failed to ack NATS message: %w", err)
 		}
 	}
 	return nil
