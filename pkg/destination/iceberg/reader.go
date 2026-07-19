@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -149,6 +150,7 @@ func validateArrowSchemaCompatibility(tableSchema *iceberggo.Schema, writeSchema
 	if err := validateArrowSchemaCompatibilityWithTimestampUnit(tableSchema, writeSchema, false); err == nil {
 		return nil
 	}
+	// Match WriteRecords by retrying with nanosecond timestamps downcast to microseconds.
 	return validateArrowSchemaCompatibilityWithTimestampUnit(tableSchema, writeSchema, true)
 }
 
@@ -221,12 +223,13 @@ func incompatibleIcebergTypeError(path string, target, actual iceberggo.Type) er
 }
 
 func validateRequiredColumns(batch arrow.RecordBatch, required []requiredColumn) error {
+	var violations []error
 	for _, field := range required {
 		if nulls := batch.Column(field.index).NullN(); nulls > 0 {
-			return fmt.Errorf("required field %q contains %d NULL value(s)", field.name, nulls)
+			violations = append(violations, fmt.Errorf("required field %q contains %d NULL value(s)", field.name, nulls))
 		}
 	}
-	return nil
+	return errors.Join(violations...)
 }
 
 func (r *recordBatchReader) RecordBatch() arrow.RecordBatch {

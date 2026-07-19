@@ -280,6 +280,31 @@ func TestRecordBatchReaderNormalizesUUIDStrings(t *testing.T) {
 	require.NoError(t, reader.Err())
 }
 
+func TestValidateRequiredColumnsReportsEveryViolation(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	builder.AppendNull()
+
+	first := builder.NewArray()
+	defer first.Release()
+	builder.AppendNull()
+	second := builder.NewArray()
+	defer second.Release()
+
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "tenant_id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil), []arrow.Array{first, second}, 1)
+	defer batch.Release()
+
+	err := validateRequiredColumns(batch, []requiredColumn{
+		{name: "id", index: 0},
+		{name: "tenant_id", index: 1},
+	})
+	require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+	require.ErrorContains(t, err, `required field "tenant_id" contains 1 NULL value(s)`)
+}
+
 func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.events"
