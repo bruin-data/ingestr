@@ -923,8 +923,6 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		if opts.IncrementalKey != "" {
 			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
 		}
-		stagingSelect := buildMergeStagingSelect(quotedStagingTable, pkList, destQuoted, orderBy, opts.StagingPrimaryKeysUnique)
-
 		var upsertSQL string
 		if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 			upsertSQL = buildPredicateMergeSQL(
@@ -938,6 +936,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 				opts.StagingPrimaryKeysUnique,
 			)
 		} else {
+			stagingSelect := buildMergeStagingSelect(quotedStagingTable, pkList, destQuoted, orderBy, opts.StagingPrimaryKeysUnique)
 			upsertSQL = fmt.Sprintf(
 				`INSERT INTO %s (%s) %s ON CONFLICT (%s) DO UPDATE SET %s`,
 				quotedTargetTable,
