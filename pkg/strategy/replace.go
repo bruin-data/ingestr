@@ -31,7 +31,7 @@ func supportsDirectReplaceDeduplication(dest destination.Destination) bool {
 	return ok && deduplicator.SupportsDirectReplaceDeduplication()
 }
 
-func sourcePrimaryKeysSafeForReplaceFastPath(job *IngestionJob) bool {
+func effectivePrimaryKeysGuaranteedUnique(job *IngestionJob) bool {
 	return sourcePrimaryKeysGuaranteedUnique(job) &&
 		!primaryKeyValuesMayChange(job)
 }
@@ -228,7 +228,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
 	}
 
-	shouldDedup := !sourcePrimaryKeysSafeForReplaceFastPath(job) &&
+	shouldDedup := !effectivePrimaryKeysGuaranteedUnique(job) &&
 		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
 	stagedDedup := useStaging && shouldDedup
 	directDedup := !useStaging && shouldDedup && supportsDirectReplaceDeduplication(job.Destination)

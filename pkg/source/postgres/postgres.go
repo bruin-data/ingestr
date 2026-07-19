@@ -12,7 +12,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
@@ -485,20 +484,34 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 
 	for i, field := range arrowSchema.Fields() {
 		builders[i] = array.NewBuilder(mem, field.Type)
+		if batchSize > 0 {
+			builders[i].Reserve(batchSize)
+		}
+	}
+
+	fields := rows.FieldDescriptions()
+	if len(fields) != len(builders) {
+		for _, b := range builders {
+			b.Release()
+		}
+		return nil, 0, fmt.Errorf("postgres returned %d columns, expected %d", len(fields), len(builders))
+	}
+	typeMap := pgtype.NewMap()
+	if conn := rows.Conn(); conn != nil {
+		typeMap = conn.TypeMap()
+	}
+	appenders := make([]postgresRawAppender, len(builders))
+	for i := range builders {
+		appenders[i] = newPostgresRawAppender(builders[i], fields[i], columns[i], typeMap)
 	}
 
 	var rowCount int64
 	for rows.Next() {
-		values, err := rows.Values()
-		if err != nil {
+		if err := appendPostgresRawRow(appenders, builders, rows.RawValues()); err != nil {
 			for _, b := range builders {
 				b.Release()
 			}
-			return nil, 0, fmt.Errorf("failed to get values: %w", err)
-		}
-
-		for i, val := range values {
-			arrowconv.AppendValue(builders[i], convertValue(val, columns[i]))
+			return nil, 0, err
 		}
 		rowCount++
 
@@ -524,6 +537,7 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 	arrays := make([]arrow.Array, len(builders))
 	for i, b := range builders {
 		arrays[i] = b.NewArray()
+		b.Release()
 	}
 
 	record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
