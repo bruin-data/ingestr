@@ -17,10 +17,11 @@ import (
 // (views, grants, foreign keys).
 //
 // When primary keys are configured, rows are first written to a staging table
-// and then inserted into the truncated target via the destination's existing
-// merge SQL. Staging is deduplicated unless the source guarantees that its
-// effective primary keys are unique. Without PKs, rows are written directly
-// into the truncated target.
+// and then inserted into the truncated target. Destinations can finalize the
+// replacement atomically; otherwise the strategy uses the destination's merge
+// SQL. Staging is deduplicated unless the source guarantees that its effective
+// primary keys are unique. Without PKs, rows are written directly into the
+// truncated target.
 //
 // Tradeoffs the user has already accepted by opting in:
 //   - Non-atomic: the target is empty between TRUNCATE and the final insert,
@@ -213,26 +214,35 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		return fmt.Errorf("failed to apply schema evolution: %w", err)
 	}
 
-	if err := truncator.TruncateTable(ctx, targetTable); err != nil {
-		return fmt.Errorf("failed to truncate target: %w", err)
-	}
-
 	stagingPrimaryKeysUnique := effectivePrimaryKeysGuaranteedUnique(job)
-	if stagingPrimaryKeysUnique {
-		config.Debug("[TRUNCATE+INSERT] Executing unique-key insert via merge from staging")
+	incrementalKey := mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey)
+	if atomicWriter, ok := job.Destination.(destination.AtomicTruncateInsertStagingWriter); ok {
+		config.Debug("[TRUNCATE+INSERT] Executing atomic insert from staging")
+		if err := atomicWriter.TruncateInsertFromStaging(ctx, destination.TruncateInsertFromStagingOptions{
+			StagingTable:             stagingTable,
+			TargetTable:              targetTable,
+			PrimaryKeys:              job.Config.PrimaryKeys,
+			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+			Columns:                  job.Schema.ColumnNames(),
+			IncrementalKey:           incrementalKey,
+		}); err != nil {
+			return fmt.Errorf("failed to atomically insert from staging: %w", err)
+		}
 	} else {
-		config.Debug("[TRUNCATE+INSERT] Executing deduplicated insert via merge from staging")
-	}
-	if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-		StagingTable:             stagingTable,
-		TargetTable:              targetTable,
-		PrimaryKeys:              job.Config.PrimaryKeys,
-		StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
-		Columns:                  job.Schema.ColumnNames(),
-		IncrementalKey:           mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey),
-		Schema:                   job.Schema,
-	}); err != nil {
-		return fmt.Errorf("failed to insert from staging: %w", err)
+		if err := truncator.TruncateTable(ctx, targetTable); err != nil {
+			return fmt.Errorf("failed to truncate target: %w", err)
+		}
+		if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
+			StagingTable:             stagingTable,
+			TargetTable:              targetTable,
+			PrimaryKeys:              job.Config.PrimaryKeys,
+			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+			Columns:                  job.Schema.ColumnNames(),
+			IncrementalKey:           incrementalKey,
+			Schema:                   job.Schema,
+		}); err != nil {
+			return fmt.Errorf("failed to insert from staging: %w", err)
+		}
 	}
 
 	if !job.Config.KeepStaging {

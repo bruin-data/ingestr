@@ -118,6 +118,65 @@ func TestBuildMergeStagingSelectSkipsDedupForUniquePrimaryKeys(t *testing.T) {
 	}
 }
 
+func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     destination.TruncateInsertFromStagingOptions
+		contains string
+		excludes string
+	}{
+		{
+			name: "unique keys",
+			opts: destination.TruncateInsertFromStagingOptions{
+				StagingTable:             "_bruin_staging.events",
+				TargetTable:              "public.events",
+				PrimaryKeys:              []string{"id"},
+				StagingPrimaryKeysUnique: true,
+				Columns:                  []string{"id", "value"},
+			},
+			contains: `SELECT "id", "value" FROM "_bruin_staging"."events"`,
+			excludes: "DISTINCT ON",
+		},
+		{
+			name: "uncertain keys",
+			opts: destination.TruncateInsertFromStagingOptions{
+				StagingTable:   "_bruin_staging.events",
+				TargetTable:    "public.events",
+				PrimaryKeys:    []string{"id"},
+				Columns:        []string{"id", "updated_at", "value"},
+				IncrementalKey: "updated_at",
+			},
+			contains: `SELECT DISTINCT ON ("id") "id", "updated_at", "value" FROM "_bruin_staging"."events" ORDER BY "id", "updated_at" DESC`,
+			excludes: "ON CONFLICT",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(tt.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if truncateSQL != `TRUNCATE TABLE "public"."events"` {
+				t.Fatalf("truncate SQL = %q", truncateSQL)
+			}
+			if !strings.Contains(insertSQL, tt.contains) {
+				t.Fatalf("insert SQL does not contain %q:\n%s", tt.contains, insertSQL)
+			}
+			if strings.Contains(insertSQL, tt.excludes) {
+				t.Fatalf("insert SQL unexpectedly contains %q:\n%s", tt.excludes, insertSQL)
+			}
+		})
+	}
+}
+
+func TestBuildTruncateInsertFromStagingSQLRequiresPrimaryKeys(t *testing.T) {
+	_, _, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{})
+	if err == nil {
+		t.Fatal("expected missing primary key error")
+	}
+}
+
 func TestDescribePostgresStatementUsesAnonymousPreparedStatement(t *testing.T) {
 	describer := &postgresStatementDescriberStub{}
 	const sql = `select "id" from "public"."events"`

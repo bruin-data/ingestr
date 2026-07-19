@@ -93,6 +93,17 @@ type MergeOptions struct {
 	Parallelism            int
 }
 
+// TruncateInsertFromStagingOptions configures an atomic replacement from a
+// populated staging table into an existing target table.
+type TruncateInsertFromStagingOptions struct {
+	StagingTable             string
+	TargetTable              string
+	PrimaryKeys              []string
+	StagingPrimaryKeysUnique bool
+	Columns                  []string
+	IncrementalKey           string
+}
+
 // DeleteInsertOptions contains parameters for delete+insert operations.
 type DeleteInsertOptions struct {
 	StagingTable       string
@@ -502,6 +513,12 @@ type CDCTruncateCapable interface {
 // readers never observe an empty or partially reloaded target.
 type AtomicTruncateInsertWriter interface {
 	TruncateInsertRecords(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
+}
+
+// AtomicTruncateInsertStagingWriter replaces all target rows from a populated
+// staging table in one destination transaction.
+type AtomicTruncateInsertStagingWriter interface {
+	TruncateInsertFromStaging(ctx context.Context, opts TruncateInsertFromStagingOptions) error
 }
 
 // AtomicTruncateInsertSchemaEvolver marks an atomic truncate+insert writer that
