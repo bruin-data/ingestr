@@ -23,6 +23,10 @@ func (d *atomicTruncateInsertDestination) TruncateInsertFromStaging(_ context.Co
 	return d.finalizeErr
 }
 
+func (d *atomicTruncateInsertDestination) SupportsMergeStrategy() bool {
+	return false
+}
+
 func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}

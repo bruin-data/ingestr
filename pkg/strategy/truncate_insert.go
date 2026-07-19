@@ -23,10 +23,12 @@ import (
 // primary keys are unique. Without PKs, rows are written directly into the
 // truncated target.
 //
-// Tradeoffs the user has already accepted by opting in:
+// Destinations without atomic truncate+insert support retain these tradeoffs:
 //   - Non-atomic: the target is empty between TRUNCATE and the final insert,
 //     so concurrent readers may see an empty result set.
 //   - No rollback: if the insert fails after truncate, the target is left empty.
+//
+// All truncate+insert paths retain these tradeoffs:
 //   - Schema drift: the existing table's schema is preserved as-is; this
 //     strategy does not drop and recreate to pick up schema changes.
 //   - ClickHouse caveat: ClickHouse's merge implementation relies on
@@ -134,7 +136,8 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 }
 
 func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
-	if !job.Destination.SupportsMergeStrategy() {
+	atomicWriter, supportsAtomicFinalize := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
+	if !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
 		return fmt.Errorf("destination does not support deduplicated truncate+insert (merge not supported); use replace instead")
 	}
 
@@ -216,7 +219,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	stagingPrimaryKeysUnique := effectivePrimaryKeysGuaranteedUnique(job)
 	incrementalKey := mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey)
-	if atomicWriter, ok := job.Destination.(destination.AtomicTruncateInsertStagingWriter); ok {
+	if supportsAtomicFinalize {
 		config.Debug("[TRUNCATE+INSERT] Executing atomic insert from staging")
 		if err := atomicWriter.TruncateInsertFromStaging(ctx, destination.TruncateInsertFromStagingOptions{
 			StagingTable:             stagingTable,
