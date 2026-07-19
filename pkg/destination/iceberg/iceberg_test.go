@@ -500,6 +500,52 @@ func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
 	require.ErrorIs(t, err, writeErr)
 }
 
+func TestDestinationRejectsNullIdentifiers(t *testing.T) {
+	tests := []struct {
+		name          string
+		replace       bool
+		arrowNullable bool
+	}{
+		{name: "append", arrowNullable: true},
+		{name: "replace with non-nullable Arrow field", replace: true, arrowNullable: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tableName := "lake.analytics.null_identifier_events"
+			tableSchema := &schema.TableSchema{
+				Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+			}
+
+			dest := NewDestination()
+			require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+			defer func() { require.NoError(t, dest.Close(ctx)) }()
+
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table: tableName, Schema: tableSchema, PrimaryKeys: []string{"id"},
+			}))
+			require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 7)), destination.WriteOptions{
+				Table: tableName, Schema: tableSchema,
+			}))
+
+			prepareOpts := destination.PrepareOptions{
+				Table: tableName, Schema: tableSchema, DropFirst: tt.replace,
+			}
+			if tt.replace {
+				prepareOpts.PrimaryKeys = []string{"id"}
+			}
+			require.NoError(t, dest.PrepareTable(ctx, prepareOpts))
+
+			err := dest.WriteParallel(ctx, recordBatches(int64BatchWithValidity(
+				t, []int64{8, 0}, []bool{true, false}, tt.arrowNullable,
+			)), destination.WriteOptions{Table: tableName, Schema: tableSchema})
+			require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+			require.EqualValues(t, 1, icebergRowCount(ctx, t, dest, tableName))
+		})
+	}
+}
+
 func TestDestinationMakesNonIdentifierColumnsOptional(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.optional_events"
@@ -632,6 +678,23 @@ func int64Batch(t *testing.T, values ...int64) arrow.RecordBatch {
 	defer arr.Release()
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	return array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(len(values)))
+}
+
+func int64BatchWithValidity(t *testing.T, values []int64, valid []bool, nullable bool) arrow.RecordBatch {
+	t.Helper()
+	require.Len(t, valid, len(values))
+
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	builder.AppendValues(values, valid)
+
+	arr := builder.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: nullable,
+	}}, nil)
 	return array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(len(values)))
 }
 

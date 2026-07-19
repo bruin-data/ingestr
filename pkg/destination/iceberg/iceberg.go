@@ -145,15 +145,25 @@ func (d *Destination) WriteParallel(ctx context.Context, records <-chan source.R
 	}
 
 	prepared := d.lookupPrepared(opts.Table)
-	writeSchema := opts.Schema
+	writeSchema := prepared.schema
 	if writeSchema == nil {
-		writeSchema = prepared.schema
+		writeSchema = opts.Schema
 	}
 	if writeSchema == nil {
 		return errors.New("iceberg destination requires schema for write")
 	}
 
-	reader := newRecordBatchReader(ctx, records, icebergArrowSchema(writeSchema))
+	targetSchema := tbl.Schema()
+	if prepared.replace && prepared.schema != nil {
+		targetSchema, err = icebergSchemaFromTableSchema(prepared.schema)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to build replacement schema for table %s: %w", opts.Table, err)
+		}
+	}
+	reader, err := newTableRecordBatchReader(ctx, records, icebergArrowSchema(writeSchema), targetSchema)
+	if err != nil {
+		return fmt.Errorf("iceberg: invalid write schema for table %s: %w", opts.Table, err)
+	}
 	defer reader.Release()
 
 	props := iceberggo.Properties{
