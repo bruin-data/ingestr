@@ -87,6 +87,7 @@ func TestBuildPredicateMergeSQLUsesPredicateForUpdateAndInsertMatch(t *testing.T
 		[]string{"event_date", "value"},
 		`"id"`,
 		predicate,
+		false,
 	)
 
 	matchCondition := `target."id" = source."id" AND (` + predicate + `)`
@@ -101,6 +102,19 @@ func TestBuildPredicateMergeSQLUsesPredicateForUpdateAndInsertMatch(t *testing.T
 	}
 	if strings.Contains(sql, "ON CONFLICT") {
 		t.Fatalf("predicate merge SQL must not use ON CONFLICT:\n%s", sql)
+	}
+}
+
+func TestBuildMergeStagingSelectSkipsDedupForUniquePrimaryKeys(t *testing.T) {
+	columns := quoteColumns([]string{"id", "value"})
+	unique := buildMergeStagingSelect(`"staging"."events"`, `"id"`, columns, `"id"`, true)
+	if strings.Contains(unique, "DISTINCT ON") {
+		t.Fatalf("unique staging select unexpectedly deduplicates: %s", unique)
+	}
+
+	uncertain := buildMergeStagingSelect(`"staging"."events"`, `"id"`, columns, `"id"`, false)
+	if !strings.Contains(uncertain, `DISTINCT ON ("id")`) {
+		t.Fatalf("uncertain staging select does not deduplicate: %s", uncertain)
 	}
 }
 

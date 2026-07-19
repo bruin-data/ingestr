@@ -79,6 +79,29 @@ func TestTruncateInsertStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema
 	}
 }
 
+func TestTruncateInsertStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Len(t, dest.mergeCalls, 1)
+	require.True(t, dest.mergeCalls[0].StagingPrimaryKeysUnique)
+}
+
+func TestTruncateInsertStrategy_Execute_DedupsUncertainSourcePrimaryKeys(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Len(t, dest.mergeCalls, 1)
+	require.False(t, dest.mergeCalls[0].StagingPrimaryKeysUnique)
+}
+
 func TestTruncateInsertStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
