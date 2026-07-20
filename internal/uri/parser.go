@@ -1,6 +1,7 @@
 package uri
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -52,6 +53,10 @@ func Parse(rawURI string) (*ParsedURI, error) {
 
 	parsed, err := url.Parse(normalizedURI)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("failed to parse URI: %w", err)
 	}
 
