@@ -490,10 +490,15 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		updateSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
 		insertSource = dedupSource("")
 	}
+	primaryKeyMatchCondition := buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
-		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
+		primaryKeyMatchCondition,
 		opts.IncrementalPredicate,
 	)
+	insertMatchCondition := matchCondition
+	if isCDC {
+		insertMatchCondition = primaryKeyMatchCondition
+	}
 
 	runUpdate := func() error {
 		if len(nonPKColumns) == 0 {
@@ -504,12 +509,16 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		if isCDC && hasUnchangedCols {
 			updateSet = buildCDCUpdateSetSQLite(nonPKColumns, "target", "source", "source."+destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
 		}
+		updateMatchCondition := matchCondition
+		if isCDC {
+			updateMatchCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn")`
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s SET %s FROM %s WHERE %s`,
 			updateTarget,
 			updateSet,
 			updateSource,
-			matchCondition,
+			updateMatchCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -528,7 +537,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			strings.Join(quotedTargetColumns, ", "),
 			insertSource,
 			quotedTargetTable,
-			matchCondition,
+			insertMatchCondition,
 		)
 		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
@@ -542,7 +551,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate.
+	// duplicate. CDC anti-joins always use the primary key alone.
 	steps := []func() error{runUpdate, runInsert}
 	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
@@ -557,7 +566,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			`UPDATE %s AS target SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
+			`UPDATE %s AS target SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1 AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0))`,
 			quotedTargetTable,
 			dedupSource(""),
 			matchCondition,

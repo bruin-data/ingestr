@@ -221,6 +221,106 @@ func TestCDCMergeWithoutUnchangedColsMarkerUpdatesNormally(t *testing.T) {
 	}
 }
 
+func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "cdc-lsn-fence.db")
+	requireNoError(t, d.Connect(t.Context(), "sqlite://"+path))
+	t.Cleanup(func() { _ = d.Close(t.Context()) })
+
+	for _, statement := range []string{
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, payload TEXT, _cdc_lsn TEXT, _cdc_deleted INTEGER, _cdc_synced_at TEXT)`,
+		`CREATE TABLE items_staging (id INTEGER, payload TEXT, _cdc_lsn TEXT, _cdc_deleted INTEGER, _cdc_synced_at TEXT, _cdc_unchanged_cols TEXT)`,
+		`INSERT INTO items VALUES
+			(1, 'newer-active', '00000000/00000030/0000000000000002', 0, '2026-01-03'),
+			(2, 'newer-deleted', '00000000/00000030/0000000000000002', 1, '2026-01-03'),
+			(3, 'legacy', NULL, 0, '2026-01-01'),
+			(6, 'same-active', '00000000/00000010/0000000000000002', 0, '2026-01-01'),
+			(7, 'same-deleted', '00000000/00000010/0000000000000002', 1, '2026-01-01'),
+			(8, 'tie-delete', '00000000/00000010/0000000000000002', 0, '2026-01-01'),
+			(9, 'toast-newer', '00000000/00000030/0000000000000002', 0, '2026-01-03')`,
+		`INSERT INTO items_staging VALUES
+			(1, 'stale-active', '00000000/00000020/0000000000000002', 0, '2026-01-02', '[]'),
+			(1, NULL, '00000000/00000025/0000000000000002', 1, '2026-01-02', '[]'),
+			(2, 'stale-resurrection', '00000000/00000020/0000000000000002', 0, '2026-01-02', '[]'),
+			(3, 'first-cdc-update', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
+			(4, 'first-insert', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
+			(5, NULL, '00000000/00000010/0000000000000002', 1, '2026-01-02', '[]'),
+			(6, 'same-replay', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
+			(7, 'same-resurrection', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
+			(8, NULL, '00000000/00000010/0000000000000002', 1, '2026-01-02', '[]'),
+			(9, NULL, '00000000/00000020/0000000000000002', 0, '2026-01-02', '["payload"]')`,
+	} {
+		requireNoError(t, d.Exec(t.Context(), statement))
+	}
+
+	opts := destination.MergeOptions{
+		TargetTable:  "items",
+		StagingTable: "items_staging",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn},
+	}
+	requireNoError(t, d.MergeTable(t.Context(), opts))
+
+	expected := map[int64]struct {
+		payload string
+		lsn     string
+		deleted int
+		synced  string
+	}{
+		1: {"newer-active", "00000000/00000030/0000000000000002", 0, "2026-01-03"},
+		2: {"newer-deleted", "00000000/00000030/0000000000000002", 1, "2026-01-03"},
+		3: {"first-cdc-update", "00000000/00000010/0000000000000002", 0, "2026-01-02"},
+		4: {"first-insert", "00000000/00000010/0000000000000002", 0, "2026-01-02"},
+		5: {"<null>", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
+		6: {"same-active", "00000000/00000010/0000000000000002", 0, "2026-01-01"},
+		7: {"same-deleted", "00000000/00000010/0000000000000002", 1, "2026-01-01"},
+		8: {"tie-delete", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
+		9: {"toast-newer", "00000000/00000030/0000000000000002", 0, "2026-01-03"},
+	}
+	for id, want := range expected {
+		var payload, lsn, synced string
+		var deleted int
+		requireNoError(t, d.db.QueryRowContext(t.Context(), `
+			SELECT COALESCE(payload, '<null>'), COALESCE(_cdc_lsn, ''), _cdc_deleted, _cdc_synced_at
+			FROM items WHERE id = ?
+		`, id).Scan(&payload, &lsn, &deleted, &synced))
+		if payload != want.payload || lsn != want.lsn || deleted != want.deleted || synced != want.synced {
+			t.Fatalf("id %d = (%q, %q, %d, %q), want (%q, %q, %d, %q)", id, payload, lsn, deleted, synced, want.payload, want.lsn, want.deleted, want.synced)
+		}
+	}
+
+	requireNoError(t, d.Exec(t.Context(), `DELETE FROM items_staging`))
+	requireNoError(t, d.Exec(t.Context(), `INSERT INTO items_staging VALUES (1, 'newest', '00000000/00000040/0000000000000002', 0, '2026-01-04', '[]')`))
+	requireNoError(t, d.MergeTable(t.Context(), opts))
+	assertSQLiteCDCRow(t, d.db, "newest", "00000000/00000040/0000000000000002", 0)
+
+	requireNoError(t, d.Exec(t.Context(), `DELETE FROM items_staging`))
+	requireNoError(t, d.Exec(t.Context(), `INSERT INTO items_staging VALUES (1, NULL, '00000000/00000040/0000000000000002', 1, '2026-01-04', '[]')`))
+	requireNoError(t, d.MergeTable(t.Context(), opts))
+	assertSQLiteCDCRow(t, d.db, "newest", "00000000/00000040/0000000000000002", 1)
+
+	requireNoError(t, d.Exec(t.Context(), `DELETE FROM items_staging`))
+	requireNoError(t, d.Exec(t.Context(), `INSERT INTO items_staging VALUES (1, 'stale-outside-predicate', '00000000/00000020/0000000000000002', 0, '2026-01-02', '[]')`))
+	opts.IncrementalPredicate = "target.id > 100"
+	requireNoError(t, d.MergeTable(t.Context(), opts))
+	assertSQLiteCDCRow(t, d.db, "newest", "00000000/00000040/0000000000000002", 1)
+	var count int
+	requireNoError(t, d.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM items WHERE id = 1`).Scan(&count))
+	if count != 1 {
+		t.Fatalf("row count = %d, want 1", count)
+	}
+}
+
+func assertSQLiteCDCRow(t *testing.T, db *sql.DB, wantPayload, wantLSN string, wantDeleted int) {
+	t.Helper()
+	var payload, lsn string
+	var deleted int
+	requireNoError(t, db.QueryRowContext(t.Context(), `SELECT payload, _cdc_lsn, _cdc_deleted FROM items WHERE id = 1`).Scan(&payload, &lsn, &deleted))
+	if payload != wantPayload || lsn != wantLSN || deleted != wantDeleted {
+		t.Fatalf("row = (%q, %q, %d), want (%q, %q, %d)", payload, lsn, deleted, wantPayload, wantLSN, wantDeleted)
+	}
+}
+
 func TestCDCMergeWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
 	d := NewSQLiteDestination()
 	path := filepath.Join(t.TempDir(), "cdc-predicate-order.db")
