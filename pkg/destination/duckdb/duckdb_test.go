@@ -1176,6 +1176,140 @@ func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		);
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP,
+			"_cdc_unchanged_cols" VARCHAR
+		);
+		INSERT INTO target_table VALUES
+			(1, 'newer-active', '00000000000000000030', false, '2026-01-03'),
+			(2, 'newer-deleted', '00000000000000000030', true, '2026-01-03'),
+			(3, 'legacy', NULL, false, '2026-01-01'),
+			(6, 'same-active', '00000000000000000010', false, '2026-01-01'),
+			(7, 'same-deleted', '00000000000000000010', true, '2026-01-01'),
+			(8, 'tie-delete', '00000000000000000010', false, '2026-01-01'),
+			(9, 'toast-newer', '00000000000000000030', false, '2026-01-03');
+		INSERT INTO staging_table VALUES
+			(1, 'stale-active', '00000000000000000020', false, '2026-01-02', '[]'),
+			(1, NULL, '00000000000000000025', true, '2026-01-02', '[]'),
+			(2, 'stale-resurrection', '00000000000000000020', false, '2026-01-02', '[]'),
+			(3, 'first-cdc-update', '00000000000000000010', false, '2026-01-02', '[]'),
+			(4, 'first-insert', '00000000000000000010', false, '2026-01-02', '[]'),
+			(5, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
+			(6, 'same-replay', '00000000000000000010', false, '2026-01-02', '[]'),
+			(7, 'same-resurrection', '00000000000000000010', false, '2026-01-02', '[]'),
+			(8, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
+			(9, NULL, '00000000000000000020', false, '2026-01-02', '["name"]')
+	`))
+
+	opts := destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn},
+	}
+	require.NoError(t, dest.MergeTable(ctx, opts))
+
+	expected := map[int64]struct {
+		name    string
+		lsn     string
+		deleted bool
+		synced  string
+	}{
+		1: {"newer-active", "00000000000000000030", false, "2026-01-03"},
+		2: {"newer-deleted", "00000000000000000030", true, "2026-01-03"},
+		3: {"first-cdc-update", "00000000000000000010", false, "2026-01-02"},
+		4: {"first-insert", "00000000000000000010", false, "2026-01-02"},
+		5: {"<null>", "00000000000000000010", true, "2026-01-02"},
+		6: {"same-active", "00000000000000000010", false, "2026-01-01"},
+		7: {"same-deleted", "00000000000000000010", true, "2026-01-01"},
+		8: {"tie-delete", "00000000000000000010", true, "2026-01-02"},
+		9: {"toast-newer", "00000000000000000030", false, "2026-01-03"},
+	}
+	for id, want := range expected {
+		name, lsn, deleted, synced := readDuckDBCDCRow(t, ctx, dest, id)
+		assert.Equal(t, want.name, name, "id %d name", id)
+		assert.Equal(t, want.lsn, lsn, "id %d LSN", id)
+		assert.Equal(t, want.deleted, deleted, "id %d deleted", id)
+		assert.Equal(t, want.synced, synced, "id %d synced timestamp", id)
+	}
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'newest', '00000000000000000040', false, '2026-01-04', '[]')`))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", false)
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, NULL, '00000000000000000040', true, '2026-01-04', '[]')`))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", true)
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'stale-outside-predicate', '00000000000000000020', false, '2026-01-02', '[]')`))
+	opts.IncrementalPredicate = "target.id > 100"
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", true)
+	require.NoError(t, dest.Close(ctx))
+	assertDuckDBCDCRow(t, ctx, path, "newest", "00000000000000000040", true)
+}
+
+func readDuckDBCDCRow(t *testing.T, ctx context.Context, dest *DuckDBDestination, id int64) (string, string, bool, string) {
+	t.Helper()
+	stmt, err := dest.conn.NewStatement()
+	require.NoError(t, err)
+	defer func() { _ = stmt.Close() }()
+	require.NoError(t, stmt.SetSqlQuery(fmt.Sprintf(`
+		SELECT COALESCE(name, '<null>'), COALESCE("_cdc_lsn", ''), "_cdc_deleted", strftime("_cdc_synced_at", '%%Y-%%m-%%d')
+		FROM target_table WHERE id = %d
+	`, id)))
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	require.NoError(t, err)
+	defer reader.Release()
+	require.True(t, reader.Next())
+	record := reader.RecordBatch()
+	return strings.Clone(record.Column(0).(*array.String).Value(0)),
+		strings.Clone(record.Column(1).(*array.String).Value(0)),
+		record.Column(2).(*array.Boolean).Value(0),
+		strings.Clone(record.Column(3).(*array.String).Value(0))
+}
+
+func assertDuckDBCDCState(t *testing.T, ctx context.Context, dest *DuckDBDestination, wantName, wantLSN string, wantDeleted bool) {
+	t.Helper()
+	name, lsn, deleted, _ := readDuckDBCDCRow(t, ctx, dest, 1)
+	assert.Equal(t, wantName, name)
+	assert.Equal(t, wantLSN, lsn)
+	assert.Equal(t, wantDeleted, deleted)
+}
+
+func assertDuckDBCDCRow(t *testing.T, ctx context.Context, path, wantName, wantLSN string, wantDeleted bool) {
+	t.Helper()
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	var nameRaw, lsnRaw []byte
+	var deleted bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name, "_cdc_lsn", "_cdc_deleted" FROM target_table WHERE id = 1`).Scan(&nameRaw, &lsnRaw, &deleted))
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_table WHERE id = 1`).Scan(&count))
+	assert.Equal(t, wantName, string(nameRaw))
+	assert.Equal(t, wantLSN, string(lsnRaw))
+	assert.Equal(t, wantDeleted, deleted)
+	assert.Equal(t, 1, count)
+}
+
 func TestMergeTable_CDCWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

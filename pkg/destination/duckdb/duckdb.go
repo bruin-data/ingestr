@@ -739,8 +739,9 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}()
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
+	primaryKeyCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	onCondition := destination.MergeJoinCondition(
-		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		primaryKeyCondition,
 		opts.IncrementalPredicate,
 	)
 
@@ -780,6 +781,10 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	if isCDC {
 		updateSource = dedupSource(` WHERE "_cdc_deleted" = false`)
 		insertSource = dedupSource("")
+	}
+	insertCondition := onCondition
+	if isCDC {
+		insertCondition = primaryKeyCondition
 	}
 
 	targetHasRows := true
@@ -829,12 +834,16 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		if len(nonPKColumns) == 0 {
 			return nil
 		}
+		updateCondition := onCondition
+		if isCDC {
+			updateCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn")`
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
 			buildUpdateSet(nonPKColumns, "target", "source", applyUnchangedCols),
 			updateSource,
-			onCondition,
+			updateCondition,
 		)
 		config.Debug("[DUCKDB MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -852,7 +861,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			strings.Join(destQuoted, ", "),
 			insertSource,
 			quotedTargetTable,
-			onCondition,
+			insertCondition,
 		)
 		config.Debug("[DUCKDB MERGE] Executing INSERT: %s", insertSQL)
 
@@ -865,7 +874,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate.
+	// duplicate. CDC anti-joins always use the primary key alone.
 	steps := []func() error{runUpdate, runInsert}
 	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
@@ -880,7 +889,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			`UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = true`,
+			`UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false))`,
 			quotedTargetTable,
 			dedupSource(""),
 			onCondition,
