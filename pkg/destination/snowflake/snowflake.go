@@ -522,7 +522,8 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
-	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate)
+	primaryKeyOnClause := strings.Join(onConditions, " AND ")
+	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
 
 	pkMap := make(map[string]bool)
 	for _, pk := range primaryKeys {
@@ -626,15 +627,23 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 		)
 
 		fmt.Fprintf(&mergeSQL, "USING %s AS source\n", composedSource)
-		fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
+		fmt.Fprintf(&mergeSQL, "ON %s\n", primaryKeyOnClause)
 
 		hasRowData := fmt.Sprintf("(source.%s = false OR source.\"__ingestr_has_active\")", cdcDeleted)
+		newerChange := fmt.Sprintf(
+			"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND source.%s = true AND COALESCE(target.%s, false) = false))",
+			cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcDeleted, cdcDeleted,
+		)
+		matchedCondition := newerChange
+		if strings.TrimSpace(incrementalPredicate) != "" {
+			matchedCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, matchedCondition)
+		}
 		if len(updateSets) > 0 {
-			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", hasRowData)
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND %s THEN\n", matchedCondition, hasRowData)
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
-		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", cdcDeleted)
+		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND source.%s = true THEN\n", matchedCondition, cdcDeleted)
 		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
