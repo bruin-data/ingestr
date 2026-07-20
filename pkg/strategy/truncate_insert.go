@@ -17,15 +17,18 @@ import (
 // (views, grants, foreign keys).
 //
 // When primary keys are configured, rows are first written to a staging table
-// and then inserted into the truncated target via the destination's existing
-// merge SQL. Staging is deduplicated unless the source guarantees that its
-// effective primary keys are unique. Without PKs, rows are written directly
-// into the truncated target.
+// and then inserted into the truncated target. Destinations can finalize the
+// replacement atomically; otherwise the strategy uses the destination's merge
+// SQL. Staging is deduplicated unless the source guarantees that its effective
+// primary keys are unique. Without PKs, rows are written directly into the
+// truncated target.
 //
-// Tradeoffs the user has already accepted by opting in:
+// Destinations without atomic truncate+insert support retain these tradeoffs:
 //   - Non-atomic: the target is empty between TRUNCATE and the final insert,
 //     so concurrent readers may see an empty result set.
 //   - No rollback: if the insert fails after truncate, the target is left empty.
+//
+// All truncate+insert paths retain these tradeoffs:
 //   - Schema drift: the existing table's schema is preserved as-is; this
 //     strategy does not drop and recreate to pick up schema changes.
 //   - ClickHouse caveat: ClickHouse's merge implementation relies on
@@ -133,7 +136,8 @@ func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *Ingesti
 }
 
 func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
-	if !job.Destination.SupportsMergeStrategy() {
+	atomicWriter, supportsAtomicFinalize := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
+	if !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
 		return fmt.Errorf("destination does not support deduplicated truncate+insert (merge not supported); use replace instead")
 	}
 
@@ -213,26 +217,35 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		return fmt.Errorf("failed to apply schema evolution: %w", err)
 	}
 
-	if err := truncator.TruncateTable(ctx, targetTable); err != nil {
-		return fmt.Errorf("failed to truncate target: %w", err)
-	}
-
 	stagingPrimaryKeysUnique := effectivePrimaryKeysGuaranteedUnique(job)
-	if stagingPrimaryKeysUnique {
-		config.Debug("[TRUNCATE+INSERT] Executing unique-key insert via merge from staging")
+	incrementalKey := mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey)
+	if supportsAtomicFinalize {
+		config.Debug("[TRUNCATE+INSERT] Executing atomic insert from staging")
+		if err := atomicWriter.TruncateInsertFromStaging(ctx, destination.TruncateInsertFromStagingOptions{
+			StagingTable:             stagingTable,
+			TargetTable:              targetTable,
+			PrimaryKeys:              job.Config.PrimaryKeys,
+			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+			Columns:                  job.Schema.ColumnNames(),
+			IncrementalKey:           incrementalKey,
+		}); err != nil {
+			return fmt.Errorf("failed to atomically insert from staging: %w", err)
+		}
 	} else {
-		config.Debug("[TRUNCATE+INSERT] Executing deduplicated insert via merge from staging")
-	}
-	if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-		StagingTable:             stagingTable,
-		TargetTable:              targetTable,
-		PrimaryKeys:              job.Config.PrimaryKeys,
-		StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
-		Columns:                  job.Schema.ColumnNames(),
-		IncrementalKey:           mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey),
-		Schema:                   job.Schema,
-	}); err != nil {
-		return fmt.Errorf("failed to insert from staging: %w", err)
+		if err := truncator.TruncateTable(ctx, targetTable); err != nil {
+			return fmt.Errorf("failed to truncate target: %w", err)
+		}
+		if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
+			StagingTable:             stagingTable,
+			TargetTable:              targetTable,
+			PrimaryKeys:              job.Config.PrimaryKeys,
+			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+			Columns:                  job.Schema.ColumnNames(),
+			IncrementalKey:           incrementalKey,
+			Schema:                   job.Schema,
+		}); err != nil {
+			return fmt.Errorf("failed to insert from staging: %w", err)
+		}
 	}
 
 	if !job.Config.KeepStaging {
