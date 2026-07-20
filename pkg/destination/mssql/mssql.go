@@ -896,7 +896,7 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
 	}
-	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate)
+	primaryKeyOnClause := strings.Join(onConditions, " AND ")
 
 	stagingCols := strings.Join(quotedColumns, ", ")
 	insertCols := strings.Join(quotedTargetColumns, ", ")
@@ -909,8 +909,10 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 	pkPartition := strings.Join(quotedPKs, ", ")
 
 	if isCDC {
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onClause, stagingCols, insertCols, sourceCols, pkPartition)
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition)
 	}
+
+	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
 
 	var updateSet string
 	if len(nonPKColumns) > 0 {
@@ -960,7 +962,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -993,6 +995,11 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 	)
 
 	hasRowData := "(source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1)"
+	newerChange := "(target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn] OR (source.[_cdc_lsn] = target.[_cdc_lsn] AND source.[_cdc_deleted] = 1 AND COALESCE(target.[_cdc_deleted], 0) = 0))"
+	matchedConditions := []string{newerChange}
+	if strings.TrimSpace(incrementalPredicate) != "" {
+		matchedConditions = append([]string{"(" + incrementalPredicate + ")"}, matchedConditions...)
+	}
 	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
 	updates := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
@@ -1017,11 +1024,12 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		`MERGE %s AS target
 USING %s AS source
 ON %s
-WHEN MATCHED THEN UPDATE SET %s
+WHEN MATCHED AND %s THEN UPDATE SET %s
 WHEN NOT MATCHED AND %s THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		composedSource,
 		onClause,
+		strings.Join(matchedConditions, " AND "),
 		strings.Join(updates, ", "),
 		hasRowData,
 		insertCols,

@@ -479,6 +479,7 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 	assertContains(t, got, "OPENJSON(COALESCE(source.[_cdc_unchanged_cols], N'[]'))")
 	assertContains(t, got, "[value] COLLATE Latin1_General_100_BIN2 = N'payload' COLLATE Latin1_General_100_BIN2")
 	assertContains(t, got, "THEN source.[payload] ELSE target.[payload] END")
+	assertContains(t, got, "WHEN MATCHED AND (target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn] OR (source.[_cdc_lsn] = target.[_cdc_lsn] AND source.[_cdc_deleted] = 1 AND COALESCE(target.[_cdc_deleted], 0) = 0)) THEN UPDATE")
 	assertContains(t, got, "INSERT ([id], [payload], [_cdc_lsn], [_cdc_deleted], [_cdc_synced_at])")
 	if strings.Contains(got, "INSERT ([id], [payload], [_cdc_lsn], [_cdc_deleted], [_cdc_synced_at], [_cdc_unchanged_cols])") {
 		t.Fatalf("CDC marker leaked into target INSERT:\n%s", got)
@@ -499,6 +500,23 @@ func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
 	)
 
 	assertContains(t, got, "ON target.[id] = source.[id] AND (target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date)))")
+}
+
+func TestBuildCDCMergeSQLKeepsIncrementalPredicateOutOfPrimaryKeyMatch(t *testing.T) {
+	predicate := "target.[id] >= 10"
+	got := buildMergeSQLWithPredicate(
+		"dbo.items",
+		"stage.items",
+		[]string{"id"},
+		[]string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
+		"",
+		predicate,
+	)
+
+	assertContains(t, got, "ON target.[id] = source.[id]\nWHEN MATCHED AND (target.[id] >= 10) AND (target.[_cdc_lsn] IS NULL")
+	if strings.Contains(got, "ON target.[id] = source.[id] AND ("+predicate+")") {
+		t.Fatalf("incremental predicate in CDC primary-key match can turn an existing row into an insert:\n%s", got)
+	}
 }
 
 func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
