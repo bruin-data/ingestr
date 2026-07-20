@@ -1,10 +1,13 @@
 package mssql_cdc
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,6 +24,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/source/mssql"
+	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
 const (
@@ -30,7 +34,21 @@ const (
 	// round-trip taken while behind, so lag reporting cannot add latency to
 	// each poll cycle of a catch-up.
 	mssqlLagRefreshInterval = 5 * time.Second
+
+	// maxTransientReadFailures bounds how many consecutive deadlock-victim
+	// change reads are retried per table before the failure is treated as
+	// permanent.
+	maxTransientReadFailures = 20
 )
+
+func sleepPoll(ctx context.Context, interval time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(interval):
+		return nil
+	}
+}
 
 var mssqlCDCColumns = []schema.Column{
 	{Name: destination.CDCLSNColumn, DataType: schema.TypeString, Nullable: false},
@@ -296,6 +314,9 @@ func (s *MSSQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	if len(pks) == 0 {
 		return nil, fmt.Errorf("SQL Server CDC table %s has no primary key; provide --primary-key or add a primary key to the source table", req.Name)
 	}
+	if err := validateCapturedPrimaryKeys(tableSchema, pks); err != nil {
+		return nil, err
+	}
 	tableSchema.PrimaryKeys = pks
 
 	strategy := config.StrategyMerge
@@ -373,6 +394,7 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 
 		startByTable := make(map[string]string, len(selected))
 		metaByTable := make(map[string]tableMetadata, len(selected))
+		reReadByTable := make(map[string]bool, len(selected))
 
 		for _, table := range selected {
 			meta, err := s.getTableMetadata(ctx, table.Name, "")
@@ -392,6 +414,7 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 				}
 				if canResume {
 					startByTable[table.Name] = startHex
+					reReadByTable[table.Name] = !isSnapshotStamp(resume)
 					continue
 				}
 			}
@@ -404,7 +427,7 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			startByTable[table.Name] = snapshotLSN
 		}
 
-		if err := s.streamTables(ctx, selected, metaByTable, startByTable, opts.ReadOptions, results); err != nil {
+		if err := s.streamTables(ctx, selected, metaByTable, startByTable, reReadByTable, opts.ReadOptions, results); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -644,12 +667,32 @@ func (s *MSSQLCDCSource) getCapturedSchema(ctx context.Context, meta tableMetada
 		}
 	}
 
-	return &schema.TableSchema{
+	tableSchema := &schema.TableSchema{
 		Name:        meta.SourceName,
 		Schema:      meta.SourceSchema,
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
-	}, nil
+	}
+	if err := validateCapturedPrimaryKeys(tableSchema, primaryKeys); err != nil {
+		return nil, err
+	}
+	return tableSchema, nil
+}
+
+// validateCapturedPrimaryKeys ensures every primary-key column is captured by
+// the CDC capture instance. Merge applies changes by primary key, so a key
+// column missing from the change table would silently corrupt replication.
+func validateCapturedPrimaryKeys(tableSchema *schema.TableSchema, pks []string) error {
+	captured := make(map[string]bool, len(tableSchema.Columns))
+	for _, col := range tableSchema.Columns {
+		captured[strings.ToLower(col.Name)] = true
+	}
+	for _, pk := range pks {
+		if !captured[strings.ToLower(pk)] {
+			return fmt.Errorf("primary key column %q of %s.%s is not captured by the SQL Server CDC capture instance; re-enable CDC capturing all key columns", pk, tableSchema.Schema, tableSchema.Name)
+		}
+	}
+	return nil
 }
 
 func (s *MSSQLCDCSource) primaryKeys(ctx context.Context, meta tableMetadata) ([]string, error) {
@@ -720,7 +763,7 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 				return
 			}
 			if canResume {
-				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, opts, results, ""); err != nil {
+				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, !isSnapshotStamp(opts.CDCResumeLSN), opts, results, ""); err != nil {
 					results <- source.RecordBatchResult{Err: err}
 				}
 				return
@@ -734,7 +777,7 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 			return
 		}
 
-		if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, snapshotLSN, opts, results, ""); err != nil {
+		if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, snapshotLSN, false, opts, results, ""); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -763,20 +806,13 @@ func (s *MSSQLCDCSource) snapshotTable(ctx context.Context, meta tableMetadata, 
 }
 
 func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string, isolation sql.IsolationLevel) (string, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: isolation == sql.LevelSnapshot})
-	if err != nil {
-		return "", fmt.Errorf("failed to begin snapshot transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	lock := isolation != sql.LevelSnapshot
-	snapshotLSN, err := s.maxLSNFromQueryer(ctx, tx)
+	// Read the harvest watermark before opening the snapshot transaction.
+	// fn_cdc_get_max_lsn reports current capture progress even inside a
+	// snapshot-isolation transaction, so reading it after BeginTx could place
+	// it ahead of the scan's consistent point and lose changes committed in
+	// between. A watermark read before BeginTx only risks re-delivering
+	// changes the scan already includes, which the merge absorbs.
+	snapshotLSN, err := s.maxLSN(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -798,12 +834,33 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 		snapshotLSN = "00000000000000000000"
 	}
 
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: isolation == sql.LevelSnapshot})
+	if err != nil {
+		return "", fmt.Errorf("failed to begin snapshot transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	lock := isolation != sql.LevelSnapshot
 	query := buildSnapshotQuery(meta, sourceColumnsWithoutCDC(tableSchema), lock)
 	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return "", fmt.Errorf("failed to query snapshot for %s: %w", tableName(meta), err)
 	}
 	defer func() { _ = rows.Close() }()
+
+	if opts.CDCSnapshotReplace {
+		// A snapshot is a complete replacement boundary. Consumers that opt in
+		// discard target rows left by an interrupted earlier attempt or a lost
+		// resume position, so source deletes missed while the position was
+		// invalid cannot linger.
+		results <- source.RecordBatchResult{Truncate: true, TableName: resultTable}
+	}
 
 	if err := s.rowsToSnapshotBatches(rows, tableSchema, opts, snapshotLSN, results, resultTable); err != nil {
 		return "", err
@@ -816,23 +873,38 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	return snapshotLSN, nil
 }
 
-type queryer interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+// isTransientMSSQLError reports errors SQL Server tells the client to retry:
+// a deadlock victim (1205), most commonly the watermark or change-table reads
+// losing a lock race against the CDC capture job under write-heavy load.
+func isTransientMSSQLError(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 1205
 }
 
 func (s *MSSQLCDCSource) maxLSN(ctx context.Context) (string, error) {
-	return s.maxLSNFromQueryer(ctx, s.db)
-}
-
-func (s *MSSQLCDCSource) maxLSNFromQueryer(ctx context.Context, q queryer) (string, error) {
 	var lsn sql.NullString
-	if err := q.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_max_lsn(), 2)").Scan(&lsn); err != nil {
-		return "", fmt.Errorf("failed to get SQL Server CDC max LSN: %w", err)
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+		err = s.db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_max_lsn(), 2)").Scan(&lsn)
+		if err == nil {
+			if !lsn.Valid {
+				return "", nil
+			}
+			return normalizeLSNHex(lsn.String), nil
+		}
+		if !isTransientMSSQLError(err) {
+			break
+		}
+		config.Debug("[MSSQL CDC] Retrying max LSN read after transient error: %v", err)
 	}
-	if !lsn.Valid {
-		return "", nil
-	}
-	return normalizeLSNHex(lsn.String), nil
+	return "", fmt.Errorf("failed to get SQL Server CDC max LSN: %w", err)
 }
 
 // minLSN returns the capture instance's low-watermark LSN. It reads
@@ -870,8 +942,15 @@ func lowestLSN(byTable map[string]string) string {
 	return lowest
 }
 
-func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.SourceTableInfo, metas map[string]tableMetadata, startByTable map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.SourceTableInfo, metas map[string]tableMetadata, startByTable map[string]string, reReadByTable map[string]bool, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	s.lag.streaming.Store(opts.Streaming)
+	// Each table's initial position (a resume cursor or a snapshot stamp) may
+	// sit mid-transaction, so the first read includes it; see streamTable.
+	inclusiveByTable := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		inclusiveByTable[table.Name] = true
+	}
+	transientFailures := make(map[string]int, len(tables))
 	for {
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
@@ -894,17 +973,36 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		// while the gap to the watermark is still open.
 		s.noteLag(ctx, lowestLSN(startByTable), targetLSN)
 
+		retryCycle := false
 		for _, table := range tables {
-			start := startByTable[table.Name]
-			if start == "" || compareLSNHex(start, targetLSN) >= 0 {
-				startByTable[table.Name] = targetLSN
+			start, readWindow := planChangeWindow(startByTable[table.Name], targetLSN, reReadByTable[table.Name])
+			startByTable[table.Name] = start
+			if !readWindow {
 				continue
 			}
 
-			if err := s.readChanges(ctx, metas[table.Name], table.Schema, start, targetLSN, opts, results, table.Name); err != nil {
+			if err := s.readChanges(ctx, metas[table.Name], table.Schema, start, targetLSN, inclusiveByTable[table.Name], opts, results, table.Name); err != nil {
+				// A deadlock victim under write-heavy load must not kill the
+				// stream: the cursor was not advanced, so re-reading the same
+				// window next cycle only re-delivers rows merge absorbs.
+				if isTransientMSSQLError(err) && transientFailures[table.Name] < maxTransientReadFailures {
+					transientFailures[table.Name]++
+					config.Debug("[MSSQL CDC] Retrying change read for %s after transient error (%d consecutive): %v", table.Name, transientFailures[table.Name], err)
+					retryCycle = true
+					break
+				}
 				return err
 			}
+			transientFailures[table.Name] = 0
+			inclusiveByTable[table.Name] = false
+			reReadByTable[table.Name] = false
 			startByTable[table.Name] = targetLSN
+		}
+		if retryCycle {
+			if err := sleepPoll(ctx, s.cdcConfig.PollInterval); err != nil {
+				return err
+			}
+			continue
 		}
 
 		if !opts.Streaming {
@@ -921,19 +1019,63 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	}
 }
 
-func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, startLSN string, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
+// planChangeWindow keeps each table's cursor monotonic while deciding whether
+// the current harvest watermark opens a readable window. A newly created
+// capture instance can report a minimum LSN just ahead of the global maximum;
+// that table must wait for the capture job rather than regress below its valid
+// range. An equal resume boundary is read once when it names a change row so a
+// transaction tail cannot be skipped.
+func planChangeWindow(start, target string, reReadBoundary bool) (string, bool) {
+	if start == "" {
+		return target, false
+	}
+	cmp := compareLSNHex(start, target)
+	if cmp > 0 || (cmp == 0 && !reReadBoundary) {
+		return start, false
+	}
+	return start, true
+}
+
+func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, startLSN string, reReadBoundary bool, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
 	s.lag.streaming.Store(opts.Streaming)
 	current := startLSN
+	// The initial position may sit mid-transaction: a resume cursor names the
+	// destination's last durable change row, whose transaction can continue
+	// past it, and a snapshot stamp must re-deliver changes at the boundary
+	// LSN. The first read therefore includes the position; merge is idempotent
+	// for the rows this re-delivers. Once the stream has advanced to a harvest
+	// watermark, everything at that LSN has been delivered, so later polls
+	// start strictly after it.
+	inclusive := true
+	transientFailures := 0
 	for {
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
 			return err
 		}
 		s.noteLag(ctx, current, targetLSN)
-		if targetLSN != "" && current != "" && compareLSNHex(current, targetLSN) < 0 {
-			if err := s.readChanges(ctx, meta, tableSchema, current, targetLSN, opts, results, resultTable); err != nil {
+		cmp := compareLSNHex(current, targetLSN)
+		// A resume cursor that caught up to the watermark still earns one
+		// re-read when it names a delivered change row (reReadBoundary): the
+		// cursor may sit mid-transaction, and only re-reading the boundary
+		// transaction restores its tail.
+		if targetLSN != "" && current != "" && (cmp < 0 || (reReadBoundary && cmp == 0)) {
+			if err := s.readChanges(ctx, meta, tableSchema, current, targetLSN, inclusive, opts, results, resultTable); err != nil {
+				// See streamTables: a deadlock victim retries the same window
+				// next cycle; the cursor was not advanced so nothing is lost.
+				if isTransientMSSQLError(err) && transientFailures < maxTransientReadFailures {
+					transientFailures++
+					config.Debug("[MSSQL CDC] Retrying change read for %s after transient error (%d consecutive): %v", tableName(meta), transientFailures, err)
+					if err := sleepPoll(ctx, s.cdcConfig.PollInterval); err != nil {
+						return err
+					}
+					continue
+				}
 				return err
 			}
+			transientFailures = 0
+			inclusive = false
+			reReadBoundary = false
 			current = targetLSN
 		}
 
@@ -951,13 +1093,14 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 	}
 }
 
-func (s *MSSQLCDCSource) readChanges(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, fromLSN string, toLSN string, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
-	if fromLSN == "" || toLSN == "" || compareLSNHex(fromLSN, toLSN) >= 0 {
+func (s *MSSQLCDCSource) readChanges(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, fromLSN string, toLSN string, inclusive bool, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
+	cmp := compareLSNHex(fromLSN, toLSN)
+	if fromLSN == "" || toLSN == "" || cmp > 0 || (cmp == 0 && !inclusive) {
 		return nil
 	}
 
 	sourceColumns := sourceColumnsWithoutCDC(tableSchema)
-	query := buildChangesQuery(meta, sourceColumns)
+	query := buildChangesQuery(meta, sourceColumns, inclusive)
 	rows, err := s.db.QueryContext(ctx, query, fromLSN, toLSN)
 	if err != nil {
 		return fmt.Errorf("failed to query CDC changes for %s: %w", tableName(meta), err)
@@ -998,8 +1141,13 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema
 	}
 	syncedAt := time.Now().UTC()
 
+	pairer, err := newUpdatePairer(tableSchema, sourceColumns)
+	if err != nil {
+		return err
+	}
+
 	for {
-		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, syncedAt)
+		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, syncedAt, pairer)
 		if err != nil {
 			return err
 		}
@@ -1008,6 +1156,126 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema
 		}
 		results <- source.RecordBatchResult{Batch: record, TableName: resultTable}
 	}
+}
+
+// changeRow is one row to emit: the scanned source-column values plus the CDC
+// metadata derived from the change record.
+type changeRow struct {
+	values  []any
+	lsn     string
+	deleted bool
+}
+
+// updatePairer pairs an update's before-image (__$operation 3) with its
+// after-image (__$operation 4), which the change query orders adjacently
+// within the same start_lsn/seqval. When a primary-key column moved, the
+// before-image is replayed as a delete of the old key so the destination does
+// not keep the orphaned row; key-preserving before-images are dropped. The
+// pending before-image survives batch boundaries inside one change read.
+type updatePairer struct {
+	pkIdx         []int
+	hasPending    bool
+	pendingValues []any
+	pendingLSN    string
+}
+
+func newUpdatePairer(tableSchema *schema.TableSchema, sourceColumns []schema.Column) (*updatePairer, error) {
+	idx := make([]int, 0, len(tableSchema.PrimaryKeys))
+	for _, pk := range tableSchema.PrimaryKeys {
+		found := -1
+		for i, col := range sourceColumns {
+			if strings.EqualFold(col.Name, pk) {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			return nil, fmt.Errorf("primary key column %q of %s is not captured by the SQL Server CDC capture instance", pk, tableSchema.Name)
+		}
+		idx = append(idx, found)
+	}
+	return &updatePairer{pkIdx: idx}, nil
+}
+
+// push consumes one scanned change row and returns the rows to emit for it:
+// the row itself, preceded by a delete of the pending before-image when an
+// update moved its primary key.
+func (p *updatePairer) push(values []any, lsn string, op int) []changeRow {
+	if op == 3 {
+		out := p.flush()
+		p.pendingValues = values
+		p.pendingLSN = lsn
+		p.hasPending = true
+		return out
+	}
+
+	var pendingDelete *changeRow
+	if p.hasPending {
+		// A before-image whose identity or operation does not line up with its
+		// after-image cannot be verified as key-preserving, so it is treated as
+		// an identity move, mirroring postgres_cdc's expandUpdates.
+		keyMoved := op != 4 || lsnIdentity(p.pendingLSN) != lsnIdentity(lsn) || !p.primaryKeysEqual(values)
+		if keyMoved {
+			pendingDelete = &changeRow{values: p.pendingValues, lsn: p.pendingLSN, deleted: true}
+		}
+		p.hasPending = false
+		p.pendingValues = nil
+		p.pendingLSN = ""
+	}
+
+	row := changeRow{values: values, lsn: lsn, deleted: op == 1}
+	if pendingDelete != nil {
+		return []changeRow{*pendingDelete, row}
+	}
+	return []changeRow{row}
+}
+
+// flush emits any pending before-image as an identity-move delete. Called
+// when the stream ends or another before-image arrives, where no matching
+// after-image can confirm the update was key-preserving.
+func (p *updatePairer) flush() []changeRow {
+	if !p.hasPending {
+		return nil
+	}
+	out := []changeRow{{values: p.pendingValues, lsn: p.pendingLSN, deleted: true}}
+	p.hasPending = false
+	p.pendingValues = nil
+	p.pendingLSN = ""
+	return out
+}
+
+func (p *updatePairer) primaryKeysEqual(after []any) bool {
+	for _, i := range p.pkIdx {
+		if !cdcValueEqual(p.pendingValues[i], after[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// lsnIdentity returns the start_lsn:seqval prefix that pairs a before-image
+// with its after-image.
+func lsnIdentity(lsn string) string {
+	parts := strings.SplitN(lsn, ":", 3)
+	if len(parts) < 2 {
+		return lsn
+	}
+	return parts[0] + ":" + parts[1]
+}
+
+func cdcValueEqual(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if ab, ok := a.([]byte); ok {
+		bb, ok := b.([]byte)
+		return ok && bytes.Equal(ab, bb)
+	}
+	if at, ok := a.(time.Time); ok {
+		bt, ok := b.(time.Time)
+		return ok && at.Equal(bt)
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
@@ -1045,7 +1313,7 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 	return finishBatch(rows, arrowSchema, builders, rowCount)
 }
 
-func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, syncedAt time.Time) (arrow.RecordBatch, int64, error) {
+func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1060,27 +1328,43 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 	}
 
 	var rowCount int64
+	exhausted := true
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			releaseBuilders(builders)
 			return nil, 0, fmt.Errorf("failed to scan CDC row: %w", err)
 		}
 
-		for i := range sourceColumns {
-			arrowconv.AppendValue(builders[i], *scanDest[i].(*any))
+		values := make([]any, len(sourceColumns))
+		for i := range values {
+			values[i] = *scanDest[i].(*any)
 		}
-
 		lsn := fmt.Sprintf("%v", *scanDest[len(sourceColumns)].(*any))
 		op, err := operationValue(*scanDest[len(sourceColumns)+1].(*any))
 		if err != nil {
 			releaseBuilders(builders)
 			return nil, 0, err
 		}
-		appendCDCValues(builders, len(sourceColumns), lsn, op == 1, syncedAt)
 
-		rowCount++
+		for _, change := range pairer.push(values, lsn, op) {
+			for i, v := range change.values {
+				arrowconv.AppendValue(builders[i], v)
+			}
+			appendCDCValues(builders, len(sourceColumns), change.lsn, change.deleted, syncedAt)
+			rowCount++
+		}
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			exhausted = false
 			break
+		}
+	}
+	if exhausted {
+		for _, change := range pairer.flush() {
+			for i, v := range change.values {
+				arrowconv.AppendValue(builders[i], v)
+			}
+			appendCDCValues(builders, len(sourceColumns), change.lsn, change.deleted, syncedAt)
+			rowCount++
 		}
 	}
 
@@ -1088,14 +1372,14 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 }
 
 func finishBatch(rows *sql.Rows, arrowSchema *arrow.Schema, builders []array.Builder, rowCount int64) (arrow.RecordBatch, int64, error) {
-	if rowCount == 0 {
-		releaseBuilders(builders)
-		return nil, 0, nil
-	}
-
 	if err := rows.Err(); err != nil {
 		releaseBuilders(builders)
 		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	if rowCount == 0 {
+		releaseBuilders(builders)
+		return nil, 0, nil
 	}
 
 	arrays := make([]arrow.Array, len(builders))
@@ -1158,7 +1442,13 @@ func buildSnapshotQuery(meta tableMetadata, columns []schema.Column, lock bool) 
 	return fmt.Sprintf("SELECT %s FROM %s%s", strings.Join(selects, ", "), quoteTable(tableName(meta)), hint)
 }
 
-func buildChangesQuery(meta tableMetadata, columns []schema.Column) string {
+// buildChangesQuery selects change rows for one capture instance, ordered so
+// an update's before-image (__$operation 3) immediately precedes its
+// after-image (__$operation 4) within the same start_lsn/seqval. When
+// inclusive is false, the window starts strictly after fromLSN; when true, at
+// it. Inclusive windows re-deliver the transaction holding the bound, which
+// keeps a resume cursor that landed mid-transaction from dropping its tail.
+func buildChangesQuery(meta tableMetadata, columns []schema.Column, inclusive bool) string {
 	selects := make([]string, 0, len(columns)+2)
 	for _, col := range columns {
 		selects = append(selects, quoteIdentifier(col.Name))
@@ -1169,14 +1459,19 @@ func buildChangesQuery(meta tableMetadata, columns []schema.Column) string {
 		`__$operation AS __ingestr_cdc_operation`,
 	)
 
+	fromExpr := "sys.fn_cdc_increment_lsn(CONVERT(binary(10), @p1, 2))"
+	if inclusive {
+		fromExpr = "CONVERT(binary(10), @p1, 2)"
+	}
+
 	return fmt.Sprintf(`
-		DECLARE @from_lsn binary(10) = sys.fn_cdc_increment_lsn(CONVERT(binary(10), @p1, 2));
+		DECLARE @from_lsn binary(10) = %s;
 		DECLARE @to_lsn binary(10) = CONVERT(binary(10), @p2, 2);
 		SELECT %s
 		FROM %s(@from_lsn, @to_lsn, N'all update old')
-		WHERE __$operation IN (1, 2, 4)
+		WHERE __$operation IN (1, 2, 3, 4)
 		ORDER BY __$start_lsn, __$seqval, __$operation
-	`, strings.Join(selects, ", "), quoteFunction("fn_cdc_get_all_changes_"+meta.CaptureInstance))
+	`, fromExpr, strings.Join(selects, ", "), quoteFunction("fn_cdc_get_all_changes_"+meta.CaptureInstance))
 }
 
 func buildArrowSchema(columns []schema.Column) *arrow.Schema {
@@ -1244,6 +1539,14 @@ func formatStoredLSN(startHex, seqHex string, op int) string {
 		seqHex = normalizeLSNHex(seqHex)
 	}
 	return fmt.Sprintf("%s:%s:%02d", startHex, seqHex, op)
+}
+
+// isSnapshotStamp reports whether a stored position was written by a snapshot
+// (zero seqval and operation) rather than by a delivered change row. Only a
+// change-row position can sit mid-transaction, so only it earns a boundary
+// re-read; a snapshot stamp already covers everything at its LSN.
+func isSnapshotStamp(stored string) bool {
+	return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(stored)), ":00000000000000000000:00")
 }
 
 func normalizeLSNHex(lsn string) string {
