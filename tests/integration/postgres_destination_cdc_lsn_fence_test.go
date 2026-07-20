@@ -128,4 +128,18 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	require.Equal(t, "newest", payload)
 	require.Equal(t, "00000000/00000040", lsn)
 	require.True(t, deleted)
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`
+		TRUNCATE %s;
+		INSERT INTO %s VALUES (1, 'excluded-by-predicate', '00000000/00000050', false, '2026-01-05', '[]');
+	`, stagingTable, stagingTable)))
+	opts.IncrementalPredicate = `target."id" > 100`
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT payload, _cdc_lsn, _cdc_deleted FROM %s WHERE id = 1`, targetTable)).Scan(&payload, &lsn, &deleted))
+	require.Equal(t, "newest", payload)
+	require.Equal(t, "00000000/00000040", lsn)
+	require.True(t, deleted)
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = 1`, targetTable)).Scan(&count))
+	require.Equal(t, 1, count)
 }

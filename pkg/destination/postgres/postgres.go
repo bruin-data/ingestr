@@ -856,8 +856,9 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Step 1: Upsert latest non-deleted rows (data changes).
 		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
 		// la."_cdc_unchanged_cols" is read once per row, not once per column.
+		primaryKeyTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
 		onTargetCondition := destination.MergeJoinCondition(
-			buildJoinCondition(opts.PrimaryKeys, "target", "la"),
+			primaryKeyTargetCondition,
 			opts.IncrementalPredicate,
 		)
 		newerActiveCondition := `(target."_cdc_lsn" IS NULL OR la."_cdc_lsn" > target."_cdc_lsn")`
@@ -884,7 +885,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
 			quotedTargetTable,
-			onTargetCondition,
+			primaryKeyTargetCondition,
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
