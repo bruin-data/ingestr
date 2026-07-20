@@ -860,6 +860,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			buildJoinCondition(opts.PrimaryKeys, "target", "la"),
 			opts.IncrementalPredicate,
 		)
+		newerActiveCondition := `(target."_cdc_lsn" IS NULL OR la."_cdc_lsn" > target."_cdc_lsn")`
 		unchangedRef := ""
 		if hasUnchangedCols {
 			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
@@ -868,7 +869,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			`WITH %s, updated AS (
 				UPDATE %s AS target SET %s
 				FROM latest_active la
-				WHERE %s
+				WHERE %s AND %s
 				RETURNING 1
 			)
 			INSERT INTO %s (%s)
@@ -878,6 +879,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			quotedTargetTable,
 			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
 			onTargetCondition,
+			newerActiveCondition,
 			quotedTargetTable,
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
@@ -898,7 +900,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			opts.IncrementalPredicate,
 		)
 		updateDeletedSQL := fmt.Sprintf(
-			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
+			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR deleted."_cdc_lsn" > target."_cdc_lsn" OR (deleted."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false))`,
 			latestAll,
 			latestDeleted,
 			quotedTargetTable,
