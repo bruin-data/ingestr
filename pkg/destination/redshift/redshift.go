@@ -35,7 +35,7 @@ func (d *RedshiftDestination) Connect(ctx context.Context, uri string) error {
 }
 
 func (d *RedshiftDestination) ValidateManagedCDCState() error {
-	return errors.New("redshift does not support destination-managed PostgreSQL CDC state")
+	return errors.New("redshift does not support destination-managed CDC state")
 }
 
 func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {

@@ -962,6 +962,35 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	return nil
 }
 
+func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	start := time.Now()
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, truncateSQL); err != nil {
+		config.LogFailedQuery(truncateSQL, err)
+		return fmt.Errorf("failed to truncate target: %w", err)
+	}
+	if _, err := tx.Exec(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert from staging: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	config.Debug("[TRUNCATE+INSERT] Atomic staging finalization completed in %v", time.Since(start))
+	return nil
+}
+
 // DeleteInsertTable performs a DELETE + INSERT operation using a transaction.
 func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
 	startOp := time.Now()
@@ -1212,6 +1241,31 @@ func (d *PostgresDestination) LoadCDCState(ctx context.Context, table, connector
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func (d *PostgresDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return err
+	}
+	var dataType string
+	err = d.pool.QueryRow(ctx,
+		`SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = '_cdc_lsn'`,
+		schemaName, tableName).Scan(&dataType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect PostgreSQL CDC state position column: %w", err)
+	}
+	if strings.EqualFold(dataType, "text") {
+		return nil
+	}
+	query := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "_cdc_lsn" TYPE TEXT`, destination.QuoteTableName(table))
+	if _, err := d.pool.Exec(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen PostgreSQL CDC state position column: %w", err)
+	}
+	return nil
 }
 
 func (d *PostgresDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
@@ -1619,6 +1673,34 @@ func buildMergeStagingSelect(quotedStagingTable, pkList string, destQuoted []str
 		return fmt.Sprintf("SELECT %s FROM %s", columns, quotedStagingTable)
 	}
 	return fmt.Sprintf("SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s", pkList, columns, quotedStagingTable, orderBy)
+}
+
+func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
+	if len(opts.PrimaryKeys) == 0 {
+		return "", "", fmt.Errorf("truncate+insert from staging requires primary keys")
+	}
+
+	destQuoted := quoteColumns(destination.DestinationColumns(opts.Columns))
+	pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
+	orderBy := pkList
+	if opts.IncrementalKey != "" {
+		orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+	}
+	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
+	stagingSelect := buildMergeStagingSelect(
+		destination.QuoteTableName(opts.StagingTable),
+		pkList,
+		destQuoted,
+		orderBy,
+		opts.StagingPrimaryKeysUnique,
+	)
+
+	return fmt.Sprintf("TRUNCATE TABLE %s", quotedTargetTable), fmt.Sprintf(
+		"INSERT INTO %s (%s) %s",
+		quotedTargetTable,
+		strings.Join(destQuoted, ", "),
+		stagingSelect,
+	), nil
 }
 
 func buildPredicateMergeSQL(quotedTargetTable, quotedStagingTable string, primaryKeys, destQuoted, nonPKColumns []string, orderBy, incrementalPredicate string, primaryKeysUnique bool) string {

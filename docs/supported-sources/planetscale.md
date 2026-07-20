@@ -70,7 +70,7 @@ psdbconnect performs a per-shard snapshot first (resumable by primary key) and t
 
 CDC URI parameters:
 - `tls`: auto-enabled for the `ps_mysql://` scheme; set it explicitly only to choose a different mode (see [TLS](#tls)).
-- `dest_schema`: optional destination schema for multi-table CDC runs.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
 
 Requirements:
 - PlanetScale database credentials (`user:password`) with read access to the branch/keyspace.

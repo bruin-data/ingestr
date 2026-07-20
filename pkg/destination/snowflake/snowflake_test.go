@@ -206,6 +206,14 @@ func TestQuoteIdentifier(t *testing.T) {
 	}
 }
 
+func TestRelaxColumnNullabilitySQL(t *testing.T) {
+	var _ destination.NullabilityRelaxer = (*Dialect)(nil)
+
+	d := &Dialect{}
+	got := d.RelaxColumnNullabilitySQL("bruin_facebook.insights", "spend")
+	assert.Equal(t, `ALTER TABLE bruin_facebook.insights ALTER COLUMN "SPEND" DROP NOT NULL`, got)
+}
+
 func TestImplicitTableStageName(t *testing.T) {
 	tests := []struct {
 		name      string

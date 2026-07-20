@@ -323,6 +323,30 @@ func TestPostgresCDCManagedStrategyDefaultsRemainValid(t *testing.T) {
 	}
 }
 
+func TestMySQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
+	for _, strategy := range []config.IncrementalStrategy{
+		config.StrategyAppend,
+		config.StrategyDeleteInsert,
+		config.StrategySCD2,
+		config.StrategyTruncateInsert,
+	} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "mysql+cdc://source/app"
+			cfg.IncrementalStrategy = strategy
+			err := validateManagedChangeConfig(cfg)
+			require.ErrorContains(t, err, "not supported for MySQL CDC")
+		})
+	}
+
+	for _, strategy := range []config.IncrementalStrategy{"", config.StrategyMerge, config.StrategyReplace} {
+		cfg := config.DefaultConfig()
+		cfg.SourceURI = "mysql+cdc://source/app"
+		cfg.IncrementalStrategy = strategy
+		require.NoError(t, validateManagedChangeConfig(cfg))
+	}
+}
+
 func TestPostgresCDCFailsClosedBeforeConnectorPreparationForUnsafeDestination(t *testing.T) {
 	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
 	require.NoError(t, err)
@@ -340,7 +364,7 @@ func TestPostgresCDCFailsClosedBeforeConnectorPreparationForUnsafeDestination(t 
 	cfg.DestTable = "raw.items"
 
 	err = New(cfg).Run(context.Background())
-	require.ErrorContains(t, err, "cannot safely run PostgreSQL CDC")
+	require.ErrorContains(t, err, "cannot safely run managed CDC")
 	require.ErrorContains(t, err, "destination-managed state")
 	require.True(t, src.connected)
 	require.True(t, src.closed)
@@ -846,6 +870,34 @@ type mockValidatedManagedCDCStateDestination struct {
 	validationErr error
 }
 
+type mockMySQLCDCFencedDestination struct {
+	mockManagedCDCStateDestination
+}
+
+func (m *mockMySQLCDCFencedDestination) SupportsCDCConditionalMerge() bool {
+	return true
+}
+
+func (m *mockMySQLCDCFencedDestination) TruncateCDCTableIfIncarnation(context.Context, string, string) error {
+	return nil
+}
+
+func (m *mockMySQLCDCFencedDestination) AcquireManagedCDCRunLease(context.Context, string) (source.ConnectorLease, error) {
+	return &mockConnectorLease{done: make(chan struct{})}, nil
+}
+
+func (m *mockMySQLCDCFencedDestination) ClaimAndPrepareEmptyCDCTarget(context.Context, string, destination.CDCTargetClaim, destination.PrepareOptions) (string, error) {
+	return "incarnation", nil
+}
+
+func (m *mockMySQLCDCFencedDestination) SupportsCDCConditionalSwap() bool {
+	return true
+}
+
+func (m *mockMySQLCDCFencedDestination) CDCConditionalSwapIncarnations(context.Context, string, string) (string, string, error) {
+	return "staging-incarnation", "result-incarnation", nil
+}
+
 func (m *mockValidatedManagedCDCStateDestination) ValidateManagedCDCState() error {
 	return m.validationErr
 }
@@ -1030,7 +1082,7 @@ func TestValidateDestinationManagedCDCState(t *testing.T) {
 		t.Fatalf("destination without managed state validation error = %v", err)
 	}
 	legacyOnly := &mockCDCResumeDestination{mockDestination: mockDestination{scheme: "legacy-only"}}
-	if err := validateDestinationManagedCDCState(legacyOnly); err == nil || !strings.Contains(err.Error(), "cannot safely run PostgreSQL CDC") {
+	if err := validateDestinationManagedCDCState(legacyOnly); err == nil || !strings.Contains(err.Error(), "cannot safely run managed CDC") {
 		t.Fatalf("legacy resume-only destination validation error = %v", err)
 	}
 	unclaimable := &mockUnclaimableCDCStateDestination{}
@@ -1053,6 +1105,12 @@ func TestValidateDestinationManagedCDCState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "consistency ONE is unsafe") {
 		t.Fatalf("validation error = %v, want consistency rejection", err)
 	}
+}
+
+func TestValidateMySQLCDCMutationFencing(t *testing.T) {
+	unsupported := &mockManagedCDCStateDestination{}
+	require.ErrorContains(t, validateMySQLCDCMutationFencing(unsupported), "atomic target-incarnation fencing for merge")
+	require.NoError(t, validateMySQLCDCMutationFencing(&mockMySQLCDCFencedDestination{}))
 }
 
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
@@ -2453,6 +2511,19 @@ func TestMultiTableCDCConnectorIDIncludesNormalizedDestinationNamespace(t *testi
 		"different dest_schema mappings must not share automatic PostgreSQL slots")
 }
 
+func TestMySQLCDCConnectorIDIgnoresOperationalXALimits(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI:   "mysql+cdc://reader@source/app?server_id=11&xa_buffer_limit=100&xa_buffer_bytes_limit=10000&xa_pending_limit=2",
+		SourceTable: "orders",
+		DestURI:     "mysql://loader@warehouse/analytics",
+		DestTable:   "orders",
+	}
+	changed := *base
+	changed.SourceURI = "mysql+cdc://reader@source/app?server_id=22&xa_buffer_limit=1000&xa_buffer_bytes_limit=20000&xa_pending_limit=20"
+
+	require.Equal(t, genericCDCConnectorID(base), genericCDCConnectorID(&changed))
+}
+
 func TestDroppedColumnsPKFiltering(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -3195,6 +3266,110 @@ func TestApplyPartitionNaming(t *testing.T) {
 			if fmt.Sprint(cfg.ClusterBy) != fmt.Sprint(tt.wantClusterBy) {
 				t.Fatalf("ClusterBy = %v, want %v", cfg.ClusterBy, tt.wantClusterBy)
 			}
+		})
+	}
+}
+
+func TestHasIgnoredDestSchema(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		sourceURI   string
+		sourceTable string
+		want        bool
+	}{
+		{
+			name:        "single table with dest_schema is ignored",
+			sourceURI:   "postgres+cdc://user:pass@host:5432/db?dest_schema=analytics",
+			sourceTable: "public.users",
+			want:        true,
+		},
+		{
+			name:      "multi table honours dest_schema",
+			sourceURI: "postgres+cdc://user:pass@host:5432/db?dest_schema=analytics",
+			want:      false,
+		},
+		{
+			name:        "single table without dest_schema",
+			sourceURI:   "postgres+cdc://user:pass@host:5432/db",
+			sourceTable: "public.users",
+			want:        false,
+		},
+		{
+			name:        "empty dest_schema value",
+			sourceURI:   "postgres+cdc://user:pass@host:5432/db?dest_schema=",
+			sourceTable: "public.users",
+			want:        false,
+		},
+		{
+			name:        "unparseable uri",
+			sourceURI:   "://not a uri",
+			sourceTable: "public.users",
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasIgnoredDestSchema(&config.IngestConfig{
+				SourceURI:   tt.sourceURI,
+				SourceTable: tt.sourceTable,
+			})
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestValidateMultiTableNamespace(t *testing.T) {
+	tests := []struct {
+		name        string
+		scheme      string
+		sourceTable string
+		target      string
+		wantErr     string
+	}{
+		{
+			name:    "bigquery without dataset is rejected",
+			scheme:  "bigquery",
+			target:  "__ingestr_cdc_namespace__",
+			wantErr: "multi-table CDC to bigquery requires a dataset",
+		},
+		{
+			name:   "bigquery with dest_schema is accepted",
+			scheme: "bigquery",
+			target: "raw.__ingestr_cdc_namespace__",
+		},
+		{
+			name:    "databricks without schema is rejected",
+			scheme:  "databricks",
+			target:  "__ingestr_cdc_namespace__",
+			wantErr: "multi-table CDC to databricks requires a schema",
+		},
+		{
+			name:   "postgres allows unqualified names",
+			scheme: "postgres",
+			target: "__ingestr_cdc_namespace__",
+		},
+		{
+			name:        "single-table mode is not checked",
+			scheme:      "bigquery",
+			sourceTable: "public.users",
+			target:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := &mockDestination{scheme: tt.scheme}
+			cfg := &config.IngestConfig{SourceTable: tt.sourceTable}
+			err := validateMultiTableNamespace(cfg, dest, tt.target)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
 }

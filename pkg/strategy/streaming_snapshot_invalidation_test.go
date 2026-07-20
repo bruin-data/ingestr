@@ -49,6 +49,13 @@ func (d *orderedCDCStateDestination) TruncateTable(_ context.Context, table stri
 	return nil
 }
 
+func (d *orderedCDCStateDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expected string) error {
+	if err := d.cdcStateDestination.TruncateCDCTableIfIncarnation(ctx, table, expected); err != nil {
+		return err
+	}
+	return d.TruncateTable(ctx, table)
+}
+
 func (d *orderedCDCStateDestination) resetOrder() {
 	d.orderMu.Lock()
 	d.order = nil

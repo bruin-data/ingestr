@@ -3,12 +3,29 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/stretchr/testify/require"
 )
+
+type atomicTruncateInsertDestination struct {
+	*truncateCapableDestination
+	finalizeCalls []destination.TruncateInsertFromStagingOptions
+	finalizeErr   error
+}
+
+func (d *atomicTruncateInsertDestination) TruncateInsertFromStaging(_ context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	d.finalizeCalls = append(d.finalizeCalls, opts)
+	return d.finalizeErr
+}
+
+func (d *atomicTruncateInsertDestination) SupportsMergeStrategy() bool {
+	return false
+}
 
 func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job, src, dest := minimalJob()
@@ -100,6 +117,26 @@ func TestTruncateInsertStrategy_Execute_DedupsUncertainSourcePrimaryKeys(t *test
 	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
 	require.Len(t, dest.mergeCalls, 1)
 	require.False(t, dest.mergeCalls[0].StagingPrimaryKeysUnique)
+}
+
+func TestTruncateInsertStrategy_Execute_PrefersAtomicStagingFinalizer(t *testing.T) {
+	for _, primaryKeysUnique := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unique=%t", primaryKeysUnique), func(t *testing.T) {
+			job, src, dest := minimalJob()
+			truncateDest := &truncateCapableDestination{fakeDestination: dest}
+			atomicDest := &atomicTruncateInsertDestination{truncateCapableDestination: truncateDest}
+			job.Destination = atomicDest
+			job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+			src.primaryKeysUnique = primaryKeysUnique
+			src.readCh = mustClosedRecords()
+
+			require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+			require.Len(t, atomicDest.finalizeCalls, 1)
+			require.Equal(t, primaryKeysUnique, atomicDest.finalizeCalls[0].StagingPrimaryKeysUnique)
+			require.Empty(t, dest.truncateCalls)
+			require.Empty(t, dest.mergeCalls)
+		})
+	}
 }
 
 func TestTruncateInsertStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {

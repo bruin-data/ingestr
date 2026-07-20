@@ -3329,6 +3329,58 @@ func (d *BigQueryDestination) LoadCDCState(ctx context.Context, table, connector
 	return entries, nil
 }
 
+// EnsureCDCStatePositionColumn widens a `_cdc_lsn STRING(64)` column left by
+// older releases to unbounded STRING. PrepareTable's schema reconciliation
+// rejects a bounded column against the now-unbounded state schema, so this
+// runs before retrying the preparation.
+func (d *BigQueryDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	if dataset == "" {
+		return errors.New("dataset must be specified in state table name or URI path")
+	}
+	meta, err := d.client.DatasetInProject(project, dataset).Table(tableName).Metadata(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	bounded := false
+	for _, field := range meta.Schema {
+		if field.Name == destination.CDCLSNColumn {
+			bounded = field.MaxLength > 0
+			break
+		}
+	}
+	if !bounded {
+		return nil
+	}
+	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN `_cdc_lsn` SET DATA TYPE STRING", quotedTable)
+	query := d.client.Query(sql)
+	if d.location != "" {
+		query.Location = d.location
+	}
+	job, err := query.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to widen BigQuery CDC state position column: %w", err)
+	}
+	status, err := waitForBigQueryJob(ctx, job)
+	if err != nil {
+		return fmt.Errorf("failed to widen BigQuery CDC state position column: %w", err)
+	}
+	if err := status.Err(); err != nil {
+		return fmt.Errorf("failed to widen BigQuery CDC state position column: %w", err)
+	}
+	return nil
+}
+
 func (d *BigQueryDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
 	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {

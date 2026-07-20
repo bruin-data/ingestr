@@ -22,7 +22,7 @@ NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
 ERROR_COLOR=\033[31;01m
 
-.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration cdc-postgres-stress-test cdc-mysql-stress-test
+.PHONY: all clean test test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint format lint-ci format-ci test-ci setup test-db2-integration cdc-postgres-stress-test cdc-mysql-stress-test cdc-mssql-stress-test
 
 all: clean deps test build
 
@@ -107,13 +107,23 @@ cdc-postgres-stress-test: generate
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestPostgresCDC_StressComplexWorkload$$' ./tests/integration/
 
 # High-volume MySQL CDC accuracy and performance test (~6 minutes with the
-# default profile). Drives repeated batch catch-up runs (resume under load)
-# against a non-UTC source, with unsigned/decimal/JSON/temporal/binary type
-# coverage, PK updates, deletes, late tables, and a schema-drift
-# fail-then-full-refresh phase. Gated behind the `stress` build tag.
+# default profile), plus focused correctness regressions for protocol modes and
+# failure recovery. Gated behind the `stress` build tag.
 cdc-mysql-stress-test: generate
-	@echo "$(OK_COLOR)==> Running MySQL CDC complex-workload stress test (default profile: ~6m)$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMySQLCDC_StressComplexWorkload$$' ./tests/integration/
+	@echo "$(OK_COLOR)==> Running MySQL CDC stress and correctness regression tests (default profile: ~6m)$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi; \
+	resolved_docker_host="$${DOCKER_HOST:-$$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)}"; \
+	if [ -n "$$resolved_docker_host" ]; then export DOCKER_HOST="$$resolved_docker_host"; fi; \
+	$(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMySQLCDC_Stress' ./pkg/source/mysql ./tests/integration/
+
+# High-volume SQL Server CDC accuracy and schema-churn test (~7 minutes with
+# the default profile). Streams multi-table CDC into Postgres under load with
+# late tables, capture-instance recreation for add/rename/widen DDL, a
+# transactional delete-all wipe, PK moves, deletes, and wide type coverage,
+# then verifies exact row-by-row parity. Gated behind the `stress` build tag.
+cdc-mssql-stress-test: generate
+	@echo "$(OK_COLOR)==> Running SQL Server CDC complex-workload stress test (default profile: ~7m)$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMSSQLCDC_StressComplexWorkload$$' ./tests/integration/
 
 test-db2-integration: generate
 	@echo "$(OK_COLOR)==> Running Db2 integration tests$(NO_COLOR)"

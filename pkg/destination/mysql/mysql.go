@@ -11,6 +11,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,11 +44,113 @@ const (
 
 var mysqlLoadDataReaderID uint64
 
+type mysqlManagedCDCRunLease struct {
+	conn        *sql.Conn
+	name        string
+	done        chan struct{}
+	stop        chan struct{}
+	stopped     chan struct{}
+	doneOnce    sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	err         error
+	releaseErr  error
+}
+
 func NewMySQLDestination() *MySQLDestination {
 	return &MySQLDestination{
 		useLoadData: true,
 		scheme:      "mysql",
 	}
+}
+
+func (d *MySQLDestination) AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error) {
+	if d.isVitess {
+		return nil, errors.New("vitess and planetscale do not support MySQL advisory locks for managed CDC")
+	}
+	if connectorID == "" {
+		return nil, errors.New("managed CDC connector ID is empty")
+	}
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reserve MySQL CDC lease connection: %w", err)
+	}
+	name := "ingestr_cdc_" + connectorID
+	var acquired sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&acquired); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("failed to acquire MySQL CDC run lease: %w", err)
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("another MySQL CDC run already owns connector %s", connectorID)
+	}
+	lease := &mysqlManagedCDCRunLease{
+		conn:    conn,
+		name:    name,
+		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	go lease.monitor()
+	return lease, nil
+}
+
+func (l *mysqlManagedCDCRunLease) monitor() {
+	defer close(l.stopped)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			var held sql.NullInt64
+			err := l.conn.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?) = CONNECTION_ID()", l.name).Scan(&held)
+			cancel()
+			if err == nil && held.Valid && held.Int64 == 1 {
+				continue
+			}
+			if err == nil {
+				err = errors.New("advisory lock is no longer owned by this connection")
+			}
+			l.mu.Lock()
+			l.err = errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("MySQL CDC run lease lost: %w", err))
+			l.mu.Unlock()
+			l.doneOnce.Do(func() { close(l.done) })
+			return
+		}
+	}
+}
+
+func (l *mysqlManagedCDCRunLease) Done() <-chan struct{} {
+	return l.done
+}
+
+func (l *mysqlManagedCDCRunLease) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
+}
+
+func (l *mysqlManagedCDCRunLease) Release() error {
+	l.releaseOnce.Do(func() {
+		close(l.stop)
+		<-l.stopped
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var released sql.NullInt64
+		if err := l.conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", l.name).Scan(&released); err != nil {
+			l.releaseErr = fmt.Errorf("failed to release MySQL CDC run lease: %w", err)
+		} else if !released.Valid || released.Int64 != 1 {
+			l.releaseErr = errors.New("MySQL CDC run lease was not owned during release")
+		}
+		if err := l.conn.Close(); err != nil {
+			l.releaseErr = errors.Join(l.releaseErr, err)
+		}
+	})
+	return l.releaseErr
 }
 
 func NewVitessCompatibleDestination(defaultScheme string) *MySQLDestination {
@@ -619,6 +722,9 @@ func isLoadDataLocalDisabledError(err error) bool {
 }
 
 func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	if opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != "" {
+		return d.swapTableConditionally(ctx, opts)
+	}
 	startSwap := time.Now()
 	if err := tablename.TwoLevel("mysql").CheckName(opts.StagingTable); err != nil {
 		return err
@@ -700,6 +806,203 @@ func (d *MySQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	return nil
 }
 
+func (d *MySQLDestination) SupportsCDCConditionalSwap() bool {
+	return !d.isVitess
+}
+
+func (d *MySQLDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
+	stagingIncarnation, exists, err := d.CDCTargetIncarnation(ctx, stagingTable)
+	if err != nil {
+		return "", "", err
+	}
+	if !exists || stagingIncarnation == "" {
+		return "", "", fmt.Errorf("MySQL CDC staging table %q has no durable physical incarnation", stagingTable)
+	}
+	stagingDatabase, stagingName := splitDatabaseTable(stagingTable)
+	if stagingDatabase == "" {
+		stagingDatabase = d.database
+	}
+	_, _, tableID, exists, err := d.mysqlInnoDBTableID(ctx, d.db, stagingDatabase, stagingName)
+	if err != nil {
+		return "", "", err
+	}
+	if !exists {
+		return "", "", fmt.Errorf("MySQL CDC staging table %q disappeared before swap", stagingTable)
+	}
+	targetDatabase, targetName := splitDatabaseTable(targetTable)
+	if targetDatabase == "" {
+		targetDatabase = d.database
+	}
+	if d.lowerCaseTableNames != 0 {
+		targetDatabase = strings.ToLower(targetDatabase)
+		targetName = strings.ToLower(targetName)
+	}
+	return stagingIncarnation, mysqlTableIncarnation(targetDatabase, targetName, tableID), nil
+}
+
+func (d *MySQLDestination) swapTableConditionally(ctx context.Context, opts destination.SwapOptions) error {
+	if !d.SupportsCDCConditionalSwap() {
+		return errors.New("MySQL CDC conditional swaps are unavailable for Vitess and PlanetScale")
+	}
+	if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
+		return errors.New("MySQL CDC conditional swap requires target, staging, and result incarnations")
+	}
+	if err := tablename.TwoLevel("mysql").CheckName(opts.StagingTable); err != nil {
+		return err
+	}
+	if err := tablename.TwoLevel("mysql").CheckName(opts.TargetTable); err != nil {
+		return err
+	}
+	targetDatabase, targetName := splitDatabaseTable(opts.TargetTable)
+	if targetDatabase == "" {
+		targetDatabase = d.database
+	}
+	stagingDatabase, stagingName := splitDatabaseTable(opts.StagingTable)
+	if stagingDatabase == "" {
+		stagingDatabase = d.database
+	}
+	targetRef := quoteMySQLTable(targetDatabase, targetName)
+	stagingRef := quoteMySQLTable(stagingDatabase, stagingName)
+	backupCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
+	backupName := destination.ShortenIdentifier(backupCandidate, backupCandidate, destination.MaxIdentifierLength("mysql"))
+	backupRef := quoteMySQLTable(targetDatabase, backupName)
+
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to reserve MySQL CDC conditional swap connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	lockSQL := fmt.Sprintf("LOCK TABLES %s WRITE, %s WRITE", targetRef, stagingRef)
+	if _, err := conn.ExecContext(ctx, lockSQL); err != nil {
+		return fmt.Errorf("failed to lock MySQL CDC swap tables: %w", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = conn.ExecContext(unlockCtx, "UNLOCK TABLES")
+		}
+	}()
+
+	currentTarget, exists, err := d.mysqlCDCTargetIncarnation(ctx, conn, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	if !exists || currentTarget != opts.CDCExpectedIncarnation {
+		return fmt.Errorf("MySQL CDC target %s was replaced before conditional swap", opts.TargetTable)
+	}
+	currentStaging, exists, err := d.mysqlCDCTargetIncarnation(ctx, conn, opts.StagingTable)
+	if err != nil {
+		return err
+	}
+	if !exists || currentStaging != opts.CDCExpectedStagingIncarnation {
+		return fmt.Errorf("MySQL CDC staging table %s was replaced before conditional swap", opts.StagingTable)
+	}
+	// MariaDB and MySQL before 8.0.13 reject RENAME TABLE while the session
+	// holds LOCK TABLES. There the locks are released first and the swap is
+	// re-verified afterwards: if the demoted backup is not the table that was
+	// validated under the lock, the rename clobbered a concurrent replacement
+	// and is atomically undone.
+	renameUnderLock, err := d.supportsRenameTableUnderLock(ctx, conn)
+	if err != nil {
+		return err
+	}
+	var demotedTableID uint64
+	if !renameUnderLock {
+		_, _, tableID, exists, err := d.mysqlInnoDBTableID(ctx, conn, targetDatabase, targetName)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("MySQL CDC target %s was replaced before conditional swap", opts.TargetTable)
+		}
+		demotedTableID = tableID
+		if _, err := conn.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+			return fmt.Errorf("failed to unlock MySQL CDC swap tables: %w", err)
+		}
+		locked = false
+	}
+	renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s, %s TO %s", targetRef, backupRef, stagingRef, targetRef)
+	if _, err := conn.ExecContext(ctx, renameSQL); err != nil {
+		return fmt.Errorf("failed to conditionally swap MySQL CDC target: %w", err)
+	}
+	if locked {
+		if _, err := conn.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+			return fmt.Errorf("failed to unlock MySQL CDC swap tables: %w", err)
+		}
+		locked = false
+	}
+	if !renameUnderLock {
+		_, _, backupID, exists, err := d.mysqlInnoDBTableID(ctx, conn, targetDatabase, backupName)
+		if err != nil {
+			return err
+		}
+		if !exists || backupID != demotedTableID {
+			restoreSQL := fmt.Sprintf("RENAME TABLE %s TO %s, %s TO %s", targetRef, stagingRef, backupRef, targetRef)
+			if _, restoreErr := conn.ExecContext(ctx, restoreSQL); restoreErr != nil {
+				return fmt.Errorf("MySQL CDC target %s was replaced during conditional swap and could not be restored from %s: %w", opts.TargetTable, backupName, restoreErr)
+			}
+			return fmt.Errorf("MySQL CDC target %s was replaced during conditional swap", opts.TargetTable)
+		}
+	}
+	resultIncarnation, exists, err := d.CDCTargetIncarnation(ctx, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	if !exists || resultIncarnation != opts.CDCExpectedResultIncarnation {
+		if !renameUnderLock {
+			restoreSQL := fmt.Sprintf("RENAME TABLE %s TO %s, %s TO %s", targetRef, stagingRef, backupRef, targetRef)
+			if _, restoreErr := conn.ExecContext(ctx, restoreSQL); restoreErr != nil {
+				return fmt.Errorf("MySQL CDC target %s was replaced during conditional swap and could not be restored from %s: %w", opts.TargetTable, backupName, restoreErr)
+			}
+		}
+		return fmt.Errorf("MySQL CDC target %s was replaced during conditional swap", opts.TargetTable)
+	}
+	if _, err := d.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+backupRef); err != nil {
+		return fmt.Errorf("failed to drop prior MySQL CDC target after conditional swap: %w", err)
+	}
+	return nil
+}
+
+func (d *MySQLDestination) supportsRenameTableUnderLock(ctx context.Context, q mysqlCDCQueryRower) (bool, error) {
+	var version string
+	if err := q.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
+		return false, fmt.Errorf("failed to read MySQL server version: %w", err)
+	}
+	return mysqlVersionAllowsRenameUnderLock(version), nil
+}
+
+// mysqlVersionAllowsRenameUnderLock reports whether the server permits RENAME
+// TABLE while the session holds LOCK TABLES ... WRITE: MySQL 8.0.13 and newer;
+// MariaDB has not adopted the relaxation.
+func mysqlVersionAllowsRenameUnderLock(version string) bool {
+	if strings.Contains(strings.ToLower(version), "mariadb") {
+		return false
+	}
+	parts := strings.SplitN(version, "-", 2)
+	numbers := strings.Split(parts[0], ".")
+	if len(numbers) < 3 {
+		return false
+	}
+	major, err := strconv.Atoi(numbers[0])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(numbers[1])
+	if err != nil {
+		return false
+	}
+	patch, err := strconv.Atoi(numbers[2])
+	if err != nil {
+		return false
+	}
+	if major != 8 {
+		return major > 8
+	}
+	return minor > 0 || patch >= 13
+}
+
 func quoteMySQLTable(database, table string) string {
 	quotedTable := fmt.Sprintf("`%s`", strings.ReplaceAll(table, "`", "``"))
 	if database == "" {
@@ -722,6 +1025,11 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if opts.CDCExpectedIncarnation != "" {
+		if err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+	}
 
 	// Build dedup subquery to handle duplicate PKs in staging. For CDC data the
 	// latest change per PK wins (LSN strings are fixed-width and sort
@@ -1131,9 +1439,14 @@ func (d *MySQLDestination) LoadCDCState(ctx context.Context, table, connectorID 
 }
 
 func (d *MySQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	_, err := d.claimCDCTarget(ctx, claimTable, claim)
+	return err
+}
+
+func (d *MySQLDestination) claimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) (bool, error) {
 	ownerID, err := claim.OwnerID()
 	if err != nil {
-		return err
+		return false, err
 	}
 	database, tableName := splitDatabaseTable(claim.DestinationTable)
 	if database == "" {
@@ -1142,25 +1455,158 @@ func (d *MySQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string
 	canonicalTarget := canonicalMySQLTarget(database, tableName, d.lowerCaseTableNames)
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	insert := fmt.Sprintf("INSERT INTO %s (`destination_table`, `connector_id`, `claimed_at`) VALUES (?, ?, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE `destination_table` = VALUES(`destination_table`)", quoteTable(claimTable))
-	if _, err := tx.ExecContext(ctx, insert, canonicalTarget, ownerID); err != nil {
-		return err
+	insert := fmt.Sprintf("INSERT IGNORE INTO %s (`destination_table`, `connector_id`, `claimed_at`) VALUES (?, ?, CURRENT_TIMESTAMP(6))", quoteTable(claimTable))
+	result, err := tx.ExecContext(ctx, insert, canonicalTarget, ownerID)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
 	}
 	var owner string
 	query := fmt.Sprintf("SELECT `connector_id` FROM %s WHERE `destination_table` = ?", quoteTable(claimTable))
 	if err := tx.QueryRowContext(ctx, query, canonicalTarget).Scan(&owner); err != nil {
-		return err
+		return false, err
 	}
 	if owner != ownerID {
-		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+		return false, fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return rowsAffected == 1, nil
+}
+
+func (d *MySQLDestination) ClaimAndPrepareEmptyCDCTarget(
+	ctx context.Context,
+	claimTable string,
+	claim destination.CDCTargetClaim,
+	opts destination.PrepareOptions,
+) (string, error) {
+	if opts.Schema == nil {
+		return "", errors.New("cannot create an empty managed CDC target without a schema")
+	}
+	targetDatabase, targetTable := splitDatabaseTable(opts.Table)
+	if targetDatabase == "" {
+		targetDatabase = d.database
+	}
+	claimDatabase, claimTableName := splitDatabaseTable(claim.DestinationTable)
+	if claimDatabase == "" {
+		claimDatabase = d.database
+	}
+	canonicalTarget := canonicalMySQLTarget(targetDatabase, targetTable, d.lowerCaseTableNames)
+	if canonicalMySQLTarget(claimDatabase, claimTableName, d.lowerCaseTableNames) != canonicalTarget {
+		return "", fmt.Errorf("CDC target claim %q does not match prepared table %q", claim.DestinationTable, opts.Table)
+	}
+	if _, exists, err := d.CDCTargetIncarnation(ctx, opts.Table); err != nil {
+		return "", err
+	} else if exists {
+		return "", fmt.Errorf("destination table %q already exists", opts.Table)
+	}
+	claimInserted, err := d.claimCDCTarget(ctx, claimTable, claim)
+	if err != nil {
+		return "", err
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return "", err
+	}
+	cleanupClaim := func() error {
+		if !claimInserted {
+			return nil
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		query := fmt.Sprintf("DELETE FROM %s WHERE `destination_table` = ? AND `connector_id` = ?", quoteTable(claimTable))
+		_, cleanupErr := d.db.ExecContext(cleanupCtx, query, canonicalTarget, ownerID)
+		return cleanupErr
+	}
+	if targetDatabase != "" {
+		if err := d.ensureDatabaseExists(ctx, targetDatabase); err != nil {
+			return "", errors.Join(err, cleanupClaim())
+		}
+	}
+	tempCandidate := fmt.Sprintf("%s_ingestr_claim_%d", targetTable, time.Now().UnixNano())
+	tempTable := destination.ShortenIdentifier(tempCandidate, tempCandidate, destination.MaxIdentifierLength("mysql"))
+	tempRef := quoteMySQLTable(targetDatabase, tempTable)
+	targetRef := quoteMySQLTable(targetDatabase, targetTable)
+	createSQL := buildCreateTableSQLForReference(tempRef, opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL = strings.Replace(createSQL, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1) + " ENGINE=InnoDB"
+	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+		return "", errors.Join(fmt.Errorf("failed to create temporary MySQL CDC target for %q: %w", opts.Table, err), cleanupClaim())
+	}
+	cleanupTemp := func() error {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, cleanupErr := d.db.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+tempRef)
+		return cleanupErr
+	}
+	normalizedDB, _, tableID, exists, err := d.mysqlInnoDBTableID(ctx, d.db, targetDatabase, tempTable)
+	if err != nil || !exists {
+		if err == nil {
+			err = fmt.Errorf("temporary MySQL CDC target %q has no durable physical incarnation", tempTable)
+		}
+		return "", errors.Join(err, cleanupTemp(), cleanupClaim())
+	}
+	normalizedTarget := targetTable
+	if d.lowerCaseTableNames != 0 {
+		normalizedTarget = strings.ToLower(normalizedTarget)
+	}
+	expectedIncarnation := mysqlTableIncarnation(normalizedDB, normalizedTarget, tableID)
+	renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s", tempRef, targetRef)
+	if _, err := d.db.ExecContext(ctx, renameSQL); err != nil {
+		return "", errors.Join(fmt.Errorf("failed to atomically bind claimed MySQL CDC target %q: %w", opts.Table, err), cleanupTemp(), cleanupClaim())
+	}
+	incarnation, exists, err := d.CDCTargetIncarnation(ctx, opts.Table)
+	if err != nil {
+		return "", err
+	}
+	if !exists || incarnation != expectedIncarnation {
+		return "", errors.Join(fmt.Errorf("claimed MySQL CDC target %q was replaced while it was being bound", opts.Table), cleanupClaim())
+	}
+	return incarnation, nil
+}
+
+func (d *MySQLDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	database, tableName := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
+	var dataType string
+	err := d.db.QueryRowContext(ctx,
+		`SELECT DATA_TYPE FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?`,
+		database, tableName, destination.CDCLSNColumn).Scan(&dataType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect MySQL CDC state position column: %w", err)
+	}
+	switch strings.ToLower(dataType) {
+	case "varchar", "char":
+	default:
+		return nil
+	}
+	query := fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN `_cdc_lsn` TEXT NOT NULL", quoteTable(table))
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen MySQL CDC state position column: %w", err)
+	}
+	return nil
+}
+
+type mysqlCDCQueryRower interface {
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
 }
 
 func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	return d.mysqlCDCTargetIncarnation(ctx, d.db, table)
+}
+
+func (d *MySQLDestination) mysqlCDCTargetIncarnation(ctx context.Context, q mysqlCDCQueryRower, table string) (string, bool, error) {
 	if d.isVitess {
 		return "", false, errors.New("vitess and planetscale do not expose a durable physical table incarnation")
 	}
@@ -1169,7 +1615,7 @@ func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		database = d.database
 	}
 	var engine string
-	err := d.db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`, database, tableName).Scan(&engine)
+	err := q.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`, database, tableName).Scan(&engine)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -1180,23 +1626,71 @@ func (d *MySQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		return "", false, fmt.Errorf("MySQL CDC target %s uses %s, which has no supported durable table incarnation", table, engine)
 	}
 
-	if d.lowerCaseTableNames != 0 {
-		database = strings.ToLower(database)
-		tableName = strings.ToLower(tableName)
-	}
-	internalName := database + "/" + tableName
-	var tableID uint64
-	err = d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
-	if err != nil {
-		err = d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
+	database, tableName, tableID, exists, err := d.mysqlInnoDBTableID(ctx, q, database, tableName)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to read durable InnoDB table identity for %s: %w", table, err)
 	}
+	if !exists {
+		return "", false, nil
+	}
 	return mysqlTableIncarnation(database, tableName, tableID), true, nil
+}
+
+func (d *MySQLDestination) mysqlInnoDBTableID(ctx context.Context, q mysqlCDCQueryRower, database, table string) (string, string, uint64, bool, error) {
+	if d.lowerCaseTableNames != 0 {
+		database = strings.ToLower(database)
+		table = strings.ToLower(table)
+	}
+	internalName := database + "/" + table
+	var tableID uint64
+	err := q.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
+	if err != nil {
+		err = q.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.INNODB_SYS_TABLES WHERE NAME = ?`, internalName).Scan(&tableID)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return database, table, 0, false, nil
+	}
+	if err != nil {
+		return database, table, 0, false, err
+	}
+	return database, table, tableID, true, nil
+}
+
+func (d *MySQLDestination) SupportsCDCConditionalMerge() bool {
+	return !d.isVitess
+}
+
+func (d *MySQLDestination) lockAndValidateCDCIncarnation(ctx context.Context, tx *sql.Tx, table, expected string) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT 1 FROM %s LIMIT 1 FOR UPDATE", quoteTable(table)))
+	if err != nil {
+		return fmt.Errorf("failed to lock MySQL CDC target %s: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("failed to release MySQL CDC target lock query for %s: %w", table, err)
+	}
+	current, exists, err := d.mysqlCDCTargetIncarnation(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expected {
+		return fmt.Errorf("MySQL CDC target %s was replaced before mutation", table)
+	}
+	return nil
+}
+
+func (d *MySQLDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := d.lockAndValidateCDCIncarnation(ctx, tx, table, expectedIncarnation); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(table))); err != nil {
+		return fmt.Errorf("failed to conditionally clear MySQL CDC target %s: %w", table, err)
+	}
+	return tx.Commit()
 }
 
 func mysqlTableIncarnation(database, table string, tableID uint64) string {
@@ -1267,12 +1761,13 @@ func (d *MySQLDestination) DeleteCDCStateEvents(ctx context.Context, table, conn
 }
 
 // isMySQLMissingTableError reports whether err means the queried table does not
-// exist. Plain MySQL raises errno 1146 ("... doesn't exist"); vtgate raises
-// errno 1146 or 1051 with "table ... does not exist" (VT05004/VT05005).
+// exist. Plain MySQL raises errno 1146 for a missing table and 1049 for its
+// missing database; vtgate raises errno 1146 or 1051 with "table ... does not
+// exist" (VT05004/VT05005).
 func isMySQLMissingTableError(err error) bool {
 	var myErr *mysqldriver.MySQLError
 	if errors.As(err, &myErr) {
-		return myErr.Number == 1146 || myErr.Number == 1051
+		return myErr.Number == 1146 || myErr.Number == 1051 || myErr.Number == 1049
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist")
@@ -1512,6 +2007,10 @@ func extractTableName(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+	return buildCreateTableSQLForReference(quoteTable(table), columns, primaryKeys)
+}
+
+func buildCreateTableSQLForReference(tableReference string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
 	binaryClaimKey := isCDCTargetClaimTable(columns, primaryKeys)
 	for _, col := range columns {
@@ -1522,7 +2021,7 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 
-	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
+	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s", tableReference, strings.Join(colDefs, ",\n  "))
 
 	if len(primaryKeys) > 0 {
 		quotedKeys := make([]string, len(primaryKeys))
