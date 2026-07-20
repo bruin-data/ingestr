@@ -36,7 +36,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/testutil"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/microsoft/go-mssqldb"
+	mssqldb "github.com/microsoft/go-mssqldb"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcmssql "github.com/testcontainers/testcontainers-go/modules/mssql"
@@ -185,13 +185,17 @@ func msqStressExec(ctx context.Context, db *sql.DB, query string, args ...any) (
 			return affected, nil
 		}
 		lastErr = err
-		msg := err.Error()
-		if !strings.Contains(msg, "deadlock") && !strings.Contains(msg, "1205") {
+		if !msqStressIsDeadlock(err) {
 			return 0, err
 		}
 		time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
 	}
 	return 0, lastErr
+}
+
+func msqStressIsDeadlock(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 1205
 }
 
 func msqStressEnableCDC(ctx context.Context, db *sql.DB, table, instance string) error {
@@ -727,7 +731,12 @@ func msqStressCompareAll(ctx context.Context, src *sql.DB, dst *pgxpool.Pool, ta
 	}
 	wg.Wait()
 	close(errCh)
-	return <-errCh
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 type msqStressTruth struct {
