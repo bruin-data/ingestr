@@ -2425,7 +2425,8 @@ func validateMultiTableNamespace(cfg *config.IngestConfig, dest destination.Dest
 	namespace := capability.Labels[1]
 	return fmt.Errorf(
 		"multi-table CDC to %s requires a %s: add ?dest_schema=<%s> to the source URI, or a default %s to the destination URI",
-		dest.GetScheme(), namespace, namespace, namespace)
+		dest.GetScheme(), namespace, namespace, namespace,
+	)
 }
 
 func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Destination) string {
