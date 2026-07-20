@@ -7,14 +7,16 @@ import (
 
 func TestParseURI(t *testing.T) {
 	tests := []struct {
-		name       string
-		uri        string
-		wantID     string
-		wantSecret string
-		wantBase   string
-		wantCert   string
-		wantKey    string
-		wantErr    bool
+		name        string
+		uri         string
+		wantID      string
+		wantSecret  string
+		wantBase    string
+		wantCert    string
+		wantKey     string
+		wantCertB64 string
+		wantKeyB64  string
+		wantErr     bool
 	}{
 		{
 			name:       "valid sandbox with mTLS",
@@ -51,8 +53,20 @@ func TestParseURI(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:        "base64 cert and key",
+			uri:         "payrails://?client_id=cid&client_secret=sec&cert_base64=Y2VydA%3D%3D&key_base64=a2V5",
+			wantBase:    productionBaseURL,
+			wantCertB64: "Y2VydA==",
+			wantKeyB64:  "a2V5",
+		},
+		{
 			name:    "cert without key",
 			uri:     "payrails://?client_id=cid&client_secret=sec&cert_path=/tmp/c.pem",
+			wantErr: true,
+		},
+		{
+			name:    "cert_base64 without key_base64",
+			uri:     "payrails://?client_id=cid&client_secret=sec&cert_base64=Y2VydA%3D%3D",
 			wantErr: true,
 		},
 		{
@@ -108,6 +122,12 @@ func TestParseURI(t *testing.T) {
 			}
 			if cfg.keyPath != tt.wantKey {
 				t.Errorf("keyPath = %q, want %q", cfg.keyPath, tt.wantKey)
+			}
+			if cfg.certBase64 != tt.wantCertB64 {
+				t.Errorf("certBase64 = %q, want %q", cfg.certBase64, tt.wantCertB64)
+			}
+			if cfg.keyBase64 != tt.wantKeyB64 {
+				t.Errorf("keyBase64 = %q, want %q", cfg.keyBase64, tt.wantKeyB64)
 			}
 		})
 	}

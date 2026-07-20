@@ -3,6 +3,8 @@ package payrails
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -52,6 +54,8 @@ type payrailsConfig struct {
 	baseURL      string
 	certPath     string
 	keyPath      string
+	certBase64   string
+	keyBase64    string
 }
 
 func NewPayrailsSource() *PayrailsSource {
@@ -85,13 +89,28 @@ func (s *PayrailsSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Accept", "application/json"),
 	}
-	if cfg.certPath != "" {
+	switch {
+	case cfg.certBase64 != "":
+		certPEM, err := base64.StdEncoding.DecodeString(cfg.certBase64)
+		if err != nil {
+			return fmt.Errorf("payrails: invalid cert_base64: %w", err)
+		}
+		keyPEM, err := base64.StdEncoding.DecodeString(cfg.keyBase64)
+		if err != nil {
+			return fmt.Errorf("payrails: invalid key_base64: %w", err)
+		}
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			return fmt.Errorf("payrails: invalid client certificate: %w", err)
+		}
+		opts = append(opts, httpclient.WithClientCertificate(cert))
+	case cfg.certPath != "":
 		opts = append(opts, httpclient.WithClientCert(cfg.certPath, cfg.keyPath))
 	}
 
 	s.client = httpclient.New(opts...)
 
-	config.Debug("[PAYRAILS] Connected successfully (%s, mTLS=%t)", cfg.baseURL, cfg.certPath != "")
+	config.Debug("[PAYRAILS] Connected successfully (%s, mTLS=%t)", cfg.baseURL, cfg.certPath != "" || cfg.certBase64 != "")
 	return nil
 }
 
@@ -119,6 +138,8 @@ func parseURI(uri string) (*payrailsConfig, error) {
 		clientSecret: values.Get("client_secret"),
 		certPath:     values.Get("cert_path"),
 		keyPath:      values.Get("key_path"),
+		certBase64:   values.Get("cert_base64"),
+		keyBase64:    values.Get("key_base64"),
 	}
 	if cfg.clientID == "" {
 		return nil, fmt.Errorf("client_id is required in payrails URI")
@@ -128,6 +149,9 @@ func parseURI(uri string) (*payrailsConfig, error) {
 	}
 	if (cfg.certPath == "") != (cfg.keyPath == "") {
 		return nil, fmt.Errorf("payrails mTLS requires both cert_path and key_path (or neither)")
+	}
+	if (cfg.certBase64 == "") != (cfg.keyBase64 == "") {
+		return nil, fmt.Errorf("payrails mTLS requires both cert_base64 and key_base64 (or neither)")
 	}
 
 	if raw := values.Get("base_url"); raw != "" {

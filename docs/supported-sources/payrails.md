@@ -20,6 +20,7 @@ URI parameters:
 - `base_url` (optional): the full API base URL. Overrides `environment`; use it if Payrails gives you an account-specific host.
 - `cert_path`: path to your mTLS client certificate (`.pem`)
 - `key_path`: path to your mTLS client private key (`.key`)
+- `cert_base64` / `key_base64`: base64-encoded PEM certificate and key
 
 You can create API credentials in the Payrails Portal under **Settings > API Credentials** (admin or developer role required), and set up mTLS following the [Payrails mTLS documentation](https://docs.payrails.com/docs/mtls-configuration-1).
 

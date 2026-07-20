@@ -105,10 +105,17 @@ func WithAllowNonIdempotentRetry() Option {
 	}
 }
 
-// WithClientCert configures a client certificate and key for mutual TLS (mTLS).
+// WithClientCert configures a client certificate and key file for mutual TLS (mTLS).
 func WithClientCert(certFile, keyFile string) Option {
 	return func(c *Client) {
 		c.resty.SetCertificateFromFile(certFile, keyFile)
+	}
+}
+
+// WithClientCertificate configures a preloaded client certificate for mutual TLS (mTLS).
+func WithClientCertificate(cert tls.Certificate) Option {
+	return func(c *Client) {
+		c.resty.SetCertificates(cert)
 	}
 }
 
