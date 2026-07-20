@@ -608,9 +608,9 @@ func TestCDCMergeWithoutUnchangedColsMarkerUsesNormalUpdate(t *testing.T) {
 
 	dest := &MySQLDestination{db: db}
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
+	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn`) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE NOT EXISTS (SELECT 1 FROM `items` AS target WHERE target.`id` = source.`id`)")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0))")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
@@ -631,9 +631,9 @@ func TestCDCMergeWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
 
 	dest := &MySQLDestination{db: db}
 	mock.ExpectBegin()
-	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`id` >= 1) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
+	mock.ExpectExec(regexp.QuoteMeta("WHERE NOT EXISTS (SELECT 1 FROM `items` AS target WHERE target.`id` = source.`id`)")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`id` >= 1) AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn`) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0))")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 

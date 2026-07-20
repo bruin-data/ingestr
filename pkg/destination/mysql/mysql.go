@@ -1062,10 +1062,15 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	if isCDC {
 		upsertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
 	}
+	primaryKeyMatchCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
-		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		primaryKeyMatchCondition,
 		opts.IncrementalPredicate,
 	)
+	insertMatchCondition := matchCondition
+	if isCDC {
+		insertMatchCondition = primaryKeyMatchCondition
+	}
 
 	runUpdate := func() error {
 		if len(nonPKColumns) == 0 {
@@ -1075,11 +1080,15 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		if isCDC && hasUnchangedCols {
 			updateSet = buildCDCUpdateSet(nonPKColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
 		}
+		updateMatchCondition := matchCondition
+		if isCDC {
+			updateMatchCondition += " AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn`)"
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target INNER JOIN %s ON %s SET %s`,
 			quoteTable(opts.TargetTable),
 			upsertSource,
-			matchCondition,
+			updateMatchCondition,
 			updateSet,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
@@ -1099,7 +1108,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			strings.Join(quotedTargetColumns, ", "),
 			upsertSource,
 			quoteTable(opts.TargetTable),
-			matchCondition,
+			insertMatchCondition,
 		)
 		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
@@ -1113,7 +1122,8 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate. The subsequent UPDATE of just-inserted rows is a no-op.
+	// duplicate. CDC anti-joins always use the primary key alone. The subsequent
+	// UPDATE of just-inserted rows is a no-op.
 	steps := []func() error{runUpdate, runInsert}
 	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
@@ -1128,7 +1138,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			"UPDATE %s AS target INNER JOIN %s ON %s SET target.`_cdc_deleted` = 1, target.`_cdc_lsn` = source.`_cdc_lsn`, target.`_cdc_synced_at` = source.`_cdc_synced_at` WHERE source.`_cdc_deleted` = 1",
+			"UPDATE %s AS target INNER JOIN %s ON %s SET target.`_cdc_deleted` = 1, target.`_cdc_lsn` = source.`_cdc_lsn`, target.`_cdc_synced_at` = source.`_cdc_synced_at` WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0))",
 			quoteTable(opts.TargetTable),
 			dedupSource(""),
 			matchCondition,
