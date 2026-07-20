@@ -472,29 +472,14 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	if isCDC {
-		markDeletedSQL := fmt.Sprintf(
-			`MERGE INTO %s
-USING %s
-ON (%s)
-WHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s
-WHERE source.%s = 1`,
-			mergeTargetExpr(opts.TargetTable, opts.IncrementalPredicate),
-			dedupSource(""),
-			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
-			quoteColumn(destination.CDCDeletedColumn),
-			quoteColumn(destination.CDCLSNColumn),
-			quoteColumn(destination.CDCLSNColumn),
-			quoteColumn(destination.CDCSyncedAtColumn),
-			quoteColumn(destination.CDCSyncedAtColumn),
-			quoteColumn(destination.CDCDeletedColumn),
-		)
+		markDeletedSQL := buildCDCDeleteMarkSQL(opts.TargetTable, dedupSource(""), opts.PrimaryKeys, opts.IncrementalPredicate)
 		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
 		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
 			config.LogFailedQuery(markDeletedSQL, err)
 			return fmt.Errorf("failed to mark deleted records: %w", err)
 		}
 
-		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQLWithPredicate(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys, opts.IncrementalPredicate)
+		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQL(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys)
 		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
 		if _, err := tx.ExecContext(ctx, insertDeletedSQL); err != nil {
 			config.LogFailedQuery(insertDeletedSQL, err)
@@ -527,19 +512,38 @@ func mergeTargetExpr(targetTable, incrementalPredicate string) string {
 
 func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
+	isCDC := destination.HasCDCDeletedColumn(columns)
+	targetExpr := mergeTargetExpr(targetTable, incrementalPredicate)
+	if isCDC {
+		targetExpr = mergeTargetExpr(targetTable, "")
+	}
 	var b strings.Builder
 	fmt.Fprintf(
 		&b, "MERGE INTO %s\nUSING %s\nON (%s)\n",
-		mergeTargetExpr(targetTable, incrementalPredicate),
+		targetExpr,
 		sourceExpr,
 		buildJoinCondition(primaryKeys, "target", "source"),
 	)
 	if len(updateColumns) > 0 {
 		updateSet := buildUpdateSet(updateColumns, "target", "source")
-		if destination.HasCDCDeletedColumn(columns) && destination.HasCDCUnchangedColsColumn(columns) {
+		if isCDC && destination.HasCDCUnchangedColsColumn(columns) {
 			updateSet = buildCDCUpdateSet(updateColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
 		}
-		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s\n", updateSet)
+		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s", updateSet)
+		if isCDC {
+			conditions := make([]string, 0, 2)
+			if predicate := strings.TrimSpace(incrementalPredicate); predicate != "" {
+				conditions = append(conditions, "("+predicate+")")
+			}
+			conditions = append(conditions, fmt.Sprintf(
+				"(target.%s IS NULL OR source.%s > target.%s)",
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+			))
+			fmt.Fprintf(&b, " WHERE %s", strings.Join(conditions, " AND "))
+		}
+		b.WriteByte('\n')
 	}
 	fmt.Fprintf(
 		&b, "WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
@@ -550,10 +554,6 @@ func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primary
 }
 
 func buildCDCDeleteTombstoneInsertSQL(targetTable, sourceExpr string, columns, primaryKeys []string) string {
-	return buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr, columns, primaryKeys, "")
-}
-
-func buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.%s = 1 AND NOT EXISTS (SELECT 1 FROM %s target WHERE %s)",
@@ -563,7 +563,35 @@ func buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr strin
 		sourceExpr,
 		quoteColumn(destination.CDCDeletedColumn),
 		quoteTable(targetTable),
-		destination.MergeJoinCondition(buildJoinCondition(primaryKeys, "target", "source"), incrementalPredicate),
+		buildJoinCondition(primaryKeys, "target", "source"),
+	)
+}
+
+func buildCDCDeleteMarkSQL(targetTable, sourceExpr string, primaryKeys []string, incrementalPredicate string) string {
+	conditions := []string{"source." + quoteColumn(destination.CDCDeletedColumn) + " = 1"}
+	if predicate := strings.TrimSpace(incrementalPredicate); predicate != "" {
+		conditions = append(conditions, "("+predicate+")")
+	}
+	conditions = append(conditions, fmt.Sprintf(
+		"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND NVL(target.%s, 0) = 0))",
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCDeletedColumn),
+	))
+	return fmt.Sprintf(
+		"MERGE INTO %s\nUSING %s\nON (%s)\nWHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s\nWHERE %s",
+		mergeTargetExpr(targetTable, ""),
+		sourceExpr,
+		buildJoinCondition(primaryKeys, "target", "source"),
+		quoteColumn(destination.CDCDeletedColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCSyncedAtColumn),
+		quoteColumn(destination.CDCSyncedAtColumn),
+		strings.Join(conditions, " AND "),
 	)
 }
 
@@ -1335,7 +1363,7 @@ func buildCDCUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef 
 			continue
 		}
 		unchanged := fmt.Sprintf(
-			"EXISTS (SELECT 1 FROM JSON_TABLE(COALESCE(%s, '[]'), '$[*]' COLUMNS (value VARCHAR2(4000) PATH '$')) jt WHERE NLSSORT(jt.value, 'NLS_SORT=BINARY') = NLSSORT('%s', 'NLS_SORT=BINARY'))",
+			"JSON_EXISTS(COALESCE(%s, '[]'), '$[*]?(@ == $marker)' PASSING '%s' AS \"marker\")",
 			unchangedRef,
 			strings.ReplaceAll(col, "'", "''"),
 		)

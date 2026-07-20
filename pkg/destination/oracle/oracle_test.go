@@ -437,6 +437,39 @@ func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
 	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
 }
 
+func TestBuildCDCMergeSQLFencesUpdatesWithoutChangingPKMatch(t *testing.T) {
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	got := buildMergeSQLWithPredicate(
+		"items",
+		source,
+		columns,
+		[]string{"id"},
+		filterColumns(destination.DestinationColumns(columns), []string{"id"}),
+		`target."PAYLOAD" = 'eligible'`,
+	)
+
+	assert.Contains(t, got, `MERGE INTO "ITEMS" target`)
+	assert.NotContains(t, got, `MERGE INTO (SELECT`)
+	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
+	assert.Contains(t, got, `WHERE (target."PAYLOAD" = 'eligible') AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN")`)
+	assert.Contains(t, got, `WHEN NOT MATCHED THEN INSERT`)
+}
+
+func TestBuildCDCDeleteMarkSQLUsesOverallLSNOrder(t *testing.T) {
+	got := buildCDCDeleteMarkSQL(
+		"items",
+		`"ITEMS_STAGING" source`,
+		[]string{"id"},
+		`target."PAYLOAD" = 'eligible'`,
+	)
+
+	assert.Contains(t, got, `MERGE INTO "ITEMS" target`)
+	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
+	assert.Contains(t, got, `WHERE source."_CDC_DELETED" = 1 AND (target."PAYLOAD" = 'eligible')`)
+	assert.Contains(t, got, `(target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND NVL(target."_CDC_DELETED", 0) = 0))`)
+}
+
 func TestBuildCDCDeleteTombstoneInsertSQL(t *testing.T) {
 	source := oracleDedupSource(
 		[]string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn},
@@ -469,9 +502,9 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
 	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
 
-	assert.Contains(t, got, `JSON_TABLE(COALESCE(source."_CDC_UNCHANGED_COLS", '[]'), '$[*]'`)
-	assert.Contains(t, got, `NLSSORT(jt.value, 'NLS_SORT=BINARY') = NLSSORT('payload', 'NLS_SORT=BINARY')`)
+	assert.Contains(t, got, `JSON_EXISTS(COALESCE(source."_CDC_UNCHANGED_COLS", '[]'), '$[*]?(@ == $marker)' PASSING 'payload' AS "marker")`)
 	assert.Contains(t, got, `THEN target."PAYLOAD" ELSE source."PAYLOAD" END`)
+	assert.Contains(t, got, `(target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN")`)
 	assert.Contains(t, got, `INSERT ("ID", "PAYLOAD", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT")`)
 	assert.NotContains(t, got, `INSERT ("ID", "PAYLOAD", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS")`)
 	assert.True(t, NewOracleDestination().SupportsCDCUnchangedCols())
@@ -483,7 +516,7 @@ func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerUsesPlainUpdateSet(t *testing
 	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
 
 	assert.NotContains(t, got, "_CDC_UNCHANGED_COLS")
-	assert.NotContains(t, got, "JSON_TABLE")
+	assert.NotContains(t, got, "JSON_EXISTS")
 	assert.Contains(t, got, `target."PAYLOAD" = source."PAYLOAD"`)
 }
 
@@ -492,8 +525,8 @@ func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
 	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
 	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
 
-	assert.Contains(t, got, `NLSSORT(jt.value, 'NLS_SORT=BINARY') = NLSSORT('"Foo"', 'NLS_SORT=BINARY')`)
-	assert.Contains(t, got, `NLSSORT(jt.value, 'NLS_SORT=BINARY') = NLSSORT('"foo"', 'NLS_SORT=BINARY')`)
+	assert.Contains(t, got, `PASSING '"Foo"' AS "marker"`)
+	assert.Contains(t, got, `PASSING '"foo"' AS "marker"`)
 	assert.Contains(t, got, `THEN target."Foo" ELSE source."Foo" END`)
 	assert.Contains(t, got, `THEN target."foo" ELSE source."foo" END`)
 	assert.NotContains(t, got, "LOWER(")
