@@ -1421,7 +1421,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/richardlehane/mscfb
-      version: v1.0.6
+      version: v1.0.7
       licenses:
         - Apache-2.0
       status: allowed
@@ -1706,7 +1706,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/xuri/excelize/v2
-      version: v2.10.1
+      version: v2.11.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1846,7 +1846,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: golang.org/x/crypto
-      version: v0.52.0
+      version: v0.53.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1856,12 +1856,12 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/mod
-      version: v0.35.0
+      version: v0.36.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/net
-      version: v0.55.0
+      version: v0.56.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1871,22 +1871,22 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/sync
-      version: v0.20.0
+      version: v0.21.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/sys
-      version: v0.45.0
+      version: v0.46.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/term
-      version: v0.43.0
+      version: v0.44.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/text
-      version: v0.37.0
+      version: v0.38.0
       licenses:
         - BSD-3-Clause
       status: allowed
