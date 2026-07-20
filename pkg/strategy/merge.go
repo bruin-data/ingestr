@@ -73,15 +73,16 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 // mergeStagingInto merges the staging table into the target table by primary
 // key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
 // highest value of that key (latest wins) instead of an arbitrary one.
-func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate string) error {
+func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) error {
 	return dest.MergeTable(ctx, destination.MergeOptions{
-		StagingTable:         stagingTable,
-		TargetTable:          targetTable,
-		PrimaryKeys:          primaryKeys,
-		Columns:              destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
-		IncrementalKey:       mergeIncrementalKeyForSchema(tableSchema, incrementalKey),
-		IncrementalPredicate: incrementalPredicate,
-		Schema:               tableSchema,
+		StagingTable:           stagingTable,
+		TargetTable:            targetTable,
+		PrimaryKeys:            primaryKeys,
+		Columns:                destination.MergeColumnsFor(dest, tableSchema.ColumnNames()),
+		IncrementalKey:         mergeIncrementalKeyForSchema(tableSchema, incrementalKey),
+		IncrementalPredicate:   incrementalPredicate,
+		Schema:                 tableSchema,
+		CDCExpectedIncarnation: expectedIncarnation,
 	})
 }
 
@@ -181,10 +182,16 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}); err != nil {
 		return err
 	}
+	expectedIncarnation := ""
 	if job.CDCStateManager != nil {
 		if err := job.CDCStateManager.BindDestinationIncarnation(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
 			return fmt.Errorf("failed to bind CDC destination before merge: %w", err)
 		}
+		boundIncarnation, err := job.CDCStateManager.BoundDestinationIncarnation(job.Config.SourceTable)
+		if err != nil {
+			return err
+		}
+		expectedIncarnation = boundIncarnation
 	}
 
 	// Read from source
@@ -262,8 +269,14 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
-		if err := destination.ApplyCDCTruncate(ctx, job.Destination, job.Config.DestTable); err != nil {
-			return err
+		var truncateErr error
+		if expectedIncarnation != "" && destination.SupportsCDCConditionalTruncate(job.Destination) {
+			truncateErr = destination.ApplyCDCTruncateIfIncarnation(ctx, job.Destination, job.Config.DestTable, expectedIncarnation)
+		} else {
+			truncateErr = destination.ApplyCDCTruncate(ctx, job.Destination, job.Config.DestTable)
+		}
+		if truncateErr != nil {
+			return truncateErr
 		}
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
@@ -272,7 +285,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate); err != nil {
+	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -485,6 +498,15 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				// Append-only change-log table: rows were written directly.
 				return
 			}
+			expectedIncarnation := ""
+			if job.CDCStateManager != nil {
+				var err error
+				expectedIncarnation, err = job.CDCStateManager.BoundDestinationIncarnation(ti.Name)
+				if err != nil {
+					mergeErrChan <- err
+					return
+				}
+			}
 			if err := source.ConnectorLeaseLoss(ctx); err != nil {
 				mergeErrChan <- err
 				return
@@ -494,8 +516,14 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 					mergeErrChan <- err
 					return
 				}
-				if err := destination.ApplyCDCTruncate(ctx, job.Destination, destTable); err != nil {
-					mergeErrChan <- fmt.Errorf("failed to reset CDC target %s: %w", ti.Name, err)
+				var truncateErr error
+				if expectedIncarnation != "" && destination.SupportsCDCConditionalTruncate(job.Destination) {
+					truncateErr = destination.ApplyCDCTruncateIfIncarnation(ctx, job.Destination, destTable, expectedIncarnation)
+				} else {
+					truncateErr = destination.ApplyCDCTruncate(ctx, job.Destination, destTable)
+				}
+				if truncateErr != nil {
+					mergeErrChan <- fmt.Errorf("failed to reset CDC target %s: %w", ti.Name, truncateErr)
 					return
 				}
 				if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -507,7 +535,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				mergeErrChan <- err
 				return
 			}
-			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", ""); err != nil {
+			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}

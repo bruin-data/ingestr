@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,7 +52,7 @@ var cdcStateSchema = &schema.TableSchema{Columns: []schema.Column{
 	{Name: "state_kind", DataType: schema.TypeString, MaxLength: 32, Nullable: false},
 	{Name: "state_generation", DataType: schema.TypeInt64, Nullable: false},
 	{Name: "state_status", DataType: schema.TypeString, MaxLength: 32, Nullable: false},
-	{Name: "_cdc_lsn", DataType: schema.TypeString, MaxLength: 64, Nullable: false},
+	{Name: "_cdc_lsn", DataType: schema.TypeString, Nullable: false},
 	{Name: "recorded_at", DataType: schema.TypeTimestampTZ, Nullable: false},
 }}
 
@@ -98,29 +99,30 @@ type CDCStateManager struct {
 	stateTable     string
 	targetTable    string
 
-	mu                  sync.Mutex
-	prepared            bool
-	targetPrepared      bool
-	loaded              bool
-	started             bool
-	generation          int64
-	runID               string
-	runEventID          string
-	runs                map[string]struct{}
-	states              map[cdcStateKey]reducedCDCState
-	destTables          map[string]string
-	knownComplete       map[string]string
-	currentIncarnations map[string]string
-	currentSchemas      map[string]string
-	knownIncarnations   map[string]string
-	knownSchemas        map[string]string
-	knownDestinations   map[string]string
-	boundDestinations   map[string]string
-	lateTargetModes     map[string]lateTargetMode
-	lateTargetRaw       map[string]string
-	snapshotEpochs      map[string]uint64
-	entries             []destination.CDCStateEntry
-	cleanupDue          bool
+	mu                   sync.Mutex
+	prepared             bool
+	targetPrepared       bool
+	loaded               bool
+	started              bool
+	generation           int64
+	runID                string
+	runEventID           string
+	runs                 map[string]struct{}
+	states               map[cdcStateKey]reducedCDCState
+	destTables           map[string]string
+	knownComplete        map[string]string
+	currentIncarnations  map[string]string
+	currentSchemas       map[string]string
+	knownIncarnations    map[string]string
+	knownSchemas         map[string]string
+	knownDestinations    map[string]string
+	boundDestinations    map[string]string
+	boundRawDestinations map[string]string
+	lateTargetModes      map[string]lateTargetMode
+	lateTargetRaw        map[string]string
+	snapshotEpochs       map[string]uint64
+	entries              []destination.CDCStateEntry
+	cleanupDue           bool
 }
 
 type lateTargetMode uint8
@@ -168,28 +170,29 @@ func newCDCStateManager(dest destination.Destination, connectorID, stateTable st
 		}
 	}
 	return &CDCStateManager{
-		dest:                dest,
-		reader:              reader,
-		fenceReader:         fenceReader,
-		pruner:              pruner,
-		incarnation:         destinationIncarnationProvider(dest),
-		initializer:         destinationIncarnationInitializer(dest),
-		pruneBatchSize:      pruneBatchSize,
-		connectorID:         connectorID,
-		stateTable:          stateTable,
-		runs:                make(map[string]struct{}),
-		states:              make(map[cdcStateKey]reducedCDCState),
-		destTables:          make(map[string]string),
-		knownComplete:       make(map[string]string),
-		currentIncarnations: make(map[string]string),
-		currentSchemas:      make(map[string]string),
-		knownIncarnations:   make(map[string]string),
-		knownSchemas:        make(map[string]string),
-		knownDestinations:   make(map[string]string),
-		boundDestinations:   make(map[string]string),
-		lateTargetModes:     make(map[string]lateTargetMode),
-		lateTargetRaw:       make(map[string]string),
-		snapshotEpochs:      make(map[string]uint64),
+		dest:                 dest,
+		reader:               reader,
+		fenceReader:          fenceReader,
+		pruner:               pruner,
+		incarnation:          destinationIncarnationProvider(dest),
+		initializer:          destinationIncarnationInitializer(dest),
+		pruneBatchSize:       pruneBatchSize,
+		connectorID:          connectorID,
+		stateTable:           stateTable,
+		runs:                 make(map[string]struct{}),
+		states:               make(map[cdcStateKey]reducedCDCState),
+		destTables:           make(map[string]string),
+		knownComplete:        make(map[string]string),
+		currentIncarnations:  make(map[string]string),
+		currentSchemas:       make(map[string]string),
+		knownIncarnations:    make(map[string]string),
+		knownSchemas:         make(map[string]string),
+		knownDestinations:    make(map[string]string),
+		boundDestinations:    make(map[string]string),
+		boundRawDestinations: make(map[string]string),
+		lateTargetModes:      make(map[string]lateTargetMode),
+		lateTargetRaw:        make(map[string]string),
+		snapshotEpochs:       make(map[string]uint64),
 	}, nil
 }
 
@@ -251,6 +254,7 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 	delete(m.knownSchemas, sourceTable)
 	delete(m.knownDestinations, sourceTable)
 	delete(m.boundDestinations, sourceTable)
+	delete(m.boundRawDestinations, sourceTable)
 	return nil
 }
 
@@ -270,18 +274,72 @@ func (m *CDCStateManager) BindDestinationIncarnation(ctx context.Context, source
 			return fmt.Errorf("CDC destination table %q disappeared before snapshot write", destTable)
 		}
 	}
-	current, exists, err := m.currentDestinationIncarnation(ctx, sourceTable)
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
 	if err != nil {
 		return err
 	}
 	if !exists {
 		return fmt.Errorf("CDC destination table %q disappeared before snapshot write", destTable)
 	}
+	if known := m.knownDestinations[sourceTable]; known != "" && current != known {
+		return fmt.Errorf("CDC destination table %q was replaced after its completed snapshot", destTable)
+	}
 	if bound := m.boundDestinations[sourceTable]; bound != "" && current != bound {
 		return fmt.Errorf("CDC destination table %q was replaced during its snapshot", destTable)
 	}
 	m.boundDestinations[sourceTable] = current
+	m.boundRawDestinations[sourceTable] = raw
 	return nil
+}
+
+func (m *CDCStateManager) BoundDestinationIncarnation(sourceTable string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	incarnation := m.boundRawDestinations[sourceTable]
+	if incarnation == "" {
+		return "", fmt.Errorf("CDC destination for source table %q has not been bound", sourceTable)
+	}
+	return incarnation, nil
+}
+
+func (m *CDCStateManager) CompleteConditionalSwap(ctx context.Context, sourceTable, destTable, previousIncarnation, resultIncarnation string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if previousIncarnation == "" || resultIncarnation == "" {
+		return fmt.Errorf("CDC conditional swap for %q has an empty physical incarnation", destTable)
+	}
+	if bound := m.boundRawDestinations[sourceTable]; bound != previousIncarnation {
+		return fmt.Errorf("CDC destination table %q changed before its conditional swap", destTable)
+	}
+	raw, digest, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || raw != resultIncarnation {
+		return fmt.Errorf("CDC destination table %q was replaced during its conditional swap", destTable)
+	}
+	m.boundRawDestinations[sourceTable] = raw
+	m.boundDestinations[sourceTable] = digest
+	return nil
+}
+
+func (m *CDCStateManager) SourceTableForDestination(destTable string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sourceTable := ""
+	for candidate, destinationTable := range m.destTables {
+		if destinationTable != destTable {
+			continue
+		}
+		if sourceTable != "" && sourceTable != candidate {
+			return "", fmt.Errorf("multiple managed CDC source tables map to destination %q", destTable)
+		}
+		sourceTable = candidate
+	}
+	if sourceTable == "" {
+		return "", fmt.Errorf("cannot resolve managed CDC source table for destination %q", destTable)
+	}
+	return sourceTable, nil
 }
 
 // ClaimTarget reserves a destination table for one logical source table before
@@ -290,6 +348,58 @@ func (m *CDCStateManager) ClaimTarget(ctx context.Context, sourceTable, destTabl
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.claimTarget(ctx, sourceTable, destTable)
+}
+
+func (m *CDCStateManager) ClaimAndPrepareTarget(ctx context.Context, sourceTable, destTable string, opts destination.PrepareOptions) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.validateTarget(ctx, destTable); err != nil {
+		return err
+	}
+	if err := m.prepareTargetTable(ctx); err != nil {
+		return err
+	}
+	rawIncarnation, incarnation, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if rawIncarnation == "" {
+			return fmt.Errorf("CDC destination table %q has no provable physical incarnation", destTable)
+		}
+		if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
+			return err
+		}
+		m.boundRawDestinations[sourceTable] = rawIncarnation
+		m.boundDestinations[sourceTable] = incarnation
+		return nil
+	}
+	preparer, ok := m.dest.(destination.CDCLateTargetClaimPreparer)
+	if !ok {
+		return fmt.Errorf("destination scheme %q cannot atomically claim and create an empty managed CDC target", m.dest.GetScheme())
+	}
+	opts.Table = destTable
+	created, err := preparer.ClaimAndPrepareEmptyCDCTarget(ctx, m.targetTable, destination.CDCTargetClaim{
+		DestinationTable: destTable,
+		ConnectorID:      m.connectorID,
+		SourceTable:      sourceTable,
+	}, opts)
+	if err != nil {
+		return fmt.Errorf("failed to atomically claim and create CDC destination table %q: %w", destTable, err)
+	}
+	if created == "" {
+		return fmt.Errorf("destination scheme %q created CDC destination table %q without a provable physical incarnation", m.dest.GetScheme(), destTable)
+	}
+	currentRaw, currentDigest, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || currentRaw != created {
+		return fmt.Errorf("CDC destination table %q was replaced while it was being claimed", destTable)
+	}
+	m.boundRawDestinations[sourceTable] = currentRaw
+	m.boundDestinations[sourceTable] = currentDigest
+	return nil
 }
 
 // ClaimLateDiscoveredTarget validates a target that was not part of the
@@ -345,6 +455,7 @@ func (m *CDCStateManager) ClaimLateDiscoveredTarget(
 		m.lateTargetModes[sourceTable] = lateTargetCreatedEmpty
 		m.lateTargetRaw[sourceTable] = createdIncarnation
 		m.boundDestinations[sourceTable] = cdcDestinationIncarnationDigest(createdIncarnation)
+		m.boundRawDestinations[sourceTable] = createdIncarnation
 		return nil
 	}
 	if !allowReplacement {
@@ -374,6 +485,7 @@ func (m *CDCStateManager) ClaimLateDiscoveredTarget(
 		m.lateTargetModes[sourceTable] = lateTargetConditionalReplace
 		m.lateTargetRaw[sourceTable] = rawDestinationIncarnation
 		m.boundDestinations[sourceTable] = destinationIncarnation
+		m.boundRawDestinations[sourceTable] = rawDestinationIncarnation
 	}
 	return nil
 }
@@ -546,6 +658,7 @@ func (m *CDCStateManager) ApplyLateSnapshotBoundary(ctx context.Context, sourceT
 		}
 	}
 	m.boundDestinations[sourceTable] = expectedDigest
+	m.boundRawDestinations[sourceTable] = expectedRaw
 	delete(m.lateTargetModes, sourceTable)
 	delete(m.lateTargetRaw, sourceTable)
 	return true, nil
@@ -750,7 +863,6 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 		m.knownIncarnations = make(map[string]string)
 		m.knownDestinations = make(map[string]string)
 	}
-	m.boundDestinations = make(map[string]string)
 	m.snapshotEpochs = make(map[string]uint64)
 	m.generation++
 	runID, err := newCDCStateRunID()
@@ -944,6 +1056,7 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		m.knownDestinations[sourceTable] = expected
 		if _, freshSnapshot := token.SnapshotPositions[sourceTable]; freshSnapshot {
 			delete(m.boundDestinations, sourceTable)
+			delete(m.boundRawDestinations, sourceTable)
 		}
 	}
 	m.pruneSuperseded(ctx)
@@ -960,10 +1073,30 @@ func (m *CDCStateManager) prepareTable(ctx context.Context) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := m.dest.PrepareTable(ctx, destination.PrepareOptions{
-		Table: m.stateTable, Schema: cdcStateSchema, DropFirst: false, PrimaryKeys: []string{"connector_id", "event_id"},
-	}); err != nil {
-		return fmt.Errorf("failed to prepare shared CDC state table %s: %w", m.stateTable, err)
+	prepare := func() error {
+		return m.dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table: m.stateTable, Schema: cdcStateSchema, DropFirst: false, PrimaryKeys: []string{"connector_id", "event_id"},
+		})
+	}
+	migrator, hasMigrator := m.dest.(destination.CDCStatePositionMigrator)
+	if err := prepare(); err != nil {
+		// A state table created by an older release carries a bounded position
+		// column that some destinations (BigQuery) refuse to reconcile against
+		// the now-unbounded schema; widen it and retry once.
+		if !hasMigrator {
+			return fmt.Errorf("failed to prepare shared CDC state table %s: %w", m.stateTable, err)
+		}
+		if migrateErr := migrator.EnsureCDCStatePositionColumn(ctx, m.stateTable); migrateErr != nil {
+			return fmt.Errorf("failed to prepare shared CDC state table %s: %w", m.stateTable,
+				errors.Join(err, fmt.Errorf("automatic position-column migration failed: %w", migrateErr)))
+		}
+		if err := prepare(); err != nil {
+			return fmt.Errorf("failed to prepare shared CDC state table %s: %w", m.stateTable, err)
+		}
+	} else if hasMigrator {
+		if err := migrator.EnsureCDCStatePositionColumn(ctx, m.stateTable); err != nil {
+			return fmt.Errorf("failed to widen shared CDC state position column in %s: %w", m.stateTable, err)
+		}
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
@@ -1359,8 +1492,10 @@ func preferCDCStateEntry(candidate, current destination.CDCStateEntry) bool {
 
 func cdcStatePositionValid(position string) bool {
 	position, _, _ = decodeCDCStatePosition(position)
-	_, err := pglogrepl.ParseLSN(position)
-	return err == nil
+	if _, err := pglogrepl.ParseLSN(position); err == nil {
+		return true
+	}
+	return mysqlCDCStatePositionRE.MatchString(position)
 }
 
 func cdcStateEntryPositionValid(entry destination.CDCStateEntry) bool {
@@ -1383,6 +1518,9 @@ func compareCDCPositions(left, right string) int {
 	leftLSN, leftErr := pglogrepl.ParseLSN(left)
 	rightLSN, rightErr := pglogrepl.ParseLSN(right)
 	if leftErr != nil || rightErr != nil {
+		if mysqlCDCStatePositionRE.MatchString(left) && mysqlCDCStatePositionRE.MatchString(right) {
+			return strings.Compare(left, right)
+		}
 		return 0
 	}
 	switch {
@@ -1394,6 +1532,8 @@ func compareCDCPositions(left, right string) int {
 		return 0
 	}
 }
+
+var mysqlCDCStatePositionRE = regexp.MustCompile(`^\d{20}:[^:]+:\d{20}:\d{20}$`)
 
 const (
 	cdcStateIncarnationSeparator   = ";incarnation="
@@ -1497,7 +1637,7 @@ func decodeCDCDestinationState(encoded string) (position, incarnation string, sn
 	if _, err := hex.DecodeString(parts[1]); err != nil {
 		return "", "", 0, false
 	}
-	if _, err := pglogrepl.ParseLSN(parts[2]); err != nil {
+	if !cdcStatePositionValid(parts[2]) {
 		return "", "", 0, false
 	}
 	return parts[2], parts[1], epoch, true

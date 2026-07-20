@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
@@ -11,7 +12,116 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestManagedCDCRunLeaseAcquiresAndReleasesAdvisoryLock(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	dest := &MySQLDestination{db: db}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, 0)")).
+		WithArgs("ingestr_cdc_connector").
+		WillReturnRows(sqlmock.NewRows([]string{"acquired"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs("ingestr_cdc_connector").
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	lease, err := dest.AcquireManagedCDCRunLease(t.Context(), "connector")
+	require.NoError(t, err)
+	require.NoError(t, lease.Release())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagedCDCRunLeaseRejectsConcurrentOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	dest := &MySQLDestination{db: db}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, 0)")).
+		WithArgs("ingestr_cdc_connector").
+		WillReturnRows(sqlmock.NewRows([]string{"acquired"}).AddRow(sql.NullInt64{Int64: 0, Valid: true}))
+
+	_, err = dest.AcquireManagedCDCRunLease(t.Context(), "connector")
+	require.ErrorContains(t, err, "already owns connector")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestClaimAndPrepareEmptyCDCTargetUsesAtomicRename(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO `_bruin_staging`.`cdc_targets` (`destination_table`, `connector_id`, `claimed_at`) VALUES (?, ?, CURRENT_TIMESTAMP(6))")).
+		WithArgs(destination.CDCTargetKey("app", "events"), destination.CDCTargetOwnerID("connector", "source.events")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `connector_id` FROM `_bruin_staging`.`cdc_targets` WHERE `destination_table` = ?")).
+		WithArgs(destination.CDCTargetKey("app", "events")).
+		WillReturnRows(sqlmock.NewRows([]string{"connector_id"}).AddRow(destination.CDCTargetOwnerID("connector", "source.events")))
+	mock.ExpectCommit()
+	mock.ExpectExec("CREATE TABLE `app`\\.`events_ingestr_claim_[0-9]+`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+	mock.ExpectExec("RENAME TABLE `app`\\.`events_ingestr_claim_[0-9]+` TO `app`\\.`events`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+
+	incarnation, err := dest.ClaimAndPrepareEmptyCDCTarget(t.Context(), "_bruin_staging.cdc_targets", destination.CDCTargetClaim{
+		DestinationTable: "events",
+		ConnectorID:      "connector",
+		SourceTable:      "source.events",
+	}, destination.PrepareOptions{
+		Table:       "events",
+		Schema:      &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}, PrimaryKeys: []string{"id"}},
+		PrimaryKeys: []string{"id"},
+		CDCMode:     true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, mysqlTableIncarnation("app", "events", 42), incarnation)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestConditionalCDCSwapRejectsReplacedTargetBeforeRename(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+
+	mock.ExpectExec(regexp.QuoteMeta("LOCK TABLES `app`.`events` WRITE, `app`.`events_staging` WRITE")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(43)))
+	mock.ExpectExec(regexp.QuoteMeta("UNLOCK TABLES")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err = dest.SwapTable(t.Context(), destination.SwapOptions{
+		TargetTable:                   "events",
+		StagingTable:                  "events_staging",
+		CDCExpectedIncarnation:        mysqlTableIncarnation("app", "events", 42),
+		CDCExpectedStagingIncarnation: mysqlTableIncarnation("app", "events_staging", 44),
+		CDCExpectedResultIncarnation:  mysqlTableIncarnation("app", "events", 44),
+	})
+	require.ErrorContains(t, err, "replaced before conditional swap")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 func TestCanonicalMySQLTargetHonorsLowerCaseTableNames(t *testing.T) {
 	if got := canonicalMySQLTarget("Sales", "Orders", 0); got != destination.CDCTargetKey("Sales", "Orders") {
@@ -113,6 +223,51 @@ func TestCDCTruncatePreservesInnoDBPhysicalIdentityWithoutChangingBatchTruncate(
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestConditionalCDCTruncateRejectsReplacedTarget(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM `app`.`events` LIMIT 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(43)))
+	mock.ExpectRollback()
+
+	err = dest.TruncateCDCTableIfIncarnation(t.Context(), "app.events", mysqlTableIncarnation("app", "events", 42))
+	require.ErrorContains(t, err, "was replaced before mutation")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestConditionalCDCTruncateMutatesBoundTarget(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM `app`.`events` LIMIT 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs("app/events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(uint64(42)))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `app`.`events`")).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectCommit()
+
+	require.NoError(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "app.events", mysqlTableIncarnation("app", "events", 42)))
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestVitessManagedCDCStateFailsWithoutDurableIncarnation(t *testing.T) {
@@ -565,6 +720,7 @@ func TestIsMySQLMissingTableError(t *testing.T) {
 		want bool
 	}{
 		{"mysql errno 1146", &mysqldriver.MySQLError{Number: 1146, Message: "Table 'db.t' doesn't exist"}, true},
+		{"mysql errno 1049", &mysqldriver.MySQLError{Number: 1049, Message: "Unknown database 'db'"}, true},
 		{"vtgate errno 1051", &mysqldriver.MySQLError{Number: 1051, Message: "VT05004: table 't' does not exist"}, true},
 		{"vtgate text without errno", errors.New("target: db.0.primary: vttablet: table 't' does not exist in keyspace 'db'"), true},
 		{"plain mysql text without errno", errors.New("Error 1146: Table 'db.t' doesn't exist"), true},
@@ -718,4 +874,17 @@ func TestDeleteInsertLockName(t *testing.T) {
 	assert.NotEqual(t, first, other)
 	assert.LessOrEqual(t, len(first), 64)
 	assert.Contains(t, first, "ingestr_di_")
+}
+
+func TestMySQLVersionAllowsRenameUnderLock(t *testing.T) {
+	assert.True(t, mysqlVersionAllowsRenameUnderLock("8.0.13"))
+	assert.True(t, mysqlVersionAllowsRenameUnderLock("8.0.34-log"))
+	assert.True(t, mysqlVersionAllowsRenameUnderLock("8.4.0"))
+	assert.True(t, mysqlVersionAllowsRenameUnderLock("9.1.0"))
+
+	assert.False(t, mysqlVersionAllowsRenameUnderLock("8.0.12"))
+	assert.False(t, mysqlVersionAllowsRenameUnderLock("5.7.44-log"))
+	assert.False(t, mysqlVersionAllowsRenameUnderLock("10.11.6-MariaDB-1:10.11.6+maria~ubu2204"))
+	assert.False(t, mysqlVersionAllowsRenameUnderLock("11.4.2-MariaDB"))
+	assert.False(t, mysqlVersionAllowsRenameUnderLock("garbage"))
 }

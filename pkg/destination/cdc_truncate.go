@@ -227,6 +227,11 @@ func ApplyCDCTruncate(ctx context.Context, dest Destination, table string) error
 	return ApplyTruncate(ctx, dest, table)
 }
 
+func SupportsCDCConditionalTruncate(dest Destination) bool {
+	_, ok := dest.(CDCConditionalTruncater)
+	return ok
+}
+
 func ApplyCDCTruncateIfIncarnation(ctx context.Context, dest Destination, table, expectedIncarnation string) error {
 	if expectedIncarnation == "" {
 		return fmt.Errorf("cannot conditionally truncate %s without a bound destination incarnation", table)

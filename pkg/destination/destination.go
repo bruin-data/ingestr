@@ -124,6 +124,7 @@ type SwapOptions struct {
 	Schema                        *schema.TableSchema
 	CDCExpectedIncarnation        string
 	CDCExpectedStagingIncarnation string
+	CDCExpectedResultIncarnation  string
 }
 
 // SCD2Options contains parameters for SCD2 (Slowly Changing Dimensions Type 2) operations.
@@ -267,6 +268,12 @@ type CDCStateWriter interface {
 	WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
 }
 
+// CDCStatePositionMigrator widens state tables created by older releases whose
+// position column was bounded too narrowly for every supported CDC cursor.
+type CDCStatePositionMigrator interface {
+	EnsureCDCStatePositionColumn(ctx context.Context, table string) error
+}
+
 type CDCTargetClaim struct {
 	DestinationTable string
 	ConnectorID      string
@@ -324,11 +331,30 @@ type CDCConditionalTruncater interface {
 	TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error
 }
 
+// CDCConditionalMergeCapable advertises that MergeTable enforces
+// MergeOptions.CDCExpectedIncarnation in the same transaction as target DML.
+type CDCConditionalMergeCapable interface {
+	SupportsCDCConditionalMerge() bool
+}
+
+// ManagedCDCRunLeaser serializes all target mutations for one managed CDC
+// connector and reports loss through the standard connector lease guard.
+type ManagedCDCRunLeaser interface {
+	AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error)
+}
+
 // CDCConditionalSwapCapable advertises that SwapTable enforces both expected
 // target and staging incarnations in the same atomic operation that replaces
 // the target.
 type CDCConditionalSwapCapable interface {
 	SupportsCDCConditionalSwap() bool
+}
+
+// CDCConditionalSwapPlanner derives the physical staging incarnation checked
+// by SwapTable and the incarnation that same physical table will have under
+// the target name after the atomic rename.
+type CDCConditionalSwapPlanner interface {
+	CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (stagingIncarnation, resultIncarnation string, err error)
 }
 
 // CDCTargetIncarnationInitializer establishes destination-specific physical

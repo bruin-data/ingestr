@@ -127,7 +127,7 @@ func uriToDSN(uri string) (string, string, error) {
 // implicit `json_valid(column)` check constraint, so INFORMATION_SCHEMA
 // reports them as longtext; without this detection they would be ingested as
 // plain strings and double-encoded by JSON-aware destinations.
-func mariadbJSONColumns(ctx context.Context, db *sql.DB, schemaName, tableName string) (map[string]bool, error) {
+func mariadbJSONColumns(ctx context.Context, db rowQuerier, schemaName, tableName string) (map[string]bool, error) {
 	var version string
 	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
 		return nil, err
@@ -240,7 +240,7 @@ func (s *MySQLSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 	return getMySQLSchema(ctx, s.db, s.database, table)
 }
 
-func getMySQLSchema(ctx context.Context, db *sql.DB, database string, table string) (*schema.TableSchema, error) {
+func getMySQLSchema(ctx context.Context, db rowQuerier, database string, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseMySQLTableName(database, table)
 
 	query := `

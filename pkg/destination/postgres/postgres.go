@@ -1243,6 +1243,31 @@ func (d *PostgresDestination) LoadCDCState(ctx context.Context, table, connector
 	return entries, rows.Err()
 }
 
+func (d *PostgresDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return err
+	}
+	var dataType string
+	err = d.pool.QueryRow(ctx,
+		`SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = '_cdc_lsn'`,
+		schemaName, tableName).Scan(&dataType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect PostgreSQL CDC state position column: %w", err)
+	}
+	if strings.EqualFold(dataType, "text") {
+		return nil
+	}
+	query := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "_cdc_lsn" TYPE TEXT`, destination.QuoteTableName(table))
+	if _, err := d.pool.Exec(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen PostgreSQL CDC state position column: %w", err)
+	}
+	return nil
+}
+
 func (d *PostgresDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
 	if err != nil {

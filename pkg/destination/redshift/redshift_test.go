@@ -13,7 +13,7 @@ import (
 func TestValidateManagedCDCStateFailsClosed(t *testing.T) {
 	dest := NewRedshiftDestination()
 
-	require.ErrorContains(t, dest.ValidateManagedCDCState(), "does not support destination-managed PostgreSQL CDC state")
+	require.ErrorContains(t, dest.ValidateManagedCDCState(), "does not support destination-managed CDC state")
 }
 
 func TestBuildPredicateMergeStatements(t *testing.T) {
