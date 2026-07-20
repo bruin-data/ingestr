@@ -2356,6 +2356,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 
 func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
@@ -2370,7 +2371,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	if partitionPredicate := mergePartitionTargetPredicate(pruning); partitionPredicate != "" {
 		onConditions = append(onConditions, partitionPredicate)
 	}
-	if incrementalPredicate = strings.TrimSpace(incrementalPredicate); incrementalPredicate != "" {
+	if incrementalPredicate = strings.TrimSpace(incrementalPredicate); incrementalPredicate != "" && !hasCDCDeleted {
 		onConditions = append(onConditions, "("+incrementalPredicate+")")
 	}
 	onClause := strings.Join(onConditions, " AND ")
@@ -2381,8 +2382,6 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
 	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
 	// and their staging tables have no such column to reference.
@@ -2474,7 +2473,10 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	fmt.Fprintf(&sql, "ON %s\n", onClause)
 
 	if hasCDCDeleted {
-		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`)"
+		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false))"
+		if incrementalPredicate != "" {
+			newerLSN = "(" + incrementalPredicate + ") AND " + newerLSN
+		}
 		// Full update whenever the window has a non-deleted change carrying row
 		// data; for deleted PKs this applies the last active values together
 		// with the delete marking. Clause order matters: BigQuery executes the
@@ -2635,8 +2637,8 @@ func (d *BigQueryDestination) SupportsAppendStrategy() bool { return true }
 // SupportsMergeStrategy returns true as BigQuery supports the merge strategy via native MERGE.
 func (d *BigQueryDestination) SupportsMergeStrategy() bool { return true }
 
-// SupportsIncrementalPredicate returns true as BigQuery appends
-// MergeOptions.IncrementalPredicate to the MERGE join condition.
+// SupportsIncrementalPredicate returns true as BigQuery applies
+// MergeOptions.IncrementalPredicate to MERGE updates.
 func (d *BigQueryDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as BigQuery supports the delete+insert strategy.
@@ -2791,6 +2793,8 @@ func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }
+
+func (d *BigQueryDestination) RequiresSerializedCDCRuns() bool { return true }
 
 func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	project, dataset, tableName, err := d.parseTable(table)

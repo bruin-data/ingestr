@@ -73,6 +73,8 @@ var (
 	_ destination.ManagedCDCStateValidator       = (*redshift.RedshiftDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*vitess.Destination)(nil)
 	_ destination.ManagedCDCStateCatalogProvider = (*bigquery.BigQueryDestination)(nil)
+	_ destination.SerializedCDCRunsRequired      = (*bigquery.BigQueryDestination)(nil)
+	_ destination.SerializedCDCRunsRequired      = (*snowflake.SnowflakeDestination)(nil)
 )
 
 var (

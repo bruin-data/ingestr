@@ -347,6 +347,78 @@ func TestMySQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
 	}
 }
 
+func TestValidateCDCRunSerialization(t *testing.T) {
+	required := &serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}
+	leased := &leasedSerializedCDCRunsDestination{
+		serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "leased-dest"}},
+	}
+	ordinary := &mockDestination{scheme: "ordinary-dest"}
+
+	tests := []struct {
+		name        string
+		sourceURI   string
+		dest        destination.Destination
+		fullRefresh bool
+		wantErr     bool
+	}{
+		{name: "PostgreSQL CDC has a source lease", sourceURI: "postgres+cdc://source/db", dest: required},
+		{name: "PostgreSQL alias has a source lease", sourceURI: "postgresql+cdc://source/db", dest: required},
+		{name: "MySQL CDC can use a destination lease", sourceURI: "mysql+cdc://source/db", dest: leased},
+		{name: "MySQL CDC without a destination lease", sourceURI: "mysql+cdc://source/db", dest: required, wantErr: true},
+		{name: "MongoDB CDC has no managed lease", sourceURI: "mongodb+cdc://source/db", dest: required, wantErr: true},
+		{name: "SQL Server CDC has no managed lease", sourceURI: "mssql+cdc://source/db", dest: required, wantErr: true},
+		{name: "SQL Server change tracking has no managed lease", sourceURI: "mssql+ct://source/db", dest: required, wantErr: true},
+		{name: "Vitess CDC has no managed lease", sourceURI: "vitess+cdc://source/db", dest: required, wantErr: true},
+		{name: "PlanetScale CDC has no managed lease", sourceURI: "ps_mysql+cdc://source/db", dest: required, wantErr: true},
+		{name: "full refresh does not merge concurrent CDC changes", sourceURI: "mongodb+cdc://source/db", dest: required, fullRefresh: true},
+		{name: "ordinary source is unaffected", sourceURI: "postgres://source/db", dest: required},
+		{name: "destination with enforced keys is unaffected", sourceURI: "mongodb+cdc://source/db", dest: ordinary},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = tt.sourceURI
+			cfg.FullRefresh = tt.fullRefresh
+			err := validateCDCRunSerialization(cfg, tt.dest)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "requires serialized CDC runs")
+				require.ErrorContains(t, err, "no pipeline-managed run lease")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestUnserializedCDCIsRejectedBeforeTableOrDestinationPreparation(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("mongodb+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, oldSource)
+
+	src := &unserializedCDCAdmissionSource{}
+	dest := &unserializedCDCAdmissionDestination{
+		serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}},
+	}
+	internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, func() interface{} { return src })
+	internalregistry.Default.RegisterDestination([]string{"unenforced-key-dest"}, func() interface{} { return dest })
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mongodb+cdc://source/db"
+	cfg.DestURI = "unenforced-key-dest://destination/db"
+	cfg.SourceTable = "app.items"
+	cfg.DestTable = "raw.items"
+
+	err = New(cfg).Run(t.Context())
+	require.ErrorContains(t, err, "requires serialized CDC runs")
+	require.True(t, src.connected)
+	require.True(t, src.closed)
+	require.True(t, dest.connected)
+	require.True(t, dest.closed)
+	require.Zero(t, src.getTableCalls)
+	require.Zero(t, dest.prepareCalls)
+}
+
 func TestPostgresCDCFailsClosedBeforeConnectorPreparationForUnsafeDestination(t *testing.T) {
 	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
 	require.NoError(t, err)
@@ -483,6 +555,61 @@ type mockPredicateDestination struct {
 
 func (m *mockPredicateDestination) SupportsIncrementalPredicate() bool {
 	return true
+}
+
+type serializedCDCRunsDestination struct {
+	mockDestination
+}
+
+func (d *serializedCDCRunsDestination) RequiresSerializedCDCRuns() bool { return true }
+
+type leasedSerializedCDCRunsDestination struct {
+	serializedCDCRunsDestination
+}
+
+func (d *leasedSerializedCDCRunsDestination) AcquireManagedCDCRunLease(context.Context, string) (source.ConnectorLease, error) {
+	return &mockConnectorLease{done: make(chan struct{})}, nil
+}
+
+type unserializedCDCAdmissionSource struct {
+	connected     bool
+	closed        bool
+	getTableCalls int
+}
+
+func (s *unserializedCDCAdmissionSource) Schemes() []string { return []string{"mongodb+cdc"} }
+func (s *unserializedCDCAdmissionSource) Connect(context.Context, string) error {
+	s.connected = true
+	return nil
+}
+func (s *unserializedCDCAdmissionSource) Close(context.Context) error {
+	s.closed = true
+	return nil
+}
+func (s *unserializedCDCAdmissionSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
+	s.getTableCalls++
+	return nil, errors.New("GetTable must not run after CDC serialization admission fails")
+}
+func (s *unserializedCDCAdmissionSource) HandlesIncrementality() bool { return true }
+
+type unserializedCDCAdmissionDestination struct {
+	serializedCDCRunsDestination
+	connected    bool
+	closed       bool
+	prepareCalls int
+}
+
+func (d *unserializedCDCAdmissionDestination) Connect(context.Context, string) error {
+	d.connected = true
+	return nil
+}
+func (d *unserializedCDCAdmissionDestination) Close(context.Context) error {
+	d.closed = true
+	return nil
+}
+func (d *unserializedCDCAdmissionDestination) PrepareTable(context.Context, destination.PrepareOptions) error {
+	d.prepareCalls++
+	return nil
 }
 
 type mockManagedCDCStateDestination struct {

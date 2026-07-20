@@ -343,6 +343,13 @@ type ManagedCDCRunLeaser interface {
 	AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error)
 }
 
+// SerializedCDCRunsRequired is implemented by destinations whose primary-key
+// constraints do not prevent concurrent CDC merges from inserting the same
+// previously absent key.
+type SerializedCDCRunsRequired interface {
+	RequiresSerializedCDCRuns() bool
+}
+
 // CDCConditionalSwapCapable advertises that SwapTable enforces both expected
 // target and staging incarnations in the same atomic operation that replaces
 // the target.

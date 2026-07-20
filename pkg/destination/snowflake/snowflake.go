@@ -1154,6 +1154,8 @@ func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 
+func (d *SnowflakeDestination) RequiresSerializedCDCRuns() bool { return true }
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	tn := sfTable(table)
 
