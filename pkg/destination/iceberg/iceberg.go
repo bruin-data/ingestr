@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	iceberggo "github.com/apache/iceberg-go"
 	icebergcatalog "github.com/apache/iceberg-go/catalog"
 	_ "github.com/apache/iceberg-go/catalog/glue"
@@ -145,23 +146,58 @@ func (d *Destination) WriteParallel(ctx context.Context, records <-chan source.R
 	}
 
 	prepared := d.lookupPrepared(opts.Table)
-	writeSchema := opts.Schema
+	writeSchema := prepared.schema
 	if writeSchema == nil {
-		writeSchema = prepared.schema
+		writeSchema = opts.Schema
 	}
 	if writeSchema == nil {
 		return errors.New("iceberg destination requires schema for write")
 	}
 
-	reader := newRecordBatchReader(ctx, records, icebergArrowSchema(writeSchema))
+	targetSchema := tbl.Schema()
+	if prepared.replace && prepared.schema != nil {
+		targetSchema, err = icebergSchemaFromTableSchema(prepared.schema)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to build replacement schema for table %s: %w", opts.Table, err)
+		}
+	}
+	reader, err := newTableRecordBatchReader(ctx, records, icebergArrowSchema(writeSchema), targetSchema)
+	if err != nil {
+		return fmt.Errorf("iceberg: invalid write schema for table %s: %w", opts.Table, err)
+	}
 	defer reader.Release()
+
+	var writeReader array.RecordReader = reader
+	if opts.DeduplicatePrimaryKeys {
+		if !prepared.replace {
+			return fmt.Errorf("iceberg: primary-key deduplication is only supported for replace writes")
+		}
+		if len(opts.PrimaryKeys) > 0 && !identifierFieldsEqual(targetSchema, opts.PrimaryKeys, false) {
+			return fmt.Errorf("iceberg: requested deduplication keys do not match table %s identifier fields", opts.Table)
+		}
+		primaryKeys, err := identifierFieldNames(targetSchema)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to resolve identifier fields for table %s: %w", opts.Table, err)
+		}
+		if len(primaryKeys) == 0 {
+			return fmt.Errorf("iceberg: table %s has no identifier fields for replace deduplication", opts.Table)
+		}
+
+		deduped, sorter, err := newDeduplicatedReplaceReader(reader, primaryKeys, opts.IncrementalKey, opts.Table)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to deduplicate replacement data for table %s: %w", opts.Table, err)
+		}
+		defer sorter.Close()
+		defer deduped.Release()
+		writeReader = deduped
+	}
 
 	props := iceberggo.Properties{
 		"ingestr.destination": "iceberg",
 	}
 	if prepared.replace {
 		props["ingestr.operation"] = "replace"
-		_, err = d.overwritePrepared(ctx, tbl, reader, props, prepared)
+		_, err = d.overwritePrepared(ctx, tbl, writeReader, props, prepared)
 	} else {
 		props["ingestr.operation"] = "append"
 		_, err = tbl.Append(ctx, reader, props)
@@ -175,8 +211,8 @@ func (d *Destination) WriteParallel(ctx context.Context, records <-chan source.R
 	return nil
 }
 
-func (d *Destination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
-	return nil
+func (d *Destination) SwapTable(_ context.Context, _ destination.SwapOptions) error {
+	return errors.New("iceberg destination does not support atomic table swap")
 }
 
 func (d *Destination) DropTable(ctx context.Context, table string) error {
@@ -231,14 +267,15 @@ func (d *Destination) GetScheme() string {
 	return "iceberg"
 }
 
-func (d *Destination) SupportsReplaceStrategy() bool      { return true }
-func (d *Destination) SupportsAppendStrategy() bool       { return true }
-func (d *Destination) SupportsMergeStrategy() bool        { return true }
-func (d *Destination) SupportsDeleteInsertStrategy() bool { return true }
-func (d *Destination) SupportsSCD2Strategy() bool         { return true }
-func (d *Destination) SupportsAtomicSwap() bool           { return false }
-func (d *Destination) SupportsCDCMerge() bool             { return true }
-func (d *Destination) SupportsCDCUnchangedCols() bool     { return true }
+func (d *Destination) SupportsReplaceStrategy() bool            { return true }
+func (d *Destination) SupportsAppendStrategy() bool             { return true }
+func (d *Destination) SupportsMergeStrategy() bool              { return true }
+func (d *Destination) SupportsDeleteInsertStrategy() bool       { return true }
+func (d *Destination) SupportsSCD2Strategy() bool               { return true }
+func (d *Destination) SupportsAtomicSwap() bool                 { return false }
+func (d *Destination) SupportsDirectReplaceDeduplication() bool { return true }
+func (d *Destination) SupportsCDCMerge() bool                   { return true }
+func (d *Destination) SupportsCDCUnchangedCols() bool           { return true }
 
 func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identifier, opts destination.PrepareOptions) error {
 	iceSchema, err := icebergSchemaFromTableSchema(opts.Schema)
@@ -368,7 +405,7 @@ func (d *Destination) stagePartitionSpecUpdate(txn *icebergtable.Transaction, tb
 	return true, nil
 }
 
-func (d *Destination) overwritePrepared(ctx context.Context, tbl *icebergtable.Table, reader *recordBatchReader, props iceberggo.Properties, prepared preparedTable) (*icebergtable.Table, error) {
+func (d *Destination) overwritePrepared(ctx context.Context, tbl *icebergtable.Table, reader array.RecordReader, props iceberggo.Properties, prepared preparedTable) (*icebergtable.Table, error) {
 	txn := tbl.NewTransaction()
 	if prepared.schema != nil {
 		if _, err := d.stageTableSchemaUpdate(txn, tbl, prepared.schema, true); err != nil {

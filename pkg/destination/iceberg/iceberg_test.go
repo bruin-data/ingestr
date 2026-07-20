@@ -280,6 +280,31 @@ func TestRecordBatchReaderNormalizesUUIDStrings(t *testing.T) {
 	require.NoError(t, reader.Err())
 }
 
+func TestValidateRequiredColumnsReportsEveryViolation(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	builder.AppendNull()
+
+	first := builder.NewArray()
+	defer first.Release()
+	builder.AppendNull()
+	second := builder.NewArray()
+	defer second.Release()
+
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "tenant_id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil), []arrow.Array{first, second}, 1)
+	defer batch.Release()
+
+	err := validateRequiredColumns(batch, []requiredColumn{
+		{name: "id", index: 0},
+		{name: "tenant_id", index: 1},
+	})
+	require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+	require.ErrorContains(t, err, `required field "tenant_id" contains 1 NULL value(s)`)
+}
+
 func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.events"
@@ -364,6 +389,54 @@ func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	require.Empty(t, icebergPartitionFieldNames(ctx, t, dest, tableName))
 }
 
+func TestDestinationDirectReplaceDeduplicatesPrimaryKeys(t *testing.T) {
+	withSpillRunRows(t, 2)
+
+	ctx := context.Background()
+	tableName := "lake.analytics.deduplicated_replace"
+	tableSchema := mergeTestSchema()
+	tableSchema.PrimaryKeys = []string{"id"}
+	dest := newHadoopDestination(t)
+
+	writeTableRows(t, dest, tableName, tableSchema, false, [][]any{
+		{int64(99), "old-snapshot", 99.0, int64(99)},
+	})
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		DropFirst:   true,
+		PrimaryKeys: []string{"id"},
+	}))
+
+	first, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{
+		{int64(1), "v1-old", 10.0, int64(1)},
+		{int64(2), "v2", 20.0, int64(2)},
+		{int64(1), "v1-latest", 11.0, int64(3)},
+	})
+	require.NoError(t, err)
+	second, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{
+		{int64(3), "v3-latest", 31.0, int64(4)},
+		{int64(3), "v3-old", 30.0, int64(5)},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(append(first, second...)...), destination.WriteOptions{
+		Table:                  tableName,
+		Schema:                 tableSchema,
+		PrimaryKeys:            []string{"id"},
+		DeduplicatePrimaryKeys: true,
+		IncrementalKey:         "score",
+	}))
+
+	rows := readTableRows(t, dest, tableName)
+	byID := singleRowByKey(t, rows, "id")
+	require.Len(t, byID, 3)
+	require.Equal(t, "v1-latest", rows.Value(byID[int64(1)], "name"))
+	require.Equal(t, "v3-latest", rows.Value(byID[int64(3)], "name"))
+	require.NotContains(t, byID, int64(99), "replace must remove the previous snapshot")
+}
+
 func TestDestinationStrategySupport(t *testing.T) {
 	dest := NewDestination()
 
@@ -375,7 +448,9 @@ func TestDestinationStrategySupport(t *testing.T) {
 	require.True(t, dest.SupportsCDCMerge())
 	require.True(t, dest.SupportsCDCUnchangedCols())
 	require.False(t, dest.SupportsAtomicSwap())
+	require.True(t, dest.SupportsDirectReplaceDeduplication())
 
+	require.ErrorContains(t, dest.SwapTable(context.Background(), destination.SwapOptions{}), "does not support atomic table swap")
 	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{PrimaryKeys: []string{"id"}}), "not connected")
 	require.ErrorContains(t, dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{IncrementalKey: "id"}), "not connected")
 	require.ErrorContains(t, dest.SCD2Table(context.Background(), destination.SCD2Options{PrimaryKeys: []string{"id"}}), "not connected")
@@ -498,6 +573,52 @@ func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
 		Schema: tableSchema,
 	})
 	require.ErrorIs(t, err, writeErr)
+}
+
+func TestDestinationRejectsNullIdentifiers(t *testing.T) {
+	tests := []struct {
+		name          string
+		replace       bool
+		arrowNullable bool
+	}{
+		{name: "append", arrowNullable: true},
+		{name: "replace with non-nullable Arrow field", replace: true, arrowNullable: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tableName := "lake.analytics.null_identifier_events"
+			tableSchema := &schema.TableSchema{
+				Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+			}
+
+			dest := NewDestination()
+			require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+			defer func() { require.NoError(t, dest.Close(ctx)) }()
+
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table: tableName, Schema: tableSchema, PrimaryKeys: []string{"id"},
+			}))
+			require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 7)), destination.WriteOptions{
+				Table: tableName, Schema: tableSchema,
+			}))
+
+			prepareOpts := destination.PrepareOptions{
+				Table: tableName, Schema: tableSchema, DropFirst: tt.replace,
+			}
+			if tt.replace {
+				prepareOpts.PrimaryKeys = []string{"id"}
+			}
+			require.NoError(t, dest.PrepareTable(ctx, prepareOpts))
+
+			err := dest.WriteParallel(ctx, recordBatches(int64BatchWithValidity(
+				t, []int64{8, 0}, []bool{true, false}, tt.arrowNullable,
+			)), destination.WriteOptions{Table: tableName, Schema: tableSchema})
+			require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+			require.EqualValues(t, 1, icebergRowCount(ctx, t, dest, tableName))
+		})
+	}
 }
 
 func TestDestinationMakesNonIdentifierColumnsOptional(t *testing.T) {
@@ -632,6 +753,23 @@ func int64Batch(t *testing.T, values ...int64) arrow.RecordBatch {
 	defer arr.Release()
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	return array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(len(values)))
+}
+
+func int64BatchWithValidity(t *testing.T, values []int64, valid []bool, nullable bool) arrow.RecordBatch {
+	t.Helper()
+	require.Len(t, valid, len(values))
+
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	builder.AppendValues(values, valid)
+
+	arr := builder.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: nullable,
+	}}, nil)
 	return array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(len(values)))
 }
 

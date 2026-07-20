@@ -125,6 +125,32 @@ func icebergNameByID(t *testing.T, rows []map[string]any, id int64) string {
 	return name
 }
 
+func TestIcebergConformance_Replace_DedupesByPK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	destURI := icebergConformanceDestURI(t)
+	destTable := icebergConformanceTable()
+
+	cfg := &config.IngestConfig{
+		SourceURI:           jsonlURI(t, "testdata/conformance_replace_dedup.jsonl"),
+		SourceTable:         "replace_dedup",
+		DestURI:             destURI,
+		DestTable:           destTable,
+		IncrementalStrategy: config.StrategyReplace,
+		IncrementalKey:      "score",
+		PrimaryKeys:         []string{"id"},
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	rows := readIcebergRows(t, ctx, destURI, destTable)
+	assert.Len(t, rows, 3, "duplicate primary keys should collapse to one row per key")
+	assert.Equal(t, "v1-latest", icebergNameByID(t, rows, 1))
+	assert.Equal(t, "v3-latest", icebergNameByID(t, rows, 3))
+}
+
 func TestIcebergConformance_Merge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

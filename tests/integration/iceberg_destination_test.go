@@ -88,6 +88,43 @@ func TestIcebergCatalogBackends(t *testing.T) {
 	}
 }
 
+func TestIcebergPipelineRejectsNullPrimaryKeys(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	tests := []struct {
+		name     string
+		strategy ingestconfig.IncrementalStrategy
+	}{
+		{name: "append", strategy: ingestconfig.StrategyAppend},
+		{name: "replace", strategy: ingestconfig.StrategyReplace},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			destURI := icebergConformanceDestURI(t)
+			tableName := "lake.null_primary_keys_" + uniqueSuffix()
+
+			initial := writeIcebergJSONL(t, "initial.jsonl", `{"id":7,"name":"seven"}`)
+			runIcebergPipeline(t, ctx, initial, destURI, tableName, ingestconfig.StrategyReplace)
+
+			invalid := writeIcebergJSONL(
+				t, "null-primary-key.jsonl",
+				`{"id":8,"name":"eight"}`,
+				`{"id":null,"name":"null-id-row"}`,
+			)
+			err := runIcebergPipelineWithError(t, ctx, invalid, destURI, tableName, tt.strategy)
+			require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+
+			rows := readIcebergRows(t, ctx, destURI, tableName)
+			require.Len(t, rows, 1)
+			assert.Equal(t, "seven", icebergNameByID(t, rows, 7))
+		})
+	}
+}
+
 func setupIcebergSQLiteMinioCatalog(t *testing.T, ctx context.Context) icebergCatalogTestEnv {
 	t.Helper()
 
@@ -305,6 +342,11 @@ func writeIcebergJSONL(t *testing.T, name string, rows ...string) string {
 
 func runIcebergPipeline(t *testing.T, ctx context.Context, sourceURI, destURI, table string, strategy ingestconfig.IncrementalStrategy) {
 	t.Helper()
+	require.NoError(t, runIcebergPipelineWithError(t, ctx, sourceURI, destURI, table, strategy))
+}
+
+func runIcebergPipelineWithError(t *testing.T, ctx context.Context, sourceURI, destURI, table string, strategy ingestconfig.IncrementalStrategy) error {
+	t.Helper()
 
 	prepareIcebergRESTLocalDataDir(t, destURI, table)
 
@@ -319,7 +361,7 @@ func runIcebergPipeline(t *testing.T, ctx context.Context, sourceURI, destURI, t
 	cfg.Progress = ingestconfig.ProgressLog
 	cfg.ExtractParallelism = 2
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	return pipeline.New(cfg).Run(ctx)
 }
 
 func prepareIcebergRESTLocalDataDir(t *testing.T, destURI, table string) {
