@@ -448,6 +448,31 @@ func TestCompare_IgnoresInferredNullabilityForConfiguredPrimaryKeys(t *testing.T
 	assert.Equal(t, "value", result.Changes[0].ColumnName)
 }
 
+func TestCompare_DoesNotRelaxNullabilityForIngestrMetadataColumns(t *testing.T) {
+	source := &schema.TableSchema{
+		Name: "insights",
+		Columns: []schema.Column{
+			{Name: "impressions", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "_dlt_load_id", DataType: schema.TypeString, Nullable: true},
+			{Name: "_dlt_id", DataType: schema.TypeString, Nullable: true},
+		},
+	}
+	dest := &schema.TableSchema{
+		Name: "insights",
+		Columns: []schema.Column{
+			{Name: "impressions", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "_DLT_LOAD_ID", DataType: schema.TypeString, Nullable: false},
+			{Name: "_DLT_ID", DataType: schema.TypeString, Nullable: false},
+		},
+	}
+
+	result, err := Compare(source, dest, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Changes, 1)
+	assert.Equal(t, ChangeRelaxNullability, result.Changes[0].Type)
+	assert.Equal(t, "impressions", result.Changes[0].ColumnName)
+}
+
 func TestMakeNullable(t *testing.T) {
 	col := schema.Column{
 		Name:     "test",

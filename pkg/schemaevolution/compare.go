@@ -64,7 +64,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 				newCol.Name = destColumn.Name
 				comparisonCol.Name = destCol.Name
 				_, isPrimaryKey := primaryKeys[lowerName]
-				relaxNullability := sourceColumn.Nullable && !destColumn.Nullable && !isPrimaryKey
+				relaxNullability := sourceColumn.Nullable && !destColumn.Nullable && !isPrimaryKey && !naming.IsIngestrColumn(sourceColumn.Name)
 				newCol.Nullable = destColumn.Nullable || relaxNullability
 				if relaxNullability {
 					old := destColumn
@@ -135,7 +135,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			continue
 		}
 		_, isPrimaryKey := primaryKeys[lowerName]
-		if sourceColumn.Nullable && !destColumn.Nullable && !isPrimaryKey {
+		if sourceColumn.Nullable && !destColumn.Nullable && !isPrimaryKey && !naming.IsIngestrColumn(sourceColumn.Name) {
 			old := destColumn
 			newCol := sourceColumn
 			newCol.Name = destColumn.Name
