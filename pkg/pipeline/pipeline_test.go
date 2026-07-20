@@ -3251,7 +3251,6 @@ func TestHasIgnoredDestSchema(t *testing.T) {
 	}
 }
 
-
 func TestValidateMultiTableNamespace(t *testing.T) {
 	tests := []struct {
 		name        string
