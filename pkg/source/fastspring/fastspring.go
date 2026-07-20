@@ -20,14 +20,15 @@ import (
 )
 
 const (
-	baseURL        = "https://api.fastspring.com"
-	maxPageSize    = 50
-	maxPages       = 100000
-	userAgent      = "ingestr" // mandatory for FastSpring API requests
-	rateLimit      = 3.3
-	rateLimitBurst = 5
-	detailWorkers  = 5
-	idColumn       = "id"
+	baseURL         = "https://api.fastspring.com"
+	maxPageSize     = 50
+	maxPages        = 100000
+	userAgent       = "ingestr" // mandatory for FastSpring API requests
+	rateLimit       = 3.3
+	rateLimitBurst  = 5
+	detailWorkers   = 5
+	detailBatchSize = 50 // FastSpring detail endpoints accept comma-separated IDs; batching cuts the request count ~50x
+	idColumn        = "id"
 )
 
 type tableConfig struct {
@@ -210,25 +211,41 @@ func (s *FastspringSource) readWithDetails(ctx context.Context, table string, tc
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	fetchDetail := func(id string) error {
-		resp, err := s.client.R(ctx).Get(tc.path + "/" + id)
+	fetchDetailBatch := func(idChunk []string) error {
+		joined := strings.Join(idChunk, ",")
+		resp, err := s.client.R(ctx).Get(tc.path + "/" + joined)
 		if err != nil {
-			return fmt.Errorf("failed to fetch %s %s: %w", table, id, err)
+			return fmt.Errorf("failed to fetch %s %s: %w", table, joined, err)
 		}
-		if !resp.IsSuccess() {
-			return fmt.Errorf("fastspring %s %s request failed with status %d: %s", table, id, resp.StatusCode(), resp.String())
+		if !resp.IsSuccess() && !isJSONArray(resp.Body()) {
+			return fmt.Errorf("fastspring %s %s request failed with status %d: %s", table, joined, resp.StatusCode(), resp.String())
 		}
 		items, err := parseObjects(resp.Body(), tc.resultKey)
 		if err != nil {
 			return fmt.Errorf("failed to parse %s details response: %w", table, err)
 		}
-		if len(items) == 0 {
+
+		valid := make([]map[string]interface{}, 0, len(items))
+		for i, item := range items {
+			requested := ""
+			if i < len(idChunk) {
+				requested = idChunk[i]
+			}
+			if res, _ := item["result"].(string); res == "error" {
+				config.Debug("[FASTSPRING] skipping %s %s: %v", table, requested, item["error"])
+				continue
+			}
+			if id, _ := item[idColumn].(string); id == "" {
+				item[idColumn] = requested
+			}
+			valid = append(valid, item)
+		}
+
+		if len(valid) == 0 {
 			return nil
 		}
-		for _, item := range items {
-			item[idColumn] = id
-		}
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(valid, nil, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
 		}
@@ -240,15 +257,15 @@ func (s *FastspringSource) readWithDetails(ctx context.Context, table string, tc
 		return nil
 	}
 
-	idCh := make(chan string)
+	chunkCh := make(chan []string)
 	errs := make(chan error, 1)
 	var wg sync.WaitGroup
 	for i := 0; i < detailWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for id := range idCh {
-				if err := fetchDetail(id); err != nil {
+			for chunk := range chunkCh {
+				if err := fetchDetailBatch(chunk); err != nil {
 					select {
 					case errs <- err:
 					default:
@@ -260,13 +277,17 @@ func (s *FastspringSource) readWithDetails(ctx context.Context, table string, tc
 		}()
 	}
 
-	for _, id := range ids {
+	for start := 0; start < len(ids); start += detailBatchSize {
+		end := start + detailBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
 		select {
-		case idCh <- id:
+		case chunkCh <- ids[start:end]:
 		case <-ctx.Done():
 		}
 	}
-	close(idCh)
+	close(chunkCh)
 	wg.Wait()
 
 	select {
@@ -350,6 +371,11 @@ func collectIDs(raw []interface{}) []string {
 		}
 	}
 	return ids
+}
+
+func isJSONArray(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	return len(trimmed) > 0 && trimmed[0] == '['
 }
 
 func extractItems(body []byte, resultKey string) ([]interface{}, int, error) {
