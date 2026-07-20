@@ -310,7 +310,7 @@ func startNATSContainer(t *testing.T, ctx context.Context) string {
 		WaitingFor: wait.ForAll(
 			wait.ForListeningPort("4222/tcp"),
 			wait.ForLog("Server is ready"),
-		).WithStartupTimeout(60 * time.Second),
+		).WithDeadline(60 * time.Second),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
