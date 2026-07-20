@@ -307,7 +307,10 @@ func startNATSContainer(t *testing.T, ctx context.Context) string {
 		Image:        "nats:2.10-alpine",
 		ExposedPorts: []string{"4222/tcp"},
 		Cmd:          []string{"-js"},
-		WaitingFor:   wait.ForListeningPort("4222/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("4222/tcp"),
+			wait.ForLog("Server is ready"),
+		).WithDeadline(60 * time.Second),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -325,8 +328,15 @@ func startNATSContainer(t *testing.T, ctx context.Context) string {
 
 func newNATSClient(t *testing.T, natsURI string) (*natsgo.Conn, natsgo.JetStreamContext) {
 	t.Helper()
-	nc, err := natsgo.Connect(natsURI)
-	require.NoError(t, err)
+	var nc *natsgo.Conn
+	require.Eventually(t, func() bool {
+		conn, err := natsgo.Connect(natsURI)
+		if err != nil {
+			return false
+		}
+		nc = conn
+		return true
+	}, 30*time.Second, 500*time.Millisecond, "connect to NATS test container")
 	js, err := nc.JetStream()
 	require.NoError(t, err)
 	return nc, js
