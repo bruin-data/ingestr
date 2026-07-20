@@ -582,10 +582,12 @@ func (s *unserializedCDCAdmissionSource) Connect(context.Context, string) error 
 	s.connected = true
 	return nil
 }
+
 func (s *unserializedCDCAdmissionSource) Close(context.Context) error {
 	s.closed = true
 	return nil
 }
+
 func (s *unserializedCDCAdmissionSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
 	s.getTableCalls++
 	return nil, errors.New("GetTable must not run after CDC serialization admission fails")
@@ -603,10 +605,12 @@ func (d *unserializedCDCAdmissionDestination) Connect(context.Context, string) e
 	d.connected = true
 	return nil
 }
+
 func (d *unserializedCDCAdmissionDestination) Close(context.Context) error {
 	d.closed = true
 	return nil
 }
+
 func (d *unserializedCDCAdmissionDestination) PrepareTable(context.Context, destination.PrepareOptions) error {
 	d.prepareCalls++
 	return nil
