@@ -2,15 +2,45 @@ package iceberg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	icebergcatalog "github.com/apache/iceberg-go/catalog"
+	icebergio "github.com/apache/iceberg-go/io"
+	icebergtable "github.com/apache/iceberg-go/table"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/require"
 )
+
+type failingCommitCatalog struct {
+	icebergcatalog.Catalog
+	err error
+}
+
+func (c *failingCommitCatalog) LoadTable(ctx context.Context, ident icebergtable.Identifier) (*icebergtable.Table, error) {
+	tbl, err := c.Catalog.LoadTable(ctx, ident)
+	if err != nil {
+		return nil, err
+	}
+	return icebergtable.New(
+		tbl.Identifier(),
+		tbl.Metadata(),
+		tbl.MetadataLocation(),
+		func(ctx context.Context) (icebergio.IO, error) { return tbl.FS(ctx) },
+		c,
+	), nil
+}
+
+func (c *failingCommitCatalog) CommitTable(context.Context, icebergtable.Identifier, []icebergtable.Requirement, []icebergtable.Update) (icebergtable.Metadata, string, error) {
+	return nil, "", c.err
+}
 
 // latestSnapshotSummary returns the summary properties of the table's current
 // snapshot, used to detect whether an operation committed equality delete
@@ -71,6 +101,113 @@ func TestMergeTableUsesRowDeltaByDefault(t *testing.T) {
 	runBasicMerge(t, dest, target, "lake.mor.merge_staging")
 	requireEqualityDeletes(t, dest, target)
 }
+
+func TestRowDeltaRemovesFilesAfterUnambiguousCommitFailure(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	tableName := "lake.cleanup.uncommitted"
+	tableSchema := mergeTestSchema()
+	writeTableRows(t, dest, tableName, tableSchema, false, [][]any{{int64(1), "seed", 1.0, nil}})
+
+	baseCatalog := dest.catalog
+	dest.catalog = &failingCommitCatalog{Catalog: baseCatalog, err: icebergtable.ErrCommitFailed}
+	target, err := dest.loadIcebergTable(ctx, tableName)
+	require.NoError(t, err)
+	location, ok := localFilesystemPath(target.Location())
+	require.True(t, ok)
+	dataDir := filepath.Join(location, "data")
+	before := regularFiles(t, dataDir)
+	require.NotEmpty(t, before)
+	deleteSchema, err := equalityDeleteArrowSchema(target.Schema(), []string{"id"})
+	require.NoError(t, err)
+
+	err = dest.commitRowDelta(
+		ctx, target, "merge", icebergArrowSchema(tableSchema),
+		rowProducer(icebergArrowSchema(tableSchema), tableSchema.ColumnNames(), []any{int64(1), "updated", 2.0, nil}),
+		[]string{"id"},
+		rowProducer(deleteSchema, []string{"id"}, []any{int64(1)}),
+	)
+	require.ErrorIs(t, err, icebergtable.ErrCommitFailed)
+	require.ElementsMatch(t, before, regularFiles(t, dataDir), "data and equality-delete files from a definitely rejected commit must be deleted immediately")
+	dest.catalog = baseCatalog
+}
+
+func TestRowDeltaRemovesDataFilesAfterPrecommitFailure(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	tableName := "lake.cleanup.precommit"
+	tableSchema := mergeTestSchema()
+	writeTableRows(t, dest, tableName, tableSchema, false, [][]any{{int64(1), "seed", 1.0, nil}})
+
+	target, err := dest.loadIcebergTable(ctx, tableName)
+	require.NoError(t, err)
+	location, ok := localFilesystemPath(target.Location())
+	require.True(t, ok)
+	dataDir := filepath.Join(location, "data")
+	before := regularFiles(t, dataDir)
+	require.NotEmpty(t, before)
+
+	err = dest.commitRowDelta(
+		ctx, target, "merge", icebergArrowSchema(tableSchema),
+		rowProducer(icebergArrowSchema(tableSchema), tableSchema.ColumnNames(), []any{int64(2), "new", 2.0, nil}),
+		[]string{"missing_key"},
+		func(rowEmit) error { return nil },
+	)
+	require.ErrorContains(t, err, `column "missing_key" not found`)
+	require.ElementsMatch(t, before, regularFiles(t, dataDir), "precommit failures must remove newly written data files")
+}
+
+func TestRowDeltaRetainsAmbiguousFilesUntilSafeOrphanCleanup(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	tableName := "lake.cleanup.ambiguous"
+	tableSchema := mergeTestSchema()
+	writeTableRows(t, dest, tableName, tableSchema, false, nil)
+
+	baseCatalog := dest.catalog
+	unknownCommitErr := errors.New("commit state unknown")
+	dest.catalog = &failingCommitCatalog{Catalog: baseCatalog, err: unknownCommitErr}
+	target, err := dest.loadIcebergTable(ctx, tableName)
+	require.NoError(t, err)
+	location, ok := localFilesystemPath(target.Location())
+	require.True(t, ok)
+
+	err = dest.commitRowDelta(
+		ctx, target, "merge", icebergArrowSchema(tableSchema),
+		rowProducer(icebergArrowSchema(tableSchema), tableSchema.ColumnNames(), []any{int64(1), "ambiguous", 1.0, nil}),
+		nil, nil,
+	)
+	require.ErrorIs(t, err, unknownCommitErr)
+	orphans := regularFiles(t, filepath.Join(location, "data"))
+	require.Len(t, orphans, 1, "ambiguous commit files must not be deleted immediately")
+	old := time.Now().Add(-orphanCleanupRetention - time.Hour)
+	require.NoError(t, os.Chtimes(orphans[0], old, old))
+
+	dest.catalog = baseCatalog
+	target, err = dest.loadIcebergTable(ctx, tableName)
+	require.NoError(t, err)
+	require.NoError(t, dest.commitRowDelta(
+		ctx, target, "merge", icebergArrowSchema(tableSchema),
+		rowProducer(icebergArrowSchema(tableSchema), tableSchema.ColumnNames(), []any{int64(2), "committed", 2.0, nil}),
+		nil, nil,
+	))
+	_, err = os.Stat(orphans[0])
+	require.ErrorIs(t, err, os.ErrNotExist, "a later successful operation should reclaim old ambiguous orphans")
+}
+
+func rowProducer(writeSchema *arrow.Schema, columns []string, rows ...[]any) func(rowEmit) error {
+	projection := newRowProjection(writeSchema, columns)
+	return func(emit rowEmit) error {
+		for _, row := range rows {
+			if err := emit(projection, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+var _ icebergcatalog.Catalog = (*failingCommitCatalog)(nil)
 
 func TestMergeTableHonorsCopyOnWriteProperty(t *testing.T) {
 	dest := NewDestination()

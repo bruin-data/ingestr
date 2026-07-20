@@ -3,9 +3,13 @@ package iceberg
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -135,6 +139,106 @@ func TestDestinationConnectSQLiteCatalog(t *testing.T) {
 
 	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
 	require.NoError(t, dest.Close(ctx))
+}
+
+func TestDestinationDropTablePurgesSQLCatalogFiles(t *testing.T) {
+	ctx := context.Background()
+	dest := NewDestination()
+	root := t.TempDir()
+	catalogDB := filepath.Join(root, "catalog.db")
+	warehouse := filepath.Join(root, "warehouse")
+	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
+	t.Cleanup(func() { require.NoError(t, dest.Close(ctx)) })
+
+	tableName := "lake.cleanup.managed_staging"
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: tableName, Schema: tableSchema, ExpiresAfter: time.Hour,
+	}))
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 1)), destination.WriteOptions{
+		Table: tableName, Schema: tableSchema,
+	}))
+
+	tbl, err := dest.loadIcebergTable(ctx, tableName)
+	require.NoError(t, err)
+	location, ok := localFilesystemPath(tbl.Location())
+	require.True(t, ok)
+	require.NotEmpty(t, regularFiles(t, location))
+
+	require.NoError(t, dest.DropTable(ctx, tableName))
+	exists, err := dest.catalog.CheckTableExists(ctx, icebergCatalogIdentifier(t, tableName))
+	require.NoError(t, err)
+	require.False(t, exists, "purge must remove the catalog entry")
+	require.Empty(t, regularFiles(t, location), "purge must remove the table's data and metadata objects")
+}
+
+func TestDestinationPurgesExpiredManagedTables(t *testing.T) {
+	ctx := context.Background()
+	dest := NewDestination()
+	root := t.TempDir()
+	catalogDB := filepath.Join(root, "catalog.db")
+	warehouse := filepath.Join(root, "warehouse")
+	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
+	t.Cleanup(func() { require.NoError(t, dest.Close(ctx)) })
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	expiredTable := "lake.cleanup.expired_staging"
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: expiredTable, Schema: tableSchema, ExpiresAfter: time.Hour,
+	}))
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 1)), destination.WriteOptions{
+		Table: expiredTable, Schema: tableSchema,
+	}))
+
+	tbl, err := dest.loadIcebergTable(ctx, expiredTable)
+	require.NoError(t, err)
+	expiresAtMillis, err := strconv.ParseInt(tbl.Properties().Get(managedExpiresAtProperty, ""), 10, 64)
+	require.NoError(t, err)
+	require.True(t, time.UnixMilli(expiresAtMillis).After(time.Now()))
+	location, ok := localFilesystemPath(tbl.Location())
+	require.True(t, ok)
+	require.NotEmpty(t, regularFiles(t, location))
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(map[string]string{managedExpiresAtProperty: "0"}))
+	_, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "lake.cleanup.current_staging", Schema: tableSchema, ExpiresAfter: time.Hour,
+	}))
+	exists, err := dest.catalog.CheckTableExists(ctx, icebergCatalogIdentifier(t, expiredTable))
+	require.NoError(t, err)
+	require.False(t, exists, "preparing managed staging should remove expired catalog entries in its namespace")
+	require.Empty(t, regularFiles(t, location), "expiry cleanup must purge underlying objects")
+}
+
+func icebergCatalogIdentifier(t *testing.T, table string) []string {
+	t.Helper()
+	ident, err := parseIdentifier(table)
+	require.NoError(t, err)
+	return ident
+}
+
+func regularFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) {
+			return fs.SkipDir
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(t, err)
+	}
+	return files
 }
 
 func TestIcebergSchemaFromTableSchemaNormalizesJSON(t *testing.T) {
