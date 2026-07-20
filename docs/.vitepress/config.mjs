@@ -245,6 +245,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
               { text: "Paddle", link: "/supported-sources/paddle.md" },
+              { text: "Payrails", link: "/supported-sources/payrails.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
               { text: "Pinterest", link: "/supported-sources/pinterest.md" },
