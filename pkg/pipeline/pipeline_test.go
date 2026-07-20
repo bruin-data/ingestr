@@ -3198,3 +3198,55 @@ func TestApplyPartitionNaming(t *testing.T) {
 		})
 	}
 }
+
+func TestHasIgnoredDestSchema(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		sourceURI   string
+		sourceTable string
+		want        bool
+	}{
+		{
+			name:        "single table with dest_schema is ignored",
+			sourceURI:   "postgres+cdc://user:pass@host:5432/db?dest_schema=analytics",
+			sourceTable: "public.users",
+			want:        true,
+		},
+		{
+			name:      "multi table honours dest_schema",
+			sourceURI: "postgres+cdc://user:pass@host:5432/db?dest_schema=analytics",
+			want:      false,
+		},
+		{
+			name:        "single table without dest_schema",
+			sourceURI:   "postgres+cdc://user:pass@host:5432/db",
+			sourceTable: "public.users",
+			want:        false,
+		},
+		{
+			name:        "empty dest_schema value",
+			sourceURI:   "postgres+cdc://user:pass@host:5432/db?dest_schema=",
+			sourceTable: "public.users",
+			want:        false,
+		},
+		{
+			name:        "unparseable uri",
+			sourceURI:   "://not a uri",
+			sourceTable: "public.users",
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasIgnoredDestSchema(&config.IngestConfig{
+				SourceURI:   tt.sourceURI,
+				SourceTable: tt.sourceTable,
+			})
+			require.Equal(t, tt.want, got)
+		})
+	}
+}

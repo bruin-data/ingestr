@@ -50,7 +50,7 @@ Vitess CDC URI parameters:
 - `grpc_host`: optional vtgate gRPC host; defaults to the host in the URI.
 - `grpc_tls`: optional override for the gRPC connection's TLS, independent of `tls`. `true` verifies the server certificate, `skip-verify` skips verification, `false` forces plaintext. When omitted, the gRPC connection inherits `tls` (`true`/`skip-verify` enable it; `preferred` and custom CA names do not).
 - `mode`: `batch`; defaults to `batch`.
-- `dest_schema`: optional destination schema for multi-table CDC runs.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
 
 Requirements:
 - The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).

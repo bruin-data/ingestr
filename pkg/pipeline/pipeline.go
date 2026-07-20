@@ -207,6 +207,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			return p.runMultiTable(ctx, mtSource)
 		}
 	}
+	if hasIgnoredDestSchema(p.config) {
+		output.Warnf("Warning: dest_schema is ignored when --source-table is set; the destination is %q. Omit --source-table for multi-table mode, or qualify --dest-table instead\n", p.config.DestTable)
+	}
 	sourceIncarnation := ""
 	sourceSchemaFingerprint := ""
 	if managedPostgresCDC {
@@ -2246,6 +2249,21 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 	}
 
 	return nil
+}
+
+// hasIgnoredDestSchema reports whether the source URI carries a dest_schema
+// that will not be honoured. dest_schema only names destination tables in
+// multi-table mode; with an explicit --source-table the destination is
+// --dest-table (or the source table name) and dest_schema is silently dropped.
+func hasIgnoredDestSchema(cfg *config.IngestConfig) bool {
+	if cfg.SourceTable == "" {
+		return false
+	}
+	parsed, err := url.Parse(cfg.SourceURI)
+	if err != nil {
+		return false
+	}
+	return parsed.Query().Get("dest_schema") != ""
 }
 
 // shouldWarnCDCStrategy returns true if the user should be warned about using

@@ -35,7 +35,7 @@ CDC-specific URI parameters (all optional):
 - `slot`: the replication slot name. When omitted, ingestr derives a stable name from the publication.
 - `state_id`: an optional stable identity for this logical connector. Ingestr otherwise derives one from the source, destination, slot/publication, and table configuration. Set it when multiple otherwise-identical CDC connectors write to the same destination and must keep independent state.
 - `mode`: **deprecated and ignored.** Continuous ingestion is controlled by `--stream`. `mode=batch` is accepted as a no-op; `mode=stream` is rejected unless `--stream` is also passed.
-- `dest_schema`: a schema/dataset prefix for destination table names.
+- `dest_schema`: optional destination schema/dataset for multi-table CDC runs. It is ignored when `--source-table` is set; in that case the destination is `--dest-table` (defaulting to the source table name), which must carry its own schema/dataset qualifier.
 - `discover_interval`: how often a running stream re-checks the source for new tables (default `30s`, e.g. `1m`, `10s`). Set to `0` or `off` to disable mid-stream discovery.
 
 Without `--source-table`, CDC runs in multi-table mode and replicates every table in the publication. Deletes are soft: rows are kept in the destination with `_cdc_deleted = true`.
