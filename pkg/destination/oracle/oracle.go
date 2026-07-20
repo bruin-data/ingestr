@@ -809,6 +809,32 @@ func (d *OracleDestination) LoadCDCState(ctx context.Context, table, connectorID
 	return entries, rows.Err()
 }
 
+func (d *OracleDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	schemaName, tableName := d.effectiveSchemaTable(table)
+	var dataType string
+	var charLength sql.NullInt64
+	err := d.db.QueryRowContext(ctx,
+		"SELECT DATA_TYPE, CHAR_LENGTH FROM ALL_TAB_COLUMNS WHERE OWNER = :1 AND TABLE_NAME = :2 AND COLUMN_NAME = :3",
+		schemaName, tableName, destination.CDCLSNColumn).Scan(&dataType, &charLength)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect Oracle CDC state position column: %w", err)
+	}
+	if !strings.EqualFold(dataType, "VARCHAR2") || (charLength.Valid && charLength.Int64 >= 4000) {
+		return nil
+	}
+	// NOT NULL is deliberately not re-specified: Oracle raises ORA-01442 when a
+	// MODIFY names NOT NULL on a column that already carries the constraint, and
+	// the column is created NOT NULL. Omitting it leaves nullability unchanged.
+	query := fmt.Sprintf("ALTER TABLE %s MODIFY (%s VARCHAR2(4000 CHAR))", quoteTable(table), quoteColumn(destination.CDCLSNColumn))
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen Oracle CDC state position column: %w", err)
+	}
+	return nil
+}
+
 func (d *OracleDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
 	ownerID, err := claim.OwnerID()
 	if err != nil {

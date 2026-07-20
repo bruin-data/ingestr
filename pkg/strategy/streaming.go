@@ -603,6 +603,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		return fmt.Errorf("source requested truncate for unknown table %q", res.TableName)
 	}
 	stateTable := ""
+	expectedIncarnation := ""
 	if l.opts.StateManager != nil {
 		stateTable = l.stateSourceTable(res.TableName)
 		if stateTable == "" {
@@ -626,12 +627,19 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		if err := l.opts.StateManager.BindDestinationIncarnation(ctx, stateTable, st.destTable); err != nil {
 			return fmt.Errorf("failed to bind CDC destination before source truncate for %s: %w", stateTable, err)
 		}
+		boundIncarnation, err := l.opts.StateManager.BoundDestinationIncarnation(stateTable)
+		if err != nil {
+			return err
+		}
+		expectedIncarnation = boundIncarnation
 	}
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
 	var truncateErr error
-	if res.CDCWALTruncate {
+	if expectedIncarnation != "" && destination.SupportsCDCConditionalTruncate(l.dest) {
+		truncateErr = destination.ApplyCDCTruncateIfIncarnation(ctx, l.dest, st.destTable, expectedIncarnation)
+	} else if res.CDCWALTruncate {
 		truncateErr = destination.ApplyCDCTruncate(ctx, l.dest, st.destTable)
 	} else {
 		truncateErr = destination.ApplyTruncate(ctx, l.dest, st.destTable)
@@ -850,15 +858,21 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 	start := time.Now()
 	loadTimestamp := start.UTC().Truncate(time.Microsecond)
+	boundSourceTables := make(map[string]string)
 	if l.opts.StateManager != nil {
-		for sourceTable := range l.pendingState.SnapshotPositions {
-			st, ok := l.tableState(sourceTable)
-			if !ok {
-				return fmt.Errorf("CDC snapshot state references unknown table %q", sourceTable)
+		for recordTable, st := range l.tables {
+			sourceTable := l.stateSourceTable(recordTable)
+			if sourceTable == "" {
+				var err error
+				sourceTable, err = l.opts.StateManager.SourceTableForDestination(st.destTable)
+				if err != nil {
+					return err
+				}
 			}
 			if err := l.opts.StateManager.BindDestinationIncarnation(ctx, sourceTable, st.destTable); err != nil {
 				return fmt.Errorf("streaming flush: failed to bind CDC destination for %s: %w", sourceTable, err)
 			}
+			boundSourceTables[recordTable] = sourceTable
 		}
 	}
 
@@ -939,7 +953,15 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
-			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate); err != nil {
+			expectedIncarnation := ""
+			if l.opts.StateManager != nil {
+				var err error
+				expectedIncarnation, err = l.opts.StateManager.BoundDestinationIncarnation(boundSourceTables[w.name])
+				if err != nil {
+					return err
+				}
+			}
+			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation); err != nil {
 				return fmt.Errorf("streaming flush: failed to merge table %s: %w", displayName, err)
 			}
 			if err := connectorLeaseLoss(ctx); err != nil {

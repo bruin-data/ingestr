@@ -142,8 +142,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}()
 
+	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
+	managedMySQLCDC := isMySQLCDCSource(p.config.SourceURI)
+	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC
 	destinationTarget := ""
-	if isPostgresCDCSource(p.config.SourceURI) {
+	if managedPostgresCDC {
 		destinationTarget = managedCDCDestinationTarget(p.config, dest)
 		if err := validateMultiTableNamespace(p.config, dest, destinationTarget); err != nil {
 			return err
@@ -154,6 +157,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 		p.cdcConnectorID = resolvedCDCStateConnectorID(p.config, postgresCDCIdentity, destinationIdentity)
 	} else if isCDCSource(p.config.SourceURI) {
+		if managedMySQLCDC {
+			destinationTarget = managedCDCDestinationTarget(p.config, dest)
+		}
 		p.cdcConnectorID = genericCDCConnectorID(p.config)
 	}
 
@@ -166,16 +172,43 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
 	}
 
-	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
-	if managedPostgresCDC {
+	if managedDestinationCDC {
 		if err := validateDestinationManagedCDCState(dest); err != nil {
 			return err
+		}
+		if managedMySQLCDC {
+			if err := validateMySQLCDCMutationFencing(dest); err != nil {
+				return err
+			}
 		}
 		if validator, ok := dest.(destination.ManagedCDCTargetValidator); ok {
 			if err := validator.ValidateManagedCDCTarget(ctx, destinationTarget); err != nil {
 				return fmt.Errorf("destination scheme %q cannot safely use managed CDC target %q: %w", dest.GetScheme(), destinationTarget, err)
 			}
 		}
+	}
+	if managedMySQLCDC {
+		leaser, ok := dest.(destination.ManagedCDCRunLeaser)
+		if !ok {
+			return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC without a connector run lease", dest.GetScheme())
+		}
+		lease, err := leaser.AcquireManagedCDCRunLease(ctx, p.cdcConnectorID)
+		if err != nil {
+			return err
+		}
+		leaseCtx, stopLeaseWatch := connectorLeaseContext(ctx, lease)
+		ctx = leaseCtx
+		defer func() {
+			stopLeaseWatch()
+			if err := lease.Release(); err != nil {
+				retErr = errors.Join(retErr, err)
+			}
+			if leaseErr := lease.Err(); leaseErr != nil {
+				retErr = errors.Join(retErr, leaseErr)
+			}
+		}()
+	}
+	if managedPostgresCDC {
 		leaser, ok := src.(source.ConnectorLeaser)
 		if !ok {
 			return fmt.Errorf("postgres CDC source does not support connector leases")
@@ -215,7 +248,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 	sourceIncarnation := ""
 	sourceSchemaFingerprint := ""
-	if managedPostgresCDC {
+	if managedDestinationCDC {
 		cdcStateManager, err = strategy.NewCDCStateManager(
 			dest,
 			p.cdcConnectorID,
@@ -296,10 +329,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		} else {
 			maxLSN, err := resumeProvider.GetMaxCDCLSN(ctx, p.config.DestTable)
 			if err != nil {
-				if isChangeTrackingSource(p.config.SourceURI) {
-					return fmt.Errorf("failed to get SQL Server Change Tracking cursor from destination: %w", err)
-				}
-				config.Debug("[PIPELINE] Failed to get max change cursor from destination: %v", err)
+				return fmt.Errorf("failed to get CDC resume cursor from destination: %w", err)
 			} else if maxLSN != "" {
 				config.Debug("[PIPELINE] Found existing change data, will resume from cursor: %s", maxLSN)
 				p.config.CDCResumeLSN = maxLSN
@@ -698,7 +728,18 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
 	}
 	if cdcStateManager != nil {
-		if err := cdcStateManager.ClaimTarget(ctx, p.config.SourceTable, p.config.DestTable); err != nil {
+		var err error
+		if managedMySQLCDC {
+			err = cdcStateManager.ClaimAndPrepareTarget(ctx, p.config.SourceTable, p.config.DestTable, destination.PrepareOptions{
+				Table:       p.config.DestTable,
+				Schema:      ingestSchema,
+				PrimaryKeys: resolvedConfig.PrimaryKeys,
+				CDCMode:     true,
+			})
+		} else {
+			err = cdcStateManager.ClaimTarget(ctx, p.config.SourceTable, p.config.DestTable)
+		}
+		if err != nil {
 			return err
 		}
 		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
@@ -732,7 +773,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if cdcStateManager != nil {
 		stateProvider, ok := src.(source.CDCStateProvider)
 		if !ok {
-			return fmt.Errorf("postgres CDC source does not expose completed batch state")
+			return fmt.Errorf("managed CDC source does not expose completed batch state")
 		}
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
@@ -1344,7 +1385,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	var cdcStateManager *strategy.CDCStateManager
 	anchorTable := ""
-	if isPostgresCDCSource(p.config.SourceURI) {
+	if isPostgresCDCSource(p.config.SourceURI) || isMySQLCDCSource(p.config.SourceURI) {
 		for _, destTable := range tableDestNames {
 			if anchorTable == "" || destTable < anchorTable {
 				anchorTable = destTable
@@ -1398,8 +1439,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				destTable := tableDestNames[table.Name]
 				maxLSN, err := resumeProvider.GetMaxCDCLSN(ctx, destTable)
 				if err != nil {
-					config.Debug("[PIPELINE] Failed to get max CDC LSN for table %s: %v", destTable, err)
-					continue
+					return fmt.Errorf("failed to get CDC resume cursor from destination table %s: %w", destTable, err)
 				}
 				if maxLSN != "" {
 					cdcResumeLSNs[table.Name] = maxLSN
@@ -1410,7 +1450,18 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	if cdcStateManager != nil {
 		for _, table := range tables {
-			if err := cdcStateManager.ClaimTarget(ctx, table.Name, tableDestNames[table.Name]); err != nil {
+			var err error
+			if isMySQLCDCSource(p.config.SourceURI) {
+				err = cdcStateManager.ClaimAndPrepareTarget(ctx, table.Name, tableDestNames[table.Name], destination.PrepareOptions{
+					Table:       tableDestNames[table.Name],
+					Schema:      table.Schema,
+					PrimaryKeys: table.PrimaryKeys,
+					CDCMode:     true,
+				})
+			} else {
+				err = cdcStateManager.ClaimTarget(ctx, table.Name, tableDestNames[table.Name])
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -1492,7 +1543,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	if cdcStateManager != nil {
 		stateProvider, ok := src.(source.CDCStateProvider)
 		if !ok {
-			return fmt.Errorf("postgres CDC source does not expose completed batch state")
+			return fmt.Errorf("managed CDC source does not expose completed batch state")
 		}
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
@@ -2390,6 +2441,19 @@ func isPostgresCDCSource(rawURI string) bool {
 	return scheme == "postgres+cdc" || scheme == "postgresql+cdc"
 }
 
+func isMySQLCDCSource(rawURI string) bool {
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	switch strings.ToLower(rawURI[:schemeEnd]) {
+	case "mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc":
+		return true
+	default:
+		return false
+	}
+}
+
 func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) string {
 	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
 		if stateID := parsed.Query().Get("state_id"); stateID != "" {
@@ -2485,6 +2549,7 @@ func canonicalCDCStateURI(rawURI string) string {
 	for _, key := range []string{
 		"state_id", "mode", "binary", "discover_interval",
 		"database", "dbname",
+		"server_id", "xa_buffer_limit", "xa_buffer_bytes_limit", "xa_pending_limit",
 		"password", "pass", "token", "secret", "api_key", "private_key",
 	} {
 		query.Del(key)
@@ -2564,6 +2629,16 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			}
 		}
 	}
+	if isMySQLCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+		switch cfg.IncrementalStrategy {
+		case "", config.StrategyMerge, config.StrategyReplace:
+		default:
+			return &config.ValidationError{
+				Field:   "incremental-strategy",
+				Message: fmt.Sprintf("%q is not supported for MySQL CDC; use merge or replace", cfg.IncrementalStrategy),
+			}
+		}
+	}
 	if isChangeTrackingSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
 		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
 	}
@@ -2606,21 +2681,21 @@ func supportsDestinationManagedCDCState(dest destination.Destination) bool {
 
 func validateDestinationManagedCDCState(dest destination.Destination) error {
 	if !supportsDestinationManagedCDCState(dest) {
-		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: destination-managed state with fencing, pruning, and truncation is not supported", dest.GetScheme())
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: destination-managed state with fencing, pruning, and truncation is not supported", dest.GetScheme())
 	}
 	if _, ok := dest.(destination.CDCTargetClaimer); !ok {
-		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: atomic destination-table claims are not supported", dest.GetScheme())
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: atomic destination-table claims are not supported", dest.GetScheme())
 	}
 	if _, ok := dest.(destination.CDCTargetIncarnationProvider); !ok {
-		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: destination-table incarnation checks are not supported", dest.GetScheme())
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: destination-table incarnation checks are not supported", dest.GetScheme())
 	}
 	cdcMerge, ok := dest.(destination.CDCMergeAware)
 	if !ok || !cdcMerge.SupportsCDCMerge() {
-		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: CDC-aware merge is not supported", dest.GetScheme())
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: CDC-aware merge is not supported", dest.GetScheme())
 	}
 	unchangedCols, ok := dest.(destination.CDCUnchangedColsAware)
 	if !ok || !unchangedCols.SupportsCDCUnchangedCols() {
-		return fmt.Errorf("destination scheme %q cannot safely run PostgreSQL CDC: preserving unchanged TOAST columns is not supported", dest.GetScheme())
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: preserving unchanged TOAST columns is not supported", dest.GetScheme())
 	}
 	validator, ok := dest.(destination.ManagedCDCStateValidator)
 	if !ok {
@@ -2628,6 +2703,30 @@ func validateDestinationManagedCDCState(dest destination.Destination) error {
 	}
 	if err := validator.ValidateManagedCDCState(); err != nil {
 		return fmt.Errorf("destination scheme %q cannot safely use managed CDC state: %w", dest.GetScheme(), err)
+	}
+	return nil
+}
+
+func validateMySQLCDCMutationFencing(dest destination.Destination) error {
+	mergeFencer, ok := dest.(destination.CDCConditionalMergeCapable)
+	if !ok || !mergeFencer.SupportsCDCConditionalMerge() {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for merge is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCConditionalTruncater); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for source TRUNCATE is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.ManagedCDCRunLeaser); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: connector run leases are not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCLateTargetClaimPreparer); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target claim and creation are not supported", dest.GetScheme())
+	}
+	swapFencer, ok := dest.(destination.CDCConditionalSwapCapable)
+	if !ok || !swapFencer.SupportsCDCConditionalSwap() {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for full-refresh swaps is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCConditionalSwapPlanner); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: full-refresh swap incarnation planning is not supported", dest.GetScheme())
 	}
 	return nil
 }

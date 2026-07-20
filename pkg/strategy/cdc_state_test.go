@@ -106,6 +106,7 @@ func newCDCStateDestination() *cdcStateDestination {
 		fakeDestination: &fakeDestination{},
 		states:          make(map[string][]storedCDCState),
 		targets:         make(map[string]string),
+		missing:         make(map[string]bool),
 		incarnations:    make(map[string]string),
 	}
 }
@@ -328,6 +329,48 @@ func TestCDCStateRequiresMatchingDestinationTableIncarnation(t *testing.T) {
 	}
 }
 
+func TestCDCStateExposesBoundRawDestinationIncarnation(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.incarnations["raw.orders"] = "physical-target-42"
+	manager, err := NewCDCStateManager(dest, "bound-incarnation", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	require.NoError(t, manager.BindDestinationIncarnation(ctx, "public.orders", "raw.orders"))
+
+	incarnation, err := manager.BoundDestinationIncarnation("public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "physical-target-42", incarnation)
+}
+
+func TestCDCStateRejectsTargetReplacementAfterResumeBeforeBind(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.incarnations["raw.orders"] = "destination-100"
+	first, err := NewCDCStateManager(dest, "bind-race", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTableIncarnation(ctx, "public.orders", "raw.orders", "source-100"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:             "00000000/00000020",
+		SnapshotPositions:    map[string]string{"public.orders": "00000000/00000010"},
+		SnapshotIncarnations: map[string]string{"public.orders": "source-100"},
+	}))
+
+	restarted, err := NewCDCStateManager(dest, "bind-race", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableIncarnation(ctx, "public.orders", "raw.orders", "source-100"))
+	position, err := restarted.ResumePosition(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "00000000/00000020", position)
+	require.NoError(t, restarted.BeginRun(ctx, false))
+
+	dest.incarnations["raw.orders"] = "destination-101"
+	err = restarted.BindDestinationIncarnation(ctx, "public.orders", "raw.orders")
+	require.ErrorContains(t, err, "replaced after its completed snapshot")
+}
+
 func TestCDCStateRejectsDestinationReplacementBeforeCheckpoint(t *testing.T) {
 	ctx := t.Context()
 	dest := newCDCStateDestination()
@@ -538,6 +581,50 @@ func TestCDCTargetClaimsAreAtomic(t *testing.T) {
 	if successes != 1 {
 		t.Fatalf("concurrent claims had %d winners, want exactly one", successes)
 	}
+}
+
+func TestCDCStateClaimsCreatesAndBindsMissingTargetBeforeRun(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.missing["raw.orders"] = true
+	manager, err := NewCDCStateManager(dest, "connector-a", "raw.orders", "")
+	require.NoError(t, err)
+
+	err = manager.ClaimAndPrepareTarget(ctx, "public.orders", "raw.orders", destination.PrepareOptions{
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	})
+	require.NoError(t, err)
+	require.False(t, dest.missing["raw.orders"])
+	require.Equal(t, destination.CDCTargetOwnerID("connector-a", "public.orders"), dest.targets["raw.orders"])
+
+	incarnation, err := manager.BoundDestinationIncarnation("public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "incarnation:raw.orders", incarnation)
+	require.NoError(t, manager.BeginRun(ctx, false))
+	incarnation, err = manager.BoundDestinationIncarnation("public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "incarnation:raw.orders", incarnation)
+}
+
+func TestCDCStatePreservesTargetFenceAcrossFullRefreshAndRebindsConditionalSwap(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.incarnations["raw.orders"] = "old-incarnation"
+	manager, err := NewCDCStateManager(dest, "connector-a", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.ClaimAndPrepareTarget(ctx, "public.orders", "raw.orders", destination.PrepareOptions{
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	}))
+	require.NoError(t, manager.BeginRun(ctx, true))
+	incarnation, err := manager.BoundDestinationIncarnation("public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "old-incarnation", incarnation)
+
+	dest.incarnations["raw.orders"] = "swap-result-incarnation"
+	require.NoError(t, manager.CompleteConditionalSwap(ctx, "public.orders", "raw.orders", "old-incarnation", "swap-result-incarnation"))
+	incarnation, err = manager.BoundDestinationIncarnation("public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "swap-result-incarnation", incarnation)
 }
 
 func TestCDCStateValidationFailureDoesNotClaimTarget(t *testing.T) {
@@ -2069,6 +2156,31 @@ func TestCDCStatePruningPreservesUnparseablePositions(t *testing.T) {
 	}
 }
 
+func TestCDCDestinationStateAcceptsMySQLPosition(t *testing.T) {
+	position := "00000000000000000012:mysql-bin.000012:00000000000000000345:00000000000000000000"
+	encoded := encodeCDCDestinationState(position, "0123456789abcdefabcd", 7)
+
+	decoded, incarnation, epoch, valid := decodeCDCDestinationState(encoded)
+	if !valid {
+		t.Fatal("MySQL destination state was rejected")
+	}
+	if decoded != position || incarnation != "0123456789abcdefabcd" || epoch != 7 {
+		t.Fatalf("decoded destination state = (%q, %q, %d), want (%q, %q, 7)", decoded, incarnation, epoch, position, "0123456789abcdefabcd")
+	}
+}
+
+func TestCDCStatePositionColumnIsUnbounded(t *testing.T) {
+	for _, column := range cdcStateSchema.Columns {
+		if column.Name == "_cdc_lsn" {
+			if column.MaxLength != 0 {
+				t.Fatalf("CDC state position MaxLength = %d, want unbounded", column.MaxLength)
+			}
+			return
+		}
+	}
+	t.Fatal("CDC state schema is missing _cdc_lsn")
+}
+
 func connectorStateCount(dest *cdcStateDestination, table, connectorID string) int {
 	dest.stateMu.Lock()
 	defer dest.stateMu.Unlock()
@@ -2104,4 +2216,29 @@ func assertCDCStatePruneBatchesBounded(t *testing.T, dest *cdcStateDestination) 
 			t.Fatalf("prune batch size = %d, want at most %d", size, cdcStatePruneBatchSize)
 		}
 	}
+}
+
+type migratingCDCStateDestination struct {
+	*cdcStateDestination
+	migrations int
+}
+
+func (d *migratingCDCStateDestination) EnsureCDCStatePositionColumn(_ context.Context, table string) error {
+	d.migrations++
+	delete(d.prepareErrByTable, table)
+	return nil
+}
+
+func TestCDCStatePrepareRetriesThroughPositionMigration(t *testing.T) {
+	ctx := context.Background()
+	dest := &migratingCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
+	manager, err := NewCDCStateManager(dest, "widen-connector", "raw.orders", "")
+	require.NoError(t, err)
+
+	dest.prepareErrByTable = map[string]error{
+		manager.stateTable: errors.New(`bigquery table has incompatible column "_cdc_lsn": existing max length 64 is bounded, want unbounded`),
+	}
+	require.NoError(t, manager.RegisterTableState(ctx, "public.orders", "raw.orders", "", ""))
+	require.NoError(t, manager.BeginRun(ctx, false))
+	require.Equal(t, 1, dest.migrations, "prepare failure must be retried through the position migration exactly once")
 }

@@ -1241,7 +1241,7 @@ func (d *MSSQLDestination) ValidateManagedCDCTarget(ctx context.Context, table s
 
 func validateMSSQLCompatibilityLevel(database string, compatibilityLevel int) error {
 	if compatibilityLevel < 130 {
-		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed PostgreSQL CDC requires level 130 or newer for OPENJSON", database, compatibilityLevel)
+		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed CDC requires level 130 or newer for OPENJSON", database, compatibilityLevel)
 	}
 	return nil
 }
@@ -1283,6 +1283,27 @@ func (d *MSSQLDestination) LoadCDCState(ctx context.Context, table, connectorID 
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func (d *MSSQLDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	var maxLength int64
+	err := d.db.QueryRowContext(ctx,
+		`SELECT c.max_length FROM sys.columns AS c WHERE c.object_id = OBJECT_ID(@p1) AND c.name = '_cdc_lsn'`,
+		table).Scan(&maxLength)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect SQL Server CDC state position column: %w", err)
+	}
+	if maxLength == -1 {
+		return nil
+	}
+	query := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN [_cdc_lsn] NVARCHAR(MAX) NOT NULL", quoteTable(table))
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen SQL Server CDC state position column: %w", err)
+	}
+	return nil
 }
 
 func (d *MSSQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {

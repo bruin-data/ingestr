@@ -95,6 +95,37 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+func TestMergeStrategyPropagatesBoundDestinationIncarnation(t *testing.T) {
+	job, src, _ := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyMerge
+	job.Config.PrimaryKeys = []string{"id"}
+	src.readCh = mustClosedRecords()
+	dest := newCDCStateDestination()
+	dest.incarnations[job.Config.DestTable] = "physical-target-42"
+	manager, err := NewCDCStateManager(dest, "merge-incarnation", job.Config.DestTable, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RegisterTable(context.Background(), job.Config.SourceTable, job.Config.DestTable); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.BeginRun(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	job.Destination = dest
+	job.CDCStateManager = manager
+
+	if err := (&MergeStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("merge calls = %d, want 1", len(dest.mergeCalls))
+	}
+	if got := dest.mergeCalls[0].CDCExpectedIncarnation; got != "physical-target-42" {
+		t.Fatalf("CDCExpectedIncarnation = %q, want physical-target-42", got)
+	}
+}
+
 func TestMergeStrategy_LeaseLossAfterStagingWriteSkipsLaterMutations(t *testing.T) {
 	job, src, base := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyMerge

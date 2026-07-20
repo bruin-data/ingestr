@@ -25,7 +25,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/vitess"
 )
 
-// Destinations eligible for destination-managed PostgreSQL CDC state must
+// Destinations eligible for destination-managed CDC state must
 // support one connector-scoped read from the shared state table.
 var (
 	_ destination.CDCStateReader = (*bigquery.BigQueryDestination)(nil)
@@ -57,6 +57,17 @@ var (
 
 var (
 	_ destination.CDCStateWriter                 = (*bigquery.BigQueryDestination)(nil)
+	_ destination.CDCStatePositionMigrator       = (*bigquery.BigQueryDestination)(nil)
+	_ destination.CDCStatePositionMigrator       = (*mssql.MSSQLDestination)(nil)
+	_ destination.CDCStatePositionMigrator       = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCStatePositionMigrator       = (*oracle.OracleDestination)(nil)
+	_ destination.CDCStatePositionMigrator       = (*postgres.PostgresDestination)(nil)
+	_ destination.CDCConditionalMergeCapable     = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCConditionalSwapCapable      = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCConditionalSwapPlanner      = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCConditionalTruncater        = (*mysql.MySQLDestination)(nil)
+	_ destination.CDCLateTargetClaimPreparer     = (*mysql.MySQLDestination)(nil)
+	_ destination.ManagedCDCRunLeaser            = (*mysql.MySQLDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*mysql.MySQLDestination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*planetscale.Destination)(nil)
 	_ destination.ManagedCDCStateValidator       = (*redshift.RedshiftDestination)(nil)
