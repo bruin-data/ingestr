@@ -27,6 +27,27 @@ type releaseCountingBatch struct {
 	releases int
 }
 
+func TestURIToConnStringDefaultsLargePacketSize(t *testing.T) {
+	connString, database, err := uriToConnString("mssql://sa:secret@localhost:1433/warehouse?encrypt=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if database != "warehouse" {
+		t.Fatalf("database = %q, want warehouse", database)
+	}
+	if !strings.Contains(connString, "packet+size=32767") {
+		t.Fatalf("connection string = %q, want default packet size", connString)
+	}
+
+	explicit, _, err := uriToConnString("mssql://sa:secret@localhost:1433/warehouse?packet+size=8192")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(explicit, "packet+size=8192") || strings.Contains(explicit, "32767") {
+		t.Fatalf("explicit packet size was not preserved: %q", explicit)
+	}
+}
+
 func TestResolveMSSQLTargetIdentityIncludesServerAndDatabase(t *testing.T) {
 	tests := map[string]mssqlTargetIdentity{
 		"orders":                        {server: "srv", database: "db", schema: "sales", table: "orders"},
@@ -228,6 +249,41 @@ func TestSwapTableTransfersCaseDistinctSchemasUnderCaseSensitiveCollation(t *tes
 	err = dest.SwapTable(t.Context(), destination.SwapOptions{
 		TargetTable:  "Sales.orders",
 		StagingTable: "sales.orders_staging",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSwapTableCreatesDeferredPrimaryKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT kc.name
+FROM sys.key_constraints AS kc
+WHERE kc.parent_object_id = OBJECT_ID(@p1) AND kc.[type] = 'PK'`)).
+		WithArgs("AppDB.dbo.orders_staging").
+		WillReturnRows(sqlmock.NewRows([]string{"name"}))
+	mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE [AppDB].[dbo].[orders_staging] ADD PRIMARY KEY ([id]) WITH (SORT_IN_TEMPDB = ON)")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`OBJECT_ID\('\[AppDB\]\.\[dbo\]\.\[orders\]', 'U'\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename 'dbo.orders_staging', 'orders'")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err = dest.SwapTable(t.Context(), destination.SwapOptions{
+		TargetTable:  "dbo.orders",
+		StagingTable: "dbo.orders_staging",
+		PrimaryKeys:  []string{"id"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +498,19 @@ func TestBuildCreateTableSQL_StringPrimaryKeyUsesIndexableType(t *testing.T) {
 	assertContains(t, sql, "[_id] NVARCHAR(450)")
 	assertContains(t, sql, "[payload] NVARCHAR(MAX)")
 	assertContains(t, sql, "PRIMARY KEY ([_id])")
+}
+
+func TestBuildCreateTableSQL_DeferredPrimaryKeyIsIndexableAndNotNull(t *testing.T) {
+	sql := buildCreateTableSQLWithDeferredPrimaryKeys("dbo.events", []schema.Column{
+		{Name: "_id", DataType: schema.TypeString},
+		{Name: "payload", DataType: schema.TypeJSON},
+	}, nil, []string{"_id"})
+
+	assertContains(t, sql, "[_id] NVARCHAR(450) NOT NULL")
+	assertContains(t, sql, "[payload] NVARCHAR(MAX)")
+	if strings.Contains(sql, "PRIMARY KEY") {
+		t.Fatalf("deferred primary key constraint was created eagerly:\n%s", sql)
+	}
 }
 
 func TestBuildCreateTableSQL_CapsLongStringPrimaryKeyLength(t *testing.T) {

@@ -20,6 +20,7 @@ type PrepareOptions struct {
 	Schema                 *schema.TableSchema
 	DropFirst              bool
 	PrimaryKeys            []string
+	DeferredPrimaryKeys    []string // PK columns whose constraint is created after loading.
 	PartitionBy            string   // Column to partition by (BigQuery)
 	ClusterBy              []string // Columns to cluster by (BigQuery)
 	CDCMode                bool     // If true, make non-PK columns nullable for staging tables (CDC delete handling)
@@ -593,6 +594,13 @@ type ReplaceStagingPolicy struct {
 // staging tables should live while keeping strategy orchestration generic.
 type ReplaceStagingPolicyProvider interface {
 	ReplaceStagingPolicy() ReplaceStagingPolicy
+}
+
+// ReplaceStagingPrimaryKeyDeferrer lets a destination bulk-load a known-unique
+// replace staging table before creating its primary key during the swap.
+type ReplaceStagingPrimaryKeyDeferrer interface {
+	DeferReplaceStagingPrimaryKey() bool
+	DeferredReplaceStagingParallelism() int
 }
 
 // ManagedStagingPolicyProvider lets a destination declare where strategy-owned

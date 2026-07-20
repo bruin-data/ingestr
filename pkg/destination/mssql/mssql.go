@@ -31,6 +31,8 @@ type MSSQLDestination struct {
 	compatibilityLevel int
 }
 
+const defaultMSSQLPacketSize = "32767"
+
 var errDirectInsertRequiresRetry = errors.New("direct insert transaction cannot be reused")
 
 func NewMSSQLDestination() *MSSQLDestination {
@@ -117,6 +119,9 @@ func uriToConnString(uri string) (string, string, error) {
 
 	query := u.Query()
 	query.Del("driver")
+	if !query.Has("packet size") {
+		query.Set("packet size", defaultMSSQLPacketSize)
+	}
 	if database != "" {
 		query.Set("database", database)
 	}
@@ -155,7 +160,12 @@ func (d *MSSQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 
 	if opts.Schema != nil {
 		startCreate := time.Now()
-		createSQL := buildCreateTableSQL(resolvedTable, opts.Schema.Columns, opts.PrimaryKeys)
+		createSQL := buildCreateTableSQLWithDeferredPrimaryKeys(
+			resolvedTable,
+			opts.Schema.Columns,
+			opts.PrimaryKeys,
+			opts.DeferredPrimaryKeys,
+		)
 		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 			if isObjectAlreadyExistsError(err) {
 				return nil
@@ -522,6 +532,10 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := addPrimaryKeyIfMissing(ctx, tx, staging.qualifiedTable(d.server), opts.PrimaryKeys); err != nil {
+		return err
+	}
+
 	if !sameSchema {
 		transferSQL, err := d.databaseScopedSQL(target, fmt.Sprintf(
 			"ALTER SCHEMA %s TRANSFER %s",
@@ -849,6 +863,30 @@ func addPrimaryKey(ctx context.Context, tx *sql.Tx, table, constraintName string
 		config.LogFailedQuery(addSQL, err)
 		return fmt.Errorf("failed to recreate primary key after deduplicated insert: %w", err)
 	}
+	return nil
+}
+
+func addPrimaryKeyIfMissing(ctx context.Context, tx *sql.Tx, table string, primaryKeys []string) error {
+	if len(primaryKeys) == 0 {
+		return nil
+	}
+
+	query := `SELECT kc.name
+FROM sys.key_constraints AS kc
+WHERE kc.parent_object_id = OBJECT_ID(@p1) AND kc.[type] = 'PK'`
+	var constraintName string
+	if err := tx.QueryRowContext(ctx, query, table).Scan(&constraintName); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		config.LogFailedQuery(query, err)
+		return fmt.Errorf("failed to inspect staging primary key: %w", err)
+	}
+
+	start := time.Now()
+	if err := addPrimaryKey(ctx, tx, table, "", primaryKeys); err != nil {
+		return err
+	}
+	config.Debug("[MSSQL] Deferred primary key created in %v", time.Since(start))
 	return nil
 }
 
@@ -1204,15 +1242,17 @@ func (t *mssqlTransaction) Rollback(ctx context.Context) error {
 	return t.tx.Rollback()
 }
 
-func (d *MSSQLDestination) SupportsReplaceStrategy() bool      { return true }
-func (d *MSSQLDestination) SupportsAppendStrategy() bool       { return true }
-func (d *MSSQLDestination) SupportsMergeStrategy() bool        { return true }
-func (d *MSSQLDestination) SupportsIncrementalPredicate() bool { return true }
-func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool { return true }
-func (d *MSSQLDestination) SupportsSCD2Strategy() bool         { return true }
-func (d *MSSQLDestination) SupportsAtomicSwap() bool           { return true }
-func (d *MSSQLDestination) SupportsCDCMerge() bool             { return true }
-func (d *MSSQLDestination) SupportsCDCUnchangedCols() bool     { return true }
+func (d *MSSQLDestination) SupportsReplaceStrategy() bool          { return true }
+func (d *MSSQLDestination) SupportsAppendStrategy() bool           { return true }
+func (d *MSSQLDestination) SupportsMergeStrategy() bool            { return true }
+func (d *MSSQLDestination) SupportsIncrementalPredicate() bool     { return true }
+func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool     { return true }
+func (d *MSSQLDestination) SupportsSCD2Strategy() bool             { return true }
+func (d *MSSQLDestination) SupportsAtomicSwap() bool               { return true }
+func (d *MSSQLDestination) DeferReplaceStagingPrimaryKey() bool    { return true }
+func (d *MSSQLDestination) DeferredReplaceStagingParallelism() int { return 12 }
+func (d *MSSQLDestination) SupportsCDCMerge() bool                 { return true }
+func (d *MSSQLDestination) SupportsCDCUnchangedCols() bool         { return true }
 
 func (d *MSSQLDestination) ValidateManagedCDCState() error {
 	return validateMSSQLCompatibilityLevel(d.database, d.compatibilityLevel)
@@ -1723,15 +1763,24 @@ func escapeTableNameForRename(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+	return buildCreateTableSQLWithDeferredPrimaryKeys(table, columns, primaryKeys, nil)
+}
+
+func buildCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.Column, primaryKeys, deferredPrimaryKeys []string) string {
 	columnNames := make([]string, len(columns))
 	for i := range columns {
 		columnNames[i] = columns[i].Name
 	}
 	primaryKeySet := matchedMSSQLIdentifiers(columnNames, primaryKeys)
+	deferredPrimaryKeySet := matchedMSSQLIdentifiers(columnNames, deferredPrimaryKeys)
 
 	var colDefs []string
 	for _, col := range columns {
-		colType := mapColumnTypeForCreate(col, primaryKeySet[col.Name])
+		isDeferredPrimaryKey := deferredPrimaryKeySet[col.Name]
+		colType := mapColumnTypeForCreate(col, primaryKeySet[col.Name] || isDeferredPrimaryKey)
+		if isDeferredPrimaryKey {
+			colType += " NOT NULL"
+		}
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 

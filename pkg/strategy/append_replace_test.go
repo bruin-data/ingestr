@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -386,6 +387,48 @@ func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing
 	}
 	if len(dest.swapCalls) != 1 || dest.swapCalls[0][0] != dest.prepareCalls[0].Table {
 		t.Fatalf("expected staging table to be swapped directly, got swaps=%v prepares=%v", dest.swapCalls, dest.prepareCalls)
+	}
+}
+
+func TestReplaceStrategy_Execute_DefersPrimaryKeyForBulkLoadDestination(t *testing.T) {
+	job, src, base := minimalJob()
+	job.Config.ExtractParallelism = config.DefaultExtractParallelism
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+	job.Destination = &fakeReplaceStagingPrimaryKeyDeferrer{fakeDestination: base}
+
+	if err := (&ReplaceStrategy{}).Execute(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(base.prepareCalls) != 1 {
+		t.Fatalf("expected 1 PrepareTable call, got %d", len(base.prepareCalls))
+	}
+	if got := base.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("staging table should defer primary keys, got %v", got)
+	}
+	if got := base.prepareCalls[0].DeferredPrimaryKeys; !slices.Equal(got, job.Config.PrimaryKeys) {
+		t.Fatalf("staging table should preserve deferred primary key columns, got %v", got)
+	}
+	if len(base.mergeCalls) != 0 {
+		t.Fatalf("expected no MergeTable calls on unique-PK fast path, got %d", len(base.mergeCalls))
+	}
+	if got := base.writeCalls[0].Parallelism; got != 12 {
+		t.Fatalf("deferred staging write parallelism = %d, want 12", got)
+	}
+	if len(base.swapOptions) != 1 || !slices.Equal(base.swapOptions[0].PrimaryKeys, job.Config.PrimaryKeys) {
+		t.Fatalf("swap should create primary keys, got %+v", base.swapOptions)
+	}
+}
+
+func TestReplaceWriteParallelism_PreservesExplicitValue(t *testing.T) {
+	job, _, base := minimalJob()
+	job.Config.ExtractParallelism = config.DefaultExtractParallelism
+	job.Config.DestinationParallelism = 7
+	job.Destination = &fakeReplaceStagingPrimaryKeyDeferrer{fakeDestination: base}
+
+	if got := replaceWriteParallelism(job, true); got != 7 {
+		t.Fatalf("replace write parallelism = %d, want explicit value 7", got)
 	}
 }
 
