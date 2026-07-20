@@ -145,6 +145,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	destinationTarget := ""
 	if isPostgresCDCSource(p.config.SourceURI) {
 		destinationTarget = managedCDCDestinationTarget(p.config, dest)
+		if err := validateMultiTableNamespace(p.config, dest, destinationTarget); err != nil {
+			return err
+		}
 		destinationIdentity, err := managedCDCDestinationIdentity(ctx, dest, destinationTarget)
 		if err != nil {
 			return fmt.Errorf("failed to resolve PostgreSQL CDC destination identity: %w", err)
@@ -2420,6 +2423,28 @@ func managedCDCDestinationIdentity(ctx context.Context, dest destination.Destina
 		return target, nil
 	}
 	return provider.CanonicalCDCTarget(ctx, target)
+}
+
+// validateMultiTableNamespace rejects a multi-table CDC run whose destination
+// requires a namespace that neither dest_schema nor the destination URI
+// supplies. Left to the destination, the failure names an internal synthesized
+// table instead of the setting the user has to change.
+func validateMultiTableNamespace(cfg *config.IngestConfig, dest destination.Destination, target string) error {
+	if cfg.SourceTable != "" {
+		return nil
+	}
+	if cfg.DestTable != "" {
+		output.Warnf("Warning: --dest-table=%s is ignored in multi-table CDC mode; use ?dest_schema= on the source URI\n", cfg.DestTable)
+	}
+	capability, ok := destination.RequiresNamespace(dest.GetScheme())
+	if !ok || capability.CheckName(target) == nil {
+		return nil
+	}
+	namespace := capability.Labels[1]
+	return fmt.Errorf(
+		"multi-table CDC to %s requires a %s: add ?dest_schema=<%s> to the source URI, or a default %s to the destination URI",
+		dest.GetScheme(), namespace, namespace, namespace,
+	)
 }
 
 func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Destination) string {

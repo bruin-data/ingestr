@@ -3250,3 +3250,56 @@ func TestHasIgnoredDestSchema(t *testing.T) {
 		})
 	}
 }
+
+
+func TestValidateMultiTableNamespace(t *testing.T) {
+	tests := []struct {
+		name        string
+		scheme      string
+		sourceTable string
+		target      string
+		wantErr     string
+	}{
+		{
+			name:    "bigquery without dataset is rejected",
+			scheme:  "bigquery",
+			target:  "__ingestr_cdc_namespace__",
+			wantErr: "multi-table CDC to bigquery requires a dataset",
+		},
+		{
+			name:   "bigquery with dest_schema is accepted",
+			scheme: "bigquery",
+			target: "raw.__ingestr_cdc_namespace__",
+		},
+		{
+			name:    "databricks without schema is rejected",
+			scheme:  "databricks",
+			target:  "__ingestr_cdc_namespace__",
+			wantErr: "multi-table CDC to databricks requires a schema",
+		},
+		{
+			name:   "postgres allows unqualified names",
+			scheme: "postgres",
+			target: "__ingestr_cdc_namespace__",
+		},
+		{
+			name:        "single-table mode is not checked",
+			scheme:      "bigquery",
+			sourceTable: "public.users",
+			target:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := &mockDestination{scheme: tt.scheme}
+			cfg := &config.IngestConfig{SourceTable: tt.sourceTable}
+			err := validateMultiTableNamespace(cfg, dest, tt.target)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
