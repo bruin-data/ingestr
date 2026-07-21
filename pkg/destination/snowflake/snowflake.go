@@ -581,6 +581,7 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 
 	if hasCDCDeleted {
 		hasActiveColumn := quoteIdentifier(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn := quoteIdentifier(uniqueInternalName("__ingestr_active_lsn"))
 		// CDC mode: compose the merge source from two per-PK dedups of staging:
 		// data columns come from the latest non-deleted change (so a trailing
 		// delete doesn't discard the last update's values), while the CDC
@@ -597,7 +598,7 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
 
-		selectCols := make([]string, 0, len(allColumns)+1)
+		selectCols := make([]string, 0, len(allColumns)+2)
 		for _, col := range allColumns {
 			alias := "act"
 			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
@@ -606,6 +607,7 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
 		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS %s", cdcLSN, hasActiveColumn))
+		selectCols = append(selectCols, fmt.Sprintf("act.%s AS %s", cdcLSN, activeLSNColumn))
 
 		dedup := func(where, orderBy string) string {
 			return fmt.Sprintf(
@@ -634,7 +636,10 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 		fmt.Fprintf(&mergeSQL, "USING %s AS source\n", composedSource)
 		fmt.Fprintf(&mergeSQL, "ON %s\n", primaryKeyOnClause)
 
-		hasRowData := fmt.Sprintf("(source.%s = false OR source.%s)", cdcDeleted, hasActiveColumn)
+		hasRowData := fmt.Sprintf(
+			"(source.%s = false OR (source.%s AND (target.%s IS NULL OR source.%s >= target.%s)))",
+			cdcDeleted, hasActiveColumn, cdcLSN, activeLSNColumn, cdcLSN,
+		)
 		newerChange := fmt.Sprintf(
 			"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND source.%s = true AND COALESCE(target.%s, false) = false))",
 			cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcDeleted, cdcDeleted,

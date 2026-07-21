@@ -58,7 +58,8 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(7, 'same-deleted', '00000000000000000010', true, '2026-01-01'),
 			(8, 'tie-delete', '00000000000000000010', false, '2026-01-01'),
 			(9, 'toast-newer', '00000000000000000030', false, '2026-01-03'),
-			(11, 'known-lsn', '00000000000000000030', false, '2026-01-03')`, targetTable),
+			(11, 'known-lsn', '00000000000000000030', false, '2026-01-03'),
+			(12, 'target-v20', '00000000000000000020', false, '2026-01-02')`, targetTable),
 		fmt.Sprintf(`INSERT INTO %s VALUES
 			(1, 'stale-active', '00000000000000000020', false, '2026-01-02', '[]'),
 			(1, NULL, '00000000000000000025', true, '2026-01-02', '[]'),
@@ -72,7 +73,9 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(9, NULL, '00000000000000000020', false, '2026-01-02', '["payload"]'),
 			(10, 'insert-then-delete', '00000000000000000010', false, '2026-01-02', '[]'),
 			(10, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
-			(11, 'null-lsn-regression', NULL, false, '2026-01-04', '[]')`, stagingTable),
+			(11, 'null-lsn-regression', NULL, false, '2026-01-04', '[]'),
+			(12, 'older-active-v10', '00000000000000000010', false, '2026-01-01', '[]'),
+			(12, NULL, '00000000000000000030', true, '2026-01-03', '[]')`, stagingTable),
 	}
 	for _, statement := range setup {
 		require.NoError(t, dest.Exec(ctx, statement))
@@ -103,6 +106,7 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03"},
 		10: {"insert-then-delete", "00000000000000000010", true, "2026-01-02"},
 		11: {"known-lsn", "00000000000000000030", false, "2026-01-03"},
+		12: {"target-v20", "00000000000000000030", true, "2026-01-03"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
@@ -180,7 +184,9 @@ func TestSnowflakeDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T)
 		__BRUIN_DEDUP_RN VARCHAR,
 		__BRUIN_DEDUP_RN_2 VARCHAR,
 		"__ingestr_has_active" VARCHAR,
-		"__ingestr_has_active_2" VARCHAR`
+		"__ingestr_has_active_2" VARCHAR,
+		"__ingestr_active_lsn" VARCHAR,
+		"__ingestr_active_lsn_2" VARCHAR`
 	for _, statement := range []string{
 		fmt.Sprintf(`CREATE TABLE %s (
 			ID NUMBER(38,0),
@@ -200,10 +206,10 @@ func TestSnowflakeDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T)
 			_CDC_UNCHANGED_COLS VARCHAR
 		)`, stagingTable, userColumnDefinitions),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, 'old', 'old-rn', 'old-rn-2', 'old-active', 'old-active-2', '00000000000000000020', false, '2026-01-01')`, targetTable),
+			(1, 'old', 'old-rn', 'old-rn-2', 'old-active', 'old-active-2', 'old-lsn', 'old-lsn-2', '00000000000000000020', false, '2026-01-01')`, targetTable),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, 'active', 'user-rn', 'user-rn-2', 'user-active', 'user-active-2', '00000000000000000020', false, '2026-01-02', '[]'),
-			(1, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', true, '2026-01-03', '[]')`, stagingTable),
+			(1, 'active', 'user-rn', 'user-rn-2', 'user-active', 'user-active-2', 'user-lsn', 'user-lsn-2', '00000000000000000020', false, '2026-01-02', '[]'),
+			(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', true, '2026-01-03', '[]')`, stagingTable),
 	} {
 		require.NoError(t, dest.Exec(ctx, statement))
 	}
@@ -215,19 +221,21 @@ func TestSnowflakeDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T)
 		Columns: []string{
 			"id", "payload", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2",
 			`"__ingestr_has_active"`, `"__ingestr_has_active_2"`,
+			`"__ingestr_active_lsn"`, `"__ingestr_active_lsn_2"`,
 			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn,
 		},
 	}))
 
-	var payload, rn, rn2, active, active2, lsn, synced string
+	var payload, rn, rn2, active, active2, activeLSN, activeLSN2, lsn, synced string
 	var deleted bool
 	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT PAYLOAD, __BRUIN_DEDUP_RN, __BRUIN_DEDUP_RN_2,
 			"__ingestr_has_active", "__ingestr_has_active_2",
+			"__ingestr_active_lsn", "__ingestr_active_lsn_2",
 			_CDC_LSN, _CDC_DELETED, TO_VARCHAR(_CDC_SYNCED_AT, 'YYYY-MM-DD')
 		FROM %s WHERE ID = 1
-	`, targetTable)).Scan(&payload, &rn, &rn2, &active, &active2, &lsn, &deleted, &synced))
-	require.Equal(t, []string{"active", "user-rn", "user-rn-2", "user-active", "user-active-2"}, []string{payload, rn, rn2, active, active2})
+	`, targetTable)).Scan(&payload, &rn, &rn2, &active, &active2, &activeLSN, &activeLSN2, &lsn, &deleted, &synced))
+	require.Equal(t, []string{"active", "user-rn", "user-rn-2", "user-active", "user-active-2", "user-lsn", "user-lsn-2"}, []string{payload, rn, rn2, active, active2, activeLSN, activeLSN2})
 	require.Equal(t, "00000000000000000020", lsn)
 	require.True(t, deleted)
 	require.Equal(t, "2026-01-03", synced)
