@@ -10,9 +10,62 @@ import (
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	mysqldest "github.com/bruin-data/ingestr/pkg/destination/mysql"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMySQLDestinationCDCPrepareRequiresMatchingPrimaryKey(t *testing.T) {
+	if mysqlDest.uri == "" {
+		t.Skip("shared mysql destination container not available")
+	}
+
+	ctx := t.Context()
+	suffix := uniqueSuffix()
+	freshTable := "cdc_pk_fresh_" + suffix
+	matchingTable := "cdc_pk_matching_" + suffix
+	missingTable := "cdc_pk_missing_" + suffix
+	mismatchedTable := "cdc_pk_mismatched_" + suffix
+	dest := mysqldest.NewMySQLDestination()
+	require.NoError(t, dest.Connect(ctx, mysqlDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		for _, table := range []string{freshTable, matchingTable, missingTable, mismatchedTable} {
+			_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+		}
+	})
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "part", DataType: schema.TypeString, MaxLength: 255},
+		{Name: "payload", DataType: schema.TypeString, Nullable: true},
+	}}
+	prepare := func(table string) error {
+		return dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:                  table,
+			Schema:                 tableSchema,
+			PrimaryKeys:            []string{"id", "part"},
+			CDCMode:                true,
+			CDCKeys:                []string{"id", "part"},
+			RequirePrimaryKeyMatch: true,
+		})
+	}
+
+	require.NoError(t, prepare(freshTable))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE `%s` (`ID` BIGINT, `part` VARCHAR(255), payload VARCHAR(255), PRIMARY KEY (`part`, `ID`))", matchingTable)))
+	require.NoError(t, prepare(matchingTable))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE `%s` (id BIGINT, part VARCHAR(255), payload VARCHAR(255))", missingTable)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO `%s` VALUES (1, 'a', 'keep')", missingTable)))
+	require.ErrorContains(t, prepare(missingTable), "found []")
+	var payload string
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf("SELECT payload FROM `%s` WHERE id = 1", missingTable)).Scan(&payload))
+	require.Equal(t, "keep", payload)
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE `%s` (id BIGINT, part VARCHAR(255), payload VARCHAR(255), PRIMARY KEY (payload))", mismatchedTable)))
+	require.ErrorContains(t, prepare(mismatchedTable), "found [payload]")
+}
 
 func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	if mysqlDest.uri == "" {

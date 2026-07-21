@@ -316,8 +316,73 @@ func (d *MySQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 		}
 		config.Debug("[MYSQL] CREATE TABLE took %v", time.Since(startCreate))
 	}
+	if opts.RequirePrimaryKeyMatch {
+		actualKeys, err := d.primaryKeyColumns(ctx, opts.Table)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if !mysqlPrimaryKeySetsEqual(opts.PrimaryKeys, actualKeys) {
+			return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
 
 	return nil
+}
+
+func (d *MySQLDestination) primaryKeyColumns(ctx context.Context, table string) ([]string, error) {
+	database, tableName := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
+	query := `
+		SELECT COLUMN_NAME
+		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA = ` + mysqlSchemaFilterExpr(database) + ` AND TABLE_NAME = ?
+		  AND CONSTRAINT_NAME = 'PRIMARY'
+		ORDER BY ORDINAL_POSITION`
+	rows, err := d.db.QueryContext(ctx, query, mysqlSchemaFilterArgs(database, tableName)...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	return columns, rows.Err()
+}
+
+func mysqlPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[mysqlIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := mysqlIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func mysqlIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *MySQLDestination) ensureDatabaseExists(ctx context.Context, database string) error {

@@ -15,6 +15,63 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		actualKeys []string
+		wantError  string
+	}{
+		{name: "matching composite in different order and case", actualKeys: []string{"PART", "ID"}},
+		{name: "missing", wantError: "found []"},
+		{name: "mismatched", actualKeys: []string{"other_id"}, wantError: "found [other_id]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &MySQLDestination{db: db, database: "app"}
+			mock.ExpectExec("CREATE TABLE IF NOT EXISTS `events`").WillReturnResult(sqlmock.NewResult(0, 0))
+			rows := sqlmock.NewRows([]string{"COLUMN_NAME"})
+			for _, key := range tt.actualKeys {
+				rows.AddRow(key)
+			}
+			mock.ExpectQuery("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA\\.KEY_COLUMN_USAGE").
+				WithArgs("app", "events").
+				WillReturnRows(rows)
+
+			err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:                  "events",
+				Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}, {Name: "part", DataType: schema.TypeString, MaxLength: 255}}},
+				PrimaryKeys:            []string{"id", "part"},
+				CDCMode:                true,
+				CDCKeys:                []string{"id", "part"},
+				RequirePrimaryKeyMatch: true,
+			})
+			if tt.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantError)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestPrepareTableWithoutRequiredPrimaryKeyMatchSkipsInspection(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `events`").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:  "events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestManagedCDCRunLeaseAcquiresAndReleasesAdvisoryLock(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
