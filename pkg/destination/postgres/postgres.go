@@ -861,13 +861,17 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			primaryKeyTargetCondition,
 			opts.IncrementalPredicate,
 		)
-		newerActiveCondition := `(target."_cdc_lsn" IS NULL OR la."_cdc_lsn" > target."_cdc_lsn")`
+		onLatestActiveCondition := buildJoinCondition(opts.PrimaryKeys, "la", "latest")
+		newerActiveCondition := fmt.Sprintf(
+			`(target."_cdc_lsn" IS NULL OR la."_cdc_lsn" > target."_cdc_lsn" OR (la."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false AND EXISTS (SELECT 1 FROM latest_all AS latest WHERE %s AND latest."_cdc_lsn" = la."_cdc_lsn" AND latest."_cdc_deleted" = true)))`,
+			onLatestActiveCondition,
+		)
 		unchangedRef := ""
 		if hasUnchangedCols {
 			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
 		}
 		upsertSQL := fmt.Sprintf(
-			`WITH %s, updated AS (
+			`WITH %s, %s, updated AS (
 				UPDATE %s AS target SET %s
 				FROM latest_active la
 				WHERE %s AND %s
@@ -877,6 +881,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			SELECT %s FROM latest_active la
 			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
+			latestAll,
 			quotedTargetTable,
 			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
 			onTargetCondition,

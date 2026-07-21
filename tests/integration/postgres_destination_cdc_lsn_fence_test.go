@@ -55,7 +55,8 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-active', '00000000/00000010', false, '2026-01-01'),
 			(7, 'same-deleted', '00000000/00000010', true, '2026-01-01'),
 			(8, 'tie-delete', '00000000/00000010', false, '2026-01-01'),
-			(9, 'toast-newer', '00000000/00000030', false, '2026-01-03');
+			(9, 'toast-newer', '00000000/00000030', false, '2026-01-03'),
+			(10, 'older-row-image', '00000000/00000010', false, '2026-01-01');
 		INSERT INTO %s VALUES
 			(1, 'stale-active', '00000000/00000020', false, '2026-01-02', '[]'),
 			(1, NULL, '00000000/00000025', true, '2026-01-02', '[]'),
@@ -67,7 +68,9 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-replay', '00000000/00000010', false, '2026-01-02', '[]'),
 			(7, 'same-resurrection', '00000000/00000010', false, '2026-01-02', '[]'),
 			(8, NULL, '00000000/00000010', true, '2026-01-02', '[]'),
-			(9, NULL, '00000000/00000020', false, '2026-01-02', '["payload"]');
+			(9, NULL, '00000000/00000020', false, '2026-01-02', '["payload"]'),
+			(10, 'latest-row-image', '00000000/00000010', false, '2026-01-02', '[]'),
+			(10, NULL, '00000000/00000010', true, '2026-01-02', '[]');
 	`, targetTable, stagingTable, targetTable, stagingTable)))
 
 	opts := destination.MergeOptions{
@@ -84,15 +87,16 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		deleted bool
 		synced  string
 	}{
-		1: {"newer-active", "00000000/00000030", false, "2026-01-03"},
-		2: {"newer-deleted", "00000000/00000030", true, "2026-01-03"},
-		3: {"first-cdc-update", "00000000/00000010", false, "2026-01-02"},
-		4: {"first-insert", "00000000/00000010", false, "2026-01-02"},
-		5: {"insert-then-delete", "00000000/00000010", true, "2026-01-02"},
-		6: {"same-active", "00000000/00000010", false, "2026-01-01"},
-		7: {"same-deleted", "00000000/00000010", true, "2026-01-01"},
-		8: {"tie-delete", "00000000/00000010", true, "2026-01-02"},
-		9: {"toast-newer", "00000000/00000030", false, "2026-01-03"},
+		1:  {"newer-active", "00000000/00000030", false, "2026-01-03"},
+		2:  {"newer-deleted", "00000000/00000030", true, "2026-01-03"},
+		3:  {"first-cdc-update", "00000000/00000010", false, "2026-01-02"},
+		4:  {"first-insert", "00000000/00000010", false, "2026-01-02"},
+		5:  {"insert-then-delete", "00000000/00000010", true, "2026-01-02"},
+		6:  {"same-active", "00000000/00000010", false, "2026-01-01"},
+		7:  {"same-deleted", "00000000/00000010", true, "2026-01-01"},
+		8:  {"tie-delete", "00000000/00000010", true, "2026-01-02"},
+		9:  {"toast-newer", "00000000/00000030", false, "2026-01-03"},
+		10: {"latest-row-image", "00000000/00000010", true, "2026-01-02"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
@@ -106,6 +110,12 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		require.Equal(t, want.deleted, deleted, "id %d deleted", id)
 		require.Equal(t, want.synced, synced, "id %d synced timestamp", id)
 	}
+
+	var xminBefore, xminAfter string
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 10`, targetTable)).Scan(&xminBefore))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 10`, targetTable)).Scan(&xminAfter))
+	require.Equal(t, xminBefore, xminAfter)
 
 	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`
 		TRUNCATE %s;
