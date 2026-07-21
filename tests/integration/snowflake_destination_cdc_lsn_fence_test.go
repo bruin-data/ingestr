@@ -156,6 +156,83 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestSnowflakeDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) {
+	snowflakeTestURI := os.Getenv("GONG_TEST_SNOWFLAKE_URI")
+	if snowflakeTestURI == "" {
+		t.Skip("GONG_TEST_SNOWFLAKE_URI not set")
+	}
+
+	ctx := t.Context()
+	targetTable := "PUBLIC.CDC_ALIAS_TARGET_" + uniqueSuffix()
+	stagingTable := "PUBLIC.CDC_ALIAS_STAGING_" + uniqueSuffix()
+	dest := snowflakedest.NewSnowflakeDestination()
+	require.NoError(t, dest.Connect(ctx, snowflakeTestURI))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := snowflakeOpenDB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+stagingTable)
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+targetTable)
+	})
+
+	const userColumnDefinitions = `
+		__BRUIN_DEDUP_RN VARCHAR,
+		__BRUIN_DEDUP_RN_2 VARCHAR,
+		"__ingestr_has_active" VARCHAR,
+		"__ingestr_has_active_2" VARCHAR`
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			ID NUMBER(38,0),
+			PAYLOAD VARCHAR,
+			%s,
+			_CDC_LSN VARCHAR,
+			_CDC_DELETED BOOLEAN,
+			_CDC_SYNCED_AT TIMESTAMP_NTZ
+		)`, targetTable, userColumnDefinitions),
+		fmt.Sprintf(`CREATE TABLE %s (
+			ID NUMBER(38,0),
+			PAYLOAD VARCHAR,
+			%s,
+			_CDC_LSN VARCHAR,
+			_CDC_DELETED BOOLEAN,
+			_CDC_SYNCED_AT TIMESTAMP_NTZ,
+			_CDC_UNCHANGED_COLS VARCHAR
+		)`, stagingTable, userColumnDefinitions),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'old', 'old-rn', 'old-rn-2', 'old-active', 'old-active-2', '00000000000000000020', false, '2026-01-01')`, targetTable),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'active', 'user-rn', 'user-rn-2', 'user-active', 'user-active-2', '00000000000000000020', false, '2026-01-02', '[]'),
+			(1, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', true, '2026-01-03', '[]')`, stagingTable),
+	} {
+		require.NoError(t, dest.Exec(ctx, statement))
+	}
+
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		TargetTable:  targetTable,
+		StagingTable: stagingTable,
+		PrimaryKeys:  []string{"id"},
+		Columns: []string{
+			"id", "payload", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2",
+			`"__ingestr_has_active"`, `"__ingestr_has_active_2"`,
+			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn,
+		},
+	}))
+
+	var payload, rn, rn2, active, active2, lsn, synced string
+	var deleted bool
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT PAYLOAD, __BRUIN_DEDUP_RN, __BRUIN_DEDUP_RN_2,
+			"__ingestr_has_active", "__ingestr_has_active_2",
+			_CDC_LSN, _CDC_DELETED, TO_VARCHAR(_CDC_SYNCED_AT, 'YYYY-MM-DD')
+		FROM %s WHERE ID = 1
+	`, targetTable)).Scan(&payload, &rn, &rn2, &active, &active2, &lsn, &deleted, &synced))
+	require.Equal(t, []string{"active", "user-rn", "user-rn-2", "user-active", "user-active-2"}, []string{payload, rn, rn2, active, active2})
+	require.Equal(t, "00000000000000000020", lsn)
+	require.True(t, deleted)
+	require.Equal(t, "2026-01-03", synced)
+}
+
 func assertSnowflakeCDCRow(t *testing.T, ctx context.Context, db *sql.DB, table, wantPayload, wantLSN string, wantDeleted bool) {
 	t.Helper()
 	var payload, lsn string
