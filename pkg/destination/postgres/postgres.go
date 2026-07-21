@@ -129,8 +129,8 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		d.pool.Reset()
 	}
 
-	if !opts.DropFirst && len(opts.PrimaryKeys) > 0 {
-		if err := d.ensurePrimaryKey(ctx, resolvedTable, opts.PrimaryKeys); err != nil {
+	if len(opts.PrimaryKeys) > 0 && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
+		if err := d.ensurePrimaryKey(ctx, schemaName, tableName, opts.PrimaryKeys, opts.RequirePrimaryKeyMatch); err != nil {
 			return fmt.Errorf("failed to ensure primary key: %w", err)
 		}
 	}
@@ -138,37 +138,87 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	return nil
 }
 
-func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string, primaryKeys []string) error {
-	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
-	if err != nil {
-		return err
-	}
-	quoted := destination.QuoteTableName(schemaName + "." + tableName)
-	var hasPK bool
-	err = d.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.table_constraints
-			WHERE table_schema = $1 AND table_name = $2
-			AND constraint_type = 'PRIMARY KEY'
-		)`, schemaName, tableName).Scan(&hasPK)
+func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, schemaName, tableName string, primaryKeys []string, requireMatch bool) error {
+	actualKeys, err := postgresPrimaryKeyColumns(ctx, d.pool, schemaName, tableName)
 	if err != nil {
 		return fmt.Errorf("failed to check primary key: %w", err)
 	}
-	if hasPK {
+	if len(actualKeys) > 0 {
+		if requireMatch && !postgresPrimaryKeySetsEqual(primaryKeys, actualKeys) {
+			return postgresPrimaryKeyMismatchError(schemaName, tableName, primaryKeys, actualKeys)
+		}
 		return nil
 	}
 
+	quoted := quotePostgresTable(schemaName, tableName)
 	quotedKeys := make([]string, len(primaryKeys))
 	for i, k := range primaryKeys {
 		quotedKeys[i] = destination.QuoteIdentifier(k)
 	}
 	alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quoted, strings.Join(quotedKeys, ", "))
 	if _, err := d.pool.Exec(ctx, alterSQL); err != nil {
+		if requireMatch {
+			concurrentKeys, inspectErr := postgresPrimaryKeyColumns(ctx, d.pool, schemaName, tableName)
+			if inspectErr == nil {
+				if postgresPrimaryKeySetsEqual(primaryKeys, concurrentKeys) {
+					return nil
+				}
+				if len(concurrentKeys) > 0 {
+					return postgresPrimaryKeyMismatchError(schemaName, tableName, primaryKeys, concurrentKeys)
+				}
+			}
+		}
 		config.LogFailedQuery(alterSQL, err)
 		return fmt.Errorf("failed to add primary key: %w", err)
 	}
-	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", table)
+	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", quoted)
 	return nil
+}
+
+func postgresPrimaryKeyColumns(ctx context.Context, queryer postgresTableResolver, schemaName, tableName string) ([]string, error) {
+	var primaryKeys []string
+	err := queryer.QueryRow(ctx, `
+		SELECT COALESCE(
+			array_agg(attr.attname::text ORDER BY key_column.ordinality),
+			ARRAY[]::text[]
+		)
+		FROM pg_catalog.pg_constraint AS con
+		JOIN pg_catalog.pg_class AS rel
+		  ON rel.oid = con.conrelid
+		JOIN pg_catalog.pg_namespace AS nsp
+		  ON nsp.oid = rel.relnamespace
+		CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+		JOIN pg_catalog.pg_attribute AS attr
+		  ON attr.attrelid = rel.oid
+		 AND attr.attnum = key_column.attnum
+		WHERE nsp.nspname = $1
+		  AND rel.relname = $2
+		  AND con.contype = 'p'
+	`, schemaName, tableName).Scan(&primaryKeys)
+	if err != nil {
+		return nil, err
+	}
+	return primaryKeys, nil
+}
+
+func postgresPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	expected = slices.Clone(expected)
+	actual = slices.Clone(actual)
+	slices.Sort(expected)
+	slices.Sort(actual)
+	return slices.Equal(expected, actual)
+}
+
+func postgresPrimaryKeyMismatchError(schemaName, tableName string, expected, actual []string) error {
+	return fmt.Errorf(
+		"CDC merge target %s must have primary key %v; found %v",
+		quotePostgresTable(schemaName, tableName),
+		expected,
+		actual,
+	)
 }
 
 func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
