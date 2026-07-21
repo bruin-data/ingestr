@@ -168,3 +168,15 @@ ingestr ingest \
 
 > [!WARNING]
 > Salesforce API limits may affect the frequency and volume of data ingestion. Incremental loading is supported for objects with the `SystemModstamp` field, but some objects may require full-refresh loads. This is indicated by `mode` in the tables above. Tables with mode `replace` don't support incremental loads, while the ones with `merge` do.
+
+## Field-level security
+
+ingestr ingests only the fields the authenticating user is allowed to read. It builds its query from Salesforce's `describe` response, and Salesforce omits any field the user lacks **Read** field-level security (FLS) on — with no error. Such fields simply arrive empty (NULL) in the destination, even though they hold data in Salesforce.
+
+If a field you expect is unexpectedly empty, check that the user (or its permission set / profile) has Read access to it. You can confirm what the user can see by describing the object as that user, for example:
+
+```plaintext
+GET https://<your-domain>.my.salesforce.com/services/data/v59.0/sobjects/<object>/describe
+```
+
+Only the fields listed in the response are ingested. Grant Read FLS on the missing fields and re-run.
