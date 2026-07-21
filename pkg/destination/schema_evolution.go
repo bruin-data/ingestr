@@ -73,6 +73,9 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 			}
 
 		case schemaevolution.ChangeWidenType, schemaevolution.ChangeOverrideType:
+			if sameDestinationType(dialect, change) {
+				continue
+			}
 			if !dialect.SupportsAlterType() {
 				warnings = append(warnings, fmt.Sprintf(
 					"column %q type change skipped: %s does not support ALTER COLUMN TYPE",
@@ -137,6 +140,9 @@ func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, tabl
 	if comparison != nil {
 		for _, change := range comparison.Changes {
 			if change.Type == schemaevolution.ChangeWidenType || change.Type == schemaevolution.ChangeOverrideType {
+				if sameDestinationType(dialect, change) {
+					continue
+				}
 				stmt := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn)
 				if !dialect.SupportsAlterType() || stmt == "" {
 					return nil, unsupportedTypeChangeError(dialect, table, change, stmt)
@@ -162,6 +168,10 @@ func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, tabl
 		}
 	}
 	return warnings, nil
+}
+
+func sameDestinationType(dialect Dialect, change schemaevolution.SchemaChange) bool {
+	return change.OldColumn != nil && dialect.TypeName(*change.OldColumn) == dialect.TypeName(change.NewColumn)
 }
 
 func unsupportedTypeChangeError(dialect Dialect, table string, change schemaevolution.SchemaChange, stmt string) error {

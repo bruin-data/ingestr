@@ -171,6 +171,25 @@ func TestApplyEvolutionRejectsEmptyTypeAlterationBeforeExecutingDDL(t *testing.T
 	require.Empty(t, dest.statements)
 }
 
+type sameTypeDialect struct{ fakeDialect }
+
+func (*sameTypeDialect) TypeName(schema.Column) string { return "SAME_TYPE" }
+
+func TestApplyEvolutionSkipsUnchangedDestinationType(t *testing.T) {
+	oldColumn := schema.Column{Name: "value", DataType: schema.TypeInt32}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "value",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "value", DataType: schema.TypeInt64},
+	}}}
+	dest := &fakeExecDestination{}
+
+	_, err := destination.ApplyEvolution(context.Background(), dest, &sameTypeDialect{fakeDialect{supportsAlter: true}}, "events", comparison)
+	require.NoError(t, err)
+	require.Empty(t, dest.statements)
+}
+
 func TestBuildMigration_NoChanges(t *testing.T) {
 	stmts, warnings := destination.BuildMigration(&fakeDialect{supportsAlter: true}, "t", &schemaevolution.SchemaComparison{})
 	assert.Empty(t, stmts)

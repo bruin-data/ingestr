@@ -431,7 +431,7 @@ func TestSchemaEvolutionNoPhantomTimestampTZChange(t *testing.T) {
 	}
 }
 
-func TestSchemaEvolutionAttemptsTypeChange(t *testing.T) {
+func TestSchemaEvolutionSkipsUnchangedFabricType(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create mock database: %v", err)
@@ -446,7 +446,32 @@ func TestSchemaEvolutionAttemptsTypeChange(t *testing.T) {
 		OldColumn:  &oldColumn,
 		NewColumn:  schema.Column{Name: "clause_names", DataType: schema.TypeArray, ArrayType: schema.TypeString, Nullable: true},
 	}}}
-	query := "ALTER TABLE dbo.events ALTER COLUMN [clause_names] VARCHAR(MAX) NULL"
+
+	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
+	if err != nil {
+		t.Fatalf("apply schema evolution: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchemaEvolutionAttemptsTypeChange(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create mock database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &FabricDestination{db: db}
+	oldColumn := schema.Column{Name: "value", DataType: schema.TypeInt32, Nullable: true}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "value",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}}
+	query := "ALTER TABLE dbo.events ALTER COLUMN [value] BIGINT NULL"
 	mock.ExpectExec(regexp.QuoteMeta(query)).WillReturnResult(sqlmock.NewResult(0, 0))
 
 	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
