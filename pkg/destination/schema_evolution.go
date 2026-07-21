@@ -49,6 +49,14 @@ type NullabilityRelaxer interface {
 	RelaxColumnNullabilitySQL(table, colName string) string
 }
 
+// CDCConditionalSchemaEvolver applies schema changes only when the managed
+// CDC target still has the expected physical identity. It returns the target
+// identity after the DDL because some databases replace catalog objects while
+// altering a table.
+type CDCConditionalSchemaEvolver interface {
+	ApplySchemaEvolutionIfIncarnation(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison, expectedIncarnation string) (warnings []string, resultIncarnation string, err error)
+}
+
 // BuildMigration turns an abstract schema comparison into the concrete DDL
 // statements (and human-readable warnings) for a dialect. It is dialect-
 // agnostic orchestration shared by SQL destinations; the dialect supplies the
@@ -131,14 +139,14 @@ func appendNullabilityRelaxation(dialect Dialect, table, column string, statemen
 	))
 }
 
-// ApplyEvolution renders the abstract schema-change plan into dialect-specific
-// DDL and executes each statement against the destination.
-func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
+// RenderEvolution validates and renders an abstract schema-change plan into
+// dialect-specific DDL without executing it.
+func RenderEvolution(dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) (statements, warnings []string, err error) {
 	if comparison != nil {
 		for _, change := range comparison.Changes {
 			if change.Type == schemaevolution.ChangeWidenType || change.Type == schemaevolution.ChangeOverrideType {
 				if !dialect.SupportsAlterType() || dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn) == "" {
-					return nil, fmt.Errorf(
+					return nil, nil, fmt.Errorf(
 						"apply schema evolution: column %q requires a type change, which generic %s DDL does not support",
 						change.ColumnName, dialect.Name(),
 					)
@@ -149,7 +157,7 @@ func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, tabl
 			if needsRelaxation {
 				relaxer, ok := dialect.(NullabilityRelaxer)
 				if !ok || relaxer.RelaxColumnNullabilitySQL(table, change.ColumnName) == "" {
-					return nil, fmt.Errorf(
+					return nil, nil, fmt.Errorf(
 						"apply schema evolution: column %q requires nullability relaxation, which generic %s DDL does not support",
 						change.ColumnName, dialect.Name(),
 					)
@@ -157,7 +165,17 @@ func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, tabl
 			}
 		}
 	}
-	statements, warnings := BuildMigration(dialect, table, comparison)
+	statements, warnings = BuildMigration(dialect, table, comparison)
+	return statements, warnings, nil
+}
+
+// ApplyEvolution renders the abstract schema-change plan into dialect-specific
+// DDL and executes each statement against the destination.
+func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
+	statements, warnings, err := RenderEvolution(dialect, table, comparison)
+	if err != nil {
+		return nil, err
+	}
 	for _, stmt := range statements {
 		if err := dest.Exec(ctx, stmt); err != nil {
 			return warnings, fmt.Errorf("apply schema evolution: %s: %w", stmt, err)

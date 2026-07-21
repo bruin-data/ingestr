@@ -6,9 +6,9 @@
 //
 // MySQL CDC is batch catch-up (snapshot, then replay the binlog to the
 // position captured at stream start, then exit), so instead of one streaming
-// pipeline this test drives repeated pipeline runs while parallel workers
-// apply ~1000 inserts/updates/deletes/PK-updates per second — every mid-load
-// run exercises the resume-from-LSN path under active writes. The source
+// pipeline this test drives parallel MySQL- and DuckDB-destination runs while
+// workers apply ~1000 inserts/updates/deletes/PK-updates per second — every
+// mid-load run exercises the resume-from-LSN path under active writes. The source
 // server runs in a non-UTC time zone and a wide-types table covers unsigned
 // integer extremes, DECIMAL, JSON, DATE/DATETIME/TIMESTAMP, and binary
 // columns. Afterwards the destination must converge to the exact source rows,
@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,7 +31,6 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/testutil"
-	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -406,6 +406,130 @@ func mysqlStressDestTruth(ctx context.Context, db *sql.DB, table string) (mysqlS
 	return tr, err
 }
 
+func mysqlStressDuckDBTruth(ctx context.Context, db *sql.DB, table string) (mysqlStressTruth, error) {
+	var tr mysqlStressTruth
+	err := db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COUNT(*), CAST(COALESCE(SUM(val), 0) AS VARCHAR) FROM "%s" WHERE _cdc_deleted = FALSE`,
+		strings.ReplaceAll(table, `"`, `""`),
+	)).Scan(&tr.count, &tr.sum)
+	return tr, err
+}
+
+func mysqlStressDuckDBCanonicalExpr(columns []mysqlStressColumn) string {
+	parts := make([]string, len(columns))
+	for i, column := range columns {
+		quoted := `"` + strings.ReplaceAll(column.name, `"`, `""`) + `"`
+		switch strings.ToLower(column.dataType) {
+		case "binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob", "bit":
+			parts[i] = "HEX(" + quoted + ")"
+		default:
+			parts[i] = quoted
+		}
+	}
+	return "CAST(JSON_ARRAY(" + strings.Join(parts, ", ") + ") AS VARCHAR)"
+}
+
+func mysqlStressFetchDuckDBChunk(
+	ctx context.Context,
+	db *sql.DB,
+	table, canonical string,
+	offset, limit int64,
+) ([]mysqlStressRow, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT id, %s FROM "%s" WHERE _cdc_deleted = FALSE ORDER BY id LIMIT ? OFFSET ?`,
+		canonical, strings.ReplaceAll(table, `"`, `""`),
+	), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []mysqlStressRow
+	for rows.Next() {
+		var row mysqlStressRow
+		var raw string
+		if err := rows.Scan(&row.id, &raw); err != nil {
+			return nil, err
+		}
+		row.canonical, err = canonicalizeCDCStressJSON(raw)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize DuckDB row %s id=%d: %w", table, row.id, err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func mysqlStressCompareDuckDBChunkRange(
+	ctx context.Context,
+	src, dst *sql.DB,
+	table string,
+	columns []mysqlStressColumn,
+	offset, limit int64,
+) error {
+	srcRows, err := mysqlStressFetchChunk(ctx, src, table, mysqlStressCanonicalExpr(columns), "", offset, limit)
+	if err != nil {
+		return fmt.Errorf("%s offset %d: source fetch: %w", table, offset, err)
+	}
+	dstRows, err := mysqlStressFetchDuckDBChunk(ctx, dst, table, mysqlStressDuckDBCanonicalExpr(columns), offset, limit)
+	if err != nil {
+		return fmt.Errorf("%s offset %d: DuckDB fetch: %w", table, offset, err)
+	}
+	if len(srcRows) != len(dstRows) {
+		return fmt.Errorf("%s offset %d: row count mismatch: source=%d DuckDB=%d", table, offset, len(srcRows), len(dstRows))
+	}
+	for i := range srcRows {
+		sourceCanonical, err := canonicalizeCDCStressJSON(srcRows[i].canonical)
+		if err != nil {
+			return fmt.Errorf("canonicalize MySQL row %s id=%d: %w", table, srcRows[i].id, err)
+		}
+		if srcRows[i].id != dstRows[i].id || sourceCanonical != dstRows[i].canonical {
+			return fmt.Errorf("%s: content mismatch at id=%d:\n  source: %s\n  DuckDB: {id:%d row:%s}",
+				table, srcRows[i].id, sourceCanonical, dstRows[i].id, dstRows[i].canonical)
+		}
+	}
+	return nil
+}
+
+func mysqlStressCompareAllDuckDB(ctx context.Context, src, dst *sql.DB, tables []*mysqlStressTable) error {
+	type chunk struct {
+		table   string
+		columns []mysqlStressColumn
+		offset  int64
+	}
+	var chunks []chunk
+	for _, table := range tables {
+		columns, err := mysqlStressSourceColumns(ctx, src, table.name)
+		if err != nil {
+			return err
+		}
+		var count int64
+		if err := src.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table.name)).Scan(&count); err != nil {
+			return fmt.Errorf("count source table %s: %w", table.name, err)
+		}
+		for offset := int64(0); offset < count; offset += stressCompareChunk {
+			chunks = append(chunks, chunk{table: table.name, columns: columns, offset: offset})
+		}
+	}
+
+	sem := make(chan struct{}, stressCompareParallel)
+	errCh := make(chan error, len(chunks))
+	var wg sync.WaitGroup
+	for _, item := range chunks {
+		wg.Add(1)
+		go func(item chunk) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := mysqlStressCompareDuckDBChunkRange(ctx, src, dst, item.table, item.columns, item.offset, stressCompareChunk); err != nil {
+				errCh <- err
+			}
+		}(item)
+	}
+	wg.Wait()
+	close(errCh)
+	return <-errCh
+}
+
 func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	ctx := context.Background()
 	if !testutil.DockerProviderHealthy(ctx) {
@@ -435,6 +559,7 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	// identically on both servers regardless of their server time zones.
 	srcVerify := mysqlStressOpenDB(t, sourceDSN+"&time_zone=%27%2B00%3A00%27", stressCompareParallel+2)
 	dstVerify := mysqlStressOpenDB(t, destDSN+"&time_zone=%27%2B00%3A00%27", stressCompareParallel+2)
+	duckDBPath := filepath.Join(t.TempDir(), "mysql-cdc-stress.duckdb")
 
 	tables := &mysqlStressTableSet{}
 	seedStart := time.Now()
@@ -451,20 +576,31 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	seededRows := (mysqlStressInitialTables + 1) * mysqlStressSeedRows
 	t.Logf("seeded %d rows across %d tables in %v", seededRows, mysqlStressInitialTables+1, time.Since(seedStart).Round(time.Millisecond))
 
-	cfg := &config.IngestConfig{
+	nativeConfig := &config.IngestConfig{
 		SourceURI:           sourceURI[:len("mysql")] + "+cdc" + sourceURI[len("mysql"):] + "?server_id=21999",
 		DestURI:             destURI,
 		IncrementalStrategy: config.StrategyMerge,
 	}
+	duckDBConfig := *nativeConfig
+	duckDBConfig.SourceURI = sourceURI[:len("mysql")] + "+cdc" + sourceURI[len("mysql"):] + "?server_id=22000"
+	duckDBConfig.DestURI = "duckdb:///" + duckDBPath
+	pipelines := []cdcStressPipeline{
+		{name: "mysql", config: nativeConfig},
+		{name: "duckdb", config: &duckDBConfig},
+	}
 
-	// Initial snapshot: the headline snapshot-throughput measurement.
-	snapshotStart := time.Now()
-	require.NoError(t, pipeline.New(cfg).Run(ctx), "initial snapshot run failed")
-	snapshotDuration := time.Since(snapshotStart)
-	snapshotRate := float64(seededRows) / snapshotDuration.Seconds()
-	t.Logf("initial snapshot: %d rows in %v (%.0f rows/sec)", seededRows, snapshotDuration.Round(time.Millisecond), snapshotRate)
-	require.GreaterOrEqual(t, snapshotRate, mysqlStressMinSnapshotRowsPerSec,
-		"snapshot throughput regressed below the acceptance floor")
+	// Initial snapshots execute simultaneously so both destinations see the
+	// exact same source pressure throughout the workload.
+	snapshotResults := runCDCStressPipelines(ctx, pipelines)
+	snapshotRates := make(map[string]float64, len(pipelines))
+	for i, result := range snapshotResults {
+		require.NoError(t, result.err, "%s initial snapshot run failed", pipelines[i].name)
+		rate := float64(seededRows) / result.duration.Seconds()
+		snapshotRates[pipelines[i].name] = rate
+		t.Logf("%s initial snapshot: %d rows in %v (%.0f rows/sec)", pipelines[i].name, seededRows, result.duration.Round(time.Millisecond), rate)
+		require.GreaterOrEqual(t, rate, mysqlStressMinSnapshotRowsPerSec,
+			"%s snapshot throughput regressed below the acceptance floor", pipelines[i].name)
+	}
 
 	lateTableDelay := stressEventDelay(stressNewTableEvery, stressLoadDuration, stressLateTables)
 	t.Logf("load phase: %v at ~%d ops/sec across %d workers, %d late tables every %v, catch-up runs back-to-back",
@@ -592,9 +728,12 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		defer close(runnerDone)
 		for loadCtx.Err() == nil {
 			start := time.Now()
-			if err := pipeline.New(cfg).Run(ctx); err != nil {
-				runnerErr <- err
-				return
+			results := runCDCStressPipelines(ctx, pipelines)
+			for i, result := range results {
+				if result.err != nil {
+					runnerErr <- fmt.Errorf("%s: %w", pipelines[i].name, result.err)
+					return
+				}
 			}
 			catchupRuns.Add(1)
 			catchupTotal.Add(int64(time.Since(start)))
@@ -656,13 +795,91 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
 
+	type mysqlStressDestination struct {
+		name        string
+		aggregate   func(string) (mysqlStressTruth, error)
+		compareAll  func() error
+		softDeleted func(string) (int64, error)
+		movedCounts func(string) (int64, int64, error)
+	}
+	destinations := []mysqlStressDestination{
+		{
+			name: "mysql",
+			aggregate: func(table string) (mysqlStressTruth, error) {
+				return mysqlStressDestTruth(ctx, dstVerify, table)
+			},
+			compareAll: func() error { return mysqlStressCompareAll(ctx, srcVerify, dstVerify, finalTables) },
+			softDeleted: func(table string) (int64, error) {
+				var count int64
+				err := dstVerify.QueryRowContext(ctx,
+					fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE `_cdc_deleted` = TRUE", table)).Scan(&count)
+				return count, err
+			},
+			movedCounts: func(table string) (int64, int64, error) {
+				var live, tombstones int64
+				if err := dstVerify.QueryRowContext(ctx, fmt.Sprintf(
+					"SELECT COUNT(*) FROM %s WHERE id >= ? AND `_cdc_deleted` = FALSE", table,
+				), mysqlStressPKOffset).Scan(&live); err != nil {
+					return 0, 0, err
+				}
+				err := dstVerify.QueryRowContext(ctx, fmt.Sprintf(
+					"SELECT COUNT(*) FROM %s WHERE id < ? AND `_cdc_deleted` = TRUE", table,
+				), mysqlStressPKOffset).Scan(&tombstones)
+				return live, tombstones, err
+			},
+		},
+		{
+			name: "duckdb",
+			aggregate: func(table string) (mysqlStressTruth, error) {
+				var truth mysqlStressTruth
+				err := withCDCStressDuckDB(duckDBPath, func(db *sql.DB) error {
+					var err error
+					truth, err = mysqlStressDuckDBTruth(ctx, db, table)
+					return err
+				})
+				return truth, err
+			},
+			compareAll: func() error {
+				return withCDCStressDuckDB(duckDBPath, func(db *sql.DB) error {
+					return mysqlStressCompareAllDuckDB(ctx, srcVerify, db, finalTables)
+				})
+			},
+			softDeleted: func(table string) (int64, error) {
+				var count int64
+				err := withCDCStressDuckDB(duckDBPath, func(db *sql.DB) error {
+					return db.QueryRowContext(ctx, fmt.Sprintf(
+						`SELECT COUNT(*) FROM "%s" WHERE _cdc_deleted = TRUE`, strings.ReplaceAll(table, `"`, `""`),
+					)).Scan(&count)
+				})
+				return count, err
+			},
+			movedCounts: func(table string) (int64, int64, error) {
+				var live, tombstones int64
+				err := withCDCStressDuckDB(duckDBPath, func(db *sql.DB) error {
+					quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+					if err := db.QueryRowContext(ctx, fmt.Sprintf(
+						"SELECT COUNT(*) FROM %s WHERE id >= ? AND _cdc_deleted = FALSE", quoted,
+					), mysqlStressPKOffset).Scan(&live); err != nil {
+						return err
+					}
+					return db.QueryRowContext(ctx, fmt.Sprintf(
+						"SELECT COUNT(*) FROM %s WHERE id < ? AND _cdc_deleted = TRUE", quoted,
+					), mysqlStressPKOffset).Scan(&tombstones)
+				})
+				return live, tombstones, err
+			},
+		},
+	}
+
 	dumpDiagnostics := func() {
-		for _, tbl := range finalTables {
-			got, err := mysqlStressDestTruth(ctx, dstVerify, tbl.name)
-			t.Logf("  %s: want %+v, got %+v (err=%v)", tbl.name, truths[tbl.name], got, err)
-		}
-		if err := mysqlStressCompareAll(ctx, srcVerify, dstVerify, finalTables); err != nil {
-			t.Logf("  first content mismatch: %v", err)
+		for _, destination := range destinations {
+			for _, tbl := range finalTables {
+				got, err := destination.aggregate(tbl.name)
+				t.Logf("  %s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
+			}
+			if err := destination.compareAll(); err != nil {
+				t.Logf("  %s first content mismatch: %v", destination.name, err)
+			}
 		}
 		stressDumpContainerLogs(t, ctx, sourceContainer, 120)
 	}
@@ -671,17 +888,24 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	convergeStart := time.Now()
 	deadline := time.Now().Add(stressConvergeTimeout)
 	for attempt := 1; ; attempt++ {
-		runStart := time.Now()
-		if err := pipeline.New(cfg).Run(ctx); err != nil {
-			dumpDiagnostics()
-			t.Fatalf("convergence run %d failed: %v", attempt, err)
+		results := runCDCStressPipelines(ctx, pipelines)
+		for i, result := range results {
+			if result.err != nil {
+				dumpDiagnostics()
+				t.Fatalf("%s convergence run %d failed: %v", pipelines[i].name, attempt, result.err)
+			}
+			t.Logf("%s convergence run %d finished in %v", pipelines[i].name, attempt, result.duration.Round(time.Millisecond))
 		}
-		t.Logf("convergence run %d finished in %v", attempt, time.Since(runStart).Round(time.Millisecond))
 		pending := ""
-		for _, tbl := range finalTables {
-			got, err := mysqlStressDestTruth(ctx, dstVerify, tbl.name)
-			if err != nil || got != truths[tbl.name] {
-				pending = fmt.Sprintf("%s: want %+v, got %+v (err=%v)", tbl.name, truths[tbl.name], got, err)
+		for _, destination := range destinations {
+			for _, tbl := range finalTables {
+				got, err := destination.aggregate(tbl.name)
+				if err != nil || got != truths[tbl.name] {
+					pending = fmt.Sprintf("%s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
+					break
+				}
+			}
+			if pending != "" {
 				break
 			}
 		}
@@ -696,29 +920,28 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 	convergeDuration := time.Since(convergeStart)
-	t.Logf("destination converged on count/sum aggregates for all tables in %v after load stop", convergeDuration.Round(time.Millisecond))
+	t.Logf("MySQL and DuckDB destinations converged on count/sum aggregates for all tables in %v after load stop", convergeDuration.Round(time.Millisecond))
 
-	compareStart := time.Now()
-	require.NoError(t, mysqlStressCompareAll(ctx, srcVerify, dstVerify, finalTables), "row-by-row content comparison failed")
-	t.Logf("row-by-row content comparison passed for all %d tables in %v", len(finalTables), time.Since(compareStart).Round(time.Millisecond))
+	for _, destination := range destinations {
+		compareStart := time.Now()
+		require.NoError(t, destination.compareAll(), "%s row-by-row content comparison failed", destination.name)
+		t.Logf("%s row-by-row content comparison passed for all %d tables in %v", destination.name, len(finalTables), time.Since(compareStart).Round(time.Millisecond))
+	}
 
 	// Deletes and PK updates must leave tombstones behind.
-	var softDeleted int64
-	for _, tbl := range finalTables {
-		var deleted int64
-		require.NoError(t, dstVerify.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE `_cdc_deleted` = TRUE", tbl.name)).Scan(&deleted))
-		softDeleted += deleted
+	for _, destination := range destinations {
+		var softDeleted int64
+		for _, tbl := range finalTables {
+			deleted, err := destination.softDeleted(tbl.name)
+			require.NoError(t, err)
+			softDeleted += deleted
+		}
+		require.Positive(t, softDeleted, "%s destination should retain soft-deleted CDC rows", destination.name)
+		movedLive, movedTombstones, err := destination.movedCounts(mysqlStressTableName(0))
+		require.NoError(t, err)
+		t.Logf("%s pk-update evidence in %s: %d live moved rows, %d tombstones below the move offset",
+			destination.name, mysqlStressTableName(0), movedLive, movedTombstones)
 	}
-	require.Positive(t, softDeleted, "destination should retain soft-deleted CDC rows")
-	var movedLive, movedTombstones int64
-	require.NoError(t, dstVerify.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE id >= ? AND `_cdc_deleted` = FALSE", mysqlStressTableName(0),
-	), mysqlStressPKOffset).Scan(&movedLive))
-	require.NoError(t, dstVerify.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE id < ? AND `_cdc_deleted` = TRUE", mysqlStressTableName(0),
-	), mysqlStressPKOffset).Scan(&movedTombstones))
-	t.Logf("pk-update evidence in %s: %d live moved rows, %d tombstones below the move offset", mysqlStressTableName(0), movedLive, movedTombstones)
 
 	// Schema-churn phases. MySQL CDC intentionally rejects schema changes that
 	// sit inside the unconsumed binlog range (positional decode cannot be
@@ -737,12 +960,17 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		verifyDeadline := time.Now().Add(stressConvergeTimeout)
 		for {
 			pending := ""
-			for _, tbl := range finalTables {
-				want, err := mysqlStressSourceTruth(ctx, srcVerify, tbl.name)
-				require.NoError(t, err, "phase %q: source truth for %s", phase, tbl.name)
-				got, err := mysqlStressDestTruth(ctx, dstVerify, tbl.name)
-				if err != nil || got != want {
-					pending = fmt.Sprintf("%s: want %+v, got %+v (err=%v)", tbl.name, want, got, err)
+			for _, destination := range destinations {
+				for _, tbl := range finalTables {
+					want, err := mysqlStressSourceTruth(ctx, srcVerify, tbl.name)
+					require.NoError(t, err, "phase %q: source truth for %s", phase, tbl.name)
+					got, err := destination.aggregate(tbl.name)
+					if err != nil || got != want {
+						pending = fmt.Sprintf("%s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, want, got, err)
+						break
+					}
+				}
+				if pending != "" {
 					break
 				}
 			}
@@ -753,10 +981,15 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 				dumpDiagnostics()
 				t.Fatalf("phase %q: aggregates did not converge: %s", phase, pending)
 			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx), "phase %q: convergence run failed", phase)
+			results := runCDCStressPipelines(ctx, pipelines)
+			for i, result := range results {
+				require.NoError(t, result.err, "phase %q: %s convergence run failed", phase, pipelines[i].name)
+			}
 		}
-		require.NoError(t, mysqlStressCompareAll(ctx, srcVerify, dstVerify, finalTables), "phase %q: row-by-row comparison failed", phase)
-		t.Logf("phase %q: aggregates and row-by-row content verified for %d tables", phase, len(finalTables))
+		for _, destination := range destinations {
+			require.NoError(t, destination.compareAll(), "phase %q: %s row-by-row comparison failed", phase, destination.name)
+		}
+		t.Logf("phase %q: aggregates and row-by-row content verified for %d tables in MySQL and DuckDB", phase, len(finalTables))
 	}
 
 	execSQL := func(query string, args ...interface{}) error {
@@ -766,28 +999,35 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 
 	runChurnPhase := func(phase string, expectDrift bool, apply func() error) {
 		require.NoError(t, apply(), "phase %q: workload failed", phase)
-		err := pipeline.New(cfg).Run(ctx)
+		results := runCDCStressPipelines(ctx, pipelines)
 		needRefresh := expectDrift
-		switch {
-		case expectDrift:
-			require.Error(t, err, "phase %q must be rejected instead of corrupting rows", phase)
-			require.Contains(t, err.Error(), "--full-refresh", "phase %q error should point at the recovery path", phase)
-			t.Logf("phase %q correctly rejected: %v", phase, err)
-		case err == nil:
-			t.Logf("phase %q ingested incrementally without a full refresh", phase)
-		default:
-			// Accuracy is the gate; the recovery path taken is reported. A full
-			// refresh must still land the exact source state.
-			t.Logf("phase %q fell back to full refresh after: %v", phase, err)
-			needRefresh = true
+		for i, result := range results {
+			switch {
+			case expectDrift:
+				require.Error(t, result.err, "phase %q: %s must reject the drift instead of corrupting rows", phase, pipelines[i].name)
+				require.Contains(t, result.err.Error(), "--full-refresh", "phase %q: %s error should point at the recovery path", phase, pipelines[i].name)
+				t.Logf("phase %q: %s correctly rejected drift: %v", phase, pipelines[i].name, result.err)
+			case result.err == nil:
+				t.Logf("phase %q: %s ingested incrementally without a full refresh", phase, pipelines[i].name)
+			default:
+				t.Logf("phase %q: %s fell back to full refresh after: %v", phase, pipelines[i].name, result.err)
+				needRefresh = true
+			}
 		}
 		if needRefresh {
-			cfg.FullRefresh = true
+			for _, item := range pipelines {
+				item.config.FullRefresh = true
+			}
 			start := time.Now()
-			require.NoError(t, pipeline.New(cfg).Run(ctx), "phase %q: full refresh failed", phase)
-			cfg.FullRefresh = false
+			refreshResults := runCDCStressPipelines(ctx, pipelines)
+			for i, result := range refreshResults {
+				require.NoError(t, result.err, "phase %q: %s full refresh failed", phase, pipelines[i].name)
+			}
+			for _, item := range pipelines {
+				item.config.FullRefresh = false
+			}
 			fullRefreshes++
-			t.Logf("phase %q: full refresh completed in %v", phase, time.Since(start).Round(time.Millisecond))
+			t.Logf("phase %q: parallel full refreshes completed in %v", phase, time.Since(start).Round(time.Millisecond))
 		}
 		verifyAllAccurate(phase)
 	}
@@ -805,6 +1045,12 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	require.NoError(t, dstVerify.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT drift_note FROM %s WHERE id = ?", driftTable), churnBase+1).Scan(&driftNote))
 	require.Equal(t, "post-drift", driftNote, "the post-ALTER column must land after recovery")
+	require.NoError(t, withCDCStressDuckDB(duckDBPath, func(db *sql.DB) error {
+		return db.QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT drift_note FROM "%s" WHERE id = ?`, strings.ReplaceAll(driftTable, `"`, `""`),
+		), churnBase+1).Scan(&driftNote)
+	}))
+	require.Equal(t, "post-drift", driftNote, "the post-ALTER column must land in DuckDB after recovery")
 
 	runChurnPhase("append column while caught up", false, func() error {
 		if err := execSQL(fmt.Sprintf("ALTER TABLE %s ADD COLUMN note2 VARCHAR(40) NULL", appendTable)); err != nil {
@@ -858,6 +1104,8 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		return execSQL(fmt.Sprintf("UPDATE %s SET val = val + 7, updated_at = NOW(6) WHERE id %% 5 = 0", tbl.name))
 	})
 
-	t.Logf("PERF SUMMARY: snapshot %.0f rows/sec (%d rows in %v); load %.0f ops/sec sustained; %d mid-load catch-up runs; convergence %v after load stop; %d full refreshes across 6 schema-churn phases",
-		snapshotRate, seededRows, snapshotDuration.Round(time.Millisecond), achieved, catchupRuns.Load(), convergeDuration.Round(time.Millisecond), fullRefreshes)
+	t.Logf("PERF SUMMARY: MySQL snapshot %.0f rows/sec in %v; DuckDB snapshot %.0f rows/sec in %v (%d rows each); load %.0f ops/sec sustained; %d parallel catch-up rounds; convergence %v after load stop; %d parallel full-refresh phases across 6 schema-churn phases",
+		snapshotRates["mysql"], snapshotResults[0].duration.Round(time.Millisecond),
+		snapshotRates["duckdb"], snapshotResults[1].duration.Round(time.Millisecond), seededRows,
+		achieved, catchupRuns.Load(), convergeDuration.Round(time.Millisecond), fullRefreshes)
 }

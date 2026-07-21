@@ -303,20 +303,28 @@ func (m *CDCStateManager) BoundDestinationIncarnation(sourceTable string) (strin
 }
 
 func (m *CDCStateManager) CompleteConditionalSwap(ctx context.Context, sourceTable, destTable, previousIncarnation, resultIncarnation string) error {
+	return m.completeDestinationMutation(ctx, sourceTable, destTable, previousIncarnation, resultIncarnation, "conditional swap")
+}
+
+func (m *CDCStateManager) CompleteSchemaEvolution(ctx context.Context, sourceTable, destTable, previousIncarnation, resultIncarnation string) error {
+	return m.completeDestinationMutation(ctx, sourceTable, destTable, previousIncarnation, resultIncarnation, "schema evolution")
+}
+
+func (m *CDCStateManager) completeDestinationMutation(ctx context.Context, sourceTable, destTable, previousIncarnation, resultIncarnation, operation string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if previousIncarnation == "" || resultIncarnation == "" {
-		return fmt.Errorf("CDC conditional swap for %q has an empty physical incarnation", destTable)
+		return fmt.Errorf("CDC %s for %q has an empty physical incarnation", operation, destTable)
 	}
 	if bound := m.boundRawDestinations[sourceTable]; bound != previousIncarnation {
-		return fmt.Errorf("CDC destination table %q changed before its conditional swap", destTable)
+		return fmt.Errorf("CDC destination table %q changed before its %s", destTable, operation)
 	}
 	raw, digest, exists, err := m.destinationIncarnationForTable(ctx, destTable)
 	if err != nil {
 		return err
 	}
 	if !exists || raw != resultIncarnation {
-		return fmt.Errorf("CDC destination table %q was replaced during its conditional swap", destTable)
+		return fmt.Errorf("CDC destination table %q was replaced during its %s", destTable, operation)
 	}
 	m.boundRawDestinations[sourceTable] = raw
 	m.boundDestinations[sourceTable] = digest

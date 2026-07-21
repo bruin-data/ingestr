@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
 	"github.com/bruin-data/ingestr/pkg/tablename"
@@ -125,7 +126,7 @@ func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
 	require.True(t, exists)
 	require.NotEmpty(t, first)
@@ -139,10 +140,165 @@ func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, exists)
 	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
-	recreated, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	recreated, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
 	require.True(t, exists)
 	require.NotEqual(t, first, recreated)
+}
+
+func TestCDCTargetIncarnationSurvivesReconnect(t *testing.T) {
+	dest, path := connectTestDuckDB(t, t.Context())
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `COMMENT ON TABLE events IS 'customer-owned comment'`))
+	first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, dest.Close(t.Context()))
+
+	reopened := NewDuckDBDestination()
+	require.NoError(t, reopened.Connect(t.Context(), "duckdb:///"+path))
+	t.Cleanup(func() { _ = reopened.Close(t.Context()) })
+	current, exists, err := reopened.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, first, current)
+
+	var comment string
+	db := openDuckDB(t, t.Context(), path)
+	require.NoError(t, db.QueryRow(`SELECT comment FROM duckdb_tables() WHERE table_name = 'events'`).Scan(&comment))
+	require.Contains(t, comment, "customer-owned comment")
+}
+
+func TestConditionalSchemaEvolutionPreservesIncarnation(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+
+	first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	comparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type:       schemaevolution.ChangeAddColumn,
+			ColumnName: "status",
+			NewColumn:  schema.Column{Name: "status", DataType: schema.TypeString, Nullable: true},
+		}},
+	}
+
+	warnings, result, err := dest.ApplySchemaEvolutionIfIncarnation(t.Context(), "events", comparison, first)
+	require.NoError(t, err)
+	require.Empty(t, warnings)
+	require.NotEmpty(t, result)
+	require.Equal(t, first, result)
+
+	current, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, result, current)
+	tableSchema, err := dest.GetTableSchema(t.Context(), "events")
+	require.NoError(t, err)
+	require.Len(t, tableSchema.Columns, 2)
+	require.Equal(t, "status", tableSchema.Columns[1].Name)
+
+	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE events`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	replacement, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NotEqual(t, first, replacement)
+	comparison.Changes[0].ColumnName = "stale_write"
+	comparison.Changes[0].NewColumn.Name = "stale_write"
+	_, _, err = dest.ApplySchemaEvolutionIfIncarnation(t.Context(), "events", comparison, first)
+	require.ErrorContains(t, err, "physical incarnation changed before schema evolution")
+	tableSchema, err = dest.GetTableSchema(t.Context(), "events")
+	require.NoError(t, err)
+	require.Len(t, tableSchema.Columns, 1)
+}
+
+func TestConditionalMergeAndTruncateRejectRecreatedTarget(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT PRIMARY KEY, name VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE staging (id BIGINT, name VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO staging VALUES (1, 'new')`))
+	expected, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "target")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE target`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT PRIMARY KEY, name VARCHAR)`))
+	_, exists, err = dest.EnsureCDCTargetIncarnation(t.Context(), "target")
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	err = dest.MergeTable(t.Context(), destination.MergeOptions{
+		StagingTable:           "staging",
+		TargetTable:            "target",
+		PrimaryKeys:            []string{"id"},
+		Columns:                []string{"id", "name"},
+		CDCExpectedIncarnation: expected,
+	})
+	require.ErrorContains(t, err, "replaced before mutation")
+	require.ErrorContains(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "target", expected), "physical incarnation changed")
+}
+
+func TestConditionalSwapRebindsStagingIncarnationToTarget(t *testing.T) {
+	dest, path := connectTestDuckDB(t, t.Context())
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO target VALUES (1)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE staging (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO staging VALUES (2)`))
+	targetIncarnation, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "target")
+	require.NoError(t, err)
+	require.True(t, exists)
+	stagingIncarnation, resultIncarnation, err := dest.CDCConditionalSwapIncarnations(t.Context(), "target", "staging")
+	require.NoError(t, err)
+	require.NoError(t, dest.SwapTable(t.Context(), destination.SwapOptions{
+		StagingTable:                  "staging",
+		TargetTable:                   "target",
+		CDCExpectedIncarnation:        targetIncarnation,
+		CDCExpectedStagingIncarnation: stagingIncarnation,
+		CDCExpectedResultIncarnation:  resultIncarnation,
+	}))
+	current, exists, err := dest.CDCTargetIncarnation(t.Context(), "target")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, resultIncarnation, current)
+
+	db := openDuckDB(t, t.Context(), path)
+	var id int64
+	require.NoError(t, db.QueryRow(`SELECT id FROM target`).Scan(&id))
+	require.Equal(t, int64(2), id)
+}
+
+func TestManagedCDCRunLeaseSerializesDuckDBFile(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	first, err := dest.AcquireManagedCDCRunLease(t.Context(), "connector-a")
+	require.NoError(t, err)
+	_, err = dest.AcquireManagedCDCRunLease(t.Context(), "connector-b")
+	require.ErrorContains(t, err, "already owns")
+	require.NoError(t, first.Release())
+	second, err := dest.AcquireManagedCDCRunLease(t.Context(), "connector-b")
+	require.NoError(t, err)
+	require.NoError(t, second.Release())
+}
+
+func TestDuckDBDecimalPrecisionScale(t *testing.T) {
+	tests := []struct {
+		dataType  string
+		precision int
+		scale     int
+	}{
+		{dataType: "DECIMAL(35,4)", precision: 35, scale: 4},
+		{dataType: "decimal( 30, 0 )", precision: 30, scale: 0},
+		{dataType: "DECIMAL", precision: 0, scale: 0},
+		{dataType: "DECIMAL(bad,4)", precision: 0, scale: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dataType, func(t *testing.T) {
+			precision, scale := duckDBDecimalPrecisionScale(tt.dataType)
+			require.Equal(t, tt.precision, precision)
+			require.Equal(t, tt.scale, scale)
+		})
+	}
 }
 
 func TestParseDuckDBPath(t *testing.T) {

@@ -109,8 +109,8 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	// rebuilding their stream around mid-stream DDL; evolve the destination
 	// before the new-shape batches arrive. Sources that never announce
 	// (message brokers) leave this callback unused.
-	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
-		return evolveDestinationTable(ctx, job.Destination, destTable, newSchema, job.Config)
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema, expectedIncarnation string) (string, error) {
+		return evolveDestinationTableIfIncarnation(ctx, job.Destination, destTable, newSchema, job.Config, expectedIncarnation)
 	}
 	defer loop.cleanup(ctx)
 	err = loop.run(ctx, records)
@@ -267,8 +267,8 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	// rebuilding their stream around mid-stream DDL — a column added or a type
 	// changed on the source while streaming. The destination is evolved before
 	// the new-shape batches arrive.
-	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
-		return evolveDestinationTable(ctx, job.Destination, destTable, newSchema, job.Config)
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema, expectedIncarnation string) (string, error) {
+		return evolveDestinationTableIfIncarnation(ctx, job.Destination, destTable, newSchema, job.Config, expectedIncarnation)
 	}
 	defer loop.cleanup(ctx)
 	err = loop.run(ctx, records)
@@ -442,7 +442,7 @@ type flushLoop struct {
 	// source schema changed mid-stream (the source re-announces it with the
 	// refreshed schema after rebuilding its stream). Nil means mid-stream
 	// schema changes are unsupported and re-announcements are ignored.
-	evolveTable func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error
+	evolveTable func(ctx context.Context, destTable string, newSchema *schema.TableSchema, expectedIncarnation string) (resultIncarnation string, err error)
 
 	buffered int64 // rows buffered across all tables
 
@@ -746,11 +746,34 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := l.evolveTable(ctx, st.destTable, newSchema); err != nil {
+	stateTable := ""
+	expectedIncarnation := ""
+	if l.opts.StateManager != nil {
+		stateTable = l.stateSourceTable(ti.Name)
+		if stateTable == "" {
+			var err error
+			stateTable, err = l.opts.StateManager.SourceTableForDestination(st.destTable)
+			if err != nil {
+				return err
+			}
+		}
+		var err error
+		expectedIncarnation, err = l.opts.StateManager.BoundDestinationIncarnation(stateTable)
+		if err != nil {
+			return fmt.Errorf("failed to read CDC destination binding before schema change for %s: %w", stateTable, err)
+		}
+	}
+	resultIncarnation, err := l.evolveTable(ctx, st.destTable, newSchema, expectedIncarnation)
+	if err != nil {
 		return fmt.Errorf("failed to evolve destination table %s: %w", st.destTable, err)
 	}
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
+	}
+	if l.opts.StateManager != nil {
+		if err := l.opts.StateManager.CompleteSchemaEvolution(ctx, stateTable, st.destTable, expectedIncarnation, resultIncarnation); err != nil {
+			return fmt.Errorf("failed to rebind CDC destination after schema change for %s: %w", stateTable, err)
+		}
 	}
 
 	st.schema = newSchema

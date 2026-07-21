@@ -28,8 +28,8 @@ func streamSchemaChangeFixture(destSchema *schema.TableSchema) (*flushLoop, *fak
 		primaryKeys: []string{"id"},
 	}
 	loop := newFlushLoop(dest, cfg, StreamingOptions{Strategy: config.StrategyMerge}, map[string]*streamTableState{"public.items": st})
-	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
-		return evolveDestinationTable(ctx, dest, destTable, newSchema, cfg)
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema, expectedIncarnation string) (string, error) {
+		return evolveDestinationTableIfIncarnation(ctx, dest, destTable, newSchema, cfg, expectedIncarnation)
 	}
 	return loop, dest, st
 }
@@ -117,8 +117,8 @@ func TestFlushLoopRefreshHonorsFreezeContract(t *testing.T) {
 		schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
 	}
 	loop := newFlushLoop(dest, cfg, StreamingOptions{Strategy: config.StrategyMerge}, map[string]*streamTableState{"public.items": st})
-	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
-		return evolveDestinationTable(ctx, dest, destTable, newSchema, cfg)
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema, expectedIncarnation string) (string, error) {
+		return evolveDestinationTableIfIncarnation(ctx, dest, destTable, newSchema, cfg, expectedIncarnation)
 	}
 
 	newSchema := &schema.TableSchema{Columns: []schema.Column{
@@ -212,8 +212,8 @@ func TestFlushLoopRefreshSkipsCDCStagingColumns(t *testing.T) {
 		}},
 	}
 	loop := newFlushLoop(dest, cfg, StreamingOptions{Strategy: config.StrategyMerge}, map[string]*streamTableState{"public.items": st})
-	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema) error {
-		return evolveDestinationTable(ctx, dest, destTable, newSchema, cfg)
+	loop.evolveTable = func(ctx context.Context, destTable string, newSchema *schema.TableSchema, expectedIncarnation string) (string, error) {
+		return evolveDestinationTableIfIncarnation(ctx, dest, destTable, newSchema, cfg, expectedIncarnation)
 	}
 
 	newSchema := &schema.TableSchema{Columns: []schema.Column{

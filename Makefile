@@ -98,17 +98,20 @@ test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
 
-# High-volume PostgreSQL CDC accuracy and schema-churn test (~6 minutes with
-# the default profile). Covers late tables, add/drop/rename/type DDL, JSONB,
-# deletes, PK updates, and transactional TRUNCATE. Gated behind the `stress`
-# build tag so CI never runs it.
+# High-volume PostgreSQL CDC accuracy and schema-churn test running parallel
+# ingestion processes into PostgreSQL and DuckDB (~6 minutes with the default
+# profile), followed by focused schema-evolution regressions. The high-volume
+# workload remains gated behind the `stress` build tag.
 cdc-postgres-stress-test: generate
 	@echo "$(OK_COLOR)==> Running PostgreSQL CDC complex-workload stress test (default profile: ~6m)$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestPostgresCDC_StressComplexWorkload$$' ./tests/integration/
+	@echo "$(OK_COLOR)==> Running PostgreSQL CDC schema-evolution regressions for DuckDB and MySQL$(NO_COLOR)"
+	@if [ -f test.env ]; then . ./test.env; fi && INTEGRATION_BACKENDS=postgres,mysql $(TELEMETRY_ENV) go test -tags integration -count=1 -v -timeout 5m -run '^TestPostgresCDC_StreamingSchemaEvolution_(DuckDB|MySQL)$$' ./tests/integration/
 
-# High-volume MySQL CDC accuracy and performance test (~6 minutes with the
-# default profile), plus focused correctness regressions for protocol modes and
-# failure recovery. Gated behind the `stress` build tag.
+# High-volume MySQL CDC accuracy and performance test running parallel batch
+# ingestion processes into MySQL and DuckDB (~6 minutes with the default
+# profile), plus focused correctness regressions for protocol modes and failure
+# recovery. Gated behind the `stress` build tag.
 cdc-mysql-stress-test: generate
 	@echo "$(OK_COLOR)==> Running MySQL CDC stress and correctness regression tests (default profile: ~6m)$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi; \

@@ -4,8 +4,9 @@
 // the regular integration suite (build tag `stress`, not `integration`) so it
 // never slows down CI; run it with `make cdc-postgres-stress-test`.
 //
-// Scenario: a streaming CDC pipeline replicates from one Postgres container to
-// another while parallel workers apply ~1000 inserts/updates/deletes per second.
+// Scenario: two streaming CDC pipelines replicate from one Postgres container
+// into PostgreSQL and DuckDB while parallel workers apply
+// ~1000 inserts/updates/deletes per second.
 // During the load, tables with pre-existing rows are discovered and one table
 // goes through column add/drop/rename, a numeric type change, large JSONB
 // updates, primary-key updates, and TRUNCATE followed by inserts in the same
@@ -16,9 +17,11 @@ package integration
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,6 +85,11 @@ type stressTable struct {
 	insertSQL string
 	updateSQL string
 	deleteSQL string
+}
+
+type stressTruth struct {
+	count int64
+	sum   string
 }
 
 func newStressTable(name string, seeded int64) *stressTable {
@@ -326,6 +334,7 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 
 	sourceContainer, sourceConnString := stressSourceContainer(t, ctx)
 	destConnString, destPool := stressDestContainer(t, ctx)
+	duckDBPath := filepath.Join(t.TempDir(), "postgres-cdc-stress.duckdb")
 
 	srcPool, err := pgxpool.New(ctx, fmt.Sprintf("%s&pool_max_conns=%d", sourceConnString, max(32, stressWorkers+8)))
 	require.NoError(t, err)
@@ -342,8 +351,9 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	_, err = srcPool.Exec(ctx, `ALTER USER testuser REPLICATION`)
 	require.NoError(t, err)
 
-	cfg := &config.IngestConfig{
-		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&discover_interval=5s",
+	nativeConfig := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&discover_interval=5s&state_id=postgres-stress-native",
 		DestURI:             destConnString,
 		IncrementalStrategy: config.StrategyMerge,
 		Stream:              true,
@@ -351,24 +361,42 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		FlushRecords:        25000,
 		Progress:            config.ProgressLog,
 	}
+	duckDBConfig := *nativeConfig
+	duckDBConfig.SourceURI = "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+		"&discover_interval=5s&state_id=postgres-stress-duckdb"
+	duckDBConfig.DestURI = "duckdb:///" + duckDBPath
 
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
-	runErr := make(chan error, 1)
-	var streamRestarts int
-	startStream := func() {
-		go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+	type streamSink struct {
+		name     string
+		config   *config.IngestConfig
+		restarts int
 	}
-	restartStreamIfRequired := func(err error) bool {
-		if err == nil || !strings.Contains(err.Error(), "requires restarting the stream before it can be ingested") {
+	type streamExit struct {
+		sink *streamSink
+		err  error
+	}
+	streamSinks := []*streamSink{
+		{name: "postgres", config: nativeConfig},
+		{name: "duckdb", config: &duckDBConfig},
+	}
+	streamExits := make(chan streamExit, len(streamSinks)*2)
+	startStream := func(sink *streamSink) {
+		go func() { streamExits <- streamExit{sink: sink, err: pipeline.New(sink.config).Run(streamCtx)} }()
+	}
+	restartStreamIfRequired := func(exit streamExit) bool {
+		if exit.err == nil || !strings.Contains(exit.err.Error(), "requires restarting the stream before it can be ingested") {
 			return false
 		}
-		streamRestarts++
-		t.Logf("restarting stream after safe late-table discovery boundary: %v", err)
-		startStream()
+		exit.sink.restarts++
+		t.Logf("restarting %s stream after safe late-table discovery boundary: %v", exit.sink.name, exit.err)
+		startStream(exit.sink)
 		return true
 	}
-	startStream()
+	for _, sink := range streamSinks {
+		startStream(sink)
+	}
 
 	ddlPhases := stressSchemaPhases()
 	ddlDelay := stressEventDelay(stressSchemaEvery, stressLoadDuration, len(ddlPhases))
@@ -482,13 +510,13 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		select {
 		case <-loadDone:
 			running = false
-		case err := <-runErr:
-			if restartStreamIfRequired(err) {
+		case exit := <-streamExits:
+			if restartStreamIfRequired(exit) {
 				continue
 			}
 			stopLoad()
 			<-loadDone
-			t.Fatalf("stream exited during load phase: %v", err)
+			t.Fatalf("%s stream exited during load phase: %v", exit.sink.name, exit.err)
 		case <-status.C:
 			t.Logf("t=%v: %d inserts, %d updates, %d deletes, %d/%d schema phases, %d op errors",
 				time.Since(started).Round(time.Second), inserts.Load(), updates.Load(), deletes.Load(), completedDDL.Load(), len(ddlPhases), opErrors.Load())
@@ -508,34 +536,96 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	require.Len(t, finalTables, stressInitialTables+1+stressLateTables, "all initial, evolving, and late tables should exist")
 
 	// The source is now quiescent; capture the ground truth.
-	type truth struct {
-		count int64
-		sum   string
-	}
-	truths := make(map[string]truth, len(finalTables))
+	truths := make(map[string]stressTruth, len(finalTables))
 	for _, tbl := range finalTables {
-		var tr truth
+		var tr stressTruth
 		require.NoError(t, srcPool.QueryRow(ctx,
 			fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0)::text FROM public.%s`, tbl.name)).Scan(&tr.count, &tr.sum))
 		truths[tbl.name] = tr
 		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
+	var duckDB *sql.DB
+	withDuckDB := func(fn func(*sql.DB) error) error {
+		if duckDB != nil {
+			return fn(duckDB)
+		}
+		return withCDCStressDuckDB(duckDBPath, fn)
+	}
 
-	destAgg := func(table string) (truth, error) {
-		var tr truth
-		err := destPool.QueryRow(ctx,
-			fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0)::text FROM %s WHERE _cdc_deleted = false`, table)).Scan(&tr.count, &tr.sum)
-		return tr, err
+	type stressDestination struct {
+		name          string
+		aggregate     func(string) (stressTruth, error)
+		compareAll    func() error
+		validate      func() error
+		validateState func() error
+		softDeleted   func(string) (int64, error)
+	}
+	destinations := []stressDestination{
+		{
+			name: "postgres",
+			aggregate: func(table string) (stressTruth, error) {
+				var tr stressTruth
+				err := destPool.QueryRow(ctx,
+					fmt.Sprintf(`SELECT count(*), COALESCE(sum(val), 0)::text FROM %s WHERE _cdc_deleted = false`, table)).Scan(&tr.count, &tr.sum)
+				return tr, err
+			},
+			compareAll:    func() error { return stressCompareAll(ctx, srcPool, destPool, finalTables) },
+			validate:      func() error { return stressValidateSchemas(ctx, srcPool, destPool, finalTables) },
+			validateState: func() error { return stressValidateDestinationState(ctx, destPool, len(finalTables)) },
+			softDeleted: func(table string) (int64, error) {
+				var deleted int64
+				err := destPool.QueryRow(ctx,
+					fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(table))).Scan(&deleted)
+				return deleted, err
+			},
+		},
+		{
+			name: "duckdb",
+			aggregate: func(table string) (stressTruth, error) {
+				var truth stressTruth
+				err := withDuckDB(func(db *sql.DB) error {
+					var err error
+					truth, err = stressDuckDBTruth(ctx, db, table)
+					return err
+				})
+				return truth, err
+			},
+			compareAll: func() error {
+				return withDuckDB(func(db *sql.DB) error {
+					return stressCompareAllDuckDB(ctx, srcPool, db, finalTables)
+				})
+			},
+			validate: func() error {
+				return withDuckDB(func(db *sql.DB) error {
+					return stressValidateDuckDBSchemas(ctx, srcPool, db, finalTables)
+				})
+			},
+			validateState: func() error {
+				return withDuckDB(func(db *sql.DB) error {
+					return stressValidateDuckDBState(ctx, db, len(finalTables))
+				})
+			},
+			softDeleted: func(table string) (int64, error) {
+				var deleted int64
+				err := withDuckDB(func(db *sql.DB) error {
+					return db.QueryRowContext(ctx,
+						fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(table))).Scan(&deleted)
+				})
+				return deleted, err
+			},
+		},
 	}
 
 	dumpDiagnostics := func() {
 		stressDumpReplicationState(t, ctx, srcPool)
-		for _, tbl := range finalTables {
-			got, err := destAgg(tbl.name)
-			t.Logf("  %s: want %+v, got %+v (err=%v)", tbl.name, truths[tbl.name], got, err)
-		}
-		if err := stressCompareAll(ctx, srcPool, destPool, finalTables); err != nil {
-			t.Logf("  first content mismatch: %v", err)
+		for _, destination := range destinations {
+			for _, tbl := range finalTables {
+				got, err := destination.aggregate(tbl.name)
+				t.Logf("  %s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
+			}
+			if err := destination.compareAll(); err != nil {
+				t.Logf("  %s first content mismatch: %v", destination.name, err)
+			}
 		}
 		stressDumpContainerLogs(t, ctx, sourceContainer, 120)
 	}
@@ -544,19 +634,24 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	lastProgressLog := time.Now()
 	for {
 		select {
-		case err := <-runErr:
-			if restartStreamIfRequired(err) {
+		case exit := <-streamExits:
+			if restartStreamIfRequired(exit) {
 				continue
 			}
 			dumpDiagnostics()
-			t.Fatalf("stream exited during convergence: %v", err)
+			t.Fatalf("%s stream exited during convergence: %v", exit.sink.name, exit.err)
 		default:
 		}
 		pending := ""
-		for _, tbl := range finalTables {
-			got, err := destAgg(tbl.name)
-			if err != nil || got != truths[tbl.name] {
-				pending = fmt.Sprintf("%s: want %+v, got %+v (err=%v)", tbl.name, truths[tbl.name], got, err)
+		for _, destination := range destinations {
+			for _, tbl := range finalTables {
+				got, err := destination.aggregate(tbl.name)
+				if err != nil || got != truths[tbl.name] {
+					pending = fmt.Sprintf("%s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
+					break
+				}
+			}
+			if pending != "" {
 				break
 			}
 		}
@@ -573,43 +668,54 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Log("destination converged on count/sum aggregates for all tables")
-	require.Positive(t, streamRestarts, "late-table workload should exercise the safe restart boundary")
+	t.Log("PostgreSQL and DuckDB destinations converged on count/sum aggregates for all tables")
+	for _, sink := range streamSinks {
+		require.Positive(t, sink.restarts, "%s workload should exercise the safe restart boundary", sink.name)
+	}
+
+	cancelStream()
+	stopped := make(map[string]struct{}, len(streamSinks))
+	deadline = time.Now().Add(60 * time.Second)
+	for len(stopped) < len(streamSinks) {
+		select {
+		case exit := <-streamExits:
+			if exit.err != nil {
+				require.ErrorIs(t, exit.err, context.Canceled, "%s stream shutdown", exit.sink.name)
+			}
+			stopped[exit.sink.name] = struct{}{}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("streaming pipelines did not exit within 60s of cancellation")
+		}
+	}
+	duckDB = openCDCStressDuckDB(t, duckDBPath)
 
 	// Aggregates can match while a final merge is still landing payload
 	// updates, so retry the deep comparison briefly before declaring failure.
-	var compareErr error
-	for attempt := 1; attempt <= 6; attempt++ {
-		if compareErr = stressCompareAll(ctx, srcPool, destPool, finalTables); compareErr == nil {
-			break
+	for _, destination := range destinations {
+		var compareErr error
+		for attempt := 1; attempt <= 6; attempt++ {
+			if compareErr = destination.compareAll(); compareErr == nil {
+				break
+			}
+			t.Logf("%s deep comparison attempt %d: %v", destination.name, attempt, compareErr)
+			time.Sleep(5 * time.Second)
 		}
-		t.Logf("deep comparison attempt %d: %v", attempt, compareErr)
-		time.Sleep(5 * time.Second)
+		require.NoError(t, compareErr, "%s row-by-row content comparison failed", destination.name)
+		t.Logf("%s row-by-row content comparison passed for all tables", destination.name)
+		require.NoError(t, destination.validate(), "%s destination schema validation failed", destination.name)
+		require.NoError(t, destination.validateState(), "%s destination CDC state validation failed", destination.name)
 	}
-	require.NoError(t, compareErr, "row-by-row content comparison failed")
-	t.Log("row-by-row content comparison passed for all tables")
 
-	require.NoError(t, stressValidateSchemas(ctx, srcPool, destPool, finalTables))
-	require.NoError(t, stressValidateDestinationState(ctx, destPool, len(finalTables)))
-	var softDeleted int64
-	for _, tbl := range finalTables {
-		var deleted int64
-		require.NoError(t, destPool.QueryRow(ctx,
-			fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(tbl.name))).Scan(&deleted))
-		softDeleted += deleted
+	for _, destination := range destinations {
+		var softDeleted int64
+		for _, tbl := range finalTables {
+			deleted, err := destination.softDeleted(tbl.name)
+			require.NoError(t, err)
+			softDeleted += deleted
+		}
+		require.Positive(t, softDeleted, "%s destination should retain soft-deleted CDC rows outside truncated tables", destination.name)
 	}
 	require.Positive(t, deletes.Load(), "workload should execute real deletes")
-	require.Positive(t, softDeleted, "destination should retain soft-deleted CDC rows outside truncated tables")
-
-	cancelStream()
-	select {
-	case err := <-runErr:
-		if err != nil {
-			require.ErrorIs(t, err, context.Canceled)
-		}
-	case <-time.After(60 * time.Second):
-		t.Fatal("streaming pipeline did not exit within 60s of cancellation")
-	}
 }
 
 func stressDumpReplicationState(t *testing.T, ctx context.Context, srcPool *pgxpool.Pool) {
@@ -756,6 +862,207 @@ func stressCompareAll(ctx context.Context, src, dst *pgxpool.Pool, tables []*str
 	wg.Wait()
 	close(errCh)
 	return <-errCh
+}
+
+func stressDuckDBTruth(ctx context.Context, db *sql.DB, table string) (stressTruth, error) {
+	var tr stressTruth
+	err := db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT count(*), CAST(COALESCE(sum(val), 0) AS VARCHAR) FROM %s WHERE _cdc_deleted = false`,
+		quoteStressIdentifier(table),
+	)).Scan(&tr.count, &tr.sum)
+	return tr, err
+}
+
+func stressFetchDuckDBChunk(
+	ctx context.Context,
+	db *sql.DB,
+	table string,
+	columns []string,
+	offset, limit int64,
+) ([]stressRow, error) {
+	pairs := make([]string, 0, len(columns)*2)
+	for _, column := range columns {
+		pairs = append(pairs, quoteStressLiteral(column), quoteStressIdentifier(column))
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT id, CAST(json_object(%s) AS VARCHAR)
+		 FROM %s WHERE _cdc_deleted = false ORDER BY id LIMIT ? OFFSET ?`,
+		strings.Join(pairs, ", "), quoteStressIdentifier(table),
+	), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []stressRow
+	for rows.Next() {
+		var row stressRow
+		var raw string
+		if err := rows.Scan(&row.id, &raw); err != nil {
+			return nil, err
+		}
+		row.canonical, err = canonicalizeCDCStressJSON(raw)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize DuckDB row %s id=%d: %w", table, row.id, err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func stressCompareChunkRangeDuckDB(
+	ctx context.Context,
+	src *pgxpool.Pool,
+	dst *sql.DB,
+	table string,
+	columns []string,
+	offset, limit int64,
+) error {
+	sourceTable := quoteStressIdentifier("public") + "." + quoteStressIdentifier(table)
+	srcRows, err := stressFetchChunk(ctx, src, sourceTable, "", columns, offset, limit)
+	if err != nil {
+		return fmt.Errorf("%s offset %d: source fetch: %w", table, offset, err)
+	}
+	dstRows, err := stressFetchDuckDBChunk(ctx, dst, table, columns, offset, limit)
+	if err != nil {
+		return fmt.Errorf("%s offset %d: DuckDB fetch: %w", table, offset, err)
+	}
+	if len(srcRows) != len(dstRows) {
+		return fmt.Errorf("%s offset %d: row count mismatch: source=%d DuckDB=%d", table, offset, len(srcRows), len(dstRows))
+	}
+	for i := range srcRows {
+		sourceCanonical, err := canonicalizeCDCStressJSON(srcRows[i].canonical)
+		if err != nil {
+			return fmt.Errorf("canonicalize source row %s id=%d: %w", table, srcRows[i].id, err)
+		}
+		if srcRows[i].id != dstRows[i].id || sourceCanonical != dstRows[i].canonical {
+			return fmt.Errorf("%s: content mismatch at id=%d: source=%s DuckDB={id:%d row:%s}",
+				table, srcRows[i].id, sourceCanonical, dstRows[i].id, dstRows[i].canonical)
+		}
+	}
+	return nil
+}
+
+func stressCompareAllDuckDB(ctx context.Context, src *pgxpool.Pool, dst *sql.DB, tables []*stressTable) error {
+	type chunk struct {
+		table   string
+		columns []string
+		offset  int64
+	}
+	var chunks []chunk
+	for _, table := range tables {
+		columns, err := stressSourceColumns(ctx, src, table.name)
+		if err != nil {
+			return err
+		}
+		var count int64
+		if err := src.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM public.%s`, quoteStressIdentifier(table.name))).Scan(&count); err != nil {
+			return fmt.Errorf("count source table %s: %w", table.name, err)
+		}
+		for offset := int64(0); offset < count; offset += stressCompareChunk {
+			chunks = append(chunks, chunk{table: table.name, columns: columns, offset: offset})
+		}
+	}
+
+	sem := make(chan struct{}, stressCompareParallel)
+	errCh := make(chan error, len(chunks))
+	var wg sync.WaitGroup
+	for _, item := range chunks {
+		wg.Add(1)
+		go func(item chunk) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := stressCompareChunkRangeDuckDB(ctx, src, dst, item.table, item.columns, item.offset, stressCompareChunk); err != nil {
+				errCh <- err
+			}
+		}(item)
+	}
+	wg.Wait()
+	close(errCh)
+	return <-errCh
+}
+
+func stressDuckDBColumns(ctx context.Context, db *sql.DB, table string) (map[string]string, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", quoteStressLiteral(table)))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	columns := make(map[string]string)
+	for rows.Next() {
+		var cid int
+		var name, dataType []byte
+		var notNull, primaryKey bool
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		columns[string(name)] = strings.ToUpper(string(dataType))
+	}
+	return columns, rows.Err()
+}
+
+func stressValidateDuckDBSchemas(ctx context.Context, src *pgxpool.Pool, dst *sql.DB, tables []*stressTable) error {
+	for _, table := range tables {
+		sourceColumns, err := stressColumns(ctx, src, table.name)
+		if err != nil {
+			return fmt.Errorf("source schema %s: %w", table.name, err)
+		}
+		destColumns, err := stressDuckDBColumns(ctx, dst, table.name)
+		if err != nil {
+			return fmt.Errorf("DuckDB schema %s: %w", table.name, err)
+		}
+		for name, sourceColumn := range sourceColumns {
+			got, ok := destColumns[name]
+			if !ok {
+				return fmt.Errorf("DuckDB table %s is missing active source column %s", table.name, name)
+			}
+			switch sourceColumn.udt {
+			case "numeric":
+				want := fmt.Sprintf("DECIMAL(%d,%d)", sourceColumn.precision, sourceColumn.scale)
+				if got != want {
+					return fmt.Errorf("DuckDB table %s column %s type mismatch: got %s want %s", table.name, name, got, want)
+				}
+			case "jsonb":
+				if got != "JSON" {
+					return fmt.Errorf("DuckDB table %s column %s type mismatch: got %s want JSON", table.name, name, got)
+				}
+			}
+		}
+		if table.name == stressEvolvingTable {
+			for _, removed := range []string{"legacy", "segment"} {
+				if _, retained := destColumns[removed]; !retained {
+					return fmt.Errorf("soft-removed DuckDB column %s is missing on %s", removed, table.name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func stressValidateDuckDBState(ctx context.Context, db *sql.DB, tableCount int) error {
+	var stateTables int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = '_bruin_staging' AND table_name = 'cdc_state'`).Scan(&stateTables); err != nil {
+		return err
+	}
+	if stateTables != 1 {
+		return fmt.Errorf("unexpected DuckDB shared CDC state table count: got %d want 1", stateTables)
+	}
+
+	var checkpointRows, completedTables int
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE state_kind = 'checkpoint' AND state_status = 'complete'),
+			COUNT(DISTINCT source_table) FILTER (WHERE state_kind = 'snapshot' AND state_status = 'complete')
+		FROM "_bruin_staging"."cdc_state"`).Scan(&checkpointRows, &completedTables); err != nil {
+		return err
+	}
+	if checkpointRows == 0 || completedTables != tableCount {
+		return fmt.Errorf("unexpected DuckDB shared CDC state: checkpoints=%d completed tables=%d want checkpoints>0 tables=%d", checkpointRows, completedTables, tableCount)
+	}
+	return nil
 }
 
 func stressSourceColumns(ctx context.Context, pool *pgxpool.Pool, table string) ([]string, error) {

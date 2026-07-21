@@ -280,11 +280,6 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: github.com/DataDog/zstd
-      version: v1.5.7
-      licenses:
-        - BSD-3-Clause
-      status: allowed
     - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
       version: v1.6.0
       licenses:
@@ -763,11 +758,6 @@ dependencies:
       licenses:
         - MIT
       status: allowed
-    - module: github.com/ebitengine/purego
-      version: v0.10.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/eclipse/paho.mqtt.golang
       version: v1.5.1
       licenses:
@@ -904,6 +894,11 @@ dependencies:
       version: v5.1.0
       licenses:
         - BSD-2-Clause
+      status: allowed
+    - module: github.com/gofrs/flock
+      version: v0.13.0
+      licenses:
+        - BSD-3-Clause
       status: allowed
     - module: github.com/gogo/protobuf
       version: v1.3.2
