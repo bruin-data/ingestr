@@ -845,7 +845,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		}
 		updateCondition := onCondition
 		if isCDC {
-			updateCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND source."__ingestr_has_equal_lsn_delete"))`
+			updateCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false AND source."__ingestr_has_equal_lsn_delete"))`
 		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,

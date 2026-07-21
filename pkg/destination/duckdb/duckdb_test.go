@@ -1252,6 +1252,13 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 		assert.Equal(t, want.synced, synced, "id %d synced timestamp", id)
 	}
 
+	require.NoError(t, dest.Exec(ctx, `UPDATE target_table SET name = 'replay-sentinel' WHERE id = 10`))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	name, lsn, deleted, _ := readDuckDBCDCRow(t, ctx, dest, 10)
+	assert.Equal(t, "replay-sentinel", name)
+	assert.Equal(t, "00000000000000000010", lsn)
+	assert.True(t, deleted)
+
 	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
 	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'newest', '00000000000000000040', false, '2026-01-04', '[]')`))
 	require.NoError(t, dest.MergeTable(ctx, opts))
