@@ -20,7 +20,10 @@ import (
 	_ "github.com/sijms/go-ora/v2"
 )
 
-const defaultOracleStagingSchema = "_bruin_staging"
+const (
+	defaultOracleStagingSchema = "_bruin_staging"
+	cdcEqualLSNDeleteMarker    = "__ingestr_has_equal_lsn_delete"
+)
 
 type OracleDestination struct {
 	db          *sql.DB
@@ -454,7 +457,7 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	upsertSource := dedupSource("")
 	if isCDC {
-		upsertSource = dedupSource(" WHERE " + quoteColumn(destination.CDCDeletedColumn) + " = 0")
+		upsertSource = oracleCDCActiveSource(columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), "source")
 	}
 
 	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate)
@@ -536,10 +539,14 @@ func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primary
 				conditions = append(conditions, "("+predicate+")")
 			}
 			conditions = append(conditions, fmt.Sprintf(
-				"(target.%s IS NULL OR source.%s > target.%s)",
+				"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND NVL(target.%s, 0) = 0 AND source.%s = 1))",
 				quoteColumn(destination.CDCLSNColumn),
 				quoteColumn(destination.CDCLSNColumn),
 				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCDeletedColumn),
+				quoteColumn(cdcEqualLSNDeleteMarker),
 			))
 			fmt.Fprintf(&b, " WHERE %s", strings.Join(conditions, " AND "))
 		}
@@ -1163,6 +1170,30 @@ func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryK
 
 func oracleDedupSource(columns, primaryKeys []string, tableExpr, orderBy, where, alias string) string {
 	return fmt.Sprintf("(%s) %s", oracleDedupSelect(columns, primaryKeys, tableExpr, orderBy, where), alias)
+}
+
+func oracleCDCActiveSource(columns, primaryKeys []string, tableExpr, alias string) string {
+	quotedColumns := strings.Join(quoteColumns(columns), ", ")
+	quotedPKs := strings.Join(quoteColumns(primaryKeys), ", ")
+	deleted := quoteColumn(destination.CDCDeletedColumn)
+	lsn := quoteColumn(destination.CDCLSNColumn)
+	marker := quoteColumn(cdcEqualLSNDeleteMarker)
+	return fmt.Sprintf(
+		"(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, %s ORDER BY %s DESC) bruin_active_rn, MAX(%s) OVER (PARTITION BY %s, %s) %s FROM %s) bruin_numbered WHERE %s = 0 AND bruin_active_rn = 1) %s",
+		quotedColumns,
+		marker,
+		quotedColumns,
+		quotedPKs,
+		deleted,
+		lsn,
+		deleted,
+		quotedPKs,
+		lsn,
+		marker,
+		tableExpr,
+		deleted,
+		alias,
+	)
 }
 
 func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string, where ...string) string {

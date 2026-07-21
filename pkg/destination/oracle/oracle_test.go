@@ -439,7 +439,7 @@ func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
 
 func TestBuildCDCMergeSQLFencesUpdatesWithoutChangingPKMatch(t *testing.T) {
 	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
-	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
 	got := buildMergeSQLWithPredicate(
 		"items",
 		source,
@@ -452,7 +452,7 @@ func TestBuildCDCMergeSQLFencesUpdatesWithoutChangingPKMatch(t *testing.T) {
 	assert.Contains(t, got, `MERGE INTO "ITEMS" target`)
 	assert.NotContains(t, got, `MERGE INTO (SELECT`)
 	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
-	assert.Contains(t, got, `WHERE (target."PAYLOAD" = 'eligible') AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN")`)
+	assert.Contains(t, got, `WHERE (target."PAYLOAD" = 'eligible') AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND NVL(target."_CDC_DELETED", 0) = 0 AND source."__INGESTR_HAS_EQUAL_LSN_DELETE" = 1))`)
 	assert.Contains(t, got, `WHEN NOT MATCHED THEN INSERT`)
 }
 
@@ -499,12 +499,12 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 		destination.CDCSyncedAtColumn,
 		destination.CDCUnchangedColsColumn,
 	}
-	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
 	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
 
 	assert.Contains(t, got, `JSON_EXISTS(COALESCE(source."_CDC_UNCHANGED_COLS", '[]'), '$[*]?(@ == $marker)' PASSING 'payload' AS "marker")`)
 	assert.Contains(t, got, `THEN target."PAYLOAD" ELSE source."PAYLOAD" END`)
-	assert.Contains(t, got, `(target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN")`)
+	assert.Contains(t, got, `(target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND NVL(target."_CDC_DELETED", 0) = 0 AND source."__INGESTR_HAS_EQUAL_LSN_DELETE" = 1))`)
 	assert.Contains(t, got, `INSERT ("ID", "PAYLOAD", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT")`)
 	assert.NotContains(t, got, `INSERT ("ID", "PAYLOAD", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS")`)
 	assert.True(t, NewOracleDestination().SupportsCDCUnchangedCols())
@@ -512,7 +512,7 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 
 func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerUsesPlainUpdateSet(t *testing.T) {
 	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
-	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
 	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
 
 	assert.NotContains(t, got, "_CDC_UNCHANGED_COLS")
@@ -522,7 +522,7 @@ func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerUsesPlainUpdateSet(t *testing
 
 func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
 	columns := []string{"id", `"Foo"`, `"foo"`, destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
-	source := oracleDedupSource(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
 	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
 
 	assert.Contains(t, got, `PASSING '"Foo"' AS "marker"`)
@@ -534,7 +534,7 @@ func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
 
 func TestBuildCDCMergeSQLKeepsCaseDistinctPayloadSeparateFromPrimaryKey(t *testing.T) {
 	columns := []string{`"Foo"`, `"foo"`, destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
-	source := oracleDedupSource(columns, []string{`"Foo"`}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn), "", "source")
+	source := oracleCDCActiveSource(columns, []string{`"Foo"`}, quoteTable("items_staging"), "source")
 	got := buildMergeSQL("items", source, columns, []string{`"Foo"`}, filterColumns(destination.DestinationColumns(columns), []string{`"Foo"`}))
 
 	assert.Contains(t, got, `ON (target."Foo" = source."Foo")`)
