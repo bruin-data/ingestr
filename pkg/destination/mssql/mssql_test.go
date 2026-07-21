@@ -490,6 +490,37 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 	}
 }
 
+func TestBuildMergeSQLAvoidsInternalAliasCollisions(t *testing.T) {
+	t.Run("non_cdc_dedup", func(t *testing.T) {
+		got := buildMergeSQL(
+			"dbo.items",
+			"stage.items",
+			[]string{"id"},
+			[]string{"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2"},
+			"",
+		)
+		assertContains(t, got, "AS [__bruin_dedup_rn_3]")
+		assertContains(t, got, "WHERE [__bruin_dedup_rn_3] = 1")
+	})
+
+	t.Run("cdc", func(t *testing.T) {
+		columns := []string{
+			"id", "payload",
+			"__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2",
+			"__INGESTR_HAS_ACTIVE", "__ingestr_has_active_2",
+			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn,
+		}
+		got := buildMergeSQL("dbo.items", "stage.items", []string{"id"}, columns, "")
+
+		assertContains(t, got, "AS [__bruin_dedup_rn_3]")
+		assertContains(t, got, "WHERE [__bruin_dedup_rn_3] = 1")
+		assertContains(t, got, "AS [__ingestr_has_active_3]")
+		assertContains(t, got, "source.[__ingestr_has_active_3] = 1")
+		assertContains(t, got, "target.[__INGESTR_HAS_ACTIVE] = CASE WHEN")
+		assertContains(t, got, "target.[__ingestr_has_active_2] = CASE WHEN")
+	})
+}
+
 func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
 	got := buildMergeSQLWithPredicate(
 		"dbo.items",
@@ -615,6 +646,19 @@ func TestBuildInsertDedupSQLAllowsNoIncrementalKey(t *testing.T) {
 	)
 
 	assertContains(t, sql, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY (SELECT NULL))")
+}
+
+func TestBuildInsertDedupSQLAvoidsInternalAliasCollisions(t *testing.T) {
+	sql := buildInsertDedupSQL(
+		"dbo.events",
+		"_bruin_staging.events_raw",
+		[]string{"id"},
+		[]string{"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2"},
+		"",
+	)
+
+	assertContains(t, sql, "AS [__bruin_dedup_rn_3]")
+	assertContains(t, sql, "WHERE [__bruin_dedup_rn_3] = 1")
 }
 
 func TestBuildInsertDirectSQL(t *testing.T) {

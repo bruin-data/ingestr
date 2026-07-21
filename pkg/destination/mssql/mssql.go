@@ -855,20 +855,48 @@ func addPrimaryKey(ctx context.Context, tx *sql.Tx, table, constraintName string
 func buildInsertDedupSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
 	quotedColumns := quoteColumns(columns)
 	colList := strings.Join(quotedColumns, ", ")
+	selectClause := buildMSSQLDedupSelect(stagingTable, primaryKeys, columns, incrementalKey)
+	return buildInsertSQL(targetTable, colList, selectClause)
+}
 
-	orderByCol := ""
-	if incrementalKey != "" {
-		orderByCol = quoteColumn(incrementalKey)
+func buildMSSQLDedupSelect(stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
+	quotedColumns := strings.Join(quoteColumns(columns), ", ")
+	if len(primaryKeys) == 0 {
+		return fmt.Sprintf("SELECT %s FROM %s", quotedColumns, quoteTable(stagingTable))
 	}
 
-	selectClause := destination.DedupStagingSelect(
-		colList,
+	orderBy := "(SELECT NULL)"
+	if incrementalKey != "" {
+		orderBy = quoteColumn(incrementalKey) + " DESC"
+	}
+	dedupRowNumber := quoteColumn(newMSSQLInternalNameAllocator(columns)("__bruin_dedup_rn"))
+	return fmt.Sprintf(
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1",
+		quotedColumns,
+		quotedColumns,
 		strings.Join(quoteColumns(primaryKeys), ", "),
+		orderBy,
+		dedupRowNumber,
 		quoteTable(stagingTable),
-		orderByCol,
+		dedupRowNumber,
 	)
+}
 
-	return buildInsertSQL(targetTable, colList, selectClause)
+func newMSSQLInternalNameAllocator(columns []string) func(string) string {
+	used := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		used[strings.ToLower(col)] = struct{}{}
+	}
+	return func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := used[strings.ToLower(candidate)]; !exists {
+				used[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
 }
 
 func buildInsertDirectSQL(targetTable, stagingTable string, columns []string) string {
@@ -907,9 +935,12 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 
 	quotedPKs := quoteColumns(primaryKeys)
 	pkPartition := strings.Join(quotedPKs, ", ")
+	uniqueInternalName := newMSSQLInternalNameAllocator(columns)
+	dedupRowNumber := quoteColumn(uniqueInternalName("__bruin_dedup_rn"))
 
 	if isCDC {
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition)
+		hasActiveColumn := quoteColumn(uniqueInternalName("__ingestr_has_active"))
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn)
 	}
 
 	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
@@ -930,12 +961,14 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 		dedupOrderBy = quoteColumns([]string{incrementalKey})[0] + " DESC"
 	}
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1)`,
 		insertCols,
 		insertCols,
 		pkPartition,
 		dedupOrderBy,
+		dedupRowNumber,
 		quoteTable(stagingTable),
+		dedupRowNumber,
 	)
 
 	sql := fmt.Sprintf(
@@ -962,7 +995,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn string) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -978,12 +1011,12 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		}
 		selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteColumn(col)))
 	}
-	selectCols = append(selectCols, "CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS [__ingestr_has_active]")
+	selectCols = append(selectCols, fmt.Sprintf("CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS %s", hasActiveColumn))
 
 	dedup := func(where, orderBy string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-			stagingCols, stagingCols, pkPartition, orderBy, quoteTable(stagingTable), where,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1)`,
+			stagingCols, stagingCols, pkPartition, orderBy, dedupRowNumber, quoteTable(stagingTable), where, dedupRowNumber,
 		)
 	}
 	composedSource := fmt.Sprintf(
@@ -994,7 +1027,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		strings.Join(laActJoin, " AND "),
 	)
 
-	hasRowData := "(source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1)"
+	hasRowData := fmt.Sprintf("(source.[_cdc_deleted] = 0 OR source.%s = 1)", hasActiveColumn)
 	newerChange := "(target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn] OR (source.[_cdc_lsn] = target.[_cdc_lsn] AND source.[_cdc_deleted] = 1 AND COALESCE(target.[_cdc_deleted], 0) = 0))"
 	matchedConditions := []string{newerChange}
 	if strings.TrimSpace(incrementalPredicate) != "" {
@@ -1056,8 +1089,7 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 
 	colList := strings.Join(quotedColumns, ", ")
-	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
-	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), quoteColumns([]string{opts.IncrementalKey})[0])
+	selectClause := buildMSSQLDedupSelect(opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) %s`, quoteTable(opts.TargetTable), colList, selectClause)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 
