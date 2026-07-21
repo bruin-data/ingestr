@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	iceberggo "github.com/apache/iceberg-go"
@@ -40,9 +44,16 @@ type Destination struct {
 	cfg     icebergConfig
 	catalog icebergcatalog.Catalog
 
-	mu       sync.Mutex
-	prepared map[string]preparedTable
+	mu                       sync.Mutex
+	prepared                 map[string]preparedTable
+	orphanCleanupLastAttempt map[string]time.Time
 }
+
+const (
+	managedExpiresAtProperty = "ingestr.managed-staging.expires-at-ms"
+	orphanCleanupRetention   = 72 * time.Hour
+	orphanCleanupInterval    = 24 * time.Hour
+)
 
 func NewDestination() *Destination {
 	return &Destination{}
@@ -66,6 +77,7 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 	d.cfg = cfg
 	d.catalog = cat
 	d.prepared = make(map[string]preparedTable)
+	d.orphanCleanupLastAttempt = make(map[string]time.Time)
 	config.Debug("[ICEBERG] Connected catalog type=%s name=%s", cat.CatalogType(), cfg.CatalogName)
 	return nil
 }
@@ -74,6 +86,7 @@ func (d *Destination) Close(ctx context.Context) error {
 	cat := d.catalog
 	d.catalog = nil
 	d.prepared = nil
+	d.orphanCleanupLastAttempt = nil
 	if closer, ok := cat.(io.Closer); ok {
 		if err := closer.Close(); err != nil {
 			return fmt.Errorf("iceberg: failed to close catalog: %w", err)
@@ -99,19 +112,28 @@ func (d *Destination) PrepareTable(ctx context.Context, opts destination.Prepare
 	if err := d.ensureNamespace(ctx, namespace); err != nil {
 		return err
 	}
+	if opts.ExpiresAfter > 0 {
+		d.purgeExpiredManagedTables(ctx, namespace, ident, time.Now())
+	}
 
 	exists, err := d.tableExists(ctx, ident)
 	if err != nil {
 		return err
 	}
 	if exists {
+		tbl, err := d.catalog.LoadTable(ctx, ident)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to load table %s: %w", opts.Table, err)
+		}
+		d.cleanupOldOrphans(ctx, tbl)
 		if opts.DropFirst {
-			tbl, err := d.catalog.LoadTable(ctx, ident)
-			if err != nil {
-				return fmt.Errorf("iceberg: failed to load table %s: %w", opts.Table, err)
-			}
 			if err := validateIdentifierFieldsForEvolution(tbl.Schema(), tableSchema, true); err != nil {
 				return err
+			}
+		}
+		if opts.ExpiresAfter > 0 {
+			if err := setManagedExpiration(ctx, tbl, time.Now().Add(opts.ExpiresAfter)); err != nil {
+				return fmt.Errorf("iceberg: failed to refresh managed table expiration for %s: %w", opts.Table, err)
 			}
 		}
 	} else {
@@ -223,9 +245,13 @@ func (d *Destination) DropTable(ctx context.Context, table string) error {
 	if err != nil {
 		return err
 	}
-	if err := d.catalog.DropTable(ctx, ident); err != nil && !isMissingTableOrNamespace(err) {
+	if err := d.purgeTable(ctx, ident); err != nil && !isMissingTableOrNamespace(err) {
 		return fmt.Errorf("iceberg: failed to drop table %s: %w", table, err)
 	}
+	d.mu.Lock()
+	delete(d.prepared, table)
+	delete(d.orphanCleanupLastAttempt, table)
+	d.mu.Unlock()
 	return nil
 }
 
@@ -283,9 +309,17 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		return err
 	}
 
+	properties := maps.Clone(d.cfg.TableProperties)
+	if properties == nil {
+		properties = iceberggo.Properties{}
+	}
+	if opts.ExpiresAfter > 0 {
+		properties[managedExpiresAtProperty] = strconv.FormatInt(time.Now().Add(opts.ExpiresAfter).UnixMilli(), 10)
+	}
+
 	createOpts := []icebergcatalog.CreateTableOpt{}
-	if len(d.cfg.TableProperties) > 0 {
-		createOpts = append(createOpts, icebergcatalog.WithProperties(d.cfg.TableProperties))
+	if len(properties) > 0 {
+		createOpts = append(createOpts, icebergcatalog.WithProperties(properties))
 	}
 	if d.cfg.TableLocation != "" {
 		createOpts = append(createOpts, icebergcatalog.WithLocation(renderTableLocation(d.cfg.TableLocation, ident)))
@@ -310,6 +344,78 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		return fmt.Errorf("iceberg: failed to create table %s: %w", strings.Join(ident, "."), err)
 	}
 	return nil
+}
+
+func setManagedExpiration(ctx context.Context, tbl *icebergtable.Table, expiresAt time.Time) error {
+	txn := tbl.NewTransaction()
+	if err := txn.SetProperties(iceberggo.Properties{
+		managedExpiresAtProperty: strconv.FormatInt(expiresAt.UnixMilli(), 10),
+	}); err != nil {
+		return err
+	}
+	_, err := txn.Commit(ctx)
+	return err
+}
+
+func (d *Destination) purgeTable(ctx context.Context, ident icebergtable.Identifier) error {
+	if purger, ok := d.catalog.(icebergcatalog.PurgeableTable); ok {
+		return purger.PurgeTable(ctx, ident)
+	}
+	return d.catalog.DropTable(ctx, ident)
+}
+
+func (d *Destination) purgeExpiredManagedTables(ctx context.Context, namespace, exclude icebergtable.Identifier, now time.Time) {
+	var expired []icebergtable.Identifier
+	for ident, err := range d.catalog.ListTables(ctx, namespace) {
+		if err != nil {
+			config.Debug("[ICEBERG] Warning: failed to list managed tables for expiry cleanup: %v", err)
+			return
+		}
+		if slices.Equal(ident, exclude) {
+			continue
+		}
+		tbl, err := d.catalog.LoadTable(ctx, ident)
+		if err != nil {
+			if !isMissingTableOrNamespace(err) {
+				config.Debug("[ICEBERG] Warning: failed to load managed table %s for expiry cleanup: %v", strings.Join(ident, "."), err)
+			}
+			continue
+		}
+		expiresAtMillis, err := strconv.ParseInt(tbl.Properties().Get(managedExpiresAtProperty, ""), 10, 64)
+		if err != nil || now.Before(time.UnixMilli(expiresAtMillis)) {
+			continue
+		}
+		expired = append(expired, ident)
+	}
+	for _, ident := range expired {
+		if err := d.purgeTable(ctx, ident); err != nil && !isMissingTableOrNamespace(err) {
+			config.Debug("[ICEBERG] Warning: failed to purge expired managed table %s: %v", strings.Join(ident, "."), err)
+		}
+	}
+}
+
+func (d *Destination) cleanupOldOrphans(ctx context.Context, tbl *icebergtable.Table) {
+	if !tbl.Properties().GetBool("gc.enabled", true) {
+		return
+	}
+	tableName := strings.Join(tbl.Identifier(), ".")
+	now := time.Now()
+	d.mu.Lock()
+	if lastAttempt := d.orphanCleanupLastAttempt[tableName]; now.Sub(lastAttempt) < orphanCleanupInterval {
+		d.mu.Unlock()
+		return
+	}
+	d.orphanCleanupLastAttempt[tableName] = now
+	d.mu.Unlock()
+
+	result, err := tbl.DeleteOrphanFiles(ctx, icebergtable.WithFilesOlderThan(orphanCleanupRetention))
+	if err != nil {
+		config.Debug("[ICEBERG] Warning: failed to clean old orphan files for table %s: %v", tableName, err)
+		return
+	}
+	if len(result.DeletedFiles) > 0 {
+		config.Debug("[ICEBERG] Removed %d old orphan file(s) for table %s", len(result.DeletedFiles), tableName)
+	}
 }
 
 func (d *Destination) stageTableSchemaUpdate(txn *icebergtable.Transaction, tbl *icebergtable.Table, desired *schema.TableSchema, reset bool) (bool, error) {
