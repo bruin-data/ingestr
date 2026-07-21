@@ -1747,7 +1747,7 @@ func TestNormalizeSchemaForLoadMethod_RelaxesNullabilityForLoadJobs(t *testing.T
 		},
 	}
 
-	got := dest.normalizeSchemaForLoadMethod(input)
+	got := dest.normalizeSchemaForLoadMethod(input, nil)
 	if got == input {
 		t.Fatal("normalizeSchemaForLoadMethod should clone the schema for load jobs")
 	}
@@ -1761,6 +1761,23 @@ func TestNormalizeSchemaForLoadMethod_RelaxesNullabilityForLoadJobs(t *testing.T
 	}
 }
 
+func TestNormalizeSchemaForLoadMethod_PreservesCDCKeysCaseInsensitively(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.loadMethod = loadMethodLoadJob
+
+	input := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "payload", DataType: schema.TypeString, Nullable: false},
+	}}
+	got := dest.normalizeSchemaForLoadMethod(input, []string{"ID"})
+	if got.Columns[0].Nullable {
+		t.Fatal("case-varied CDC key became nullable in load-job mode")
+	}
+	if !got.Columns[1].Nullable {
+		t.Fatal("CDC payload remained required in load-job mode")
+	}
+}
+
 func TestNormalizeSchemaForLoadMethod_KeepsStorageWriteSchema(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.loadMethod = loadMethodStorageWrite
@@ -1771,7 +1788,7 @@ func TestNormalizeSchemaForLoadMethod_KeepsStorageWriteSchema(t *testing.T) {
 		},
 	}
 
-	got := dest.normalizeSchemaForLoadMethod(input)
+	got := dest.normalizeSchemaForLoadMethod(input, nil)
 	if got != input {
 		t.Fatal("storage write mode should keep the original schema")
 	}
@@ -2748,11 +2765,11 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false)) AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
 			t.Fatalf("sql missing CDC-only update for delete-only windows:\n%s", sql)
 		}
-		if !contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {
-			t.Fatalf("sql missing insert clause materializing insert-then-deleted rows:\n%s", sql)
+		if !contains(sql, "WHEN NOT MATCHED THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {
+			t.Fatalf("sql missing insert clause materializing CDC tombstones:\n%s", sql)
 		}
-		if contains(sql, "WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN") {
-			t.Fatalf("sql still has the old insert clause that drops insert-then-deleted rows:\n%s", sql)
+		if contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN") {
+			t.Fatalf("sql still drops delete-only tombstones:\n%s", sql)
 		}
 	})
 

@@ -2,7 +2,6 @@ package bigquery
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -233,14 +232,18 @@ func splitTableName(name string) []string {
 }
 
 // makeNonPKColumnsNullable returns a copy of the schema where all non-primary-key
-// columns are marked as nullable. This is needed for CDC staging tables because
-// DELETE events only contain key column values — non-key columns are NULL.
+// columns are marked as nullable. CDC deletes only contain key column values, so
+// staging rows and delete-only target tombstones have NULL non-key columns.
 func makeNonPKColumnsNullable(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
+	keyColumns := make(map[string]struct{}, len(primaryKeys))
+	for _, key := range primaryKeys {
+		keyColumns[strings.ToLower(key)] = struct{}{}
+	}
 	cp := *s
 	cp.Columns = make([]schema.Column, len(s.Columns))
 	for i, col := range s.Columns {
 		cp.Columns[i] = col
-		if !slices.Contains(primaryKeys, col.Name) {
+		if _, isKey := keyColumns[strings.ToLower(col.Name)]; !isKey {
 			cp.Columns[i].Nullable = true
 		}
 	}

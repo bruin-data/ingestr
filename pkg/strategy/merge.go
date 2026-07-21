@@ -39,6 +39,8 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 		Schema:      destination.DestinationTableSchema(p.Schema),
 		DropFirst:   false,
 		PrimaryKeys: p.PrimaryKeys,
+		CDCMode:     p.IsCDC,
+		CDCKeys:     p.PrimaryKeys,
 		PartitionBy: p.PartitionBy,
 		ClusterBy:   p.ClusterBy,
 	}); err != nil {
@@ -56,7 +58,8 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 		Schema:       p.Schema,
 		DropFirst:    true,
 		PrimaryKeys:  nil,
-		CDCMode:      p.IsCDC, // Allow NULLs for CDC deletes in staging
+		CDCMode:      p.IsCDC,
+		CDCKeys:      p.PrimaryKeys,
 		PartitionBy:  p.PartitionBy,
 		ClusterBy:    p.ClusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,
@@ -389,7 +392,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				StagingTable: stagingTable,
 				Schema:       ti.Schema,
 				PrimaryKeys:  ti.PrimaryKeys,
-				IsCDC:        hasCDCColumns(ti.Schema), // Make non-PK columns nullable for CDC staging tables
+				IsCDC:        hasCDCColumns(ti.Schema),
 			}); err != nil {
 				errChan <- err
 				return

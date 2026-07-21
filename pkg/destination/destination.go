@@ -22,7 +22,8 @@ type PrepareOptions struct {
 	PrimaryKeys            []string
 	PartitionBy            string   // Column to partition by (BigQuery)
 	ClusterBy              []string // Columns to cluster by (BigQuery)
-	CDCMode                bool     // If true, make non-PK columns nullable for staging tables (CDC delete handling)
+	CDCMode                bool     // If true, make non-PK columns nullable for CDC delete handling.
+	CDCKeys                []string // CDC keys kept non-nullable without declaring a table constraint.
 	ExpiresAfter           time.Duration
 	PreserveExistingLayout bool // Leave an existing table's properties, partition spec, and sort order unchanged.
 	TableProperties        map[string]string

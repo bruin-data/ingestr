@@ -272,6 +272,8 @@ func (e *StreamingExecutor) lateTargetPrepareOptions(st *streamTableState) desti
 		Table:       st.destTable,
 		Schema:      destination.DestinationTableSchema(st.schema),
 		PrimaryKeys: st.primaryKeys,
+		CDCMode:     st.isCDC,
+		CDCKeys:     st.primaryKeys,
 		PartitionBy: st.partitionBy,
 		ClusterBy:   st.clusterBy,
 	}
@@ -300,6 +302,7 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 		DropFirst:    true,
 		PrimaryKeys:  nil,
 		CDCMode:      st.isCDC,
+		CDCKeys:      st.primaryKeys,
 		PartitionBy:  st.partitionBy,
 		ClusterBy:    st.clusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,
@@ -382,6 +385,7 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 			PartitionBy: st.partitionBy,
 			ClusterBy:   st.clusterBy,
 			CDCMode:     st.isCDC,
+			CDCKeys:     st.primaryKeys,
 		}); err != nil {
 			return fmt.Errorf("failed to prepare destination table %s: %w", st.destTable, err)
 		}
@@ -751,6 +755,7 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 			DropFirst:    true,
 			PrimaryKeys:  nil,
 			CDCMode:      st.isCDC,
+			CDCKeys:      st.primaryKeys,
 			PartitionBy:  st.partitionBy,
 			ClusterBy:    st.clusterBy,
 			ExpiresAfter: destination.ManagedStagingTTL,
@@ -1105,6 +1110,7 @@ func (l *flushLoop) resetStaging(ctx context.Context, st *streamTableState) erro
 		DropFirst:    true,
 		PrimaryKeys:  nil,
 		CDCMode:      st.isCDC,
+		CDCKeys:      st.primaryKeys,
 		PartitionBy:  st.partitionBy,
 		ClusterBy:    st.clusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,

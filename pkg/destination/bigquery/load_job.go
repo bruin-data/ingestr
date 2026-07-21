@@ -147,7 +147,15 @@ func (d *BigQueryDestination) writeWithLoadJob(
 	// destination and the staging table; the load file must match that table.
 	var targetSchema *arrow.Schema
 	if opts.Schema != nil {
-		targetSchema = opts.Schema.ToArrowSchema()
+		loadSchema := opts.Schema
+		if destination.HasCDCDeletedColumn(loadSchema.ColumnNames()) {
+			primaryKeys := opts.PrimaryKeys
+			if len(primaryKeys) == 0 {
+				primaryKeys = loadSchema.PrimaryKeys
+			}
+			loadSchema = makeNonPKColumnsNullable(loadSchema, primaryKeys)
+		}
+		targetSchema = loadSchema.ToArrowSchema()
 	}
 
 	staged, err := d.stageLoadJobFiles(ctx, table, records, opts.StagingBucket, format, maxRowsPerFile, targetSchema)

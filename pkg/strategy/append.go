@@ -49,6 +49,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		PartitionBy: job.Config.PartitionBy,
 		ClusterBy:   job.Config.ClusterBy,
 		CDCMode:     isCDC,
+		CDCKeys:     job.Schema.PrimaryKeys,
 	}); err != nil {
 		return fmt.Errorf("failed to prepare table: %w", err)
 	}
@@ -160,6 +161,7 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
 				CDCMode:     isCDC,
+				CDCKeys:     ti.PrimaryKeys,
 			}); err != nil {
 				errChan <- fmt.Errorf("failed to prepare table %s: %w", ti.Name, err)
 				return
