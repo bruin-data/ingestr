@@ -96,6 +96,7 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		2:  {"newer-deleted", "00000000000000000030", true, "2026-01-03"},
 		3:  {"first-cdc-update", "00000000000000000010", false, "2026-01-02"},
 		4:  {"first-insert", "00000000000000000010", false, "2026-01-02"},
+		5:  {"<null>", "00000000000000000010", true, "2026-01-02"},
 		6:  {"same-active", "00000000000000000010", false, "2026-01-01"},
 		7:  {"same-deleted", "00000000000000000010", true, "2026-01-01"},
 		8:  {"tie-delete", "00000000000000000010", true, "2026-01-02"},
@@ -107,7 +108,7 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		var payload, lsn, synced string
 		var deleted bool
 		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT PAYLOAD, COALESCE(_CDC_LSN, ''), _CDC_DELETED, TO_VARCHAR(_CDC_SYNCED_AT, 'YYYY-MM-DD')
+			SELECT COALESCE(PAYLOAD, '<null>'), COALESCE(_CDC_LSN, ''), _CDC_DELETED, TO_VARCHAR(_CDC_SYNCED_AT, 'YYYY-MM-DD')
 			FROM %s WHERE ID = %d
 		`, targetTable, id)).Scan(&payload, &lsn, &deleted, &synced))
 		require.Equal(t, want.payload, payload, "id %d payload", id)
@@ -116,9 +117,19 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		require.Equal(t, want.synced, synced, "id %d synced timestamp", id)
 	}
 
-	var count int
-	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE ID = 5", targetTable)).Scan(&count))
-	require.Zero(t, count, "a delete-only change must not create a payload-less row")
+	require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+stagingTable))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (5, 'stale-resurrection', '00000000000000000005', false, '2026-01-01', '[]')`, stagingTable)))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	var tombstonePayload, tombstoneLSN, tombstoneSynced string
+	var tombstoneDeleted bool
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COALESCE(PAYLOAD, '<null>'), _CDC_LSN, _CDC_DELETED, TO_VARCHAR(_CDC_SYNCED_AT, 'YYYY-MM-DD')
+		FROM %s WHERE ID = 5
+	`, targetTable)).Scan(&tombstonePayload, &tombstoneLSN, &tombstoneDeleted, &tombstoneSynced))
+	require.Equal(t, "<null>", tombstonePayload)
+	require.Equal(t, "00000000000000000010", tombstoneLSN)
+	require.True(t, tombstoneDeleted)
+	require.Equal(t, "2026-01-02", tombstoneSynced)
 
 	require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+stagingTable))
 	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (1, 'newest', '00000000000000000040', false, '2026-01-04', '[]')`, stagingTable)))
@@ -140,6 +151,7 @@ func TestSnowflakeDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	opts.IncrementalPredicate = `target."ID" > 100`
 	require.NoError(t, dest.MergeTable(ctx, opts))
 	assertSnowflakeCDCRow(t, ctx, db, targetTable, "newest", "00000000000000000050", false)
+	var count int
 	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE ID = 1", targetTable)).Scan(&count))
 	require.Equal(t, 1, count)
 }

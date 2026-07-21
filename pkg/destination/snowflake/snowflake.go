@@ -647,7 +647,7 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
-		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
+		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
 		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
 		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 

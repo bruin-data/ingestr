@@ -81,8 +81,8 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.Contains(t, sql, `WHEN MATCHED AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND source."_CDC_DELETED" = true AND COALESCE(target."_CDC_DELETED", false) = false)) AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 		assert.Contains(t, sql, `WHEN MATCHED AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND source."_CDC_DELETED" = true AND COALESCE(target."_CDC_DELETED", false) = false)) AND source."_CDC_DELETED" = true THEN`)
 		assert.Contains(t, sql, `target."_CDC_DELETED" = true, target."_CDC_LSN" = source."_CDC_LSN", target."_CDC_SYNCED_AT" = source."_CDC_SYNCED_AT"`)
-		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
-		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN\n")
+		assert.NotContains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
 	})
 
 	t.Run("cdc_uppercased_columns", func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestBuildMergeSQL(t *testing.T) {
 
 		assert.Contains(t, sql, `"__ingestr_has_active"`)
 		assert.Contains(t, sql, `AND source."_CDC_DELETED" = true THEN`)
-		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN\n")
 	})
 
 	t.Run("cdc_resume_uppercased_columns", func(t *testing.T) {
@@ -129,7 +129,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
 		assert.NotContains(t, sql, `target."NAME" = source."NAME"`)
 		assert.Contains(t, sql, `AND source."_CDC_DELETED" = true THEN`)
-		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN\n")
 	})
 
 	t.Run("cdc_incremental_predicate", func(t *testing.T) {
