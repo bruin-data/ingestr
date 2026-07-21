@@ -139,7 +139,7 @@ func TestMongoExtractPartitionFilter(t *testing.T) {
 			want: bson.D{{Key: "id", Value: bson.D{{Key: "$gte", Value: start}, {Key: "$lt", Value: end}}}},
 		},
 		{
-			name: "inclusive final range",
+			name: "open-ended final range",
 			opts: source.ReadOptions{
 				ExtractPartitionBy:           "id",
 				ExtractPartitionKind:         source.ExtractPartitionKindNumeric,
@@ -147,7 +147,7 @@ func TestMongoExtractPartitionFilter(t *testing.T) {
 				ExtractPartitionNumericEnd:   &end,
 				ExtractPartitionEndInclusive: true,
 			},
-			want: bson.D{{Key: "id", Value: bson.D{{Key: "$gte", Value: start}, {Key: "$lte", Value: end}}}},
+			want: bson.D{{Key: "id", Value: bson.D{{Key: "$gte", Value: start}}}},
 		},
 		{
 			name: "null and missing values",

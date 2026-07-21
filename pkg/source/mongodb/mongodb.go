@@ -548,13 +548,14 @@ func mongoExtractPartitionFilter(opts source.ReadOptions) bson.D {
 		return nil
 	}
 
-	endOperator := "$lt"
 	if opts.ExtractPartitionEndInclusive {
-		endOperator = "$lte"
+		return bson.D{{Key: opts.ExtractPartitionBy, Value: bson.D{
+			{Key: "$gte", Value: *opts.ExtractPartitionNumericStart},
+		}}}
 	}
 	return bson.D{{Key: opts.ExtractPartitionBy, Value: bson.D{
 		{Key: "$gte", Value: *opts.ExtractPartitionNumericStart},
-		{Key: endOperator, Value: *opts.ExtractPartitionNumericEnd},
+		{Key: "$lt", Value: *opts.ExtractPartitionNumericEnd},
 	}}}
 }
 
