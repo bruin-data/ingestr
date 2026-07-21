@@ -134,6 +134,10 @@ func TestReadAPIUsagePaginatesAndPreservesLargeIntegers(t *testing.T) {
 	require.Len(t, records, 2)
 	require.EqualValues(t, 1, records[0].NumRows())
 	require.EqualValues(t, 1, records[1].NumRows())
+	require.Equal(t, "bucket_start", records[0].Schema().Field(0).Name)
+	require.Equal(t, arrow.TIMESTAMP, records[0].Schema().Field(0).Type.ID())
+	require.Equal(t, "bucket_end", records[0].Schema().Field(1).Name)
+	require.Equal(t, arrow.TIMESTAMP, records[0].Schema().Field(1).Type.ID())
 	for _, record := range records {
 		record.Release()
 	}

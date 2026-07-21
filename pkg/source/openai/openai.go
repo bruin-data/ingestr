@@ -46,6 +46,11 @@ var supportedGroupBy = []string{
 	"service_tier",
 }
 
+var apiUsageColumns = []schema.Column{
+	{Name: "bucket_start", DataType: schema.TypeTimestampTZ},
+	{Name: "bucket_end", DataType: schema.TypeTimestampTZ},
+}
+
 type OpenAISource struct {
 	baseURL        string
 	platformClient *httpclient.Client
@@ -358,7 +363,11 @@ func sendBatch(ctx context.Context, items []map[string]interface{}, opts source.
 	if len(items) == 0 {
 		return nil
 	}
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+	columns := apiUsageColumns
+	if opts.Schema != nil {
+		columns = opts.Schema.Columns
+	}
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
 	if err != nil {
 		return fmt.Errorf("failed to convert api_usage data to Arrow: %w", err)
 	}
