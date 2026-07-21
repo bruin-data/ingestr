@@ -313,6 +313,20 @@ func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	requireNoError(t, d.Exec(t.Context(), `DROP TRIGGER cdc_replay_audit_trigger`))
 
 	requireNoError(t, d.Exec(t.Context(), `DELETE FROM items_staging`))
+	requireNoError(t, d.Exec(t.Context(), `INSERT INTO items_staging VALUES
+		(14, 'predicate-excluded-image', '00000000/00000030/0000000000000002', 0, '2026-01-03 01:00:00', '[]'),
+		(14, NULL, '00000000/00000040/0000000000000002', 1, '2026-01-03 02:00:00', '[]')`))
+	opts.IncrementalPredicate = "target.id > 100"
+	requireNoError(t, d.MergeTable(t.Context(), opts))
+	var predicatePayload, predicateLSN, predicateSynced string
+	var predicateDeleted int
+	requireNoError(t, d.db.QueryRowContext(t.Context(), `SELECT payload, _cdc_lsn, _cdc_deleted, _cdc_synced_at FROM items WHERE id = 14`).Scan(&predicatePayload, &predicateLSN, &predicateDeleted, &predicateSynced))
+	if predicatePayload != "predicate-excluded-image" || predicateLSN != "00000000/00000040/0000000000000002" || predicateDeleted != 1 || predicateSynced != "2026-01-03 02:00:00" {
+		t.Fatalf("predicate-excluded row = (%q, %q, %d, %q)", predicatePayload, predicateLSN, predicateDeleted, predicateSynced)
+	}
+	opts.IncrementalPredicate = ""
+
+	requireNoError(t, d.Exec(t.Context(), `DELETE FROM items_staging`))
 	requireNoError(t, d.Exec(t.Context(), `INSERT INTO items_staging VALUES (1, 'newest', '00000000/00000040/0000000000000002', 0, '2026-01-04', '[]')`))
 	requireNoError(t, d.MergeTable(t.Context(), opts))
 	assertSQLiteCDCRow(t, d.db, "newest", "00000000/00000040/0000000000000002", 0)
@@ -331,6 +345,85 @@ func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	requireNoError(t, d.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM items WHERE id = 1`).Scan(&count))
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1", count)
+	}
+}
+
+func TestCDCMergeInternalAliasesDoNotCollide(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "cdc-alias-collision.db")
+	requireNoError(t, d.Connect(t.Context(), "sqlite://"+path))
+	t.Cleanup(func() { _ = d.Close(t.Context()) })
+	collisionColumns := []string{
+		"__BRUIN_DEDUP_RN",
+		"__bruin_ACTIVE_RN",
+		"__BRUIN_IMAGE_RN",
+		"__INGESTR_HAS_EQUAL_LSN_DELETE",
+		"__ingestr_LATEST_LSN",
+		"__INGESTR_LATEST_DELETED",
+		"__ingestr_LATEST_SYNCED_AT",
+	}
+	requireNoError(t, d.Exec(t.Context(), `
+		CREATE TABLE target_aliases (
+			id INTEGER PRIMARY KEY,
+			payload TEXT,
+			_cdc_lsn TEXT,
+			_cdc_deleted INTEGER,
+			_cdc_synced_at TEXT,
+			__BRUIN_DEDUP_RN TEXT,
+			__bruin_ACTIVE_RN TEXT,
+			__BRUIN_IMAGE_RN TEXT,
+			__INGESTR_HAS_EQUAL_LSN_DELETE TEXT,
+			__ingestr_LATEST_LSN TEXT,
+			__INGESTR_LATEST_DELETED TEXT,
+			__ingestr_LATEST_SYNCED_AT TEXT
+		);
+		CREATE TABLE staging_aliases AS SELECT * FROM target_aliases WHERE false;
+		INSERT INTO target_aliases VALUES
+			(2, 'before-update', '00000000/00000005/0000000000000002', 0, '2026-01-01 00:00:00', 'old-dedup', 'old-active', 'old-image', 'old-equal-delete', 'old-lsn', 'old-deleted', 'old-synced');
+		INSERT INTO staging_aliases VALUES
+			(1, 'active-image', '00000000/00000010/0000000000000002', 0, '2026-01-01 01:00:00', 'user-dedup', 'user-active', 'user-image', 'user-equal-delete', 'user-lsn', 'user-deleted', 'user-synced'),
+			(1, NULL, '00000000/00000020/0000000000000002', 1, '2026-01-01 02:00:00', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+			(2, 'tied-active-image', '00000000/00000030/0000000000000002', 0, '2026-01-01 03:00:00', 'tied-dedup', 'tied-active', 'tied-image', 'tied-equal-delete', 'tied-lsn', 'tied-deleted', 'tied-synced'),
+			(2, NULL, '00000000/00000030/0000000000000002', 1, '2026-01-01 03:01:00', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+	`))
+
+	columns := append([]string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}, collisionColumns...)
+	requireNoError(t, d.MergeTable(t.Context(), destination.MergeOptions{
+		StagingTable: "staging_aliases",
+		TargetTable:  "target_aliases",
+		PrimaryKeys:  []string{"id"},
+		Columns:      columns,
+	}))
+	var payload, lsn, syncedAt string
+	var deleted int
+	values := make([]string, len(collisionColumns))
+	requireNoError(t, d.db.QueryRowContext(t.Context(), `
+		SELECT payload, _cdc_lsn, _cdc_deleted, _cdc_synced_at,
+			__bruin_dedup_rn, __bruin_active_rn, __bruin_image_rn, __ingestr_has_equal_lsn_delete,
+			__ingestr_latest_lsn, __ingestr_latest_deleted, __ingestr_latest_synced_at
+		FROM target_aliases WHERE id = 1
+	`).Scan(&payload, &lsn, &deleted, &syncedAt, &values[0], &values[1], &values[2], &values[3], &values[4], &values[5], &values[6]))
+	if payload != "active-image" || lsn != "00000000/00000020/0000000000000002" || deleted != 1 || syncedAt != "2026-01-01 02:00:00" {
+		t.Fatalf("row = (%q, %q, %d, %q)", payload, lsn, deleted, syncedAt)
+	}
+	wantValues := []string{"user-dedup", "user-active", "user-image", "user-equal-delete", "user-lsn", "user-deleted", "user-synced"}
+	if !reflect.DeepEqual(values, wantValues) {
+		t.Fatalf("collision values = %v, want %v", values, wantValues)
+	}
+
+	values = make([]string, len(collisionColumns))
+	requireNoError(t, d.db.QueryRowContext(t.Context(), `
+		SELECT payload, _cdc_lsn, _cdc_deleted, _cdc_synced_at,
+			__BRUIN_DEDUP_RN, __bruin_ACTIVE_RN, __BRUIN_IMAGE_RN, __INGESTR_HAS_EQUAL_LSN_DELETE,
+			__ingestr_LATEST_LSN, __INGESTR_LATEST_DELETED, __ingestr_LATEST_SYNCED_AT
+		FROM target_aliases WHERE id = 2
+	`).Scan(&payload, &lsn, &deleted, &syncedAt, &values[0], &values[1], &values[2], &values[3], &values[4], &values[5], &values[6]))
+	if payload != "tied-active-image" || lsn != "00000000/00000030/0000000000000002" || deleted != 1 || syncedAt != "2026-01-01 03:01:00" {
+		t.Fatalf("tied row = (%q, %q, %d, %q)", payload, lsn, deleted, syncedAt)
+	}
+	wantValues = []string{"tied-dedup", "tied-active", "tied-image", "tied-equal-delete", "tied-lsn", "tied-deleted", "tied-synced"}
+	if !reflect.DeepEqual(values, wantValues) {
+		t.Fatalf("tied collision values = %v, want %v", values, wantValues)
 	}
 }
 

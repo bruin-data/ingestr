@@ -469,36 +469,92 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
+	usedInternalNames := make(map[string]struct{}, len(columns)+6)
+	for _, col := range columns {
+		usedInternalNames[strings.ToLower(col)] = struct{}{}
+	}
+	uniqueInternalName := func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedInternalNames[strings.ToLower(candidate)]; !exists {
+				usedInternalNames[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	dedupRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_dedup_rn"))
 	dedupSourceWithOrder := func(where, orderBy string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1) AS source`,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
 			orderBy,
+			dedupRowNumber,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
+			dedupRowNumber,
 		)
 	}
 	dedupSource := func(where string) string { return dedupSourceWithOrder(where, dedupOrderBy) }
 
-	// For CDC, updates and inserts use the latest active image when available;
-	// delete-only keys use their latest tombstone. Deletes are applied below.
+	// For CDC, updates use the latest active image. Inserts combine that image
+	// with the latest overall CDC metadata; delete-only keys use their tombstone.
 	updateSource := dedupSource("")
 	insertSource := updateSource
+	equalDeleteMarker := ""
 	if isCDC {
-		marker := destination.QuoteIdentifier("__ingestr_has_equal_lsn_delete")
+		equalDeleteMarker = destination.QuoteIdentifier(uniqueInternalName("__ingestr_has_equal_lsn_delete"))
+		activeRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_active_rn"))
 		updateSource = fmt.Sprintf(
-			`(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, "_cdc_deleted" ORDER BY "_cdc_lsn" DESC) AS __bruin_active_rn, MAX("_cdc_deleted") OVER (PARTITION BY %s, "_cdc_lsn") AS %s FROM %s) AS _numbered WHERE "_cdc_deleted" = 0 AND __bruin_active_rn = 1) AS source`,
+			`(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, "_cdc_deleted" ORDER BY "_cdc_lsn" DESC) AS %s, MAX("_cdc_deleted") OVER (PARTITION BY %s, "_cdc_lsn") AS %s FROM %s) AS _numbered WHERE "_cdc_deleted" = 0 AND %s = 1) AS source`,
 			strings.Join(quotedColumns, ", "),
-			marker,
+			equalDeleteMarker,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
+			activeRowNumber,
 			strings.Join(quotedPKs, ", "),
-			marker,
+			equalDeleteMarker,
 			destination.QuoteTableName(opts.StagingTable),
+			activeRowNumber,
 		)
-		insertSource = dedupSourceWithOrder("", `"_cdc_deleted" ASC, "_cdc_lsn" DESC`)
+		imageRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_image_rn"))
+		latestLSN := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_lsn"))
+		latestDeleted := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_deleted"))
+		latestSyncedAt := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_synced_at"))
+		insertColumns := make([]string, len(targetColumns))
+		for i, col := range targetColumns {
+			quoted := destination.QuoteIdentifier(col)
+			switch {
+			case strings.EqualFold(col, destination.CDCLSNColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestLSN, quoted)
+			case strings.EqualFold(col, destination.CDCDeletedColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestDeleted, quoted)
+			case strings.EqualFold(col, destination.CDCSyncedAtColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestSyncedAt, quoted)
+			default:
+				insertColumns[i] = quoted
+			}
+		}
+		insertSource = fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_deleted" ASC, "_cdc_lsn" DESC) AS %s, FIRST_VALUE("_cdc_lsn") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_deleted") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_synced_at") OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1) AS source`,
+			strings.Join(insertColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			imageRowNumber,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestLSN,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestDeleted,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestSyncedAt,
+			destination.QuoteTableName(opts.StagingTable),
+			imageRowNumber,
+		)
 	}
 	primaryKeyMatchCondition := buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
@@ -521,7 +577,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		}
 		updateMatchCondition := matchCondition
 		if isCDC {
-			updateMatchCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0 AND source."__ingestr_has_equal_lsn_delete" = 1))`
+			updateMatchCondition += fmt.Sprintf(` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0 AND source.%s = 1))`, equalDeleteMarker)
 		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s SET %s FROM %s WHERE %s`,
