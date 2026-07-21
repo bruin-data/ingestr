@@ -469,21 +469,21 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := func(where string) string {
+	dedupSourceWithOrder := func(where, orderBy string) string {
 		return fmt.Sprintf(
 			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
-			dedupOrderBy,
+			orderBy,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceWithOrder(where, dedupOrderBy) }
 
-	// For CDC, updates use the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data. Inserts use the latest
-	// change overall so delete-only keys can materialize tombstones for resume.
+	// For CDC, updates and inserts use the latest active image when available;
+	// delete-only keys use their latest tombstone. Deletes are applied below.
 	updateSource := dedupSource("")
 	insertSource := updateSource
 	if isCDC {
@@ -498,7 +498,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			marker,
 			destination.QuoteTableName(opts.StagingTable),
 		)
-		insertSource = dedupSource("")
+		insertSource = dedupSourceWithOrder("", `"_cdc_deleted" ASC, "_cdc_lsn" DESC`)
 	}
 	primaryKeyMatchCondition := buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
