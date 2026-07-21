@@ -159,3 +159,85 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	require.Equal(t, "00000000/00000040", lsn)
 	require.True(t, deleted)
 }
+
+func TestMySQLDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
+	if mysqlDest.uri == "" {
+		t.Skip("shared mysql destination container not available")
+	}
+
+	ctx := t.Context()
+	targetTable := "cdc_alias_target_" + uniqueSuffix()
+	stagingTable := "cdc_alias_staging_" + uniqueSuffix()
+	dest := mysqldest.NewMySQLDestination()
+	require.NoError(t, dest.Connect(ctx, mysqlDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", stagingTable))
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", targetTable))
+	})
+
+	userColumns := []string{
+		"__BRUIN_DEDUP_RN",
+		"__bruin_dedup_rn_2",
+		"__INGESTR_HAS_EQUAL_LSN_DELETE",
+		"__ingestr_has_equal_lsn_delete_2",
+	}
+	const userColumnDefinitions = "`__BRUIN_DEDUP_RN` VARCHAR(255), `__bruin_dedup_rn_2` VARCHAR(255), `__INGESTR_HAS_EQUAL_LSN_DELETE` VARCHAR(255), `__ingestr_has_equal_lsn_delete_2` VARCHAR(255)"
+	const quotedUserColumns = "`__BRUIN_DEDUP_RN`, `__bruin_dedup_rn_2`, `__INGESTR_HAS_EQUAL_LSN_DELETE`, `__ingestr_has_equal_lsn_delete_2`"
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			id BIGINT PRIMARY KEY,
+			payload VARCHAR(255),
+			%s,
+			_cdc_lsn VARCHAR(64),
+			_cdc_deleted BOOLEAN,
+			_cdc_synced_at DATETIME(6)
+		)`, targetTable, userColumnDefinitions),
+		fmt.Sprintf(`CREATE TABLE %s (
+			id BIGINT,
+			payload VARCHAR(255),
+			%s,
+			_cdc_lsn VARCHAR(64),
+			_cdc_deleted BOOLEAN,
+			_cdc_synced_at DATETIME(6),
+			_cdc_unchanged_cols JSON
+		)`, stagingTable, userColumnDefinitions),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'old', 'old-rn', 'old-rn-2', 'old-marker', 'old-marker-2', '00000000/00000020', 0, '2026-01-01')`, targetTable),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'active-existing', 'existing-rn', 'existing-rn-2', 'existing-marker', 'existing-marker-2', '00000000/00000020', 0, '2026-01-02', JSON_ARRAY()),
+			(1, NULL, NULL, NULL, NULL, NULL, '00000000/00000020', 1, '2026-01-03', JSON_ARRAY()),
+			(2, 'active-new', 'new-rn', 'new-rn-2', 'new-marker', 'new-marker-2', '00000000/00000020', 0, '2026-01-02', JSON_ARRAY()),
+			(2, NULL, NULL, NULL, NULL, NULL, '00000000/00000020', 1, '2026-01-03', JSON_ARRAY())`, stagingTable),
+	} {
+		require.NoError(t, dest.Exec(ctx, statement))
+	}
+
+	columns := append([]string{"id", "payload"}, userColumns...)
+	columns = append(columns, destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn)
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		TargetTable:  targetTable,
+		StagingTable: stagingTable,
+		PrimaryKeys:  []string{"id"},
+		Columns:      columns,
+	}))
+
+	for id, want := range map[int64][]string{
+		1: {"active-existing", "existing-rn", "existing-rn-2", "existing-marker", "existing-marker-2"},
+		2: {"active-new", "new-rn", "new-rn-2", "new-marker", "new-marker-2"},
+	} {
+		var payload, rn, rn2, marker, marker2, lsn, synced string
+		var deleted bool
+		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT payload, %s, _cdc_lsn, _cdc_deleted, DATE_FORMAT(_cdc_synced_at, '%%Y-%%m-%%d')
+			FROM %s WHERE id = ?
+		`, quotedUserColumns, targetTable), id).Scan(&payload, &rn, &rn2, &marker, &marker2, &lsn, &deleted, &synced))
+		require.Equal(t, want, []string{payload, rn, rn2, marker, marker2}, "id %d active row image", id)
+		require.Equal(t, "00000000/00000020", lsn, "id %d LSN", id)
+		require.True(t, deleted, "id %d deleted", id)
+		require.Equal(t, "2026-01-03", synced, "id %d synced timestamp", id)
+	}
+}
