@@ -1274,6 +1274,21 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 	assert.Equal(t, "2026-01-02 00:00:00", synced)
 
 	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(14, 'predicate-excluded-image', '00000000000000000030', false, '2026-01-03 01:00:00', '[]'),
+			(14, NULL, '00000000000000000040', true, '2026-01-03 02:00:00', '[]')
+	`))
+	opts.IncrementalPredicate = "target.id > 100"
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	name, lsn, deleted, synced = readDuckDBCDCRow(t, ctx, dest, 14)
+	assert.Equal(t, "predicate-excluded-image", name)
+	assert.Equal(t, "00000000000000000040", lsn)
+	assert.True(t, deleted)
+	assert.Equal(t, "2026-01-03 02:00:00", synced)
+	opts.IncrementalPredicate = ""
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
 	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'newest', '00000000000000000040', false, '2026-01-04', '[]')`))
 	require.NoError(t, dest.MergeTable(ctx, opts))
 	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", false)
@@ -1374,6 +1389,64 @@ func TestMergeTable_CDCWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T)
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(name) FROM target_table WHERE id = 1").Scan(&count, &nameRaw))
 	assert.Equal(t, 1, count)
 	assert.Equal(t, "after", string(nameRaw))
+}
+
+func TestMergeTable_CDCInternalAliasesDoNotCollide(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	collisionColumns := []string{
+		"__bruin_dedup_rn",
+		"__bruin_image_rn",
+		"__ingestr_has_equal_lsn_delete",
+		"__ingestr_latest_lsn",
+		"__ingestr_latest_deleted",
+		"__ingestr_latest_synced_at",
+	}
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_aliases (
+			id BIGINT PRIMARY KEY,
+			payload VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP,
+			"__bruin_dedup_rn" VARCHAR,
+			"__bruin_image_rn" VARCHAR,
+			"__ingestr_has_equal_lsn_delete" VARCHAR,
+			"__ingestr_latest_lsn" VARCHAR,
+			"__ingestr_latest_deleted" VARCHAR,
+			"__ingestr_latest_synced_at" VARCHAR
+		);
+		CREATE TABLE staging_aliases AS SELECT * FROM target_aliases WHERE false;
+		INSERT INTO staging_aliases VALUES
+			(1, 'active-image', '00000000000000000010', false, '2026-01-01 01:00:00', 'user-dedup', 'user-image', 'user-equal-delete', 'user-lsn', 'user-deleted', 'user-synced'),
+			(1, NULL, '00000000000000000020', true, '2026-01-01 02:00:00', NULL, NULL, NULL, NULL, NULL, NULL);
+	`))
+
+	columns := append([]string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}, collisionColumns...)
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_aliases",
+		TargetTable:  "target_aliases",
+		PrimaryKeys:  []string{"id"},
+		Columns:      columns,
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	var payload, lsn, syncedAt []byte
+	var deleted bool
+	values := make([][]byte, len(collisionColumns))
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT payload, "_cdc_lsn", "_cdc_deleted", strftime("_cdc_synced_at", '%Y-%m-%d %H:%M:%S'),
+			"__bruin_dedup_rn", "__bruin_image_rn", "__ingestr_has_equal_lsn_delete",
+			"__ingestr_latest_lsn", "__ingestr_latest_deleted", "__ingestr_latest_synced_at"
+		FROM target_aliases WHERE id = 1
+	`).Scan(&payload, &lsn, &deleted, &syncedAt, &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]))
+	assert.Equal(t, "active-image", string(payload))
+	assert.Equal(t, "00000000000000000020", string(lsn))
+	assert.True(t, deleted)
+	assert.Equal(t, "2026-01-01 02:00:00", string(syncedAt))
+	assert.Equal(t, []string{"user-dedup", "user-image", "user-equal-delete", "user-lsn", "user-deleted", "user-synced"}, []string{string(values[0]), string(values[1]), string(values[2]), string(values[3]), string(values[4]), string(values[5])})
 }
 
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
