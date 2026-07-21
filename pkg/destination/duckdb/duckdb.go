@@ -761,35 +761,34 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSourceAs := func(where, alias string) string {
+	dedupSourceAs := func(where, orderBy, alias string) string {
 		return fmt.Sprintf(
 			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS %s`,
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
-			dedupOrderBy,
+			orderBy,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
 			alias,
 		)
 	}
-	dedupSource := func(where string) string { return dedupSourceAs(where, "source") }
+	dedupSource := func(where string) string { return dedupSourceAs(where, dedupOrderBy, "source") }
 
-	// For CDC, updates use the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data. Inserts use the latest
-	// change overall so delete-only keys can materialize tombstones for resume.
+	// For CDC, updates and inserts use the latest active image when available;
+	// delete-only keys use their latest tombstone. Deletes are applied below.
 	updateSource := dedupSource("")
 	insertSource := updateSource
 	if isCDC {
-		activeSource := dedupSourceAs(` WHERE "_cdc_deleted" = false`, "active")
-		latestSource := dedupSourceAs("", "latest")
+		activeSource := dedupSourceAs(` WHERE "_cdc_deleted" = false`, dedupOrderBy, "active")
+		latestSource := dedupSourceAs("", dedupOrderBy, "latest")
 		updateSource = fmt.Sprintf(
 			`(SELECT active.*, COALESCE(latest."_cdc_lsn" = active."_cdc_lsn" AND latest."_cdc_deleted" = true, false) AS "__ingestr_has_equal_lsn_delete" FROM %s LEFT JOIN %s ON %s) AS source`,
 			activeSource,
 			latestSource,
 			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
 		)
-		insertSource = dedupSource("")
+		insertSource = dedupSourceAs("", `"_cdc_deleted" ASC, "_cdc_lsn" DESC`, "source")
 	}
 	insertCondition := onCondition
 	if isCDC {

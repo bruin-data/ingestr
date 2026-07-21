@@ -1215,8 +1215,14 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 			(7, 'same-resurrection', '00000000000000000010', false, '2026-01-02', '[]'),
 			(8, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
 			(9, NULL, '00000000000000000020', false, '2026-01-02', '["name"]'),
-			(10, 'latest-row-image', '00000000000000000010', false, '2026-01-02', '[]'),
-			(10, NULL, '00000000000000000010', true, '2026-01-02', '[]')
+			(10, 'latest-row-image', '00000000000000000010', false, '2026-01-02 01:00:00', '[]'),
+			(10, NULL, '00000000000000000010', true, '2026-01-02 02:00:00', '[]'),
+			(11, 'insert-then-delete', '00000000000000000010', false, '2026-01-02 01:00:00', '[]'),
+			(11, NULL, '00000000000000000010', true, '2026-01-02 02:00:00', '[]'),
+			(12, NULL, '00000000000000000010', true, '2026-01-01', '[]'),
+			(12, 'newer-active-image', '00000000000000000020', false, '2026-01-02', '[]'),
+			(13, 'older-active-image', '00000000000000000010', false, '2026-01-01', '[]'),
+			(13, NULL, '00000000000000000020', true, '2026-01-02', '[]')
 	`))
 
 	opts := destination.MergeOptions{
@@ -1233,16 +1239,19 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 		deleted bool
 		synced  string
 	}{
-		1:  {"newer-active", "00000000000000000030", false, "2026-01-03"},
-		2:  {"newer-deleted", "00000000000000000030", true, "2026-01-03"},
-		3:  {"first-cdc-update", "00000000000000000010", false, "2026-01-02"},
-		4:  {"first-insert", "00000000000000000010", false, "2026-01-02"},
-		5:  {"<null>", "00000000000000000010", true, "2026-01-02"},
-		6:  {"same-active", "00000000000000000010", false, "2026-01-01"},
-		7:  {"same-deleted", "00000000000000000010", true, "2026-01-01"},
-		8:  {"tie-delete", "00000000000000000010", true, "2026-01-02"},
-		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03"},
-		10: {"latest-row-image", "00000000000000000010", true, "2026-01-02"},
+		1:  {"newer-active", "00000000000000000030", false, "2026-01-03 00:00:00"},
+		2:  {"newer-deleted", "00000000000000000030", true, "2026-01-03 00:00:00"},
+		3:  {"first-cdc-update", "00000000000000000010", false, "2026-01-02 00:00:00"},
+		4:  {"first-insert", "00000000000000000010", false, "2026-01-02 00:00:00"},
+		5:  {"<null>", "00000000000000000010", true, "2026-01-02 00:00:00"},
+		6:  {"same-active", "00000000000000000010", false, "2026-01-01 00:00:00"},
+		7:  {"same-deleted", "00000000000000000010", true, "2026-01-01 00:00:00"},
+		8:  {"tie-delete", "00000000000000000010", true, "2026-01-02 00:00:00"},
+		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03 00:00:00"},
+		10: {"latest-row-image", "00000000000000000010", true, "2026-01-02 02:00:00"},
+		11: {"insert-then-delete", "00000000000000000010", true, "2026-01-02 02:00:00"},
+		12: {"newer-active-image", "00000000000000000020", false, "2026-01-02 00:00:00"},
+		13: {"older-active-image", "00000000000000000020", true, "2026-01-02 00:00:00"},
 	}
 	for id, want := range expected {
 		name, lsn, deleted, synced := readDuckDBCDCRow(t, ctx, dest, id)
@@ -1258,6 +1267,11 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 	assert.Equal(t, "replay-sentinel", name)
 	assert.Equal(t, "00000000000000000010", lsn)
 	assert.True(t, deleted)
+	name, lsn, deleted, synced := readDuckDBCDCRow(t, ctx, dest, 5)
+	assert.Equal(t, "<null>", name)
+	assert.Equal(t, "00000000000000000010", lsn)
+	assert.True(t, deleted)
+	assert.Equal(t, "2026-01-02 00:00:00", synced)
 
 	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
 	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'newest', '00000000000000000040', false, '2026-01-04', '[]')`))
@@ -1284,7 +1298,7 @@ func readDuckDBCDCRow(t *testing.T, ctx context.Context, dest *DuckDBDestination
 	require.NoError(t, err)
 	defer func() { _ = stmt.Close() }()
 	require.NoError(t, stmt.SetSqlQuery(fmt.Sprintf(`
-		SELECT COALESCE(name, '<null>'), COALESCE("_cdc_lsn", ''), "_cdc_deleted", strftime("_cdc_synced_at", '%%Y-%%m-%%d')
+		SELECT COALESCE(name, '<null>'), COALESCE("_cdc_lsn", ''), "_cdc_deleted", strftime("_cdc_synced_at", '%%Y-%%m-%%d %%H:%%M:%%S')
 		FROM target_table WHERE id = %d
 	`, id)))
 	reader, _, err := stmt.ExecuteQuery(ctx)
