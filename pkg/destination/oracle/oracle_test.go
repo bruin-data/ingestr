@@ -3,6 +3,7 @@ package oracle
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -24,6 +25,107 @@ type oracleDottedBackupArgument struct{}
 func (oracleDottedBackupArgument) Match(value driver.Value) bool {
 	name, ok := value.(string)
 	return ok && strings.HasPrefix(name, "order.events_OLD_") && name != "ORDER"
+}
+
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		actualKeys []string
+		wantError  string
+	}{
+		{name: "matching composite in different order", actualKeys: []string{"Part", "ID"}},
+		{name: "missing", wantError: "found []"},
+		{name: "mismatched quoted case", actualKeys: []string{"ID", "PART"}, wantError: "found [ID PART]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &OracleDestination{db: db, currentUser: "APP"}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")).
+				WithArgs("APP", "EVENTS").
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+			rows := sqlmock.NewRows([]string{"column_name"})
+			for _, key := range tt.actualKeys {
+				rows.AddRow(key)
+			}
+			mock.ExpectQuery(`FROM ALL_CONSTRAINTS c`).
+				WithArgs("APP", "EVENTS").
+				WillReturnRows(rows)
+
+			err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:                  "events",
+				Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}, {Name: `"Part"`, DataType: schema.TypeString}}},
+				PrimaryKeys:            []string{"id", `"Part"`},
+				CDCMode:                true,
+				CDCKeys:                []string{"id", `"Part"`},
+				RequirePrimaryKeyMatch: true,
+			})
+			if tt.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantError)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestOraclePrimaryKeyInspectionRequiresEnabledValidatedConstraint(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+	mock.ExpectQuery(`c\.STATUS = 'ENABLED'.*c\.VALIDATED = 'VALIDATED'`).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("ID"))
+
+	keys, err := dest.getEnforcedPrimaryKeys(t.Context(), "APP", "EVENTS")
+	require.NoError(t, err)
+	require.Equal(t, []string{"ID"}, keys)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPrepareTableValidatesConcurrentCreateWinnerPrimaryKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE "EVENTS"`).WillReturnError(assert.AnError)
+
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:                  "events",
+		Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+		PrimaryKeys:            []string{"id"},
+		RequirePrimaryKeyMatch: true,
+	})
+	require.ErrorIs(t, err, assert.AnError)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	db, mock, err = sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest = &OracleDestination{db: db, currentUser: "APP"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE "EVENTS"`).WillReturnError(errors.New("ORA-00955: name is already used by an existing object"))
+	mock.ExpectQuery(`FROM ALL_CONSTRAINTS c`).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("OTHER_ID"))
+
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:                  "events",
+		Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+		PrimaryKeys:            []string{"id"},
+		RequirePrimaryKeyMatch: true,
+	})
+	require.ErrorContains(t, err, "found [OTHER_ID]")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestBuildConnStrings(t *testing.T) {

@@ -10,9 +10,66 @@ import (
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	oracledest "github.com/bruin-data/ingestr/pkg/destination/oracle"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	_ "github.com/sijms/go-ora/v2"
 	"github.com/stretchr/testify/require"
 )
+
+func TestOracleDestinationCDCPrepareRequiresMatchingPrimaryKey(t *testing.T) {
+	if oracleDest.uri == "" {
+		t.Skip("shared oracle destination container not available")
+	}
+
+	ctx := t.Context()
+	suffix := uniqueSuffix()
+	freshTable := "CDC_PK_F_" + suffix
+	matchingTable := "CDC_PK_OK_" + suffix
+	missingTable := "CDC_PK_NO_" + suffix
+	mismatchedTable := "CDC_PK_BAD_" + suffix
+	disabledTable := "CDC_PK_DIS_" + suffix
+	dest := oracledest.NewOracleDestination()
+	require.NoError(t, dest.Connect(ctx, oracleDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := sql.Open("oracle", oracleSQLConnString(oracleDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		for _, table := range []string{freshTable, matchingTable, missingTable, mismatchedTable, disabledTable} {
+			_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE %s PURGE", table))
+		}
+	})
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "part", DataType: schema.TypeString, MaxLength: 255},
+		{Name: "payload", DataType: schema.TypeString, MaxLength: 255, Nullable: true},
+	}}
+	prepare := func(table string) error {
+		return dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:                  table,
+			Schema:                 tableSchema,
+			PrimaryKeys:            []string{"id", "part"},
+			CDCMode:                true,
+			CDCKeys:                []string{"id", "part"},
+			RequirePrimaryKeyMatch: true,
+		})
+	}
+
+	require.NoError(t, prepare(freshTable))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (ID NUMBER(19), PART VARCHAR2(255), PAYLOAD VARCHAR2(255), PRIMARY KEY (PART, ID))", matchingTable)))
+	require.NoError(t, prepare(matchingTable))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (ID NUMBER(19), PART VARCHAR2(255), PAYLOAD VARCHAR2(255))", missingTable)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1, 'a', 'keep')", missingTable)))
+	require.ErrorContains(t, prepare(missingTable), "found []")
+	var payload string
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf("SELECT PAYLOAD FROM %s WHERE ID = 1", missingTable)).Scan(&payload))
+	require.Equal(t, "keep", payload)
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (ID NUMBER(19), PART VARCHAR2(255), PAYLOAD VARCHAR2(255), PRIMARY KEY (PAYLOAD))", mismatchedTable)))
+	require.ErrorContains(t, prepare(mismatchedTable), "found [PAYLOAD]")
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (ID NUMBER(19), PART VARCHAR2(255), PAYLOAD VARCHAR2(255), PRIMARY KEY (ID, PART))", disabledTable)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE PRIMARY KEY", disabledTable)))
+	require.ErrorContains(t, prepare(disabledTable), "found []")
+}
 
 func TestOracleDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	if oracleDest.uri == "" {

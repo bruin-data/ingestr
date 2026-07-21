@@ -179,21 +179,47 @@ func (d *OracleDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
-
-	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
-	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-		if isOracleError(err, "00955") {
-			return nil
+	if !exists {
+		startCreate := time.Now()
+		createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
+		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			if !isOracleError(err, "00955") {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else {
+			config.Debug("[ORACLE] CREATE TABLE took %v", time.Since(startCreate))
 		}
-		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create table: %w", err)
 	}
-	config.Debug("[ORACLE] CREATE TABLE took %v", time.Since(startCreate))
+	if opts.RequirePrimaryKeyMatch {
+		schemaName, tableName := d.effectiveSchemaTable(opts.Table)
+		actualKeys, err := d.getEnforcedPrimaryKeys(ctx, schemaName, tableName)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if !oraclePrimaryKeySetsEqual(opts.PrimaryKeys, actualKeys) {
+			return fmt.Errorf("CDC merge target %s must have an enabled and validated primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
 	return nil
+}
+
+func oraclePrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[canonicalIdentifier(key)]++
+	}
+	for _, key := range actual {
+		canonical := canonicalIdentifier(key)
+		if remaining[canonical] == 0 {
+			return false
+		}
+		remaining[canonical]--
+	}
+	return true
 }
 
 func (d *OracleDestination) DropTable(ctx context.Context, table string) error {
@@ -1060,13 +1086,25 @@ func (d *OracleDestination) GetTableSchema(ctx context.Context, table string) (*
 }
 
 func (d *OracleDestination) getPrimaryKeys(ctx context.Context, schemaName, tableName string) ([]string, error) {
+	return d.queryPrimaryKeys(ctx, schemaName, tableName, false)
+}
+
+func (d *OracleDestination) getEnforcedPrimaryKeys(ctx context.Context, schemaName, tableName string) ([]string, error) {
+	return d.queryPrimaryKeys(ctx, schemaName, tableName, true)
+}
+
+func (d *OracleDestination) queryPrimaryKeys(ctx context.Context, schemaName, tableName string, requireEnforced bool) ([]string, error) {
+	enforcedFilter := ""
+	if requireEnforced {
+		enforcedFilter = "\n\t\t\tAND c.STATUS = 'ENABLED'\n\t\t\tAND c.VALIDATED = 'VALIDATED'"
+	}
 	query := `
 		SELECT cc.COLUMN_NAME
 		FROM ALL_CONSTRAINTS c
 		JOIN ALL_CONS_COLUMNS cc
 			ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
 			AND c.OWNER = cc.OWNER
-		WHERE c.CONSTRAINT_TYPE = 'P'
+		WHERE c.CONSTRAINT_TYPE = 'P'` + enforcedFilter + `
 			AND c.OWNER = :1
 			AND c.TABLE_NAME = :2
 		ORDER BY cc.POSITION`
