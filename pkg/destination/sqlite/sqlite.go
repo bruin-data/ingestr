@@ -487,7 +487,17 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	updateSource := dedupSource("")
 	insertSource := updateSource
 	if isCDC {
-		updateSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
+		marker := destination.QuoteIdentifier("__ingestr_has_equal_lsn_delete")
+		updateSource = fmt.Sprintf(
+			`(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, "_cdc_deleted" ORDER BY "_cdc_lsn" DESC) AS __bruin_active_rn, MAX("_cdc_deleted") OVER (PARTITION BY %s, "_cdc_lsn") AS %s FROM %s) AS _numbered WHERE "_cdc_deleted" = 0 AND __bruin_active_rn = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			marker,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			strings.Join(quotedPKs, ", "),
+			marker,
+			destination.QuoteTableName(opts.StagingTable),
+		)
 		insertSource = dedupSource("")
 	}
 	primaryKeyMatchCondition := buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source")
@@ -511,7 +521,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		}
 		updateMatchCondition := matchCondition
 		if isCDC {
-			updateMatchCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn")`
+			updateMatchCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0 AND source."__ingestr_has_equal_lsn_delete" = 1))`
 		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s SET %s FROM %s WHERE %s`,

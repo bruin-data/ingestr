@@ -237,7 +237,8 @@ func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-active', '00000000/00000010/0000000000000002', 0, '2026-01-01'),
 			(7, 'same-deleted', '00000000/00000010/0000000000000002', 1, '2026-01-01'),
 			(8, 'tie-delete', '00000000/00000010/0000000000000002', 0, '2026-01-01'),
-			(9, 'toast-newer', '00000000/00000030/0000000000000002', 0, '2026-01-03')`,
+			(9, 'toast-newer', '00000000/00000030/0000000000000002', 0, '2026-01-03'),
+			(10, 'older-row-image', '00000000/00000010/0000000000000002', 0, '2026-01-01')`,
 		`INSERT INTO items_staging VALUES
 			(1, 'stale-active', '00000000/00000020/0000000000000002', 0, '2026-01-02', '[]'),
 			(1, NULL, '00000000/00000025/0000000000000002', 1, '2026-01-02', '[]'),
@@ -248,7 +249,9 @@ func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-replay', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
 			(7, 'same-resurrection', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
 			(8, NULL, '00000000/00000010/0000000000000002', 1, '2026-01-02', '[]'),
-			(9, NULL, '00000000/00000020/0000000000000002', 0, '2026-01-02', '["payload"]')`,
+			(9, NULL, '00000000/00000020/0000000000000002', 0, '2026-01-02', '["payload"]'),
+			(10, 'latest-row-image', '00000000/00000010/0000000000000002', 0, '2026-01-02', '[]'),
+			(10, NULL, '00000000/00000010/0000000000000002', 1, '2026-01-02', '[]')`,
 	} {
 		requireNoError(t, d.Exec(t.Context(), statement))
 	}
@@ -267,15 +270,16 @@ func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		deleted int
 		synced  string
 	}{
-		1: {"newer-active", "00000000/00000030/0000000000000002", 0, "2026-01-03"},
-		2: {"newer-deleted", "00000000/00000030/0000000000000002", 1, "2026-01-03"},
-		3: {"first-cdc-update", "00000000/00000010/0000000000000002", 0, "2026-01-02"},
-		4: {"first-insert", "00000000/00000010/0000000000000002", 0, "2026-01-02"},
-		5: {"<null>", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
-		6: {"same-active", "00000000/00000010/0000000000000002", 0, "2026-01-01"},
-		7: {"same-deleted", "00000000/00000010/0000000000000002", 1, "2026-01-01"},
-		8: {"tie-delete", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
-		9: {"toast-newer", "00000000/00000030/0000000000000002", 0, "2026-01-03"},
+		1:  {"newer-active", "00000000/00000030/0000000000000002", 0, "2026-01-03"},
+		2:  {"newer-deleted", "00000000/00000030/0000000000000002", 1, "2026-01-03"},
+		3:  {"first-cdc-update", "00000000/00000010/0000000000000002", 0, "2026-01-02"},
+		4:  {"first-insert", "00000000/00000010/0000000000000002", 0, "2026-01-02"},
+		5:  {"<null>", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
+		6:  {"same-active", "00000000/00000010/0000000000000002", 0, "2026-01-01"},
+		7:  {"same-deleted", "00000000/00000010/0000000000000002", 1, "2026-01-01"},
+		8:  {"tie-delete", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
+		9:  {"toast-newer", "00000000/00000030/0000000000000002", 0, "2026-01-03"},
+		10: {"latest-row-image", "00000000/00000010/0000000000000002", 1, "2026-01-02"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
@@ -288,6 +292,16 @@ func TestCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			t.Fatalf("id %d = (%q, %q, %d, %q), want (%q, %q, %d, %q)", id, payload, lsn, deleted, synced, want.payload, want.lsn, want.deleted, want.synced)
 		}
 	}
+
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE cdc_replay_audit (target_id INTEGER)`))
+	requireNoError(t, d.Exec(t.Context(), `CREATE TRIGGER cdc_replay_audit_trigger AFTER UPDATE ON items BEGIN INSERT INTO cdc_replay_audit VALUES (NEW.id); END`))
+	requireNoError(t, d.MergeTable(t.Context(), opts))
+	var replayUpdates int
+	requireNoError(t, d.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM cdc_replay_audit`).Scan(&replayUpdates))
+	if replayUpdates != 0 {
+		t.Fatalf("replay update count = %d, want 0", replayUpdates)
+	}
+	requireNoError(t, d.Exec(t.Context(), `DROP TRIGGER cdc_replay_audit_trigger`))
 
 	requireNoError(t, d.Exec(t.Context(), `DELETE FROM items_staging`))
 	requireNoError(t, d.Exec(t.Context(), `INSERT INTO items_staging VALUES (1, 'newest', '00000000/00000040/0000000000000002', 0, '2026-01-04', '[]')`))
