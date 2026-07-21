@@ -1192,11 +1192,19 @@ func oracleCDCActiveSource(columns, primaryKeys []string, tableExpr, alias strin
 }
 
 func newOracleCDCInternalAliases(columns []string) oracleCDCInternalAliases {
+	allocate := newOracleInternalNameAllocator(columns)
+	return oracleCDCInternalAliases{
+		activeRowNumber:      allocate("bruin_active_rn"),
+		equalLSNDeleteMarker: allocate(cdcEqualLSNDeleteMarker),
+	}
+}
+
+func newOracleInternalNameAllocator(columns []string) func(string) string {
 	used := make(map[string]struct{}, len(columns)+2)
 	for _, col := range columns {
 		used[strings.ToLower(canonicalIdentifier(col))] = struct{}{}
 	}
-	allocate := func(base string) string {
+	return func(base string) string {
 		candidate := base
 		for suffix := 2; ; suffix++ {
 			canonical := strings.ToLower(canonicalIdentifier(candidate))
@@ -1206,10 +1214,6 @@ func newOracleCDCInternalAliases(columns []string) oracleCDCInternalAliases {
 			}
 			candidate = fmt.Sprintf("%s_%d", base, suffix)
 		}
-	}
-	return oracleCDCInternalAliases{
-		activeRowNumber:      allocate("bruin_active_rn"),
-		equalLSNDeleteMarker: allocate(cdcEqualLSNDeleteMarker),
 	}
 }
 
@@ -1247,14 +1251,17 @@ func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string,
 	}
 
 	whereClause := strings.Join(where, "")
+	dedupRowNumber := quoteColumn(newOracleInternalNameAllocator(columns)("bruin_dedup_rn"))
 	return fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) bruin_dedup_rn FROM %s%s) bruin_numbered WHERE bruin_dedup_rn = 1",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) %s FROM %s%s) bruin_numbered WHERE %s = 1",
 		quotedColumns,
 		quotedColumns,
 		strings.Join(quoteColumns(primaryKeys), ", "),
 		orderBy,
+		dedupRowNumber,
 		tableExpr,
 		whereClause,
+		dedupRowNumber,
 	)
 }
 

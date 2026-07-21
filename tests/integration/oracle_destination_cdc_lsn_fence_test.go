@@ -176,6 +176,8 @@ func TestOracleDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
 	})
 
 	const userColumnDefinitions = `
+		BRUIN_DEDUP_RN VARCHAR2(255 CHAR),
+		BRUIN_DEDUP_RN_2 VARCHAR2(255 CHAR),
 		BRUIN_ACTIVE_RN VARCHAR2(255 CHAR),
 		BRUIN_ACTIVE_RN_2 VARCHAR2(255 CHAR),
 		"__INGESTR_HAS_EQUAL_LSN_DELETE" VARCHAR2(255 CHAR),
@@ -199,12 +201,12 @@ func TestOracleDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
 			"_CDC_UNCHANGED_COLS" VARCHAR2(4000 CHAR)
 		)`, stagingTable, userColumnDefinitions),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, 'old', 'old-rn', 'old-rn-2', 'old-marker', 'old-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-01 00:00:00')`, targetTable),
+			(1, 'old', 'old-dedup', 'old-dedup-2', 'old-active', 'old-active-2', 'old-marker', 'old-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-01 00:00:00')`, targetTable),
 		fmt.Sprintf(`INSERT ALL
-			INTO %s VALUES (1, 'active-existing', 'existing-rn', 'existing-rn-2', 'existing-marker', 'existing-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-02 00:00:00', '[]')
-			INTO %s VALUES (1, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', 1, TIMESTAMP '2026-01-03 00:00:00', '[]')
-			INTO %s VALUES (2, 'active-new', 'new-rn', 'new-rn-2', 'new-marker', 'new-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-02 00:00:00', '[]')
-			INTO %s VALUES (2, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', 1, TIMESTAMP '2026-01-03 00:00:00', '[]')
+			INTO %s VALUES (1, 'active-existing', 'existing-dedup', 'existing-dedup-2', 'existing-active', 'existing-active-2', 'existing-marker', 'existing-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-02 00:00:00', '[]')
+			INTO %s VALUES (1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', 1, TIMESTAMP '2026-01-03 00:00:00', '[]')
+			INTO %s VALUES (2, 'active-new', 'new-dedup', 'new-dedup-2', 'new-active', 'new-active-2', 'new-marker', 'new-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-02 00:00:00', '[]')
+			INTO %s VALUES (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', 1, TIMESTAMP '2026-01-03 00:00:00', '[]')
 		SELECT 1 FROM DUAL`, stagingTable, stagingTable, stagingTable, stagingTable),
 	} {
 		require.NoError(t, dest.Exec(ctx, statement))
@@ -213,6 +215,8 @@ func TestOracleDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
 	columns := []string{
 		"id",
 		"payload",
+		"BrUiN_DeDuP_Rn",
+		"bruin_dedup_rn_2",
 		"BrUiN_Active_Rn",
 		"bruin_active_rn_2",
 		`"__INGESTR_HAS_EQUAL_LSN_DELETE"`,
@@ -230,18 +234,18 @@ func TestOracleDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
 	}))
 
 	for id, want := range map[int64][]string{
-		1: {"active-existing", "existing-rn", "existing-rn-2", "existing-marker", "existing-marker-2"},
-		2: {"active-new", "new-rn", "new-rn-2", "new-marker", "new-marker-2"},
+		1: {"active-existing", "existing-dedup", "existing-dedup-2", "existing-active", "existing-active-2", "existing-marker", "existing-marker-2"},
+		2: {"active-new", "new-dedup", "new-dedup-2", "new-active", "new-active-2", "new-marker", "new-marker-2"},
 	} {
-		var payload, activeRN, activeRN2, marker, marker2, lsn, synced string
+		var payload, dedupRN, dedupRN2, activeRN, activeRN2, marker, marker2, lsn, synced string
 		var deleted int
 		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT PAYLOAD, BRUIN_ACTIVE_RN, BRUIN_ACTIVE_RN_2,
+			SELECT PAYLOAD, BRUIN_DEDUP_RN, BRUIN_DEDUP_RN_2, BRUIN_ACTIVE_RN, BRUIN_ACTIVE_RN_2,
 				"__INGESTR_HAS_EQUAL_LSN_DELETE", "__INGESTR_HAS_EQUAL_LSN_DELETE_2",
 				"_CDC_LSN", "_CDC_DELETED", TO_CHAR("_CDC_SYNCED_AT", 'YYYY-MM-DD')
 			FROM %s WHERE ID = :1
-		`, targetTable), id).Scan(&payload, &activeRN, &activeRN2, &marker, &marker2, &lsn, &deleted, &synced))
-		require.Equal(t, want, []string{payload, activeRN, activeRN2, marker, marker2}, "id %d active row image", id)
+		`, targetTable), id).Scan(&payload, &dedupRN, &dedupRN2, &activeRN, &activeRN2, &marker, &marker2, &lsn, &deleted, &synced))
+		require.Equal(t, want, []string{payload, dedupRN, dedupRN2, activeRN, activeRN2, marker, marker2}, "id %d active row image", id)
 		require.Equal(t, "00000000000000000020", lsn, "id %d LSN", id)
 		require.Equal(t, 1, deleted, "id %d deleted", id)
 		require.Equal(t, "2026-01-03", synced, "id %d synced timestamp", id)

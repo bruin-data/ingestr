@@ -409,7 +409,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	)
 
 	assert.Equal(t, `MERGE INTO "USERS" target
-USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "UPDATED_AT" DESC) bruin_dedup_rn FROM "_BRUIN_STAGING"."USERS_MERGE_123") bruin_numbered WHERE bruin_dedup_rn = 1) source
+USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "UPDATED_AT" DESC) "BRUIN_DEDUP_RN" FROM "_BRUIN_STAGING"."USERS_MERGE_123") bruin_numbered WHERE "BRUIN_DEDUP_RN" = 1) source
 ON (target."ID" = source."ID")
 WHEN MATCHED THEN UPDATE SET target."NAME" = source."NAME", target."UPDATED_AT" = source."UPDATED_AT"
 WHEN NOT MATCHED THEN INSERT ("ID", "NAME", "UPDATED_AT") VALUES (source."ID", source."NAME", source."UPDATED_AT")`, got)
@@ -460,6 +460,8 @@ func TestOracleCDCInternalAliasesAvoidCanonicalIdentifierCollisions(t *testing.T
 	columns := []string{
 		"id",
 		"payload",
+		"BrUiN_DeDuP_Rn",
+		"bruin_dedup_rn_2",
 		"BrUiN_Active_Rn",
 		"bruin_active_rn_2",
 		`"__INGESTR_HAS_EQUAL_LSN_DELETE"`,
@@ -489,6 +491,9 @@ func TestOracleCDCInternalAliasesAvoidCanonicalIdentifierCollisions(t *testing.T
 	assert.Contains(t, got, `source."__INGESTR_HAS_EQUAL_LSN_DELETE_3" = 1`)
 	assert.Contains(t, got, `source."BRUIN_ACTIVE_RN"`)
 	assert.Contains(t, got, `source."__ingestr_has_equal_lsn_delete_2"`)
+	dedup := oracleDedupSelect(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn))
+	assert.Contains(t, dedup, `ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) "BRUIN_DEDUP_RN_3"`)
+	assert.Contains(t, dedup, `WHERE "BRUIN_DEDUP_RN_3" = 1`)
 }
 
 func TestBuildCDCDeleteMarkSQLUsesOverallLSNOrder(t *testing.T) {
@@ -522,7 +527,7 @@ func TestBuildCDCDeleteTombstoneInsertSQL(t *testing.T) {
 		[]string{"id"},
 	)
 
-	assert.Equal(t, `INSERT INTO "USERS" ("ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT") SELECT source."ID", source."NAME", source."_CDC_LSN", source."_CDC_DELETED", source."_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) bruin_dedup_rn FROM "USERS_STAGING") bruin_numbered WHERE bruin_dedup_rn = 1) source WHERE source."_CDC_DELETED" = 1 AND NOT EXISTS (SELECT 1 FROM "USERS" target WHERE target."ID" = source."ID")`, got)
+	assert.Equal(t, `INSERT INTO "USERS" ("ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT") SELECT source."ID", source."NAME", source."_CDC_LSN", source."_CDC_DELETED", source."_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) "BRUIN_DEDUP_RN" FROM "USERS_STAGING") bruin_numbered WHERE "BRUIN_DEDUP_RN" = 1) source WHERE source."_CDC_DELETED" = 1 AND NOT EXISTS (SELECT 1 FROM "USERS" target WHERE target."ID" = source."ID")`, got)
 }
 
 func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testing.T) {
