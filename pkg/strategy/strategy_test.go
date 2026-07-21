@@ -166,6 +166,7 @@ type fakeDestination struct {
 	prepareCalls  []destination.PrepareOptions
 	writeCalls    []destination.WriteOptions
 	swapCalls     [][2]string
+	swapOptions   []destination.SwapOptions
 	mergeCalls    []destination.MergeOptions
 	diCalls       []destination.DeleteInsertOptions
 	dropCalls     []string
@@ -276,6 +277,7 @@ func (d *fakeDestination) SwapTable(ctx context.Context, opts destination.SwapOp
 	d.mu.Lock()
 	d.calls = append(d.calls, "SwapTable")
 	d.swapCalls = append(d.swapCalls, [2]string{opts.StagingTable, opts.TargetTable})
+	d.swapOptions = append(d.swapOptions, opts)
 	swapErr := d.swapErr
 	d.mu.Unlock()
 	return swapErr
@@ -346,6 +348,18 @@ type fakeReplaceStagingPolicyProvider struct {
 	*fakeDestination
 
 	policy destination.ReplaceStagingPolicy
+}
+
+type fakeReplaceStagingPrimaryKeyDeferrer struct {
+	*fakeDestination
+}
+
+func (d *fakeReplaceStagingPrimaryKeyDeferrer) DeferReplaceStagingPrimaryKey() bool {
+	return true
+}
+
+func (d *fakeReplaceStagingPrimaryKeyDeferrer) DeferredReplaceStagingParallelism() int {
+	return 12
 }
 
 func (d *fakeReplaceStagingPolicyProvider) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {

@@ -31,6 +31,27 @@ func supportsDirectReplaceDeduplication(dest destination.Destination) bool {
 	return ok && deduplicator.SupportsDirectReplaceDeduplication()
 }
 
+func replaceShouldDeferStagingPrimaryKey(job *IngestionJob) bool {
+	provider, ok := job.Destination.(destination.ReplaceStagingPrimaryKeyDeferrer)
+	return ok && provider.DeferReplaceStagingPrimaryKey() && effectivePrimaryKeysGuaranteedUnique(job)
+}
+
+func replaceWriteParallelism(job *IngestionJob, deferredPrimaryKey bool) int {
+	parallelism := job.Config.EffectiveDestinationParallelism()
+	if !deferredPrimaryKey || job.Config.DestinationParallelism > 0 || job.Config.ExtractParallelism != config.DefaultExtractParallelism {
+		return parallelism
+	}
+
+	provider, ok := job.Destination.(destination.ReplaceStagingPrimaryKeyDeferrer)
+	if !ok {
+		return parallelism
+	}
+	if preferred := provider.DeferredReplaceStagingParallelism(); preferred > 0 {
+		return preferred
+	}
+	return parallelism
+}
+
 func effectivePrimaryKeysGuaranteedUnique(job *IngestionJob) bool {
 	return sourcePrimaryKeysGuaranteedUnique(job) &&
 		!primaryKeyValuesMayChange(job)
@@ -282,20 +303,26 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
 	stagedDedup := useStaging && shouldDedup
 	directDedup := !useStaging && shouldDedup && supportsDirectReplaceDeduplication(job.Destination)
+	deferStagingPrimaryKey := useStaging && replaceShouldDeferStagingPrimaryKey(job)
 
 	// Staged dedup loads into a PK-free table so duplicate keys can land.
 	stagingPrimaryKeys := job.Config.PrimaryKeys
-	if stagedDedup {
+	deferredPrimaryKeys := []string(nil)
+	if deferStagingPrimaryKey {
+		deferredPrimaryKeys = job.Config.PrimaryKeys
+		stagingPrimaryKeys = nil
+	} else if stagedDedup {
 		stagingPrimaryKeys = nil
 	}
 
 	prepareOpts := destination.PrepareOptions{
-		Table:       writeTable,
-		Schema:      job.Schema,
-		DropFirst:   true,
-		PrimaryKeys: stagingPrimaryKeys,
-		PartitionBy: job.Config.PartitionBy,
-		ClusterBy:   job.Config.ClusterBy,
+		Table:               writeTable,
+		Schema:              job.Schema,
+		DropFirst:           true,
+		PrimaryKeys:         stagingPrimaryKeys,
+		DeferredPrimaryKeys: deferredPrimaryKeys,
+		PartitionBy:         job.Config.PartitionBy,
+		ClusterBy:           job.Config.ClusterBy,
 	}
 	if useStaging {
 		prepareOpts.ExpiresAfter = destination.ManagedStagingTTL
@@ -347,7 +374,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	writeOpts := destination.WriteOptions{
 		Table:            writeTable,
 		Schema:           job.Schema,
-		Parallelism:      job.Config.EffectiveDestinationParallelism(),
+		Parallelism:      replaceWriteParallelism(job, deferStagingPrimaryKey),
 		StagingTable:     useStaging,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
