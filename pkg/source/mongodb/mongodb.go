@@ -1,9 +1,11 @@
 package mongodb
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -99,11 +102,12 @@ func (s *MongoDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:           tableName,
-		TablePrimaryKeys:    pks,
-		TableIncrementalKey: req.IncrementalKey,
-		TableStrategy:       strategy,
-		KnownSchema:         false,
+		TableName:                        tableName,
+		TablePrimaryKeys:                 pks,
+		TableIncrementalKey:              req.IncrementalKey,
+		TableStrategy:                    strategy,
+		TableSupportsExtractPartitioning: true,
+		KnownSchema:                      false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return nil, fmt.Errorf("MongoDB does not have a predefined schema; schema inference is required")
 		},
@@ -442,6 +446,29 @@ func (s *MongoDBSource) read(ctx context.Context, table string, opts source.Read
 	collection := s.client.Database(db).Collection(col)
 
 	batchSize := normalizeBatchSize(opts.PageSize)
+	if opts.ExtractPartitioningEnabled() {
+		if customQuery != nil {
+			return nil, fmt.Errorf("MongoDB aggregation pipelines do not support extract partitioning")
+		}
+		if opts.Limit > 0 {
+			return nil, fmt.Errorf("MongoDB extract partitioning cannot be combined with a row limit")
+		}
+		partitionSchema := &schema.TableSchema{Columns: []schema.Column{{
+			Name:     opts.ExtractPartitionBy,
+			DataType: schema.TypeInt64,
+		}}}
+		return source.ReadExtractPartitions(
+			ctx,
+			opts,
+			partitionSchema,
+			func(ctx context.Context, windowOpts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+				return s.readFind(ctx, collection, batchSize, windowOpts, startTotal)
+			},
+			func(ctx context.Context, boundsOpts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+				return discoverMongoNumericPartitionBounds(ctx, collection, boundsOpts.ExtractPartitionBy)
+			},
+		)
+	}
 
 	if customQuery != nil {
 		if opts.IncrementalKey != "" {
@@ -467,7 +494,7 @@ func (s *MongoDBSource) readFind(ctx context.Context, collection *mongo.Collecti
 		}
 		findOpts.SetBatchSize(int32(batchSize))
 
-		filter := bson.D{}
+		filters := make([]bson.D, 0, 2)
 		if opts.IncrementalKey != "" {
 			hasStart := opts.IntervalStart != nil
 			hasEnd := opts.IntervalEnd != nil
@@ -480,10 +507,21 @@ func (s *MongoDBSource) readFind(ctx context.Context, collection *mongo.Collecti
 				if hasEnd {
 					rangeFilter = append(rangeFilter, bson.E{Key: "$lt", Value: opts.IntervalEnd})
 				}
-				filter = append(filter, bson.E{Key: opts.IncrementalKey, Value: rangeFilter})
+				filters = append(filters, bson.D{{Key: opts.IncrementalKey, Value: rangeFilter}})
 			}
 
 			findOpts.SetSort(bson.D{{Key: opts.IncrementalKey, Value: 1}})
+		}
+		if partitionFilter := mongoExtractPartitionFilter(opts); len(partitionFilter) > 0 {
+			filters = append(filters, partitionFilter)
+		}
+
+		filter := bson.D{}
+		switch len(filters) {
+		case 1:
+			filter = filters[0]
+		case 2:
+			filter = bson.D{{Key: "$and", Value: bson.A{filters[0], filters[1]}}}
 		}
 
 		cursor, err := collection.Find(ctx, filter, findOpts)
@@ -497,6 +535,131 @@ func (s *MongoDBSource) readFind(ctx context.Context, collection *mongo.Collecti
 	}()
 
 	return results, nil
+}
+
+func mongoExtractPartitionFilter(opts source.ReadOptions) bson.D {
+	if opts.ExtractPartitionBy == "" {
+		return nil
+	}
+	if opts.ExtractPartitionIsNull {
+		return bson.D{{Key: opts.ExtractPartitionBy, Value: nil}}
+	}
+	if opts.ExtractPartitionKind != source.ExtractPartitionKindNumeric || opts.ExtractPartitionNumericStart == nil || opts.ExtractPartitionNumericEnd == nil {
+		return nil
+	}
+
+	if opts.ExtractPartitionEndInclusive {
+		return bson.D{{Key: opts.ExtractPartitionBy, Value: bson.D{
+			{Key: "$gte", Value: *opts.ExtractPartitionNumericStart},
+		}}}
+	}
+	return bson.D{{Key: opts.ExtractPartitionBy, Value: bson.D{
+		{Key: "$gte", Value: *opts.ExtractPartitionNumericStart},
+		{Key: "$lt", Value: *opts.ExtractPartitionNumericEnd},
+	}}}
+}
+
+func discoverMongoNumericPartitionBounds(ctx context.Context, collection *mongo.Collection, field string) (source.ExtractPartitionBounds, error) {
+	indexed, err := mongoCollectionHasLeadingIndex(ctx, collection, field)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to inspect MongoDB indexes: %w", err)
+	}
+	if !indexed {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("MongoDB extract partition column %q must be the leading field of an index", field)
+	}
+
+	numericTypeFilter := bson.D{{Key: "$or", Value: bson.A{
+		bson.D{{Key: field, Value: bson.D{{Key: "$type", Value: "int"}}}},
+		bson.D{{Key: field, Value: bson.D{{Key: "$type", Value: "long"}}}},
+	}}}
+	unsupportedFilter := bson.D{
+		{Key: field, Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: nil}}},
+		{Key: "$nor", Value: bson.A{
+			bson.D{{Key: field, Value: bson.D{{Key: "$type", Value: "int"}}}},
+			bson.D{{Key: field, Value: bson.D{{Key: "$type", Value: "long"}}}},
+		}},
+	}
+	if err := collection.FindOne(ctx, unsupportedFilter, options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Err(); err == nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("MongoDB extract partition column %q contains non-integer values", field)
+	} else if !errors.Is(err, mongo.ErrNoDocuments) {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to validate MongoDB extract partition values: %w", err)
+	}
+
+	minimum, found, err := findMongoNumericPartitionBound(ctx, collection, field, numericTypeFilter, 1)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, err
+	}
+	nullErr := collection.FindOne(ctx, bson.D{{Key: field, Value: nil}}, options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Err()
+	if nullErr != nil && !errors.Is(nullErr, mongo.ErrNoDocuments) {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to inspect null MongoDB extract partition values: %w", nullErr)
+	}
+	hasNulls := nullErr == nil
+	if !found {
+		return source.ExtractPartitionBounds{Kind: source.ExtractPartitionKindNumeric, HasNulls: hasNulls}, nil
+	}
+	maximum, found, err := findMongoNumericPartitionBound(ctx, collection, field, numericTypeFilter, -1)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, err
+	}
+	if !found {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("MongoDB extract partition column %q has a minimum but no maximum", field)
+	}
+	return source.ExtractPartitionBounds{
+		NumericStart: minimum,
+		NumericEnd:   maximum,
+		Kind:         source.ExtractPartitionKindNumeric,
+		HasRange:     true,
+		HasNulls:     hasNulls,
+	}, nil
+}
+
+func findMongoNumericPartitionBound(ctx context.Context, collection *mongo.Collection, field string, filter bson.D, direction int) (int64, bool, error) {
+	var result bson.Raw
+	err := collection.FindOne(
+		ctx,
+		filter,
+		options.FindOne().SetSort(bson.D{{Key: field, Value: direction}}).SetProjection(bson.D{{Key: field, Value: 1}, {Key: "_id", Value: 0}}),
+	).Decode(&result)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to discover MongoDB extract partition bounds: %w", err)
+	}
+	value := result.Lookup(field)
+	switch value.Type {
+	case bson.TypeInt32:
+		v, ok := value.Int32OK()
+		if !ok {
+			return 0, false, fmt.Errorf("failed to decode MongoDB extract partition bound for %q", field)
+		}
+		return int64(v), true, nil
+	case bson.TypeInt64:
+		v, ok := value.Int64OK()
+		if !ok {
+			return 0, false, fmt.Errorf("failed to decode MongoDB extract partition bound for %q", field)
+		}
+		return v, true, nil
+	default:
+		return 0, false, fmt.Errorf("MongoDB extract partition column %q is not an integer", field)
+	}
+}
+
+func mongoCollectionHasLeadingIndex(ctx context.Context, collection *mongo.Collection, field string) (bool, error) {
+	specs, err := collection.Indexes().ListSpecifications(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, spec := range specs {
+		elements, err := spec.KeysDocument.Elements()
+		if err != nil {
+			return false, err
+		}
+		if len(elements) > 0 && elements[0].Key() == field {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *MongoDBSource) readAggregate(ctx context.Context, collection *mongo.Collection, pipeline []bson.M, batchSize int, opts source.ReadOptions, startTotal time.Time) (<-chan source.RecordBatchResult, error) {
@@ -539,31 +702,17 @@ func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor,
 		}
 
 		startBatch := time.Now()
-		var builder mongoRecordBatchBuilder = newMongoRawBatchBuilder(opts.ExcludeColumns)
+		var builder mongoRecordBatchBuilder = newMongoRawBatchBuilderWithCapacity(opts.ExcludeColumns, batchSize)
 		if opts.Schema != nil {
-			builder = newMongoSchemaBatchBuilder(opts.Schema.Columns, opts.ExcludeColumns)
+			builder = newMongoSchemaBatchBuilderWithCapacity(opts.Schema.Columns, opts.ExcludeColumns, batchSize)
 		}
 		batchRows := 0
 
 		for batchRows < batchSize && cursor.Next(ctx) {
-			if opts.Schema == nil {
-				if err := builder.AppendRawDocument(cursor.Current); err != nil {
-					builder.Release()
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build Arrow batch: %w", err)}
-					return
-				}
-			} else {
-				var doc bson.M
-				if err := cursor.Decode(&doc); err != nil {
-					builder.Release()
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to decode document: %w", err)}
-					return
-				}
-				if err := builder.AppendDocument(doc); err != nil {
-					builder.Release()
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build Arrow batch: %w", err)}
-					return
-				}
+			if err := builder.AppendRawDocument(cursor.Current); err != nil {
+				builder.Release()
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build Arrow batch: %w", err)}
+				return
 			}
 			batchRows++
 		}
@@ -861,16 +1010,31 @@ type mongoRawBatchBuilder struct {
 	excludeMap  map[string]bool
 	hasExcludes bool
 	fieldOrder  []string
-	cols        map[string]*typedColumnBuilder
+	columnIndex map[string]int
+	columns     []*typedColumnBuilder
+	seenAt      []uint64
+	fieldAt     []int
+	generation  uint64
+	rowCapacity int
 	rowCount    int
 }
 
 type rawDocumentField struct {
-	key   string
+	index int
 	value bson.RawValue
 }
 
+// transientString avoids allocating for map lookups. Callers must not retain it
+// beyond the lifetime of data.
+func transientString(data []byte) string {
+	return unsafe.String(unsafe.SliceData(data), len(data))
+}
+
 func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
+	return newMongoRawBatchBuilderWithCapacity(excludeColumns, 0)
+}
+
+func newMongoRawBatchBuilderWithCapacity(excludeColumns []string, rowCapacity int) *mongoRawBatchBuilder {
 	excludeMap := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
 		excludeMap[strings.ToLower(col)] = true
@@ -881,7 +1045,8 @@ func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
 		excludeMap:  excludeMap,
 		hasExcludes: len(excludeMap) > 0,
 		fieldOrder:  make([]string, 0),
-		cols:        make(map[string]*typedColumnBuilder),
+		columnIndex: make(map[string]int),
+		rowCapacity: rowCapacity,
 	}
 }
 
@@ -902,9 +1067,7 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 
 	var stackFields [64]rawDocumentField
 	fields := stackFields[:0]
-	var stackKeys [64]string
-	keys := stackKeys[:0]
-	hasDuplicate := false
+	generation := b.nextGeneration()
 
 	for length > 1 {
 		elem, next, ok := bsoncore.ReadElement(rem)
@@ -914,11 +1077,11 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 		length -= int32(len(elem))
 		rem = next
 
-		key, err := elem.KeyErr()
+		keyBytes, err := elem.KeyBytesErr()
 		if err != nil {
 			return err
 		}
-		if b.isExcludedKey(key) {
+		if b.isExcludedRawKey(keyBytes) {
 			continue
 		}
 		val, err := elem.ValueErr()
@@ -926,86 +1089,59 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 			return err
 		}
 
-		isNewKey := true
-		for _, seen := range keys {
-			if seen == key {
-				hasDuplicate = true
-				isNewKey = false
-				break
-			}
+		key := transientString(keyBytes)
+		index, ok := b.columnIndex[key]
+		if !ok {
+			key = string(keyBytes)
+			index = len(b.columns)
+			b.columnIndex[key] = index
+			b.fieldOrder = append(b.fieldOrder, key)
+			b.columns = append(b.columns, newTypedColumnBuilderWithCapacity(b.mem, b.rowCapacity))
+			b.seenAt = append(b.seenAt, 0)
+			b.fieldAt = append(b.fieldAt, 0)
 		}
-		if isNewKey {
-			keys = append(keys, key)
+
+		value := rawValueFromCore(val)
+		if b.seenAt[index] == generation {
+			fields[b.fieldAt[index]].value = value
+			continue
 		}
+		b.seenAt[index] = generation
+		b.fieldAt[index] = len(fields)
 		fields = append(fields, rawDocumentField{
-			key:   key,
-			value: rawValueFromCore(val),
+			index: index,
+			value: value,
 		})
 	}
 
-	if hasDuplicate {
-		return b.appendRawFieldsCollapsed(fields, keys)
-	}
-	return b.appendRawFieldsDirect(fields)
-}
-
-func (b *mongoRawBatchBuilder) appendRawFieldsCollapsed(fields []rawDocumentField, keys []string) error {
-	values := make(map[string]bson.RawValue, len(keys))
 	for _, field := range fields {
-		values[field.key] = field.value
-	}
-
-	for _, key := range keys {
-		col, ok := b.cols[key]
-		if !ok {
-			col = newTypedColumnBuilder(b.mem)
-			col.AppendNulls(b.rowCount)
-			b.cols[key] = col
-			b.fieldOrder = append(b.fieldOrder, key)
-		}
-		col.AppendRaw(values[key])
-	}
-
-	for _, field := range b.fieldOrder {
-		if _, ok := values[field]; ok {
-			continue
-		}
-		b.cols[field].AppendNull()
-	}
-
-	b.rowCount++
-	return nil
-}
-
-func (b *mongoRawBatchBuilder) appendRawFieldsDirect(fields []rawDocumentField) error {
-	for _, field := range fields {
-		col, ok := b.cols[field.key]
-		if !ok {
-			col = newTypedColumnBuilder(b.mem)
-			col.AppendNulls(b.rowCount)
-			b.cols[field.key] = col
-			b.fieldOrder = append(b.fieldOrder, field.key)
+		col := b.columns[field.index]
+		if missing := b.rowCount - col.rowCount; missing > 0 {
+			col.AppendNulls(missing)
 		}
 		col.AppendRaw(field.value)
 	}
 
-	for _, field := range b.fieldOrder {
-		col := b.cols[field]
-		if col.rowCount <= b.rowCount {
-			col.AppendNull()
-		}
-	}
-
 	b.rowCount++
 	return nil
+}
+
+func (b *mongoRawBatchBuilder) nextGeneration() uint64 {
+	b.generation++
+	if b.generation != 0 {
+		return b.generation
+	}
+	clear(b.seenAt)
+	b.generation = 1
+	return b.generation
 }
 
 func (b *mongoBatchBuilder) isExcludedKey(key string) bool {
 	return b.hasExcludes && b.excludeMap[strings.ToLower(key)]
 }
 
-func (b *mongoRawBatchBuilder) isExcludedKey(key string) bool {
-	return b.hasExcludes && b.excludeMap[strings.ToLower(key)]
+func (b *mongoRawBatchBuilder) isExcludedRawKey(key []byte) bool {
+	return b.hasExcludes && b.excludeMap[strings.ToLower(string(key))]
 }
 
 func rawValueFromCore(val bsoncore.Value) bson.RawValue {
@@ -1018,14 +1154,19 @@ func (b *mongoRawBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
 		return array.NewRecordBatch(emptySchema, []arrow.Array{}, 0), nil
 	}
 
-	fieldOrder := append([]string(nil), b.fieldOrder...)
-	sort.Strings(fieldOrder)
+	columnOrder := make([]int, len(b.fieldOrder))
+	for i := range columnOrder {
+		columnOrder[i] = i
+	}
+	sort.Slice(columnOrder, func(i, j int) bool {
+		return b.fieldOrder[columnOrder[i]] < b.fieldOrder[columnOrder[j]]
+	})
 
-	fields := make([]arrow.Field, len(fieldOrder))
-	arrays := make([]arrow.Array, len(fieldOrder))
-	for i, name := range fieldOrder {
-		arr, field := b.cols[name].Build(b.rowCount)
-		field.Name = name
+	fields := make([]arrow.Field, len(columnOrder))
+	arrays := make([]arrow.Array, len(columnOrder))
+	for i, columnIndex := range columnOrder {
+		arr, field := b.columns[columnIndex].Build(b.rowCount)
+		field.Name = b.fieldOrder[columnIndex]
 		fields[i] = field
 		arrays[i] = arr
 	}
@@ -1041,7 +1182,7 @@ func (b *mongoRawBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
 }
 
 func (b *mongoRawBatchBuilder) Release() {
-	for _, col := range b.cols {
+	for _, col := range b.columns {
 		col.Release()
 	}
 	b.reset()
@@ -1049,17 +1190,32 @@ func (b *mongoRawBatchBuilder) Release() {
 
 func (b *mongoRawBatchBuilder) reset() {
 	b.fieldOrder = b.fieldOrder[:0]
-	b.cols = make(map[string]*typedColumnBuilder)
+	b.columnIndex = make(map[string]int)
+	b.columns = b.columns[:0]
+	b.seenAt = b.seenAt[:0]
+	b.fieldAt = b.fieldAt[:0]
+	b.generation = 0
 	b.rowCount = 0
 }
 
 type mongoSchemaBatchBuilder struct {
-	columns  []schema.Column
-	builders []array.Builder
-	rowCount int
+	columns     []schema.Column
+	builders    []array.Builder
+	columnIndex map[string]int
+	columnRows  []int
+	jsonBuffers []bytes.Buffer
+	seenAt      []uint64
+	fieldAt     []int
+	generation  uint64
+	rowCapacity int
+	rowCount    int
 }
 
 func newMongoSchemaBatchBuilder(columns []schema.Column, excludeColumns []string) *mongoSchemaBatchBuilder {
+	return newMongoSchemaBatchBuilderWithCapacity(columns, excludeColumns, 0)
+}
+
+func newMongoSchemaBatchBuilderWithCapacity(columns []schema.Column, excludeColumns []string, rowCapacity int) *mongoSchemaBatchBuilder {
 	excludeMap := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
 		excludeMap[strings.ToLower(col)] = true
@@ -1075,35 +1231,118 @@ func newMongoSchemaBatchBuilder(columns []schema.Column, excludeColumns []string
 
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(filtered))
+	columnIndex := make(map[string]int, len(filtered))
 	for i, col := range filtered {
 		builders[i] = array.NewBuilder(mem, schema.DataTypeToArrowType(col))
+		columnIndex[col.Name] = i
 	}
 
 	return &mongoSchemaBatchBuilder{
-		columns:  filtered,
-		builders: builders,
+		columns:     filtered,
+		builders:    builders,
+		columnIndex: columnIndex,
+		columnRows:  make([]int, len(filtered)),
+		jsonBuffers: make([]bytes.Buffer, len(filtered)),
+		seenAt:      make([]uint64, len(filtered)),
+		fieldAt:     make([]int, len(filtered)),
+		rowCapacity: rowCapacity,
 	}
 }
 
 func (b *mongoSchemaBatchBuilder) AppendDocument(doc bson.M) error {
+	b.reserveRows()
 	for i, col := range b.columns {
+		if missing := b.rowCount - b.columnRows[i]; missing > 0 {
+			b.builders[i].AppendNulls(missing)
+			b.columnRows[i] += missing
+		}
 		val, ok := doc[col.Name]
 		if !ok || val == nil {
 			b.builders[i].AppendNull()
+			b.columnRows[i]++
 			continue
 		}
 		arrowconv.AppendValue(b.builders[i], convertBSONValue(val))
+		b.columnRows[i]++
 	}
 	b.rowCount++
 	return nil
 }
 
 func (b *mongoSchemaBatchBuilder) AppendRawDocument(doc bson.Raw) error {
-	var decoded bson.M
-	if err := bson.Unmarshal(doc, &decoded); err != nil {
-		return err
+	b.reserveRows()
+	length, rem, ok := bsoncore.ReadLength(doc)
+	if !ok {
+		return bsoncore.NewInsufficientBytesError(doc, rem)
 	}
-	return b.AppendDocument(decoded)
+	length -= 4
+
+	var stackFields [64]rawDocumentField
+	fields := stackFields[:0]
+	generation := b.nextGeneration()
+	for length > 1 {
+		elem, next, ok := bsoncore.ReadElement(rem)
+		if !ok {
+			return bsoncore.NewInsufficientBytesError(doc, rem)
+		}
+		length -= int32(len(elem))
+		rem = next
+
+		key, err := elem.KeyBytesErr()
+		if err != nil {
+			return err
+		}
+		index, exists := b.columnIndex[transientString(key)]
+		if !exists {
+			continue
+		}
+		value, err := elem.ValueErr()
+		if err != nil {
+			return err
+		}
+		rawValue := rawValueFromCore(value)
+		if b.seenAt[index] == generation {
+			fields[b.fieldAt[index]].value = rawValue
+			continue
+		}
+		b.seenAt[index] = generation
+		b.fieldAt[index] = len(fields)
+		fields = append(fields, rawDocumentField{index: index, value: rawValue})
+	}
+
+	for _, field := range fields {
+		if missing := b.rowCount - b.columnRows[field.index]; missing > 0 {
+			b.builders[field.index].AppendNulls(missing)
+			b.columnRows[field.index] += missing
+		}
+		if field.value.Type == bson.TypeNull {
+			b.builders[field.index].AppendNull()
+		} else if !appendRawValue(b.builders[field.index], field.value, &b.jsonBuffers[field.index]) {
+			arrowconv.AppendValue(b.builders[field.index], convertRawBSONValue(field.value))
+		}
+		b.columnRows[field.index]++
+	}
+	b.rowCount++
+	return nil
+}
+
+func (b *mongoSchemaBatchBuilder) reserveRows() {
+	if b.rowCount != 0 || b.rowCapacity <= 0 {
+		return
+	}
+	for _, builder := range b.builders {
+		builder.Reserve(b.rowCapacity)
+	}
+}
+
+func (b *mongoSchemaBatchBuilder) nextGeneration() uint64 {
+	b.generation++
+	if b.generation != 0 {
+		return b.generation
+	}
+	clear(b.seenAt)
+	b.generation = 1
+	return b.generation
 }
 
 func (b *mongoSchemaBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
@@ -1115,6 +1354,10 @@ func (b *mongoSchemaBatchBuilder) NewRecordBatch() (arrow.RecordBatch, error) {
 	fields := make([]arrow.Field, len(b.columns))
 	arrays := make([]arrow.Array, len(b.columns))
 	for i, col := range b.columns {
+		if missing := b.rowCount - b.columnRows[i]; missing > 0 {
+			b.builders[i].AppendNulls(missing)
+			b.columnRows[i] += missing
+		}
 		fields[i] = arrow.Field{
 			Name:     col.Name,
 			Type:     schema.DataTypeToArrowType(col),
@@ -1141,6 +1384,13 @@ func (b *mongoSchemaBatchBuilder) Release() {
 	}
 	b.builders = nil
 	b.columns = nil
+	b.columnIndex = nil
+	b.columnRows = nil
+	b.jsonBuffers = nil
+	b.seenAt = nil
+	b.fieldAt = nil
+	b.generation = 0
+	b.rowCapacity = 0
 	b.rowCount = 0
 }
 
