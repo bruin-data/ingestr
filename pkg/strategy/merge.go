@@ -28,28 +28,35 @@ type mergeTableParams struct {
 	IsCDC        bool
 }
 
-// prepareMergeTables ensures the destination table exists (without dropping it)
-// and creates a fresh staging table for it.
-func prepareMergeTables(ctx context.Context, dest destination.Destination, p mergeTableParams) error {
+func prepareMergeTarget(ctx context.Context, dest destination.Destination, p mergeTableParams) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
-		Table:       p.DestTable,
-		Schema:      destination.DestinationTableSchema(p.Schema),
-		DropFirst:   false,
-		PrimaryKeys: p.PrimaryKeys,
-		CDCMode:     p.IsCDC,
-		CDCKeys:     p.PrimaryKeys,
-		PartitionBy: p.PartitionBy,
-		ClusterBy:   p.ClusterBy,
+		Table:                  p.DestTable,
+		Schema:                 destination.DestinationTableSchema(p.Schema),
+		DropFirst:              false,
+		PrimaryKeys:            p.PrimaryKeys,
+		CDCMode:                p.IsCDC,
+		CDCKeys:                p.PrimaryKeys,
+		RequirePrimaryKeyMatch: p.IsCDC && len(p.PrimaryKeys) > 0,
+		PartitionBy:            p.PartitionBy,
+		ClusterBy:              p.ClusterBy,
 	}); err != nil {
 		return fmt.Errorf("failed to prepare destination table %s: %w", p.DestTable, err)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	return nil
+}
 
+// prepareMergeTables ensures the destination table exists (without dropping it)
+// and creates a fresh staging table for it.
+func prepareMergeTables(ctx context.Context, dest destination.Destination, p mergeTableParams) error {
+	if err := prepareMergeTarget(ctx, dest, p); err != nil {
+		return err
+	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}

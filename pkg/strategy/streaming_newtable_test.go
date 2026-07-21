@@ -44,6 +44,7 @@ type lateTableCDCStateDestination struct {
 	beforeAtomicCreate        func(destination.CDCTargetClaim)
 	beforeTargetClaim         func(destination.CDCTargetClaim)
 	beforeConditionalTruncate func(string)
+	primaryKeyValidationErr   error
 }
 
 func newLateTableCDCStateDestination() *lateTableCDCStateDestination {
@@ -56,6 +57,9 @@ func newLateTableCDCStateDestination() *lateTableCDCStateDestination {
 }
 
 func (d *lateTableCDCStateDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if opts.RequirePrimaryKeyMatch && d.primaryKeyValidationErr != nil {
+		return d.primaryKeyValidationErr
+	}
 	if err := d.cdcStateDestination.PrepareTable(ctx, opts); err != nil {
 		return err
 	}
@@ -466,6 +470,61 @@ func TestStreaming_NewTableCompletedStateAuthorizesReplacement(t *testing.T) {
 	}).ExecuteMultiTable(t.Context(), job))
 	require.Equal(t, []string{target}, dest.truncateCalls)
 	require.Empty(t, dest.rows[target])
+}
+
+func TestStreaming_NewTableCompletedStateValidatesExistingMergeTargetPrimaryKey(t *testing.T) {
+	const (
+		connector = "connector-a"
+		startup   = "public.users"
+		late      = "public.products"
+		target    = "landing.public_products"
+	)
+	dest := newLateTableCDCStateDestination()
+	dest.rows[target] = []int64{41, 42}
+	completed, err := NewCDCStateManager(dest, connector, target, "")
+	require.NoError(t, err)
+	require.NoError(t, completed.RegisterTableState(t.Context(), late, target, "100", "schema-a"))
+	require.NoError(t, completed.ClaimTarget(t.Context(), late, target))
+	require.NoError(t, completed.BeginRun(t.Context(), false))
+	require.NoError(t, completed.Persist(t.Context(), source.CDCStateCommitToken{
+		SnapshotPositions:    map[string]string{late: "00000000/00000010"},
+		SnapshotIncarnations: map[string]string{late: "100"},
+		SnapshotSchemas:      map[string]string{late: "schema-a"},
+	}))
+
+	manager, err := NewCDCStateManager(dest, connector, "landing.public_users", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTable(t.Context(), startup, "landing.public_users"))
+	require.NoError(t, manager.ClaimTarget(t.Context(), startup, "landing.public_users"))
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+	dest.primaryKeyValidationErr = errors.New("CDC merge target must have primary key [id]; found [other_id]")
+	info := newTableInfo(late)
+	info.Schema.Columns = append(info.Schema.Columns,
+		schema.Column{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+		schema.Column{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+		schema.Column{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+	)
+	info.Incarnation = "100"
+	info.SchemaFingerprint = "schema-a"
+	info.DestSchema = "landing"
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: late, TableInfo: &info}
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{newTableInfo(startup)}, records: records}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Source:         src,
+		Destination:    dest,
+		Tables:         src.tables,
+		TableDestNames: map[string]string{startup: "landing.public_users"},
+	}
+
+	err = NewStreamingExecutor(StreamingOptions{
+		Strategy: config.StrategyMerge, FlushInterval: time.Hour, StateManager: manager,
+	}).ExecuteMultiTable(t.Context(), job)
+	require.ErrorContains(t, err, "must have primary key")
+	require.Equal(t, []int64{41, 42}, dest.rows[target])
+	require.Empty(t, dest.truncateCalls)
 }
 
 func TestStreaming_NewTableAbsentTargetCanBeClaimedAndPrepared(t *testing.T) {

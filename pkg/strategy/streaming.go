@@ -234,6 +234,18 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		}
 		pendingSafeBoundary := e.opts.StateManager != nil && e.opts.StateManager.HasPendingLateSnapshotBoundary(ti.Name)
 		if pendingSafeBoundary {
+			if e.opts.Strategy == config.StrategyMerge && !(st.isCDC && len(st.primaryKeys) == 0) {
+				if err := prepareMergeTarget(ctx, job.Destination, mergeTableParams{
+					DestTable:   st.destTable,
+					Schema:      st.schema,
+					PrimaryKeys: st.primaryKeys,
+					PartitionBy: st.partitionBy,
+					ClusterBy:   st.clusterBy,
+					IsCDC:       st.isCDC,
+				}); err != nil {
+					return nil, err
+				}
+			}
 			if err := e.prepareLateStagingTable(ctx, job.Destination, job.Config, st); err != nil {
 				return nil, err
 			}
@@ -269,13 +281,14 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 
 func (e *StreamingExecutor) lateTargetPrepareOptions(st *streamTableState) destination.PrepareOptions {
 	opts := destination.PrepareOptions{
-		Table:       st.destTable,
-		Schema:      destination.DestinationTableSchema(st.schema),
-		PrimaryKeys: st.primaryKeys,
-		CDCMode:     st.isCDC,
-		CDCKeys:     st.primaryKeys,
-		PartitionBy: st.partitionBy,
-		ClusterBy:   st.clusterBy,
+		Table:                  st.destTable,
+		Schema:                 destination.DestinationTableSchema(st.schema),
+		PrimaryKeys:            st.primaryKeys,
+		CDCMode:                st.isCDC,
+		CDCKeys:                st.primaryKeys,
+		PartitionBy:            st.partitionBy,
+		ClusterBy:              st.clusterBy,
+		RequirePrimaryKeyMatch: e.opts.Strategy == config.StrategyMerge && st.isCDC && len(st.primaryKeys) > 0,
 	}
 	if e.opts.Strategy == config.StrategyAppend || (st.isCDC && len(st.primaryKeys) == 0) {
 		opts.PrimaryKeys = nil

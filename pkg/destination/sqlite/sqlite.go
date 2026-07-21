@@ -180,7 +180,6 @@ func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err := tablename.TwoLevel("sqlite").CheckName(opts.Table); err != nil {
 		return err
 	}
-	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	if err := d.ensureSchemaAttached(ctx, schemaOf(opts.Table)); err != nil {
 		return err
@@ -205,8 +204,50 @@ func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.P
 		}
 		config.Debug("[SQLITE] CREATE TABLE took %v", time.Since(startCreate))
 	}
+	if opts.RequirePrimaryKeyMatch {
+		actual, err := d.GetTableSchema(ctx, opts.Table)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if actual == nil || !sqlitePrimaryKeySetsEqual(opts.PrimaryKeys, actual.PrimaryKeys) {
+			var actualKeys []string
+			if actual != nil {
+				actualKeys = actual.PrimaryKeys
+			}
+			return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	return nil
+}
+
+func sqlitePrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[sqliteIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := sqliteIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func sqliteIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *SQLiteDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -1196,6 +1237,7 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	primaryKeysByOrdinal := make(map[int]string)
 	for rows.Next() {
 		var cid int
 		var name, colType string
@@ -1212,6 +1254,9 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 			Nullable:     notNull == 0,
 			IsPrimaryKey: pk > 0,
 		})
+		if pk > 0 {
+			primaryKeysByOrdinal[pk] = name
+		}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -1222,10 +1267,14 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 		return nil, nil
 	}
 
-	return &schema.TableSchema{
-		Name:    tableName,
-		Columns: columns,
-	}, nil
+	primaryKeys := make([]string, len(primaryKeysByOrdinal))
+	for ordinal, name := range primaryKeysByOrdinal {
+		if ordinal > 0 && ordinal <= len(primaryKeys) {
+			primaryKeys[ordinal-1] = name
+		}
+	}
+
+	return &schema.TableSchema{Name: tableName, Columns: columns, PrimaryKeys: primaryKeys}, nil
 }
 
 func mapSQLiteTypeToSchema(colType string) schema.DataType {

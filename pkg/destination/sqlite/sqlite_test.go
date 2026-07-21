@@ -18,6 +18,77 @@ import (
 	"github.com/bruin-data/ingestr/pkg/transformer"
 )
 
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "cdc-primary-key.db")
+	requireNoError(t, d.Connect(t.Context(), "sqlite://"+path))
+	defer func() { _ = d.Close(t.Context()) }()
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "part", DataType: schema.TypeString},
+		{Name: "payload", DataType: schema.TypeString, Nullable: true},
+	}}
+	prepare := func(table string, keys []string, requireMatch bool) error {
+		return d.PrepareTable(t.Context(), destination.PrepareOptions{
+			Table:                  table,
+			Schema:                 tableSchema,
+			PrimaryKeys:            keys,
+			CDCMode:                true,
+			CDCKeys:                keys,
+			RequirePrimaryKeyMatch: requireMatch,
+		})
+	}
+
+	requireNoError(t, prepare("fresh", []string{"id", "part"}, true))
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE matching ("ID" INTEGER, "part" TEXT, "payload" TEXT, PRIMARY KEY ("part", "ID"))`))
+	requireNoError(t, prepare("matching", []string{"id", "PART"}, true))
+
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE missing (id INTEGER, part TEXT, payload TEXT)`))
+	requireNoError(t, d.Exec(t.Context(), `INSERT INTO missing VALUES (1, 'a', 'keep')`))
+	err := prepare("missing", []string{"id"}, true)
+	if err == nil || !strings.Contains(err.Error(), "must have primary key [id]; found []") {
+		t.Fatalf("missing primary key error = %v", err)
+	}
+	var payload string
+	requireNoError(t, d.db.QueryRowContext(t.Context(), `SELECT payload FROM missing WHERE id = 1`).Scan(&payload))
+	if payload != "keep" {
+		t.Fatalf("failed validation mutated existing row: payload=%q", payload)
+	}
+	if d.lookupSchema("missing") != nil {
+		t.Fatal("failed validation cached the requested schema")
+	}
+
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE mismatched (id INTEGER, part TEXT, payload TEXT PRIMARY KEY)`))
+	err = prepare("mismatched", []string{"id"}, true)
+	if err == nil || !strings.Contains(err.Error(), "found [payload]") {
+		t.Fatalf("mismatched primary key error = %v", err)
+	}
+
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE unicode_keys ("ä" INTEGER PRIMARY KEY, part TEXT, payload TEXT)`))
+	err = prepare("unicode_keys", []string{"Ä"}, true)
+	if err == nil || !strings.Contains(err.Error(), "found [ä]") {
+		t.Fatalf("non-ASCII case-distinct primary key error = %v", err)
+	}
+
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE append_log (id INTEGER, part TEXT, payload TEXT)`))
+	requireNoError(t, prepare("append_log", nil, false))
+}
+
+func TestGetTableSchemaReturnsCompositePrimaryKeyOrdinalOrder(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "primary-key-order.db")
+	requireNoError(t, d.Connect(t.Context(), "sqlite://"+path))
+	defer func() { _ = d.Close(t.Context()) }()
+	requireNoError(t, d.Exec(t.Context(), `CREATE TABLE events (first TEXT, second TEXT, payload TEXT, PRIMARY KEY (second, first))`))
+
+	tableSchema, err := d.GetTableSchema(t.Context(), "events")
+	requireNoError(t, err)
+	if !reflect.DeepEqual(tableSchema.PrimaryKeys, []string{"second", "first"}) {
+		t.Fatalf("PrimaryKeys = %v, want [second first]", tableSchema.PrimaryKeys)
+	}
+}
+
 func TestManagedStagingSchemaUsesLegacyCompatibleFilename(t *testing.T) {
 	targetPath := filepath.Join(t.TempDir(), "events.db")
 	legacyPath := filepath.Join(filepath.Dir(targetPath), "events__bruin_staging.db")

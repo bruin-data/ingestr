@@ -53,6 +53,9 @@ func TestPrepareMergeTablesEnablesCDCModeForTargetAndStaging(t *testing.T) {
 	if !dest.prepareCalls[0].CDCMode || !dest.prepareCalls[1].CDCMode {
 		t.Fatalf("CDCMode = (%v, %v), want true for target and staging", dest.prepareCalls[0].CDCMode, dest.prepareCalls[1].CDCMode)
 	}
+	if !dest.prepareCalls[0].RequirePrimaryKeyMatch || dest.prepareCalls[1].RequirePrimaryKeyMatch {
+		t.Fatalf("RequirePrimaryKeyMatch = (%v, %v), want true only for target", dest.prepareCalls[0].RequirePrimaryKeyMatch, dest.prepareCalls[1].RequirePrimaryKeyMatch)
+	}
 	if strings.Join(dest.prepareCalls[0].CDCKeys, ",") != "id" || strings.Join(dest.prepareCalls[1].CDCKeys, ",") != "id" {
 		t.Fatalf("CDCKeys = (%v, %v), want [id] for target and staging", dest.prepareCalls[0].CDCKeys, dest.prepareCalls[1].CDCKeys)
 	}
