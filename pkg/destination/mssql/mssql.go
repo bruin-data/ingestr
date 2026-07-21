@@ -157,15 +157,106 @@ func (d *MSSQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 		startCreate := time.Now()
 		createSQL := buildCreateTableSQL(resolvedTable, opts.Schema.Columns, opts.PrimaryKeys)
 		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-			if isObjectAlreadyExistsError(err) {
+			alreadyExists := isObjectAlreadyExistsError(err)
+			if alreadyExists && !opts.RequirePrimaryKeyMatch {
 				return nil
 			}
-			config.LogFailedQuery(createSQL, err)
-			return fmt.Errorf("failed to create table: %w", err)
+			if !alreadyExists {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else {
+			config.Debug("[MSSQL] CREATE TABLE took %v", time.Since(startCreate))
 		}
-		config.Debug("[MSSQL] CREATE TABLE took %v", time.Since(startCreate))
 	}
 
+	if opts.RequirePrimaryKeyMatch {
+		if err := d.validateTargetPrimaryKey(ctx, identity, opts.PrimaryKeys); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *MSSQLDestination) validateTargetPrimaryKey(ctx context.Context, identity mssqlTargetIdentity, expected []string) error {
+	resolvedTable := identity.qualifiedTable(d.server)
+	if len(expected) == 0 {
+		return fmt.Errorf("CDC merge target %s requires at least one primary key", resolvedTable)
+	}
+
+	placeholders := make([]string, len(expected))
+	args := make([]any, 0, len(expected)+2)
+	args = append(args, identity.schema, identity.table)
+	for i, key := range expected {
+		placeholders[i] = fmt.Sprintf("@p%d", i+3)
+		args = append(args, key)
+	}
+
+	prefix := identity.catalogPrefix(d.server)
+	linkedServer := identity.server != "" && !strings.EqualFold(identity.server, d.server)
+	if linkedServer {
+		prefix = ""
+	} else if prefix != "" {
+		prefix += "."
+	}
+	query := fmt.Sprintf(`SELECT c.name,
+	       CAST(CASE WHEN c.name IN (%s) THEN 1 ELSE 0 END AS bit) AS expected_key
+	FROM %ssys.tables AS t
+	JOIN %ssys.schemas AS s ON s.schema_id = t.schema_id
+	JOIN %ssys.key_constraints AS kc ON kc.parent_object_id = t.object_id AND kc.[type] = 'PK'
+	JOIN %ssys.indexes AS i ON i.object_id = t.object_id AND i.index_id = kc.unique_index_id
+	JOIN %ssys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+	JOIN %ssys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+	WHERE s.name = @p1 AND t.name = @p2
+	  AND i.is_primary_key = 1
+	  AND i.is_unique = 1
+	  AND i.is_disabled = 0
+	  AND i.is_hypothetical = 0
+	ORDER BY ic.key_ordinal`, strings.Join(placeholders, ", "), prefix, prefix, prefix, prefix, prefix, prefix)
+	if linkedServer {
+		// Execute remotely so identifier comparisons use the target catalog's collation.
+		parameterTypes := make([]string, len(args))
+		parameters := make([]string, len(args))
+		for i := range args {
+			parameterTypes[i] = fmt.Sprintf("@p%d sysname", i+1)
+			parameters[i] = fmt.Sprintf("@p%d", i+1)
+		}
+		query = fmt.Sprintf(
+			"EXEC %s.sys.sp_executesql N'%s', N'%s', %s",
+			identity.catalogPrefix(d.server),
+			strings.ReplaceAll(query, "'", "''"),
+			strings.Join(parameterTypes, ", "),
+			strings.Join(parameters, ", "),
+		)
+	}
+
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return fmt.Errorf("failed to inspect CDC merge target %s primary key: %w", resolvedTable, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	actual := make([]string, 0, len(expected))
+	matched := 0
+	for rows.Next() {
+		var key string
+		var expectedKey bool
+		if err := rows.Scan(&key, &expectedKey); err != nil {
+			return fmt.Errorf("failed to inspect CDC merge target %s primary key: %w", resolvedTable, err)
+		}
+		actual = append(actual, key)
+		if expectedKey {
+			matched++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to inspect CDC merge target %s primary key: %w", resolvedTable, err)
+	}
+	if len(actual) != len(expected) || matched != len(expected) {
+		return fmt.Errorf("CDC merge target %s must have enabled primary key %v; found %v", resolvedTable, expected, actual)
+	}
 	return nil
 }
 

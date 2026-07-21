@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"regexp"
@@ -172,6 +173,190 @@ func TestPrepareTableUsesConnectedDefaultSchema(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	t.Run("fresh composite key ignores physical key order", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+
+		tableSchema := &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "region", DataType: schema.TypeString},
+			{Name: "payload", DataType: schema.TypeString, Nullable: true},
+		}}
+		createSQL := buildCreateTableSQL("AppDB.dbo.events", tableSchema.Columns, []string{"id", "REGION"})
+		mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+		expectMSSQLPrimaryKeyInspection(mock, "AppDB", "dbo", "events", []string{"id", "REGION"}).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "expected_key"}).
+				AddRow("region", true).
+				AddRow("ID", true))
+
+		dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+		err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+			Table:                  "dbo.events",
+			Schema:                 tableSchema,
+			PrimaryKeys:            []string{"id", "REGION"},
+			RequirePrimaryKeyMatch: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("missing and mismatched physical keys fail closed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			actualRows *sqlmock.Rows
+			want       string
+		}{
+			{name: "missing", actualRows: sqlmock.NewRows([]string{"name", "expected_key"}), want: "found []"},
+			{name: "mismatched", actualRows: sqlmock.NewRows([]string{"name", "expected_key"}).AddRow("payload", false), want: "found [payload]"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+
+				tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+				createSQL := buildCreateTableSQL("AppDB.dbo.events", tableSchema.Columns, []string{"id"})
+				mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+				expectMSSQLPrimaryKeyInspection(mock, "AppDB", "dbo", "events", []string{"id"}).WillReturnRows(tc.actualRows)
+
+				dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+				err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+					Table:                  "dbo.events",
+					Schema:                 tableSchema,
+					PrimaryKeys:            []string{"id"},
+					RequirePrimaryKeyMatch: true,
+				})
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("PrepareTable() error = %v, want %q", err, tc.want)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
+}
+
+func TestPrepareTableValidatesConcurrentCreateWinnerPrimaryKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	createSQL := buildCreateTableSQL("AppDB.dbo.events", tableSchema.Columns, []string{"id"})
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).
+		WillReturnError(mssqldb.Error{Number: 2714, Message: "There is already an object named 'events' in the database."})
+	expectMSSQLPrimaryKeyInspection(mock, "AppDB", "dbo", "events", []string{"id"}).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "expected_key"}).AddRow("id", true))
+
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:                  "dbo.events",
+		Schema:                 tableSchema,
+		PrimaryKeys:            []string{"id"},
+		RequirePrimaryKeyMatch: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareTableWithoutPrimaryKeyRequirementPreservesConcurrentCreateBehavior(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	createSQL := buildCreateTableSQL("dbo.events", tableSchema.Columns, nil)
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).
+		WillReturnError(mssqldb.Error{Number: 2714, Message: "There is already an object named 'events' in the database."})
+
+	dest := &MSSQLDestination{db: db}
+	if err := dest.PrepareTable(t.Context(), destination.PrepareOptions{Table: "dbo.events", Schema: tableSchema}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateTargetPrimaryKeyUsesQualifiedCatalogAndCatalogCollation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	identity := mssqlTargetIdentity{server: "linked-a", database: "Warehouse", schema: "Sales", table: "Orders"}
+	expectMSSQLPrimaryKeyInspectionWithServer(mock, "linked-a", "Warehouse", "Sales", "Orders", []string{"résumé"}).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "expected_key"}).AddRow("RESUME", true))
+
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+	if err := dest.validateTargetPrimaryKey(t.Context(), identity, []string{"résumé"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectMSSQLPrimaryKeyInspection(mock sqlmock.Sqlmock, database, schemaName, table string, expected []string) *sqlmock.ExpectedQuery {
+	return expectMSSQLPrimaryKeyInspectionForPrefix(mock, regexp.QuoteMeta("["+database+"]"), schemaName, table, expected)
+}
+
+func expectMSSQLPrimaryKeyInspectionWithServer(mock sqlmock.Sqlmock, server, database, schemaName, table string, expected []string) *sqlmock.ExpectedQuery {
+	prefix := regexp.QuoteMeta("[" + server + "].[" + database + "]")
+	parameterTypes := make([]string, len(expected)+2)
+	parameters := make([]string, len(expected)+2)
+	for i := range parameterTypes {
+		parameterTypes[i] = fmt.Sprintf("@p%d sysname", i+1)
+		parameters[i] = fmt.Sprintf("@p%d", i+1)
+	}
+	pattern := `(?s)EXEC ` + prefix + `\.sys\.sp_executesql N'SELECT c\.name,.*FROM sys\.tables AS t.*` +
+		`JOIN sys\.key_constraints AS kc.*kc\.\[type\] = ''PK''.*` +
+		`JOIN sys\.indexes AS i.*JOIN sys\.index_columns AS ic.*JOIN sys\.columns AS c.*` +
+		`AND i\.is_primary_key = 1.*AND i\.is_unique = 1.*AND i\.is_disabled = 0.*AND i\.is_hypothetical = 0.*` +
+		`', N'` + regexp.QuoteMeta(strings.Join(parameterTypes, ", ")) + `', ` + regexp.QuoteMeta(strings.Join(parameters, ", "))
+	args := make([]driver.Value, 0, len(expected)+2)
+	args = append(args, schemaName, table)
+	for _, key := range expected {
+		args = append(args, key)
+	}
+	return mock.ExpectQuery(pattern).WithArgs(args...)
+}
+
+func expectMSSQLPrimaryKeyInspectionForPrefix(mock sqlmock.Sqlmock, prefix, schemaName, table string, expected []string) *sqlmock.ExpectedQuery {
+	pattern := `(?s)SELECT c\.name,.*FROM ` + prefix + `\.sys\.tables AS t.*` +
+		`JOIN ` + prefix + `\.sys\.key_constraints AS kc.*` +
+		`JOIN ` + prefix + `\.sys\.indexes AS i.*` +
+		`JOIN ` + prefix + `\.sys\.index_columns AS ic.*` +
+		`JOIN ` + prefix + `\.sys\.columns AS c.*` +
+		`AND i\.is_primary_key = 1.*AND i\.is_unique = 1.*AND i\.is_disabled = 0.*AND i\.is_hypothetical = 0`
+	args := make([]driver.Value, 0, len(expected)+2)
+	args = append(args, schemaName, table)
+	for _, key := range expected {
+		args = append(args, key)
+	}
+	return mock.ExpectQuery(pattern).WithArgs(args...)
 }
 
 func TestSwapTableUsesResolvedDefaultSchema(t *testing.T) {
