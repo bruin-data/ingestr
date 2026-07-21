@@ -456,6 +456,41 @@ func TestBuildCDCMergeSQLFencesUpdatesWithoutChangingPKMatch(t *testing.T) {
 	assert.Contains(t, got, `WHEN NOT MATCHED THEN INSERT`)
 }
 
+func TestOracleCDCInternalAliasesAvoidCanonicalIdentifierCollisions(t *testing.T) {
+	columns := []string{
+		"id",
+		"payload",
+		"BrUiN_Active_Rn",
+		"bruin_active_rn_2",
+		`"__INGESTR_HAS_EQUAL_LSN_DELETE"`,
+		`"__ingestr_has_equal_lsn_delete_2"`,
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+	}
+	aliases := newOracleCDCInternalAliases(columns)
+	require.Equal(t, "bruin_active_rn_3", aliases.activeRowNumber)
+	require.Equal(t, "__ingestr_has_equal_lsn_delete_3", aliases.equalLSNDeleteMarker)
+
+	source := oracleCDCActiveSourceWithAliases(columns, []string{"id"}, quoteTable("items_staging"), "source", aliases)
+	got := buildMergeSQLWithCDCMarker(
+		"items",
+		source,
+		columns,
+		[]string{"id"},
+		filterColumns(destination.DestinationColumns(columns), []string{"id"}),
+		"",
+		aliases.equalLSNDeleteMarker,
+	)
+
+	assert.Contains(t, source, `ROW_NUMBER() OVER (PARTITION BY "ID", "_CDC_DELETED" ORDER BY "_CDC_LSN" DESC) "BRUIN_ACTIVE_RN_3"`)
+	assert.Contains(t, source, `MAX("_CDC_DELETED") OVER (PARTITION BY "ID", "_CDC_LSN") "__INGESTR_HAS_EQUAL_LSN_DELETE_3"`)
+	assert.Contains(t, source, `AND "BRUIN_ACTIVE_RN_3" = 1`)
+	assert.Contains(t, got, `source."__INGESTR_HAS_EQUAL_LSN_DELETE_3" = 1`)
+	assert.Contains(t, got, `source."BRUIN_ACTIVE_RN"`)
+	assert.Contains(t, got, `source."__ingestr_has_equal_lsn_delete_2"`)
+}
+
 func TestBuildCDCDeleteMarkSQLUsesOverallLSNOrder(t *testing.T) {
 	got := buildCDCDeleteMarkSQL(
 		"items",

@@ -156,6 +156,98 @@ func TestOracleDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestOracleDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
+	if oracleDest.uri == "" {
+		t.Skip("shared oracle destination container not available")
+	}
+
+	ctx := t.Context()
+	targetTable := "CDC_ALIAS_T_" + uniqueSuffix()
+	stagingTable := "CDC_ALIAS_S_" + uniqueSuffix()
+	dest := oracledest.NewOracleDestination()
+	require.NoError(t, dest.Connect(ctx, oracleDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := sql.Open("oracle", oracleSQLConnString(oracleDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE %s PURGE", stagingTable))
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE %s PURGE", targetTable))
+	})
+
+	const userColumnDefinitions = `
+		BRUIN_ACTIVE_RN VARCHAR2(255 CHAR),
+		BRUIN_ACTIVE_RN_2 VARCHAR2(255 CHAR),
+		"__INGESTR_HAS_EQUAL_LSN_DELETE" VARCHAR2(255 CHAR),
+		"__INGESTR_HAS_EQUAL_LSN_DELETE_2" VARCHAR2(255 CHAR)`
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			ID NUMBER(19) PRIMARY KEY,
+			PAYLOAD VARCHAR2(255 CHAR),
+			%s,
+			"_CDC_LSN" VARCHAR2(64 CHAR),
+			"_CDC_DELETED" NUMBER(1),
+			"_CDC_SYNCED_AT" TIMESTAMP
+		)`, targetTable, userColumnDefinitions),
+		fmt.Sprintf(`CREATE TABLE %s (
+			ID NUMBER(19),
+			PAYLOAD VARCHAR2(255 CHAR),
+			%s,
+			"_CDC_LSN" VARCHAR2(64 CHAR),
+			"_CDC_DELETED" NUMBER(1),
+			"_CDC_SYNCED_AT" TIMESTAMP,
+			"_CDC_UNCHANGED_COLS" VARCHAR2(4000 CHAR)
+		)`, stagingTable, userColumnDefinitions),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'old', 'old-rn', 'old-rn-2', 'old-marker', 'old-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-01 00:00:00')`, targetTable),
+		fmt.Sprintf(`INSERT ALL
+			INTO %s VALUES (1, 'active-existing', 'existing-rn', 'existing-rn-2', 'existing-marker', 'existing-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-02 00:00:00', '[]')
+			INTO %s VALUES (1, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', 1, TIMESTAMP '2026-01-03 00:00:00', '[]')
+			INTO %s VALUES (2, 'active-new', 'new-rn', 'new-rn-2', 'new-marker', 'new-marker-2', '00000000000000000020', 0, TIMESTAMP '2026-01-02 00:00:00', '[]')
+			INTO %s VALUES (2, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', 1, TIMESTAMP '2026-01-03 00:00:00', '[]')
+		SELECT 1 FROM DUAL`, stagingTable, stagingTable, stagingTable, stagingTable),
+	} {
+		require.NoError(t, dest.Exec(ctx, statement))
+	}
+
+	columns := []string{
+		"id",
+		"payload",
+		"BrUiN_Active_Rn",
+		"bruin_active_rn_2",
+		`"__INGESTR_HAS_EQUAL_LSN_DELETE"`,
+		`"__INGESTR_HAS_EQUAL_LSN_DELETE_2"`,
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+		destination.CDCUnchangedColsColumn,
+	}
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		TargetTable:  targetTable,
+		StagingTable: stagingTable,
+		PrimaryKeys:  []string{"id"},
+		Columns:      columns,
+	}))
+
+	for id, want := range map[int64][]string{
+		1: {"active-existing", "existing-rn", "existing-rn-2", "existing-marker", "existing-marker-2"},
+		2: {"active-new", "new-rn", "new-rn-2", "new-marker", "new-marker-2"},
+	} {
+		var payload, activeRN, activeRN2, marker, marker2, lsn, synced string
+		var deleted int
+		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT PAYLOAD, BRUIN_ACTIVE_RN, BRUIN_ACTIVE_RN_2,
+				"__INGESTR_HAS_EQUAL_LSN_DELETE", "__INGESTR_HAS_EQUAL_LSN_DELETE_2",
+				"_CDC_LSN", "_CDC_DELETED", TO_CHAR("_CDC_SYNCED_AT", 'YYYY-MM-DD')
+			FROM %s WHERE ID = :1
+		`, targetTable), id).Scan(&payload, &activeRN, &activeRN2, &marker, &marker2, &lsn, &deleted, &synced))
+		require.Equal(t, want, []string{payload, activeRN, activeRN2, marker, marker2}, "id %d active row image", id)
+		require.Equal(t, "00000000000000000020", lsn, "id %d LSN", id)
+		require.Equal(t, 1, deleted, "id %d deleted", id)
+		require.Equal(t, "2026-01-03", synced, "id %d synced timestamp", id)
+	}
+}
+
 func assertOracleCDCRow(t *testing.T, ctx context.Context, db *sql.DB, table, wantPayload, wantLSN string, wantDeleted int) {
 	t.Helper()
 	var payload, lsn string

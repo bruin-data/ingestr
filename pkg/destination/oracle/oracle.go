@@ -31,6 +31,11 @@ type OracleDestination struct {
 	currentUser string
 }
 
+type oracleCDCInternalAliases struct {
+	activeRowNumber      string
+	equalLSNDeleteMarker string
+}
+
 func NewOracleDestination() *OracleDestination {
 	return &OracleDestination{}
 }
@@ -456,11 +461,14 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	upsertSource := dedupSource("")
+	equalLSNDeleteMarker := cdcEqualLSNDeleteMarker
 	if isCDC {
-		upsertSource = oracleCDCActiveSource(columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), "source")
+		aliases := newOracleCDCInternalAliases(columns)
+		equalLSNDeleteMarker = aliases.equalLSNDeleteMarker
+		upsertSource = oracleCDCActiveSourceWithAliases(columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), "source", aliases)
 	}
 
-	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate)
+	mergeSQL := buildMergeSQLWithCDCMarker(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate, equalLSNDeleteMarker)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -514,6 +522,10 @@ func mergeTargetExpr(targetTable, incrementalPredicate string) string {
 }
 
 func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate string) string {
+	return buildMergeSQLWithCDCMarker(targetTable, sourceExpr, columns, primaryKeys, updateColumns, incrementalPredicate, cdcEqualLSNDeleteMarker)
+}
+
+func buildMergeSQLWithCDCMarker(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate, equalLSNDeleteMarker string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	isCDC := destination.HasCDCDeletedColumn(columns)
 	targetExpr := mergeTargetExpr(targetTable, incrementalPredicate)
@@ -546,7 +558,7 @@ func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primary
 				quoteColumn(destination.CDCLSNColumn),
 				quoteColumn(destination.CDCLSNColumn),
 				quoteColumn(destination.CDCDeletedColumn),
-				quoteColumn(cdcEqualLSNDeleteMarker),
+				quoteColumn(equalLSNDeleteMarker),
 			))
 			fmt.Fprintf(&b, " WHERE %s", strings.Join(conditions, " AND "))
 		}
@@ -1173,25 +1185,57 @@ func oracleDedupSource(columns, primaryKeys []string, tableExpr, orderBy, where,
 }
 
 func oracleCDCActiveSource(columns, primaryKeys []string, tableExpr, alias string) string {
+	return oracleCDCActiveSourceWithAliases(columns, primaryKeys, tableExpr, alias, oracleCDCInternalAliases{
+		activeRowNumber:      "bruin_active_rn",
+		equalLSNDeleteMarker: cdcEqualLSNDeleteMarker,
+	})
+}
+
+func newOracleCDCInternalAliases(columns []string) oracleCDCInternalAliases {
+	used := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		used[strings.ToLower(canonicalIdentifier(col))] = struct{}{}
+	}
+	allocate := func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			canonical := strings.ToLower(canonicalIdentifier(candidate))
+			if _, exists := used[canonical]; !exists {
+				used[canonical] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	return oracleCDCInternalAliases{
+		activeRowNumber:      allocate("bruin_active_rn"),
+		equalLSNDeleteMarker: allocate(cdcEqualLSNDeleteMarker),
+	}
+}
+
+func oracleCDCActiveSourceWithAliases(columns, primaryKeys []string, tableExpr, alias string, aliases oracleCDCInternalAliases) string {
 	quotedColumns := strings.Join(quoteColumns(columns), ", ")
 	quotedPKs := strings.Join(quoteColumns(primaryKeys), ", ")
 	deleted := quoteColumn(destination.CDCDeletedColumn)
 	lsn := quoteColumn(destination.CDCLSNColumn)
-	marker := quoteColumn(cdcEqualLSNDeleteMarker)
+	activeRowNumber := quoteColumn(aliases.activeRowNumber)
+	marker := quoteColumn(aliases.equalLSNDeleteMarker)
 	return fmt.Sprintf(
-		"(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, %s ORDER BY %s DESC) bruin_active_rn, MAX(%s) OVER (PARTITION BY %s, %s) %s FROM %s) bruin_numbered WHERE %s = 0 AND bruin_active_rn = 1) %s",
+		"(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, %s ORDER BY %s DESC) %s, MAX(%s) OVER (PARTITION BY %s, %s) %s FROM %s) bruin_numbered WHERE %s = 0 AND %s = 1) %s",
 		quotedColumns,
 		marker,
 		quotedColumns,
 		quotedPKs,
 		deleted,
 		lsn,
+		activeRowNumber,
 		deleted,
 		quotedPKs,
 		lsn,
 		marker,
 		tableExpr,
 		deleted,
+		activeRowNumber,
 		alias,
 	)
 }
