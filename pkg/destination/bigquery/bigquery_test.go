@@ -1747,7 +1747,7 @@ func TestNormalizeSchemaForLoadMethod_RelaxesNullabilityForLoadJobs(t *testing.T
 		},
 	}
 
-	got := dest.normalizeSchemaForLoadMethod(input)
+	got := dest.normalizeSchemaForLoadMethod(input, nil)
 	if got == input {
 		t.Fatal("normalizeSchemaForLoadMethod should clone the schema for load jobs")
 	}
@@ -1761,6 +1761,23 @@ func TestNormalizeSchemaForLoadMethod_RelaxesNullabilityForLoadJobs(t *testing.T
 	}
 }
 
+func TestNormalizeSchemaForLoadMethod_PreservesCDCKeysCaseInsensitively(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.loadMethod = loadMethodLoadJob
+
+	input := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "payload", DataType: schema.TypeString, Nullable: false},
+	}}
+	got := dest.normalizeSchemaForLoadMethod(input, []string{"ID"})
+	if got.Columns[0].Nullable {
+		t.Fatal("case-varied CDC key became nullable in load-job mode")
+	}
+	if !got.Columns[1].Nullable {
+		t.Fatal("CDC payload remained required in load-job mode")
+	}
+}
+
 func TestNormalizeSchemaForLoadMethod_KeepsStorageWriteSchema(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.loadMethod = loadMethodStorageWrite
@@ -1771,7 +1788,7 @@ func TestNormalizeSchemaForLoadMethod_KeepsStorageWriteSchema(t *testing.T) {
 		},
 	}
 
-	got := dest.normalizeSchemaForLoadMethod(input)
+	got := dest.normalizeSchemaForLoadMethod(input, nil)
 	if got != input {
 		t.Fatal("storage write mode should keep the original schema")
 	}
@@ -2733,7 +2750,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "")
 
-		if !contains(sql, "SELECT la.`id`, act.`name`, la.`_cdc_lsn`, la.`_cdc_deleted`, la.`_cdc_synced_at`, act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`") {
+		if !contains(sql, "SELECT la.`id`, act.`name`, la.`_cdc_lsn`, la.`_cdc_deleted`, la.`_cdc_synced_at`, act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`, act.`_cdc_lsn` AS `__ingestr_active_lsn`") {
 			t.Fatalf("sql missing composed source columns (data from latest active, CDC from latest overall):\n%s", sql)
 		}
 		if !contains(sql, "ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS la") {
@@ -2742,17 +2759,67 @@ func TestBuildMergeSQL(t *testing.T) {
 		if !contains(sql, "WHERE `_cdc_deleted` = false QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_cdc_lsn` DESC) = 1) AS act") {
 			t.Fatalf("sql missing latest-active dedup:\n%s", sql)
 		}
-		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  UPDATE SET t.`name` = s.`name`") {
+		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false)) AND (s.`_cdc_deleted` = false OR (s.`__ingestr_has_active` AND (t.`_cdc_lsn` IS NULL OR s.`__ingestr_active_lsn` >= t.`_cdc_lsn`))) THEN\n  UPDATE SET t.`name` = s.`name`") {
 			t.Fatalf("sql missing full update for active or update-then-deleted rows:\n%s", sql)
 		}
-		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
+		if !contains(sql, "WHEN MATCHED AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false)) AND s.`_cdc_deleted` = true THEN\n  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`") {
 			t.Fatalf("sql missing CDC-only update for delete-only windows:\n%s", sql)
 		}
-		if !contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {
-			t.Fatalf("sql missing insert clause materializing insert-then-deleted rows:\n%s", sql)
+		if !contains(sql, "WHEN NOT MATCHED THEN\n  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)") {
+			t.Fatalf("sql missing insert clause materializing CDC tombstones:\n%s", sql)
 		}
-		if contains(sql, "WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN") {
-			t.Fatalf("sql still has the old insert clause that drops insert-then-deleted rows:\n%s", sql)
+		if contains(sql, "WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN") {
+			t.Fatalf("sql still drops delete-only tombstones:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_mode_internal_alias_collision", func(t *testing.T) {
+		columns := []string{
+			"id",
+			"payload",
+			"__INGESTR_HAS_ACTIVE",
+			"__ingestr_has_active_2",
+			"__INGESTR_ACTIVE_LSN",
+			"__ingestr_active_lsn_2",
+			"_cdc_lsn",
+			"_cdc_deleted",
+			"_cdc_synced_at",
+		}
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, columns, nil, "")
+
+		if !contains(sql, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active_3`") {
+			t.Fatalf("sql did not allocate a collision-free active marker:\n%s", sql)
+		}
+		if !contains(sql, "s.`_cdc_deleted` = false OR (s.`__ingestr_has_active_3`") {
+			t.Fatalf("sql did not reference the allocated active marker:\n%s", sql)
+		}
+		if !contains(sql, "act.`_cdc_lsn` AS `__ingestr_active_lsn_3`") || !contains(sql, "s.`__ingestr_active_lsn_3` >= t.`_cdc_lsn`") {
+			t.Fatalf("sql did not allocate and reference a collision-free active LSN:\n%s", sql)
+		}
+		if !contains(sql, "act.`__INGESTR_HAS_ACTIVE`, act.`__ingestr_has_active_2`") {
+			t.Fatalf("sql dropped colliding user columns from the active image:\n%s", sql)
+		}
+		if !contains(sql, "t.`__INGESTR_HAS_ACTIVE` = s.`__INGESTR_HAS_ACTIVE`") || !contains(sql, "t.`__ingestr_has_active_2` = s.`__ingestr_has_active_2`") {
+			t.Fatalf("sql did not update colliding user columns:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_incremental_predicate_is_not_part_of_key_match", func(t *testing.T) {
+		predicate := "t.`id` > 100"
+		sql := dest.buildMergeSQLWithPredicate(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "",
+			map[string]bool{"id": true}, nil, predicate,
+		)
+
+		if !contains(sql, "ON t.`id` = s.`id`\n") {
+			t.Fatalf("CDC merge must match existing rows by primary key:\n%s", sql)
+		}
+		if contains(sql, "ON t.`id` = s.`id` AND ("+predicate+")") {
+			t.Fatalf("incremental predicate in CDC key match can turn an existing row into an insert:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND (t.`_cdc_lsn` IS NULL") {
+			t.Fatalf("CDC matched update does not apply the incremental predicate:\n%s", sql)
 		}
 	})
 

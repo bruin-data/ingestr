@@ -167,15 +167,106 @@ func (d *MSSQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 			opts.DeferredPrimaryKeys,
 		)
 		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-			if isObjectAlreadyExistsError(err) {
+			alreadyExists := isObjectAlreadyExistsError(err)
+			if alreadyExists && !opts.RequirePrimaryKeyMatch {
 				return nil
 			}
-			config.LogFailedQuery(createSQL, err)
-			return fmt.Errorf("failed to create table: %w", err)
+			if !alreadyExists {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else {
+			config.Debug("[MSSQL] CREATE TABLE took %v", time.Since(startCreate))
 		}
-		config.Debug("[MSSQL] CREATE TABLE took %v", time.Since(startCreate))
 	}
 
+	if opts.RequirePrimaryKeyMatch {
+		if err := d.validateTargetPrimaryKey(ctx, identity, opts.PrimaryKeys); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *MSSQLDestination) validateTargetPrimaryKey(ctx context.Context, identity mssqlTargetIdentity, expected []string) error {
+	resolvedTable := identity.qualifiedTable(d.server)
+	if len(expected) == 0 {
+		return fmt.Errorf("CDC merge target %s requires at least one primary key", resolvedTable)
+	}
+
+	placeholders := make([]string, len(expected))
+	args := make([]any, 0, len(expected)+2)
+	args = append(args, identity.schema, identity.table)
+	for i, key := range expected {
+		placeholders[i] = fmt.Sprintf("@p%d", i+3)
+		args = append(args, key)
+	}
+
+	prefix := identity.catalogPrefix(d.server)
+	linkedServer := identity.server != "" && !strings.EqualFold(identity.server, d.server)
+	if linkedServer {
+		prefix = ""
+	} else if prefix != "" {
+		prefix += "."
+	}
+	query := fmt.Sprintf(`SELECT c.name,
+	       CAST(CASE WHEN c.name IN (%s) THEN 1 ELSE 0 END AS bit) AS expected_key
+	FROM %ssys.tables AS t
+	JOIN %ssys.schemas AS s ON s.schema_id = t.schema_id
+	JOIN %ssys.key_constraints AS kc ON kc.parent_object_id = t.object_id AND kc.[type] = 'PK'
+	JOIN %ssys.indexes AS i ON i.object_id = t.object_id AND i.index_id = kc.unique_index_id
+	JOIN %ssys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+	JOIN %ssys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+	WHERE s.name = @p1 AND t.name = @p2
+	  AND i.is_primary_key = 1
+	  AND i.is_unique = 1
+	  AND i.is_disabled = 0
+	  AND i.is_hypothetical = 0
+	ORDER BY ic.key_ordinal`, strings.Join(placeholders, ", "), prefix, prefix, prefix, prefix, prefix, prefix)
+	if linkedServer {
+		// Execute remotely so identifier comparisons use the target catalog's collation.
+		parameterTypes := make([]string, len(args))
+		parameters := make([]string, len(args))
+		for i := range args {
+			parameterTypes[i] = fmt.Sprintf("@p%d sysname", i+1)
+			parameters[i] = fmt.Sprintf("@p%d", i+1)
+		}
+		query = fmt.Sprintf(
+			"EXEC %s.sys.sp_executesql N'%s', N'%s', %s",
+			identity.catalogPrefix(d.server),
+			strings.ReplaceAll(query, "'", "''"),
+			strings.Join(parameterTypes, ", "),
+			strings.Join(parameters, ", "),
+		)
+	}
+
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return fmt.Errorf("failed to inspect CDC merge target %s primary key: %w", resolvedTable, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	actual := make([]string, 0, len(expected))
+	matched := 0
+	for rows.Next() {
+		var key string
+		var expectedKey bool
+		if err := rows.Scan(&key, &expectedKey); err != nil {
+			return fmt.Errorf("failed to inspect CDC merge target %s primary key: %w", resolvedTable, err)
+		}
+		actual = append(actual, key)
+		if expectedKey {
+			matched++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to inspect CDC merge target %s primary key: %w", resolvedTable, err)
+	}
+	if len(actual) != len(expected) || matched != len(expected) {
+		return fmt.Errorf("CDC merge target %s must have enabled primary key %v; found %v", resolvedTable, expected, actual)
+	}
 	return nil
 }
 
@@ -893,20 +984,48 @@ WHERE kc.parent_object_id = OBJECT_ID(@p1) AND kc.[type] = 'PK'`
 func buildInsertDedupSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
 	quotedColumns := quoteColumns(columns)
 	colList := strings.Join(quotedColumns, ", ")
+	selectClause := buildMSSQLDedupSelect(stagingTable, primaryKeys, columns, incrementalKey)
+	return buildInsertSQL(targetTable, colList, selectClause)
+}
 
-	orderByCol := ""
-	if incrementalKey != "" {
-		orderByCol = quoteColumn(incrementalKey)
+func buildMSSQLDedupSelect(stagingTable string, primaryKeys, columns []string, incrementalKey string) string {
+	quotedColumns := strings.Join(quoteColumns(columns), ", ")
+	if len(primaryKeys) == 0 {
+		return fmt.Sprintf("SELECT %s FROM %s", quotedColumns, quoteTable(stagingTable))
 	}
 
-	selectClause := destination.DedupStagingSelect(
-		colList,
+	orderBy := "(SELECT NULL)"
+	if incrementalKey != "" {
+		orderBy = quoteColumn(incrementalKey) + " DESC"
+	}
+	dedupRowNumber := quoteColumn(newMSSQLInternalNameAllocator(columns)("__bruin_dedup_rn"))
+	return fmt.Sprintf(
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1",
+		quotedColumns,
+		quotedColumns,
 		strings.Join(quoteColumns(primaryKeys), ", "),
+		orderBy,
+		dedupRowNumber,
 		quoteTable(stagingTable),
-		orderByCol,
+		dedupRowNumber,
 	)
+}
 
-	return buildInsertSQL(targetTable, colList, selectClause)
+func newMSSQLInternalNameAllocator(columns []string) func(string) string {
+	used := make(map[string]struct{}, len(columns)+3)
+	for _, col := range columns {
+		used[strings.ToLower(col)] = struct{}{}
+	}
+	return func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := used[strings.ToLower(candidate)]; !exists {
+				used[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
 }
 
 func buildInsertDirectSQL(targetTable, stagingTable string, columns []string) string {
@@ -934,7 +1053,7 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
 	}
-	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate)
+	primaryKeyOnClause := strings.Join(onConditions, " AND ")
 
 	stagingCols := strings.Join(quotedColumns, ", ")
 	insertCols := strings.Join(quotedTargetColumns, ", ")
@@ -945,10 +1064,16 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 
 	quotedPKs := quoteColumns(primaryKeys)
 	pkPartition := strings.Join(quotedPKs, ", ")
+	uniqueInternalName := newMSSQLInternalNameAllocator(columns)
+	dedupRowNumber := quoteColumn(uniqueInternalName("__bruin_dedup_rn"))
 
 	if isCDC {
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, onClause, stagingCols, insertCols, sourceCols, pkPartition)
+		hasActiveColumn := quoteColumn(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn := quoteColumn(uniqueInternalName("__ingestr_active_lsn"))
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn)
 	}
+
+	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
 
 	var updateSet string
 	if len(nonPKColumns) > 0 {
@@ -966,12 +1091,14 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 		dedupOrderBy = quoteColumns([]string{incrementalKey})[0] + " DESC"
 	}
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1)`,
 		insertCols,
 		insertCols,
 		pkPartition,
 		dedupOrderBy,
+		dedupRowNumber,
 		quoteTable(stagingTable),
+		dedupRowNumber,
 	)
 
 	sql := fmt.Sprintf(
@@ -998,7 +1125,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, stagingCols, insertCols string, sourceCols []string, pkPartition string) string {
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn string) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -1006,7 +1133,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		laActJoin[i] = fmt.Sprintf("la.%s = act.%s", quoteColumn(pk), quoteColumn(pk))
 	}
 
-	selectCols := make([]string, 0, len(columns)+1)
+	selectCols := make([]string, 0, len(columns)+2)
 	for _, col := range columns {
 		alias := "act"
 		if pkMap[col] || destination.IsCDCColumn(col) {
@@ -1014,12 +1141,13 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		}
 		selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteColumn(col)))
 	}
-	selectCols = append(selectCols, "CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS [__ingestr_has_active]")
+	selectCols = append(selectCols, fmt.Sprintf("CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS %s", hasActiveColumn))
+	selectCols = append(selectCols, fmt.Sprintf("act.[_cdc_lsn] AS %s", activeLSNColumn))
 
 	dedup := func(where, orderBy string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
-			stagingCols, stagingCols, pkPartition, orderBy, quoteTable(stagingTable), where,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1)`,
+			stagingCols, stagingCols, pkPartition, orderBy, dedupRowNumber, quoteTable(stagingTable), where, dedupRowNumber,
 		)
 	}
 	composedSource := fmt.Sprintf(
@@ -1030,7 +1158,16 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		strings.Join(laActJoin, " AND "),
 	)
 
-	hasRowData := "(source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1)"
+	hasFreshRowData := fmt.Sprintf(
+		"(source.[_cdc_deleted] = 0 OR (source.%s = 1 AND (target.[_cdc_lsn] IS NULL OR source.%s >= target.[_cdc_lsn])))",
+		hasActiveColumn,
+		activeLSNColumn,
+	)
+	newerChange := "(target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn] OR (source.[_cdc_lsn] = target.[_cdc_lsn] AND source.[_cdc_deleted] = 1 AND COALESCE(target.[_cdc_deleted], 0) = 0))"
+	matchedConditions := []string{newerChange}
+	if strings.TrimSpace(incrementalPredicate) != "" {
+		matchedConditions = append([]string{"(" + incrementalPredicate + ")"}, matchedConditions...)
+	}
 	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
 	updates := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
@@ -1039,14 +1176,14 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
 			continue
 		}
-		condition := hasRowData
+		condition := hasFreshRowData
 		if hasUnchangedCols {
 			unchanged := fmt.Sprintf(
 				"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
 				quoteColumn(destination.CDCUnchangedColsColumn),
 				strings.ReplaceAll(col, "'", "''"),
 			)
-			condition = fmt.Sprintf("%s AND NOT %s", hasRowData, unchanged)
+			condition = fmt.Sprintf("%s AND NOT %s", hasFreshRowData, unchanged)
 		}
 		updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, condition, quoted, quoted)
 	}
@@ -1055,13 +1192,13 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		`MERGE %s AS target
 USING %s AS source
 ON %s
-WHEN MATCHED THEN UPDATE SET %s
-WHEN NOT MATCHED AND %s THEN INSERT (%s) VALUES (%s);`,
+WHEN MATCHED AND %s THEN UPDATE SET %s
+WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		composedSource,
 		onClause,
+		strings.Join(matchedConditions, " AND "),
 		strings.Join(updates, ", "),
-		hasRowData,
 		insertCols,
 		strings.Join(sourceCols, ", "),
 	)
@@ -1087,8 +1224,7 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 
 	colList := strings.Join(quotedColumns, ", ")
-	// Dedupe staging by primary key, keeping the latest row per key by incremental key.
-	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), quoteColumns([]string{opts.IncrementalKey})[0])
+	selectClause := buildMSSQLDedupSelect(opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) %s`, quoteTable(opts.TargetTable), colList, selectClause)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 

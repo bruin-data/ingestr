@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,32 @@ func (r postgresResolverRow) Scan(dest ...any) error {
 	return nil
 }
 
+type postgresPrimaryKeyResolverStub struct {
+	query string
+	args  []any
+	keys  []string
+	err   error
+}
+
+func (s *postgresPrimaryKeyResolverStub) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
+	s.query = query
+	s.args = args
+	return postgresPrimaryKeyRow{keys: s.keys, err: s.err}
+}
+
+type postgresPrimaryKeyRow struct {
+	keys []string
+	err  error
+}
+
+func (r postgresPrimaryKeyRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*dest[0].(*[]string) = slices.Clone(r.keys)
+	return nil
+}
+
 func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
 	dest := NewPostgresDestination()
 	resolver := &postgresResolverStub{schema: "tenant_a", table: "orders"}
@@ -74,6 +101,50 @@ func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
 	}
 	if !strings.Contains(resolver.query, "to_regclass($1)") || !strings.Contains(resolver.query, "current_schema()") {
 		t.Fatalf("resolver query does not honor existing table resolution and search_path: %s", resolver.query)
+	}
+}
+
+func TestPostgresPrimaryKeyColumnsUsesResolvedIdentifiers(t *testing.T) {
+	resolver := &postgresPrimaryKeyResolverStub{keys: []string{"part", "id"}}
+
+	got, err := postgresPrimaryKeyColumns(t.Context(), resolver, "CaseSchema", "order.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"part", "id"}) {
+		t.Fatalf("postgresPrimaryKeyColumns() = %v", got)
+	}
+	if !reflect.DeepEqual(resolver.args, []any{"CaseSchema", "order.events"}) {
+		t.Fatalf("query args = %v", resolver.args)
+	}
+	if !strings.Contains(resolver.query, "FROM pg_catalog.pg_constraint") ||
+		!strings.Contains(resolver.query, "ORDER BY key_column.ordinality") {
+		t.Fatalf("primary key query does not select the ordered constraint columns: %s", resolver.query)
+	}
+}
+
+func TestPostgresPrimaryKeySetsEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected []string
+		actual   []string
+		want     bool
+	}{
+		{name: "single", expected: []string{"id"}, actual: []string{"id"}, want: true},
+		{name: "composite order is irrelevant", expected: []string{"id", "part"}, actual: []string{"part", "id"}, want: true},
+		{name: "missing", expected: []string{"id", "part"}, actual: []string{"id"}},
+		{name: "extra", expected: []string{"id"}, actual: []string{"id", "part"}},
+		{name: "different", expected: []string{"id"}, actual: []string{"part"}},
+		{name: "quoted identifiers remain case sensitive", expected: []string{"id"}, actual: []string{"ID"}},
+		{name: "duplicate expected key is not collapsed", expected: []string{"id", "id"}, actual: []string{"id", "part"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := postgresPrimaryKeySetsEqual(tt.expected, tt.actual); got != tt.want {
+				t.Fatalf("postgresPrimaryKeySetsEqual(%v, %v) = %v, want %v", tt.expected, tt.actual, got, tt.want)
+			}
+		})
 	}
 }
 

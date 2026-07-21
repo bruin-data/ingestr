@@ -202,10 +202,41 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	if preparedSchema == nil {
 		return fmt.Errorf("prepared table %s was not found", opts.Table)
 	}
+	if opts.RequirePrimaryKeyMatch && !duckDBPrimaryKeySetsEqual(opts.PrimaryKeys, preparedSchema.PrimaryKeys) {
+		return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, preparedSchema.PrimaryKeys)
+	}
 	d.recordSchema(opts.Table, opts.Schema, preparedSchema.PrimaryKeys)
 	config.Debug("[DUCKDB] CREATE TABLE took %v", time.Since(startCreate))
 
 	return nil
+}
+
+func duckDBPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[duckDBIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := duckDBIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func duckDBIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *DuckDBDestination) ensureSchemaExists(ctx context.Context, tn tablename.TableName) error {
@@ -739,8 +770,9 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}()
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
+	primaryKeyCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	onCondition := destination.MergeJoinCondition(
-		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		primaryKeyCondition,
 		opts.IncrementalPredicate,
 	)
 
@@ -760,26 +792,93 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := func(where string) string {
+	usedInternalNames := make(map[string]struct{}, len(stagingColumns)+6)
+	for _, col := range stagingColumns {
+		usedInternalNames[strings.ToLower(col)] = struct{}{}
+	}
+	uniqueInternalName := func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedInternalNames[strings.ToLower(candidate)]; !exists {
+				usedInternalNames[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	dedupRowNumber := quoteIdentifier(uniqueInternalName("__bruin_dedup_rn"))
+	dedupSourceAs := func(where, orderBy, alias string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1) AS %s`,
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
-			dedupOrderBy,
+			orderBy,
+			dedupRowNumber,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
+			dedupRowNumber,
+			alias,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceAs(where, dedupOrderBy, "source") }
 
-	// For CDC, updates use the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data. Inserts use the latest
-	// change overall so delete-only keys can materialize tombstones for resume.
+	// For CDC, updates use the latest active image. Inserts combine that image
+	// with the latest overall CDC metadata; delete-only keys use their tombstone.
 	updateSource := dedupSource("")
 	insertSource := updateSource
+	equalDeleteMarker := ""
 	if isCDC {
-		updateSource = dedupSource(` WHERE "_cdc_deleted" = false`)
-		insertSource = dedupSource("")
+		equalDeleteMarker = quoteIdentifier(uniqueInternalName("__ingestr_has_equal_lsn_delete"))
+		activeSource := dedupSourceAs(` WHERE "_cdc_deleted" = false`, dedupOrderBy, "active")
+		latestSource := dedupSourceAs("", dedupOrderBy, "latest")
+		updateSource = fmt.Sprintf(
+			`(SELECT active.*, COALESCE(latest."_cdc_lsn" = active."_cdc_lsn" AND latest."_cdc_deleted" = true, false) AS %s FROM %s LEFT JOIN %s ON %s) AS source`,
+			equalDeleteMarker,
+			activeSource,
+			latestSource,
+			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
+		)
+		imageRowNumber := quoteIdentifier(uniqueInternalName("__bruin_image_rn"))
+		latestLSN := quoteIdentifier(uniqueInternalName("__ingestr_latest_lsn"))
+		latestDeleted := quoteIdentifier(uniqueInternalName("__ingestr_latest_deleted"))
+		latestSyncedAt := quoteIdentifier(uniqueInternalName("__ingestr_latest_synced_at"))
+		insertColumns := make([]string, len(destColumns))
+		for i, col := range destColumns {
+			quoted := quoteIdentifier(col)
+			switch {
+			case strings.EqualFold(col, destination.CDCLSNColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestLSN, quoted)
+			case strings.EqualFold(col, destination.CDCDeletedColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestDeleted, quoted)
+			case strings.EqualFold(col, destination.CDCSyncedAtColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestSyncedAt, quoted)
+			default:
+				insertColumns[i] = quoted
+			}
+		}
+		insertSource = fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_deleted" ASC, "_cdc_lsn" DESC) AS %s, FIRST_VALUE("_cdc_lsn") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_deleted") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_synced_at") OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1) AS source`,
+			strings.Join(insertColumns, ", "),
+			strings.Join(stagingQuoted, ", "),
+			strings.Join(quotedPKs, ", "),
+			imageRowNumber,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestLSN,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestDeleted,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestSyncedAt,
+			destination.QuoteTableName(opts.StagingTable),
+			imageRowNumber,
+		)
+	}
+	insertCondition := onCondition
+	if isCDC {
+		insertCondition = primaryKeyCondition
 	}
 
 	targetHasRows := true
@@ -829,12 +928,16 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		if len(nonPKColumns) == 0 {
 			return nil
 		}
+		updateCondition := onCondition
+		if isCDC {
+			updateCondition += fmt.Sprintf(` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false AND source.%s))`, equalDeleteMarker)
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,
 			quotedTargetTable,
 			buildUpdateSet(nonPKColumns, "target", "source", applyUnchangedCols),
 			updateSource,
-			onCondition,
+			updateCondition,
 		)
 		config.Debug("[DUCKDB MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -852,7 +955,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			strings.Join(destQuoted, ", "),
 			insertSource,
 			quotedTargetTable,
-			onCondition,
+			insertCondition,
 		)
 		config.Debug("[DUCKDB MERGE] Executing INSERT: %s", insertSQL)
 
@@ -865,7 +968,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate.
+	// duplicate. CDC anti-joins always use the primary key alone.
 	steps := []func() error{runUpdate, runInsert}
 	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
@@ -880,7 +983,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			`UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = true`,
+			`UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false))`,
 			quotedTargetTable,
 			dedupSource(""),
 			onCondition,

@@ -1040,6 +1040,31 @@ func TestStreaming_MergeEnforcesPrimaryKey(t *testing.T) {
 	assert.NotEmpty(t, st.stagingTable)
 }
 
+func TestStreaming_CDCMergePreservesStagingKeysWithoutConstraint(t *testing.T) {
+	dest := &fakeDestination{}
+	exec := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge})
+	st := &streamTableState{
+		destTable: "ds.evt",
+		schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+		}},
+		primaryKeys: []string{"id"},
+		isCDC:       true,
+	}
+
+	require.NoError(t, exec.prepareTable(t.Context(), dest, &config.IngestConfig{}, st))
+	require.Len(t, dest.prepareCalls, 2)
+	assert.Equal(t, []string{"id"}, dest.prepareCalls[0].CDCKeys)
+	assert.Equal(t, []string{"id"}, dest.prepareCalls[1].CDCKeys)
+	assert.Empty(t, dest.prepareCalls[1].PrimaryKeys, "staging must not declare a PK constraint")
+
+	require.NoError(t, (&flushLoop{dest: dest}).resetStaging(t.Context(), st))
+	require.Len(t, dest.prepareCalls, 3)
+	assert.Equal(t, []string{"id"}, dest.prepareCalls[2].CDCKeys)
+	assert.Empty(t, dest.prepareCalls[2].PrimaryKeys, "reset staging must not declare a PK constraint")
+}
+
 func TestStreaming_MergePassesIncrementalKeyForOrdering(t *testing.T) {
 	// Broker streams set an incremental key (e.g. _ingestr_order) so the per-PK
 	// dedup keeps the latest record within a flush cycle rather than arbitrary.

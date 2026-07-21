@@ -20,12 +20,20 @@ import (
 	_ "github.com/sijms/go-ora/v2"
 )
 
-const defaultOracleStagingSchema = "_bruin_staging"
+const (
+	defaultOracleStagingSchema = "_bruin_staging"
+	cdcEqualLSNDeleteMarker    = "__ingestr_has_equal_lsn_delete"
+)
 
 type OracleDestination struct {
 	db          *sql.DB
 	uri         string
 	currentUser string
+}
+
+type oracleCDCInternalAliases struct {
+	activeRowNumber      string
+	equalLSNDeleteMarker string
 }
 
 func NewOracleDestination() *OracleDestination {
@@ -171,21 +179,47 @@ func (d *OracleDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
-
-	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
-	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-		if isOracleError(err, "00955") {
-			return nil
+	if !exists {
+		startCreate := time.Now()
+		createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
+		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			if !isOracleError(err, "00955") {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else {
+			config.Debug("[ORACLE] CREATE TABLE took %v", time.Since(startCreate))
 		}
-		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create table: %w", err)
 	}
-	config.Debug("[ORACLE] CREATE TABLE took %v", time.Since(startCreate))
+	if opts.RequirePrimaryKeyMatch {
+		schemaName, tableName := d.effectiveSchemaTable(opts.Table)
+		actualKeys, err := d.getEnforcedPrimaryKeys(ctx, schemaName, tableName)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if !oraclePrimaryKeySetsEqual(opts.PrimaryKeys, actualKeys) {
+			return fmt.Errorf("CDC merge target %s must have an enabled and validated primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
 	return nil
+}
+
+func oraclePrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[canonicalIdentifier(key)]++
+	}
+	for _, key := range actual {
+		canonical := canonicalIdentifier(key)
+		if remaining[canonical] == 0 {
+			return false
+		}
+		remaining[canonical]--
+	}
+	return true
 }
 
 func (d *OracleDestination) DropTable(ctx context.Context, table string) error {
@@ -453,11 +487,14 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	upsertSource := dedupSource("")
+	equalLSNDeleteMarker := cdcEqualLSNDeleteMarker
 	if isCDC {
-		upsertSource = dedupSource(" WHERE " + quoteColumn(destination.CDCDeletedColumn) + " = 0")
+		aliases := newOracleCDCInternalAliases(columns)
+		equalLSNDeleteMarker = aliases.equalLSNDeleteMarker
+		upsertSource = oracleCDCActiveSourceWithAliases(columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), "source", aliases)
 	}
 
-	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate)
+	mergeSQL := buildMergeSQLWithCDCMarker(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate, equalLSNDeleteMarker)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -472,29 +509,14 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	if isCDC {
-		markDeletedSQL := fmt.Sprintf(
-			`MERGE INTO %s
-USING %s
-ON (%s)
-WHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s
-WHERE source.%s = 1`,
-			mergeTargetExpr(opts.TargetTable, opts.IncrementalPredicate),
-			dedupSource(""),
-			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
-			quoteColumn(destination.CDCDeletedColumn),
-			quoteColumn(destination.CDCLSNColumn),
-			quoteColumn(destination.CDCLSNColumn),
-			quoteColumn(destination.CDCSyncedAtColumn),
-			quoteColumn(destination.CDCSyncedAtColumn),
-			quoteColumn(destination.CDCDeletedColumn),
-		)
+		markDeletedSQL := buildCDCDeleteMarkSQL(opts.TargetTable, dedupSource(""), opts.PrimaryKeys, opts.IncrementalPredicate)
 		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
 		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
 			config.LogFailedQuery(markDeletedSQL, err)
 			return fmt.Errorf("failed to mark deleted records: %w", err)
 		}
 
-		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQLWithPredicate(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys, opts.IncrementalPredicate)
+		insertDeletedSQL := buildCDCDeleteTombstoneInsertSQL(opts.TargetTable, dedupSource(""), columns, opts.PrimaryKeys)
 		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
 		if _, err := tx.ExecContext(ctx, insertDeletedSQL); err != nil {
 			config.LogFailedQuery(insertDeletedSQL, err)
@@ -526,20 +548,47 @@ func mergeTargetExpr(targetTable, incrementalPredicate string) string {
 }
 
 func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate string) string {
+	return buildMergeSQLWithCDCMarker(targetTable, sourceExpr, columns, primaryKeys, updateColumns, incrementalPredicate, cdcEqualLSNDeleteMarker)
+}
+
+func buildMergeSQLWithCDCMarker(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate, equalLSNDeleteMarker string) string {
 	targetColumns := destination.DestinationColumns(columns)
+	isCDC := destination.HasCDCDeletedColumn(columns)
+	targetExpr := mergeTargetExpr(targetTable, incrementalPredicate)
+	if isCDC {
+		targetExpr = mergeTargetExpr(targetTable, "")
+	}
 	var b strings.Builder
 	fmt.Fprintf(
 		&b, "MERGE INTO %s\nUSING %s\nON (%s)\n",
-		mergeTargetExpr(targetTable, incrementalPredicate),
+		targetExpr,
 		sourceExpr,
 		buildJoinCondition(primaryKeys, "target", "source"),
 	)
 	if len(updateColumns) > 0 {
 		updateSet := buildUpdateSet(updateColumns, "target", "source")
-		if destination.HasCDCDeletedColumn(columns) && destination.HasCDCUnchangedColsColumn(columns) {
+		if isCDC && destination.HasCDCUnchangedColsColumn(columns) {
 			updateSet = buildCDCUpdateSet(updateColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
 		}
-		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s\n", updateSet)
+		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s", updateSet)
+		if isCDC {
+			conditions := make([]string, 0, 2)
+			if predicate := strings.TrimSpace(incrementalPredicate); predicate != "" {
+				conditions = append(conditions, "("+predicate+")")
+			}
+			conditions = append(conditions, fmt.Sprintf(
+				"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND NVL(target.%s, 0) = 0 AND source.%s = 1))",
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCDeletedColumn),
+				quoteColumn(equalLSNDeleteMarker),
+			))
+			fmt.Fprintf(&b, " WHERE %s", strings.Join(conditions, " AND "))
+		}
+		b.WriteByte('\n')
 	}
 	fmt.Fprintf(
 		&b, "WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
@@ -550,10 +599,6 @@ func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primary
 }
 
 func buildCDCDeleteTombstoneInsertSQL(targetTable, sourceExpr string, columns, primaryKeys []string) string {
-	return buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr, columns, primaryKeys, "")
-}
-
-func buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.%s = 1 AND NOT EXISTS (SELECT 1 FROM %s target WHERE %s)",
@@ -563,7 +608,35 @@ func buildCDCDeleteTombstoneInsertSQLWithPredicate(targetTable, sourceExpr strin
 		sourceExpr,
 		quoteColumn(destination.CDCDeletedColumn),
 		quoteTable(targetTable),
-		destination.MergeJoinCondition(buildJoinCondition(primaryKeys, "target", "source"), incrementalPredicate),
+		buildJoinCondition(primaryKeys, "target", "source"),
+	)
+}
+
+func buildCDCDeleteMarkSQL(targetTable, sourceExpr string, primaryKeys []string, incrementalPredicate string) string {
+	conditions := []string{"source." + quoteColumn(destination.CDCDeletedColumn) + " = 1"}
+	if predicate := strings.TrimSpace(incrementalPredicate); predicate != "" {
+		conditions = append(conditions, "("+predicate+")")
+	}
+	conditions = append(conditions, fmt.Sprintf(
+		"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND NVL(target.%s, 0) = 0))",
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCDeletedColumn),
+	))
+	return fmt.Sprintf(
+		"MERGE INTO %s\nUSING %s\nON (%s)\nWHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s\nWHERE %s",
+		mergeTargetExpr(targetTable, ""),
+		sourceExpr,
+		buildJoinCondition(primaryKeys, "target", "source"),
+		quoteColumn(destination.CDCDeletedColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCSyncedAtColumn),
+		quoteColumn(destination.CDCSyncedAtColumn),
+		strings.Join(conditions, " AND "),
 	)
 }
 
@@ -1013,13 +1086,25 @@ func (d *OracleDestination) GetTableSchema(ctx context.Context, table string) (*
 }
 
 func (d *OracleDestination) getPrimaryKeys(ctx context.Context, schemaName, tableName string) ([]string, error) {
+	return d.queryPrimaryKeys(ctx, schemaName, tableName, false)
+}
+
+func (d *OracleDestination) getEnforcedPrimaryKeys(ctx context.Context, schemaName, tableName string) ([]string, error) {
+	return d.queryPrimaryKeys(ctx, schemaName, tableName, true)
+}
+
+func (d *OracleDestination) queryPrimaryKeys(ctx context.Context, schemaName, tableName string, requireEnforced bool) ([]string, error) {
+	enforcedFilter := ""
+	if requireEnforced {
+		enforcedFilter = "\n\t\t\tAND c.STATUS = 'ENABLED'\n\t\t\tAND c.VALIDATED = 'VALIDATED'"
+	}
 	query := `
 		SELECT cc.COLUMN_NAME
 		FROM ALL_CONSTRAINTS c
 		JOIN ALL_CONS_COLUMNS cc
 			ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
 			AND c.OWNER = cc.OWNER
-		WHERE c.CONSTRAINT_TYPE = 'P'
+		WHERE c.CONSTRAINT_TYPE = 'P'` + enforcedFilter + `
 			AND c.OWNER = :1
 			AND c.TABLE_NAME = :2
 		ORDER BY cc.POSITION`
@@ -1137,6 +1222,66 @@ func oracleDedupSource(columns, primaryKeys []string, tableExpr, orderBy, where,
 	return fmt.Sprintf("(%s) %s", oracleDedupSelect(columns, primaryKeys, tableExpr, orderBy, where), alias)
 }
 
+func oracleCDCActiveSource(columns, primaryKeys []string, tableExpr, alias string) string {
+	return oracleCDCActiveSourceWithAliases(columns, primaryKeys, tableExpr, alias, oracleCDCInternalAliases{
+		activeRowNumber:      "bruin_active_rn",
+		equalLSNDeleteMarker: cdcEqualLSNDeleteMarker,
+	})
+}
+
+func newOracleCDCInternalAliases(columns []string) oracleCDCInternalAliases {
+	allocate := newOracleInternalNameAllocator(columns)
+	return oracleCDCInternalAliases{
+		activeRowNumber:      allocate("bruin_active_rn"),
+		equalLSNDeleteMarker: allocate(cdcEqualLSNDeleteMarker),
+	}
+}
+
+func newOracleInternalNameAllocator(columns []string) func(string) string {
+	used := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		used[strings.ToLower(canonicalIdentifier(col))] = struct{}{}
+	}
+	return func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			canonical := strings.ToLower(canonicalIdentifier(candidate))
+			if _, exists := used[canonical]; !exists {
+				used[canonical] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+}
+
+func oracleCDCActiveSourceWithAliases(columns, primaryKeys []string, tableExpr, alias string, aliases oracleCDCInternalAliases) string {
+	quotedColumns := strings.Join(quoteColumns(columns), ", ")
+	quotedPKs := strings.Join(quoteColumns(primaryKeys), ", ")
+	deleted := quoteColumn(destination.CDCDeletedColumn)
+	lsn := quoteColumn(destination.CDCLSNColumn)
+	activeRowNumber := quoteColumn(aliases.activeRowNumber)
+	marker := quoteColumn(aliases.equalLSNDeleteMarker)
+	return fmt.Sprintf(
+		"(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, %s ORDER BY %s DESC) %s, MAX(%s) OVER (PARTITION BY %s, %s) %s FROM %s) bruin_numbered WHERE %s = 0 AND %s = 1) %s",
+		quotedColumns,
+		marker,
+		quotedColumns,
+		quotedPKs,
+		deleted,
+		lsn,
+		activeRowNumber,
+		deleted,
+		quotedPKs,
+		lsn,
+		marker,
+		tableExpr,
+		deleted,
+		activeRowNumber,
+		alias,
+	)
+}
+
 func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string, where ...string) string {
 	quotedColumns := strings.Join(quoteColumns(columns), ", ")
 	if len(primaryKeys) == 0 {
@@ -1144,14 +1289,17 @@ func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string,
 	}
 
 	whereClause := strings.Join(where, "")
+	dedupRowNumber := quoteColumn(newOracleInternalNameAllocator(columns)("bruin_dedup_rn"))
 	return fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) bruin_dedup_rn FROM %s%s) bruin_numbered WHERE bruin_dedup_rn = 1",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) %s FROM %s%s) bruin_numbered WHERE %s = 1",
 		quotedColumns,
 		quotedColumns,
 		strings.Join(quoteColumns(primaryKeys), ", "),
 		orderBy,
+		dedupRowNumber,
 		tableExpr,
 		whereClause,
+		dedupRowNumber,
 	)
 }
 
@@ -1335,7 +1483,7 @@ func buildCDCUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef 
 			continue
 		}
 		unchanged := fmt.Sprintf(
-			"EXISTS (SELECT 1 FROM JSON_TABLE(COALESCE(%s, '[]'), '$[*]' COLUMNS (value VARCHAR2(4000) PATH '$')) jt WHERE NLSSORT(jt.value, 'NLS_SORT=BINARY') = NLSSORT('%s', 'NLS_SORT=BINARY'))",
+			"JSON_EXISTS(COALESCE(%s, '[]'), '$[*]?(@ == $marker)' PASSING '%s' AS \"marker\")",
 			unchangedRef,
 			strings.ReplaceAll(col, "'", "''"),
 		)

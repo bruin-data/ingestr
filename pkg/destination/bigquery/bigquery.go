@@ -787,6 +787,14 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
+	cdcKeyColumns := opts.CDCKeys
+	if len(cdcKeyColumns) == 0 {
+		cdcKeyColumns = opts.PrimaryKeys
+	}
+	requiredColumns := []string(nil)
+	if opts.CDCMode {
+		requiredColumns = cdcKeyColumns
+	}
 
 	// Store partition and cluster information for use in SwapTable
 	d.partitionBy = opts.PartitionBy
@@ -798,9 +806,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		// If table doesn't exist, TRUNCATE fails and we fall back to CREATE.
 		tableSchema := opts.Schema
 		if opts.CDCMode {
-			tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 		}
-		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 		metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.location, opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
 		errCh := make(chan error, 1)
 		d.setPendingTableErr(tableKey, errCh)
@@ -822,17 +830,17 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 				if err == nil {
 					tableSchema := opts.Schema
 					if opts.CDCMode {
-						tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+						tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 					}
-					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 					if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
 						errCh <- fmt.Errorf("failed to update schema: %w", err)
 						return
 					}
 					latestMeta, metaErr := tableRef.Metadata(ctx)
 					if metaErr == nil {
-						if err := d.ensureLoadJobColumnRelaxation(ctx, tableRef, latestMeta, tableSchema); err != nil {
-							errCh <- fmt.Errorf("failed to relax schema for load jobs: %w", err)
+						if err := d.ensureColumnRelaxation(ctx, tableRef, latestMeta, tableSchema, opts.CDCMode, cdcKeyColumns); err != nil {
+							errCh <- fmt.Errorf("failed to relax schema: %w", err)
 							return
 						}
 						existingMeta = latestMeta
@@ -864,9 +872,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 
 	tableSchema := opts.Schema
 	if opts.CDCMode {
-		tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+		tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 	}
-	tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+	tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 	metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.location, opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
 
 	config.Debug("[DEST] Creating table: %s", opts.Table)
@@ -884,12 +892,20 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 }
 
 func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableRef *bigquery.Table, existingMeta *bigquery.TableMetadata, opts destination.PrepareOptions) error {
+	cdcKeyColumns := opts.CDCKeys
+	if len(cdcKeyColumns) == 0 {
+		cdcKeyColumns = opts.PrimaryKeys
+	}
+	requiredColumns := []string(nil)
+	if opts.CDCMode {
+		requiredColumns = cdcKeyColumns
+	}
 	tableSchema := opts.Schema
 	if tableSchema != nil {
 		if opts.CDCMode {
-			tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 		}
-		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 		if err := validateBigQuerySchemaCompatibility(existingMeta, tableSchema); err != nil {
 			return err
 		}
@@ -898,8 +914,8 @@ func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableR
 		}
 		latestMeta, metaErr := tableRef.Metadata(ctx)
 		if metaErr == nil {
-			if err := d.ensureLoadJobColumnRelaxation(ctx, tableRef, latestMeta, tableSchema); err != nil {
-				return fmt.Errorf("failed to relax schema for load jobs: %w", err)
+			if err := d.ensureColumnRelaxation(ctx, tableRef, latestMeta, tableSchema, opts.CDCMode, cdcKeyColumns); err != nil {
+				return fmt.Errorf("failed to relax schema: %w", err)
 			}
 			existingMeta = latestMeta
 		}
@@ -1004,16 +1020,22 @@ func (d *BigQueryDestination) createTableFresh(ctx context.Context, tableRef *bi
 	return nil
 }
 
-func (d *BigQueryDestination) normalizeSchemaForLoadMethod(tableSchema *schema.TableSchema) *schema.TableSchema {
+func (d *BigQueryDestination) normalizeSchemaForLoadMethod(tableSchema *schema.TableSchema, requiredColumns []string) *schema.TableSchema {
 	if tableSchema == nil || d.effectiveLoadMethod() != loadMethodLoadJob {
 		return tableSchema
 	}
 
+	required := make(map[string]struct{}, len(requiredColumns))
+	for _, col := range requiredColumns {
+		required[strings.ToLower(col)] = struct{}{}
+	}
 	cp := *tableSchema
 	cp.Columns = make([]schema.Column, len(tableSchema.Columns))
 	for i, col := range tableSchema.Columns {
 		cp.Columns[i] = col
-		cp.Columns[i].Nullable = true
+		if _, keepRequired := required[strings.ToLower(col.Name)]; !keepRequired {
+			cp.Columns[i].Nullable = true
+		}
 	}
 
 	return &cp
@@ -1041,40 +1063,46 @@ func (d *BigQueryDestination) ensureTableExpiration(
 	return nil
 }
 
-func (d *BigQueryDestination) ensureLoadJobColumnRelaxation(
+func (d *BigQueryDestination) ensureColumnRelaxation(
 	ctx context.Context,
 	tableRef *bigquery.Table,
 	existingMeta *bigquery.TableMetadata,
 	sourceSchema *schema.TableSchema,
+	cdcMode bool,
+	primaryKeys []string,
 ) error {
-	if d.effectiveLoadMethod() != loadMethodLoadJob || existingMeta == nil || sourceSchema == nil {
+	if (d.effectiveLoadMethod() != loadMethodLoadJob && !cdcMode) || existingMeta == nil || sourceSchema == nil {
 		return nil
 	}
 
 	sourceCols := make(map[string]struct{}, len(sourceSchema.Columns))
 	for _, col := range sourceSchema.Columns {
-		sourceCols[col.Name] = struct{}{}
+		sourceCols[strings.ToLower(col.Name)] = struct{}{}
 	}
 
 	keyCols := make(map[string]bool)
+	for _, col := range primaryKeys {
+		keyCols[strings.ToLower(col)] = true
+	}
 	if existingMeta.TableConstraints != nil && existingMeta.TableConstraints.PrimaryKey != nil {
 		for _, col := range existingMeta.TableConstraints.PrimaryKey.Columns {
-			keyCols[col] = true
+			keyCols[strings.ToLower(col)] = true
 		}
 	}
-	if existingMeta.Clustering != nil {
+	if !cdcMode && existingMeta.Clustering != nil {
 		for _, col := range existingMeta.Clustering.Fields {
-			keyCols[col] = true
+			keyCols[strings.ToLower(col)] = true
 		}
 	}
-
 	var (
 		updatedSchema bigquery.Schema
 		needsUpdate   bool
 	)
 	for _, field := range existingMeta.Schema {
 		fieldCopy := *field
-		if _, ok := sourceCols[field.Name]; ok && fieldCopy.Required && !keyCols[field.Name] {
+		fieldName := strings.ToLower(field.Name)
+		_, inSourceSchema := sourceCols[fieldName]
+		if (cdcMode || inSourceSchema) && fieldCopy.Required && !keyCols[fieldName] {
 			fieldCopy.Required = false
 			needsUpdate = true
 		}
@@ -1085,7 +1113,7 @@ func (d *BigQueryDestination) ensureLoadJobColumnRelaxation(
 		return nil
 	}
 
-	config.Debug("[DEST] Relaxing REQUIRED columns for load-job compatibility on %s", tableRef.TableID)
+	config.Debug("[DEST] Relaxing REQUIRED non-key columns on %s", tableRef.TableID)
 	_, err := tableRef.Update(ctx, bigquery.TableMetadataToUpdate{
 		Schema: updatedSchema,
 	}, existingMeta.ETag)
@@ -2356,6 +2384,27 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 
 func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	hasActiveColumn := quoteIdentifier("__ingestr_has_active")
+	activeLSNColumn := quoteIdentifier("__ingestr_active_lsn")
+	if hasCDCDeleted && len(primaryKeys) > 0 {
+		usedNames := make(map[string]struct{}, len(allColumns)+2)
+		for _, col := range allColumns {
+			usedNames[strings.ToLower(col)] = struct{}{}
+		}
+		uniqueInternalName := func(base string) string {
+			candidate := base
+			for suffix := 2; ; suffix++ {
+				if _, exists := usedNames[strings.ToLower(candidate)]; !exists {
+					usedNames[strings.ToLower(candidate)] = struct{}{}
+					return candidate
+				}
+				candidate = fmt.Sprintf("%s_%d", base, suffix)
+			}
+		}
+		hasActiveColumn = quoteIdentifier(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn = quoteIdentifier(uniqueInternalName("__ingestr_active_lsn"))
+	}
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
@@ -2370,7 +2419,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	if partitionPredicate := mergePartitionTargetPredicate(pruning); partitionPredicate != "" {
 		onConditions = append(onConditions, partitionPredicate)
 	}
-	if incrementalPredicate = strings.TrimSpace(incrementalPredicate); incrementalPredicate != "" {
+	if incrementalPredicate = strings.TrimSpace(incrementalPredicate); incrementalPredicate != "" && !hasCDCDeleted {
 		onConditions = append(onConditions, "("+incrementalPredicate+")")
 	}
 	onClause := strings.Join(onConditions, " AND ")
@@ -2381,8 +2430,6 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
 	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
 	// and their staging tables have no such column to reference.
@@ -2431,7 +2478,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
 
-		selectCols := make([]string, 0, len(allColumns)+1)
+		selectCols := make([]string, 0, len(allColumns)+2)
 		for _, col := range allColumns {
 			alias := "act"
 			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
@@ -2439,7 +2486,8 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 			}
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
-		selectCols = append(selectCols, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`")
+		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` IS NOT NULL AS %s", hasActiveColumn))
+		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` AS %s", activeLSNColumn))
 
 		fmt.Fprintf(
 			&sql,
@@ -2474,13 +2522,17 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	fmt.Fprintf(&sql, "ON %s\n", onClause)
 
 	if hasCDCDeleted {
-		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`)"
+		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false))"
+		if incrementalPredicate != "" {
+			newerLSN = "(" + incrementalPredicate + ") AND " + newerLSN
+		}
 		// Full update whenever the window has a non-deleted change carrying row
 		// data; for deleted PKs this applies the last active values together
 		// with the delete marking. Clause order matters: BigQuery executes the
 		// first matching WHEN clause.
 		if len(updateSets) > 0 {
-			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n", newerLSN)
+			hasFreshRowData := fmt.Sprintf("(s.`_cdc_deleted` = false OR (s.%s AND (t.`_cdc_lsn` IS NULL OR s.%s >= t.`_cdc_lsn`)))", hasActiveColumn, activeLSNColumn)
+			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND %s THEN\n", newerLSN, hasFreshRowData)
 			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
@@ -2490,10 +2542,9 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 		fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND s.`_cdc_deleted` = true THEN\n", newerLSN)
 		sql.WriteString("  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`\n")
 
-		// Insert new rows, including ones already deleted within the window
-		// (materialized as soft-deleted). A delete-only window for an unknown
-		// row has no data to materialize and is skipped.
-		sql.WriteString("WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n")
+		// Insert new rows, including delete-only tombstones for unknown keys so
+		// their LSN prevents a stale active replay from resurrecting the row.
+		sql.WriteString("WHEN NOT MATCHED THEN\n")
 		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
 		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
 	} else {
@@ -2635,8 +2686,8 @@ func (d *BigQueryDestination) SupportsAppendStrategy() bool { return true }
 // SupportsMergeStrategy returns true as BigQuery supports the merge strategy via native MERGE.
 func (d *BigQueryDestination) SupportsMergeStrategy() bool { return true }
 
-// SupportsIncrementalPredicate returns true as BigQuery appends
-// MergeOptions.IncrementalPredicate to the MERGE join condition.
+// SupportsIncrementalPredicate returns true as BigQuery applies
+// MergeOptions.IncrementalPredicate to MERGE updates.
 func (d *BigQueryDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as BigQuery supports the delete+insert strategy.
@@ -2791,6 +2842,8 @@ func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }
+
+func (d *BigQueryDestination) RequiresSerializedCDCRuns() bool { return true }
 
 func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	project, dataset, tableName, err := d.parseTable(table)

@@ -129,8 +129,8 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		d.pool.Reset()
 	}
 
-	if !opts.DropFirst && len(opts.PrimaryKeys) > 0 {
-		if err := d.ensurePrimaryKey(ctx, resolvedTable, opts.PrimaryKeys); err != nil {
+	if len(opts.PrimaryKeys) > 0 && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
+		if err := d.ensurePrimaryKey(ctx, schemaName, tableName, opts.PrimaryKeys, opts.RequirePrimaryKeyMatch); err != nil {
 			return fmt.Errorf("failed to ensure primary key: %w", err)
 		}
 	}
@@ -138,37 +138,87 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	return nil
 }
 
-func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string, primaryKeys []string) error {
-	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
-	if err != nil {
-		return err
-	}
-	quoted := destination.QuoteTableName(schemaName + "." + tableName)
-	var hasPK bool
-	err = d.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.table_constraints
-			WHERE table_schema = $1 AND table_name = $2
-			AND constraint_type = 'PRIMARY KEY'
-		)`, schemaName, tableName).Scan(&hasPK)
+func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, schemaName, tableName string, primaryKeys []string, requireMatch bool) error {
+	actualKeys, err := postgresPrimaryKeyColumns(ctx, d.pool, schemaName, tableName)
 	if err != nil {
 		return fmt.Errorf("failed to check primary key: %w", err)
 	}
-	if hasPK {
+	if len(actualKeys) > 0 {
+		if requireMatch && !postgresPrimaryKeySetsEqual(primaryKeys, actualKeys) {
+			return postgresPrimaryKeyMismatchError(schemaName, tableName, primaryKeys, actualKeys)
+		}
 		return nil
 	}
 
+	quoted := quotePostgresTable(schemaName, tableName)
 	quotedKeys := make([]string, len(primaryKeys))
 	for i, k := range primaryKeys {
 		quotedKeys[i] = destination.QuoteIdentifier(k)
 	}
 	alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quoted, strings.Join(quotedKeys, ", "))
 	if _, err := d.pool.Exec(ctx, alterSQL); err != nil {
+		if requireMatch {
+			concurrentKeys, inspectErr := postgresPrimaryKeyColumns(ctx, d.pool, schemaName, tableName)
+			if inspectErr == nil {
+				if postgresPrimaryKeySetsEqual(primaryKeys, concurrentKeys) {
+					return nil
+				}
+				if len(concurrentKeys) > 0 {
+					return postgresPrimaryKeyMismatchError(schemaName, tableName, primaryKeys, concurrentKeys)
+				}
+			}
+		}
 		config.LogFailedQuery(alterSQL, err)
 		return fmt.Errorf("failed to add primary key: %w", err)
 	}
-	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", table)
+	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", quoted)
 	return nil
+}
+
+func postgresPrimaryKeyColumns(ctx context.Context, queryer postgresTableResolver, schemaName, tableName string) ([]string, error) {
+	var primaryKeys []string
+	err := queryer.QueryRow(ctx, `
+		SELECT COALESCE(
+			array_agg(attr.attname::text ORDER BY key_column.ordinality),
+			ARRAY[]::text[]
+		)
+		FROM pg_catalog.pg_constraint AS con
+		JOIN pg_catalog.pg_class AS rel
+		  ON rel.oid = con.conrelid
+		JOIN pg_catalog.pg_namespace AS nsp
+		  ON nsp.oid = rel.relnamespace
+		CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+		JOIN pg_catalog.pg_attribute AS attr
+		  ON attr.attrelid = rel.oid
+		 AND attr.attnum = key_column.attnum
+		WHERE nsp.nspname = $1
+		  AND rel.relname = $2
+		  AND con.contype = 'p'
+	`, schemaName, tableName).Scan(&primaryKeys)
+	if err != nil {
+		return nil, err
+	}
+	return primaryKeys, nil
+}
+
+func postgresPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	expected = slices.Clone(expected)
+	actual = slices.Clone(actual)
+	slices.Sort(expected)
+	slices.Sort(actual)
+	return slices.Equal(expected, actual)
+}
+
+func postgresPrimaryKeyMismatchError(schemaName, tableName string, expected, actual []string) error {
+	return fmt.Errorf(
+		"CDC merge target %s must have primary key %v; found %v",
+		quotePostgresTable(schemaName, tableName),
+		expected,
+		actual,
+	)
 }
 
 func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
@@ -856,33 +906,41 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Step 1: Upsert latest non-deleted rows (data changes).
 		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
 		// la."_cdc_unchanged_cols" is read once per row, not once per column.
+		primaryKeyTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
 		onTargetCondition := destination.MergeJoinCondition(
-			buildJoinCondition(opts.PrimaryKeys, "target", "la"),
+			primaryKeyTargetCondition,
 			opts.IncrementalPredicate,
+		)
+		onLatestActiveCondition := buildJoinCondition(opts.PrimaryKeys, "la", "latest")
+		newerActiveCondition := fmt.Sprintf(
+			`(target."_cdc_lsn" IS NULL OR la."_cdc_lsn" > target."_cdc_lsn" OR (la."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false AND EXISTS (SELECT 1 FROM latest_all AS latest WHERE %s AND latest."_cdc_lsn" = la."_cdc_lsn" AND latest."_cdc_deleted" = true)))`,
+			onLatestActiveCondition,
 		)
 		unchangedRef := ""
 		if hasUnchangedCols {
 			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
 		}
 		upsertSQL := fmt.Sprintf(
-			`WITH %s, updated AS (
+			`WITH %s, %s, updated AS (
 				UPDATE %s AS target SET %s
 				FROM latest_active la
-				WHERE %s
+				WHERE %s AND %s
 				RETURNING 1
 			)
 			INSERT INTO %s (%s)
 			SELECT %s FROM latest_active la
 			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
+			latestAll,
 			quotedTargetTable,
 			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
 			onTargetCondition,
+			newerActiveCondition,
 			quotedTargetTable,
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
 			quotedTargetTable,
-			onTargetCondition,
+			primaryKeyTargetCondition,
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -898,7 +956,7 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			opts.IncrementalPredicate,
 		)
 		updateDeletedSQL := fmt.Sprintf(
-			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
+			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR deleted."_cdc_lsn" > target."_cdc_lsn" OR (deleted."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false))`,
 			latestAll,
 			latestDeleted,
 			quotedTargetTable,
@@ -910,6 +968,23 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		if _, err := tx.Exec(ctx, updateDeletedSQL); err != nil {
 			config.LogFailedQuery(updateDeletedSQL, err)
 			return fmt.Errorf("failed to update deleted records: %w", err)
+		}
+
+		onInsertDeletedTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "latest")
+		insertDeletedSQL := fmt.Sprintf(
+			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_all AS latest WHERE latest."_cdc_deleted" = true AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			latestAll,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			quotedTargetTable,
+			onInsertDeletedTargetCondition,
+		)
+		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
+
+		if _, err := tx.Exec(ctx, insertDeletedSQL); err != nil {
+			config.LogFailedQuery(insertDeletedSQL, err)
+			return fmt.Errorf("failed to insert CDC delete tombstones: %w", err)
 		}
 	} else {
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.

@@ -622,6 +622,91 @@ func TestPrepareTable_CreateTable(t *testing.T) {
 	assert.Equal(t, 1, count, "table should exist")
 }
 
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "part", DataType: schema.TypeString},
+		{Name: "payload", DataType: schema.TypeString},
+	}}
+	prepare := func(table string, keys []string, requireMatch bool) error {
+		return dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:                  table,
+			Schema:                 tableSchema,
+			PrimaryKeys:            keys,
+			CDCMode:                true,
+			CDCKeys:                keys,
+			RequirePrimaryKeyMatch: requireMatch,
+		})
+	}
+
+	require.NoError(t, prepare("fresh", []string{"id", "part"}, true))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE matching ("ID" BIGINT, "Part" VARCHAR, payload VARCHAR, PRIMARY KEY ("Part", "ID"))`))
+	require.NoError(t, prepare("matching", []string{"id", "PART"}, true))
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE missing (id BIGINT, part VARCHAR, payload VARCHAR)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO missing VALUES (1, 'a', 'keep')`))
+	err := prepare("missing", []string{"id"}, true)
+	require.ErrorContains(t, err, "must have primary key [id]; found []")
+	db := openDuckDB(t, ctx, path)
+	var payload string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT payload FROM missing WHERE id = 1`).Scan(&payload))
+	require.Equal(t, "keep", payload)
+	require.Nil(t, dest.lookupSchema("missing"))
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE mismatched (id BIGINT, part VARCHAR, payload VARCHAR PRIMARY KEY)`))
+	err = prepare("mismatched", []string{"id"}, true)
+	require.ErrorContains(t, err, "found [payload]")
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE extra_key (id BIGINT, part VARCHAR, payload VARCHAR, PRIMARY KEY (id, part))`))
+	err = prepare("extra_key", []string{"id"}, true)
+	require.ErrorContains(t, err, "found [id part]")
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE unicode_key ("å" BIGINT PRIMARY KEY, payload VARCHAR)`))
+	err = dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "unicode_key",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "Å", DataType: schema.TypeInt64},
+			{Name: "payload", DataType: schema.TypeString},
+		}},
+		PrimaryKeys:            []string{"Å"},
+		CDCMode:                true,
+		CDCKeys:                []string{"Å"},
+		RequirePrimaryKeyMatch: true,
+	})
+	require.ErrorContains(t, err, "found [å]")
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE non_cdc (id BIGINT, part VARCHAR, payload VARCHAR PRIMARY KEY)`))
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       "non_cdc",
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	}))
+}
+
+func TestDuckDBPrimaryKeySetsEqualUsesASCIIIdentifierSemantics(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected []string
+		actual   []string
+		want     bool
+	}{
+		{name: "exact", expected: []string{"id"}, actual: []string{"id"}, want: true},
+		{name: "composite order", expected: []string{"id", "part"}, actual: []string{"part", "id"}, want: true},
+		{name: "ASCII case", expected: []string{"ID", "Part"}, actual: []string{"id", "pART"}, want: true},
+		{name: "non ASCII case", expected: []string{"Å"}, actual: []string{"å"}, want: false},
+		{name: "missing", expected: []string{"id", "part"}, actual: []string{"id"}, want: false},
+		{name: "extra", expected: []string{"id"}, actual: []string{"id", "part"}, want: false},
+		{name: "different", expected: []string{"id"}, actual: []string{"part"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, duckDBPrimaryKeySetsEqual(tt.expected, tt.actual))
+		})
+	}
+}
+
 func TestPrepareTable_DropFirst(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
@@ -1176,6 +1261,180 @@ func TestMergeTable_CDCMaterializesDeleteOnlyTombstone(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_table (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		);
+		CREATE TABLE staging_table (
+			id BIGINT,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP,
+			"_cdc_unchanged_cols" VARCHAR
+		);
+		INSERT INTO target_table VALUES
+			(1, 'newer-active', '00000000000000000030', false, '2026-01-03'),
+			(2, 'newer-deleted', '00000000000000000030', true, '2026-01-03'),
+			(3, 'legacy', NULL, false, '2026-01-01'),
+			(6, 'same-active', '00000000000000000010', false, '2026-01-01'),
+			(7, 'same-deleted', '00000000000000000010', true, '2026-01-01'),
+			(8, 'tie-delete', '00000000000000000010', false, '2026-01-01'),
+			(9, 'toast-newer', '00000000000000000030', false, '2026-01-03'),
+			(10, 'older-row-image', '00000000000000000010', false, '2026-01-01');
+		INSERT INTO staging_table VALUES
+			(1, 'stale-active', '00000000000000000020', false, '2026-01-02', '[]'),
+			(1, NULL, '00000000000000000025', true, '2026-01-02', '[]'),
+			(2, 'stale-resurrection', '00000000000000000020', false, '2026-01-02', '[]'),
+			(3, 'first-cdc-update', '00000000000000000010', false, '2026-01-02', '[]'),
+			(4, 'first-insert', '00000000000000000010', false, '2026-01-02', '[]'),
+			(5, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
+			(6, 'same-replay', '00000000000000000010', false, '2026-01-02', '[]'),
+			(7, 'same-resurrection', '00000000000000000010', false, '2026-01-02', '[]'),
+			(8, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
+			(9, NULL, '00000000000000000020', false, '2026-01-02', '["name"]'),
+			(10, 'latest-row-image', '00000000000000000010', false, '2026-01-02 01:00:00', '[]'),
+			(10, NULL, '00000000000000000010', true, '2026-01-02 02:00:00', '[]'),
+			(11, 'insert-then-delete', '00000000000000000010', false, '2026-01-02 01:00:00', '[]'),
+			(11, NULL, '00000000000000000010', true, '2026-01-02 02:00:00', '[]'),
+			(12, NULL, '00000000000000000010', true, '2026-01-01', '[]'),
+			(12, 'newer-active-image', '00000000000000000020', false, '2026-01-02', '[]'),
+			(13, 'older-active-image', '00000000000000000010', false, '2026-01-01', '[]'),
+			(13, NULL, '00000000000000000020', true, '2026-01-02', '[]')
+	`))
+
+	opts := destination.MergeOptions{
+		StagingTable: "staging_table",
+		TargetTable:  "target_table",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn},
+	}
+	require.NoError(t, dest.MergeTable(ctx, opts))
+
+	expected := map[int64]struct {
+		name    string
+		lsn     string
+		deleted bool
+		synced  string
+	}{
+		1:  {"newer-active", "00000000000000000030", false, "2026-01-03 00:00:00"},
+		2:  {"newer-deleted", "00000000000000000030", true, "2026-01-03 00:00:00"},
+		3:  {"first-cdc-update", "00000000000000000010", false, "2026-01-02 00:00:00"},
+		4:  {"first-insert", "00000000000000000010", false, "2026-01-02 00:00:00"},
+		5:  {"<null>", "00000000000000000010", true, "2026-01-02 00:00:00"},
+		6:  {"same-active", "00000000000000000010", false, "2026-01-01 00:00:00"},
+		7:  {"same-deleted", "00000000000000000010", true, "2026-01-01 00:00:00"},
+		8:  {"tie-delete", "00000000000000000010", true, "2026-01-02 00:00:00"},
+		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03 00:00:00"},
+		10: {"latest-row-image", "00000000000000000010", true, "2026-01-02 02:00:00"},
+		11: {"insert-then-delete", "00000000000000000010", true, "2026-01-02 02:00:00"},
+		12: {"newer-active-image", "00000000000000000020", false, "2026-01-02 00:00:00"},
+		13: {"older-active-image", "00000000000000000020", true, "2026-01-02 00:00:00"},
+	}
+	for id, want := range expected {
+		name, lsn, deleted, synced := readDuckDBCDCRow(t, ctx, dest, id)
+		assert.Equal(t, want.name, name, "id %d name", id)
+		assert.Equal(t, want.lsn, lsn, "id %d LSN", id)
+		assert.Equal(t, want.deleted, deleted, "id %d deleted", id)
+		assert.Equal(t, want.synced, synced, "id %d synced timestamp", id)
+	}
+
+	require.NoError(t, dest.Exec(ctx, `UPDATE target_table SET name = 'replay-sentinel' WHERE id = 10`))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	name, lsn, deleted, _ := readDuckDBCDCRow(t, ctx, dest, 10)
+	assert.Equal(t, "replay-sentinel", name)
+	assert.Equal(t, "00000000000000000010", lsn)
+	assert.True(t, deleted)
+	name, lsn, deleted, synced := readDuckDBCDCRow(t, ctx, dest, 5)
+	assert.Equal(t, "<null>", name)
+	assert.Equal(t, "00000000000000000010", lsn)
+	assert.True(t, deleted)
+	assert.Equal(t, "2026-01-02 00:00:00", synced)
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `
+		INSERT INTO staging_table VALUES
+			(14, 'predicate-excluded-image', '00000000000000000030', false, '2026-01-03 01:00:00', '[]'),
+			(14, NULL, '00000000000000000040', true, '2026-01-03 02:00:00', '[]')
+	`))
+	opts.IncrementalPredicate = "target.id > 100"
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	name, lsn, deleted, synced = readDuckDBCDCRow(t, ctx, dest, 14)
+	assert.Equal(t, "predicate-excluded-image", name)
+	assert.Equal(t, "00000000000000000040", lsn)
+	assert.True(t, deleted)
+	assert.Equal(t, "2026-01-03 02:00:00", synced)
+	opts.IncrementalPredicate = ""
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'newest', '00000000000000000040', false, '2026-01-04', '[]')`))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", false)
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, NULL, '00000000000000000040', true, '2026-01-04', '[]')`))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", true)
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_table`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (1, 'stale-outside-predicate', '00000000000000000020', false, '2026-01-02', '[]')`))
+	opts.IncrementalPredicate = "target.id > 100"
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	assertDuckDBCDCState(t, ctx, dest, "newest", "00000000000000000040", true)
+	require.NoError(t, dest.Close(ctx))
+	assertDuckDBCDCRow(t, ctx, path, "newest", "00000000000000000040", true)
+}
+
+func readDuckDBCDCRow(t *testing.T, ctx context.Context, dest *DuckDBDestination, id int64) (string, string, bool, string) {
+	t.Helper()
+	stmt, err := dest.conn.NewStatement()
+	require.NoError(t, err)
+	defer func() { _ = stmt.Close() }()
+	require.NoError(t, stmt.SetSqlQuery(fmt.Sprintf(`
+		SELECT COALESCE(name, '<null>'), COALESCE("_cdc_lsn", ''), "_cdc_deleted", strftime("_cdc_synced_at", '%%Y-%%m-%%d %%H:%%M:%%S')
+		FROM target_table WHERE id = %d
+	`, id)))
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	require.NoError(t, err)
+	defer reader.Release()
+	require.True(t, reader.Next())
+	record := reader.RecordBatch()
+	return strings.Clone(record.Column(0).(*array.String).Value(0)),
+		strings.Clone(record.Column(1).(*array.String).Value(0)),
+		record.Column(2).(*array.Boolean).Value(0),
+		strings.Clone(record.Column(3).(*array.String).Value(0))
+}
+
+func assertDuckDBCDCState(t *testing.T, ctx context.Context, dest *DuckDBDestination, wantName, wantLSN string, wantDeleted bool) {
+	t.Helper()
+	name, lsn, deleted, _ := readDuckDBCDCRow(t, ctx, dest, 1)
+	assert.Equal(t, wantName, name)
+	assert.Equal(t, wantLSN, lsn)
+	assert.Equal(t, wantDeleted, deleted)
+}
+
+func assertDuckDBCDCRow(t *testing.T, ctx context.Context, path, wantName, wantLSN string, wantDeleted bool) {
+	t.Helper()
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	var nameRaw, lsnRaw []byte
+	var deleted bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name, "_cdc_lsn", "_cdc_deleted" FROM target_table WHERE id = 1`).Scan(&nameRaw, &lsnRaw, &deleted))
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_table WHERE id = 1`).Scan(&count))
+	assert.Equal(t, wantName, string(nameRaw))
+	assert.Equal(t, wantLSN, string(lsnRaw))
+	assert.Equal(t, wantDeleted, deleted)
+	assert.Equal(t, 1, count)
+}
+
 func TestMergeTable_CDCWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
@@ -1215,6 +1474,64 @@ func TestMergeTable_CDCWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T)
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(name) FROM target_table WHERE id = 1").Scan(&count, &nameRaw))
 	assert.Equal(t, 1, count)
 	assert.Equal(t, "after", string(nameRaw))
+}
+
+func TestMergeTable_CDCInternalAliasesDoNotCollide(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	collisionColumns := []string{
+		"__bruin_dedup_rn",
+		"__bruin_image_rn",
+		"__ingestr_has_equal_lsn_delete",
+		"__ingestr_latest_lsn",
+		"__ingestr_latest_deleted",
+		"__ingestr_latest_synced_at",
+	}
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_aliases (
+			id BIGINT PRIMARY KEY,
+			payload VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP,
+			"__bruin_dedup_rn" VARCHAR,
+			"__bruin_image_rn" VARCHAR,
+			"__ingestr_has_equal_lsn_delete" VARCHAR,
+			"__ingestr_latest_lsn" VARCHAR,
+			"__ingestr_latest_deleted" VARCHAR,
+			"__ingestr_latest_synced_at" VARCHAR
+		);
+		CREATE TABLE staging_aliases AS SELECT * FROM target_aliases WHERE false;
+		INSERT INTO staging_aliases VALUES
+			(1, 'active-image', '00000000000000000010', false, '2026-01-01 01:00:00', 'user-dedup', 'user-image', 'user-equal-delete', 'user-lsn', 'user-deleted', 'user-synced'),
+			(1, NULL, '00000000000000000020', true, '2026-01-01 02:00:00', NULL, NULL, NULL, NULL, NULL, NULL);
+	`))
+
+	columns := append([]string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}, collisionColumns...)
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_aliases",
+		TargetTable:  "target_aliases",
+		PrimaryKeys:  []string{"id"},
+		Columns:      columns,
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	var payload, lsn, syncedAt []byte
+	var deleted bool
+	values := make([][]byte, len(collisionColumns))
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT payload, "_cdc_lsn", "_cdc_deleted", strftime("_cdc_synced_at", '%Y-%m-%d %H:%M:%S'),
+			"__bruin_dedup_rn", "__bruin_image_rn", "__ingestr_has_equal_lsn_delete",
+			"__ingestr_latest_lsn", "__ingestr_latest_deleted", "__ingestr_latest_synced_at"
+		FROM target_aliases WHERE id = 1
+	`).Scan(&payload, &lsn, &deleted, &syncedAt, &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]))
+	assert.Equal(t, "active-image", string(payload))
+	assert.Equal(t, "00000000000000000020", string(lsn))
+	assert.True(t, deleted)
+	assert.Equal(t, "2026-01-01 02:00:00", string(syncedAt))
+	assert.Equal(t, []string{"user-dedup", "user-image", "user-equal-delete", "user-lsn", "user-deleted", "user-synced"}, []string{string(values[0]), string(values[1]), string(values[2]), string(values[3]), string(values[4]), string(values[5])})
 }
 
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {

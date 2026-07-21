@@ -15,6 +15,63 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		actualKeys []string
+		wantError  string
+	}{
+		{name: "matching composite in different order and case", actualKeys: []string{"PART", "ID"}},
+		{name: "missing", wantError: "found []"},
+		{name: "mismatched", actualKeys: []string{"other_id"}, wantError: "found [other_id]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &MySQLDestination{db: db, database: "app"}
+			mock.ExpectExec("CREATE TABLE IF NOT EXISTS `events`").WillReturnResult(sqlmock.NewResult(0, 0))
+			rows := sqlmock.NewRows([]string{"COLUMN_NAME"})
+			for _, key := range tt.actualKeys {
+				rows.AddRow(key)
+			}
+			mock.ExpectQuery("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA\\.KEY_COLUMN_USAGE").
+				WithArgs("app", "events").
+				WillReturnRows(rows)
+
+			err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:                  "events",
+				Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}, {Name: "part", DataType: schema.TypeString, MaxLength: 255}}},
+				PrimaryKeys:            []string{"id", "part"},
+				CDCMode:                true,
+				CDCKeys:                []string{"id", "part"},
+				RequirePrimaryKeyMatch: true,
+			})
+			if tt.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantError)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestPrepareTableWithoutRequiredPrimaryKeyMatchSkipsInspection(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `events`").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:  "events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestManagedCDCRunLeaseAcquiresAndReleasesAdvisoryLock(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -608,9 +665,11 @@ func TestCDCMergeWithoutUnchangedColsMarkerUsesNormalUpdate(t *testing.T) {
 
 	dest := &MySQLDestination{db: db}
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
+	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0 AND source.`__ingestr_has_equal_lsn_delete` = 1)) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE NOT EXISTS (SELECT 1 FROM `items` AS target WHERE target.`id` = source.`id`)")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0))")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE source.`_cdc_deleted` = 1 AND NOT EXISTS (SELECT 1 FROM `items` AS target WHERE target.`id` = source.`id`)")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
@@ -631,9 +690,11 @@ func TestCDCMergeWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
 
 	dest := &MySQLDestination{db: db}
 	mock.ExpectBegin()
-	mock.ExpectExec("^INSERT INTO ").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`id` >= 1) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("SET target.`_cdc_deleted` = 1")).
+	mock.ExpectExec(regexp.QuoteMeta("WHERE NOT EXISTS (SELECT 1 FROM `items` AS target WHERE target.`id` = source.`id`)")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("ON target.`id` = source.`id` AND (target.`id` >= 1) AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0 AND source.`__ingestr_has_equal_lsn_delete` = 1)) SET target.`payload` = source.`payload`")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0))")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("WHERE source.`_cdc_deleted` = 1 AND NOT EXISTS (SELECT 1 FROM `items` AS target WHERE target.`id` = source.`id`)")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 

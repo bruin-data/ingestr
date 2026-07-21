@@ -522,7 +522,8 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
-	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate)
+	primaryKeyOnClause := strings.Join(onConditions, " AND ")
+	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
 
 	pkMap := make(map[string]bool)
 	for _, pk := range primaryKeys {
@@ -567,6 +568,8 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 	for i, pk := range primaryKeys {
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
+	uniqueInternalName := newSnowflakeInternalNameAllocator(allColumns)
+	dedupRowNumber := quoteIdentifier(uniqueInternalName("__bruin_dedup_rn"))
 
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
@@ -577,6 +580,8 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
 
 	if hasCDCDeleted {
+		hasActiveColumn := quoteIdentifier(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn := quoteIdentifier(uniqueInternalName("__ingestr_active_lsn"))
 		// CDC mode: compose the merge source from two per-PK dedups of staging:
 		// data columns come from the latest non-deleted change (so a trailing
 		// delete doesn't discard the last update's values), while the CDC
@@ -593,7 +598,7 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
 
-		selectCols := make([]string, 0, len(allColumns)+1)
+		selectCols := make([]string, 0, len(allColumns)+2)
 		for _, col := range allColumns {
 			alias := "act"
 			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
@@ -601,17 +606,20 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 			}
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
-		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS \"__ingestr_has_active\"", cdcLSN))
+		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS %s", cdcLSN, hasActiveColumn))
+		selectCols = append(selectCols, fmt.Sprintf("act.%s AS %s", cdcLSN, activeLSNColumn))
 
 		dedup := func(where, orderBy string) string {
 			return fmt.Sprintf(
-				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1)`,
 				strings.Join(stagingQuoted, ", "),
 				strings.Join(stagingQuoted, ", "),
 				strings.Join(quotedPKList, ", "),
 				orderBy,
+				dedupRowNumber,
 				stagingFull,
 				where,
+				dedupRowNumber,
 			)
 		}
 		quoteActual := func(col string) string {
@@ -626,19 +634,30 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 		)
 
 		fmt.Fprintf(&mergeSQL, "USING %s AS source\n", composedSource)
-		fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
+		fmt.Fprintf(&mergeSQL, "ON %s\n", primaryKeyOnClause)
 
-		hasRowData := fmt.Sprintf("(source.%s = false OR source.\"__ingestr_has_active\")", cdcDeleted)
+		hasRowData := fmt.Sprintf(
+			"(source.%s = false OR (source.%s AND (target.%s IS NULL OR source.%s >= target.%s)))",
+			cdcDeleted, hasActiveColumn, cdcLSN, activeLSNColumn, cdcLSN,
+		)
+		newerChange := fmt.Sprintf(
+			"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND source.%s = true AND COALESCE(target.%s, false) = false))",
+			cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcDeleted, cdcDeleted,
+		)
+		matchedCondition := newerChange
+		if strings.TrimSpace(incrementalPredicate) != "" {
+			matchedCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, matchedCondition)
+		}
 		if len(updateSets) > 0 {
-			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", hasRowData)
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND %s THEN\n", matchedCondition, hasRowData)
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
-		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", cdcDeleted)
+		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND source.%s = true THEN\n", matchedCondition, cdcDeleted)
 		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
-		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
+		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
 		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
 		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 
@@ -646,12 +665,14 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 	}
 
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1)`,
 		strings.Join(stagingQuoted, ", "),
 		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
+		dedupRowNumber,
 		stagingFull,
+		dedupRowNumber,
 	)
 
 	fmt.Fprintf(&mergeSQL, "USING %s AS source\n", dedupSource)
@@ -1145,6 +1166,8 @@ func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 
+func (d *SnowflakeDestination) RequiresSerializedCDCRuns() bool { return true }
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	tn := sfTable(table)
 
@@ -1318,6 +1341,31 @@ func quoteIdentifier(name string) string {
 		return name
 	}
 	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
+}
+
+func newSnowflakeInternalNameAllocator(columns []string) func(string) string {
+	used := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		used[snowflakeIdentifierKey(col)] = struct{}{}
+	}
+	return func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := used[snowflakeIdentifierKey(candidate)]; !exists {
+				used[snowflakeIdentifierKey(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+}
+
+func snowflakeIdentifierKey(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+	}
+	return strings.ToLower(name)
 }
 
 func quoteColumns(cols []string) []string {

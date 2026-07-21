@@ -75,14 +75,14 @@ func TestBuildMergeSQL(t *testing.T) {
 
 		// Composed source: data columns from the latest non-deleted change,
 		// CDC columns from the latest change overall.
-		assert.Contains(t, sql, `SELECT la."ID", act."NAME", act."VALUE", la."_CDC_LSN", la."_CDC_DELETED", la."_CDC_SYNCED_AT", act."_CDC_LSN" IS NOT NULL AS "__ingestr_has_active"`)
+		assert.Contains(t, sql, `SELECT la."ID", act."NAME", act."VALUE", la."_CDC_LSN", la."_CDC_DELETED", la."_CDC_SYNCED_AT", act."_CDC_LSN" IS NOT NULL AS "__INGESTR_HAS_ACTIVE", act."_CDC_LSN" AS "__INGESTR_ACTIVE_LSN"`)
 		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
 		assert.Contains(t, sql, `WHERE "_CDC_DELETED" = false`)
-		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
-		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND source."_CDC_DELETED" = true AND COALESCE(target."_CDC_DELETED", false) = false)) AND (source."_CDC_DELETED" = false OR (source."__INGESTR_HAS_ACTIVE" AND (target."_CDC_LSN" IS NULL OR source."__INGESTR_ACTIVE_LSN" >= target."_CDC_LSN"))) THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND source."_CDC_DELETED" = true AND COALESCE(target."_CDC_DELETED", false) = false)) AND source."_CDC_DELETED" = true THEN`)
 		assert.Contains(t, sql, `target."_CDC_DELETED" = true, target."_CDC_LSN" = source."_CDC_LSN", target."_CDC_SYNCED_AT" = source."_CDC_SYNCED_AT"`)
-		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
-		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN\n")
+		assert.NotContains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__INGESTR_HAS_ACTIVE") THEN`)
 	})
 
 	t.Run("cdc_uppercased_columns", func(t *testing.T) {
@@ -91,9 +91,9 @@ func TestBuildMergeSQL(t *testing.T) {
 		columns := []string{"ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"ID"}, columns, "", nil)
 
-		assert.Contains(t, sql, `"__ingestr_has_active"`)
-		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
-		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN\n")
+		assert.Contains(t, sql, `"__INGESTR_HAS_ACTIVE"`)
+		assert.Contains(t, sql, `AND source."_CDC_DELETED" = true THEN`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN\n")
 	})
 
 	t.Run("cdc_resume_uppercased_columns", func(t *testing.T) {
@@ -104,7 +104,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		columns := []string{"ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_cdc_unchanged_cols"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
-		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
+		assert.Contains(t, sql, `AND (source."_CDC_DELETED" = false OR (source."__INGESTR_HAS_ACTIVE" AND (target."_CDC_LSN" IS NULL OR source."__INGESTR_ACTIVE_LSN" >= target."_CDC_LSN"))) THEN`)
 		assert.Contains(t, sql, `"CONFIG_DATA" = IFF(ARRAY_CONTAINS(TO_VARIANT('config_data'), TRY_PARSE_JSON(LOWER(source."_CDC_UNCHANGED_COLS"))), target."CONFIG_DATA", source."CONFIG_DATA")`)
 		// staging-only column must not be persisted on the destination
 		assert.Contains(t, sql, "INSERT (\"ID\", \"NAME\", \"CONFIG_DATA\", \"_CDC_LSN\", \"_CDC_DELETED\", \"_CDC_SYNCED_AT\")\n")
@@ -125,11 +125,51 @@ func TestBuildMergeSQL(t *testing.T) {
 		columns := []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
-		assert.Contains(t, sql, `WHEN MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
+		assert.Contains(t, sql, `AND (source."_CDC_DELETED" = false OR (source."__INGESTR_HAS_ACTIVE" AND (target."_CDC_LSN" IS NULL OR source."__INGESTR_ACTIVE_LSN" >= target."_CDC_LSN"))) THEN`)
 		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
 		assert.NotContains(t, sql, `target."NAME" = source."NAME"`)
-		assert.Contains(t, sql, `WHEN MATCHED AND source."_CDC_DELETED" = true THEN`)
-		assert.Contains(t, sql, `WHEN NOT MATCHED AND (source."_CDC_DELETED" = false OR source."__ingestr_has_active") THEN`)
+		assert.Contains(t, sql, `AND source."_CDC_DELETED" = true THEN`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED THEN\n")
+	})
+
+	t.Run("cdc_incremental_predicate", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		predicate := `target."ID" > 100`
+		sql := buildMergeSQLWithPredicate("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, predicate)
+
+		assert.Contains(t, sql, "ON target.\"ID\" = source.\"ID\"\n")
+		assert.NotContains(t, sql, `ON target."ID" = source."ID" AND (`+predicate+`)`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND (target."_CDC_LSN" IS NULL`)
+	})
+
+	t.Run("non_cdc_internal_alias_collision", func(t *testing.T) {
+		columns := []string{"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2"}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
+
+		assert.Contains(t, sql, `AS "__BRUIN_DEDUP_RN_3"`)
+		assert.Contains(t, sql, `WHERE "__BRUIN_DEDUP_RN_3" = 1`)
+	})
+
+	t.Run("cdc_internal_alias_collision", func(t *testing.T) {
+		columns := []string{
+			"id", "payload",
+			"__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2",
+			`"__ingestr_has_active"`, `"__ingestr_has_active_2"`,
+			`"__ingestr_active_lsn"`, `"__ingestr_active_lsn_2"`,
+			"_cdc_lsn", "_cdc_deleted", "_cdc_synced_at",
+		}
+		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
+
+		assert.Contains(t, sql, `AS "__BRUIN_DEDUP_RN_3"`)
+		assert.Contains(t, sql, `WHERE "__BRUIN_DEDUP_RN_3" = 1`)
+		assert.Contains(t, sql, `AS "__INGESTR_HAS_ACTIVE_3"`)
+		assert.Contains(t, sql, `source."__INGESTR_HAS_ACTIVE_3"`)
+		assert.Contains(t, sql, `act."_CDC_LSN" AS "__INGESTR_ACTIVE_LSN_3"`)
+		assert.Contains(t, sql, `source."__INGESTR_ACTIVE_LSN_3" >= target."_CDC_LSN"`)
+		assert.Contains(t, sql, `target."__ingestr_has_active" = source."__ingestr_has_active"`)
+		assert.Contains(t, sql, `target."__ingestr_has_active_2" = source."__ingestr_has_active_2"`)
+		assert.Contains(t, sql, `target."__ingestr_active_lsn" = source."__ingestr_active_lsn"`)
+		assert.Contains(t, sql, `target."__ingestr_active_lsn_2" = source."__ingestr_active_lsn_2"`)
 	})
 }
 

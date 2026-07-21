@@ -180,7 +180,6 @@ func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err := tablename.TwoLevel("sqlite").CheckName(opts.Table); err != nil {
 		return err
 	}
-	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	if err := d.ensureSchemaAttached(ctx, schemaOf(opts.Table)); err != nil {
 		return err
@@ -205,8 +204,50 @@ func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.P
 		}
 		config.Debug("[SQLITE] CREATE TABLE took %v", time.Since(startCreate))
 	}
+	if opts.RequirePrimaryKeyMatch {
+		actual, err := d.GetTableSchema(ctx, opts.Table)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if actual == nil || !sqlitePrimaryKeySetsEqual(opts.PrimaryKeys, actual.PrimaryKeys) {
+			var actualKeys []string
+			if actual != nil {
+				actualKeys = actual.PrimaryKeys
+			}
+			return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	return nil
+}
+
+func sqlitePrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[sqliteIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := sqliteIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func sqliteIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *SQLiteDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -469,31 +510,102 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := func(where string) string {
+	usedInternalNames := make(map[string]struct{}, len(columns)+6)
+	for _, col := range columns {
+		usedInternalNames[strings.ToLower(col)] = struct{}{}
+	}
+	uniqueInternalName := func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedInternalNames[strings.ToLower(candidate)]; !exists {
+				usedInternalNames[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	dedupRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_dedup_rn"))
+	dedupSourceWithOrder := func(where, orderBy string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1) AS source`,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
-			dedupOrderBy,
+			orderBy,
+			dedupRowNumber,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
+			dedupRowNumber,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceWithOrder(where, dedupOrderBy) }
 
-	// For CDC, updates use the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data. Inserts use the latest
-	// change overall so delete-only keys can materialize tombstones for resume.
+	// For CDC, updates use the latest active image. Inserts combine that image
+	// with the latest overall CDC metadata; delete-only keys use their tombstone.
 	updateSource := dedupSource("")
 	insertSource := updateSource
+	equalDeleteMarker := ""
 	if isCDC {
-		updateSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
-		insertSource = dedupSource("")
+		equalDeleteMarker = destination.QuoteIdentifier(uniqueInternalName("__ingestr_has_equal_lsn_delete"))
+		activeRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_active_rn"))
+		updateSource = fmt.Sprintf(
+			`(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, "_cdc_deleted" ORDER BY "_cdc_lsn" DESC) AS %s, MAX("_cdc_deleted") OVER (PARTITION BY %s, "_cdc_lsn") AS %s FROM %s) AS _numbered WHERE "_cdc_deleted" = 0 AND %s = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			equalDeleteMarker,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			activeRowNumber,
+			strings.Join(quotedPKs, ", "),
+			equalDeleteMarker,
+			destination.QuoteTableName(opts.StagingTable),
+			activeRowNumber,
+		)
+		imageRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_image_rn"))
+		latestLSN := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_lsn"))
+		latestDeleted := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_deleted"))
+		latestSyncedAt := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_synced_at"))
+		insertColumns := make([]string, len(targetColumns))
+		for i, col := range targetColumns {
+			quoted := destination.QuoteIdentifier(col)
+			switch {
+			case strings.EqualFold(col, destination.CDCLSNColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestLSN, quoted)
+			case strings.EqualFold(col, destination.CDCDeletedColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestDeleted, quoted)
+			case strings.EqualFold(col, destination.CDCSyncedAtColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestSyncedAt, quoted)
+			default:
+				insertColumns[i] = quoted
+			}
+		}
+		insertSource = fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_deleted" ASC, "_cdc_lsn" DESC) AS %s, FIRST_VALUE("_cdc_lsn") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_deleted") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_synced_at") OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1) AS source`,
+			strings.Join(insertColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			imageRowNumber,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestLSN,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestDeleted,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestSyncedAt,
+			destination.QuoteTableName(opts.StagingTable),
+			imageRowNumber,
+		)
 	}
+	primaryKeyMatchCondition := buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
-		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
+		primaryKeyMatchCondition,
 		opts.IncrementalPredicate,
 	)
+	insertMatchCondition := matchCondition
+	if isCDC {
+		insertMatchCondition = primaryKeyMatchCondition
+	}
 
 	runUpdate := func() error {
 		if len(nonPKColumns) == 0 {
@@ -504,12 +616,16 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		if isCDC && hasUnchangedCols {
 			updateSet = buildCDCUpdateSetSQLite(nonPKColumns, "target", "source", "source."+destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
 		}
+		updateMatchCondition := matchCondition
+		if isCDC {
+			updateMatchCondition += fmt.Sprintf(` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0 AND source.%s = 1))`, equalDeleteMarker)
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s SET %s FROM %s WHERE %s`,
 			updateTarget,
 			updateSet,
 			updateSource,
-			matchCondition,
+			updateMatchCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -528,7 +644,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			strings.Join(quotedTargetColumns, ", "),
 			insertSource,
 			quotedTargetTable,
-			matchCondition,
+			insertMatchCondition,
 		)
 		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
@@ -542,7 +658,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate.
+	// duplicate. CDC anti-joins always use the primary key alone.
 	steps := []func() error{runUpdate, runInsert}
 	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
@@ -557,7 +673,7 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			`UPDATE %s AS target SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
+			`UPDATE %s AS target SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1 AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0))`,
 			quotedTargetTable,
 			dedupSource(""),
 			matchCondition,
@@ -1121,6 +1237,7 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	primaryKeysByOrdinal := make(map[int]string)
 	for rows.Next() {
 		var cid int
 		var name, colType string
@@ -1137,6 +1254,9 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 			Nullable:     notNull == 0,
 			IsPrimaryKey: pk > 0,
 		})
+		if pk > 0 {
+			primaryKeysByOrdinal[pk] = name
+		}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -1147,10 +1267,14 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 		return nil, nil
 	}
 
-	return &schema.TableSchema{
-		Name:    tableName,
-		Columns: columns,
-	}, nil
+	primaryKeys := make([]string, len(primaryKeysByOrdinal))
+	for ordinal, name := range primaryKeysByOrdinal {
+		if ordinal > 0 && ordinal <= len(primaryKeys) {
+			primaryKeys[ordinal-1] = name
+		}
+	}
+
+	return &schema.TableSchema{Name: tableName, Columns: columns, PrimaryKeys: primaryKeys}, nil
 }
 
 func mapSQLiteTypeToSchema(colType string) schema.DataType {

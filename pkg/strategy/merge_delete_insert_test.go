@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
@@ -28,6 +29,38 @@ func TestMergeStrategy_Validate(t *testing.T) {
 	cfg.PrimaryKeys = []string{"id"}
 	if err := strat.Validate(cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrepareMergeTablesEnablesCDCModeForTargetAndStaging(t *testing.T) {
+	dest := &fakeDestination{}
+	err := prepareMergeTables(t.Context(), dest, mergeTableParams{
+		DestTable:    "ds.items",
+		StagingTable: "ds.items_staging",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+		}},
+		PrimaryKeys: []string{"id"},
+		IsCDC:       true,
+	})
+	if err != nil {
+		t.Fatalf("prepareMergeTables() error = %v", err)
+	}
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("PrepareTable calls = %d, want 2", len(dest.prepareCalls))
+	}
+	if !dest.prepareCalls[0].CDCMode || !dest.prepareCalls[1].CDCMode {
+		t.Fatalf("CDCMode = (%v, %v), want true for target and staging", dest.prepareCalls[0].CDCMode, dest.prepareCalls[1].CDCMode)
+	}
+	if !dest.prepareCalls[0].RequirePrimaryKeyMatch || dest.prepareCalls[1].RequirePrimaryKeyMatch {
+		t.Fatalf("RequirePrimaryKeyMatch = (%v, %v), want true only for target", dest.prepareCalls[0].RequirePrimaryKeyMatch, dest.prepareCalls[1].RequirePrimaryKeyMatch)
+	}
+	if strings.Join(dest.prepareCalls[0].CDCKeys, ",") != "id" || strings.Join(dest.prepareCalls[1].CDCKeys, ",") != "id" {
+		t.Fatalf("CDCKeys = (%v, %v), want [id] for target and staging", dest.prepareCalls[0].CDCKeys, dest.prepareCalls[1].CDCKeys)
+	}
+	if len(dest.prepareCalls[1].PrimaryKeys) != 0 {
+		t.Fatalf("staging PrimaryKeys = %v, want no declared constraint", dest.prepareCalls[1].PrimaryKeys)
 	}
 }
 

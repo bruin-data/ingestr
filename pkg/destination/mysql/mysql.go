@@ -316,8 +316,73 @@ func (d *MySQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 		}
 		config.Debug("[MYSQL] CREATE TABLE took %v", time.Since(startCreate))
 	}
+	if opts.RequirePrimaryKeyMatch {
+		actualKeys, err := d.primaryKeyColumns(ctx, opts.Table)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if !mysqlPrimaryKeySetsEqual(opts.PrimaryKeys, actualKeys) {
+			return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
 
 	return nil
+}
+
+func (d *MySQLDestination) primaryKeyColumns(ctx context.Context, table string) ([]string, error) {
+	database, tableName := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
+	query := `
+		SELECT COLUMN_NAME
+		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA = ` + mysqlSchemaFilterExpr(database) + ` AND TABLE_NAME = ?
+		  AND CONSTRAINT_NAME = 'PRIMARY'
+		ORDER BY ORDINAL_POSITION`
+	rows, err := d.db.QueryContext(ctx, query, mysqlSchemaFilterArgs(database, tableName)...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	return columns, rows.Err()
+}
+
+func mysqlPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[mysqlIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := mysqlIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func mysqlIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *MySQLDestination) ensureDatabaseExists(ctx context.Context, database string) error {
@@ -1044,28 +1109,64 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = quoteColumns([]string{opts.IncrementalKey})[0] + " DESC"
 	}
-	dedupSource := func(where string) string {
+	usedInternalNames := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		usedInternalNames[strings.ToLower(col)] = struct{}{}
+	}
+	uniqueInternalName := func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedInternalNames[strings.ToLower(candidate)]; !exists {
+				usedInternalNames[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	dedupRowNumber := quoteColumn(uniqueInternalName("__bruin_dedup_rn"))
+	dedupSourceAs := func(where, alias string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1) AS %s`,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
 			dedupOrderBy,
+			dedupRowNumber,
 			quoteTable(opts.StagingTable),
 			where,
+			dedupRowNumber,
+			alias,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceAs(where, "source") }
 
 	// For CDC, upsert from the latest non-deleted change per PK so a delete
 	// followed by nothing doesn't clobber row data; deletes are applied below.
 	upsertSource := dedupSource("")
+	insertSource := upsertSource
+	equalDeleteMarker := ""
 	if isCDC {
-		upsertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
+		equalDeleteMarker = quoteColumn(uniqueInternalName("__ingestr_has_equal_lsn_delete"))
+		activeSource := dedupSourceAs(" WHERE `_cdc_deleted` = 0", "active")
+		latestSource := dedupSourceAs("", "latest")
+		upsertSource = fmt.Sprintf(
+			"(SELECT active.*, COALESCE(latest.`_cdc_lsn` = active.`_cdc_lsn` AND latest.`_cdc_deleted` = 1, 0) AS %s FROM %s LEFT JOIN %s ON %s) AS source",
+			equalDeleteMarker,
+			activeSource,
+			latestSource,
+			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
+		)
+		insertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
 	}
+	primaryKeyMatchCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
-		buildJoinCondition(opts.PrimaryKeys, "target", "source"),
+		primaryKeyMatchCondition,
 		opts.IncrementalPredicate,
 	)
+	insertMatchCondition := matchCondition
+	if isCDC {
+		insertMatchCondition = primaryKeyMatchCondition
+	}
 
 	runUpdate := func() error {
 		if len(nonPKColumns) == 0 {
@@ -1075,11 +1176,15 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		if isCDC && hasUnchangedCols {
 			updateSet = buildCDCUpdateSet(nonPKColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
 		}
+		updateMatchCondition := matchCondition
+		if isCDC {
+			updateMatchCondition += fmt.Sprintf(" AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0 AND source.%s = 1))", equalDeleteMarker)
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target INNER JOIN %s ON %s SET %s`,
 			quoteTable(opts.TargetTable),
 			upsertSource,
-			matchCondition,
+			updateMatchCondition,
 			updateSet,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
@@ -1097,9 +1202,9 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			quoteTable(opts.TargetTable),
 			strings.Join(quotedTargetColumns, ", "),
 			strings.Join(quotedTargetColumns, ", "),
-			upsertSource,
+			insertSource,
 			quoteTable(opts.TargetTable),
-			matchCondition,
+			insertMatchCondition,
 		)
 		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
@@ -1113,7 +1218,8 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	// With a predicate, the INSERT runs first so its anti-join sees the
 	// pre-update target: an UPDATE that moves a matched row out of the
 	// predicate window would otherwise make the INSERT re-add it as a
-	// duplicate. The subsequent UPDATE of just-inserted rows is a no-op.
+	// duplicate. CDC anti-joins always use the primary key alone. The subsequent
+	// UPDATE of just-inserted rows is a no-op.
 	steps := []func() error{runUpdate, runInsert}
 	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
 		steps = []func() error{runInsert, runUpdate}
@@ -1128,7 +1234,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			"UPDATE %s AS target INNER JOIN %s ON %s SET target.`_cdc_deleted` = 1, target.`_cdc_lsn` = source.`_cdc_lsn`, target.`_cdc_synced_at` = source.`_cdc_synced_at` WHERE source.`_cdc_deleted` = 1",
+			"UPDATE %s AS target INNER JOIN %s ON %s SET target.`_cdc_deleted` = 1, target.`_cdc_lsn` = source.`_cdc_lsn`, target.`_cdc_synced_at` = source.`_cdc_synced_at` WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0))",
 			quoteTable(opts.TargetTable),
 			dedupSource(""),
 			matchCondition,
@@ -1138,6 +1244,22 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
 			config.LogFailedQuery(markDeletedSQL, err)
 			return fmt.Errorf("failed to mark deleted records: %w", err)
+		}
+
+		insertDeletedSQL := fmt.Sprintf(
+			"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.`_cdc_deleted` = 1 AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)",
+			quoteTable(opts.TargetTable),
+			strings.Join(quotedTargetColumns, ", "),
+			strings.Join(quotedTargetColumns, ", "),
+			dedupSource(""),
+			quoteTable(opts.TargetTable),
+			primaryKeyMatchCondition,
+		)
+		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
+
+		if _, err := tx.ExecContext(ctx, insertDeletedSQL); err != nil {
+			config.LogFailedQuery(insertDeletedSQL, err)
+			return fmt.Errorf("failed to insert CDC delete tombstones: %w", err)
 		}
 	}
 
