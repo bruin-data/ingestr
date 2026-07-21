@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -17,6 +18,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
+
+var benchmarkJSONString string
 
 func TestParseTableSpec(t *testing.T) {
 	tests := []struct {
@@ -112,6 +115,59 @@ func TestParseTableSpec(t *testing.T) {
 			}
 			if !tt.wantQuery && query != nil {
 				t.Errorf("expected nil query, got %v", query)
+			}
+		})
+	}
+}
+
+func TestMongoExtractPartitionFilter(t *testing.T) {
+	start := int64(100)
+	end := int64(200)
+	tests := []struct {
+		name string
+		opts source.ReadOptions
+		want bson.D
+	}{
+		{
+			name: "exclusive numeric range",
+			opts: source.ReadOptions{
+				ExtractPartitionBy:           "id",
+				ExtractPartitionKind:         source.ExtractPartitionKindNumeric,
+				ExtractPartitionNumericStart: &start,
+				ExtractPartitionNumericEnd:   &end,
+			},
+			want: bson.D{{Key: "id", Value: bson.D{{Key: "$gte", Value: start}, {Key: "$lt", Value: end}}}},
+		},
+		{
+			name: "inclusive final range",
+			opts: source.ReadOptions{
+				ExtractPartitionBy:           "id",
+				ExtractPartitionKind:         source.ExtractPartitionKindNumeric,
+				ExtractPartitionNumericStart: &start,
+				ExtractPartitionNumericEnd:   &end,
+				ExtractPartitionEndInclusive: true,
+			},
+			want: bson.D{{Key: "id", Value: bson.D{{Key: "$gte", Value: start}, {Key: "$lte", Value: end}}}},
+		},
+		{
+			name: "null and missing values",
+			opts: source.ReadOptions{ExtractPartitionBy: "id", ExtractPartitionIsNull: true},
+			want: bson.D{{Key: "id", Value: nil}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := bson.Marshal(mongoExtractPartitionFilter(tt.opts))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := bson.Marshal(tt.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("filter = %v, want %v", mongoExtractPartitionFilter(tt.opts), tt.want)
 			}
 		})
 	}
@@ -1027,6 +1083,29 @@ func TestMongoRawBatchBuilder_RawStringAndObjectIDMatchDecodedPath(t *testing.T)
 	}
 }
 
+func TestRawRegexPatternBytes(t *testing.T) {
+	rawDoc := bsoncore.NewDocumentBuilder().
+		AppendRegex("value", `^name[0-9]+$`, "im").
+		Build()
+
+	pattern, ok := rawRegexPatternBytes(bson.Raw(rawDoc).Lookup("value"))
+	if !ok {
+		t.Fatal("rawRegexPatternBytes returned false")
+	}
+	if got, want := string(pattern), `^name[0-9]+$`; got != want {
+		t.Fatalf("pattern = %q, want %q", got, want)
+	}
+
+	for _, malformed := range [][]byte{
+		[]byte("missing terminators"),
+		[]byte("pattern\x00options"),
+	} {
+		if _, ok := rawRegexPatternBytes(bson.RawValue{Type: bson.TypeRegex, Value: malformed}); ok {
+			t.Fatalf("rawRegexPatternBytes(%q) returned true", malformed)
+		}
+	}
+}
+
 func TestMongoRawBatchBuilder_DuplicateKeysMatchDecodedPath(t *testing.T) {
 	duplicateRaw := bsoncore.NewDocumentBuilder().
 		AppendInt32("x", 1).
@@ -1286,6 +1365,184 @@ func TestMongoSchemaBatchBuilder_UsesProvidedSchema(t *testing.T) {
 	}
 }
 
+func BenchmarkMongoRawBatchBuilder(b *testing.B) {
+	benchmarkMongoRawBatchBuilder(b, 25_000)
+}
+
+func BenchmarkMongoRawBatchBuilderNoReserve(b *testing.B) {
+	benchmarkMongoRawBatchBuilder(b, 0)
+}
+
+func benchmarkMongoRawBatchBuilder(b *testing.B, rowCapacity int) {
+	raw := benchmarkMongoRawDocument(b)
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	builder := newMongoRawBatchBuilderWithCapacity(nil, rowCapacity)
+	for i := 0; i < b.N; i++ {
+		if err := builder.AppendRawDocument(raw); err != nil {
+			b.Fatal(err)
+		}
+		if (i+1)%25_000 == 0 {
+			record, err := builder.NewRecordBatch()
+			if err != nil {
+				b.Fatal(err)
+			}
+			record.Release()
+		}
+	}
+
+	b.StopTimer()
+	if builder.rowCount > 0 {
+		record, err := builder.NewRecordBatch()
+		if err != nil {
+			b.Fatal(err)
+		}
+		record.Release()
+	}
+}
+
+func BenchmarkRawBSONValueAsJSONString(b *testing.B) {
+	raw := benchmarkMongoRawDocument(b)
+	value := raw.Lookup("nested_doc")
+	b.SetBytes(int64(len(value.Value)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		encoded, ok := rawBSONValueAsJSONString(value)
+		if !ok {
+			b.Fatal("failed to encode nested BSON")
+		}
+		benchmarkJSONString = encoded
+	}
+}
+
+func BenchmarkMongoSchemaRawBatchBuilder(b *testing.B) {
+	benchmarkMongoSchemaRawBatchBuilder(b, 25_000)
+}
+
+func BenchmarkMongoSchemaRawBatchBuilderNoReserve(b *testing.B) {
+	benchmarkMongoSchemaRawBatchBuilder(b, 0)
+}
+
+func benchmarkMongoSchemaRawBatchBuilder(b *testing.B, rowCapacity int) {
+	raw := benchmarkMongoRawDocument(b)
+	columns := benchmarkMongoSchema()
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	builder := newMongoSchemaBatchBuilderWithCapacity(columns, nil, rowCapacity)
+	for i := 0; i < b.N; i++ {
+		if err := builder.AppendRawDocument(raw); err != nil {
+			b.Fatal(err)
+		}
+		if (i+1)%25_000 == 0 {
+			record, err := builder.NewRecordBatch()
+			if err != nil {
+				b.Fatal(err)
+			}
+			record.Release()
+			builder = newMongoSchemaBatchBuilderWithCapacity(columns, nil, rowCapacity)
+		}
+	}
+
+	b.StopTimer()
+	if builder.rowCount > 0 {
+		record, err := builder.NewRecordBatch()
+		if err != nil {
+			b.Fatal(err)
+		}
+		record.Release()
+	} else {
+		builder.Release()
+	}
+}
+
+func benchmarkMongoRawDocument(tb testing.TB) bson.Raw {
+	tb.Helper()
+
+	doc := bson.D{
+		{Key: "_id", Value: primitive.NewObjectID()},
+		{Key: "id", Value: int32(42)},
+		{Key: "small_str", Value: "name_42"},
+		{Key: "medium_str", Value: "user_42@example-42.com"},
+		{Key: "large_str", Value: strings.Repeat("Q", 142)},
+		{Key: "tiny_int", Value: int32(42)},
+		{Key: "regular_int", Value: int32(42)},
+		{Key: "big_int", Value: int64(42_000_000)},
+		{Key: "float_val", Value: 48.0},
+		{Key: "decimal_val", Value: mustDecimal128(tb, "420.0000")},
+		{Key: "bool_val", Value: true},
+		{Key: "date_val", Value: primitive.NewDateTimeFromTime(time.Unix(1_700_000_000, 0).UTC())},
+		{Key: "ts_val", Value: primitive.NewDateTimeFromTime(time.Unix(1_700_000_042, 0).UTC())},
+		{Key: "ts_tz_val", Value: primitive.NewDateTimeFromTime(time.Unix(1_700_010_042, 0).UTC())},
+		{Key: "extra_text", Value: "extra_text_row_42_" + strings.Repeat("x", 92)},
+		{Key: "object_id_val", Value: primitive.NewObjectID()},
+		{Key: "decimal_value", Value: mustDecimal128(tb, "42.0042")},
+		{Key: "nested_doc", Value: bson.D{
+			{Key: "profile", Value: bson.D{
+				{Key: "score", Value: 42.0 / 13.0},
+				{Key: "active", Value: true},
+				{Key: "updated_at", Value: primitive.NewDateTimeFromTime(time.Unix(1_700_000_000, 0).UTC())},
+			}},
+			{Key: "labels", Value: bson.A{"tag_2", "bucket_42"}},
+		}},
+		{Key: "array_val", Value: bson.A{int32(42), "item_42", bson.D{{Key: "rank", Value: int32(42)}}}},
+		{Key: "binary_val", Value: primitive.Binary{Data: []byte{1, 2, 3, 4, 5, 6, 7, 8}}},
+		{Key: "regex_val", Value: primitive.Regex{Pattern: "^name_42", Options: "i"}},
+		{Key: "timestamp_val", Value: primitive.Timestamp{T: 1_700_000_042, I: 42}},
+		{Key: "null_val", Value: nil},
+		{Key: "optional_val", Value: "present_42"},
+	}
+
+	raw, err := bson.Marshal(doc)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return bson.Raw(raw)
+}
+
+func benchmarkMongoSchema() []schema.Column {
+	return []schema.Column{
+		{Name: "_id", DataType: schema.TypeString},
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "small_str", DataType: schema.TypeString},
+		{Name: "medium_str", DataType: schema.TypeString},
+		{Name: "large_str", DataType: schema.TypeString},
+		{Name: "tiny_int", DataType: schema.TypeInt64},
+		{Name: "regular_int", DataType: schema.TypeInt64},
+		{Name: "big_int", DataType: schema.TypeInt64},
+		{Name: "float_val", DataType: schema.TypeFloat64},
+		{Name: "decimal_val", DataType: schema.TypeString},
+		{Name: "bool_val", DataType: schema.TypeBoolean},
+		{Name: "date_val", DataType: schema.TypeTimestamp},
+		{Name: "ts_val", DataType: schema.TypeTimestamp},
+		{Name: "ts_tz_val", DataType: schema.TypeTimestamp},
+		{Name: "extra_text", DataType: schema.TypeString},
+		{Name: "object_id_val", DataType: schema.TypeString},
+		{Name: "decimal_value", DataType: schema.TypeString},
+		{Name: "nested_doc", DataType: schema.TypeJSON},
+		{Name: "array_val", DataType: schema.TypeJSON},
+		{Name: "binary_val", DataType: schema.TypeBinary},
+		{Name: "regex_val", DataType: schema.TypeString},
+		{Name: "timestamp_val", DataType: schema.TypeTimestamp},
+		{Name: "null_val", DataType: schema.TypeString},
+		{Name: "optional_val", DataType: schema.TypeString},
+	}
+}
+
+func mustDecimal128(tb testing.TB, value string) primitive.Decimal128 {
+	tb.Helper()
+	v, err := primitive.ParseDecimal128(value)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return v
+}
+
 func TestMongoSchemaBatchBuilder_ExcludesSchemaColumns(t *testing.T) {
 	builder := newMongoSchemaBatchBuilder([]schema.Column{
 		{Name: "keep", DataType: schema.TypeString},
@@ -1338,10 +1595,7 @@ func TestMongoBatchBuilder_NumericPromotionWithinBatch(t *testing.T) {
 	}
 }
 
-func TestMongoBatchBuilder_NestedDocAndArrayUseUnknownPath(t *testing.T) {
-	// Nested documents and arrays are not directly representable as a typed
-	// scalar column, so the typed builder must fall through to the unknown
-	// extension type and JSON-encode the value.
+func TestMongoBatchBuilder_NestedDocAndArrayUseJSONType(t *testing.T) {
 	builder := newMongoBatchBuilder(nil)
 	doc := bson.M{
 		"meta":   bson.M{"src": "test", "level": int64(1)},
@@ -1362,8 +1616,8 @@ func TestMongoBatchBuilder_NestedDocAndArrayUseUnknownPath(t *testing.T) {
 		field := record.Schema().Field(i)
 		switch field.Name {
 		case "meta", "tags":
-			if !isUnknownType(field.Type) {
-				t.Errorf("%s: type = %s, want unknown", field.Name, field.Type)
+			if !arrow.TypeEqual(field.Type, schema.JSONArrowType) {
+				t.Errorf("%s: type = %s, want JSON", field.Name, field.Type)
 			}
 		case "scalar":
 			if field.Type.String() != "utf8" {

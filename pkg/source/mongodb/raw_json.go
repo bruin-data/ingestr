@@ -5,16 +5,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
 type rawBSONJSONField struct {
-	key   string
+	key   []byte
 	value bson.RawValue
 }
 
@@ -27,28 +28,44 @@ func rawBSONValueAsJSONString(val bson.RawValue) (string, bool) {
 }
 
 func appendRawBSONDocumentJSON(buf *bytes.Buffer, doc bson.Raw) bool {
-	elements, err := doc.Elements()
-	if err != nil {
+	length, rem, ok := bsoncore.ReadLength(doc)
+	if !ok {
 		return false
 	}
+	length -= 4
 
-	fields := make([]rawBSONJSONField, 0, len(elements))
-	for _, elem := range elements {
-		key := elem.Key()
+	var stackFields [32]rawBSONJSONField
+	fields := stackFields[:0]
+	for length > 1 {
+		elem, next, ok := bsoncore.ReadElement(rem)
+		if !ok {
+			return false
+		}
+		length -= int32(len(elem))
+		rem = next
+
+		key, err := elem.KeyBytesErr()
+		if err != nil {
+			return false
+		}
+		value, err := elem.ValueErr()
+		if err != nil {
+			return false
+		}
 		replaced := false
 		for i := range fields {
-			if fields[i].key == key {
-				fields[i].value = elem.Value()
+			if bytes.Equal(fields[i].key, key) {
+				fields[i].value = rawValueFromCore(value)
 				replaced = true
 				break
 			}
 		}
 		if !replaced {
-			fields = append(fields, rawBSONJSONField{key: key, value: elem.Value()})
+			fields = append(fields, rawBSONJSONField{key: key, value: rawValueFromCore(value)})
 		}
 	}
-	sort.Slice(fields, func(i, j int) bool {
-		return fields[i].key < fields[j].key
+	slices.SortFunc(fields, func(a, b rawBSONJSONField) int {
+		return bytes.Compare(a.key, b.key)
 	})
 
 	buf.WriteByte('{')
@@ -56,7 +73,7 @@ func appendRawBSONDocumentJSON(buf *bytes.Buffer, doc bson.Raw) bool {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		appendJSONString(buf, field.key)
+		appendJSONKey(buf, field.key)
 		buf.WriteByte(':')
 		if !appendRawBSONJSONValue(buf, field.value) {
 			return false
@@ -67,22 +84,47 @@ func appendRawBSONDocumentJSON(buf *bytes.Buffer, doc bson.Raw) bool {
 }
 
 func appendRawBSONArrayJSON(buf *bytes.Buffer, arr bson.Raw) bool {
-	values, err := arr.Values()
-	if err != nil {
+	length, rem, ok := bsoncore.ReadLength(arr)
+	if !ok {
 		return false
 	}
+	length -= 4
 
 	buf.WriteByte('[')
-	for i, value := range values {
-		if i > 0 {
+	first := true
+	for length > 1 {
+		elem, next, ok := bsoncore.ReadElement(rem)
+		if !ok {
+			return false
+		}
+		length -= int32(len(elem))
+		rem = next
+		value, err := elem.ValueErr()
+		if err != nil {
+			return false
+		}
+		if !first {
 			buf.WriteByte(',')
 		}
-		if !appendRawBSONJSONValue(buf, value) {
+		first = false
+		if !appendRawBSONJSONValue(buf, rawValueFromCore(value)) {
 			return false
 		}
 	}
 	buf.WriteByte(']')
 	return true
+}
+
+func appendJSONKey(buf *bytes.Buffer, value []byte) {
+	for _, c := range value {
+		if c < 0x20 || c == '\\' || c == '"' || c >= utf8.RuneSelf {
+			appendJSONString(buf, string(value))
+			return
+		}
+	}
+	buf.WriteByte('"')
+	buf.Write(value)
+	buf.WriteByte('"')
 }
 
 func appendRawBSONJSONValue(buf *bytes.Buffer, val bson.RawValue) bool {
@@ -94,12 +136,12 @@ func appendRawBSONJSONValue(buf *bytes.Buffer, val bson.RawValue) bool {
 		}
 		appendJSONFloat64(buf, v)
 		return true
-	case bson.TypeString:
-		v, ok := val.StringValueOK()
+	case bson.TypeString, bson.TypeJavaScript, bson.TypeSymbol:
+		v, ok := rawStringBytes(val)
 		if !ok {
 			return false
 		}
-		appendJSONString(buf, v)
+		appendJSONStringBytes(buf, v)
 		return true
 	case bson.TypeEmbeddedDocument:
 		doc, ok := val.DocumentOK()
@@ -136,25 +178,11 @@ func appendRawBSONJSONValue(buf *bytes.Buffer, val bson.RawValue) bool {
 		v, ok := val.DateTimeOK()
 		return ok && appendJSONTime(buf, time.UnixMilli(v))
 	case bson.TypeRegex:
-		pattern, _, ok := val.RegexOK()
+		pattern, ok := rawRegexPatternBytes(val)
 		if !ok {
 			return false
 		}
-		appendJSONString(buf, pattern)
-		return true
-	case bson.TypeJavaScript:
-		v, ok := val.JavaScriptOK()
-		if !ok {
-			return false
-		}
-		appendJSONString(buf, v)
-		return true
-	case bson.TypeSymbol:
-		v, ok := val.SymbolOK()
-		if !ok {
-			return false
-		}
-		appendJSONString(buf, v)
+		appendJSONStringBytes(buf, pattern)
 		return true
 	case bson.TypeInt32:
 		v, ok := val.Int32OK()
@@ -244,6 +272,16 @@ func appendJSONString(buf *bytes.Buffer, value string) {
 	buf.WriteByte('"')
 }
 
+func appendJSONStringBytes(buf *bytes.Buffer, value []byte) {
+	if bytesNeedNoEscaping(value) {
+		buf.WriteByte('"')
+		buf.Write(value)
+		buf.WriteByte('"')
+		return
+	}
+	appendJSONString(buf, string(value))
+}
+
 func stringNeedsNoEscaping(value string) bool {
 	for i := 0; i < len(value); i++ {
 		c := value[i]
@@ -257,6 +295,15 @@ func stringNeedsNoEscaping(value string) bool {
 	return true
 }
 
+func bytesNeedNoEscaping(value []byte) bool {
+	for _, c := range value {
+		if c < 0x20 || c == '\\' || c == '"' || c >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
 func appendJSONFloat64(buf *bytes.Buffer, value float64) {
 	format := byte('f')
 	abs := math.Abs(value)
@@ -264,7 +311,8 @@ func appendJSONFloat64(buf *bytes.Buffer, value float64) {
 		format = 'e'
 	}
 
-	out := strconv.AppendFloat(nil, value, format, -1, 64)
+	var scratch [32]byte
+	out := strconv.AppendFloat(scratch[:0], value, format, -1, 64)
 	if format == 'e' {
 		n := len(out)
 		if n >= 4 && out[n-4] == 'e' && out[n-3] == '-' && out[n-2] == '0' {
