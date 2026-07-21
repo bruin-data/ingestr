@@ -171,12 +171,12 @@ ingestr ingest \
 
 ## Field-level security
 
-ingestr ingests only the fields the authenticating user is permitted to read — its query is built from what Salesforce returns for that user, so a field the user cannot read isn't fetched and stays empty (NULL) in the destination.
+ingestr ingests only the fields the authenticating user is permitted to read. Its query is built from what Salesforce returns for that user, so a field the user cannot read is not fetched.
 
-If a field you expect is coming through empty, make sure the user (or its permission set / profile) has **Read** access to it — for example, check its field-level security (FLS). You can see which fields the user can read by describing the object as that user:
+If you want a field to be ingested, make sure the user (or its permission set or profile) has **Read** access to it, for example through its field-level security (FLS) settings. You can see which fields the user can read by describing the object as that user:
 
 ```plaintext
 GET https://<your-domain>.my.salesforce.com/services/data/v59.0/sobjects/<object>/describe
 ```
 
-Only the fields listed in the response are ingested. Grant Read access to the missing fields and re-run.
+Only the fields listed in the response are ingested. Grant Read access to the fields you want and run the ingestion again.
