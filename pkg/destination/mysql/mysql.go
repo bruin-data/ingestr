@@ -1044,23 +1044,34 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = quoteColumns([]string{opts.IncrementalKey})[0] + " DESC"
 	}
-	dedupSource := func(where string) string {
+	dedupSourceAs := func(where, alias string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS %s`,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
 			dedupOrderBy,
 			quoteTable(opts.StagingTable),
 			where,
+			alias,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceAs(where, "source") }
 
 	// For CDC, upsert from the latest non-deleted change per PK so a delete
 	// followed by nothing doesn't clobber row data; deletes are applied below.
 	upsertSource := dedupSource("")
+	insertSource := upsertSource
 	if isCDC {
-		upsertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
+		activeSource := dedupSourceAs(" WHERE `_cdc_deleted` = 0", "active")
+		latestSource := dedupSourceAs("", "latest")
+		upsertSource = fmt.Sprintf(
+			"(SELECT active.*, COALESCE(latest.`_cdc_lsn` = active.`_cdc_lsn` AND latest.`_cdc_deleted` = 1, 0) AS `__ingestr_has_equal_lsn_delete` FROM %s LEFT JOIN %s ON %s) AS source",
+			activeSource,
+			latestSource,
+			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
+		)
+		insertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
 	}
 	primaryKeyMatchCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
@@ -1082,7 +1093,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		}
 		updateMatchCondition := matchCondition
 		if isCDC {
-			updateMatchCondition += " AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn`)"
+			updateMatchCondition += " AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` > target.`_cdc_lsn` OR (source.`_cdc_lsn` = target.`_cdc_lsn` AND COALESCE(target.`_cdc_deleted`, 0) = 0 AND source.`__ingestr_has_equal_lsn_delete` = 1))"
 		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target INNER JOIN %s ON %s SET %s`,
@@ -1106,7 +1117,7 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			quoteTable(opts.TargetTable),
 			strings.Join(quotedTargetColumns, ", "),
 			strings.Join(quotedTargetColumns, ", "),
-			upsertSource,
+			insertSource,
 			quoteTable(opts.TargetTable),
 			insertMatchCondition,
 		)

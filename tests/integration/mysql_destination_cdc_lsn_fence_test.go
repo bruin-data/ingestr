@@ -22,6 +22,8 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	ctx := t.Context()
 	targetTable := "cdc_lsn_target_" + uniqueSuffix()
 	stagingTable := "cdc_lsn_staging_" + uniqueSuffix()
+	auditTable := "cdc_lsn_audit_" + uniqueSuffix()
+	auditTrigger := "cdc_lsn_trigger_" + uniqueSuffix()
 	dest := mysqldest.NewMySQLDestination()
 	require.NoError(t, dest.Connect(ctx, mysqlDest.uri))
 	t.Cleanup(func() { _ = dest.Close(context.Background()) })
@@ -29,6 +31,8 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS `%s`", auditTrigger))
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", auditTable))
 		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", stagingTable))
 		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", targetTable))
 	})
@@ -56,7 +60,8 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-active', '00000000/00000010', 0, '2026-01-01'),
 			(7, 'same-deleted', '00000000/00000010', 1, '2026-01-01'),
 			(8, 'tie-delete', '00000000/00000010', 0, '2026-01-01'),
-			(9, 'toast-newer', '00000000/00000030', 0, '2026-01-03')`, targetTable),
+			(9, 'toast-newer', '00000000/00000030', 0, '2026-01-03'),
+			(10, 'older-row-image', '00000000/00000010', 0, '2026-01-01')`, targetTable),
 		fmt.Sprintf(`INSERT INTO %s VALUES
 			(1, 'stale-active', '00000000/00000020', 0, '2026-01-02', JSON_ARRAY()),
 			(1, NULL, '00000000/00000025', 1, '2026-01-02', JSON_ARRAY()),
@@ -68,7 +73,9 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-replay', '00000000/00000010', 0, '2026-01-02', JSON_ARRAY()),
 			(7, 'same-resurrection', '00000000/00000010', 0, '2026-01-02', JSON_ARRAY()),
 			(8, NULL, '00000000/00000010', 1, '2026-01-02', JSON_ARRAY()),
-			(9, NULL, '00000000/00000020', 0, '2026-01-02', JSON_ARRAY('payload'))`, stagingTable),
+			(9, NULL, '00000000/00000020', 0, '2026-01-02', JSON_ARRAY('payload')),
+			(10, 'latest-row-image', '00000000/00000010', 0, '2026-01-02', JSON_ARRAY()),
+			(10, NULL, '00000000/00000010', 1, '2026-01-02', JSON_ARRAY())`, stagingTable),
 	}
 	for _, statement := range setup {
 		require.NoError(t, dest.Exec(ctx, statement))
@@ -88,15 +95,16 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		deleted bool
 		synced  string
 	}{
-		1: {"newer-active", "00000000/00000030", false, "2026-01-03"},
-		2: {"newer-deleted", "00000000/00000030", true, "2026-01-03"},
-		3: {"first-cdc-update", "00000000/00000010", false, "2026-01-02"},
-		4: {"first-insert", "00000000/00000010", false, "2026-01-02"},
-		5: {"insert-then-delete", "00000000/00000010", true, "2026-01-02"},
-		6: {"same-active", "00000000/00000010", false, "2026-01-01"},
-		7: {"same-deleted", "00000000/00000010", true, "2026-01-01"},
-		8: {"tie-delete", "00000000/00000010", true, "2026-01-02"},
-		9: {"toast-newer", "00000000/00000030", false, "2026-01-03"},
+		1:  {"newer-active", "00000000/00000030", false, "2026-01-03"},
+		2:  {"newer-deleted", "00000000/00000030", true, "2026-01-03"},
+		3:  {"first-cdc-update", "00000000/00000010", false, "2026-01-02"},
+		4:  {"first-insert", "00000000/00000010", false, "2026-01-02"},
+		5:  {"insert-then-delete", "00000000/00000010", true, "2026-01-02"},
+		6:  {"same-active", "00000000/00000010", false, "2026-01-01"},
+		7:  {"same-deleted", "00000000/00000010", true, "2026-01-01"},
+		8:  {"tie-delete", "00000000/00000010", true, "2026-01-02"},
+		9:  {"toast-newer", "00000000/00000030", false, "2026-01-03"},
+		10: {"latest-row-image", "00000000/00000010", true, "2026-01-02"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
@@ -110,6 +118,14 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		require.Equal(t, want.deleted, deleted, "id %d deleted", id)
 		require.Equal(t, want.synced, synced, "id %d synced timestamp", id)
 	}
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (target_id BIGINT)`, auditTable)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TRIGGER %s AFTER UPDATE ON %s FOR EACH ROW INSERT INTO %s VALUES (NEW.id)`, auditTrigger, targetTable, auditTable)))
+	require.NoError(t, dest.MergeTable(ctx, opts))
+	var replayUpdates int
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, auditTable)).Scan(&replayUpdates))
+	require.Zero(t, replayUpdates)
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`DROP TRIGGER %s`, auditTrigger)))
 
 	require.NoError(t, dest.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", stagingTable)))
 	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (1, 'newest', '00000000/00000040', 0, '2026-01-04', JSON_ARRAY())`, stagingTable)))
