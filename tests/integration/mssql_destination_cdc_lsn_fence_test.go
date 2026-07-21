@@ -56,7 +56,8 @@ func TestMSSQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(7, N'same-deleted', N'00000000000000000010', 1, '2026-01-01'),
 			(8, N'tie-delete', N'00000000000000000010', 0, '2026-01-01'),
 			(9, N'toast-newer', N'00000000000000000030', 0, '2026-01-03'),
-			(11, N'known-lsn', N'00000000000000000030', 0, '2026-01-03')`, quoteTableMSSQL(targetTable)),
+			(11, N'known-lsn', N'00000000000000000030', 0, '2026-01-03'),
+			(12, N'target-v20', N'00000000000000000020', 0, '2026-01-02')`, quoteTableMSSQL(targetTable)),
 		fmt.Sprintf(`INSERT INTO %s VALUES
 			(1, N'stale-active', N'00000000000000000020', 0, '2026-01-02', N'[]'),
 			(1, NULL, N'00000000000000000025', 1, '2026-01-02', N'[]'),
@@ -70,7 +71,9 @@ func TestMSSQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(9, NULL, N'00000000000000000020', 0, '2026-01-02', N'["payload"]'),
 			(10, N'insert-then-delete', N'00000000000000000010', 0, '2026-01-02', N'[]'),
 			(10, NULL, N'00000000000000000010', 1, '2026-01-02', N'[]'),
-			(11, N'null-lsn-regression', NULL, 0, '2026-01-04', N'[]')`, quoteTableMSSQL(stagingTable)),
+			(11, N'null-lsn-regression', NULL, 0, '2026-01-04', N'[]'),
+			(12, N'older-active-v10', N'00000000000000000010', 0, '2026-01-01', N'[]'),
+			(12, NULL, N'00000000000000000030', 1, '2026-01-03', N'[]')`, quoteTableMSSQL(stagingTable)),
 	}
 	for _, statement := range setup {
 		require.NoError(t, dest.Exec(ctx, statement))
@@ -101,6 +104,7 @@ func TestMSSQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03"},
 		10: {"insert-then-delete", "00000000000000000010", true, "2026-01-02"},
 		11: {"known-lsn", "00000000000000000030", false, "2026-01-03"},
+		12: {"target-v20", "00000000000000000030", true, "2026-01-03"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
@@ -176,7 +180,9 @@ func TestMSSQLDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) {
 		[__BRUIN_DEDUP_RN] NVARCHAR(255),
 		[__bruin_dedup_rn_2] NVARCHAR(255),
 		[__INGESTR_HAS_ACTIVE] NVARCHAR(255),
-		[__ingestr_has_active_2] NVARCHAR(255)`
+		[__ingestr_has_active_2] NVARCHAR(255),
+		[__INGESTR_ACTIVE_LSN] NVARCHAR(255),
+		[__ingestr_active_lsn_2] NVARCHAR(255)`
 	for _, statement := range []string{
 		fmt.Sprintf(`CREATE TABLE %s (
 			[id] BIGINT PRIMARY KEY,
@@ -196,10 +202,10 @@ func TestMSSQLDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) {
 			[_cdc_unchanged_cols] NVARCHAR(MAX)
 		)`, quoteTableMSSQL(stagingTable), userColumnDefinitions),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, N'old', N'old-rn', N'old-rn-2', N'old-active', N'old-active-2', N'00000000000000000020', 0, '2026-01-01')`, quoteTableMSSQL(targetTable)),
+			(1, N'old', N'old-rn', N'old-rn-2', N'old-active', N'old-active-2', N'old-lsn', N'old-lsn-2', N'00000000000000000020', 0, '2026-01-01')`, quoteTableMSSQL(targetTable)),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, N'active', N'user-rn', N'user-rn-2', N'user-active', N'user-active-2', N'00000000000000000020', 0, '2026-01-02', N'[]'),
-			(1, NULL, NULL, NULL, NULL, NULL, N'00000000000000000020', 1, '2026-01-03', N'[]')`, quoteTableMSSQL(stagingTable)),
+			(1, N'active', N'user-rn', N'user-rn-2', N'user-active', N'user-active-2', N'user-lsn', N'user-lsn-2', N'00000000000000000020', 0, '2026-01-02', N'[]'),
+			(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, N'00000000000000000020', 1, '2026-01-03', N'[]')`, quoteTableMSSQL(stagingTable)),
 	} {
 		require.NoError(t, dest.Exec(ctx, statement))
 	}
@@ -212,19 +218,21 @@ func TestMSSQLDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) {
 			"id", "payload",
 			"__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2",
 			"__INGESTR_HAS_ACTIVE", "__ingestr_has_active_2",
+			"__INGESTR_ACTIVE_LSN", "__ingestr_active_lsn_2",
 			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn,
 		},
 	}))
 
-	var payload, rn, rn2, active, active2, lsn, synced string
+	var payload, rn, rn2, active, active2, activeLSN, activeLSN2, lsn, synced string
 	var deleted bool
 	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT [payload], [__BRUIN_DEDUP_RN], [__bruin_dedup_rn_2],
 			[__INGESTR_HAS_ACTIVE], [__ingestr_has_active_2],
+			[__INGESTR_ACTIVE_LSN], [__ingestr_active_lsn_2],
 			[_cdc_lsn], [_cdc_deleted], CONVERT(varchar(10), [_cdc_synced_at], 23)
 		FROM %s WHERE [id] = 1
-	`, quoteTableMSSQL(targetTable))).Scan(&payload, &rn, &rn2, &active, &active2, &lsn, &deleted, &synced))
-	require.Equal(t, []string{"active", "user-rn", "user-rn-2", "user-active", "user-active-2"}, []string{payload, rn, rn2, active, active2})
+	`, quoteTableMSSQL(targetTable))).Scan(&payload, &rn, &rn2, &active, &active2, &activeLSN, &activeLSN2, &lsn, &deleted, &synced))
+	require.Equal(t, []string{"active", "user-rn", "user-rn-2", "user-active", "user-active-2", "user-lsn", "user-lsn-2"}, []string{payload, rn, rn2, active, active2, activeLSN, activeLSN2})
 	require.Equal(t, "00000000000000000020", lsn)
 	require.True(t, deleted)
 	require.Equal(t, "2026-01-03", synced)

@@ -478,6 +478,8 @@ func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testi
 
 	assertContains(t, got, "OPENJSON(COALESCE(source.[_cdc_unchanged_cols], N'[]'))")
 	assertContains(t, got, "[value] COLLATE Latin1_General_100_BIN2 = N'payload' COLLATE Latin1_General_100_BIN2")
+	assertContains(t, got, "act.[_cdc_lsn] AS [__ingestr_active_lsn]")
+	assertContains(t, got, "source.[__ingestr_active_lsn] >= target.[_cdc_lsn]")
 	assertContains(t, got, "THEN source.[payload] ELSE target.[payload] END")
 	assertContains(t, got, "WHEN MATCHED AND (target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn] OR (source.[_cdc_lsn] = target.[_cdc_lsn] AND source.[_cdc_deleted] = 1 AND COALESCE(target.[_cdc_deleted], 0) = 0)) THEN UPDATE")
 	assertContains(t, got, "WHEN NOT MATCHED THEN INSERT")
@@ -508,6 +510,7 @@ func TestBuildMergeSQLAvoidsInternalAliasCollisions(t *testing.T) {
 			"id", "payload",
 			"__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2",
 			"__INGESTR_HAS_ACTIVE", "__ingestr_has_active_2",
+			"__INGESTR_ACTIVE_LSN", "__ingestr_active_lsn_2",
 			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn,
 		}
 		got := buildMergeSQL("dbo.items", "stage.items", []string{"id"}, columns, "")
@@ -516,8 +519,12 @@ func TestBuildMergeSQLAvoidsInternalAliasCollisions(t *testing.T) {
 		assertContains(t, got, "WHERE [__bruin_dedup_rn_3] = 1")
 		assertContains(t, got, "AS [__ingestr_has_active_3]")
 		assertContains(t, got, "source.[__ingestr_has_active_3] = 1")
+		assertContains(t, got, "act.[_cdc_lsn] AS [__ingestr_active_lsn_3]")
+		assertContains(t, got, "source.[__ingestr_active_lsn_3] >= target.[_cdc_lsn]")
 		assertContains(t, got, "target.[__INGESTR_HAS_ACTIVE] = CASE WHEN")
 		assertContains(t, got, "target.[__ingestr_has_active_2] = CASE WHEN")
+		assertContains(t, got, "target.[__INGESTR_ACTIVE_LSN] = CASE WHEN")
+		assertContains(t, got, "target.[__ingestr_active_lsn_2] = CASE WHEN")
 	})
 }
 
@@ -570,7 +577,7 @@ func TestBuildCDCMergeSQLKeepsCaseDistinctPayloadSeparateFromPrimaryKey(t *testi
 
 	assertContains(t, got, "ON target.[Foo] = source.[Foo]")
 	assertContains(t, got, "SELECT la.[Foo], act.[foo]")
-	assertContains(t, got, "target.[foo] = CASE WHEN (source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1) AND NOT EXISTS")
+	assertContains(t, got, "target.[foo] = CASE WHEN (source.[_cdc_deleted] = 0 OR (source.[__ingestr_has_active] = 1 AND (target.[_cdc_lsn] IS NULL OR source.[__ingestr_active_lsn] >= target.[_cdc_lsn]))) AND NOT EXISTS")
 	assertContains(t, got, "THEN source.[foo] ELSE target.[foo] END")
 	if strings.Contains(got, "target.[Foo] = CASE") {
 		t.Fatalf("case-distinct primary key leaked into update set:\n%s", got)
@@ -587,7 +594,7 @@ func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerSkipsMarkerPredicate(t *testi
 	if strings.Contains(got, "OPENJSON") {
 		t.Fatalf("merge SQL uses OPENJSON marker predicate without the marker column:\n%s", got)
 	}
-	assertContains(t, got, "target.[payload] = CASE WHEN (source.[_cdc_deleted] = 0 OR source.[__ingestr_has_active] = 1) THEN source.[payload] ELSE target.[payload] END")
+	assertContains(t, got, "target.[payload] = CASE WHEN (source.[_cdc_deleted] = 0 OR (source.[__ingestr_has_active] = 1 AND (target.[_cdc_lsn] IS NULL OR source.[__ingestr_active_lsn] >= target.[_cdc_lsn]))) THEN source.[payload] ELSE target.[payload] END")
 }
 
 func TestFilterColumnsRetainsOrdinaryCaseInsensitiveMSSQLMatching(t *testing.T) {

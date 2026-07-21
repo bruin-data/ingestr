@@ -883,7 +883,7 @@ func buildMSSQLDedupSelect(stagingTable string, primaryKeys, columns []string, i
 }
 
 func newMSSQLInternalNameAllocator(columns []string) func(string) string {
-	used := make(map[string]struct{}, len(columns)+2)
+	used := make(map[string]struct{}, len(columns)+3)
 	for _, col := range columns {
 		used[strings.ToLower(col)] = struct{}{}
 	}
@@ -940,7 +940,8 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 
 	if isCDC {
 		hasActiveColumn := quoteColumn(uniqueInternalName("__ingestr_has_active"))
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn)
+		activeLSNColumn := quoteColumn(uniqueInternalName("__ingestr_active_lsn"))
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn)
 	}
 
 	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
@@ -995,7 +996,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn string) string {
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn string) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -1003,7 +1004,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		laActJoin[i] = fmt.Sprintf("la.%s = act.%s", quoteColumn(pk), quoteColumn(pk))
 	}
 
-	selectCols := make([]string, 0, len(columns)+1)
+	selectCols := make([]string, 0, len(columns)+2)
 	for _, col := range columns {
 		alias := "act"
 		if pkMap[col] || destination.IsCDCColumn(col) {
@@ -1012,6 +1013,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteColumn(col)))
 	}
 	selectCols = append(selectCols, fmt.Sprintf("CASE WHEN act.[_cdc_lsn] IS NOT NULL THEN 1 ELSE 0 END AS %s", hasActiveColumn))
+	selectCols = append(selectCols, fmt.Sprintf("act.[_cdc_lsn] AS %s", activeLSNColumn))
 
 	dedup := func(where, orderBy string) string {
 		return fmt.Sprintf(
@@ -1027,7 +1029,11 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		strings.Join(laActJoin, " AND "),
 	)
 
-	hasRowData := fmt.Sprintf("(source.[_cdc_deleted] = 0 OR source.%s = 1)", hasActiveColumn)
+	hasFreshRowData := fmt.Sprintf(
+		"(source.[_cdc_deleted] = 0 OR (source.%s = 1 AND (target.[_cdc_lsn] IS NULL OR source.%s >= target.[_cdc_lsn])))",
+		hasActiveColumn,
+		activeLSNColumn,
+	)
 	newerChange := "(target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn] OR (source.[_cdc_lsn] = target.[_cdc_lsn] AND source.[_cdc_deleted] = 1 AND COALESCE(target.[_cdc_deleted], 0) = 0))"
 	matchedConditions := []string{newerChange}
 	if strings.TrimSpace(incrementalPredicate) != "" {
@@ -1041,14 +1047,14 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
 			continue
 		}
-		condition := hasRowData
+		condition := hasFreshRowData
 		if hasUnchangedCols {
 			unchanged := fmt.Sprintf(
 				"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
 				quoteColumn(destination.CDCUnchangedColsColumn),
 				strings.ReplaceAll(col, "'", "''"),
 			)
-			condition = fmt.Sprintf("%s AND NOT %s", hasRowData, unchanged)
+			condition = fmt.Sprintf("%s AND NOT %s", hasFreshRowData, unchanged)
 		}
 		updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, condition, quoted, quoted)
 	}
