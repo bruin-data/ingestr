@@ -622,6 +622,91 @@ func TestPrepareTable_CreateTable(t *testing.T) {
 	assert.Equal(t, 1, count, "table should exist")
 }
 
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "part", DataType: schema.TypeString},
+		{Name: "payload", DataType: schema.TypeString},
+	}}
+	prepare := func(table string, keys []string, requireMatch bool) error {
+		return dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:                  table,
+			Schema:                 tableSchema,
+			PrimaryKeys:            keys,
+			CDCMode:                true,
+			CDCKeys:                keys,
+			RequirePrimaryKeyMatch: requireMatch,
+		})
+	}
+
+	require.NoError(t, prepare("fresh", []string{"id", "part"}, true))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE matching ("ID" BIGINT, "Part" VARCHAR, payload VARCHAR, PRIMARY KEY ("Part", "ID"))`))
+	require.NoError(t, prepare("matching", []string{"id", "PART"}, true))
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE missing (id BIGINT, part VARCHAR, payload VARCHAR)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO missing VALUES (1, 'a', 'keep')`))
+	err := prepare("missing", []string{"id"}, true)
+	require.ErrorContains(t, err, "must have primary key [id]; found []")
+	db := openDuckDB(t, ctx, path)
+	var payload string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT payload FROM missing WHERE id = 1`).Scan(&payload))
+	require.Equal(t, "keep", payload)
+	require.Nil(t, dest.lookupSchema("missing"))
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE mismatched (id BIGINT, part VARCHAR, payload VARCHAR PRIMARY KEY)`))
+	err = prepare("mismatched", []string{"id"}, true)
+	require.ErrorContains(t, err, "found [payload]")
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE extra_key (id BIGINT, part VARCHAR, payload VARCHAR, PRIMARY KEY (id, part))`))
+	err = prepare("extra_key", []string{"id"}, true)
+	require.ErrorContains(t, err, "found [id part]")
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE unicode_key ("å" BIGINT PRIMARY KEY, payload VARCHAR)`))
+	err = dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "unicode_key",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "Å", DataType: schema.TypeInt64},
+			{Name: "payload", DataType: schema.TypeString},
+		}},
+		PrimaryKeys:            []string{"Å"},
+		CDCMode:                true,
+		CDCKeys:                []string{"Å"},
+		RequirePrimaryKeyMatch: true,
+	})
+	require.ErrorContains(t, err, "found [å]")
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE non_cdc (id BIGINT, part VARCHAR, payload VARCHAR PRIMARY KEY)`))
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       "non_cdc",
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	}))
+}
+
+func TestDuckDBPrimaryKeySetsEqualUsesASCIIIdentifierSemantics(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected []string
+		actual   []string
+		want     bool
+	}{
+		{name: "exact", expected: []string{"id"}, actual: []string{"id"}, want: true},
+		{name: "composite order", expected: []string{"id", "part"}, actual: []string{"part", "id"}, want: true},
+		{name: "ASCII case", expected: []string{"ID", "Part"}, actual: []string{"id", "pART"}, want: true},
+		{name: "non ASCII case", expected: []string{"Å"}, actual: []string{"å"}, want: false},
+		{name: "missing", expected: []string{"id", "part"}, actual: []string{"id"}, want: false},
+		{name: "extra", expected: []string{"id"}, actual: []string{"id", "part"}, want: false},
+		{name: "different", expected: []string{"id"}, actual: []string{"part"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, duckDBPrimaryKeySetsEqual(tt.expected, tt.actual))
+		})
+	}
+}
+
 func TestPrepareTable_DropFirst(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

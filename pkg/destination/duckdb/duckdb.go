@@ -202,10 +202,41 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 	if preparedSchema == nil {
 		return fmt.Errorf("prepared table %s was not found", opts.Table)
 	}
+	if opts.RequirePrimaryKeyMatch && !duckDBPrimaryKeySetsEqual(opts.PrimaryKeys, preparedSchema.PrimaryKeys) {
+		return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, preparedSchema.PrimaryKeys)
+	}
 	d.recordSchema(opts.Table, opts.Schema, preparedSchema.PrimaryKeys)
 	config.Debug("[DUCKDB] CREATE TABLE took %v", time.Since(startCreate))
 
 	return nil
+}
+
+func duckDBPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[duckDBIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := duckDBIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func duckDBIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *DuckDBDestination) ensureSchemaExists(ctx context.Context, tn tablename.TableName) error {
