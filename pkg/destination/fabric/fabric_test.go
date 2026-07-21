@@ -1,11 +1,15 @@
 package fabric
 
 import (
+	"context"
+	"errors"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -424,5 +428,59 @@ func TestSchemaEvolutionNoPhantomTimestampTZChange(t *testing.T) {
 	}
 	if !without.HasChanges {
 		t.Fatal("expected a phantom change without the normalizer")
+	}
+}
+
+func TestSchemaEvolutionAttemptsTypeChange(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create mock database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &FabricDestination{db: db}
+	oldColumn := schema.Column{Name: "clause_names", DataType: schema.TypeString, MaxLength: -1, Nullable: true}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "clause_names",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "clause_names", DataType: schema.TypeArray, ArrayType: schema.TypeString, Nullable: true},
+	}}}
+	query := "ALTER TABLE dbo.events ALTER COLUMN [clause_names] VARCHAR(MAX) NULL"
+	mock.ExpectExec(regexp.QuoteMeta(query)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
+	if err != nil {
+		t.Fatalf("apply schema evolution: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchemaEvolutionTypeChangeFailureIncludesQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create mock database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &FabricDestination{db: db}
+	oldColumn := schema.Column{Name: "value", DataType: schema.TypeInt32, Nullable: true}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "value",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}}
+	query := "ALTER TABLE dbo.events ALTER COLUMN [value] BIGINT NULL"
+	mock.ExpectExec(regexp.QuoteMeta(query)).WillReturnError(errors.New("Fabric rejected conversion"))
+
+	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
+	if err == nil || !strings.Contains(err.Error(), query) || !strings.Contains(err.Error(), "Fabric rejected conversion") {
+		t.Fatalf("expected query and Fabric error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

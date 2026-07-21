@@ -35,9 +35,6 @@ func (d *fakeDialect) AddColumnSQL(table string, col schema.Column) string {
 }
 
 func (d *fakeDialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {
-	if !d.supportsAlter {
-		return ""
-	}
 	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", table, d.QuoteIdentifier(colName), d.TypeName(newType))
 }
 
@@ -145,13 +142,17 @@ func TestApplyEvolutionExecutesSupportedNullabilityRelaxation(t *testing.T) {
 }
 
 func TestApplyEvolutionRejectsUnsupportedTypeChangeBeforeExecutingDDL(t *testing.T) {
+	oldColumn := schema.Column{Name: "value", DataType: schema.TypeInt32}
 	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{
 		{Type: schemaevolution.ChangeAddColumn, ColumnName: "new_col", NewColumn: schema.Column{Name: "new_col", DataType: schema.TypeString}},
-		{Type: schemaevolution.ChangeWidenType, ColumnName: "value", NewColumn: schema.Column{Name: "value", DataType: schema.TypeInt64}},
+		{Type: schemaevolution.ChangeWidenType, ColumnName: "value", OldColumn: &oldColumn, NewColumn: schema.Column{Name: "value", DataType: schema.TypeInt64}},
 	}}
 	dest := &fakeExecDestination{}
 	_, err := destination.ApplyEvolution(context.Background(), dest, &fakeDialect{supportsAlter: false}, "events", comparison)
 	require.ErrorContains(t, err, "requires a type change")
+	require.ErrorContains(t, err, `column "value" on table "events"`)
+	require.ErrorContains(t, err, "from int32 (fake type T_int32) to int64 (fake type T_int64)")
+	require.ErrorContains(t, err, `query was not executed: ALTER TABLE events ALTER COLUMN "value" TYPE T_int64`)
 	require.Empty(t, dest.statements, "validation must reject the complete migration before ADD COLUMN executes")
 }
 
@@ -166,6 +167,7 @@ func TestApplyEvolutionRejectsEmptyTypeAlterationBeforeExecutingDDL(t *testing.T
 	dest := &fakeExecDestination{}
 	_, err := destination.ApplyEvolution(context.Background(), dest, &emptyAlterDialect{fakeDialect{supportsAlter: true}}, "events", comparison)
 	require.ErrorContains(t, err, "requires a type change")
+	require.ErrorContains(t, err, "no ALTER COLUMN query was generated or executed")
 	require.Empty(t, dest.statements)
 }
 
