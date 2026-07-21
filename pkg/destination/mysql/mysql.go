@@ -1160,6 +1160,22 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 			config.LogFailedQuery(markDeletedSQL, err)
 			return fmt.Errorf("failed to mark deleted records: %w", err)
 		}
+
+		insertDeletedSQL := fmt.Sprintf(
+			"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.`_cdc_deleted` = 1 AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)",
+			quoteTable(opts.TargetTable),
+			strings.Join(quotedTargetColumns, ", "),
+			strings.Join(quotedTargetColumns, ", "),
+			dedupSource(""),
+			quoteTable(opts.TargetTable),
+			primaryKeyMatchCondition,
+		)
+		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
+
+		if _, err := tx.ExecContext(ctx, insertDeletedSQL); err != nil {
+			config.LogFailedQuery(insertDeletedSQL, err)
+			return fmt.Errorf("failed to insert CDC delete tombstones: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

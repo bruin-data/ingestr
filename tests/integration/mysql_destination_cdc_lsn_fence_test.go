@@ -75,7 +75,8 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(8, NULL, '00000000/00000010', 1, '2026-01-02', JSON_ARRAY()),
 			(9, NULL, '00000000/00000020', 0, '2026-01-02', JSON_ARRAY('payload')),
 			(10, 'latest-row-image', '00000000/00000010', 0, '2026-01-02', JSON_ARRAY()),
-			(10, NULL, '00000000/00000010', 1, '2026-01-02', JSON_ARRAY())`, stagingTable),
+			(10, NULL, '00000000/00000010', 1, '2026-01-02', JSON_ARRAY()),
+			(11, NULL, '00000000/00000010', 1, '2026-01-02', JSON_ARRAY())`, stagingTable),
 	}
 	for _, statement := range setup {
 		require.NoError(t, dest.Exec(ctx, statement))
@@ -105,12 +106,13 @@ func TestMySQLDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		8:  {"tie-delete", "00000000/00000010", true, "2026-01-02"},
 		9:  {"toast-newer", "00000000/00000030", false, "2026-01-03"},
 		10: {"latest-row-image", "00000000/00000010", true, "2026-01-02"},
+		11: {"<null>", "00000000/00000010", true, "2026-01-02"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
 		var deleted bool
 		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT payload, COALESCE(_cdc_lsn, ''), _cdc_deleted, DATE_FORMAT(_cdc_synced_at, '%%Y-%%m-%%d')
+			SELECT COALESCE(payload, '<null>'), COALESCE(_cdc_lsn, ''), _cdc_deleted, DATE_FORMAT(_cdc_synced_at, '%%Y-%%m-%%d')
 			FROM %s WHERE id = ?
 		`, targetTable), id).Scan(&payload, &lsn, &deleted, &synced))
 		require.Equal(t, want.payload, payload, "id %d payload", id)
