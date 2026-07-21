@@ -499,7 +499,8 @@ func TestStreaming_NewTableCompletedStateValidatesExistingMergeTargetPrimaryKey(
 	require.NoError(t, manager.BeginRun(t.Context(), false))
 	dest.primaryKeyValidationErr = errors.New("CDC merge target must have primary key [id]; found [other_id]")
 	info := newTableInfo(late)
-	info.Schema.Columns = append(info.Schema.Columns,
+	info.Schema.Columns = append(
+		info.Schema.Columns,
 		schema.Column{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
 		schema.Column{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
 		schema.Column{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},

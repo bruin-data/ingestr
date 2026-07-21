@@ -234,7 +234,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		}
 		pendingSafeBoundary := e.opts.StateManager != nil && e.opts.StateManager.HasPendingLateSnapshotBoundary(ti.Name)
 		if pendingSafeBoundary {
-			if e.opts.Strategy == config.StrategyMerge && !(st.isCDC && len(st.primaryKeys) == 0) {
+			if e.opts.Strategy == config.StrategyMerge && (!st.isCDC || len(st.primaryKeys) != 0) {
 				if err := prepareMergeTarget(ctx, job.Destination, mergeTableParams{
 					DestTable:   st.destTable,
 					Schema:      st.schema,
