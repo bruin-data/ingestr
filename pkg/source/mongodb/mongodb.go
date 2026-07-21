@@ -692,6 +692,7 @@ func (s *MongoDBSource) readAggregate(ctx context.Context, collection *mongo.Col
 func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult, startTotal time.Time) {
 	batchNum := 0
 	totalRows := int64(0)
+	mem := newRecyclingAllocator(memory.NewGoAllocator(), mongoArrowBufferCacheSize)
 
 	for {
 		select {
@@ -702,9 +703,9 @@ func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor,
 		}
 
 		startBatch := time.Now()
-		var builder mongoRecordBatchBuilder = newMongoRawBatchBuilderWithCapacity(opts.ExcludeColumns, batchSize)
+		var builder mongoRecordBatchBuilder = newMongoRawBatchBuilderWithAllocator(mem, opts.ExcludeColumns, batchSize)
 		if opts.Schema != nil {
-			builder = newMongoSchemaBatchBuilderWithCapacity(opts.Schema.Columns, opts.ExcludeColumns, batchSize)
+			builder = newMongoSchemaBatchBuilderWithAllocator(mem, opts.Schema.Columns, opts.ExcludeColumns, batchSize)
 		}
 		batchRows := 0
 
@@ -1035,13 +1036,17 @@ func newMongoRawBatchBuilder(excludeColumns []string) *mongoRawBatchBuilder {
 }
 
 func newMongoRawBatchBuilderWithCapacity(excludeColumns []string, rowCapacity int) *mongoRawBatchBuilder {
+	return newMongoRawBatchBuilderWithAllocator(memory.NewGoAllocator(), excludeColumns, rowCapacity)
+}
+
+func newMongoRawBatchBuilderWithAllocator(mem memory.Allocator, excludeColumns []string, rowCapacity int) *mongoRawBatchBuilder {
 	excludeMap := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
 		excludeMap[strings.ToLower(col)] = true
 	}
 
 	return &mongoRawBatchBuilder{
-		mem:         memory.NewGoAllocator(),
+		mem:         mem,
 		excludeMap:  excludeMap,
 		hasExcludes: len(excludeMap) > 0,
 		fieldOrder:  make([]string, 0),
@@ -1068,6 +1073,7 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 	var stackFields [64]rawDocumentField
 	fields := stackFields[:0]
 	generation := b.nextGeneration()
+	nextFieldIndex := 0
 
 	for length > 1 {
 		elem, next, ok := bsoncore.ReadElement(rem)
@@ -1090,8 +1096,12 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 		}
 
 		key := transientString(keyBytes)
-		index, ok := b.columnIndex[key]
-		if !ok {
+		index := nextFieldIndex
+		exists := index < len(b.fieldOrder) && b.fieldOrder[index] == key
+		if !exists {
+			index, exists = b.columnIndex[key]
+		}
+		if !exists {
 			key = string(keyBytes)
 			index = len(b.columns)
 			b.columnIndex[key] = index
@@ -1100,6 +1110,7 @@ func (b *mongoRawBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 			b.seenAt = append(b.seenAt, 0)
 			b.fieldAt = append(b.fieldAt, 0)
 		}
+		nextFieldIndex = index + 1
 
 		value := rawValueFromCore(val)
 		if b.seenAt[index] == generation {
@@ -1216,6 +1227,10 @@ func newMongoSchemaBatchBuilder(columns []schema.Column, excludeColumns []string
 }
 
 func newMongoSchemaBatchBuilderWithCapacity(columns []schema.Column, excludeColumns []string, rowCapacity int) *mongoSchemaBatchBuilder {
+	return newMongoSchemaBatchBuilderWithAllocator(memory.NewGoAllocator(), columns, excludeColumns, rowCapacity)
+}
+
+func newMongoSchemaBatchBuilderWithAllocator(mem memory.Allocator, columns []schema.Column, excludeColumns []string, rowCapacity int) *mongoSchemaBatchBuilder {
 	excludeMap := make(map[string]bool, len(excludeColumns))
 	for _, col := range excludeColumns {
 		excludeMap[strings.ToLower(col)] = true
@@ -1229,7 +1244,6 @@ func newMongoSchemaBatchBuilderWithCapacity(columns []schema.Column, excludeColu
 		filtered = append(filtered, col)
 	}
 
-	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(filtered))
 	columnIndex := make(map[string]int, len(filtered))
 	for i, col := range filtered {
@@ -1280,6 +1294,7 @@ func (b *mongoSchemaBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 	var stackFields [64]rawDocumentField
 	fields := stackFields[:0]
 	generation := b.nextGeneration()
+	nextFieldIndex := 0
 	for length > 1 {
 		elem, next, ok := bsoncore.ReadElement(rem)
 		if !ok {
@@ -1292,10 +1307,16 @@ func (b *mongoSchemaBatchBuilder) AppendRawDocument(doc bson.Raw) error {
 		if err != nil {
 			return err
 		}
-		index, exists := b.columnIndex[transientString(key)]
+		keyString := transientString(key)
+		index := nextFieldIndex
+		exists := index < len(b.columns) && b.columns[index].Name == keyString
+		if !exists {
+			index, exists = b.columnIndex[keyString]
+		}
 		if !exists {
 			continue
 		}
+		nextFieldIndex = index + 1
 		value, err := elem.ValueErr()
 		if err != nil {
 			return err

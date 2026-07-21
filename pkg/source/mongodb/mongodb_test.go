@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -1161,6 +1162,55 @@ func TestMongoRawBatchBuilder_DuplicateKeysMatchDecodedPath(t *testing.T) {
 	}
 }
 
+func TestMongoRawBatchBuilder_FieldOrderFallbacks(t *testing.T) {
+	documents := []bson.Raw{
+		bson.Raw(bsoncore.NewDocumentBuilder().
+			AppendInt32("a", 1).
+			AppendString("b", "one").
+			AppendBoolean("c", true).
+			Build()),
+		bson.Raw(bsoncore.NewDocumentBuilder().
+			AppendBoolean("c", false).
+			AppendInt32("a", 2).
+			Build()),
+		bson.Raw(bsoncore.NewDocumentBuilder().
+			AppendString("d", "new").
+			AppendString("b", "three").
+			AppendInt32("a", 3).
+			Build()),
+	}
+
+	builder := newMongoRawBatchBuilder(nil)
+	for _, document := range documents {
+		if err := builder.AppendRawDocument(document); err != nil {
+			t.Fatalf("AppendRawDocument error = %v", err)
+		}
+	}
+	record, err := builder.NewRecordBatch()
+	if err != nil {
+		t.Fatalf("NewRecordBatch error = %v", err)
+	}
+	defer record.Release()
+
+	want := map[string][]any{
+		"a": {int64(1), int64(2), int64(3)},
+		"b": {"one", nil, "three"},
+		"c": {true, false, nil},
+		"d": {nil, nil, "new"},
+	}
+	if got := int(record.NumCols()); got != len(want) {
+		t.Fatalf("NumCols = %d, want %d", got, len(want))
+	}
+	for columnIndex := 0; columnIndex < int(record.NumCols()); columnIndex++ {
+		name := record.Schema().Field(columnIndex).Name
+		for row, expected := range want[name] {
+			if got := arrowutil.Value(record.Column(columnIndex), row); got != expected {
+				t.Fatalf("%s row %d = %#v, want %#v", name, row, got, expected)
+			}
+		}
+	}
+}
+
 func TestMongoRawBatchBuilder_NestedTemporalValuesMatchDecodedPath(t *testing.T) {
 	nested := bsoncore.NewDocumentBuilder().
 		AppendDateTime("dt", 1_782_003_600_123).
@@ -1365,6 +1415,54 @@ func TestMongoSchemaBatchBuilder_UsesProvidedSchema(t *testing.T) {
 	}
 }
 
+func TestMongoSchemaBatchBuilder_FieldOrderFallbacks(t *testing.T) {
+	builder := newMongoSchemaBatchBuilder([]schema.Column{
+		{Name: "a", DataType: schema.TypeInt64},
+		{Name: "b", DataType: schema.TypeString},
+		{Name: "c", DataType: schema.TypeBoolean},
+	}, nil)
+	documents := []bson.Raw{
+		bson.Raw(bsoncore.NewDocumentBuilder().
+			AppendInt32("a", 1).
+			AppendString("b", "one").
+			AppendBoolean("c", true).
+			Build()),
+		bson.Raw(bsoncore.NewDocumentBuilder().
+			AppendString("extra", "ignored").
+			AppendBoolean("c", false).
+			AppendInt32("a", 2).
+			Build()),
+		bson.Raw(bsoncore.NewDocumentBuilder().
+			AppendString("b", "three").
+			AppendInt32("a", 3).
+			Build()),
+	}
+	for _, document := range documents {
+		if err := builder.AppendRawDocument(document); err != nil {
+			t.Fatalf("AppendRawDocument error = %v", err)
+		}
+	}
+
+	record, err := builder.NewRecordBatch()
+	if err != nil {
+		t.Fatalf("NewRecordBatch error = %v", err)
+	}
+	defer record.Release()
+
+	want := [][]any{
+		{int64(1), int64(2), int64(3)},
+		{"one", nil, "three"},
+		{true, false, nil},
+	}
+	for columnIndex, values := range want {
+		for row, expected := range values {
+			if got := arrowutil.Value(record.Column(columnIndex), row); got != expected {
+				t.Fatalf("column %d row %d = %#v, want %#v", columnIndex, row, got, expected)
+			}
+		}
+	}
+}
+
 func BenchmarkMongoRawBatchBuilder(b *testing.B) {
 	benchmarkMongoRawBatchBuilder(b, 25_000)
 }
@@ -1373,13 +1471,29 @@ func BenchmarkMongoRawBatchBuilderNoReserve(b *testing.B) {
 	benchmarkMongoRawBatchBuilder(b, 0)
 }
 
+func BenchmarkMongoRawBatchBuilderRecyclingAllocator(b *testing.B) {
+	for _, cacheSize := range []int{8 << 20, 16 << 20, 32 << 20, 64 << 20} {
+		b.Run(fmt.Sprintf("Cache%dMiB", cacheSize>>20), func(b *testing.B) {
+			benchmarkMongoRawBatchBuilderWithAllocator(
+				b,
+				25_000,
+				newRecyclingAllocator(memory.NewGoAllocator(), cacheSize),
+			)
+		})
+	}
+}
+
 func benchmarkMongoRawBatchBuilder(b *testing.B, rowCapacity int) {
+	benchmarkMongoRawBatchBuilderWithAllocator(b, rowCapacity, memory.NewGoAllocator())
+}
+
+func benchmarkMongoRawBatchBuilderWithAllocator(b *testing.B, rowCapacity int, mem memory.Allocator) {
 	raw := benchmarkMongoRawDocument(b)
 	b.SetBytes(int64(len(raw)))
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	builder := newMongoRawBatchBuilderWithCapacity(nil, rowCapacity)
+	builder := newMongoRawBatchBuilderWithAllocator(mem, nil, rowCapacity)
 	for i := 0; i < b.N; i++ {
 		if err := builder.AppendRawDocument(raw); err != nil {
 			b.Fatal(err)
@@ -1427,14 +1541,26 @@ func BenchmarkMongoSchemaRawBatchBuilderNoReserve(b *testing.B) {
 	benchmarkMongoSchemaRawBatchBuilder(b, 0)
 }
 
+func BenchmarkMongoSchemaRawBatchBuilderRecyclingAllocator(b *testing.B) {
+	benchmarkMongoSchemaRawBatchBuilderWithAllocator(
+		b,
+		25_000,
+		newRecyclingAllocator(memory.NewGoAllocator(), mongoArrowBufferCacheSize),
+	)
+}
+
 func benchmarkMongoSchemaRawBatchBuilder(b *testing.B, rowCapacity int) {
+	benchmarkMongoSchemaRawBatchBuilderWithAllocator(b, rowCapacity, memory.NewGoAllocator())
+}
+
+func benchmarkMongoSchemaRawBatchBuilderWithAllocator(b *testing.B, rowCapacity int, mem memory.Allocator) {
 	raw := benchmarkMongoRawDocument(b)
 	columns := benchmarkMongoSchema()
 	b.SetBytes(int64(len(raw)))
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	builder := newMongoSchemaBatchBuilderWithCapacity(columns, nil, rowCapacity)
+	builder := newMongoSchemaBatchBuilderWithAllocator(mem, columns, nil, rowCapacity)
 	for i := 0; i < b.N; i++ {
 		if err := builder.AppendRawDocument(raw); err != nil {
 			b.Fatal(err)
@@ -1445,7 +1571,7 @@ func benchmarkMongoSchemaRawBatchBuilder(b *testing.B, rowCapacity int) {
 				b.Fatal(err)
 			}
 			record.Release()
-			builder = newMongoSchemaBatchBuilderWithCapacity(columns, nil, rowCapacity)
+			builder = newMongoSchemaBatchBuilderWithAllocator(mem, columns, nil, rowCapacity)
 		}
 	}
 
