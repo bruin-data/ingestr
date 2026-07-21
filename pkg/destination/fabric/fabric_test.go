@@ -9,7 +9,9 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
@@ -365,5 +367,62 @@ func TestColumnsForRecordMapsByCaseInsensitiveName(t *testing.T) {
 	}
 	if cols[1] != nil {
 		t.Fatalf("expected unmatched column to map to nil, got %+v", cols[1])
+	}
+}
+
+func TestNormalizeSchemaEvolutionColumn(t *testing.T) {
+	d := &FabricDestination{}
+
+	// TimestampTZ and Timestamp both store as DATETIME2, so they must normalize
+	// to the same logical type Fabric recovers on read-back.
+	if got := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeTimestampTZ}); got.DataType != schema.TypeTimestamp {
+		t.Fatalf("TimestampTZ should normalize to Timestamp, got %v", got.DataType)
+	}
+	// Int8 and Int16 both store as SMALLINT.
+	if got := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeInt8}); got.DataType != schema.TypeInt16 {
+		t.Fatalf("Int8 should normalize to Int16, got %v", got.DataType)
+	}
+	// Distinguishable types are left alone.
+	if got := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeInt64}); got.DataType != schema.TypeInt64 {
+		t.Fatalf("Int64 should be unchanged, got %v", got.DataType)
+	}
+	// Precision/scale/length are preserved so genuine widenings still surface.
+	dec := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeDecimal, Precision: 18, Scale: 4})
+	if dec.Precision != 18 || dec.Scale != 4 {
+		t.Fatalf("decimal precision/scale should be preserved, got %+v", dec)
+	}
+	str := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeString, MaxLength: 255})
+	if str.MaxLength != 255 {
+		t.Fatalf("string length should be preserved, got %+v", str)
+	}
+}
+
+func TestSchemaEvolutionNoPhantomTimestampTZChange(t *testing.T) {
+	d := &FabricDestination{}
+	desired := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: naming.IngestrLoadedAtColumn, DataType: schema.TypeTimestampTZ, Nullable: true},
+	}}
+	existing := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: naming.IngestrLoadedAtColumn, DataType: schema.TypeTimestamp, Nullable: true},
+	}}
+
+	withNormalizer, err := schemaevolution.Compare(desired, existing, &schemaevolution.CompareOptions{
+		NormalizeColumn: d.NormalizeSchemaEvolutionColumn,
+	})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if withNormalizer.HasChanges {
+		t.Fatalf("expected no changes with normalizer, got %+v", withNormalizer.Changes)
+	}
+
+	without, err := schemaevolution.Compare(desired, existing, nil)
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if !without.HasChanges {
+		t.Fatal("expected a phantom change without the normalizer")
 	}
 }
