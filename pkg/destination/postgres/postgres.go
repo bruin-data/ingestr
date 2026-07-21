@@ -919,6 +919,23 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			config.LogFailedQuery(updateDeletedSQL, err)
 			return fmt.Errorf("failed to update deleted records: %w", err)
 		}
+
+		onInsertDeletedTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "latest")
+		insertDeletedSQL := fmt.Sprintf(
+			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_all AS latest WHERE latest."_cdc_deleted" = true AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			latestAll,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			quotedTargetTable,
+			onInsertDeletedTargetCondition,
+		)
+		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
+
+		if _, err := tx.Exec(ctx, insertDeletedSQL); err != nil {
+			config.LogFailedQuery(insertDeletedSQL, err)
+			return fmt.Errorf("failed to insert CDC delete tombstones: %w", err)
+		}
 	} else {
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
 		// Unless the caller guarantees staging PK uniqueness, DISTINCT ON

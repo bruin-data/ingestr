@@ -70,7 +70,8 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(8, NULL, '00000000/00000010', true, '2026-01-02', '[]'),
 			(9, NULL, '00000000/00000020', false, '2026-01-02', '["payload"]'),
 			(10, 'latest-row-image', '00000000/00000010', false, '2026-01-02', '[]'),
-			(10, NULL, '00000000/00000010', true, '2026-01-02', '[]');
+			(10, NULL, '00000000/00000010', true, '2026-01-02', '[]'),
+			(11, NULL, '00000000/00000010', true, '2026-01-02', '[]');
 	`, targetTable, stagingTable, targetTable, stagingTable)))
 
 	opts := destination.MergeOptions{
@@ -97,12 +98,13 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		8:  {"tie-delete", "00000000/00000010", true, "2026-01-02"},
 		9:  {"toast-newer", "00000000/00000030", false, "2026-01-03"},
 		10: {"latest-row-image", "00000000/00000010", true, "2026-01-02"},
+		11: {"<null>", "00000000/00000010", true, "2026-01-02"},
 	}
 	for id, want := range expected {
 		var payload, lsn, synced string
 		var deleted bool
 		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT payload, COALESCE(_cdc_lsn, ''), _cdc_deleted, to_char(_cdc_synced_at, 'YYYY-MM-DD')
+			SELECT COALESCE(payload, '<null>'), COALESCE(_cdc_lsn, ''), _cdc_deleted, to_char(_cdc_synced_at, 'YYYY-MM-DD')
 			FROM %s WHERE id = $1
 		`, targetTable), id).Scan(&payload, &lsn, &deleted, &synced))
 		require.Equal(t, want.payload, payload, "id %d payload", id)
@@ -111,11 +113,14 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		require.Equal(t, want.synced, synced, "id %d synced timestamp", id)
 	}
 
-	var xminBefore, xminAfter string
-	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 10`, targetTable)).Scan(&xminBefore))
+	var xminBefore10, xminBefore11, xminAfter10, xminAfter11 string
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 10`, targetTable)).Scan(&xminBefore10))
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 11`, targetTable)).Scan(&xminBefore11))
 	require.NoError(t, dest.MergeTable(ctx, opts))
-	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 10`, targetTable)).Scan(&xminAfter))
-	require.Equal(t, xminBefore, xminAfter)
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 10`, targetTable)).Scan(&xminAfter10))
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT xmin::text FROM %s WHERE id = 11`, targetTable)).Scan(&xminAfter11))
+	require.Equal(t, xminBefore10, xminAfter10)
+	require.Equal(t, xminBefore11, xminAfter11)
 
 	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`
 		TRUNCATE %s;
