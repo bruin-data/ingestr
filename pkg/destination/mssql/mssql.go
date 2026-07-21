@@ -1025,13 +1025,12 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 USING %s AS source
 ON %s
 WHEN MATCHED AND %s THEN UPDATE SET %s
-WHEN NOT MATCHED AND %s THEN INSERT (%s) VALUES (%s);`,
+WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		composedSource,
 		onClause,
 		strings.Join(matchedConditions, " AND "),
 		strings.Join(updates, ", "),
-		hasRowData,
 		insertCols,
 		strings.Join(sourceCols, ", "),
 	)
