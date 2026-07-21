@@ -36,6 +36,66 @@ func TestBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	}
 }
 
+func TestBigQueryDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) {
+	if os.Getenv("GONG_TEST_BIGQUERY_URI") == "" {
+		t.Skip("set GONG_TEST_BIGQUERY_URI to run")
+	}
+
+	dest, client, project, dataset := bqDedupSetup(t)
+	ctx := t.Context()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	targetTable := "cdc_alias_target_" + suffix
+	stagingTable := "cdc_alias_staging_" + suffix
+	defer bqDropTables(ctx, client, dataset, stagingTable, targetTable)
+	defer func() { _ = dest.Close(ctx) }()
+
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			id INT64,
+			payload STRING,
+			__INGESTR_HAS_ACTIVE STRING,
+			__ingestr_has_active_2 STRING,
+			_cdc_lsn STRING,
+			_cdc_deleted BOOL,
+			_cdc_synced_at TIMESTAMP
+		)`, bqQualifiedTable(project, dataset, targetTable)),
+		fmt.Sprintf(`CREATE TABLE %s (
+			id INT64,
+			payload STRING,
+			__INGESTR_HAS_ACTIVE STRING,
+			__ingestr_has_active_2 STRING,
+			_cdc_lsn STRING,
+			_cdc_deleted BOOL,
+			_cdc_synced_at TIMESTAMP,
+			_cdc_unchanged_cols STRING
+		)`, bqQualifiedTable(project, dataset, stagingTable)),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'old', 'old-marker', 'old-marker-2', '00000000000000000020', false, TIMESTAMP '2026-01-01 00:00:00 UTC')`, bqQualifiedTable(project, dataset, targetTable)),
+		fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, 'active', 'user-marker', 'user-marker-2', '00000000000000000020', false, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
+			(1, NULL, NULL, NULL, '00000000000000000020', true, TIMESTAMP '2026-01-03 00:00:00 UTC', '[]')`, bqQualifiedTable(project, dataset, stagingTable)),
+	} {
+		require.NoError(t, dest.Exec(ctx, statement))
+	}
+
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		TargetTable:  dataset + "." + targetTable,
+		StagingTable: dataset + "." + stagingTable,
+		PrimaryKeys:  []string{"id"},
+		Columns: []string{
+			"id", "payload", "__INGESTR_HAS_ACTIVE", "__ingestr_has_active_2",
+			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn,
+		},
+	}))
+
+	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(`
+		SELECT payload, __INGESTR_HAS_ACTIVE, __ingestr_has_active_2,
+			_cdc_lsn, _cdc_deleted, FORMAT_TIMESTAMP('%%F', _cdc_synced_at)
+		FROM %s WHERE id = 1
+	`, bqQualifiedTable(project, dataset, targetTable)))
+	require.Equal(t, [][]bigquery.Value{{"active", "user-marker", "user-marker-2", "00000000000000000020", true, "2026-01-03"}}, rows)
+}
+
 func testBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	dest, client, project, dataset := bqDedupSetup(t)
 	ctx := t.Context()

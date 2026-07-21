@@ -2773,6 +2773,32 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("cdc_mode_internal_alias_collision", func(t *testing.T) {
+		columns := []string{
+			"id",
+			"payload",
+			"__INGESTR_HAS_ACTIVE",
+			"__ingestr_has_active_2",
+			"_cdc_lsn",
+			"_cdc_deleted",
+			"_cdc_synced_at",
+		}
+		sql := dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, columns, nil, "")
+
+		if !contains(sql, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active_3`") {
+			t.Fatalf("sql did not allocate a collision-free active marker:\n%s", sql)
+		}
+		if !contains(sql, "s.`_cdc_deleted` = false OR s.`__ingestr_has_active_3`") {
+			t.Fatalf("sql did not reference the allocated active marker:\n%s", sql)
+		}
+		if !contains(sql, "act.`__INGESTR_HAS_ACTIVE`, act.`__ingestr_has_active_2`") {
+			t.Fatalf("sql dropped colliding user columns from the active image:\n%s", sql)
+		}
+		if !contains(sql, "t.`__INGESTR_HAS_ACTIVE` = s.`__INGESTR_HAS_ACTIVE`") || !contains(sql, "t.`__ingestr_has_active_2` = s.`__ingestr_has_active_2`") {
+			t.Fatalf("sql did not update colliding user columns:\n%s", sql)
+		}
+	})
+
 	t.Run("cdc_incremental_predicate_is_not_part_of_key_match", func(t *testing.T) {
 		predicate := "t.`id` > 100"
 		sql := dest.buildMergeSQLWithPredicate(

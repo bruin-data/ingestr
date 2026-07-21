@@ -2385,6 +2385,21 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	hasActiveColumn := quoteIdentifier("__ingestr_has_active")
+	if hasCDCDeleted && len(primaryKeys) > 0 {
+		usedNames := make(map[string]struct{}, len(allColumns)+1)
+		for _, col := range allColumns {
+			usedNames[strings.ToLower(col)] = struct{}{}
+		}
+		candidate := "__ingestr_has_active"
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedNames[strings.ToLower(candidate)]; !exists {
+				hasActiveColumn = quoteIdentifier(candidate)
+				break
+			}
+			candidate = fmt.Sprintf("__ingestr_has_active_%d", suffix)
+		}
+	}
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
@@ -2466,7 +2481,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 			}
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
-		selectCols = append(selectCols, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`")
+		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` IS NOT NULL AS %s", hasActiveColumn))
 
 		fmt.Fprintf(
 			&sql,
@@ -2510,7 +2525,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 		// with the delete marking. Clause order matters: BigQuery executes the
 		// first matching WHEN clause.
 		if len(updateSets) > 0 {
-			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n", newerLSN)
+			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND (s.`_cdc_deleted` = false OR s.%s) THEN\n", newerLSN, hasActiveColumn)
 			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
