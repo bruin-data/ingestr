@@ -180,73 +180,93 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: github.com/DataDog/appsec-internal-go
-      version: v1.14.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/DataDog/datadog-agent/comp/core/tagger/origindetection
-      version: v0.70.2
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/obfuscate
-      version: v0.70.2
+      version: v0.77.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/DataDog/datadog-agent/pkg/opentelemetry-mapping-go/otlp/attributes
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/proto
-      version: v0.70.2
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/remoteconfig/state
-      version: v0.70.2
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/trace
-      version: v0.70.2
+      version: v0.77.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/DataDog/datadog-agent/pkg/trace/log
+      version: v0.77.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/DataDog/datadog-agent/pkg/trace/otel
+      version: v0.77.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/DataDog/datadog-agent/pkg/trace/stats
+      version: v0.77.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/DataDog/datadog-agent/pkg/trace/traceutil
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/util/log
-      version: v0.70.2
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/util/scrubber
-      version: v0.70.2
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-agent/pkg/version
-      version: v0.70.2
+      version: v0.77.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/datadog-go/v5
-      version: v5.8.0
+      version: v5.8.3
       licenses:
         - MIT
       status: allowed
     - module: github.com/DataDog/dd-trace-go/v2
-      version: v2.2.3
+      version: v2.8.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/go-libddwaf/v4
-      version: v4.5.0
+      version: v4.9.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/go-runtime-metrics-internal
-      version: v0.0.4-0.20250721125240-fdf1ef85b633
+      version: v0.0.4-0.20260217080614-b0f4edc38a6d
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/go-sqllexer
-      version: v0.1.8
+      version: v0.1.13
       licenses:
         - MIT
       status: allowed
@@ -255,18 +275,13 @@ dependencies:
       licenses:
         - BSD-3-Clause
       status: allowed
-    - module: github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/attributes
-      version: v0.29.1
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/DataDog/sketches-go
-      version: v1.4.7
+      version: v1.4.8
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/DataDog/zstd
-      version: v1.5.6
+      version: v1.5.7
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -583,6 +598,11 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/cenkalti/backoff/v5
+      version: v5.0.3
+      licenses:
+        - MIT
+      status: allowed
     - module: github.com/cespare/xxhash/v2
       version: v2.3.0
       licenses:
@@ -743,10 +763,10 @@ dependencies:
       licenses:
         - MIT
       status: allowed
-    - module: github.com/eapache/queue/v2
-      version: v2.0.0-20230407133247-75960ed334e4
+    - module: github.com/ebitengine/purego
+      version: v0.10.0
       licenses:
-        - MIT
+        - Apache-2.0
       status: allowed
     - module: github.com/eclipse/paho.mqtt.golang
       version: v1.5.1
@@ -754,11 +774,6 @@ dependencies:
         - EPL-2.0
       status: manual-review
       note: EPL-2.0 reviewed for the MQTT source dependency.
-    - module: github.com/ebitengine/purego
-      version: v0.10.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/elastic/elastic-transport-go/v8
       version: v8.8.0
       licenses:
@@ -800,7 +815,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/fxamacker/cbor/v2
-      version: v2.7.0
+      version: v2.9.0
       licenses:
         - MIT
       status: allowed
@@ -914,11 +929,6 @@ dependencies:
       version: v1.2.5
       licenses:
         - Apache-2.0
-      status: allowed
-    - module: github.com/golang/protobuf
-      version: v1.5.4
-      licenses:
-        - BSD-3-Clause
       status: allowed
     - module: github.com/golang/snappy
       version: v1.0.0
@@ -1159,6 +1169,11 @@ dependencies:
         - BSD-3-Clause
         - MIT
       status: allowed
+    - module: github.com/minio/simdjson-go
+      version: v0.4.5
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/mitchellh/colorstring
       version: v0.0.0-20190213212951-d06e56a500db
       licenses:
@@ -1386,12 +1401,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/prometheus/common
-      version: v0.66.1
+      version: v0.67.5
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/prometheus/procfs
-      version: v0.17.0
+      version: v0.19.2
       licenses:
         - Apache-2.0
       status: allowed
@@ -1581,7 +1596,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/tinylib/msgp
-      version: v1.4.0
+      version: v1.6.3
       licenses:
         - MIT
       status: allowed
@@ -1599,6 +1614,11 @@ dependencies:
       version: v0.0.0-20190904060850-447a3041c3bc
       licenses:
         - BSD-2-Clause
+      status: allowed
+    - module: github.com/trailofbits/go-mutexasserts
+      version: v0.0.0-20250514102930-c1f3d2e37561
+      licenses:
+        - MIT
       status: allowed
     - module: github.com/trinodb/trino-go-client
       version: v0.333.0
@@ -1746,27 +1766,22 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/collector/component
-      version: v1.42.0
+      version: v1.51.1-0.20260205185216-81bc641f26c0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/collector/featuregate
-      version: v1.42.0
-      licenses:
-        - Apache-2.0
-      status: allowed
-    - module: go.opentelemetry.io/collector/internal/telemetry
-      version: v0.136.0
+      version: v1.51.1-0.20260205185216-81bc641f26c0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/collector/pdata
-      version: v1.42.0
+      version: v1.51.1-0.20260205185216-81bc641f26c0
       licenses:
         - Apache-2.0
       status: allowed
-    - module: go.opentelemetry.io/contrib/bridges/otelzap
-      version: v0.13.0
+    - module: go.opentelemetry.io/collector/pdata/pprofile
+      version: v0.145.1-0.20260205185216-81bc641f26c0
       licenses:
         - Apache-2.0
       status: allowed
@@ -1790,11 +1805,6 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: go.opentelemetry.io/otel/log
-      version: v0.14.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: go.opentelemetry.io/otel/metric
       version: v1.43.0
       licenses:
@@ -1812,6 +1822,11 @@ dependencies:
       status: allowed
     - module: go.opentelemetry.io/otel/trace
       version: v1.43.0
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: go.opentelemetry.io/proto/otlp
+      version: v1.10.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -1941,7 +1956,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: gopkg.in/ini.v1
-      version: v1.67.0
+      version: v1.67.1
       licenses:
         - Apache-2.0
       status: allowed
@@ -1956,7 +1971,7 @@ dependencies:
         - MIT
       status: allowed
     - module: k8s.io/apimachinery
-      version: v0.33.4
+      version: v0.35.1
       licenses:
         - Apache-2.0
         - BSD-3-Clause
@@ -1971,8 +1986,13 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: k8s.io/kube-openapi
+      version: v0.0.0-20250910181357-589584f1c912
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: k8s.io/utils
-      version: v0.0.0-20250321185631-1f6e0b77f77e
+      version: v0.0.0-20251002143259-bc988d571ff4
       licenses:
         - Apache-2.0
         - BSD-3-Clause
@@ -1998,7 +2018,7 @@ dependencies:
         - MIT
       status: allowed
     - module: sigs.k8s.io/json
-      version: v0.0.0-20241010143419-9aa6b5e7a4b3
+      version: v0.0.0-20250730193827-2d320260d730
       licenses:
         - Apache-2.0
       status: allowed
@@ -2007,13 +2027,8 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: sigs.k8s.io/structured-merge-diff/v4
-      version: v4.6.0
-      licenses:
-        - Apache-2.0
-      status: allowed
-    - module: sigs.k8s.io/yaml
-      version: v1.6.0
+    - module: sigs.k8s.io/structured-merge-diff/v6
+      version: v6.3.0
       licenses:
         - Apache-2.0
       status: allowed
