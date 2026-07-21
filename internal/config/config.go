@@ -271,12 +271,6 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	case StrategyReplace, StrategyTruncateInsert:
 		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", c.IncrementalStrategy)}
 	}
-	if rawQuery, ok := strings.CutPrefix(c.SourceTable, "query:"); ok {
-		if strings.TrimSpace(rawQuery) == "" {
-			return nil
-		}
-		return &ValidationError{Field: "source-table", Message: "custom queries do not support extract partitioning"}
-	}
 	return nil
 }
 

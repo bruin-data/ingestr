@@ -114,6 +114,7 @@ type ReadOptions struct {
 	ExcludeColumns                  []string
 	Parallelism                     int
 	Schema                          *schema.TableSchema // Optional: if provided, Read will skip GetSchema call
+	ExtractPartitionSchema          *schema.TableSchema // Optional: source metadata used to plan extract partitions
 	CDCResumeLSN                    string              // Optional: for CDC sources, resume from this LSN (skip snapshot)
 	CDCResumeIncarnation            string              // Source table incarnation that authorized CDCResumeLSN
 	CDCResumeSchemaFingerprint      string              // Source schema fingerprint that authorized CDCResumeLSN
@@ -319,6 +320,13 @@ type SourceTable interface {
 	HasKnownSchema() bool
 	GetSchema(ctx context.Context) (*schema.TableSchema, error)
 	Read(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error)
+}
+
+// ReadSchemaProvider resolves the source schema for a specific read. It is
+// used by sources whose query schema depends on read-time parameters.
+type ReadSchemaProvider interface {
+	SupportsReadSchema() bool
+	GetReadSchema(ctx context.Context, opts ReadOptions) (*schema.TableSchema, error)
 }
 
 type PrimaryKeyUniquenessProvider interface {

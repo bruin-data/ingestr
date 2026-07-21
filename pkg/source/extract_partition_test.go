@@ -958,3 +958,42 @@ func TestSQLIntValueRejectsNonIntegerFloat(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestSQLCustomQueryBuilders(t *testing.T) {
+	quote := func(name string) string { return `"` + name + `"` }
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+
+	schemaQuery := SQLCustomQuerySchemaQuery(" SELECT id, created_at FROM orders; ", quote)
+	wantSchema := `SELECT * FROM (SELECT id, created_at FROM orders) AS "__ingestr_query" WHERE 1 = 0`
+	if schemaQuery != wantSchema {
+		t.Fatalf("schema query = %q, want %q", schemaQuery, wantSchema)
+	}
+
+	windowQuery := SQLCustomQuerySelectQuery("SELECT id, created_at FROM orders;", ReadOptions{
+		ExtractPartitionBy:           "created_at",
+		ExtractPartitionStart:        &start,
+		ExtractPartitionEnd:          &end,
+		ExtractPartitionEndInclusive: true,
+		ExtractPartitionDataType:     schema.TypeTimestamp,
+	}, quote, DefaultSQLTimeFormat)
+	wantWindow := `SELECT * FROM (SELECT id, created_at FROM orders) AS "__ingestr_query" WHERE "__ingestr_query"."created_at" >= '2026-01-01 00:00:00' AND "__ingestr_query"."created_at" <= '2026-01-02 00:00:00'`
+	if windowQuery != wantWindow {
+		t.Fatalf("window query = %q, want %q", windowQuery, wantWindow)
+	}
+
+	nullQuery := SQLCustomQuerySelectQuery("SELECT id FROM orders", ReadOptions{
+		ExtractPartitionBy:     "id",
+		ExtractPartitionIsNull: true,
+	}, quote, DefaultSQLTimeFormat)
+	wantNull := `SELECT * FROM (SELECT id FROM orders) AS "__ingestr_query" WHERE "__ingestr_query"."id" IS NULL`
+	if nullQuery != wantNull {
+		t.Fatalf("null query = %q, want %q", nullQuery, wantNull)
+	}
+
+	boundsQuery := SQLCustomQueryBoundsQuery("SELECT id FROM orders;", "id", quote)
+	wantBounds := `SELECT MIN("__ingestr_query"."id"), MAX("__ingestr_query"."id"), COUNT(*), COUNT("__ingestr_query"."id") FROM (SELECT id FROM orders) AS "__ingestr_query"`
+	if boundsQuery != wantBounds {
+		t.Fatalf("bounds query = %q, want %q", boundsQuery, wantBounds)
+	}
+}

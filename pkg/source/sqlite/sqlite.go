@@ -70,7 +70,12 @@ func (s *SQLiteSource) GetTable(ctx context.Context, req source.TableRequest) (s
 	}
 
 	if _, ok := source.IsCustomQuery(req.Name); ok {
-		return source.CustomQueryTable(req, s.ExecuteCustomQuery)
+		return source.PartitionedCustomQueryTable(req, s.ExecuteCustomQuery, source.PartitionedCustomQueryOptions{
+			QuoteIdentifier: quoteIdentifier,
+			FormatTime:      source.NativeSQLTimeFormat,
+			GetSchema:       s.getCustomQuerySchema,
+			DiscoverBounds:  s.discoverCustomQueryExtractPartitionBounds,
+		})
 	}
 
 	tableSchema, err := s.getSchema(ctx, req.Name)
@@ -244,6 +249,29 @@ func (s *SQLiteSource) discoverExtractPartitionBounds(ctx context.Context, table
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }
 
+func (s *SQLiteSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect custom query schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get custom query column types: %w", err)
+	}
+	return &schema.TableSchema{Name: source.CustomQueryTableName, Columns: sqliteCustomQueryColumns(colTypes)}, nil
+}
+
+func (s *SQLiteSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+}
+
 func (s *SQLiteSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -269,18 +297,7 @@ func (s *SQLiteSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 			return
 		}
 
-		columns := make([]schema.Column, len(colTypes))
-		for i, ct := range colTypes {
-			dt, precision, scale := MapSQLiteToDataType(ct.DatabaseTypeName())
-			nullable, _ := ct.Nullable()
-			columns[i] = schema.Column{
-				Name:      ct.Name(),
-				DataType:  dt,
-				Nullable:  nullable,
-				Precision: precision,
-				Scale:     scale,
-			}
-		}
+		columns := sqliteCustomQueryColumns(colTypes)
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
@@ -297,6 +314,22 @@ func (s *SQLiteSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 	}()
 
 	return results, nil
+}
+
+func sqliteCustomQueryColumns(colTypes []*sql.ColumnType) []schema.Column {
+	columns := make([]schema.Column, len(colTypes))
+	for i, ct := range colTypes {
+		dt, precision, scale := MapSQLiteToDataType(ct.DatabaseTypeName())
+		nullable, _ := ct.Nullable()
+		columns[i] = schema.Column{
+			Name:      ct.Name(),
+			DataType:  dt,
+			Nullable:  nullable,
+			Precision: precision,
+			Scale:     scale,
+		}
+	}
+	return columns
 }
 
 func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
