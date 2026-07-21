@@ -55,6 +55,8 @@ func TestBigQueryDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) 
 			payload STRING,
 			__INGESTR_HAS_ACTIVE STRING,
 			__ingestr_has_active_2 STRING,
+			__INGESTR_ACTIVE_LSN STRING,
+			__ingestr_active_lsn_2 STRING,
 			_cdc_lsn STRING,
 			_cdc_deleted BOOL,
 			_cdc_synced_at TIMESTAMP
@@ -64,16 +66,18 @@ func TestBigQueryDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) 
 			payload STRING,
 			__INGESTR_HAS_ACTIVE STRING,
 			__ingestr_has_active_2 STRING,
+			__INGESTR_ACTIVE_LSN STRING,
+			__ingestr_active_lsn_2 STRING,
 			_cdc_lsn STRING,
 			_cdc_deleted BOOL,
 			_cdc_synced_at TIMESTAMP,
 			_cdc_unchanged_cols STRING
 		)`, bqQualifiedTable(project, dataset, stagingTable)),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, 'old', 'old-marker', 'old-marker-2', '00000000000000000020', false, TIMESTAMP '2026-01-01 00:00:00 UTC')`, bqQualifiedTable(project, dataset, targetTable)),
+			(1, 'old', 'old-marker', 'old-marker-2', 'old-lsn', 'old-lsn-2', '00000000000000000020', false, TIMESTAMP '2026-01-01 00:00:00 UTC')`, bqQualifiedTable(project, dataset, targetTable)),
 		fmt.Sprintf(`INSERT INTO %s VALUES
-			(1, 'active', 'user-marker', 'user-marker-2', '00000000000000000020', false, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
-			(1, NULL, NULL, NULL, '00000000000000000020', true, TIMESTAMP '2026-01-03 00:00:00 UTC', '[]')`, bqQualifiedTable(project, dataset, stagingTable)),
+			(1, 'active', 'user-marker', 'user-marker-2', 'user-lsn', 'user-lsn-2', '00000000000000000020', false, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
+			(1, NULL, NULL, NULL, NULL, NULL, '00000000000000000020', true, TIMESTAMP '2026-01-03 00:00:00 UTC', '[]')`, bqQualifiedTable(project, dataset, stagingTable)),
 	} {
 		require.NoError(t, dest.Exec(ctx, statement))
 	}
@@ -84,16 +88,17 @@ func TestBigQueryDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) 
 		PrimaryKeys:  []string{"id"},
 		Columns: []string{
 			"id", "payload", "__INGESTR_HAS_ACTIVE", "__ingestr_has_active_2",
+			"__INGESTR_ACTIVE_LSN", "__ingestr_active_lsn_2",
 			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn,
 		},
 	}))
 
 	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(`
-		SELECT payload, __INGESTR_HAS_ACTIVE, __ingestr_has_active_2,
+		SELECT payload, __INGESTR_HAS_ACTIVE, __ingestr_has_active_2, __INGESTR_ACTIVE_LSN, __ingestr_active_lsn_2,
 			_cdc_lsn, _cdc_deleted, FORMAT_TIMESTAMP('%%F', _cdc_synced_at)
 		FROM %s WHERE id = 1
 	`, bqQualifiedTable(project, dataset, targetTable)))
-	require.Equal(t, [][]bigquery.Value{{"active", "user-marker", "user-marker-2", "00000000000000000020", true, "2026-01-03"}}, rows)
+	require.Equal(t, [][]bigquery.Value{{"active", "user-marker", "user-marker-2", "user-lsn", "user-lsn-2", "00000000000000000020", true, "2026-01-03"}}, rows)
 }
 
 func testBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
@@ -131,7 +136,8 @@ func testBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(7, 'same-deleted', 'retired', '00000000000000000010', true, TIMESTAMP '2026-01-01 00:00:00 UTC'),
 			(8, 'tie-delete', 'retired', '00000000000000000010', false, TIMESTAMP '2026-01-01 00:00:00 UTC'),
 			(9, 'toast-newer', 'retired', '00000000000000000030', false, TIMESTAMP '2026-01-03 00:00:00 UTC'),
-			(11, 'known-lsn', 'retired', '00000000000000000030', false, TIMESTAMP '2026-01-03 00:00:00 UTC')`, bqQualifiedTable(project, dataset, targetTable)),
+			(11, 'known-lsn', 'retired', '00000000000000000030', false, TIMESTAMP '2026-01-03 00:00:00 UTC'),
+			(12, 'target-v20', 'retired', '00000000000000000020', false, TIMESTAMP '2026-01-02 00:00:00 UTC')`, bqQualifiedTable(project, dataset, targetTable)),
 		fmt.Sprintf(`INSERT INTO %s VALUES
 			(1, 'stale-active', '00000000000000000020', false, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
 			(1, NULL, '00000000000000000025', true, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
@@ -145,7 +151,9 @@ func testBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 			(9, NULL, '00000000000000000020', false, TIMESTAMP '2026-01-02 00:00:00 UTC', '["payload"]'),
 			(10, 'insert-then-delete', '00000000000000000010', false, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
 			(10, NULL, '00000000000000000010', true, TIMESTAMP '2026-01-02 00:00:00 UTC', '[]'),
-			(11, 'null-lsn-regression', NULL, false, TIMESTAMP '2026-01-04 00:00:00 UTC', '[]')`, bqQualifiedTable(project, dataset, stagingTable)),
+			(11, 'null-lsn-regression', NULL, false, TIMESTAMP '2026-01-04 00:00:00 UTC', '[]'),
+			(12, 'older-active-v10', '00000000000000000010', false, TIMESTAMP '2026-01-01 00:00:00 UTC', '[]'),
+			(12, NULL, '00000000000000000030', true, TIMESTAMP '2026-01-03 00:00:00 UTC', '[]')`, bqQualifiedTable(project, dataset, stagingTable)),
 	}
 	for _, statement := range setup[:2] {
 		require.NoError(t, dest.Exec(ctx, statement))
@@ -233,6 +241,7 @@ func testBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03"},
 		10: {"insert-then-delete", "00000000000000000010", true, "2026-01-02"},
 		11: {"known-lsn", "00000000000000000030", false, "2026-01-03"},
+		12: {"target-v20", "00000000000000000030", true, "2026-01-03"},
 	}
 	rows := bqRunQuery(t, ctx, client, fmt.Sprintf(`
 		SELECT id, COALESCE(payload, '<null>'), COALESCE(_cdc_lsn, ''), _cdc_deleted, FORMAT_TIMESTAMP('%%F', _cdc_synced_at)

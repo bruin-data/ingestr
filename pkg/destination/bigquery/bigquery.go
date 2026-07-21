@@ -2386,19 +2386,24 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	destColumns := destination.DestinationColumns(allColumns)
 	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 	hasActiveColumn := quoteIdentifier("__ingestr_has_active")
+	activeLSNColumn := quoteIdentifier("__ingestr_active_lsn")
 	if hasCDCDeleted && len(primaryKeys) > 0 {
-		usedNames := make(map[string]struct{}, len(allColumns)+1)
+		usedNames := make(map[string]struct{}, len(allColumns)+2)
 		for _, col := range allColumns {
 			usedNames[strings.ToLower(col)] = struct{}{}
 		}
-		candidate := "__ingestr_has_active"
-		for suffix := 2; ; suffix++ {
-			if _, exists := usedNames[strings.ToLower(candidate)]; !exists {
-				hasActiveColumn = quoteIdentifier(candidate)
-				break
+		uniqueInternalName := func(base string) string {
+			candidate := base
+			for suffix := 2; ; suffix++ {
+				if _, exists := usedNames[strings.ToLower(candidate)]; !exists {
+					usedNames[strings.ToLower(candidate)] = struct{}{}
+					return candidate
+				}
+				candidate = fmt.Sprintf("%s_%d", base, suffix)
 			}
-			candidate = fmt.Sprintf("__ingestr_has_active_%d", suffix)
 		}
+		hasActiveColumn = quoteIdentifier(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn = quoteIdentifier(uniqueInternalName("__ingestr_active_lsn"))
 	}
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
@@ -2473,7 +2478,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
 
-		selectCols := make([]string, 0, len(allColumns)+1)
+		selectCols := make([]string, 0, len(allColumns)+2)
 		for _, col := range allColumns {
 			alias := "act"
 			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
@@ -2482,6 +2487,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
 		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` IS NOT NULL AS %s", hasActiveColumn))
+		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` AS %s", activeLSNColumn))
 
 		fmt.Fprintf(
 			&sql,
@@ -2525,7 +2531,8 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 		// with the delete marking. Clause order matters: BigQuery executes the
 		// first matching WHEN clause.
 		if len(updateSets) > 0 {
-			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND (s.`_cdc_deleted` = false OR s.%s) THEN\n", newerLSN, hasActiveColumn)
+			hasFreshRowData := fmt.Sprintf("(s.`_cdc_deleted` = false OR (s.%s AND (t.`_cdc_lsn` IS NULL OR s.%s >= t.`_cdc_lsn`)))", hasActiveColumn, activeLSNColumn)
+			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND %s THEN\n", newerLSN, hasFreshRowData)
 			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
