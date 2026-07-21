@@ -761,17 +761,19 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := func(where string) string {
+	dedupSourceAs := func(where, alias string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS %s`,
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(stagingQuoted, ", "),
 			strings.Join(quotedPKs, ", "),
 			dedupOrderBy,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
+			alias,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceAs(where, "source") }
 
 	// For CDC, updates use the latest non-deleted change per PK so a delete
 	// followed by nothing doesn't clobber row data. Inserts use the latest
@@ -779,7 +781,14 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 	updateSource := dedupSource("")
 	insertSource := updateSource
 	if isCDC {
-		updateSource = dedupSource(` WHERE "_cdc_deleted" = false`)
+		activeSource := dedupSourceAs(` WHERE "_cdc_deleted" = false`, "active")
+		latestSource := dedupSourceAs("", "latest")
+		updateSource = fmt.Sprintf(
+			`(SELECT active.*, COALESCE(latest."_cdc_lsn" = active."_cdc_lsn" AND latest."_cdc_deleted" = true, false) AS "__ingestr_has_equal_lsn_delete" FROM %s LEFT JOIN %s ON %s) AS source`,
+			activeSource,
+			latestSource,
+			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
+		)
 		insertSource = dedupSource("")
 	}
 	insertCondition := onCondition
@@ -836,7 +845,7 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 		}
 		updateCondition := onCondition
 		if isCDC {
-			updateCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn")`
+			updateCondition += ` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND source."__ingestr_has_equal_lsn_delete"))`
 		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s AS target SET %s FROM %s WHERE %s`,

@@ -1202,7 +1202,8 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-active', '00000000000000000010', false, '2026-01-01'),
 			(7, 'same-deleted', '00000000000000000010', true, '2026-01-01'),
 			(8, 'tie-delete', '00000000000000000010', false, '2026-01-01'),
-			(9, 'toast-newer', '00000000000000000030', false, '2026-01-03');
+			(9, 'toast-newer', '00000000000000000030', false, '2026-01-03'),
+			(10, 'older-row-image', '00000000000000000010', false, '2026-01-01');
 		INSERT INTO staging_table VALUES
 			(1, 'stale-active', '00000000000000000020', false, '2026-01-02', '[]'),
 			(1, NULL, '00000000000000000025', true, '2026-01-02', '[]'),
@@ -1213,7 +1214,9 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 			(6, 'same-replay', '00000000000000000010', false, '2026-01-02', '[]'),
 			(7, 'same-resurrection', '00000000000000000010', false, '2026-01-02', '[]'),
 			(8, NULL, '00000000000000000010', true, '2026-01-02', '[]'),
-			(9, NULL, '00000000000000000020', false, '2026-01-02', '["name"]')
+			(9, NULL, '00000000000000000020', false, '2026-01-02', '["name"]'),
+			(10, 'latest-row-image', '00000000000000000010', false, '2026-01-02', '[]'),
+			(10, NULL, '00000000000000000010', true, '2026-01-02', '[]')
 	`))
 
 	opts := destination.MergeOptions{
@@ -1230,15 +1233,16 @@ func TestMergeTable_CDCDoesNotRegressTargetLSN(t *testing.T) {
 		deleted bool
 		synced  string
 	}{
-		1: {"newer-active", "00000000000000000030", false, "2026-01-03"},
-		2: {"newer-deleted", "00000000000000000030", true, "2026-01-03"},
-		3: {"first-cdc-update", "00000000000000000010", false, "2026-01-02"},
-		4: {"first-insert", "00000000000000000010", false, "2026-01-02"},
-		5: {"<null>", "00000000000000000010", true, "2026-01-02"},
-		6: {"same-active", "00000000000000000010", false, "2026-01-01"},
-		7: {"same-deleted", "00000000000000000010", true, "2026-01-01"},
-		8: {"tie-delete", "00000000000000000010", true, "2026-01-02"},
-		9: {"toast-newer", "00000000000000000030", false, "2026-01-03"},
+		1:  {"newer-active", "00000000000000000030", false, "2026-01-03"},
+		2:  {"newer-deleted", "00000000000000000030", true, "2026-01-03"},
+		3:  {"first-cdc-update", "00000000000000000010", false, "2026-01-02"},
+		4:  {"first-insert", "00000000000000000010", false, "2026-01-02"},
+		5:  {"<null>", "00000000000000000010", true, "2026-01-02"},
+		6:  {"same-active", "00000000000000000010", false, "2026-01-01"},
+		7:  {"same-deleted", "00000000000000000010", true, "2026-01-01"},
+		8:  {"tie-delete", "00000000000000000010", true, "2026-01-02"},
+		9:  {"toast-newer", "00000000000000000030", false, "2026-01-03"},
+		10: {"latest-row-image", "00000000000000000010", true, "2026-01-02"},
 	}
 	for id, want := range expected {
 		name, lsn, deleted, synced := readDuckDBCDCRow(t, ctx, dest, id)
