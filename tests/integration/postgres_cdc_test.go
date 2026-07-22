@@ -1856,6 +1856,248 @@ func TestPostgresCDC_MultiTable_SchemaEvolution(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
+func TestPostgresCDC_StreamingSchemaEvolution_DuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.customers (
+			id BIGINT PRIMARY KEY,
+			email TEXT NOT NULL
+		);
+		INSERT INTO public.customers VALUES
+			(1, 'a@example.com'),
+			(2, 'b@example.com');
+		CREATE PUBLICATION streaming_evolution_pub FOR TABLE public.customers;
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	duckdbPath := fmt.Sprintf("%s/streaming-evolution.duckdb", t.TempDir())
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&publication=streaming_evolution_pub&dest_schema=raw&discover_interval=1s",
+		DestURI:             "duckdb:///" + duckdbPath,
+		IncrementalStrategy: config.StrategyMerge,
+		SchemaContract:      "evolve",
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        10,
+		Progress:            config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	queryCustomer := func(id int64) (string, error) {
+		db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckdbPath))
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = db.Close() }()
+		var status string
+		err = db.QueryRow(fmt.Sprintf(`SELECT status FROM raw.customers WHERE id = %d AND _cdc_deleted = false`, id)).Scan(&status)
+		return status, err
+	}
+
+	require.Eventually(t, func() bool {
+		db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckdbPath))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = db.Close() }()
+		var count int
+		return db.QueryRow(`SELECT count(*) FROM raw.customers WHERE _cdc_deleted = false`).Scan(&count) == nil && count == 2
+	}, 60*time.Second, 500*time.Millisecond, "initial snapshot should land in DuckDB")
+
+	_, err = srcPool.Exec(ctx, `
+		ALTER TABLE public.customers ADD COLUMN status TEXT;
+		INSERT INTO public.customers VALUES (3, 'c@example.com', 'active');
+	`)
+	require.NoError(t, err)
+
+	waitForPostgresCDCSlotConfirmation(t, ctx, srcPool, runErr, "the replacement snapshot should be committed after DuckDB schema evolution")
+
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.customers VALUES (4, 'd@example.com', 'still-running')`)
+	require.NoError(t, err)
+	waitForPostgresCDCSlotConfirmation(t, ctx, srcPool, runErr, "the stream should remain alive after schema evolution")
+
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
+	status, err := queryCustomer(3)
+	require.NoError(t, err)
+	require.Equal(t, "active", status)
+	status, err = queryCustomer(4)
+	require.NoError(t, err)
+	require.Equal(t, "still-running", status)
+}
+
+func TestPostgresCDC_StreamingSchemaEvolution_MySQL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	if mysqlDest.uri == "" {
+		t.Skip("shared MySQL destination container not available")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	suffix := uniqueSuffix()
+	sourceTable := "mysql_schema_evolution_" + suffix
+	publication := "mysql_schema_evolution_pub_" + suffix
+	tableRef := pqTable("public", sourceTable)
+	_, err = srcPool.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE %s (
+			id BIGINT PRIMARY KEY,
+			amount BIGINT NOT NULL
+		);
+		INSERT INTO %s VALUES (1, 10), (2, 20);
+		CREATE PUBLICATION %s FOR TABLE %s;
+		ALTER USER testuser REPLICATION;
+	`, tableRef, tableRef, pqIdent(publication), tableRef))
+	require.NoError(t, err)
+
+	mysqlDBConn, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
+	require.NoError(t, err)
+	defer func() { _ = mysqlDBConn.Close() }()
+	mysqlTable := "`" + sourceTable + "`"
+	defer func() { _, _ = mysqlDBConn.ExecContext(ctx, "DROP TABLE IF EXISTS "+mysqlTable) }()
+
+	cfg := &config.IngestConfig{
+		SourceURI: "postgres+cdc://" + sourceConnString[len("postgres://"):] +
+			"&publication=" + publication + "&dest_schema=" + mysqlDB + "&discover_interval=1s",
+		DestURI:             mysqlDest.uri,
+		IncrementalStrategy: config.StrategyMerge,
+		SchemaContract:      "evolve",
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        10,
+		Progress:            config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	require.Eventually(t, func() bool {
+		var count int
+		return mysqlDBConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+mysqlTable+" WHERE `_cdc_deleted` = 0").Scan(&count) == nil && count == 2
+	}, 60*time.Second, 500*time.Millisecond, "initial snapshot should land in MySQL")
+
+	var initialTableID uint64
+	require.NoError(t, mysqlDBConn.QueryRowContext(
+		ctx,
+		`SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`,
+		mysqlDB+"/"+sourceTable,
+	).Scan(&initialTableID))
+
+	_, err = srcPool.Exec(ctx, fmt.Sprintf(`
+		ALTER TABLE %s ALTER COLUMN amount TYPE NUMERIC(35,4);
+		INSERT INTO %s VALUES (3, 123456789012345678901234567890.1250);
+	`, tableRef, tableRef))
+	require.NoError(t, err)
+	waitForPostgresCDCSlotConfirmation(t, ctx, srcPool, runErr, "the replacement snapshot should be committed after MySQL schema evolution")
+
+	_, err = srcPool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s VALUES (4, 987654321098765432109876543210.8750)`, tableRef))
+	require.NoError(t, err)
+	waitForPostgresCDCSlotConfirmation(t, ctx, srcPool, runErr, "the MySQL stream should remain alive after schema evolution")
+
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
+
+	var dataType string
+	var precision, scale int
+	require.NoError(t, mysqlDBConn.QueryRowContext(ctx, `
+		SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
+		FROM information_schema.columns
+		WHERE table_schema = ? AND table_name = ? AND column_name = 'amount'
+	`, mysqlDB, sourceTable).Scan(&dataType, &precision, &scale))
+	require.Equal(t, "decimal", dataType)
+	require.Equal(t, 35, precision)
+	require.Equal(t, 4, scale)
+
+	var resultTableID uint64
+	require.NoError(t, mysqlDBConn.QueryRowContext(
+		ctx,
+		`SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?`,
+		mysqlDB+"/"+sourceTable,
+	).Scan(&resultTableID))
+	require.NotEqual(t, initialTableID, resultTableID, "the regression must exercise an InnoDB table rebuild")
+
+	var amount, tableComment string
+	require.NoError(t, mysqlDBConn.QueryRowContext(
+		ctx,
+		"SELECT CAST(amount AS CHAR) FROM "+mysqlTable+" WHERE id = 4 AND `_cdc_deleted` = 0",
+	).Scan(&amount))
+	require.Equal(t, "987654321098765432109876543210.8750", amount)
+	require.NoError(t, mysqlDBConn.QueryRowContext(ctx, `
+		SELECT TABLE_COMMENT FROM information_schema.tables
+		WHERE table_schema = ? AND table_name = ?
+	`, mysqlDB, sourceTable).Scan(&tableComment))
+	require.Empty(t, tableComment, "the transient schema-evolution guard must be removed")
+}
+
+func waitForPostgresCDCSlotConfirmation(
+	t *testing.T,
+	ctx context.Context,
+	srcPool *pgxpool.Pool,
+	runErr <-chan error,
+	message string,
+) {
+	t.Helper()
+	var targetLSN string
+	require.NoError(t, srcPool.QueryRow(ctx, `SELECT pg_current_wal_lsn()::text`).Scan(&targetLSN))
+	var streamFailure error
+	confirmed := false
+	finished := assert.Eventually(t, func() bool {
+		select {
+		case streamFailure = <-runErr:
+			return true
+		default:
+		}
+		return srcPool.QueryRow(ctx, `
+			SELECT COALESCE(confirmed_flush_lsn >= $1::pg_lsn, false)
+			FROM pg_replication_slots
+			WHERE slot_name LIKE 'ingestr_%'
+			LIMIT 1
+		`, targetLSN).Scan(&confirmed) == nil && confirmed
+	}, 60*time.Second, 500*time.Millisecond, message)
+	require.NoError(t, streamFailure)
+	require.True(t, finished && confirmed)
+}
+
 func TestPostgresCDC_MultiTableTrimWhitespace(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

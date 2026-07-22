@@ -148,22 +148,34 @@ func (j *MultiTableIngestionJob) ApplyEvolutionFor(ctx context.Context, sourceTa
 // evolution, used when a CDC source re-announces a table whose source schema
 // changed while streaming.
 func evolveDestinationTable(ctx context.Context, dest destination.Destination, destTable string, sourceSchema *schema.TableSchema, cfg *config.IngestConfig) error {
+	_, err := evolveDestinationTableIfIncarnation(ctx, dest, destTable, sourceSchema, cfg, "")
+	return err
+}
+
+func evolveDestinationTableIfIncarnation(
+	ctx context.Context,
+	dest destination.Destination,
+	destTable string,
+	sourceSchema *schema.TableSchema,
+	cfg *config.IngestConfig,
+	expectedIncarnation string,
+) (string, error) {
 	destSchema, err := dest.GetTableSchema(ctx, destTable)
 	if err != nil {
-		return fmt.Errorf("failed to get destination schema: %w", err)
+		return "", fmt.Errorf("failed to get destination schema: %w", err)
 	}
 	if destSchema == nil {
-		return nil
+		return expectedIncarnation, nil
 	}
 	destSchema = destination.PreserveSourceCDCColumnTypes(destSchema, sourceSchema)
 
 	contractMode, err := schemaevolution.ParseContractMode(cfg.SchemaContract)
 	if err != nil {
-		return fmt.Errorf("failed to parse schema contract: %w", err)
+		return "", fmt.Errorf("failed to parse schema contract: %w", err)
 	}
 	overrides, err := schemaevolution.ParseColumnOverrides(cfg.Columns)
 	if err != nil {
-		return fmt.Errorf("failed to parse column overrides: %w", err)
+		return "", fmt.Errorf("failed to parse column overrides: %w", err)
 	}
 
 	primaryKeys := cfg.PrimaryKeys
@@ -178,42 +190,65 @@ func evolveDestinationTable(ctx context.Context, dest destination.Destination, d
 	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
 	if err != nil {
-		return fmt.Errorf("failed to compare schemas: %w", err)
+		return "", fmt.Errorf("failed to compare schemas: %w", err)
 	}
 	if !comparison.HasChanges {
-		return nil
+		return expectedIncarnation, nil
 	}
 
 	contractResult := schemaevolution.ApplyContract(schemaevolution.SchemaContract{Mode: contractMode}, comparison)
 	if contractMode == schemaevolution.ContractFreeze && contractResult.HasViolations() {
-		return contractResult.ViolationError()
+		return "", contractResult.ViolationError()
 	}
 	filtered := &schemaevolution.SchemaComparison{
 		Changes:    contractResult.Allowed,
 		HasChanges: len(contractResult.Allowed) > 0,
 	}
-	return applyEvolutionPlan(ctx, dest, &schemaevolution.EvolutionPlan{
+	return applyEvolutionPlanIfIncarnation(ctx, dest, &schemaevolution.EvolutionPlan{
 		Table:       destTable,
 		Comparison:  filtered,
 		FinalSchema: schemaevolution.BuildFinalSchema(destSchema, filtered),
-	})
+	}, expectedIncarnation)
 }
 
 // applyEvolutionPlan asks the destination to apply an abstract evolution plan.
 // Destinations that cannot evolve schemas (do not implement SchemaEvolver) are
 // silently skipped, matching the previous no-dialect behavior.
 func applyEvolutionPlan(ctx context.Context, dest destination.Destination, plan *schemaevolution.EvolutionPlan) error {
+	_, err := applyEvolutionPlanIfIncarnation(ctx, dest, plan, "")
+	return err
+}
+
+func applyEvolutionPlanIfIncarnation(ctx context.Context, dest destination.Destination, plan *schemaevolution.EvolutionPlan, expectedIncarnation string) (string, error) {
 	if plan == nil || !plan.HasChanges() {
-		return nil
+		return expectedIncarnation, nil
 	}
 	evolver, ok := dest.(schemaevolution.SchemaEvolver)
 	if !ok {
-		return nil
+		return expectedIncarnation, nil
 	}
 	ctx = annotation.WithStep(ctx, annotation.StepEvolve)
-	warnings, err := evolver.ApplySchemaEvolution(ctx, plan.Table, plan.Comparison)
+	resultIncarnation := expectedIncarnation
+	var warnings []string
+	var err error
+	if conditional, ok := dest.(destination.CDCConditionalSchemaEvolver); expectedIncarnation != "" && ok {
+		warnings, resultIncarnation, err = conditional.ApplySchemaEvolutionIfIncarnation(ctx, plan.Table, plan.Comparison, expectedIncarnation)
+	} else {
+		warnings, err = evolver.ApplySchemaEvolution(ctx, plan.Table, plan.Comparison)
+		if err == nil && expectedIncarnation != "" {
+			provider, ok := dest.(destination.CDCTargetIncarnationProvider)
+			if !ok {
+				return "", fmt.Errorf("destination scheme %q cannot verify CDC target identity after schema evolution", dest.GetScheme())
+			}
+			var exists bool
+			resultIncarnation, exists, err = provider.CDCTargetIncarnation(ctx, plan.Table)
+			if err == nil && (!exists || resultIncarnation != expectedIncarnation) {
+				return "", fmt.Errorf("CDC destination table %q changed physical incarnation during unfenced schema evolution", plan.Table)
+			}
+		}
+	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, w := range warnings {
 		fmt.Printf("Warning: %s\n", w)
@@ -222,7 +257,7 @@ func applyEvolutionPlan(ctx context.Context, dest destination.Destination, plan 
 	// EvolutionPlan.Apply contract (which cleared its rendered statements) and
 	// prevents re-issuing ADD COLUMN/ALTER on a double-apply.
 	plan.Comparison = nil
-	return nil
+	return resultIncarnation, nil
 }
 
 // GetDestTableName returns the destination table name for a source table.

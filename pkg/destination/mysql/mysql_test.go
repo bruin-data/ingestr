@@ -10,6 +10,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -259,6 +260,108 @@ func TestCDCTargetIncarnationReadsInnoDBDictionaryID(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestConditionalSchemaEvolutionReturnsRebuiltInnoDBIncarnation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+	expected := mysqlTableIncarnation("app", "events", 42)
+
+	mock.ExpectExec(regexp.QuoteMeta("LOCK TABLES `app`.`events` WRITE")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectMySQLCDCIncarnation(mock, "app", "events", 42)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_COMMENT FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_COMMENT"}).AddRow("owner's\\table"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT @@SESSION.sql_mode")).
+		WillReturnRows(sqlmock.NewRows([]string{"sql_mode"}).AddRow("STRICT_TRANS_TABLES"))
+	mock.ExpectExec("^ALTER TABLE app\\.events MODIFY COLUMN `amount` DECIMAL\\(35,4\\) NULL, COMMENT = '__ingestr_cdc_schema_guard_[0-9a-f]{32}'$").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("LOCK TABLES `app`.`events` WRITE")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectMySQLSchemaEvolutionGuard(mock, "app", "events", true)
+	expectMySQLCDCIncarnation(mock, "app", "events", 43)
+	expectMySQLSchemaEvolutionGuard(mock, "app", "events", true)
+	mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE `app`.`events` COMMENT = 'owner''s\\\\table', ALGORITHM=INPLACE")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("UNLOCK TABLES")).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	comparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type:       schemaevolution.ChangeWidenType,
+			ColumnName: "amount",
+			OldColumn:  &schema.Column{Name: "amount", DataType: schema.TypeInt64, Nullable: true},
+			NewColumn:  schema.Column{Name: "amount", DataType: schema.TypeDecimal, Precision: 35, Scale: 4, Nullable: true},
+		}},
+	}
+
+	warnings, result, err := dest.ApplySchemaEvolutionIfIncarnation(t.Context(), "app.events", comparison, expected)
+	require.NoError(t, err)
+	require.Empty(t, warnings)
+	require.Equal(t, mysqlTableIncarnation("app", "events", 43), result)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestConditionalSchemaEvolutionRejectsReplacementAfterRebuild(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &MySQLDestination{db: db, database: "app"}
+
+	mock.ExpectExec(regexp.QuoteMeta("LOCK TABLES `app`.`events` WRITE")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectMySQLCDCIncarnation(mock, "app", "events", 42)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_COMMENT FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs("app", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_COMMENT"}).AddRow(""))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT @@SESSION.sql_mode")).
+		WillReturnRows(sqlmock.NewRows([]string{"sql_mode"}).AddRow(""))
+	mock.ExpectExec("^ALTER TABLE app\\.events ADD COLUMN `status` TEXT NULL, COMMENT = '__ingestr_cdc_schema_guard_[0-9a-f]{32}'$").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("LOCK TABLES `app`.`events` WRITE")).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectMySQLSchemaEvolutionGuard(mock, "app", "events", false)
+	mock.ExpectExec(regexp.QuoteMeta("UNLOCK TABLES")).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	comparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type:       schemaevolution.ChangeAddColumn,
+			ColumnName: "status",
+			NewColumn:  schema.Column{Name: "status", DataType: schema.TypeString, Nullable: true},
+		}},
+	}
+
+	_, _, err = dest.ApplySchemaEvolutionIfIncarnation(
+		t.Context(),
+		"app.events",
+		comparison,
+		mysqlTableIncarnation("app", "events", 42),
+	)
+	require.ErrorContains(t, err, "was replaced during schema evolution")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func expectMySQLCDCIncarnation(mock sqlmock.Sqlmock, database, table string, tableID uint64) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ENGINE FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")).
+		WithArgs(database, table).
+		WillReturnRows(sqlmock.NewRows([]string{"ENGINE"}).AddRow("InnoDB"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT TABLE_ID FROM information_schema.INNODB_TABLES WHERE NAME = ?")).
+		WithArgs(database + "/" + table).
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_ID"}).AddRow(tableID))
+}
+
+func expectMySQLSchemaEvolutionGuard(mock sqlmock.Sqlmock, database, table string, matches bool) {
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (
+		SELECT 1 FROM information_schema.tables
+		WHERE table_schema = ? AND table_name = ? AND table_comment = ?
+	)`)).
+		WithArgs(database, table, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"matches"}).AddRow(matches))
+}
+
+func TestMySQLStringLiteralHonorsSQLMode(t *testing.T) {
+	assert.Equal(t, `'owner''s\\table'`, mysqlStringLiteral(`owner's\table`, "STRICT_TRANS_TABLES"))
+	assert.Equal(t, `'owner''s\table'`, mysqlStringLiteral(`owner's\table`, "NO_BACKSLASH_ESCAPES"))
 }
 
 func TestCDCTruncatePreservesInnoDBPhysicalIdentityWithoutChangingBatchTruncate(t *testing.T) {

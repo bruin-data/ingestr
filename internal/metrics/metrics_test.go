@@ -225,6 +225,15 @@ func TestServeExposesDebugVars(t *testing.T) {
 	if _, ok := out["ingestr_stream_rows_synced"]; !ok {
 		t.Fatalf("expected ingestr_stream_rows_synced in /debug/vars, got keys %v", out)
 	}
+
+	// expvar injects cmdline and memstats into the shared registry; the handler
+	// must filter them out so scrapes never trigger runtime.ReadMemStats or leak
+	// the process arguments.
+	for _, builtin := range []string{"memstats", "cmdline"} {
+		if _, ok := out[builtin]; ok {
+			t.Fatalf("expected %q to be excluded from /debug/vars, got keys %v", builtin, out)
+		}
+	}
 }
 
 func TestServeStopDoesNotHang(t *testing.T) {
