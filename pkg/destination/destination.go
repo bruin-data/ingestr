@@ -572,6 +572,18 @@ type StagingTableInserter interface {
 	InsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) error
 }
 
+// PreparedStagingTableInsert executes an insert that was validated before the
+// target table was truncated.
+type PreparedStagingTableInsert interface {
+	Insert(ctx context.Context) error
+}
+
+// StagingTableInsertPreparer validates and prepares a staging insert before a
+// non-atomic truncate+insert finalization starts.
+type StagingTableInsertPreparer interface {
+	PrepareInsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) (PreparedStagingTableInsert, error)
+}
+
 // AtomicTruncateInsertSchemaEvolver marks an atomic truncate+insert writer that
 // commits supported schema evolution and the replacement rows together.
 type AtomicTruncateInsertSchemaEvolver interface {

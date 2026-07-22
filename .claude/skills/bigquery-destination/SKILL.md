@@ -157,6 +157,9 @@ table first, including keyless loads. Once staging is complete and schema
 evolution has been applied, the target is truncated in place so dependent
 objects survive. Keyed loads use `MergeTable` to deduplicate staging into the
 empty target. Keyless loads run an explicit insert-select query from staging.
+The keyless insert is validated and its required type casts are resolved from
+table metadata before the target is truncated, so metadata failures leave the
+target untouched.
 BigQuery cannot include `TRUNCATE TABLE` in a transaction, so readers can
 observe an empty target between truncate and insert.
 

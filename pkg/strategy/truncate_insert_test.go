@@ -25,6 +25,32 @@ type stagingInsertDestination struct {
 	insertErr   error
 }
 
+type preparedStagingInsertDestination struct {
+	*stagingInsertDestination
+	prepareErr error
+}
+
+type preparedStagingInsert struct {
+	destination *preparedStagingInsertDestination
+}
+
+func (i *preparedStagingInsert) Insert(_ context.Context) error {
+	i.destination.mu.Lock()
+	i.destination.calls = append(i.destination.calls, "PreparedInsertFromStaging")
+	i.destination.mu.Unlock()
+	return nil
+}
+
+func (d *preparedStagingInsertDestination) PrepareInsertFromStaging(_ context.Context, _ destination.InsertFromStagingOptions) (destination.PreparedStagingTableInsert, error) {
+	d.mu.Lock()
+	d.calls = append(d.calls, "PrepareInsertFromStaging")
+	d.mu.Unlock()
+	if d.prepareErr != nil {
+		return nil, d.prepareErr
+	}
+	return &preparedStagingInsert{destination: d}, nil
+}
+
 func (d *stagingInsertDestination) InsertFromStaging(_ context.Context, opts destination.InsertFromStagingOptions) error {
 	d.mu.Lock()
 	d.calls = append(d.calls, "InsertFromStaging")
@@ -137,6 +163,50 @@ func TestTruncateInsertStrategy_Execute_KeylessWriteFailureLeavesTargetUntouched
 	require.True(t, dest.writeCalls[0].StagingTable)
 	require.Empty(t, dest.truncateCalls)
 	require.Empty(t, stagingDest.insertCalls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessPreparationFailureLeavesTargetUntouched(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	preparedDest := &preparedStagingInsertDestination{
+		stagingInsertDestination: stagingDest,
+		prepareErr:               errors.New("metadata unavailable"),
+	}
+	job.Destination = preparedDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to prepare insert from staging: metadata unavailable")
+	require.Empty(t, dest.truncateCalls)
+	require.Empty(t, stagingDest.insertCalls)
+	require.Contains(t, dest.calls, "PrepareInsertFromStaging")
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessPreparedInsertIsBuiltBeforeTruncate(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = &preparedStagingInsertDestination{stagingInsertDestination: stagingDest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Empty(t, stagingDest.insertCalls)
+	require.Equal(t, []string{
+		"PrepareTable",
+		"PrepareTable",
+		"WriteParallel",
+		"PrepareInsertFromStaging",
+		"TruncateTable",
+		"PreparedInsertFromStaging",
+		"DropTable",
+	}, dest.calls)
 }
 
 func TestTruncateInsertStrategy_ExecuteWithStaging_FullRefreshUsesLeasedSlotSuffix(t *testing.T) {

@@ -63,10 +63,11 @@ func (s *TruncateInsertStrategy) Execute(ctx context.Context, job *IngestionJob)
 func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
 	atomicWriter, supportsAtomicFinalize := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
 	stagingInserter, supportsStagingInsert := job.Destination.(destination.StagingTableInserter)
+	stagingInsertPreparer, supportsPreparedStagingInsert := job.Destination.(destination.StagingTableInsertPreparer)
 	if len(job.Config.PrimaryKeys) > 0 && !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
 		return fmt.Errorf("destination does not support deduplicated truncate+insert (merge not supported); use replace instead")
 	}
-	if len(job.Config.PrimaryKeys) == 0 && !supportsAtomicFinalize && !supportsStagingInsert {
+	if len(job.Config.PrimaryKeys) == 0 && !supportsAtomicFinalize && !supportsStagingInsert && !supportsPreparedStagingInsert {
 		return fmt.Errorf("destination does not support keyless truncate+insert from staging; use replace instead")
 	}
 
@@ -148,6 +149,18 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	stagingPrimaryKeysUnique := effectivePrimaryKeysGuaranteedUnique(job)
 	incrementalKey := mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey)
+	insertOpts := destination.InsertFromStagingOptions{
+		StagingTable: stagingTable,
+		TargetTable:  targetTable,
+		Columns:      job.Schema.ColumnNames(),
+	}
+	var preparedStagingInsert destination.PreparedStagingTableInsert
+	if len(job.Config.PrimaryKeys) == 0 && !supportsAtomicFinalize && supportsPreparedStagingInsert {
+		preparedStagingInsert, err = stagingInsertPreparer.PrepareInsertFromStaging(ctx, insertOpts)
+		if err != nil {
+			return fmt.Errorf("failed to prepare insert from staging: %w", err)
+		}
+	}
 	if supportsAtomicFinalize {
 		config.Debug("[TRUNCATE+INSERT] Executing atomic insert from staging")
 		if err := atomicWriter.TruncateInsertFromStaging(ctx, destination.TruncateInsertFromStagingOptions{
@@ -176,11 +189,11 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 			}); err != nil {
 				return fmt.Errorf("failed to insert from staging: %w", err)
 			}
-		} else if err := stagingInserter.InsertFromStaging(ctx, destination.InsertFromStagingOptions{
-			StagingTable: stagingTable,
-			TargetTable:  targetTable,
-			Columns:      job.Schema.ColumnNames(),
-		}); err != nil {
+		} else if preparedStagingInsert != nil {
+			if err := preparedStagingInsert.Insert(ctx); err != nil {
+				return fmt.Errorf("failed to insert from staging: %w", err)
+			}
+		} else if err := stagingInserter.InsertFromStaging(ctx, insertOpts); err != nil {
 			return fmt.Errorf("failed to insert from staging: %w", err)
 		}
 	}
