@@ -264,6 +264,60 @@ func (d *FabricDestination) InsertFromStaging(ctx context.Context, opts destinat
 	return nil
 }
 
+func (d *FabricDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, truncateSQL); err != nil {
+		config.LogFailedQuery(truncateSQL, err)
+		return fmt.Errorf("failed to truncate target: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert from staging: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return "", "", errors.New("truncate+insert from staging requires at least one column")
+	}
+
+	columnList := strings.Join(columns, ", ")
+	stagingTable := quoteTable(opts.StagingTable)
+	selectClause := fmt.Sprintf("SELECT %s FROM %s", columnList, stagingTable)
+	if len(opts.PrimaryKeys) > 0 && !opts.StagingPrimaryKeysUnique {
+		orderBy := ""
+		if opts.IncrementalKey != "" {
+			orderBy = quoteColumn(opts.IncrementalKey)
+		}
+		selectClause = destination.DedupStagingSelect(
+			columnList,
+			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+			stagingTable,
+			orderBy,
+		)
+	}
+
+	targetTable := quoteTable(opts.TargetTable)
+	return fmt.Sprintf("TRUNCATE TABLE %s", targetTable),
+		fmt.Sprintf("INSERT INTO %s (%s) %s", targetTable, columnList, selectClause),
+		nil
+}
+
 func (d *FabricDestination) DropTable(ctx context.Context, table string) error {
 	dropSQL := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s",
 		escapeTableName(table), quoteTable(table))

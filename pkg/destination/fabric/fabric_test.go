@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -31,6 +32,58 @@ func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
 
 	if !strings.Contains(sql, "ON target.[id] = source.[id] AND (target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date)))") {
 		t.Fatalf("merge SQL missing incremental predicate: %s", sql)
+	}
+}
+
+func TestTruncateInsertFromStagingRollsBackInsertFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &FabricDestination{db: db}
+	opts := destination.TruncateInsertFromStagingOptions{
+		StagingTable:             "stage.events",
+		TargetTable:              "dbo.events",
+		PrimaryKeys:              []string{"id"},
+		StagingPrimaryKeysUnique: true,
+		Columns:                  []string{"id", "value"},
+	}
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(truncateSQL)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(insertSQL)).WillReturnError(errors.New("insert failed"))
+	mock.ExpectRollback()
+
+	err = dest.TruncateInsertFromStaging(t.Context(), opts)
+	if err == nil || !strings.Contains(err.Error(), "failed to insert from staging") {
+		t.Fatalf("TruncateInsertFromStaging() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildTruncateInsertFromStagingSQLDeduplicatesUncertainKeys(t *testing.T) {
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{
+		StagingTable:   "stage.events",
+		TargetTable:    "dbo.events",
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "updated_at", "value"},
+		IncrementalKey: "updated_at",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncateSQL != "TRUNCATE TABLE [dbo].[events]" {
+		t.Fatalf("truncateSQL = %q", truncateSQL)
+	}
+	if !strings.Contains(insertSQL, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY [updated_at] DESC)") {
+		t.Fatalf("insertSQL does not deduplicate staging rows:\n%s", insertSQL)
 	}
 }
 

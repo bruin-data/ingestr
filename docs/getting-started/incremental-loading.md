@@ -45,7 +45,7 @@ The interval still defines the complete replacement data set: destination rows o
 ## Truncate+Insert
 Truncate+Insert empties the existing destination table in place and then inserts the rows read from the source. Unlike `replace`, it keeps the same destination table object, which can help preserve dependent views, grants, and foreign keys on destinations that support truncation.
 
-This strategy is only available for destinations that support truncating a table in place. It is not atomic on every destination: readers may see an empty table between the truncate and the insert, and a failed insert can leave the table empty.
+This strategy is only available for destinations that support truncating a table in place. PostgreSQL, DuckDB, SQLite, SQL Server, Fabric Warehouse, Synapse dedicated SQL pool, and Databricks finalize the staged load atomically, so an insert failure rolls the target back to its previous rows. Databricks uses an atomic `DELETE` plus `INSERT` block because its multi-statement transactions support DML but not `TRUNCATE` DDL. On other destinations, readers may see an empty table between the truncate and insert, and a failed insert can leave the table empty.
 
 ## Append
 Append writes every row returned by the source to the destination table. By default, it appends all rows read from the source. `incremental_key` is only used for source-side filtering when the source supports it, usually together with `--interval-start` and `--interval-end`; append does not look at the destination table to find the latest value.

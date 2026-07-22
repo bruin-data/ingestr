@@ -68,6 +68,54 @@ func TestSchemes(t *testing.T) {
 	}
 }
 
+func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE target_events (id BIGINT PRIMARY KEY, value VARCHAR NOT NULL)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO target_events VALUES (1, 'old')`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE staging_events (id BIGINT, value VARCHAR)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_events VALUES (2, NULL)`))
+
+	opts := destination.TruncateInsertFromStagingOptions{
+		StagingTable:             "staging_events",
+		TargetTable:              "target_events",
+		PrimaryKeys:              []string{"id"},
+		StagingPrimaryKeysUnique: true,
+		Columns:                  []string{"id", "value"},
+	}
+	require.Error(t, dest.TruncateInsertFromStaging(ctx, opts))
+
+	db := openDuckDB(t, ctx, path)
+	var id int64
+	var value string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id, value FROM target_events`).Scan(&id, &value))
+	require.Equal(t, int64(1), id)
+	require.Equal(t, "old", value)
+
+	require.NoError(t, dest.Exec(ctx, `DELETE FROM staging_events`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_events VALUES (2, 'new')`))
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
+	require.NoError(t, db.Close())
+	require.NoError(t, dest.Close(ctx))
+	db = openDuckDB(t, ctx, path)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id, value FROM target_events`).Scan(&id, &value))
+	require.Equal(t, int64(2), id)
+	require.Equal(t, "new", value)
+}
+
+func TestBuildTruncateInsertFromStagingSQLDeduplicatesUncertainKeys(t *testing.T) {
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{
+		StagingTable:   "stage.events",
+		TargetTable:    "main.events",
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "updated_at", "value"},
+		IncrementalKey: "updated_at",
+	})
+	require.NoError(t, err)
+	require.Equal(t, `TRUNCATE TABLE "main"."events"`, truncateSQL)
+	require.Contains(t, insertSQL, `ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY "updated_at" DESC)`)
+}
+
 func TestWriteCancellationReleasesQueuedRecords(t *testing.T) {
 	t.Setenv("INGESTR_DUCKDB_CHECKPOINT_ROWS", "-1")
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())

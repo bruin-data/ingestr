@@ -16,7 +16,54 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/stretchr/testify/require"
 )
+
+func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "truncate-insert.db")
+	require.NoError(t, d.Connect(t.Context(), "sqlite://"+path))
+	t.Cleanup(func() { _ = d.Close(t.Context()) })
+	require.NoError(t, d.Exec(t.Context(), `CREATE TABLE target_events (id INTEGER PRIMARY KEY, value TEXT NOT NULL)`))
+	require.NoError(t, d.Exec(t.Context(), `INSERT INTO target_events VALUES (1, 'old')`))
+	require.NoError(t, d.Exec(t.Context(), `CREATE TABLE staging_events (id INTEGER, value TEXT)`))
+	require.NoError(t, d.Exec(t.Context(), `INSERT INTO staging_events VALUES (2, NULL)`))
+
+	opts := destination.TruncateInsertFromStagingOptions{
+		StagingTable:             "staging_events",
+		TargetTable:              "target_events",
+		PrimaryKeys:              []string{"id"},
+		StagingPrimaryKeysUnique: true,
+		Columns:                  []string{"id", "value"},
+	}
+	require.Error(t, d.TruncateInsertFromStaging(t.Context(), opts))
+
+	var id int64
+	var value string
+	require.NoError(t, d.db.QueryRowContext(t.Context(), `SELECT id, value FROM target_events`).Scan(&id, &value))
+	require.Equal(t, int64(1), id)
+	require.Equal(t, "old", value)
+
+	require.NoError(t, d.Exec(t.Context(), `DELETE FROM staging_events`))
+	require.NoError(t, d.Exec(t.Context(), `INSERT INTO staging_events VALUES (2, 'new')`))
+	require.NoError(t, d.TruncateInsertFromStaging(t.Context(), opts))
+	require.NoError(t, d.db.QueryRowContext(t.Context(), `SELECT id, value FROM target_events`).Scan(&id, &value))
+	require.Equal(t, int64(2), id)
+	require.Equal(t, "new", value)
+}
+
+func TestBuildTruncateInsertFromStagingSQLDeduplicatesUncertainKeys(t *testing.T) {
+	deleteSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{
+		StagingTable:   "stage.events",
+		TargetTable:    "main.events",
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "updated_at", "value"},
+		IncrementalKey: "updated_at",
+	})
+	require.NoError(t, err)
+	require.Equal(t, `DELETE FROM "main"."events"`, deleteSQL)
+	require.Contains(t, insertSQL, `ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY "updated_at" DESC)`)
+}
 
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
 	d := NewSQLiteDestination()

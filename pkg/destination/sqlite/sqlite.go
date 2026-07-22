@@ -881,6 +881,60 @@ func (d *SQLiteDestination) InsertFromStaging(ctx context.Context, opts destinat
 	return nil
 }
 
+func (d *SQLiteDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	deleteSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, deleteSQL); err != nil {
+		config.LogFailedQuery(deleteSQL, err)
+		return fmt.Errorf("failed to clear target: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert from staging: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return "", "", errors.New("truncate+insert from staging requires at least one column")
+	}
+
+	columnList := strings.Join(columns, ", ")
+	stagingTable := destination.QuoteTableName(opts.StagingTable)
+	selectClause := fmt.Sprintf("SELECT %s FROM %s", columnList, stagingTable)
+	if len(opts.PrimaryKeys) > 0 && !opts.StagingPrimaryKeysUnique {
+		orderBy := ""
+		if opts.IncrementalKey != "" {
+			orderBy = destination.QuoteIdentifier(opts.IncrementalKey)
+		}
+		selectClause = destination.DedupStagingSelect(
+			columnList,
+			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+			stagingTable,
+			orderBy,
+		)
+	}
+
+	targetTable := destination.QuoteTableName(opts.TargetTable)
+	return fmt.Sprintf("DELETE FROM %s", targetTable),
+		fmt.Sprintf("INSERT INTO %s (%s) %s", targetTable, columnList, selectClause),
+		nil
+}
+
 // SupportsReplaceStrategy returns true as SQLite supports the replace strategy.
 func (d *SQLiteDestination) SupportsReplaceStrategy() bool { return true }
 

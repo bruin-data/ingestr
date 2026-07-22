@@ -1457,6 +1457,67 @@ func (d *DuckDBDestination) InsertFromStaging(ctx context.Context, opts destinat
 	return nil
 }
 
+func (d *DuckDBDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.exec(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = d.exec(ctx, "ROLLBACK")
+		}
+	}()
+
+	if err := d.exec(ctx, truncateSQL); err != nil {
+		config.LogFailedQuery(truncateSQL, err)
+		return fmt.Errorf("failed to truncate target: %w", err)
+	}
+	if err := d.exec(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert from staging: %w", err)
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return "", "", errors.New("truncate+insert from staging requires at least one column")
+	}
+
+	columnList := strings.Join(columns, ", ")
+	stagingTable := destination.QuoteTableName(opts.StagingTable)
+	selectClause := fmt.Sprintf("SELECT %s FROM %s", columnList, stagingTable)
+	if len(opts.PrimaryKeys) > 0 && !opts.StagingPrimaryKeysUnique {
+		orderBy := ""
+		if opts.IncrementalKey != "" {
+			orderBy = quoteIdentifier(opts.IncrementalKey)
+		}
+		selectClause = destination.DedupStagingSelect(
+			columnList,
+			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+			stagingTable,
+			orderBy,
+		)
+	}
+
+	targetTable := destination.QuoteTableName(opts.TargetTable)
+	return fmt.Sprintf("TRUNCATE TABLE %s", targetTable),
+		fmt.Sprintf("INSERT INTO %s (%s) %s", targetTable, columnList, selectClause),
+		nil
+}
+
 func (d *DuckDBDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
 	if expectedIncarnation == "" {
 		return fmt.Errorf("cannot conditionally truncate %s without a destination incarnation", table)

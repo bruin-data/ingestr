@@ -530,6 +530,51 @@ func (d *DatabricksDestination) InsertFromStaging(ctx context.Context, opts dest
 	return nil
 }
 
+func (d *DatabricksDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	deleteSQL, insertSQL, atomicSQL, err := d.buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+	config.Debug("[DATABRICKS] Executing transactional target clear: %s", deleteSQL)
+	config.Debug("[DATABRICKS] Executing transactional insert: %s", insertSQL)
+	if err := d.executeStatement(ctx, atomicSQL); err != nil {
+		config.LogFailedQuery(atomicSQL, err)
+		return fmt.Errorf("failed to execute atomic truncate+insert load: %w", err)
+	}
+	return nil
+}
+
+func (d *DatabricksDestination) buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, string, error) {
+	_, stagingName := d.parseTableName(opts.StagingTable)
+	targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return "", "", "", errors.New("truncate+insert from staging requires at least one column")
+	}
+
+	targetTable := d.quoteFullTable(targetSchema, targetName)
+	stagingTable := d.quoteFullTable(stagingSchema, stagingName)
+	columnList := strings.Join(columns, ", ")
+	selectClause := fmt.Sprintf("SELECT %s FROM %s", columnList, stagingTable)
+	if len(opts.PrimaryKeys) > 0 && !opts.StagingPrimaryKeysUnique {
+		orderBy := ""
+		if opts.IncrementalKey != "" {
+			orderBy = quoteIdentifier(opts.IncrementalKey)
+		}
+		selectClause = destination.DedupStagingSelect(
+			columnList,
+			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+			stagingTable,
+			orderBy,
+		)
+	}
+
+	deleteSQL := fmt.Sprintf("DELETE FROM %s", targetTable)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetTable, columnList, selectClause)
+	atomicSQL := fmt.Sprintf("BEGIN ATOMIC\n  %s;\n  %s;\nEND;", deleteSQL, insertSQL)
+	return deleteSQL, insertSQL, atomicSQL, nil
+}
+
 func (d *DatabricksDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
 	if len(args) > 0 {
 		for i, arg := range args {
