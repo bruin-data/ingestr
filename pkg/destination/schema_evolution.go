@@ -73,6 +73,9 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 			}
 
 		case schemaevolution.ChangeWidenType, schemaevolution.ChangeOverrideType:
+			if sameDestinationType(dialect, change) {
+				continue
+			}
 			if !dialect.SupportsAlterType() {
 				warnings = append(warnings, fmt.Sprintf(
 					"column %q type change skipped: %s does not support ALTER COLUMN TYPE",
@@ -137,11 +140,12 @@ func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, tabl
 	if comparison != nil {
 		for _, change := range comparison.Changes {
 			if change.Type == schemaevolution.ChangeWidenType || change.Type == schemaevolution.ChangeOverrideType {
-				if !dialect.SupportsAlterType() || dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn) == "" {
-					return nil, fmt.Errorf(
-						"apply schema evolution: column %q requires a type change, which generic %s DDL does not support",
-						change.ColumnName, dialect.Name(),
-					)
+				if sameDestinationType(dialect, change) {
+					continue
+				}
+				stmt := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn)
+				if !dialect.SupportsAlterType() || stmt == "" {
+					return nil, unsupportedTypeChangeError(dialect, table, change, stmt)
 				}
 			}
 			needsRelaxation := change.Type == schemaevolution.ChangeRelaxNullability ||
@@ -164,4 +168,34 @@ func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, tabl
 		}
 	}
 	return warnings, nil
+}
+
+func sameDestinationType(dialect Dialect, change schemaevolution.SchemaChange) bool {
+	return change.OldColumn != nil && dialect.TypeName(*change.OldColumn) == dialect.TypeName(change.NewColumn)
+}
+
+func unsupportedTypeChangeError(dialect Dialect, table string, change schemaevolution.SchemaChange, stmt string) error {
+	oldLogicalType := "unknown"
+	oldDestinationType := "unknown"
+	if change.OldColumn != nil {
+		oldLogicalType = change.OldColumn.DataType.String()
+		oldDestinationType = dialect.TypeName(*change.OldColumn)
+	}
+
+	detail := fmt.Sprintf(
+		"apply schema evolution: column %q on table %q requires a type change from %s (%s type %s) to %s (%s type %s), which generic %s DDL does not support",
+		change.ColumnName,
+		table,
+		oldLogicalType,
+		dialect.Name(),
+		oldDestinationType,
+		change.NewColumn.DataType,
+		dialect.Name(),
+		dialect.TypeName(change.NewColumn),
+		dialect.Name(),
+	)
+	if stmt == "" {
+		return fmt.Errorf("%s; no ALTER COLUMN query was generated or executed", detail)
+	}
+	return fmt.Errorf("%s; query was not executed: %s", detail, stmt)
 }
