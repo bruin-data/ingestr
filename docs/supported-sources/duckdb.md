@@ -139,7 +139,8 @@ GCS uses S3 interoperability (HMAC) credentials, not OAuth. Create HMAC keys in 
 
 Authenticate either with an account-key `storage_connection_string`, or with
 `storage_account_name` alone to use DuckDB's credential chain (managed identity,
-`az login`, or environment credentials).
+`az login`, or environment credentials). Set exactly one — if both are provided,
+`storage_connection_string` takes precedence and `storage_account_name` is ignored.
 
 ```plaintext
 # Account-key auth
@@ -218,8 +219,8 @@ ingestr ingest \
 | `storage_path` | yes | Bucket/container path the lake writes to (`s3://`, `gs://`, `az://`) |
 | `storage_access_key` | yes (s3 / gcs) | — |
 | `storage_secret_key` | yes (s3 / gcs) | — |
-| `storage_connection_string` | yes (azure, unless `storage_account_name`) | Account-key connection string |
-| `storage_account_name` | yes (azure, unless `storage_connection_string`) | Uses DuckDB's credential chain (managed identity / `az login` / env) |
+| `storage_connection_string` | yes (azure, unless `storage_account_name`) | Account-key connection string. Takes precedence if both are set |
+| `storage_account_name` | yes (azure, unless `storage_connection_string`) | Uses DuckDB's credential chain (managed identity / `az login` / env). Ignored if `storage_connection_string` is set |
 | `storage_endpoint` | yes for S3-compatible | Omit for real AWS S3 |
 | `storage_url_style` | yes for S3-compatible | `path` for MinIO, R2, B2, etc. |
 | `storage_use_ssl` | no | Set `false` for plain-HTTP local dev |
