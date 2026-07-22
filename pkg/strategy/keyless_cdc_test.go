@@ -142,6 +142,31 @@ func TestMergeStrategy_MultiTableCDCUsesOneAtomicDestinationMerge(t *testing.T) 
 	assert.Empty(t, base.mergeCalls)
 }
 
+func TestMergeStrategy_MixedKeyedAndKeylessCDCDoesNotClaimAtomicMerge(t *testing.T) {
+	base := &fakeDestination{}
+	dest := &atomicBatchDestination{fakeDestination: base}
+	keyed := keylessCDCSchema()
+	keyed.PrimaryKeys = []string{"id"}
+	tables := []source.SourceTableInfo{
+		{Name: "users", Schema: keyed, PrimaryKeys: []string{"id"}},
+		{Name: "events", Schema: keylessCDCSchema()},
+	}
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         &announcingMultiTableSource{tables: tables, records: records},
+		Destination:    dest,
+		Tables:         tables,
+		TableDestNames: map[string]string{"users": "users", "events": "events"},
+	}
+
+	require.NoError(t, (&MergeStrategy{}).ExecuteMultiTable(t.Context(), job))
+	assert.Empty(t, dest.atomicCalls)
+	require.Len(t, base.mergeCalls, 1)
+	assert.Equal(t, "users", base.mergeCalls[0].TargetTable)
+}
+
 func TestStreaming_PrepareTableKeylessCDCSkipsStaging(t *testing.T) {
 	dest := &fakeDestination{}
 	exec := NewStreamingExecutor(StreamingOptions{

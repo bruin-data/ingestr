@@ -497,7 +497,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if atomicMerger, ok := job.Destination.(destination.CDCMultiTableAtomicMerger); ok && anyTableHasCDC {
+	if atomicMerger, ok := job.Destination.(destination.CDCMultiTableAtomicMerger); ok && anyTableHasCDC && len(stagingTables) == len(job.Tables) {
 		dropStagingTables := func() {
 			if source.ConnectorLeaseLoss(ctx) != nil {
 				return
