@@ -100,7 +100,9 @@ func replacementSnapshotLoop(t *testing.T) (*flushLoop, *orderedCDCStateDestinat
 		Strategy:      config.StrategyMerge,
 		StateManager:  manager,
 	}, map[string]*streamTableState{"public.items": st})
-	loop.evolveTable = func(context.Context, string, *schema.TableSchema) error { return nil }
+	loop.evolveTable = func(_ context.Context, _ string, _ *schema.TableSchema, expectedIncarnation string) (string, error) {
+		return expectedIncarnation, nil
+	}
 	dest.resetOrder()
 	return loop, dest, manager, st
 }

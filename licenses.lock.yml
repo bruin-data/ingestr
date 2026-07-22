@@ -905,6 +905,11 @@ dependencies:
       licenses:
         - BSD-2-Clause
       status: allowed
+    - module: github.com/gofrs/flock
+      version: v0.13.0
+      licenses:
+        - BSD-3-Clause
+      status: allowed
     - module: github.com/gogo/protobuf
       version: v1.3.2
       licenses:

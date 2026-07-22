@@ -2,6 +2,8 @@ package duckdb
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -26,6 +28,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
 	"github.com/bruin-data/ingestr/pkg/tablename"
+	"github.com/gofrs/flock"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -33,6 +36,9 @@ type DuckDBDestination struct {
 	filePath string
 	catalog  string
 	mu       sync.Mutex
+
+	memoryLeaseMu   sync.Mutex
+	memoryLeaseHeld bool
 
 	db   adbc.Database
 	conn adbc.Connection
@@ -46,8 +52,62 @@ type DuckDBDestination struct {
 	schemasMu sync.Mutex
 }
 
+type duckDBManagedCDCRunLease struct {
+	release     func() error
+	done        chan struct{}
+	releaseOnce sync.Once
+	releaseErr  error
+}
+
 func NewDuckDBDestination() *DuckDBDestination {
 	return &DuckDBDestination{}
+}
+
+func (d *DuckDBDestination) AcquireManagedCDCRunLease(_ context.Context, connectorID string) (source.ConnectorLease, error) {
+	if connectorID == "" {
+		return nil, fmt.Errorf("managed CDC connector ID is empty")
+	}
+	if strings.HasPrefix(d.filePath, "md:") {
+		return nil, fmt.Errorf("MotherDuck does not support local managed CDC run leases")
+	}
+	if d.filePath == ":memory:" {
+		d.memoryLeaseMu.Lock()
+		defer d.memoryLeaseMu.Unlock()
+		if d.memoryLeaseHeld {
+			return nil, fmt.Errorf("another DuckDB CDC run already owns the destination")
+		}
+		d.memoryLeaseHeld = true
+		return &duckDBManagedCDCRunLease{
+			done: make(chan struct{}),
+			release: func() error {
+				d.memoryLeaseMu.Lock()
+				defer d.memoryLeaseMu.Unlock()
+				d.memoryLeaseHeld = false
+				return nil
+			},
+		}, nil
+	}
+	lockPath := d.filePath + ".ingestr-cdc.lock"
+	fileLock := flock.New(lockPath)
+	locked, err := fileLock.TryLock()
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire DuckDB CDC run lease: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("another DuckDB CDC run already owns the destination")
+	}
+	return &duckDBManagedCDCRunLease{release: fileLock.Unlock, done: make(chan struct{})}, nil
+}
+
+func (l *duckDBManagedCDCRunLease) Done() <-chan struct{} { return l.done }
+
+func (l *duckDBManagedCDCRunLease) Err() error { return nil }
+
+func (l *duckDBManagedCDCRunLease) Release() error {
+	l.releaseOnce.Do(func() {
+		l.releaseErr = l.release()
+	})
+	return l.releaseErr
 }
 
 func (d *DuckDBDestination) recordSchema(table string, sch *schema.TableSchema, pks []string) {
@@ -666,6 +726,31 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			_ = d.exec(ctx, "ROLLBACK")
 		}
 	}()
+	conditional := opts.CDCExpectedIncarnation != "" ||
+		opts.CDCExpectedStagingIncarnation != "" ||
+		opts.CDCExpectedResultIncarnation != ""
+	if conditional {
+		if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
+			return fmt.Errorf("DuckDB CDC conditional swap requires target, staging, and result incarnations")
+		}
+		if !duckSameNamespace(stagingTn, targetTn) {
+			return fmt.Errorf("DuckDB CDC conditional swaps require staging and target tables in the same schema")
+		}
+		currentTarget, exists, err := d.cdcTargetIncarnationLocked(ctx, targetTable)
+		if err != nil {
+			return err
+		}
+		if !exists || currentTarget != opts.CDCExpectedIncarnation {
+			return fmt.Errorf("DuckDB CDC target %s was replaced before conditional swap", targetTable)
+		}
+		currentStaging, exists, err := d.cdcTargetIncarnationLocked(ctx, stagingTable)
+		if err != nil {
+			return err
+		}
+		if !exists || currentStaging != opts.CDCExpectedStagingIncarnation {
+			return fmt.Errorf("DuckDB CDC staging table %s was replaced before conditional swap", stagingTable)
+		}
+	}
 
 	if duckSameNamespace(stagingTn, targetTn) {
 		// Same catalog+schema: cheap rename swap.
@@ -726,6 +811,15 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		}
 		d.forgetSchema(stagingTable)
 	}
+	if conditional {
+		result, exists, err := d.cdcTargetIncarnationLocked(ctx, targetTable)
+		if err != nil {
+			return err
+		}
+		if !exists || result != opts.CDCExpectedResultIncarnation {
+			return fmt.Errorf("DuckDB CDC target %s was replaced during conditional swap", targetTable)
+		}
+	}
 
 	if err := d.exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("failed to commit swap: %w", err)
@@ -745,6 +839,33 @@ func quoteDuckTable(tn tablename.TableName) string {
 		result = destination.QuoteIdentifier(tn.Catalog) + "." + result
 	}
 	return result
+}
+
+func (d *DuckDBDestination) SupportsCDCConditionalSwap() bool { return true }
+
+func (d *DuckDBDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
+	targetTn := duckTable(targetTable)
+	stagingTn := duckTable(stagingTable)
+	if !duckSameNamespace(stagingTn, targetTn) {
+		return "", "", fmt.Errorf("DuckDB CDC conditional swaps require staging and target tables in the same schema")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	stagingIncarnation, exists, err := d.ensureCDCTargetIncarnationLocked(ctx, stagingTable)
+	if err != nil {
+		return "", "", err
+	}
+	if !exists || stagingIncarnation == "" {
+		return "", "", fmt.Errorf("DuckDB CDC staging table %q has no durable physical incarnation", stagingTable)
+	}
+	metadata, _, err := d.duckDBTargetMetadataLocked(ctx, stagingTable)
+	if err != nil {
+		return "", "", err
+	}
+	marker := duckDBIncarnationMarker(metadata.incarnationComment)
+	resultTable := metadata.table
+	resultTable.Table = targetTn.Table
+	return stagingIncarnation, duckDBTableIncarnation(resultTable, marker), nil
 }
 
 func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -768,6 +889,15 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			_ = d.exec(ctx, "ROLLBACK")
 		}
 	}()
+	if opts.CDCExpectedIncarnation != "" {
+		current, exists, err := d.cdcTargetIncarnationLocked(ctx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		if !exists || current != opts.CDCExpectedIncarnation {
+			return fmt.Errorf("DuckDB CDC target %s was replaced before mutation", opts.TargetTable)
+		}
+	}
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	primaryKeyCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
@@ -1307,6 +1437,38 @@ func (d *DuckDBDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *DuckDBDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return fmt.Errorf("cannot conditionally truncate %s without a destination incarnation", table)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.exec(ctx, "BEGIN"); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = d.exec(ctx, "ROLLBACK")
+		}
+	}()
+	current, exists, err := d.cdcTargetIncarnationLocked(ctx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("DuckDB CDC target %q physical incarnation changed", table)
+	}
+	if err := d.exec(ctx, fmt.Sprintf("DELETE FROM %s", destination.QuoteTableName(table))); err != nil {
+		return fmt.Errorf("failed to conditionally clear DuckDB CDC target %s: %w", table, err)
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func (d *DuckDBDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1361,6 +1523,14 @@ func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
 func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
 func (d *DuckDBDestination) SupportsCDCUnchangedCols() bool     { return true }
+func (d *DuckDBDestination) SupportsCDCConditionalMerge() bool  { return true }
+
+func (d *DuckDBDestination) ValidateManagedCDCState() error {
+	if strings.HasPrefix(d.filePath, "md:") {
+		return fmt.Errorf("MotherDuck does not expose a process-wide managed CDC run lease")
+	}
+	return nil
+}
 
 // GetScheme returns the primary URI scheme for DuckDB.
 func (d *DuckDBDestination) GetScheme() string { return "duckdb" }
@@ -1523,6 +1693,112 @@ func (d *DuckDBDestination) ClaimCDCTarget(ctx context.Context, claimTable strin
 	return reader.Err()
 }
 
+func (d *DuckDBDestination) ClaimAndPrepareEmptyCDCTarget(
+	ctx context.Context,
+	claimTable string,
+	claim destination.CDCTargetClaim,
+	opts destination.PrepareOptions,
+) (string, error) {
+	if opts.Schema == nil {
+		return "", fmt.Errorf("cannot create an empty managed CDC target without a schema")
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return "", err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	targetTn := duckTable(opts.Table)
+	claimTn := duckTable(claim.DestinationTable)
+	if d.catalog == "" {
+		catalog, err := d.currentCatalog(ctx)
+		if err != nil {
+			return "", err
+		}
+		d.catalog = catalog
+	}
+	if targetTn.Catalog == "" {
+		targetTn.Catalog = d.catalog
+	}
+	if claimTn.Catalog == "" {
+		claimTn.Catalog = d.catalog
+	}
+	if canonicalDuckDBTarget(targetTn) != canonicalDuckDBTarget(claimTn) {
+		return "", fmt.Errorf("CDC target claim %q does not match prepared table %q", claim.DestinationTable, opts.Table)
+	}
+	if err := d.exec(ctx, "BEGIN"); err != nil {
+		return "", err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = d.exec(ctx, "ROLLBACK")
+		}
+	}()
+	if err := d.ensureSchemaExistsLocked(ctx, targetTn); err != nil {
+		return "", err
+	}
+	if _, exists, err := d.cdcTargetIncarnationLocked(ctx, opts.Table); err != nil {
+		return "", err
+	} else if exists {
+		return "", fmt.Errorf("destination table %q already exists", opts.Table)
+	}
+	createSQL := strings.Replace(
+		buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys),
+		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
+	)
+	if err := d.exec(ctx, createSQL); err != nil {
+		return "", fmt.Errorf("failed to exclusively create DuckDB CDC target: %w", err)
+	}
+	canonicalTarget := canonicalDuckDBTarget(targetTn)
+	query := fmt.Sprintf(
+		`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ('%s', '%s', CURRENT_TIMESTAMP)
+		ON CONFLICT ("destination_table") DO UPDATE SET "claimed_at" = "claimed_at" RETURNING "connector_id"`,
+		destination.QuoteTableName(claimTable),
+		strings.ReplaceAll(canonicalTarget, "'", "''"),
+		strings.ReplaceAll(ownerID, "'", "''"),
+	)
+	stmt, err := d.conn.NewStatement()
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := stmt.SetSqlQuery(query); err != nil {
+		return "", err
+	}
+	reader, _, err := stmt.ExecuteQuery(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !reader.Next() || reader.RecordBatch().NumRows() != 1 {
+		reader.Release()
+		return "", fmt.Errorf("CDC target claim for %q returned no owner", canonicalTarget)
+	}
+	owners, ok := reader.RecordBatch().Column(0).(*array.String)
+	if !ok {
+		reader.Release()
+		return "", fmt.Errorf("unexpected DuckDB CDC target owner type")
+	}
+	owner := strings.Clone(owners.Value(0))
+	reader.Release()
+	if owner != ownerID {
+		return "", fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	incarnation, exists, err := d.ensureCDCTargetIncarnationLocked(ctx, opts.Table)
+	if err != nil {
+		return "", err
+	}
+	if !exists || incarnation == "" {
+		return "", fmt.Errorf("claimed DuckDB CDC target %q has no durable physical incarnation", opts.Table)
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return "", err
+	}
+	committed = true
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
+	return incarnation, nil
+}
+
 func (d *DuckDBDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
 	tn := duckTable(table)
 	d.mu.Lock()
@@ -1545,14 +1821,36 @@ func canonicalDuckDBTarget(tn tablename.TableName) string {
 }
 
 func (d *DuckDBDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
-	tn := duckTable(table)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.cdcTargetIncarnationLocked(ctx, table)
+}
+
+func (d *DuckDBDestination) cdcTargetIncarnationLocked(ctx context.Context, table string) (string, bool, error) {
+	metadata, exists, err := d.duckDBTargetMetadataLocked(ctx, table)
+	if err != nil || !exists {
+		return "", exists, err
+	}
+	marker := duckDBIncarnationMarker(metadata.incarnationComment)
+	if marker == "" {
+		return "", true, nil
+	}
+	return duckDBTableIncarnation(metadata.table, marker), true, nil
+}
+
+type duckDBTargetMetadata struct {
+	table                tablename.TableName
+	incarnationComment   string
+	hasIncarnationColumn bool
+}
+
+func (d *DuckDBDestination) duckDBTargetMetadataLocked(ctx context.Context, table string) (duckDBTargetMetadata, bool, error) {
+	tn := duckTable(table)
 	if tn.Catalog == "" {
 		if d.catalog == "" {
 			catalog, err := d.currentCatalog(ctx)
 			if err != nil {
-				return "", false, err
+				return duckDBTargetMetadata{}, false, err
 			}
 			d.catalog = catalog
 		}
@@ -1560,39 +1858,114 @@ func (d *DuckDBDestination) CDCTargetIncarnation(ctx context.Context, table stri
 	}
 	tn.Schema = canonicalDuckDBSchema(tn.Schema)
 	literal := func(value string) string { return strings.ReplaceAll(value, "'", "''") }
-	query := fmt.Sprintf(`SELECT CAST(database_oid AS VARCHAR), CAST(table_oid AS VARCHAR)
-		FROM duckdb_tables()
-		WHERE lower(database_name) = lower('%s') AND lower(schema_name) = lower('%s') AND lower(table_name) = lower('%s')`,
-		literal(tn.Catalog), literal(tn.Schema), literal(tn.Table))
+	query := fmt.Sprintf(`SELECT tables.database_name, tables.schema_name, tables.table_name,
+			COALESCE(columns.comment, ''), columns.column_name IS NOT NULL
+		FROM duckdb_tables() AS tables
+		LEFT JOIN duckdb_columns() AS columns
+			ON lower(columns.database_name) = lower(tables.database_name)
+			AND lower(columns.schema_name) = lower(tables.schema_name)
+			AND lower(columns.table_name) = lower(tables.table_name)
+			AND lower(columns.column_name) = lower('%s')
+		WHERE lower(tables.database_name) = lower('%s')
+			AND lower(tables.schema_name) = lower('%s')
+			AND lower(tables.table_name) = lower('%s')`,
+		literal(destination.CDCLSNColumn), literal(tn.Catalog), literal(tn.Schema), literal(tn.Table))
 	stmt, err := d.conn.NewStatement()
 	if err != nil {
-		return "", false, err
+		return duckDBTargetMetadata{}, false, err
 	}
 	defer func() { _ = stmt.Close() }()
 	if err := stmt.SetSqlQuery(query); err != nil {
-		return "", false, err
+		return duckDBTargetMetadata{}, false, err
 	}
 	reader, _, err := stmt.ExecuteQuery(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("failed to read DuckDB CDC target incarnation for %s: %w", table, err)
+		return duckDBTargetMetadata{}, false, fmt.Errorf("failed to read DuckDB CDC target incarnation for %s: %w", table, err)
 	}
 	defer reader.Release()
 	if !reader.Next() {
 		if err := reader.Err(); err != nil {
-			return "", false, err
+			return duckDBTargetMetadata{}, false, err
 		}
-		return "", false, nil
+		return duckDBTargetMetadata{}, false, nil
 	}
 	batch := reader.RecordBatch()
 	if batch.NumRows() == 0 {
-		return "", false, nil
+		return duckDBTargetMetadata{}, false, nil
 	}
-	databaseOIDs, databaseOK := batch.Column(0).(*array.String)
-	tableOIDs, tableOK := batch.Column(1).(*array.String)
-	if !databaseOK || !tableOK {
-		return "", false, fmt.Errorf("unexpected DuckDB CDC target incarnation column types")
+	databaseNames, databaseOK := batch.Column(0).(*array.String)
+	schemaNames, schemaOK := batch.Column(1).(*array.String)
+	tableNames, tableOK := batch.Column(2).(*array.String)
+	comments, commentOK := batch.Column(3).(*array.String)
+	hasIncarnationColumns, hasIncarnationColumnOK := batch.Column(4).(*array.Boolean)
+	if !databaseOK || !schemaOK || !tableOK || !commentOK || !hasIncarnationColumnOK {
+		return duckDBTargetMetadata{}, false, fmt.Errorf("unexpected DuckDB CDC target incarnation column types")
 	}
-	return destination.CDCTargetKey(databaseOIDs.Value(0), tableOIDs.Value(0)), true, nil
+	return duckDBTargetMetadata{
+		table: tablename.TableName{
+			Catalog: strings.Clone(databaseNames.Value(0)),
+			Schema:  strings.Clone(schemaNames.Value(0)),
+			Table:   strings.Clone(tableNames.Value(0)),
+		},
+		incarnationComment:   strings.Clone(comments.Value(0)),
+		hasIncarnationColumn: hasIncarnationColumns.Value(0),
+	}, true, nil
+}
+
+const duckDBIncarnationCommentPrefix = "__ingestr_cdc_incarnation="
+
+func duckDBIncarnationMarker(comment string) string {
+	marker, found := strings.CutPrefix(comment, duckDBIncarnationCommentPrefix)
+	if !found || len(marker) != 32 {
+		return ""
+	}
+	if _, err := hex.DecodeString(marker); err != nil {
+		return ""
+	}
+	return marker
+}
+
+func duckDBTableIncarnation(table tablename.TableName, marker string) string {
+	return destination.CDCTargetKey(
+		strings.ToLower(table.Catalog),
+		strings.ToLower(canonicalDuckDBSchema(table.Schema)),
+		strings.ToLower(table.Table),
+		marker,
+	)
+}
+
+func (d *DuckDBDestination) EnsureCDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ensureCDCTargetIncarnationLocked(ctx, table)
+}
+
+func (d *DuckDBDestination) ensureCDCTargetIncarnationLocked(ctx context.Context, table string) (string, bool, error) {
+	metadata, exists, err := d.duckDBTargetMetadataLocked(ctx, table)
+	if err != nil || !exists {
+		return "", exists, err
+	}
+	if !metadata.hasIncarnationColumn {
+		return "", true, fmt.Errorf("DuckDB CDC target %q is missing managed column %q", table, destination.CDCLSNColumn)
+	}
+	marker := duckDBIncarnationMarker(metadata.incarnationComment)
+	if marker == "" {
+		var token [16]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			return "", false, err
+		}
+		marker = hex.EncodeToString(token[:])
+		query := fmt.Sprintf(
+			"COMMENT ON COLUMN %s.%s IS '%s'",
+			quoteDuckTable(metadata.table),
+			destination.QuoteIdentifier(destination.CDCLSNColumn),
+			duckDBIncarnationCommentPrefix+marker,
+		)
+		if err := d.exec(ctx, query); err != nil {
+			return "", false, fmt.Errorf("failed to establish DuckDB CDC target incarnation for %s: %w", table, err)
+		}
+	}
+	return duckDBTableIncarnation(metadata.table, marker), true, nil
 }
 
 func (d *DuckDBDestination) currentCatalog(ctx context.Context) (string, error) {
@@ -1737,11 +2110,18 @@ func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table stri
 				primaryKeys = append(primaryKeys, strings.Clone(colName))
 			}
 
+			dataType := mapDuckDBTypeToSchema(colType)
+			precision, scale := 0, 0
+			if dataType == schema.TypeDecimal {
+				precision, scale = duckDBDecimalPrecisionScale(colType)
+			}
 			columns = append(columns, schema.Column{
 				Name:         strings.Clone(colName),
-				DataType:     mapDuckDBTypeToSchema(colType),
+				DataType:     dataType,
 				Nullable:     nullable,
 				IsPrimaryKey: isPrimaryKey,
+				Precision:    precision,
+				Scale:        scale,
 			})
 		}
 	}
@@ -1801,6 +2181,28 @@ func mapDuckDBTypeToSchema(colType string) schema.DataType {
 	default:
 		return schema.TypeString
 	}
+}
+
+func duckDBDecimalPrecisionScale(colType string) (int, int) {
+	upper := strings.ToUpper(strings.TrimSpace(colType))
+	start := strings.IndexByte(upper, '(')
+	end := strings.LastIndexByte(upper, ')')
+	if start < 0 || end <= start+1 {
+		return 0, 0
+	}
+	parts := strings.Split(upper[start+1:end], ",")
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	precision, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0
+	}
+	scale, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0
+	}
+	return precision, scale
 }
 
 func parseDuckDBPath(uri string) (string, error) {

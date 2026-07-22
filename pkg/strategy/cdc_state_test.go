@@ -627,6 +627,24 @@ func TestCDCStatePreservesTargetFenceAcrossFullRefreshAndRebindsConditionalSwap(
 	require.Equal(t, "swap-result-incarnation", incarnation)
 }
 
+func TestCDCStateRebindsDestinationAfterSchemaEvolution(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.incarnations["raw.orders"] = "old-incarnation"
+	manager, err := NewCDCStateManager(dest, "connector-a", "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, manager.ClaimAndPrepareTarget(ctx, "public.orders", "raw.orders", destination.PrepareOptions{
+		Schema: &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	}))
+	require.NoError(t, manager.BeginRun(ctx, true))
+
+	dest.incarnations["raw.orders"] = "evolved-incarnation"
+	require.NoError(t, manager.CompleteSchemaEvolution(ctx, "public.orders", "raw.orders", "old-incarnation", "evolved-incarnation"))
+	incarnation, err := manager.BoundDestinationIncarnation("public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "evolved-incarnation", incarnation)
+}
+
 func TestCDCStateValidationFailureDoesNotClaimTarget(t *testing.T) {
 	ctx := t.Context()
 	dest := newCDCStateDestination()

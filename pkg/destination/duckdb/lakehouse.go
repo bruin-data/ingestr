@@ -32,6 +32,12 @@ func NewDuckLakeDestination() *DuckLakeDestination {
 func (d *DuckLakeDestination) Schemes() []string { return []string{"ducklake"} }
 func (d *DuckLakeDestination) GetScheme() string { return "ducklake" }
 
+// A local file lock cannot fence mutations on a shared ducklake catalog, so
+// leasing is rejected the same way the MotherDuck path is.
+func (d *DuckLakeDestination) AcquireManagedCDCRunLease(context.Context, string) (source.ConnectorLease, error) {
+	return nil, fmt.Errorf("DuckLake does not support local managed CDC run leases")
+}
+
 // Write and WriteParallel stage the Arrow stream in a regular in-memory DuckDB
 // table, then copy it into the DuckLake table with a SQL INSERT ... SELECT.
 //
