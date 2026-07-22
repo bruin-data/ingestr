@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
 )
 
@@ -18,6 +19,12 @@ func NewDuckLakeDestination() *DuckLakeDestination {
 
 func (d *DuckLakeDestination) Schemes() []string { return []string{"ducklake"} }
 func (d *DuckLakeDestination) GetScheme() string { return "ducklake" }
+
+// A local file lock cannot fence mutations on a shared ducklake catalog, so
+// leasing is rejected the same way the MotherDuck path is.
+func (d *DuckLakeDestination) AcquireManagedCDCRunLease(context.Context, string) (source.ConnectorLease, error) {
+	return nil, fmt.Errorf("DuckLake does not support local managed CDC run leases")
+}
 
 func (d *DuckLakeDestination) Connect(ctx context.Context, uri string) error {
 	cfg, err := srcduckdb.ParseLakehouseURI(uri)

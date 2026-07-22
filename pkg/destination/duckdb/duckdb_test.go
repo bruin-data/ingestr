@@ -281,6 +281,12 @@ func TestManagedCDCRunLeaseSerializesDuckDBFile(t *testing.T) {
 	require.NoError(t, second.Release())
 }
 
+func TestManagedCDCRunLeaseRejectedForDuckLake(t *testing.T) {
+	dest := NewDuckLakeDestination()
+	_, err := dest.AcquireManagedCDCRunLease(t.Context(), "connector-a")
+	require.ErrorContains(t, err, "DuckLake does not support local managed CDC run leases")
+}
+
 func TestDuckDBDecimalPrecisionScale(t *testing.T) {
 	tests := []struct {
 		dataType  string
