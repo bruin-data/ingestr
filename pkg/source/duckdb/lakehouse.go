@@ -24,8 +24,9 @@ const (
 type StorageType string
 
 const (
-	StorageTypeS3  StorageType = "s3"
-	StorageTypeGCS StorageType = "gcs"
+	StorageTypeS3    StorageType = "s3"
+	StorageTypeGCS   StorageType = "gcs"
+	StorageTypeAzure StorageType = "azure"
 )
 
 type CatalogConfig struct {
@@ -54,6 +55,12 @@ type StorageConfig struct {
 	AccessKey    string
 	SecretKey    string
 	SessionToken string
+
+	// Azure: ConnectionString authenticates with an account key; when empty,
+	// AccountName selects DuckDB's credential_chain provider (managed identity
+	// / az login / env).
+	ConnectionString string
+	AccountName      string
 }
 
 type LakehouseConfig struct {
@@ -109,9 +116,9 @@ func ParseLakehouseURI(raw string) (*LakehouseConfig, error) {
 
 	cfg.Storage.Type = StorageType(q.Get("storage_type"))
 	switch cfg.Storage.Type {
-	case StorageTypeS3, StorageTypeGCS:
+	case StorageTypeS3, StorageTypeGCS, StorageTypeAzure:
 	case "":
-		return nil, fmt.Errorf("storage_type is required (one of: s3, gcs)")
+		return nil, fmt.Errorf("storage_type is required (one of: s3, gcs, azure)")
 	default:
 		return nil, fmt.Errorf("unsupported storage_type: %s", cfg.Storage.Type)
 	}
@@ -132,7 +139,13 @@ func ParseLakehouseURI(raw string) (*LakehouseConfig, error) {
 	cfg.Storage.AccessKey = q.Get("storage_access_key")
 	cfg.Storage.SecretKey = q.Get("storage_secret_key")
 	cfg.Storage.SessionToken = q.Get("storage_session_token")
-	if cfg.Storage.AccessKey == "" || cfg.Storage.SecretKey == "" {
+	cfg.Storage.ConnectionString = q.Get("storage_connection_string")
+	cfg.Storage.AccountName = q.Get("storage_account_name")
+	if cfg.Storage.Type == StorageTypeAzure {
+		if cfg.Storage.ConnectionString == "" && cfg.Storage.AccountName == "" {
+			return nil, fmt.Errorf("storage_connection_string or storage_account_name is required for storage_type=azure")
+		}
+	} else if cfg.Storage.AccessKey == "" || cfg.Storage.SecretKey == "" {
 		return nil, fmt.Errorf("storage_access_key and storage_secret_key are required for storage_type=%s", cfg.Storage.Type)
 	}
 
@@ -158,6 +171,15 @@ func (l *LakehouseAttacher) GenerateAttachStatements(cfg *LakehouseConfig, alias
 	for _, ext := range extensions {
 		statements = append(statements, "INSTALL "+ext)
 		statements = append(statements, "LOAD "+ext)
+	}
+
+	// The azure extension's default transport ignores the system CA bundle and
+	// fails TLS to *.blob.core.windows.net on Linux/containers; the curl
+	// transport uses libcurl + the standard CA paths. GLOBAL because the
+	// session scope is insufficient for DuckLake maintenance calls
+	// (duckdb/ducklake#776).
+	if cfg.Storage.Type == StorageTypeAzure {
+		statements = append(statements, "SET GLOBAL azure_transport_option_type = 'curl'")
 	}
 
 	statements = append(statements, l.generateSecretStatements(*cfg, alias)...)
@@ -228,6 +250,10 @@ func (l *LakehouseAttacher) getRequiredExtensions(cfg LakehouseConfig) []string 
 	if cfg.Storage.Type == StorageTypeGCS {
 		exts = append(exts, "httpfs")
 	}
+	// The azure extension registers the az:// filesystem itself — no httpfs/aws.
+	if cfg.Storage.Type == StorageTypeAzure {
+		exts = append(exts, "azure")
+	}
 	if cfg.Catalog.Type == CatalogTypePostgres {
 		exts = append(exts, "postgres")
 	}
@@ -258,6 +284,8 @@ func (l *LakehouseAttacher) generateSecretStatements(cfg LakehouseConfig, alias 
 		storageSecret = l.generateS3Secret(defaultSecretName(alias, "storage"), cfg.Storage)
 	case StorageTypeGCS:
 		storageSecret = l.generateGCSSecret(defaultSecretName(alias, "storage"), cfg.Storage)
+	case StorageTypeAzure:
+		storageSecret = l.generateAzureSecret(defaultSecretName(alias, "storage"), cfg.Storage)
 	}
 	if storageSecret != "" {
 		stmts = append(stmts, storageSecret)
@@ -319,6 +347,29 @@ func (l *LakehouseAttacher) generateGCSSecret(name string, st StorageConfig) str
 		",   SCOPE " + quoteSQLStringLiteral(scope),
 		")",
 	}
+	return strings.Join(parts, "\n")
+}
+
+func (l *LakehouseAttacher) generateAzureSecret(name string, st StorageConfig) string {
+	if st.ConnectionString == "" && st.AccountName == "" {
+		return ""
+	}
+	parts := []string{
+		"CREATE OR REPLACE SECRET " + name + " (",
+		"    TYPE azure",
+	}
+	if st.ConnectionString != "" {
+		parts = append(parts, ",   CONNECTION_STRING "+quoteSQLStringLiteral(st.ConnectionString))
+	} else {
+		// No account key: authenticate via managed identity / az login / env.
+		parts = append(parts, ",   PROVIDER credential_chain")
+		parts = append(parts, ",   ACCOUNT_NAME "+quoteSQLStringLiteral(st.AccountName))
+	}
+	scope := st.Path
+	if scope == "" {
+		scope = "az://"
+	}
+	parts = append(parts, ",   SCOPE "+quoteSQLStringLiteral(scope), ")")
 	return strings.Join(parts, "\n")
 }
 

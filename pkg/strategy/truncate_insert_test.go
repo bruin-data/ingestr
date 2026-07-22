@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -215,6 +216,54 @@ func TestTruncateInsertStrategy_Execute_PrefersAtomicStagingFinalizer(t *testing
 			require.Empty(t, dest.mergeCalls)
 		})
 	}
+}
+
+func TestTruncateInsertStrategy_Execute_PartitionedExtractWithoutKeysUsesAtomicStaging(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	atomicDest := &atomicTruncateInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = atomicDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	job.SourceSchema.PrimaryKeys = nil
+	job.Config.ExtractPartitionBy = "created_at"
+	job.Config.ExtractPartitionInterval = 24 * time.Hour
+	src.primaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Len(t, dest.prepareCalls, 2)
+	require.Equal(t, job.Config.DestTable, dest.prepareCalls[0].Table)
+	require.True(t, dest.prepareCalls[1].DropFirst)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.Len(t, atomicDest.finalizeCalls, 1)
+	require.Empty(t, atomicDest.finalizeCalls[0].PrimaryKeys)
+	require.Empty(t, dest.truncateCalls)
+	require.Equal(t, job.Config.ExtractPartitionBy, src.readOpts.ExtractPartitionBy)
+	require.Equal(t, job.Config.ExtractPartitionInterval, src.readOpts.ExtractPartitionInterval)
+}
+
+func TestTruncateInsertStrategy_Execute_PartitionedExtractFinalizeFailureDoesNotTruncateDirectly(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	atomicDest := &atomicTruncateInsertDestination{
+		truncateCapableDestination: truncateDest,
+		finalizeErr:                errors.New("finalize failed"),
+	}
+	job.Destination = atomicDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	job.SourceSchema.PrimaryKeys = nil
+	job.Config.ExtractPartitionBy = "created_at"
+	job.Config.ExtractPartitionInterval = 24 * time.Hour
+	src.primaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to atomically insert from staging")
+	require.Empty(t, dest.truncateCalls)
 }
 
 func TestTruncateInsertStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {

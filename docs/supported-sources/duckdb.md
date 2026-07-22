@@ -20,7 +20,7 @@ The same URI structure can be used both for sources and destinations.
 
 ## DuckLake
 
-[DuckLake](https://ducklake.select/) is a lakehouse table format developed by the DuckDB team. Data is stored as Parquet files in object storage (S3 / GCS / S3-compatible); table metadata (schemas, snapshots, file lists) lives in a regular SQL database (DuckDB, SQLite, or Postgres).
+[DuckLake](https://ducklake.select/) is a lakehouse table format developed by the DuckDB team. Data is stored as Parquet files in object storage (S3 / GCS / Azure Blob / S3-compatible); table metadata (schemas, snapshots, file lists) lives in a regular SQL database (DuckDB, SQLite, or Postgres).
 
 ingestr can read from and write to DuckLake tables using the `ducklake://` URI scheme. The same URI shape works for both source and destination:
 
@@ -52,15 +52,17 @@ ducklake://?
   &catalog_username=<user>                        # postgres catalog
   &catalog_password=<pass>                        # postgres catalog
 
-  &storage_type=<s3|gcs>
-  &storage_path=<s3://bucket/prefix | gs://bucket/prefix>
+  &storage_type=<s3|gcs|azure>
+  &storage_path=<s3://bucket/prefix | gs://bucket/prefix | az://container/prefix>
   &storage_region=<region>                        # optional
   &storage_endpoint=<endpoint>                    # S3-compatible (MinIO, R2, B2, Tigris)
   &storage_url_style=<path|vhost>                 # path required for most S3-compatible
   &storage_use_ssl=<true|false>                   # optional, default true
-  &storage_access_key=<key>
-  &storage_secret_key=<secret>
+  &storage_access_key=<key>                       # s3 / gcs
+  &storage_secret_key=<secret>                    # s3 / gcs
   &storage_session_token=<token>                  # optional, AWS STS
+  &storage_connection_string=<conn-string>        # azure (account-key auth)
+  &storage_account_name=<account>                 # azure (credential-chain auth)
 ```
 
 All values must be URL-encoded if they contain `&`, `=`, `/`, `?` or other reserved characters.
@@ -133,6 +135,31 @@ storage_secret_key=...
 
 GCS uses S3 interoperability (HMAC) credentials, not OAuth. Create HMAC keys in the [GCP Console → Storage → Settings → Interoperability](https://console.cloud.google.com/storage/settings;tab=interoperability).
 
+#### Azure Blob Storage
+
+Authenticate either with an account-key `storage_connection_string`, or with
+`storage_account_name` alone to use DuckDB's credential chain (managed identity,
+`az login`, or environment credentials). Set exactly one — if both are provided,
+`storage_connection_string` takes precedence and `storage_account_name` is ignored.
+
+```plaintext
+# Account-key auth
+storage_type=azure
+storage_path=az://my-container/lake
+storage_connection_string=DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=...;EndpointSuffix=core.windows.net
+```
+
+```plaintext
+# Managed identity / az login / environment credentials
+storage_type=azure
+storage_path=az://my-container/lake
+storage_account_name=myaccount
+```
+
+ingestr loads the `azure` extension and sets `azure_transport_option_type = 'curl'`
+so TLS to `*.blob.core.windows.net` uses the system CA bundle — required on
+Linux/containers, which must have `ca-certificates` installed.
+
 ---
 
 ### Examples
@@ -157,6 +184,16 @@ ingestr ingest \
   --dest-table="public.events"
 ```
 
+#### Postgres catalog + Azure Blob Storage
+
+```bash
+ingestr ingest \
+  --source-uri="postgres://app-db:5432/prod" \
+  --source-table="public.events" \
+  --dest-uri="ducklake://?catalog_type=postgres&catalog_host=metastore.prod&catalog_database=ducklake_meta&catalog_username=lake_user&catalog_password=${LAKE_PASSWORD}&storage_type=azure&storage_path=az://my-container/lake&storage_connection_string=${AZURE_STORAGE_CONNECTION_STRING}" \
+  --dest-table="public.events"
+```
+
 #### Reading from DuckLake to Postgres
 
 ```bash
@@ -178,10 +215,12 @@ ingestr ingest \
 | `catalog_username` | yes (postgres) | — |
 | `catalog_password` | yes (postgres) | — |
 | `catalog_port` | no | Defaults to `5432` |
-| `storage_type` | yes | One of `s3`, `gcs` |
-| `storage_path` | yes | Bucket/path the lake writes to |
-| `storage_access_key` | yes | — |
-| `storage_secret_key` | yes | — |
+| `storage_type` | yes | One of `s3`, `gcs`, `azure` |
+| `storage_path` | yes | Bucket/container path the lake writes to (`s3://`, `gs://`, `az://`) |
+| `storage_access_key` | yes (s3 / gcs) | — |
+| `storage_secret_key` | yes (s3 / gcs) | — |
+| `storage_connection_string` | yes (azure, unless `storage_account_name`) | Account-key connection string. Takes precedence if both are set |
+| `storage_account_name` | yes (azure, unless `storage_connection_string`) | Uses DuckDB's credential chain (managed identity / `az login` / env). Ignored if `storage_connection_string` is set |
 | `storage_endpoint` | yes for S3-compatible | Omit for real AWS S3 |
 | `storage_url_style` | yes for S3-compatible | `path` for MinIO, R2, B2, etc. |
 | `storage_use_ssl` | no | Set `false` for plain-HTTP local dev |
