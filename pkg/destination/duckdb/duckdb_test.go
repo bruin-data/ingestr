@@ -122,7 +122,7 @@ func TestClaimCDCTargetCanonicalizesCurrentCatalog(t *testing.T) {
 
 func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 	dest, _ := connectTestDuckDB(t, t.Context())
-	if err := dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`); err != nil {
+	if err := dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,7 +130,7 @@ func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, exists)
 	require.NotEmpty(t, first)
-	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO events VALUES (1)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO events (id) VALUES (1)`))
 	stable, exists, err := dest.CDCTargetIncarnation(t.Context(), "main.events")
 	require.NoError(t, err)
 	require.True(t, exists)
@@ -139,7 +139,7 @@ func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 	_, exists, err = dest.CDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
 	require.False(t, exists)
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`))
 	recreated, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
 	require.True(t, exists)
@@ -148,7 +148,7 @@ func TestCDCTargetIncarnationStableAcrossDMLAndChangesOnRecreate(t *testing.T) {
 
 func TestCDCTargetIncarnationSurvivesReconnect(t *testing.T) {
 	dest, path := connectTestDuckDB(t, t.Context())
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`))
 	require.NoError(t, dest.Exec(t.Context(), `COMMENT ON TABLE events IS 'customer-owned comment'`))
 	first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
@@ -166,12 +166,39 @@ func TestCDCTargetIncarnationSurvivesReconnect(t *testing.T) {
 	var comment string
 	db := openDuckDB(t, t.Context(), path)
 	require.NoError(t, db.QueryRow(`SELECT comment FROM duckdb_tables() WHERE table_name = 'events'`).Scan(&comment))
-	require.Contains(t, comment, "customer-owned comment")
+	require.Equal(t, "customer-owned comment", comment)
+}
+
+func TestCDCTargetIncarnationIgnoresSpoofedTableComment(t *testing.T) {
+	dest, _ := connectTestDuckDB(t, t.Context())
+	spoofedComment := "customer-owned comment\n" + duckDBIncarnationCommentPrefix + strings.Repeat("a", 32)
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), fmt.Sprintf(
+		"COMMENT ON TABLE events IS '%s'",
+		strings.ReplaceAll(spoofedComment, "'", "''"),
+	)))
+
+	first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NotContains(t, first, strings.Repeat("a", 32))
+
+	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE events`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), fmt.Sprintf(
+		"COMMENT ON TABLE events IS '%s'",
+		strings.ReplaceAll(spoofedComment, "'", "''"),
+	)))
+	current, exists, err := dest.CDCTargetIncarnation(t.Context(), "events")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Empty(t, current)
+	require.ErrorContains(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "events", first), "physical incarnation changed")
 }
 
 func TestConditionalSchemaEvolutionPreservesIncarnation(t *testing.T) {
 	dest, _ := connectTestDuckDB(t, t.Context())
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`))
 
 	first, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
@@ -197,11 +224,11 @@ func TestConditionalSchemaEvolutionPreservesIncarnation(t *testing.T) {
 	require.Equal(t, result, current)
 	tableSchema, err := dest.GetTableSchema(t.Context(), "events")
 	require.NoError(t, err)
-	require.Len(t, tableSchema.Columns, 2)
-	require.Equal(t, "status", tableSchema.Columns[1].Name)
+	require.Len(t, tableSchema.Columns, 3)
+	require.Equal(t, "status", tableSchema.Columns[2].Name)
 
 	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE events`))
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE events (id BIGINT, "_cdc_lsn" VARCHAR)`))
 	replacement, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "events")
 	require.NoError(t, err)
 	require.True(t, exists)
@@ -212,19 +239,19 @@ func TestConditionalSchemaEvolutionPreservesIncarnation(t *testing.T) {
 	require.ErrorContains(t, err, "physical incarnation changed before schema evolution")
 	tableSchema, err = dest.GetTableSchema(t.Context(), "events")
 	require.NoError(t, err)
-	require.Len(t, tableSchema.Columns, 1)
+	require.Len(t, tableSchema.Columns, 2)
 }
 
 func TestConditionalMergeAndTruncateRejectRecreatedTarget(t *testing.T) {
 	dest, _ := connectTestDuckDB(t, t.Context())
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT PRIMARY KEY, name VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT PRIMARY KEY, name VARCHAR, "_cdc_lsn" VARCHAR)`))
 	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE staging (id BIGINT, name VARCHAR)`))
 	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO staging VALUES (1, 'new')`))
 	expected, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "target")
 	require.NoError(t, err)
 	require.True(t, exists)
 	require.NoError(t, dest.Exec(t.Context(), `DROP TABLE target`))
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT PRIMARY KEY, name VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT PRIMARY KEY, name VARCHAR, "_cdc_lsn" VARCHAR)`))
 	_, exists, err = dest.EnsureCDCTargetIncarnation(t.Context(), "target")
 	require.NoError(t, err)
 	require.True(t, exists)
@@ -242,10 +269,10 @@ func TestConditionalMergeAndTruncateRejectRecreatedTarget(t *testing.T) {
 
 func TestConditionalSwapRebindsStagingIncarnationToTarget(t *testing.T) {
 	dest, path := connectTestDuckDB(t, t.Context())
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT)`))
-	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO target VALUES (1)`))
-	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE staging (id BIGINT)`))
-	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO staging VALUES (2)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT, "_cdc_lsn" VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO target (id) VALUES (1)`))
+	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE staging (id BIGINT, "_cdc_lsn" VARCHAR)`))
+	require.NoError(t, dest.Exec(t.Context(), `INSERT INTO staging (id) VALUES (2)`))
 	targetIncarnation, exists, err := dest.EnsureCDCTargetIncarnation(t.Context(), "target")
 	require.NoError(t, err)
 	require.True(t, exists)
@@ -279,6 +306,30 @@ func TestManagedCDCRunLeaseSerializesDuckDBFile(t *testing.T) {
 	second, err := dest.AcquireManagedCDCRunLease(t.Context(), "connector-b")
 	require.NoError(t, err)
 	require.NoError(t, second.Release())
+}
+
+func TestManagedCDCRunLeaseIsolatesInMemoryDatabases(t *testing.T) {
+	connect := func() *DuckDBDestination {
+		dest := NewDuckDBDestination()
+		require.NoError(t, dest.Connect(t.Context(), "duckdb:///:memory:"))
+		t.Cleanup(func() { _ = dest.Close(t.Context()) })
+		return dest
+	}
+
+	firstDest := connect()
+	secondDest := connect()
+	first, err := firstDest.AcquireManagedCDCRunLease(t.Context(), "connector-a")
+	require.NoError(t, err)
+	second, err := secondDest.AcquireManagedCDCRunLease(t.Context(), "connector-b")
+	require.NoError(t, err)
+	_, err = firstDest.AcquireManagedCDCRunLease(t.Context(), "connector-c")
+	require.ErrorContains(t, err, "already owns")
+	require.NoError(t, first.Release())
+	require.NoError(t, second.Release())
+
+	reacquired, err := firstDest.AcquireManagedCDCRunLease(t.Context(), "connector-c")
+	require.NoError(t, err)
+	require.NoError(t, reacquired.Release())
 }
 
 func TestManagedCDCRunLeaseRejectedForDuckLake(t *testing.T) {
