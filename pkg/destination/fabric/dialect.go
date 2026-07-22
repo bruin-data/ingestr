@@ -34,10 +34,10 @@ func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Colum
 		nullable)
 }
 
-// SupportsAlterType is false for v1: ALTER COLUMN type changes are a preview
-// feature in Fabric Warehouse.
+// SupportsAlterType is true because Fabric Warehouse supports compatible,
+// metadata-only ALTER COLUMN changes. Fabric validates the specific conversion.
 func (d *Dialect) SupportsAlterType() bool {
-	return false
+	return true
 }
 
 func (d *Dialect) TypeName(col schema.Column) string {

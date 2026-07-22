@@ -414,6 +414,31 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	var preStageRpt *preStageReport
 	var preStageKeyTransform func(string) string
 	var preStagedForJob destination.PreStagedData
+	var extractReadSchema *schema.TableSchema
+
+	if p.config.ExtractPartitionBy != "" && !table.HasKnownSchema() {
+		provider, ok := table.(source.ReadSchemaProvider)
+		if ok && provider.SupportsReadSchema() {
+			extractReadSchema, err = provider.GetReadSchema(ctx, source.ReadOptions{
+				IncrementalKey:     table.IncrementalKey(),
+				IntervalStart:      p.config.IntervalStart,
+				IntervalEnd:        p.config.IntervalEnd,
+				ExtractPartitionBy: p.config.ExtractPartitionBy,
+				Columns:            p.config.Columns,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to get custom query schema for extract partitioning: %w", err)
+			}
+			if err := applyExtractReadSchemaOverrides(extractReadSchema, p.config.Columns, p.config.SchemaNaming); err != nil {
+				return fmt.Errorf("failed to apply column overrides to custom query schema: %w", err)
+			}
+			partitionColumn, err := source.ValidateExtractPartitionColumn(extractReadSchema, p.config.ExtractPartitionBy)
+			if err != nil {
+				return err
+			}
+			p.config.ExtractPartitionBy = partitionColumn
+		}
+	}
 
 	if table.HasKnownSchema() {
 		tableSchema, err = table.GetSchema(ctx)
@@ -431,7 +456,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
 		var preStage destination.PreStageWriter
 		preStage, preStageKeyTransform = p.maybeStartPreStage(ctx, preFetchStrategy, preFetchConfig.PrimaryKeys, loadTimestamp)
-		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage)
+		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage, extractReadSchema)
 		defer func() {
 			if preStagedData != nil {
 				preStagedData.Close()
@@ -449,7 +474,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			config.Debug("[PIPELINE] Inferred schema with %d columns", len(tableSchema.Columns))
 		} else {
 			config.Debug("[PIPELINE] Inferred schema is nil")
-			if fallback, err := table.GetSchema(ctx); err == nil && fallback != nil && len(fallback.Columns) > 0 {
+			if extractReadSchema != nil && len(extractReadSchema.Columns) > 0 {
+				tableSchema = extractReadSchema
+				config.Debug("[PIPELINE] Using custom query metadata schema (%d columns) for empty extract", len(extractReadSchema.Columns))
+			} else if fallback, err := table.GetSchema(ctx); err == nil && fallback != nil && len(fallback.Columns) > 0 {
 				tableSchema = fallback
 				config.Debug("[PIPELINE] Using source-provided schema (%d columns) for empty extract", len(fallback.Columns))
 			} else if synthetic, err := schemainfer.TableSchemaFromColumnOverrides(p.config.Columns, table.Name(), p.config.SchemaNaming); err != nil {
@@ -480,7 +508,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	if p.config.ExtractPartitionBy != "" {
-		partitionColumn, err := source.ValidateExtractPartitionColumn(tableSchema, p.config.ExtractPartitionBy)
+		partitionSchema := tableSchema
+		if extractReadSchema != nil {
+			partitionSchema = extractReadSchema
+		}
+		partitionColumn, err := source.ValidateExtractPartitionColumn(partitionSchema, p.config.ExtractPartitionBy)
 		if err != nil {
 			return err
 		}
@@ -701,24 +733,25 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	job := &strategy.IngestionJob{
-		Config:              &resolvedConfig,
-		Table:               table,
-		Destination:         dest,
-		Schema:              ingestSchema,
-		SourceSchema:        originalSourceSchema,
-		Tracker:             jobTracker,
-		BufferedRecords:     bufferedRecords,
-		PreStaged:           preStagedForJob,
-		SchemaComparison:    p.schemaComparison,
-		DestinationSchema:   p.destinationSchema,
-		ColumnRenamer:       p.columnRenamer,
-		IngestrColumnFiller: p.ingestrColumnFiller,
-		ColumnMasker:        columnMasker,
-		WhitespaceTrimmer:   whitespaceTrimmer,
-		LoadTimestamp:       loadTimestampTransformer,
-		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
-		EvolutionPlan:       evolutionPlan,
-		CDCStateManager:     cdcStateManager,
+		Config:                 &resolvedConfig,
+		Table:                  table,
+		Destination:            dest,
+		Schema:                 ingestSchema,
+		SourceSchema:           originalSourceSchema,
+		ExtractPartitionSchema: extractReadSchema,
+		Tracker:                jobTracker,
+		BufferedRecords:        bufferedRecords,
+		PreStaged:              preStagedForJob,
+		SchemaComparison:       p.schemaComparison,
+		DestinationSchema:      p.destinationSchema,
+		ColumnRenamer:          p.columnRenamer,
+		IngestrColumnFiller:    p.ingestrColumnFiller,
+		ColumnMasker:           columnMasker,
+		WhitespaceTrimmer:      whitespaceTrimmer,
+		LoadTimestamp:          loadTimestampTransformer,
+		SchemaAligner:          transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
+		EvolutionPlan:          evolutionPlan,
+		CDCStateManager:        cdcStateManager,
 	}
 
 	// For --no-inference, enforce the user-provided source schema even when
@@ -893,6 +926,24 @@ func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.
 	return tableSchema, nil
 }
 
+func applyExtractReadSchemaOverrides(tableSchema *schema.TableSchema, columnsSpec, schemaNaming string) error {
+	if tableSchema == nil {
+		return nil
+	}
+	overrides, err := schemaevolution.ParseColumnOverrides(columnsSpec)
+	if err != nil {
+		return err
+	}
+	for i, column := range tableSchema.Columns {
+		override, ok := overrides.GetForColumn(column.Name, schemaNaming)
+		if !ok || override.DataType == schema.TypeUnknown {
+			continue
+		}
+		tableSchema.Columns[i] = override.ApplyToColumn(column)
+	}
+	return nil
+}
+
 func (p *Pipeline) buildSourceSchemaCaster(sourceSchema *schema.TableSchema) *transformer.TypeCaster {
 	if sourceSchema == nil {
 		return nil
@@ -983,6 +1034,7 @@ func (p *Pipeline) inferSchemaFromData(
 	table source.SourceTable,
 	tracker progress.Tracker,
 	preStage destination.PreStageWriter,
+	readSchema *schema.TableSchema,
 ) (*schema.TableSchema, *databuffer.FileBuffer, destination.PreStagedData, *preStageReport, error) {
 	// Create schema inferrer and file-backed data buffer
 	inferrer := schemainfer.NewSchemaInferrer()
@@ -1014,6 +1066,8 @@ func (p *Pipeline) inferSchemaFromData(
 		Parallelism:                     parallelism,
 		FullRefresh:                     p.config.FullRefresh,
 		Columns:                         p.config.Columns,
+		Schema:                          readSchema,
+		ExtractPartitionSchema:          readSchema,
 	}
 
 	records, err := table.Read(ctx, readOpts)
@@ -2386,12 +2440,9 @@ func validateExtractPartitionSupport(cfg *config.IngestConfig, table source.Sour
 	if cfg.ExtractPartitionBy == "" {
 		return nil
 	}
-	if table.Name() == source.CustomQueryTableName {
-		return fmt.Errorf("custom queries do not support extract partitioning")
-	}
 	provider, ok := table.(source.ExtractPartitioningProvider)
 	if !ok || !provider.SupportsExtractPartitioning() {
-		return fmt.Errorf("source table %q does not support extract partitioning; v1 supports normal SQL table scans for postgres, mysql, mssql, sqlite, and ADBC-backed sources", table.Name())
+		return fmt.Errorf("source table %q does not support extract partitioning; supported sources are postgres, mysql, mssql, sqlite, and ADBC-backed SQL sources", table.Name())
 	}
 	return nil
 }

@@ -1300,6 +1300,41 @@ func TestValidateExtractPartitionSupportAllowsMatchingIncrementalKey(t *testing.
 	}
 }
 
+func TestValidateExtractPartitionSupportUsesCustomQueryCapability(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+
+	supported := &source.DynamicSourceTable{
+		TableName:                        source.CustomQueryTableName,
+		TableSupportsExtractPartitioning: true,
+	}
+	if err := validateExtractPartitionSupport(cfg, supported); err != nil {
+		t.Fatalf("expected partition-aware custom query to pass validation, got %v", err)
+	}
+
+	unsupported := &source.DynamicSourceTable{TableName: source.CustomQueryTableName}
+	if err := validateExtractPartitionSupport(cfg, unsupported); err == nil {
+		t.Fatal("expected custom query without partition capability to be rejected")
+	}
+}
+
+func TestApplyExtractReadSchemaOverridesKeepsMetadataColumnName(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{{Name: "PARTITION_ID", DataType: schema.TypeString}},
+	}
+
+	err := applyExtractReadSchemaOverrides(tableSchema, "partition_id:bigint", "snake_case")
+	if err != nil {
+		t.Fatalf("applyExtractReadSchemaOverrides() error = %v", err)
+	}
+	if got := tableSchema.Columns[0].Name; got != "PARTITION_ID" {
+		t.Fatalf("column name = %q, want PARTITION_ID", got)
+	}
+	if got := tableSchema.Columns[0].DataType; got != schema.TypeInt64 {
+		t.Fatalf("column type = %s, want %s", got, schema.TypeInt64)
+	}
+}
+
 func TestValidateChangeTrackingDestinationRunsForFullRefreshRequirement(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.SourceURI = "mssql+ct://example:1433/app"

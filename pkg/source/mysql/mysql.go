@@ -199,7 +199,12 @@ func (s *MySQLSource) HandlesIncrementality() bool {
 
 func (s *MySQLSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	if _, ok := source.IsCustomQuery(req.Name); ok {
-		return source.CustomQueryTable(req, s.ExecuteCustomQuery)
+		return source.PartitionedCustomQueryTable(req, s.ExecuteCustomQuery, source.PartitionedCustomQueryOptions{
+			QuoteIdentifier: quoteColumn,
+			FormatTime:      source.NativeSQLTimeFormat,
+			GetSchema:       s.getCustomQuerySchema,
+			DiscoverBounds:  s.discoverCustomQueryExtractPartitionBounds,
+		})
 	}
 
 	tableSchema, err := s.getSchema(ctx, req.Name)
@@ -585,6 +590,42 @@ func (s *MySQLSource) discoverExtractPartitionBounds(ctx context.Context, table 
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }
 
+func (s *MySQLSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
+	q, cleanup, err := s.querier(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	rows, closeStmt, err := queryRows(ctx, q, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect custom query schema: %w", err)
+	}
+	defer closeStmt()
+	defer func() { _ = rows.Close() }()
+
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get custom query column types: %w", err)
+	}
+	return &schema.TableSchema{Name: source.CustomQueryTableName, Columns: mysqlCustomQueryColumns(colTypes)}, nil
+}
+
+func (s *MySQLSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	q, cleanup, err := s.querier(ctx)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, err
+	}
+	defer cleanup()
+
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := q.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+}
+
 func mysqlColumnIsNonNullable(tableSchema *schema.TableSchema, columnName string) bool {
 	if tableSchema == nil {
 		return false
@@ -630,19 +671,7 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 			return
 		}
 
-		columns := make([]schema.Column, len(colTypes))
-		for i, ct := range colTypes {
-			dt, precision, scale, arrayType := MapMySQLToDataType(ct.DatabaseTypeName())
-			nullable, _ := ct.Nullable()
-			columns[i] = schema.Column{
-				Name:      ct.Name(),
-				DataType:  dt,
-				Nullable:  nullable,
-				Precision: precision,
-				Scale:     scale,
-				ArrayType: arrayType,
-			}
-		}
+		columns := mysqlCustomQueryColumns(colTypes)
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
@@ -659,6 +688,23 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	}()
 
 	return results, nil
+}
+
+func mysqlCustomQueryColumns(colTypes []*sql.ColumnType) []schema.Column {
+	columns := make([]schema.Column, len(colTypes))
+	for i, ct := range colTypes {
+		dt, precision, scale, arrayType := MapMySQLToDataType(ct.DatabaseTypeName())
+		nullable, _ := ct.Nullable()
+		columns[i] = schema.Column{
+			Name:      ct.Name(),
+			DataType:  dt,
+			Nullable:  nullable,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+		}
+	}
+	return columns
 }
 
 func queryRows(ctx context.Context, q rowQuerier, query string) (*sql.Rows, func(), error) {

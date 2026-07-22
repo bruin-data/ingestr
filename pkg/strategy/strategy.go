@@ -16,12 +16,13 @@ import (
 )
 
 type IngestionJob struct {
-	Config       *config.IngestConfig
-	Table        source.SourceTable
-	Destination  destination.Destination
-	Schema       *schema.TableSchema
-	SourceSchema *schema.TableSchema // Original source schema without extra ingestr metadata columns
-	Tracker      progress.Tracker    // Progress tracker for monitoring ingestion
+	Config                 *config.IngestConfig
+	Table                  source.SourceTable
+	Destination            destination.Destination
+	Schema                 *schema.TableSchema
+	SourceSchema           *schema.TableSchema // Original source schema without extra ingestr metadata columns
+	ExtractPartitionSchema *schema.TableSchema
+	Tracker                progress.Tracker // Progress tracker for monitoring ingestion
 
 	// BufferedRecords contains pre-read data for schema-unknown sources.
 	// If non-nil, GetRecords() transforms this stream instead of reading from Table.
@@ -76,6 +77,9 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 		records = j.BufferedRecords
 	} else {
 		var err error
+		if opts.ExtractPartitionSchema == nil {
+			opts.ExtractPartitionSchema = j.ExtractPartitionSchema
+		}
 		records, err = j.Table.Read(ctx, opts)
 		if err != nil {
 			return nil, err

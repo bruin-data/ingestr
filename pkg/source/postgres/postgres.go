@@ -78,7 +78,12 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 	}
 
 	if _, ok := source.IsCustomQuery(req.Name); ok {
-		return source.CustomQueryTable(req, s.ExecuteCustomQuery)
+		return source.PartitionedCustomQueryTable(req, s.ExecuteCustomQuery, source.PartitionedCustomQueryOptions{
+			QuoteIdentifier: quoteIdentifier,
+			FormatTime:      source.DefaultSQLTimeFormat,
+			GetSchema:       s.getCustomQuerySchema,
+			DiscoverBounds:  s.discoverCustomQueryExtractPartitionBounds,
+		})
 	}
 
 	// Fetch schema from database
@@ -334,6 +339,56 @@ func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, tab
 	var totalCount, nonNullCount int64
 	if err := conn.QueryRow(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+}
+
+func (s *PostgresSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	rows, err := conn.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect custom query schema: %w", err)
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	typeMap := conn.Conn().TypeMap()
+	columns := make([]schema.Column, len(fields))
+	for i, fd := range fields {
+		pgTypeName := "text"
+		if t, ok := typeMap.TypeForOID(fd.DataTypeOID); ok {
+			pgTypeName = t.Name
+		}
+		dt, precision, scale, arrayType := MapPostgresToDataType(pgTypeName)
+		columns[i] = schema.Column{
+			Name:      string(fd.Name),
+			DataType:  dt,
+			Nullable:  true,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+		}
+	}
+
+	return &schema.TableSchema{Name: source.CustomQueryTableName, Columns: columns}, nil
+}
+
+func (s *PostgresSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := conn.QueryRow(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
 	}
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }
