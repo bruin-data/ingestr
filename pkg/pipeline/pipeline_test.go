@@ -1318,6 +1318,27 @@ func TestValidateExtractPartitionSupportUsesCustomQueryCapability(t *testing.T) 
 	}
 }
 
+func TestValidateExtractPartitionStrategyAllowsReplace(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.IncrementalStrategy = config.StrategyReplace
+
+	if err := validateExtractPartitionStrategy(cfg); err != nil {
+		t.Fatalf("expected replace to support extract partitioning, got %v", err)
+	}
+}
+
+func TestValidateExtractPartitionStrategyRejectsExplicitTruncateInsert(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.IncrementalStrategy = config.StrategyTruncateInsert
+
+	err := validateExtractPartitionStrategy(cfg)
+	if err == nil || !strings.Contains(err.Error(), "use replace") {
+		t.Fatalf("expected truncate+insert validation error, got %v", err)
+	}
+}
+
 func TestApplyExtractReadSchemaOverridesKeepsMetadataColumnName(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{{Name: "PARTITION_ID", DataType: schema.TypeString}},

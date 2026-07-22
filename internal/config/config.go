@@ -267,9 +267,8 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	if c.FullRefresh {
 		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with extract partitioning"}
 	}
-	switch c.IncrementalStrategy {
-	case StrategyReplace, StrategyTruncateInsert:
-		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", c.IncrementalStrategy)}
+	if c.IncrementalStrategy == StrategyTruncateInsert {
+		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning; use replace so the complete extract is staged before the destination is finalized", c.IncrementalStrategy)}
 	}
 	return nil
 }

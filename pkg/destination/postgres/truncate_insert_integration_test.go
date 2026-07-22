@@ -73,4 +73,28 @@ func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
 	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.current_events`).Scan(&id, &value))
 	require.Equal(t, int64(2), id)
 	require.Equal(t, "new", value)
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE public.keyless_events (id bigint, value text NOT NULL);
+		INSERT INTO public.keyless_events VALUES (10, 'old-keyless');
+		CREATE VIEW public.current_keyless_events AS SELECT id, value FROM public.keyless_events;
+		CREATE TABLE _bruin_staging.keyless_events (id bigint, value text);
+		INSERT INTO _bruin_staging.keyless_events VALUES (20, NULL);
+	`))
+
+	keylessOpts := destination.TruncateInsertFromStagingOptions{
+		StagingTable: "_bruin_staging.keyless_events",
+		TargetTable:  "public.keyless_events",
+		Columns:      []string{"id", "value"},
+	}
+	require.Error(t, dest.TruncateInsertFromStaging(ctx, keylessOpts))
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.current_keyless_events`).Scan(&id, &value))
+	require.Equal(t, int64(10), id)
+	require.Equal(t, "old-keyless", value)
+
+	require.NoError(t, dest.Exec(ctx, `TRUNCATE _bruin_staging.keyless_events; INSERT INTO _bruin_staging.keyless_events VALUES (20, 'new-keyless')`))
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, keylessOpts))
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.current_keyless_events`).Scan(&id, &value))
+	require.Equal(t, int64(20), id)
+	require.Equal(t, "new-keyless", value)
 }

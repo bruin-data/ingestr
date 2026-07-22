@@ -379,7 +379,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
 	preFetchConfig.PrimaryKeys = resolvePrimaryKeys(p.config, table)
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
-	if err := validateExtractPartitionStrategy(&preFetchConfig, preFetchStrategy); err != nil {
+	if err := validateExtractPartitionStrategy(p.config); err != nil {
 		return err
 	}
 	if err := validateIncrementalPredicate(p.config, dest, preFetchStrategy); err != nil {
@@ -2447,15 +2447,13 @@ func validateExtractPartitionSupport(cfg *config.IngestConfig, table source.Sour
 	return nil
 }
 
-func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy) error {
-	if cfg.ExtractPartitionBy == "" {
+func validateExtractPartitionStrategy(cfg *config.IngestConfig) error {
+	if cfg.ExtractPartitionBy == "" || cfg.IncrementalStrategy != config.StrategyTruncateInsert {
 		return nil
 	}
-	switch resolvedStrategy {
-	case config.StrategyReplace, config.StrategyTruncateInsert:
-		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", resolvedStrategy)}
-	default:
-		return nil
+	return &config.ValidationError{
+		Field:   "incremental-strategy",
+		Message: fmt.Sprintf("%q cannot be combined with extract partitioning; use replace so the complete extract is staged before the destination is finalized", cfg.IncrementalStrategy),
 	}
 }
 
