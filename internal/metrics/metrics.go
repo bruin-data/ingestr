@@ -6,14 +6,22 @@ package metrics
 
 import (
 	"expvar"
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/source"
 )
+
+// varPrefix namespaces every variable ingestr publishes. The handler filters on
+// it so the endpoint exposes only ingestr's own vars, never expvar's built-in
+// cmdline/memstats, which the standard library injects into the shared registry
+// at package-import time.
+const varPrefix = "ingestr_"
 
 // reporter holds the active source's lag reporter. It is a package global
 // because expvar's registry is process-global and ingestr runs one stream per
@@ -138,10 +146,32 @@ func Serve(addr string) (boundAddr string, stop func(), err error) {
 	// A dedicated mux, never http.DefaultServeMux: importing expvar registers
 	// /debug/vars there, and that must not leak into the web UI server.
 	mux := http.NewServeMux()
-	mux.Handle("/debug/vars", expvar.Handler())
+	mux.HandleFunc("/debug/vars", handler)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
 	return ln.Addr().String(), func() { _ = srv.Close() }, nil
+}
+
+// handler serves ingestr's own vars as a JSON object, mirroring the format of
+// expvar.Handler but skipping every var outside the ingestr_ namespace. This
+// keeps expvar's cmdline/memstats built-ins out of the response; memstats in
+// particular calls runtime.ReadMemStats on each scrape, which is needless work
+// and a stop-the-world pause for data no ingestr consumer asked for.
+func handler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintf(w, "{\n")
+	first := true
+	expvar.Do(func(kv expvar.KeyValue) {
+		if !strings.HasPrefix(kv.Key, varPrefix) {
+			return
+		}
+		if !first {
+			fmt.Fprintf(w, ",\n")
+		}
+		first = false
+		fmt.Fprintf(w, "%q: %s", kv.Key, kv.Value)
+	})
+	fmt.Fprintf(w, "\n}\n")
 }
