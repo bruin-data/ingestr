@@ -6,9 +6,10 @@ package metrics
 
 import (
 	"expvar"
-	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -160,18 +161,23 @@ func Serve(addr string) (boundAddr string, stop func(), err error) {
 // particular calls runtime.ReadMemStats on each scrape, which is needless work
 // and a stop-the-world pause for data no ingestr consumer asked for.
 func handler(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	fmt.Fprintf(w, "{\n")
+	var buf strings.Builder
+	buf.WriteString("{\n")
 	first := true
 	expvar.Do(func(kv expvar.KeyValue) {
 		if !strings.HasPrefix(kv.Key, varPrefix) {
 			return
 		}
 		if !first {
-			fmt.Fprintf(w, ",\n")
+			buf.WriteString(",\n")
 		}
 		first = false
-		fmt.Fprintf(w, "%q: %s", kv.Key, kv.Value)
+		buf.WriteString(strconv.Quote(kv.Key))
+		buf.WriteString(": ")
+		buf.WriteString(kv.Value.String())
 	})
-	fmt.Fprintf(w, "\n}\n")
+	buf.WriteString("\n}\n")
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = io.WriteString(w, buf.String())
 }
