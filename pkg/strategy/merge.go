@@ -84,7 +84,11 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 // key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
 // highest value of that key (latest wins) instead of an arbitrary one.
 func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) error {
-	return dest.MergeTable(ctx, destination.MergeOptions{
+	return dest.MergeTable(ctx, mergeStagingOptions(dest, stagingTable, targetTable, primaryKeys, tableSchema, incrementalKey, incrementalPredicate, expectedIncarnation))
+}
+
+func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) destination.MergeOptions {
+	return destination.MergeOptions{
 		StagingTable:           stagingTable,
 		TargetTable:            targetTable,
 		PrimaryKeys:            primaryKeys,
@@ -93,7 +97,7 @@ func mergeStagingInto(ctx context.Context, dest destination.Destination, staging
 		IncrementalPredicate:   incrementalPredicate,
 		Schema:                 tableSchema,
 		CDCExpectedIncarnation: expectedIncarnation,
-	})
+	}
 }
 
 func mergeIncrementalKeyForSchema(tableSchema *schema.TableSchema, incrementalKey string) string {
@@ -492,6 +496,51 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
+	}
+	if atomicMerger, ok := job.Destination.(destination.CDCMultiTableAtomicMerger); ok && anyTableHasCDC {
+		dropStagingTables := func() {
+			if source.ConnectorLeaseLoss(ctx) != nil {
+				return
+			}
+			for _, stagingTable := range stagingTables {
+				if source.ConnectorLeaseLoss(ctx) != nil {
+					break
+				}
+				if dropErr := job.Destination.DropTable(ctx, stagingTable); dropErr != nil {
+					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, dropErr)
+				}
+			}
+		}
+		merges := make([]destination.CDCAtomicTableMerge, 0, len(stagingTables))
+		for _, tableInfo := range job.Tables {
+			stagingTable, staged := stagingTables[tableInfo.Name]
+			if !staged {
+				continue
+			}
+			expectedIncarnation := ""
+			if job.CDCStateManager != nil {
+				expectedIncarnation, err = job.CDCStateManager.BoundDestinationIncarnation(tableInfo.Name)
+				if err != nil {
+					dropStagingTables()
+					return err
+				}
+			}
+			merges = append(merges, destination.CDCAtomicTableMerge{
+				Options:  mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation),
+				Truncate: writeResult.TruncatedTables[tableInfo.Name],
+			})
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := atomicMerger.MergeCDCTablesAtomically(ctx, merges); err != nil {
+			dropStagingTables()
+			return fmt.Errorf("failed to atomically merge multi-table CDC batch: %w", err)
+		}
+		if !job.Config.KeepStaging {
+			dropStagingTables()
+		}
+		return source.ConnectorLeaseLoss(ctx)
 	}
 
 	mergeErrChan := make(chan error, len(job.Tables))

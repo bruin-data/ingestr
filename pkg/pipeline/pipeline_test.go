@@ -355,6 +355,96 @@ func TestMySQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
 	}
 }
 
+func TestMySQLCDCRejectsUnsafeMetadataTransforms(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*config.IngestConfig)
+		field string
+	}{
+		{name: "exclude metadata", apply: func(cfg *config.IngestConfig) { cfg.SQLExcludeColumns = []string{"_cdc_lsn"} }, field: "sql-exclude-columns"},
+		{name: "mask metadata", apply: func(cfg *config.IngestConfig) { cfg.Mask = []string{"_cdc_deleted:redact"} }, field: "mask"},
+		{name: "override metadata", apply: func(cfg *config.IngestConfig) { cfg.Columns = "_cdc_lsn:string" }, field: "columns"},
+		{name: "rename to metadata", apply: func(cfg *config.IngestConfig) { cfg.Columns = "_cdc_lsn::source_lsn" }, field: "columns"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "mysql+cdc://source/app"
+			cfg.SourceTable = "items"
+			tt.apply(cfg)
+			err := validateManagedChangeConfig(cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+func TestMySQLCDCMultiTableRejectsBypassedTransforms(t *testing.T) {
+	for _, apply := range []func(*config.IngestConfig){
+		func(cfg *config.IngestConfig) { cfg.SQLExcludeColumns = []string{"secret"} },
+		func(cfg *config.IngestConfig) { cfg.Mask = []string{"secret:redact"} },
+		func(cfg *config.IngestConfig) { cfg.Columns = "secret:string" },
+	} {
+		cfg := config.DefaultConfig()
+		cfg.SourceURI = "mysql+cdc://source/app"
+		apply(cfg)
+		require.ErrorContains(t, validateManagedChangeConfig(cfg), "multi-table MySQL CDC")
+	}
+}
+
+type mysqlIdentitySource struct {
+	source.Source
+	identity string
+	database string
+}
+
+func (s *mysqlIdentitySource) MySQLServerIdentity() string { return s.identity }
+func (s *mysqlIdentitySource) MySQLDatabaseName() string   { return s.database }
+
+type mysqlIdentityDestination struct {
+	mockDestination
+	identity string
+	database string
+	flavor   string
+}
+
+func (d *mysqlIdentityDestination) MySQLServerIdentity() string { return d.identity }
+func (d *mysqlIdentityDestination) MySQLDatabaseName() string   { return d.database }
+func (d *mysqlIdentityDestination) MySQLServerFlavor() string   { return d.flavor }
+
+func TestMySQLCDCRejectsSourceToSameTable(t *testing.T) {
+	src := &mysqlIdentitySource{identity: "mysql:server-a", database: "app"}
+	dest := &mysqlIdentityDestination{mockDestination: mockDestination{scheme: "mysql"}, identity: "mysql:server-a", database: "app"}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mysql+cdc://source/app"
+	cfg.SourceTable = "items"
+	cfg.DestTable = "items"
+	require.ErrorContains(t, validateMySQLCDCSourceDestination(cfg, src, dest), "same physical table")
+
+	cfg.DestTable = "archive.items"
+	require.NoError(t, validateMySQLCDCSourceDestination(cfg, src, dest))
+
+	cfg.SourceTable = ""
+	cfg.SourceURI = "mysql+cdc://source/app?dest_schema=app"
+	require.ErrorContains(t, validateMySQLCDCSourceDestination(cfg, src, dest), "same server and database")
+}
+
+func TestMySQLCDCDestinationWithoutIdentity(t *testing.T) {
+	src := &mysqlIdentitySource{identity: "mysql:server-a", database: "app"}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mysql+cdc://source/app"
+	cfg.SourceTable = "items"
+
+	differentFlavor := &mysqlIdentityDestination{mockDestination: mockDestination{scheme: "mariadb"}, database: "app", flavor: "mariadb"}
+	require.NoError(t, validateMySQLCDCSourceDestination(cfg, src, differentFlavor))
+
+	sameFlavor := &mysqlIdentityDestination{mockDestination: mockDestination{scheme: "mysql"}, database: "app", flavor: "mysql"}
+	require.ErrorContains(t, validateMySQLCDCSourceDestination(cfg, src, sameFlavor), "verifiable MySQL server identity")
+
+	unknownFlavor := &mysqlIdentityDestination{mockDestination: mockDestination{scheme: "mysql"}, database: "app"}
+	require.ErrorContains(t, validateMySQLCDCSourceDestination(cfg, src, unknownFlavor), "verifiable MySQL server identity")
+}
+
 func TestValidateCDCRunSerialization(t *testing.T) {
 	required := &serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}
 	leased := &leasedSerializedCDCRunsDestination{
@@ -1248,8 +1338,8 @@ func TestValidateDestinationManagedCDCState(t *testing.T) {
 
 func TestValidateMySQLCDCMutationFencing(t *testing.T) {
 	unsupported := &mockManagedCDCStateDestination{}
-	require.ErrorContains(t, validateMySQLCDCMutationFencing(unsupported), "atomic target-incarnation fencing for merge")
-	require.NoError(t, validateMySQLCDCMutationFencing(&mockMySQLCDCFencedDestination{}))
+	require.ErrorContains(t, validateMySQLCDCMutationFencing(unsupported, false), "atomic target-incarnation fencing for merge")
+	require.NoError(t, validateMySQLCDCMutationFencing(&mockMySQLCDCFencedDestination{}, false))
 }
 
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {

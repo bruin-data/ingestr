@@ -31,6 +31,8 @@ type MySQLDestination struct {
 	db                  *sql.DB
 	uri                 string
 	database            string
+	serverIdentity      string
+	serverFlavor        string
 	isVitess            bool
 	vitessBackend       bool
 	useLoadData         bool
@@ -224,11 +226,58 @@ func (d *MySQLDestination) Connect(ctx context.Context, uri string) error {
 	d.isVitess = d.vitessBackend
 	d.useLoadData = !d.vitessBackend
 	d.lowerCaseTableNames = lowerCaseTableNames
+	if !d.vitessBackend {
+		// Detect the flavor from the server itself, not the URI scheme: the
+		// mysql:// and mariadb:// schemes are interchangeable for this
+		// destination, and the identity string must match the one the CDC
+		// source computes from the server flavor for feedback-loop detection.
+		d.serverFlavor = detectMySQLFlavor(ctx, db)
+		identityVariable := "@@GLOBAL.server_uuid"
+		identityPrefix := "mysql:"
+		if d.serverFlavor == "mariadb" {
+			identityVariable = "@@GLOBAL.server_uid"
+			identityPrefix = "mariadb:"
+		}
+		if d.serverFlavor != "" {
+			var identity string
+			if err := db.QueryRowContext(ctx, "SELECT "+identityVariable).Scan(&identity); err != nil {
+				config.Debug("[MYSQL] server identity probe (%s) failed: %v", identityVariable, err)
+			} else if strings.TrimSpace(identity) != "" {
+				d.serverIdentity = identityPrefix + identity
+			}
+		}
+	}
 	if scheme != "" {
 		d.scheme = scheme
 	}
 	config.Debug("[MYSQL] Connected to database: %s", database)
 	return nil
+}
+
+func (d *MySQLDestination) MySQLServerIdentity() string {
+	return d.serverIdentity
+}
+
+func (d *MySQLDestination) MySQLServerFlavor() string {
+	return d.serverFlavor
+}
+
+func (d *MySQLDestination) MySQLDatabaseName() string {
+	return d.database
+}
+
+// detectMySQLFlavor returns "mariadb" or "mysql" based on the server's own
+// version string, or "" when the probe fails and the flavor is unknown.
+func detectMySQLFlavor(ctx context.Context, db *sql.DB) string {
+	var version string
+	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
+		config.Debug("[MYSQL] server flavor detection failed: %v", err)
+		return ""
+	}
+	if strings.Contains(strings.ToLower(version), "mariadb") {
+		return "mariadb"
+	}
+	return "mysql"
 }
 
 // detectVitess reports whether the server identifies as Vitess (this also covers
@@ -1095,18 +1144,28 @@ func quoteMySQLTable(database, table string) string {
 
 func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := d.mergeTableInTx(ctx, tx, opts); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
 
+func (d *MySQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts destination.MergeOptions) error {
 	columns := opts.Columns
 	quotedColumns := quoteColumns(columns)
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
 	nonPKColumns := filterColumns(targetColumns, opts.PrimaryKeys)
 
-	tx, err := d.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 	if opts.CDCExpectedIncarnation != "" {
 		if err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
 			return err
@@ -1280,11 +1339,34 @@ func (d *MySQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
+	return nil
+}
 
-	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+func (d *MySQLDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin multi-table CDC transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, merge := range merges {
+		if merge.Truncate {
+			if merge.Options.CDCExpectedIncarnation != "" {
+				if err := d.lockAndValidateCDCIncarnation(ctx, tx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+quoteTable(merge.Options.TargetTable)); err != nil {
+				return fmt.Errorf("failed to reset CDC target %s: %w", merge.Options.TargetTable, err)
+			}
+		}
+		if err := d.mergeTableInTx(ctx, tx, merge.Options); err != nil {
+			return fmt.Errorf("failed to merge CDC target %s: %w", merge.Options.TargetTable, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit multi-table CDC transaction: %w", err)
+	}
 	return nil
 }
 

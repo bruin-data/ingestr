@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -87,12 +88,19 @@ type MySQLCDCSource struct {
 	db                *sql.DB
 	uri               string
 	database          string
+	lineageIdentity   string
 	cdcConfig         MySQLCDCConfig
 	connInfo          mysqlCDCConnInfo
 	stateMu           sync.Mutex
 	state             source.CDCStateCommitToken
 	schemaMu          sync.Mutex
 	discoveredSchemas map[string]*schema.TableSchema
+}
+
+type mysqlCDCCheckpoint struct {
+	Position gomysql.Position
+	Identity string
+	GTIDSet  string
 }
 
 type mysqlCDCTableMetadata struct {
@@ -279,10 +287,16 @@ func (s *MySQLCDCSource) Connect(ctx context.Context, rawURI string) error {
 		_ = db.Close()
 		return err
 	}
+	lineageIdentity, err := loadMySQLCDCLineageIdentity(ctx, db, cdcConfig.Flavor)
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
 
 	s.db = db
 	s.uri = rawURI
 	s.database = database
+	s.lineageIdentity = lineageIdentity
 	s.cdcConfig = cdcConfig
 	s.connInfo = connInfo
 	return nil
@@ -295,6 +309,14 @@ func (s *MySQLCDCSource) Close(ctx context.Context) error {
 	return nil
 }
 
+func (s *MySQLCDCSource) MySQLServerIdentity() string {
+	return s.lineageIdentity
+}
+
+func (s *MySQLCDCSource) MySQLDatabaseName() string {
+	return s.database
+}
+
 func (s *MySQLCDCSource) resetCDCState() {
 	s.stateMu.Lock()
 	s.state = source.CDCStateCommitToken{
@@ -303,24 +325,24 @@ func (s *MySQLCDCSource) resetCDCState() {
 	s.stateMu.Unlock()
 }
 
-func (s *MySQLCDCSource) recordMySQLCDCSnapshot(table string, position gomysql.Position) {
-	if table == "" || position.Name == "" {
+func (s *MySQLCDCSource) recordMySQLCDCSnapshot(table string, checkpoint mysqlCDCCheckpoint) {
+	if table == "" || checkpoint.Position.Name == "" {
 		return
 	}
 	s.stateMu.Lock()
 	if s.state.SnapshotPositions == nil {
 		s.state.SnapshotPositions = make(map[string]string)
 	}
-	s.state.SnapshotPositions[table] = formatStoredMySQLPosition(position, 0)
+	s.state.SnapshotPositions[table] = formatStoredMySQLCheckpoint(checkpoint)
 	s.stateMu.Unlock()
 }
 
-func (s *MySQLCDCSource) recordMySQLCDCCheckpoint(position gomysql.Position) {
-	if position.Name == "" {
+func (s *MySQLCDCSource) recordMySQLCDCCheckpoint(checkpoint mysqlCDCCheckpoint) {
+	if checkpoint.Position.Name == "" {
 		return
 	}
 	s.stateMu.Lock()
-	s.state.Position = formatStoredMySQLPosition(position, 0)
+	s.state.Position = formatStoredMySQLCheckpoint(checkpoint)
 	s.stateMu.Unlock()
 }
 
@@ -348,6 +370,9 @@ func (s *MySQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 
 	fullSchema, err := s.getSchema(ctx, req.Name)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateMySQLCDCSourceColumns(fullSchema, req.Name); err != nil {
 		return nil, err
 	}
 	if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, req.Name); err != nil {
@@ -449,6 +474,9 @@ func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []st
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName, err)
 		}
+		if err := validateMySQLCDCSourceColumns(fullSchema, tableName); err != nil {
+			return nil, err
+		}
 		if validateSupported {
 			if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, tableName); err != nil {
 				return nil, err
@@ -527,17 +555,17 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			metaByTable[table.Name] = meta
 
 			storedLSN := strings.TrimSpace(opts.CDCResumeLSNs[table.Name])
-			if resume, ok := parseStoredMySQLPosition(storedLSN); ok {
+			if resume, ok := parseStoredMySQLCheckpoint(storedLSN); ok {
 				canResume, err := s.canResume(ctx, resume)
 				if err != nil {
 					results <- source.RecordBatchResult{Err: err}
 					return
 				}
 				if canResume {
-					startByTable[table.Name] = resume
+					startByTable[table.Name] = resume.Position
 					continue
 				}
-				results <- source.RecordBatchResult{Err: mysqlCDCResumeExpiredError(table.Name, resume)}
+				results <- source.RecordBatchResult{Err: mysqlCDCResumeExpiredError(table.Name, resume.Position)}
 				return
 			} else if storedLSN != "" {
 				results <- source.RecordBatchResult{Err: mysqlCDCResumeInvalidError(table.Name, storedLSN)}
@@ -547,13 +575,13 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			inventoryValidator := func(validationCtx context.Context, q mysqlCDCPositionQueryer) error {
 				return s.validateMySQLCDCInventory(validationCtx, q, opts.Tables)
 			}
-			snapshotPos, err := s.snapshotTable(ctx, meta, table.Schema, opts.ReadOptions, results, table.Name, inventoryValidator)
+			snapshotCheckpoint, err := s.snapshotTable(ctx, meta, table.Schema, opts.ReadOptions, results, table.Name, inventoryValidator)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed for %s: %w", table.Name, err)}
 				return
 			}
-			startByTable[table.Name] = snapshotPos
-			s.recordMySQLCDCSnapshot(table.Name, snapshotPos)
+			startByTable[table.Name] = snapshotCheckpoint.Position
+			s.recordMySQLCDCSnapshot(table.Name, snapshotCheckpoint)
 		}
 
 		if err := s.streamTables(ctx, selected, metaByTable, startByTable, opts.ReadOptions, results, true); err != nil {
@@ -918,7 +946,7 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 		t.source.resetCDCState()
 
 		storedLSN := strings.TrimSpace(opts.CDCResumeLSN)
-		if resume, ok := parseStoredMySQLPosition(storedLSN); ok {
+		if resume, ok := parseStoredMySQLCheckpoint(storedLSN); ok {
 			canResume, err := t.source.canResume(ctx, resume)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
@@ -926,7 +954,7 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 			}
 			if canResume {
 				internalName := t.metadata.Name
-				startByTable := map[string]gomysql.Position{internalName: resume}
+				startByTable := map[string]gomysql.Position{internalName: resume.Position}
 				metaByTable := map[string]mysqlCDCTableMetadata{internalName: t.metadata}
 				tableInfo := source.SourceTableInfo{
 					Name:        internalName,
@@ -938,22 +966,22 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 				}
 				return
 			}
-			results <- source.RecordBatchResult{Err: mysqlCDCResumeExpiredError(t.tableName, resume)}
+			results <- source.RecordBatchResult{Err: mysqlCDCResumeExpiredError(t.tableName, resume.Position)}
 			return
 		} else if storedLSN != "" {
 			results <- source.RecordBatchResult{Err: mysqlCDCResumeInvalidError(t.tableName, storedLSN)}
 			return
 		}
 
-		snapshotPos, err := t.source.snapshotTable(ctx, t.metadata, outputSchema, opts, results, "", nil)
+		snapshotCheckpoint, err := t.source.snapshotTable(ctx, t.metadata, outputSchema, opts, results, "", nil)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)}
 			return
 		}
-		t.source.recordMySQLCDCSnapshot(t.tableName, snapshotPos)
+		t.source.recordMySQLCDCSnapshot(t.tableName, snapshotCheckpoint)
 
 		internalName := t.metadata.Name
-		startByTable := map[string]gomysql.Position{internalName: snapshotPos}
+		startByTable := map[string]gomysql.Position{internalName: snapshotCheckpoint.Position}
 		metaByTable := map[string]mysqlCDCTableMetadata{internalName: t.metadata}
 		tableInfo := source.SourceTableInfo{
 			Name:        internalName,
@@ -968,7 +996,27 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 	return results, nil
 }
 
-func (s *MySQLCDCSource) canResume(ctx context.Context, pos gomysql.Position) (bool, error) {
+func (s *MySQLCDCSource) canResume(ctx context.Context, checkpoint mysqlCDCCheckpoint) (bool, error) {
+	pos := checkpoint.Position
+	if s.lineageIdentity != "" {
+		if checkpoint.Identity == "" {
+			return false, fmt.Errorf("MySQL CDC resume checkpoint has no source lineage identity; run with --full-refresh to establish a lineage-aware checkpoint")
+		}
+		if checkpoint.Identity != s.lineageIdentity {
+			return false, fmt.Errorf("MySQL CDC resume checkpoint belongs to source server %q, but the connected server is %q; run with --full-refresh instead of reusing file positions across servers", checkpoint.Identity, s.lineageIdentity)
+		}
+		currentGTIDSet, err := s.currentMySQLCDCLineageGTIDSet(ctx)
+		if err != nil {
+			return false, err
+		}
+		contains, err := mysqlCDCGTIDSetContains(s.cdcConfig.Flavor, currentGTIDSet, checkpoint.GTIDSet)
+		if err != nil {
+			return false, err
+		}
+		if !contains {
+			return false, fmt.Errorf("MySQL CDC resume checkpoint GTID history is not contained in the connected server history; the server may have been reset or replaced, so run with --full-refresh")
+		}
+	}
 	rows, err := s.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
 		rows, err = s.db.QueryContext(ctx, "SHOW MASTER LOGS")
@@ -1001,10 +1049,10 @@ func (s *MySQLCDCSource) canResume(ctx context.Context, pos gomysql.Position) (b
 	return false, nil
 }
 
-func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMetadata, outputSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string, validateInventory func(context.Context, mysqlCDCPositionQueryer) error) (gomysql.Position, error) {
+func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMetadata, outputSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string, validateInventory func(context.Context, mysqlCDCPositionQueryer) error) (mysqlCDCCheckpoint, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return gomysql.Position{}, fmt.Errorf("failed to acquire MySQL connection: %w", err)
+		return mysqlCDCCheckpoint{}, fmt.Errorf("failed to acquire MySQL connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -1017,21 +1065,25 @@ func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMe
 
 	snapshotPos, err := beginMySQLConsistentSnapshotWithValidation(ctx, conn, validateInventory)
 	if err != nil {
-		return gomysql.Position{}, err
+		return mysqlCDCCheckpoint{}, err
+	}
+	snapshotCheckpoint, err := s.checkpointForPosition(ctx, conn, snapshotPos)
+	if err != nil {
+		return mysqlCDCCheckpoint{}, err
 	}
 	freshSchema, err := getMySQLSchema(ctx, conn, s.database, meta.Name)
 	if err != nil {
-		return gomysql.Position{}, fmt.Errorf("failed to validate snapshot schema for %s: %w", meta.Name, err)
+		return mysqlCDCCheckpoint{}, fmt.Errorf("failed to validate snapshot schema for %s: %w", meta.Name, err)
 	}
 	if err := validateMySQLCDCSnapshotSchema(removeMySQLCDCColumns(meta.FullSchema), freshSchema, meta.Name); err != nil {
-		return gomysql.Position{}, err
+		return mysqlCDCCheckpoint{}, err
 	}
 
 	sourceColumns := sourceColumnsWithoutMySQLCDC(outputSchema)
 	query := buildMySQLCDCSnapshotQuery(meta, sourceColumns)
 	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
-		return gomysql.Position{}, fmt.Errorf("failed to query snapshot for %s: %w", meta.Name, err)
+		return mysqlCDCCheckpoint{}, fmt.Errorf("failed to query snapshot for %s: %w", meta.Name, err)
 	}
 	if opts.CDCSnapshotReplace {
 		results <- source.RecordBatchResult{TableName: resultTable, Truncate: true}
@@ -1039,18 +1091,18 @@ func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMe
 
 	if err := rowsToMySQLCDCSnapshotBatches(rows, outputSchema, opts, snapshotPos, results, resultTable); err != nil {
 		_ = rows.Close()
-		return gomysql.Position{}, err
+		return mysqlCDCCheckpoint{}, err
 	}
 	if err := rows.Close(); err != nil {
-		return gomysql.Position{}, err
+		return mysqlCDCCheckpoint{}, err
 	}
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return gomysql.Position{}, fmt.Errorf("failed to commit MySQL snapshot transaction: %w", err)
+		return mysqlCDCCheckpoint{}, fmt.Errorf("failed to commit MySQL snapshot transaction: %w", err)
 	}
 	committed = true
 
-	return snapshotPos, nil
+	return snapshotCheckpoint, nil
 }
 
 func validateMySQLCDCSnapshotSchema(expected, current *schema.TableSchema, table string) error {
@@ -1135,12 +1187,16 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	if err != nil {
 		return err
 	}
+	targetCheckpoint, err := s.checkpointForPosition(ctx, s.db, target)
+	if err != nil {
+		return err
+	}
 	start := minMySQLPosition(startByTable)
 	if start.Name == "" {
 		return nil
 	}
 	if start.Compare(target) >= 0 {
-		s.recordMySQLCDCCheckpoint(target)
+		s.recordMySQLCDCCheckpoint(targetCheckpoint)
 		return nil
 	}
 
@@ -1202,7 +1258,9 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		if err := flushMySQLCDCChangeBuffers(buffers, results); err != nil {
 			return err
 		}
-		s.recordMySQLCDCCheckpoint(safeCheckpoint(position))
+		checkpoint := targetCheckpoint
+		checkpoint.Position = safeCheckpoint(position)
+		s.recordMySQLCDCCheckpoint(checkpoint)
 		return nil
 	}
 	appendChanges := func(table string, changes []mysqlCDCChange) error {
@@ -2372,6 +2430,80 @@ type mysqlCDCSnapshotConn interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 }
 
+type mysqlCDCLineageQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+func loadMySQLCDCLineageIdentity(ctx context.Context, q mysqlCDCLineageQueryer, flavor string) (string, error) {
+	if flavor == gomysql.MariaDBFlavor {
+		var identity string
+		if err := q.QueryRowContext(ctx, "SELECT @@GLOBAL.server_uid").Scan(&identity); err != nil {
+			return "", fmt.Errorf("MariaDB CDC requires a server version exposing immutable @@GLOBAL.server_uid for checkpoint lineage validation: %w", err)
+		}
+		if strings.TrimSpace(identity) == "" {
+			return "", fmt.Errorf("MariaDB CDC server_uid is empty; checkpoint lineage cannot be validated safely")
+		}
+		return "mariadb:" + identity, nil
+	}
+
+	var identity, gtidMode string
+	if err := q.QueryRowContext(ctx, "SELECT @@GLOBAL.server_uuid, @@GLOBAL.gtid_mode").Scan(&identity, &gtidMode); err != nil {
+		return "", fmt.Errorf("failed to read MySQL server identity and GTID mode: %w", err)
+	}
+	if strings.TrimSpace(identity) == "" {
+		return "", fmt.Errorf("MySQL server_uuid is empty; checkpoint lineage cannot be validated safely")
+	}
+	if !strings.EqualFold(strings.TrimSpace(gtidMode), "ON") {
+		return "", fmt.Errorf("MySQL CDC requires gtid_mode=ON for lineage-safe checkpoints; current mode is %q", gtidMode)
+	}
+	return "mysql:" + identity, nil
+}
+
+func (s *MySQLCDCSource) currentMySQLCDCLineageGTIDSet(ctx context.Context) (string, error) {
+	return currentMySQLCDCLineageGTIDSet(ctx, s.db, s.cdcConfig.Flavor)
+}
+
+func currentMySQLCDCLineageGTIDSet(ctx context.Context, q mysqlCDCLineageQueryer, flavor string) (string, error) {
+	variable := "@@GLOBAL.gtid_executed"
+	if flavor == gomysql.MariaDBFlavor {
+		// gtid_binlog_state is the full per-(domain, server_id) history;
+		// gtid_binlog_pos only holds the latest GTID per domain, so a
+		// primary switch or server_id change would make containment fail
+		// even though the binlog history is intact.
+		variable = "@@GLOBAL.gtid_binlog_state"
+	}
+	var value sql.NullString
+	if err := q.QueryRowContext(ctx, "SELECT "+variable).Scan(&value); err != nil {
+		return "", fmt.Errorf("failed to read MySQL CDC GTID history: %w", err)
+	}
+	return value.String, nil
+}
+
+func (s *MySQLCDCSource) checkpointForPosition(ctx context.Context, q mysqlCDCLineageQueryer, position gomysql.Position) (mysqlCDCCheckpoint, error) {
+	checkpoint := mysqlCDCCheckpoint{Position: position, Identity: s.lineageIdentity}
+	if s.lineageIdentity == "" {
+		return checkpoint, nil
+	}
+	gtidSet, err := currentMySQLCDCLineageGTIDSet(ctx, q, s.cdcConfig.Flavor)
+	if err != nil {
+		return mysqlCDCCheckpoint{}, err
+	}
+	checkpoint.GTIDSet = gtidSet
+	return checkpoint, nil
+}
+
+func mysqlCDCGTIDSetContains(flavor, current, checkpoint string) (bool, error) {
+	currentSet, err := gomysql.ParseGTIDSet(flavor, strings.TrimSpace(current))
+	if err != nil {
+		return false, fmt.Errorf("failed to parse current MySQL CDC GTID history: %w", err)
+	}
+	checkpointSet, err := gomysql.ParseGTIDSet(flavor, strings.TrimSpace(checkpoint))
+	if err != nil {
+		return false, fmt.Errorf("failed to parse checkpoint MySQL CDC GTID history: %w", err)
+	}
+	return currentSet.Contain(checkpointSet), nil
+}
+
 func currentMySQLBinlogPosition(ctx context.Context, q mysqlCDCPositionQueryer) (gomysql.Position, error) {
 	pos, ok, err := currentMySQLBinlogPositionFromStatement(ctx, q, "SHOW BINARY LOG STATUS")
 	if err == nil && ok {
@@ -2488,6 +2620,18 @@ func addMySQLCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {
 	return &copied
 }
 
+func validateMySQLCDCSourceColumns(tableSchema *schema.TableSchema, table string) error {
+	if tableSchema == nil {
+		return nil
+	}
+	for _, column := range tableSchema.Columns {
+		if destination.IsCDCMetaColumn(column.Name) {
+			return fmt.Errorf("MySQL CDC source table %s contains reserved metadata column %q; rename the source column before enabling CDC", table, column.Name)
+		}
+	}
+	return nil
+}
+
 func removeMySQLCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {
 	if tableSchema == nil {
 		return nil
@@ -2539,7 +2683,7 @@ func mysqlEventPosition(event *replication.BinlogEvent, current gomysql.Position
 }
 
 var (
-	storedMySQLPositionRegex    = regexp.MustCompile(`^(\d{20}):([^:]+):(\d{20})(?::\d{6,})?$`)
+	storedMySQLPositionRegex    = regexp.MustCompile(`^(\d{20}):([^:]+):(\d{20})(?::\d{6,})?(?::l1:([^:]+):([^:]*))?$`)
 	legacyStoredMySQLPositionRE = regexp.MustCompile(`^([^:]+):(\d{20})(?::\d{6,})?$`)
 )
 
@@ -2547,26 +2691,53 @@ func formatStoredMySQLPosition(pos gomysql.Position, rowSeq int) string {
 	return fmt.Sprintf("%020d:%s:%020d:%020d", mysqlBinlogSequence(pos.Name), pos.Name, pos.Pos, rowSeq)
 }
 
-func parseStoredMySQLPosition(stored string) (gomysql.Position, bool) {
+func formatStoredMySQLCheckpoint(checkpoint mysqlCDCCheckpoint) string {
+	position := formatStoredMySQLPosition(checkpoint.Position, 0)
+	if checkpoint.Identity == "" {
+		return position
+	}
+	encode := base64.RawURLEncoding.EncodeToString
+	return position + ":l1:" + encode([]byte(checkpoint.Identity)) + ":" + encode([]byte(checkpoint.GTIDSet))
+}
+
+func parseStoredMySQLCheckpoint(stored string) (mysqlCDCCheckpoint, bool) {
 	stored = strings.TrimSpace(stored)
 	if stored == "" {
-		return gomysql.Position{}, false
+		return mysqlCDCCheckpoint{}, false
 	}
-	if matches := storedMySQLPositionRegex.FindStringSubmatch(stored); len(matches) == 4 {
+	if matches := storedMySQLPositionRegex.FindStringSubmatch(stored); len(matches) == 6 {
 		pos, err := strconv.ParseUint(matches[3], 10, 32)
 		if err != nil {
-			return gomysql.Position{}, false
+			return mysqlCDCCheckpoint{}, false
 		}
-		return gomysql.Position{Name: matches[2], Pos: uint32(pos)}, true
+		checkpoint := mysqlCDCCheckpoint{Position: gomysql.Position{Name: matches[2], Pos: uint32(pos)}}
+		if matches[4] != "" {
+			identity, err := base64.RawURLEncoding.DecodeString(matches[4])
+			if err != nil {
+				return mysqlCDCCheckpoint{}, false
+			}
+			gtidSet, err := base64.RawURLEncoding.DecodeString(matches[5])
+			if err != nil {
+				return mysqlCDCCheckpoint{}, false
+			}
+			checkpoint.Identity = string(identity)
+			checkpoint.GTIDSet = string(gtidSet)
+		}
+		return checkpoint, true
 	}
 	if matches := legacyStoredMySQLPositionRE.FindStringSubmatch(stored); len(matches) == 3 {
 		pos, err := strconv.ParseUint(matches[2], 10, 32)
 		if err != nil {
-			return gomysql.Position{}, false
+			return mysqlCDCCheckpoint{}, false
 		}
-		return gomysql.Position{Name: matches[1], Pos: uint32(pos)}, true
+		return mysqlCDCCheckpoint{Position: gomysql.Position{Name: matches[1], Pos: uint32(pos)}}, true
 	}
-	return gomysql.Position{}, false
+	return mysqlCDCCheckpoint{}, false
+}
+
+func parseStoredMySQLPosition(stored string) (gomysql.Position, bool) {
+	checkpoint, ok := parseStoredMySQLCheckpoint(stored)
+	return checkpoint.Position, ok
 }
 
 func mysqlBinlogSequence(name string) uint64 {

@@ -33,6 +33,8 @@ func newMySQLCDCRegressionHarness(t *testing.T, ctx context.Context, sourceOptio
 	sourceCommand := []string{
 		"--server-id=21777",
 		"--log-bin=mysql-bin",
+		"--gtid-mode=ON",
+		"--enforce-gtid-consistency=ON",
 		"--binlog-format=ROW",
 		"--binlog-row-image=FULL",
 		"--max-connections=100",

@@ -29,6 +29,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/strategy"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"golang.org/x/term"
 )
@@ -145,6 +146,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
 	managedMySQLCDC := isMySQLCDCSource(p.config.SourceURI)
 	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC
+	if managedMySQLCDC {
+		if err := validateMySQLCDCSourceDestination(p.config, src, dest); err != nil {
+			return err
+		}
+	}
 	if err := validateCDCRunSerialization(p.config, dest); err != nil {
 		return err
 	}
@@ -180,7 +186,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			return err
 		}
 		if managedMySQLCDC {
-			if err := validateMySQLCDCMutationFencing(dest); err != nil {
+			if err := validateMySQLCDCMutationFencing(dest, p.config.SourceTable == ""); err != nil {
 				return err
 			}
 		}
@@ -2186,6 +2192,17 @@ func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namin
 		config.Debug("[NAMING] No column renames needed")
 		return nil
 	}
+	if isCDCSource(p.config.SourceURI) {
+		for sourceName, destinationName := range columnMapping {
+			if destination.IsCDCMetaColumn(sourceName) {
+				delete(columnMapping, sourceName)
+				continue
+			}
+			if destination.IsCDCMetaColumn(destinationName) {
+				return fmt.Errorf("source column %q normalizes to reserved CDC metadata column %q", sourceName, destinationName)
+			}
+		}
+	}
 
 	// Log the column mappings
 	for src, dest := range columnMapping {
@@ -2518,6 +2535,71 @@ func isMySQLCDCSource(rawURI string) bool {
 	}
 }
 
+type mysqlServerIdentityProvider interface {
+	MySQLServerIdentity() string
+	MySQLDatabaseName() string
+}
+
+type mysqlServerFlavorProvider interface {
+	MySQLServerFlavor() string
+}
+
+func validateMySQLCDCSourceDestination(cfg *config.IngestConfig, src source.Source, dest destination.Destination) error {
+	sourceIdentity, ok := src.(mysqlServerIdentityProvider)
+	if !ok || sourceIdentity.MySQLServerIdentity() == "" {
+		return fmt.Errorf("MySQL CDC source does not expose a verifiable server identity")
+	}
+	destinationIdentity, ok := dest.(mysqlServerIdentityProvider)
+	if !ok || destinationIdentity.MySQLServerIdentity() == "" {
+		// A missing identity (e.g. a MariaDB destination predating
+		// @@GLOBAL.server_uid) is still safe when the destination flavor
+		// provably differs from the source's: identities are prefixed by
+		// flavor, so they can never refer to the same physical server.
+		if flavorProvider, ok := dest.(mysqlServerFlavorProvider); ok {
+			destinationFlavor := flavorProvider.MySQLServerFlavor()
+			sourceFlavor, _, _ := strings.Cut(sourceIdentity.MySQLServerIdentity(), ":")
+			if destinationFlavor != "" && destinationFlavor != sourceFlavor {
+				return nil
+			}
+		}
+		return fmt.Errorf("destination scheme %q does not expose a verifiable MySQL server identity required to prevent CDC feedback loops", dest.GetScheme())
+	}
+	if sourceIdentity.MySQLServerIdentity() != destinationIdentity.MySQLServerIdentity() {
+		return nil
+	}
+
+	sourceDatabase := sourceIdentity.MySQLDatabaseName()
+	destinationDatabase := destinationIdentity.MySQLDatabaseName()
+	if cfg.SourceTable == "" {
+		if parsed, err := url.Parse(cfg.SourceURI); err == nil {
+			if mappedDatabase := strings.TrimSpace(parsed.Query().Get("dest_schema")); mappedDatabase != "" {
+				destinationDatabase = mappedDatabase
+			}
+		}
+		if strings.EqualFold(sourceDatabase, destinationDatabase) {
+			return fmt.Errorf("MySQL CDC source and multi-table destination resolve to the same server and database %q; choose a different destination database to prevent the connector from consuming its own writes", sourceDatabase)
+		}
+		return nil
+	}
+
+	sourceParts := tablename.Split(cfg.SourceTable)
+	destinationTable := cfg.DestTable
+	if strings.TrimSpace(destinationTable) == "" {
+		destinationTable = cfg.SourceTable
+	}
+	destinationParts := tablename.Split(destinationTable)
+	if len(sourceParts) == 0 || len(destinationParts) == 0 {
+		return fmt.Errorf("failed to resolve MySQL CDC source and destination table names for feedback-loop validation")
+	}
+	if len(destinationParts) > 1 {
+		destinationDatabase = destinationParts[len(destinationParts)-2]
+	}
+	if strings.EqualFold(sourceDatabase, destinationDatabase) && strings.EqualFold(sourceParts[len(sourceParts)-1], destinationParts[len(destinationParts)-1]) {
+		return fmt.Errorf("MySQL CDC source and destination resolve to the same physical table %s.%s; choose a different destination to prevent the connector from consuming its own writes", sourceDatabase, sourceParts[len(sourceParts)-1])
+	}
+	return nil
+}
+
 func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) string {
 	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
 		if stateID := parsed.Query().Get("state_id"); stateID != "" {
@@ -2693,13 +2775,46 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			}
 		}
 	}
-	if isMySQLCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
-		switch cfg.IncrementalStrategy {
-		case "", config.StrategyMerge, config.StrategyReplace:
-		default:
-			return &config.ValidationError{
-				Field:   "incremental-strategy",
-				Message: fmt.Sprintf("%q is not supported for MySQL CDC; use merge or replace", cfg.IncrementalStrategy),
+	if isMySQLCDCSource(cfg.SourceURI) {
+		if !cfg.FullRefresh {
+			switch cfg.IncrementalStrategy {
+			case "", config.StrategyMerge, config.StrategyReplace:
+			default:
+				return &config.ValidationError{
+					Field:   "incremental-strategy",
+					Message: fmt.Sprintf("%q is not supported for MySQL CDC; use merge or replace", cfg.IncrementalStrategy),
+				}
+			}
+		}
+		if cfg.SourceTable == "" {
+			switch {
+			case len(cfg.SQLExcludeColumns) > 0:
+				return &config.ValidationError{Field: "sql-exclude-columns", Message: "is not supported in multi-table MySQL CDC because exclusions are not applied consistently; select one table or remove the option"}
+			case len(cfg.Mask) > 0:
+				return &config.ValidationError{Field: "mask", Message: "is not supported in multi-table MySQL CDC because masks are not applied consistently; select one table or remove the option"}
+			case strings.TrimSpace(cfg.Columns) != "":
+				return &config.ValidationError{Field: "columns", Message: "is not supported in multi-table MySQL CDC because overrides are not applied consistently; select one table or remove the option"}
+			}
+		}
+		for _, column := range cfg.SQLExcludeColumns {
+			if destination.IsCDCMetaColumn(column) {
+				return &config.ValidationError{Field: "sql-exclude-columns", Message: fmt.Sprintf("cannot exclude reserved CDC metadata column %q", column)}
+			}
+		}
+		masker, err := transformer.NewColumnMasker(cfg.Mask)
+		if err == nil {
+			for _, column := range masker.MaskedColumns() {
+				if destination.IsCDCMetaColumn(column) {
+					return &config.ValidationError{Field: "mask", Message: fmt.Sprintf("cannot mask reserved CDC metadata column %q", column)}
+				}
+			}
+		}
+		overrides, err := schemaevolution.ParseColumnOverrides(cfg.Columns)
+		if err == nil {
+			for _, override := range overrides {
+				if destination.IsCDCMetaColumn(override.Name) || destination.IsCDCMetaColumn(override.RenameTo) {
+					return &config.ValidationError{Field: "columns", Message: "cannot rename or override reserved CDC metadata columns"}
+				}
 			}
 		}
 	}
@@ -2794,7 +2909,7 @@ func validateDestinationManagedCDCState(dest destination.Destination) error {
 	return nil
 }
 
-func validateMySQLCDCMutationFencing(dest destination.Destination) error {
+func validateMySQLCDCMutationFencing(dest destination.Destination, multiTable bool) error {
 	mergeFencer, ok := dest.(destination.CDCConditionalMergeCapable)
 	if !ok || !mergeFencer.SupportsCDCConditionalMerge() {
 		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for merge is not supported", dest.GetScheme())
@@ -2804,6 +2919,9 @@ func validateMySQLCDCMutationFencing(dest destination.Destination) error {
 	}
 	if _, ok := dest.(destination.ManagedCDCRunLeaser); !ok {
 		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: connector run leases are not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCMultiTableAtomicMerger); multiTable && !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic multi-table merge is not supported", dest.GetScheme())
 	}
 	if _, ok := dest.(destination.CDCLateTargetClaimPreparer); !ok {
 		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target claim and creation are not supported", dest.GetScheme())

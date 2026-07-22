@@ -539,6 +539,48 @@ func TestStoredMySQLPositionHelpers(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestStoredMySQLCheckpointCarriesLineage(t *testing.T) {
+	checkpoint := mysqlCDCCheckpoint{
+		Position: gomysql.Position{Name: "mysql-bin.000012", Pos: 345},
+		Identity: "mysql:550e8400-e29b-41d4-a716-446655440000",
+		GTIDSet:  "550e8400-e29b-41d4-a716-446655440000:1-42",
+	}
+	stored := formatStoredMySQLCheckpoint(checkpoint)
+	parsed, ok := parseStoredMySQLCheckpoint(stored)
+	require.True(t, ok)
+	assert.Equal(t, checkpoint, parsed)
+	assert.True(t, strings.HasPrefix(stored, formatStoredMySQLPosition(checkpoint.Position, 0)+":l1:"))
+}
+
+func TestMySQLCDCResumeRejectsMissingAndMismatchedLineage(t *testing.T) {
+	src := &MySQLCDCSource{lineageIdentity: "mysql:current"}
+
+	_, err := src.canResume(t.Context(), mysqlCDCCheckpoint{Position: gomysql.Position{Name: "mysql-bin.000001", Pos: 4}})
+	require.ErrorContains(t, err, "no source lineage identity")
+
+	_, err = src.canResume(t.Context(), mysqlCDCCheckpoint{
+		Position: gomysql.Position{Name: "mysql-bin.000001", Pos: 4},
+		Identity: "mysql:other",
+	})
+	require.ErrorContains(t, err, "connected server is")
+}
+
+func TestMySQLCDCGTIDContainment(t *testing.T) {
+	const uuid = "550e8400-e29b-41d4-a716-446655440000"
+	contains, err := mysqlCDCGTIDSetContains(gomysql.MySQLFlavor, uuid+":1-10", uuid+":1-5")
+	require.NoError(t, err)
+	assert.True(t, contains)
+
+	contains, err = mysqlCDCGTIDSetContains(gomysql.MySQLFlavor, uuid+":1-4", uuid+":1-5")
+	require.NoError(t, err)
+	assert.False(t, contains)
+}
+
+func TestMySQLCDCRejectsReservedSourceColumns(t *testing.T) {
+	err := validateMySQLCDCSourceColumns(&schema.TableSchema{Columns: []schema.Column{{Name: "_CDC_LSN"}}}, "items")
+	require.ErrorContains(t, err, "reserved metadata column")
+}
+
 func TestAddMySQLCDCColumns(t *testing.T) {
 	original := &schema.TableSchema{
 		Name: "users",
