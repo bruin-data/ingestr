@@ -3,8 +3,11 @@ package duckdb
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
 )
 
@@ -18,6 +21,79 @@ func NewDuckLakeDestination() *DuckLakeDestination {
 
 func (d *DuckLakeDestination) Schemes() []string { return []string{"ducklake"} }
 func (d *DuckLakeDestination) GetScheme() string { return "ducklake" }
+
+// Write and WriteParallel stage the Arrow stream in a regular in-memory DuckDB
+// table, then copy it into the DuckLake table with a SQL INSERT ... SELECT.
+//
+// The embedded DuckDBDestination writes via ADBC bulk-append (the DuckDB
+// appender), which cannot target tables in a DuckLake catalog. SQL writes
+// into DuckLake tables work,so we ADBC-load into a plain in-memory table
+// and then hand the rows to DuckLake via SQL.
+func (d *DuckLakeDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.writeViaMemoryStage(ctx, records, opts)
+}
+
+func (d *DuckLakeDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	return d.writeViaMemoryStage(ctx, records, opts)
+}
+
+func (d *DuckLakeDestination) writeViaMemoryStage(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	target := opts.Table
+	memName := duckLakeMemStageName(target)
+	memQualified := "memory.main." + memName
+
+	// Mirror the DuckLake table's schema into a plain in-memory table.
+	if err := d.exec(ctx, fmt.Sprintf(
+		"CREATE OR REPLACE TABLE %s AS SELECT * FROM %s WHERE 1=0",
+		memQualified, destination.QuoteTableName(target),
+	)); err != nil {
+		return fmt.Errorf("ducklake: create in-memory stage: %w", err)
+	}
+	defer func() { _ = d.exec(ctx, "DROP TABLE IF EXISTS "+memQualified) }()
+
+	// ADBC bulk-append cannot target a DuckLake table, and DuckDB rejects the
+	// ADBC target_catalog option — so switch the default catalog to `memory`,
+	// load the rows there via the embedded ADBC path, then switch back.
+	if err := d.exec(ctx, "USE memory"); err != nil {
+		return fmt.Errorf("ducklake: switch to memory catalog: %w", err)
+	}
+	restore := func() error { return d.exec(ctx, "USE "+srcduckdb.AttachAlias) }
+
+	memOpts := opts
+	memOpts.Table = "main." + memName // schema-qualified only: no ADBC catalog option
+	if err := d.DuckDBDestination.Write(ctx, records, memOpts); err != nil {
+		_ = restore()
+		return fmt.Errorf("ducklake: load in-memory stage: %w", err)
+	}
+	if err := restore(); err != nil {
+		return fmt.Errorf("ducklake: restore catalog: %w", err)
+	}
+
+	if err := d.exec(ctx, fmt.Sprintf(
+		"INSERT INTO %s SELECT * FROM %s",
+		destination.QuoteTableName(target), memQualified,
+	)); err != nil {
+		return fmt.Errorf("ducklake: copy stage into ducklake table: %w", err)
+	}
+	return nil
+}
+
+// duckLakeMemStageName derives a collision-safe in-memory staging table name
+// from the (already unique) target table name.
+func duckLakeMemStageName(target string) string {
+	name := duckTable(target).Table + "__ducklake_memstage"
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
 
 func (d *DuckLakeDestination) Connect(ctx context.Context, uri string) error {
 	cfg, err := srcduckdb.ParseLakehouseURI(uri)
