@@ -213,6 +213,9 @@ func (d *SynapseDestination) TruncateInsertFromStaging(ctx context.Context, opts
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Dedicated SQL pools allow minimally logged TRUNCATE TABLE operations to
+	// participate in explicit transactions.
+	// https://learn.microsoft.com/azure/synapse-analytics/sql/develop-transaction-best-practices
 	if _, err := tx.ExecContext(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate target: %w", err)
@@ -241,11 +244,13 @@ func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagin
 		if opts.IncrementalKey != "" {
 			orderBy = quoteColumn(opts.IncrementalKey)
 		}
-		selectClause = destination.DedupStagingSelect(
+		rowNumberAlias := quoteColumn(destination.UniqueInternalColumnName(opts.Columns, "__bruin_dedup_rn"))
+		selectClause = destination.DedupStagingSelectWithRowNumberAlias(
 			columnList,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			stagingTable,
 			orderBy,
+			rowNumberAlias,
 		)
 	}
 

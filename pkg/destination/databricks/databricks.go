@@ -561,11 +561,13 @@ func (d *DatabricksDestination) buildTruncateInsertFromStagingSQL(opts destinati
 		if opts.IncrementalKey != "" {
 			orderBy = quoteIdentifier(opts.IncrementalKey)
 		}
-		selectClause = destination.DedupStagingSelect(
+		rowNumberAlias := quoteIdentifier(destination.UniqueInternalColumnName(opts.Columns, "__bruin_dedup_rn"))
+		selectClause = destination.DedupStagingSelectWithRowNumberAlias(
 			columnList,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			stagingTable,
 			orderBy,
+			rowNumberAlias,
 		)
 	}
 

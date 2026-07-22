@@ -73,7 +73,7 @@ func TestBuildTruncateInsertFromStagingSQLDeduplicatesUncertainKeys(t *testing.T
 		StagingTable:   "stage.events",
 		TargetTable:    "dbo.events",
 		PrimaryKeys:    []string{"id"},
-		Columns:        []string{"id", "updated_at", "value"},
+		Columns:        []string{"id", "updated_at", "value", "__BRUIN_DEDUP_RN"},
 		IncrementalKey: "updated_at",
 	})
 	if err != nil {
@@ -84,6 +84,9 @@ func TestBuildTruncateInsertFromStagingSQLDeduplicatesUncertainKeys(t *testing.T
 	}
 	if !strings.Contains(insertSQL, "ROW_NUMBER() OVER (PARTITION BY [id] ORDER BY [updated_at] DESC)") {
 		t.Fatalf("insertSQL does not deduplicate staging rows:\n%s", insertSQL)
+	}
+	if !strings.Contains(insertSQL, "AS [__bruin_dedup_rn_2]") || !strings.Contains(insertSQL, "WHERE [__bruin_dedup_rn_2] = 1") {
+		t.Fatalf("insertSQL does not avoid the user column alias:\n%s", insertSQL)
 	}
 }
 

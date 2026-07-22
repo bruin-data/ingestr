@@ -1,6 +1,9 @@
 package destination
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDedupStagingSelect(t *testing.T) {
 	cols := `"id", "name", "ts"`
@@ -36,4 +39,16 @@ func TestDedupStagingSelect(t *testing.T) {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
+}
+
+func TestDedupStagingSelectWithCollisionSafeAlias(t *testing.T) {
+	alias := UniqueInternalColumnName([]string{"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2"}, "__bruin_dedup_rn")
+	if alias != "__bruin_dedup_rn_3" {
+		t.Fatalf("alias = %q, want __bruin_dedup_rn_3", alias)
+	}
+	quotedAlias := `"` + alias + `"`
+	got := DedupStagingSelectWithRowNumberAlias(`"id", "__BRUIN_DEDUP_RN"`, `"id"`, `"staging"`, "", quotedAlias)
+	if !strings.Contains(got, `AS "__bruin_dedup_rn_3"`) || !strings.Contains(got, `WHERE "__bruin_dedup_rn_3" = 1`) {
+		t.Fatalf("dedup SQL does not use collision-safe alias: %s", got)
+	}
 }

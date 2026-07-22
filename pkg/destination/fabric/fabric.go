@@ -276,6 +276,8 @@ func (d *FabricDestination) TruncateInsertFromStaging(ctx context.Context, opts 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Fabric Warehouse explicitly supports TRUNCATE TABLE in ACID transactions.
+	// https://learn.microsoft.com/fabric/data-warehouse/transactions
 	if _, err := tx.ExecContext(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate target: %w", err)
@@ -304,11 +306,13 @@ func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagin
 		if opts.IncrementalKey != "" {
 			orderBy = quoteColumn(opts.IncrementalKey)
 		}
-		selectClause = destination.DedupStagingSelect(
+		rowNumberAlias := quoteColumn(destination.UniqueInternalColumnName(opts.Columns, "__bruin_dedup_rn"))
+		selectClause = destination.DedupStagingSelectWithRowNumberAlias(
 			columnList,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			stagingTable,
 			orderBy,
+			rowNumberAlias,
 		)
 	}
 

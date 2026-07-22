@@ -1471,7 +1471,9 @@ func (d *DuckDBDestination) TruncateInsertFromStaging(ctx context.Context, opts 
 	committed := false
 	defer func() {
 		if !committed {
-			_ = d.exec(ctx, "ROLLBACK")
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = d.exec(rollbackCtx, "ROLLBACK")
 		}
 	}()
 
@@ -1504,11 +1506,13 @@ func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagin
 		if opts.IncrementalKey != "" {
 			orderBy = quoteIdentifier(opts.IncrementalKey)
 		}
-		selectClause = destination.DedupStagingSelect(
+		rowNumberAlias := quoteIdentifier(destination.UniqueInternalColumnName(opts.Columns, "__bruin_dedup_rn"))
+		selectClause = destination.DedupStagingSelectWithRowNumberAlias(
 			columnList,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			stagingTable,
 			orderBy,
+			rowNumberAlias,
 		)
 	}
 

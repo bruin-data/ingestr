@@ -921,11 +921,13 @@ func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagin
 		if opts.IncrementalKey != "" {
 			orderBy = destination.QuoteIdentifier(opts.IncrementalKey)
 		}
-		selectClause = destination.DedupStagingSelect(
+		rowNumberAlias := destination.QuoteIdentifier(destination.UniqueInternalColumnName(opts.Columns, "__bruin_dedup_rn"))
+		selectClause = destination.DedupStagingSelectWithRowNumberAlias(
 			columnList,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			stagingTable,
 			orderBy,
+			rowNumberAlias,
 		)
 	}
 
