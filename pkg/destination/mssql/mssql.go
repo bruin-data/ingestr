@@ -351,6 +351,19 @@ func (d *MSSQLDestination) TruncateTable(ctx context.Context, table string) erro
 	return nil
 }
 
+func (d *MSSQLDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	insertSQL := buildInsertDirectSQL(opts.TargetTable, opts.StagingTable, columns)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *MSSQLDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	return d.WriteParallel(ctx, records, opts)
 }

@@ -449,6 +449,23 @@ func (d *MySQLDestination) TruncateTable(ctx context.Context, table string) erro
 	return nil
 }
 
+func (d *MySQLDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *MySQLDestination) TruncateCDCTable(ctx context.Context, table string) error {
 	deleteSQL := fmt.Sprintf("DELETE FROM %s", quoteTable(table))
 	if _, err := d.db.ExecContext(ctx, deleteSQL); err != nil {

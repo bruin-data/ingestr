@@ -40,7 +40,7 @@ func preStageStrategyAllowed(strategy config.IncrementalStrategy) bool {
 func (p *Pipeline) maybeStartPreStage(
 	ctx context.Context,
 	strategy config.IncrementalStrategy,
-	primaryKeys []string,
+	_ []string,
 	loadTimestamp time.Time,
 ) (destination.PreStageWriter, func(string) string) {
 	if p.config.DisablePreStaging {
@@ -77,7 +77,7 @@ func (p *Pipeline) maybeStartPreStage(
 
 	usesStagingTable := strategy == config.StrategyMerge ||
 		strategy == config.StrategyReplace ||
-		(strategy == config.StrategyTruncateInsert && len(primaryKeys) > 0)
+		strategy == config.StrategyTruncateInsert
 
 	writer, err := prestager.NewPreStageWriter(ctx, destination.PreStageOptions{
 		Table:               p.config.DestTable,

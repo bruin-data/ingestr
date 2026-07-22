@@ -563,6 +563,24 @@ func (d *CrateDBDestination) TruncateTable(ctx context.Context, table string) er
 	return nil
 }
 
+func (d *CrateDBDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		destination.QuoteTableName(opts.TargetTable), columnList, columnList, destination.QuoteTableName(opts.StagingTable),
+	)
+	if _, err := d.pool.Exec(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	d.refreshTable(ctx, opts.TargetTable)
+	return nil
+}
+
 func (d *CrateDBDestination) Exec(ctx context.Context, sql string, args ...any) error {
 	_, err := d.pool.Exec(ctx, sql, args...)
 	if err != nil {

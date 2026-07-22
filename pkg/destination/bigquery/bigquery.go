@@ -2677,6 +2677,40 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 	return nil
 }
 
+func (d *BigQueryDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	targetProject, targetDataset, targetTable, _, err := d.resolveTable(opts.TargetTable)
+	if err != nil {
+		return fmt.Errorf("invalid target table name: %w", err)
+	}
+	stagingProject, stagingDataset, stagingTable, _, err := d.resolveTable(opts.StagingTable)
+	if err != nil {
+		return fmt.Errorf("invalid staging table name: %w", err)
+	}
+	destinationColumns := destination.DestinationColumns(opts.Columns)
+	columns := make([]string, len(destinationColumns))
+	selectColumns := make([]string, len(destinationColumns))
+	castMap := d.buildCastMap(ctx, targetProject, targetDataset, targetTable, stagingDataset, stagingTable)
+	for i, column := range destinationColumns {
+		columns[i] = quoteIdentifier(column)
+		selectColumns[i] = castSourceCol(column, castMap)
+	}
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s.%s.%s (%s) SELECT %s FROM %s.%s.%s AS s",
+		quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTable), columnList,
+		strings.Join(selectColumns, ", "), quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable),
+	)
+	job, err := d.runQueryJobWithRetry(ctx, insertSQL, "insert from staging")
+	if err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging (job %s): %w", opts.TargetTable, jobRef(job), err)
+	}
+	return nil
+}
+
 // SupportsReplaceStrategy returns true as BigQuery supports the replace strategy.
 func (d *BigQueryDestination) SupportsReplaceStrategy() bool { return true }
 

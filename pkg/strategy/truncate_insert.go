@@ -16,12 +16,11 @@ import (
 // swap), this preserves the table definition and any dependent objects
 // (views, grants, foreign keys).
 //
-// When primary keys are configured, rows are first written to a staging table
-// and then inserted into the truncated target. Destinations can finalize the
-// replacement atomically; otherwise the strategy uses the destination's merge
-// SQL. Staging is deduplicated unless the source guarantees that its effective
-// primary keys are unique. Without PKs, rows are written directly into the
-// truncated target.
+// Rows are first written to a staging table and only copied into the target
+// after the source read succeeds. Destinations can finalize the replacement
+// atomically; otherwise the target is truncated and populated from staging.
+// With primary keys, staging is deduplicated unless the source guarantees that
+// its effective primary keys are unique.
 //
 // Destinations without atomic truncate+insert support retain these tradeoffs:
 //   - Non-atomic: the target is empty between TRUNCATE and the final insert,
@@ -58,87 +57,17 @@ func (s *TruncateInsertStrategy) Execute(ctx context.Context, job *IngestionJob)
 	if !ok {
 		return fmt.Errorf("destination does not support truncate+insert strategy; use replace instead")
 	}
-
-	if len(job.Config.PrimaryKeys) > 0 {
-		return s.executeWithStaging(ctx, job, truncator)
-	}
-	return s.executeDirect(ctx, job, truncator)
-}
-
-func (s *TruncateInsertStrategy) executeDirect(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
-	targetTable := job.Config.DestTable
-	config.Debug("[TRUNCATE+INSERT] Target table: %s (direct path, no PKs)", targetTable)
-
-	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
-		Table:       targetTable,
-		Schema:      destination.DestinationTableSchema(job.Schema),
-		DropFirst:   false,
-		PrimaryKeys: job.Config.PrimaryKeys,
-		PartitionBy: job.Config.PartitionBy,
-		ClusterBy:   job.Config.ClusterBy,
-	}); err != nil {
-		return fmt.Errorf("failed to prepare table: %w", err)
-	}
-
-	if err := job.ApplyEvolution(ctx); err != nil {
-		return fmt.Errorf("failed to apply schema evolution: %w", err)
-	}
-
-	if err := truncator.TruncateTable(ctx, targetTable); err != nil {
-		return fmt.Errorf("failed to truncate table: %w", err)
-	}
-
-	parallelism := job.Config.ExtractParallelism
-	if parallelism <= 0 {
-		parallelism = 4
-	}
-
-	readOpts := source.ReadOptions{
-		IncrementalKey:                  job.Config.IncrementalKey,
-		IntervalStart:                   job.Config.IntervalStart,
-		IntervalEnd:                     job.Config.IntervalEnd,
-		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
-		ExtractPartitionInterval:        job.Config.ExtractPartitionInterval,
-		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
-		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
-		PageSize:                        job.Config.PageSize,
-		Limit:                           job.Config.SQLLimit,
-		ExcludeColumns:                  job.Config.SQLExcludeColumns,
-		Parallelism:                     parallelism,
-		Schema:                          job.SourceSchema,
-		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
-		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
-		FullRefresh:                     job.Config.FullRefresh,
-	}
-
-	records, err := job.GetRecords(ctx, readOpts)
-	if err != nil {
-		return fmt.Errorf("failed to get records: %w", err)
-	}
-
-	if job.Tracker != nil {
-		records = job.Tracker.Wrap(records)
-	}
-
-	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
-		Table:            targetTable,
-		Schema:           job.Schema,
-		Parallelism:      job.Config.EffectiveDestinationParallelism(),
-		StagingBucket:    job.Config.StagingBucket,
-		LoaderFileSize:   job.Config.LoaderFileSize,
-		LoaderFileFormat: job.Config.LoaderFileFormat,
-		PreStaged:        job.PreStaged,
-	}); err != nil {
-		return fmt.Errorf("failed to write data: %w", err)
-	}
-
-	return nil
+	return s.executeWithStaging(ctx, job, truncator)
 }
 
 func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
 	atomicWriter, supportsAtomicFinalize := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
-	if !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
+	stagingInserter, supportsStagingInsert := job.Destination.(destination.StagingTableInserter)
+	if len(job.Config.PrimaryKeys) > 0 && !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
 		return fmt.Errorf("destination does not support deduplicated truncate+insert (merge not supported); use replace instead")
+	}
+	if len(job.Config.PrimaryKeys) == 0 && !supportsAtomicFinalize && !supportsStagingInsert {
+		return fmt.Errorf("destination does not support keyless truncate+insert from staging; use replace instead")
 	}
 
 	targetTable := job.Config.DestTable
@@ -235,14 +164,22 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		if err := truncator.TruncateTable(ctx, targetTable); err != nil {
 			return fmt.Errorf("failed to truncate target: %w", err)
 		}
-		if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-			StagingTable:             stagingTable,
-			TargetTable:              targetTable,
-			PrimaryKeys:              job.Config.PrimaryKeys,
-			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
-			Columns:                  job.Schema.ColumnNames(),
-			IncrementalKey:           incrementalKey,
-			Schema:                   job.Schema,
+		if len(job.Config.PrimaryKeys) > 0 {
+			if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
+				StagingTable:             stagingTable,
+				TargetTable:              targetTable,
+				PrimaryKeys:              job.Config.PrimaryKeys,
+				StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+				Columns:                  job.Schema.ColumnNames(),
+				IncrementalKey:           incrementalKey,
+				Schema:                   job.Schema,
+			}); err != nil {
+				return fmt.Errorf("failed to insert from staging: %w", err)
+			}
+		} else if err := stagingInserter.InsertFromStaging(ctx, destination.InsertFromStagingOptions{
+			StagingTable: stagingTable,
+			TargetTable:  targetTable,
+			Columns:      job.Schema.ColumnNames(),
 		}); err != nil {
 			return fmt.Errorf("failed to insert from staging: %w", err)
 		}

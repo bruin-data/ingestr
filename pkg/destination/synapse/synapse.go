@@ -3,6 +3,7 @@ package synapse
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -180,6 +181,23 @@ func (d *SynapseDestination) TruncateTable(ctx context.Context, table string) er
 		return fmt.Errorf("failed to truncate table %s: %w", table, err)
 	}
 	config.Debug("[Synapse] Truncated table: %s", table)
+	return nil
+}
+
+func (d *SynapseDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
 	return nil
 }
 

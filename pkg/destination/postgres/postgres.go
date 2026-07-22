@@ -1751,24 +1751,27 @@ func buildMergeStagingSelect(quotedStagingTable, pkList string, destQuoted []str
 }
 
 func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
-	if len(opts.PrimaryKeys) == 0 {
-		return "", "", fmt.Errorf("truncate+insert from staging requires primary keys")
-	}
-
 	destQuoted := quoteColumns(destination.DestinationColumns(opts.Columns))
-	pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
-	orderBy := pkList
-	if opts.IncrementalKey != "" {
-		orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+	if len(destQuoted) == 0 {
+		return "", "", fmt.Errorf("truncate+insert from staging requires at least one column")
 	}
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
-	stagingSelect := buildMergeStagingSelect(
-		destination.QuoteTableName(opts.StagingTable),
-		pkList,
-		destQuoted,
-		orderBy,
-		opts.StagingPrimaryKeysUnique,
-	)
+	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
+	stagingSelect := fmt.Sprintf("SELECT %s FROM %s", strings.Join(destQuoted, ", "), quotedStagingTable)
+	if len(opts.PrimaryKeys) > 0 {
+		pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
+		orderBy := pkList
+		if opts.IncrementalKey != "" {
+			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+		}
+		stagingSelect = buildMergeStagingSelect(
+			quotedStagingTable,
+			pkList,
+			destQuoted,
+			orderBy,
+			opts.StagingPrimaryKeysUnique,
+		)
+	}
 
 	return fmt.Sprintf("TRUNCATE TABLE %s", quotedTargetTable), fmt.Sprintf(
 		"INSERT INTO %s (%s) %s",

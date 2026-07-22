@@ -3,6 +3,7 @@ package duckdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -1304,6 +1305,25 @@ func (d *DuckDBDestination) TruncateTable(ctx context.Context, table string) err
 		return fmt.Errorf("failed to truncate table %s: %w", table, err)
 	}
 	config.Debug("[DUCKDB] Truncated table: %s", table)
+	return nil
+}
+
+func (d *DuckDBDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		destination.QuoteTableName(opts.TargetTable), columnList, columnList, destination.QuoteTableName(opts.StagingTable),
+	)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.exec(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
 	return nil
 }
 

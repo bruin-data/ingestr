@@ -215,6 +215,43 @@ func (d *MaxComputeDestination) TruncateTable(ctx context.Context, table string)
 	return nil
 }
 
+func (d *MaxComputeDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	if d.emulator != nil {
+		quotedColumns := make([]string, len(columns))
+		for i, column := range columns {
+			quotedColumns[i] = quoteSQLiteIdentifier(column)
+		}
+		columnList := strings.Join(quotedColumns, ", ")
+		insertSQL := fmt.Sprintf(
+			"INSERT INTO %s (%s) SELECT %s FROM %s",
+			quoteSQLiteIdentifier(emulatorPhysicalTable(opts.TargetTable)), columnList,
+			columnList, quoteSQLiteIdentifier(emulatorPhysicalTable(opts.StagingTable)),
+		)
+		if _, err := d.emulator.ExecContext(ctx, insertSQL); err != nil {
+			return fmt.Errorf("failed to insert into MaxCompute emulator table %s from staging: %w", opts.TargetTable, err)
+		}
+		return nil
+	}
+	quotedColumns := make([]string, len(columns))
+	for i, column := range columns {
+		quotedColumns[i] = maxcomputeutil.QuoteIdentifier(column)
+	}
+	columnList := strings.Join(quotedColumns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		maxcomputeutil.QuoteTable(opts.TargetTable), columnList, columnList, maxcomputeutil.QuoteTable(opts.StagingTable),
+	)
+	if err := d.executeSQL(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into MaxCompute table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *MaxComputeDestination) Exec(ctx context.Context, sqlText string, args ...interface{}) error {
 	if d.emulator != nil {
 		_, err := d.emulator.ExecContext(ctx, sqlText, args...)

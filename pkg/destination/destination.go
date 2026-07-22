@@ -107,6 +107,14 @@ type TruncateInsertFromStagingOptions struct {
 	IncrementalKey           string
 }
 
+// InsertFromStagingOptions configures a keyless insert from a populated
+// staging table into an empty destination table.
+type InsertFromStagingOptions struct {
+	StagingTable string
+	TargetTable  string
+	Columns      []string
+}
+
 // DeleteInsertOptions contains parameters for delete+insert operations.
 type DeleteInsertOptions struct {
 	StagingTable       string
@@ -555,6 +563,13 @@ type AtomicTruncateInsertWriter interface {
 // staging table in one destination transaction.
 type AtomicTruncateInsertStagingWriter interface {
 	TruncateInsertFromStaging(ctx context.Context, opts TruncateInsertFromStagingOptions) error
+}
+
+// StagingTableInserter copies rows from a staging table into an empty target.
+// The truncate+insert strategy uses this for keyless loads after the complete
+// source result has landed in staging.
+type StagingTableInserter interface {
+	InsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) error
 }
 
 // AtomicTruncateInsertSchemaEvolver marks an atomic truncate+insert writer that

@@ -18,6 +18,20 @@ type atomicTruncateInsertDestination struct {
 	finalizeErr   error
 }
 
+type stagingInsertDestination struct {
+	*truncateCapableDestination
+	insertCalls []destination.InsertFromStagingOptions
+	insertErr   error
+}
+
+func (d *stagingInsertDestination) InsertFromStaging(_ context.Context, opts destination.InsertFromStagingOptions) error {
+	d.mu.Lock()
+	d.calls = append(d.calls, "InsertFromStaging")
+	d.insertCalls = append(d.insertCalls, opts)
+	d.mu.Unlock()
+	return d.insertErr
+}
+
 func (d *atomicTruncateInsertDestination) TruncateInsertFromStaging(_ context.Context, opts destination.TruncateInsertFromStagingOptions) error {
 	d.finalizeCalls = append(d.finalizeCalls, opts)
 	return d.finalizeErr
@@ -29,7 +43,7 @@ func (d *atomicTruncateInsertDestination) SupportsMergeStrategy() bool {
 
 func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job, src, dest := minimalJob()
-	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Destination = &stagingInsertDestination{truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest}}
 	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
 	job.Config.FullRefresh = true
 	job.Config.CDCSlotSuffix = "current-destination-slot"
@@ -58,6 +72,70 @@ func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	if src.readOpts.CDCResumeLSN != "" {
 		t.Fatalf("full refresh unexpectedly supplied resume LSN %q, which could select a previous or legacy slot", src.readOpts.CDCResumeLSN)
 	}
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.NotEqual(t, job.Config.DestTable, dest.writeCalls[0].Table)
+	require.Equal(t, []string{job.Config.DestTable}, dest.truncateCalls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessFinalizesFromStaging(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = stagingDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.Len(t, stagingDest.insertCalls, 1)
+	require.Equal(t, dest.writeCalls[0].Table, stagingDest.insertCalls[0].StagingTable)
+	require.Equal(t, job.Config.DestTable, stagingDest.insertCalls[0].TargetTable)
+	require.Empty(t, dest.mergeCalls)
+	require.Equal(t, []string{
+		"PrepareTable",
+		"PrepareTable",
+		"WriteParallel",
+		"TruncateTable",
+		"InsertFromStaging",
+		"DropTable",
+	}, dest.calls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessRequiresStagingInsert(t *testing.T) {
+	job, _, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "does not support keyless truncate+insert from staging")
+	require.Empty(t, dest.prepareCalls)
+	require.Empty(t, dest.writeCalls)
+	require.Empty(t, dest.truncateCalls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessWriteFailureLeavesTargetUntouched(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = stagingDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	dest.writeErr = errors.New("write failed")
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to write to staging")
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.Empty(t, dest.truncateCalls)
+	require.Empty(t, stagingDest.insertCalls)
 }
 
 func TestTruncateInsertStrategy_ExecuteWithStaging_FullRefreshUsesLeasedSlotSuffix(t *testing.T) {

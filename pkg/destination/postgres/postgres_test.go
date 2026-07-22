@@ -197,6 +197,16 @@ func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
 		excludes string
 	}{
 		{
+			name: "keyless",
+			opts: destination.TruncateInsertFromStagingOptions{
+				StagingTable: "_bruin_staging.events",
+				TargetTable:  "public.events",
+				Columns:      []string{"id", "value"},
+			},
+			contains: `SELECT "id", "value" FROM "_bruin_staging"."events"`,
+			excludes: "DISTINCT ON",
+		},
+		{
 			name: "unique keys",
 			opts: destination.TruncateInsertFromStagingOptions{
 				StagingTable:             "_bruin_staging.events",
@@ -241,10 +251,10 @@ func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
 	}
 }
 
-func TestBuildTruncateInsertFromStagingSQLRequiresPrimaryKeys(t *testing.T) {
+func TestBuildTruncateInsertFromStagingSQLRequiresColumns(t *testing.T) {
 	_, _, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{})
 	if err == nil {
-		t.Fatal("expected missing primary key error")
+		t.Fatal("expected missing column error")
 	}
 }
 
