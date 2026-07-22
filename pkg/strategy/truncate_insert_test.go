@@ -34,14 +34,14 @@ type preparedStagingInsert struct {
 	destination *preparedStagingInsertDestination
 }
 
-func (i *preparedStagingInsert) Insert(_ context.Context) error {
+func (i *preparedStagingInsert) Execute(_ context.Context) error {
 	i.destination.mu.Lock()
 	i.destination.calls = append(i.destination.calls, "PreparedInsertFromStaging")
 	i.destination.mu.Unlock()
 	return nil
 }
 
-func (d *preparedStagingInsertDestination) PrepareInsertFromStaging(_ context.Context, _ destination.InsertFromStagingOptions) (destination.PreparedStagingTableInsert, error) {
+func (d *preparedStagingInsertDestination) PrepareInsertFromStaging(_ context.Context, _ destination.InsertFromStagingOptions) (destination.PreparedStagingTableWrite, error) {
 	d.mu.Lock()
 	d.calls = append(d.calls, "PrepareInsertFromStaging")
 	d.mu.Unlock()
@@ -49,6 +49,32 @@ func (d *preparedStagingInsertDestination) PrepareInsertFromStaging(_ context.Co
 		return nil, d.prepareErr
 	}
 	return &preparedStagingInsert{destination: d}, nil
+}
+
+type preparedStagingMergeDestination struct {
+	*truncateCapableDestination
+	prepareErr error
+}
+
+type preparedStagingMerge struct {
+	destination *preparedStagingMergeDestination
+}
+
+func (m *preparedStagingMerge) Execute(_ context.Context) error {
+	m.destination.mu.Lock()
+	m.destination.calls = append(m.destination.calls, "PreparedMergeFromStaging")
+	m.destination.mu.Unlock()
+	return nil
+}
+
+func (d *preparedStagingMergeDestination) PrepareMergeTable(_ context.Context, _ destination.MergeOptions) (destination.PreparedStagingTableWrite, error) {
+	d.mu.Lock()
+	d.calls = append(d.calls, "PrepareMergeTable")
+	d.mu.Unlock()
+	if d.prepareErr != nil {
+		return nil, d.prepareErr
+	}
+	return &preparedStagingMerge{destination: d}, nil
 }
 
 func (d *stagingInsertDestination) InsertFromStaging(_ context.Context, opts destination.InsertFromStagingOptions) error {
@@ -205,6 +231,43 @@ func TestTruncateInsertStrategy_Execute_KeylessPreparedInsertIsBuiltBeforeTrunca
 		"PrepareInsertFromStaging",
 		"TruncateTable",
 		"PreparedInsertFromStaging",
+		"DropTable",
+	}, dest.calls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeyedPreparationFailureLeavesTargetUntouched(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &preparedStagingMergeDestination{
+		truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest},
+		prepareErr:                 errors.New("metadata unavailable"),
+	}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to prepare merge from staging: metadata unavailable")
+	require.Empty(t, dest.truncateCalls)
+	require.Empty(t, dest.mergeCalls)
+	require.Contains(t, dest.calls, "PrepareMergeTable")
+}
+
+func TestTruncateInsertStrategy_Execute_KeyedPreparedMergeIsBuiltBeforeTruncate(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &preparedStagingMergeDestination{
+		truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest},
+	}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Empty(t, dest.mergeCalls)
+	require.Equal(t, []string{
+		"PrepareTable",
+		"PrepareTable",
+		"WriteParallel",
+		"PrepareMergeTable",
+		"TruncateTable",
+		"PreparedMergeFromStaging",
 		"DropTable",
 	}, dest.calls)
 }

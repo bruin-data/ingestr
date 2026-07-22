@@ -64,6 +64,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 	atomicWriter, supportsAtomicFinalize := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
 	stagingInserter, supportsStagingInsert := job.Destination.(destination.StagingTableInserter)
 	stagingInsertPreparer, supportsPreparedStagingInsert := job.Destination.(destination.StagingTableInsertPreparer)
+	stagingMergePreparer, supportsPreparedStagingMerge := job.Destination.(destination.StagingTableMergePreparer)
 	if len(job.Config.PrimaryKeys) > 0 && !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
 		return fmt.Errorf("destination does not support deduplicated truncate+insert (merge not supported); use replace instead")
 	}
@@ -154,11 +155,27 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		TargetTable:  targetTable,
 		Columns:      job.Schema.ColumnNames(),
 	}
-	var preparedStagingInsert destination.PreparedStagingTableInsert
-	if len(job.Config.PrimaryKeys) == 0 && !supportsAtomicFinalize && supportsPreparedStagingInsert {
-		preparedStagingInsert, err = stagingInsertPreparer.PrepareInsertFromStaging(ctx, insertOpts)
-		if err != nil {
-			return fmt.Errorf("failed to prepare insert from staging: %w", err)
+	mergeOpts := destination.MergeOptions{
+		StagingTable:             stagingTable,
+		TargetTable:              targetTable,
+		PrimaryKeys:              job.Config.PrimaryKeys,
+		StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+		Columns:                  job.Schema.ColumnNames(),
+		IncrementalKey:           incrementalKey,
+		Schema:                   job.Schema,
+	}
+	var preparedStagingWrite destination.PreparedStagingTableWrite
+	if !supportsAtomicFinalize {
+		if len(job.Config.PrimaryKeys) > 0 && supportsPreparedStagingMerge {
+			preparedStagingWrite, err = stagingMergePreparer.PrepareMergeTable(ctx, mergeOpts)
+			if err != nil {
+				return fmt.Errorf("failed to prepare merge from staging: %w", err)
+			}
+		} else if len(job.Config.PrimaryKeys) == 0 && supportsPreparedStagingInsert {
+			preparedStagingWrite, err = stagingInsertPreparer.PrepareInsertFromStaging(ctx, insertOpts)
+			if err != nil {
+				return fmt.Errorf("failed to prepare insert from staging: %w", err)
+			}
 		}
 	}
 	if supportsAtomicFinalize {
@@ -177,20 +194,12 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		if err := truncator.TruncateTable(ctx, targetTable); err != nil {
 			return fmt.Errorf("failed to truncate target: %w", err)
 		}
-		if len(job.Config.PrimaryKeys) > 0 {
-			if err := job.Destination.MergeTable(ctx, destination.MergeOptions{
-				StagingTable:             stagingTable,
-				TargetTable:              targetTable,
-				PrimaryKeys:              job.Config.PrimaryKeys,
-				StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
-				Columns:                  job.Schema.ColumnNames(),
-				IncrementalKey:           incrementalKey,
-				Schema:                   job.Schema,
-			}); err != nil {
+		if preparedStagingWrite != nil {
+			if err := preparedStagingWrite.Execute(ctx); err != nil {
 				return fmt.Errorf("failed to insert from staging: %w", err)
 			}
-		} else if preparedStagingInsert != nil {
-			if err := preparedStagingInsert.Insert(ctx); err != nil {
+		} else if len(job.Config.PrimaryKeys) > 0 {
+			if err := job.Destination.MergeTable(ctx, mergeOpts); err != nil {
 				return fmt.Errorf("failed to insert from staging: %w", err)
 			}
 		} else if err := stagingInserter.InsertFromStaging(ctx, insertOpts); err != nil {
