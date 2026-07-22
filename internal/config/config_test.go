@@ -372,9 +372,8 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 			wantErr: "source-uri",
 		},
 		{
-			name:    "custom query rejected",
-			mutate:  func(c *IngestConfig) { c.SourceTable = "query:select * from orders" },
-			wantErr: "source-table",
+			name:   "custom query accepted",
+			mutate: func(c *IngestConfig) { c.SourceTable = "query:select * from orders" },
 		},
 		{
 			name:    "full refresh rejected",

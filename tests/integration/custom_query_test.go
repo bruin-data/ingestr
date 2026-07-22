@@ -206,6 +206,70 @@ func TestCustomQuery_PostgresToPostgres(t *testing.T) {
 	assert.Greater(t, minAmount, 500.0, "all amounts should be > 500")
 }
 
+func TestCustomQuery_PostgresPartitionedExtraction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceURI := sharedPostgresURI(t, "source")
+	destURI := sharedPostgresURI(t, "dest")
+	sourceSchema := uniqueSchemaName(t, "cq_partition_src")
+	destSchema := uniqueSchemaName(t, "cq_partition_dst")
+	ensurePostgresSchema(t, ctx, sourceURI, sourceSchema)
+	ensurePostgresSchema(t, ctx, destURI, destSchema)
+	t.Cleanup(func() {
+		dropPostgresSchema(t, ctx, sourceURI, sourceSchema)
+		dropPostgresSchema(t, ctx, destURI, destSchema)
+	})
+	setupCustomQuerySourceData(t, ctx, sourceURI, sourceSchema)
+
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(99 * time.Minute)
+	query := fmt.Sprintf(`
+		SELECT
+			o.id,
+			o.amount,
+			o.status,
+			o.created_at AS partition_ts,
+			o.created_at AS updated_at
+		FROM %s AS o
+		JOIN (VALUES ('active'), ('inactive')) AS allowed(status)
+			ON allowed.status = o.status
+		WHERE o.created_at >= :interval_start
+			AND o.created_at <= :interval_end
+	`, pqTable(sourceSchema, "orders"))
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = sourceURI
+	cfg.SourceTable = "query:" + query
+	cfg.DestURI = destURI
+	cfg.DestTable = destSchema + ".partitioned_orders"
+	cfg.IncrementalStrategy = config.StrategyAppend
+	cfg.IncrementalKey = "updated_at"
+	cfg.IntervalStart = &start
+	cfg.IntervalEnd = &end
+	cfg.ExtractPartitionBy = "partition_ts"
+	cfg.ExtractPartitionInterval = 20 * time.Minute
+	cfg.ExtractParallelism = 3
+
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	var count, distinctCount, boundaryCount int
+	err = db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COUNT(*), COUNT(DISTINCT id), COUNT(*) FILTER (WHERE id IN (1, 100))
+		FROM %s
+	`, pqTable(destSchema, "partitioned_orders"))).Scan(&count, &distinctCount, &boundaryCount)
+	require.NoError(t, err)
+	assert.Equal(t, 100, count)
+	assert.Equal(t, 100, distinctCount)
+	assert.Equal(t, 2, boundaryCount)
+}
+
 func TestCustomQuery_WithIntervalParams(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

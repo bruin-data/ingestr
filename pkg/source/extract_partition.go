@@ -53,6 +53,7 @@ const (
 	extractAutoPartitionsPerWorker = 4
 	maxExtractPartitionWindows     = 100000
 	extractPartitionReadBufferSize = 1
+	customQueryAlias               = "__ingestr_query"
 )
 
 type (
@@ -553,6 +554,45 @@ func SQLExtractPartitionConditions(opts ReadOptions, quote func(string) string, 
 		return SQLNumericRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionNumericStart, opts.ExtractPartitionNumericEnd, opts.ExtractPartitionEndOperator(), quote)
 	}
 	return SQLTemporalRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionDataType, opts.ExtractPartitionStart, opts.ExtractPartitionEnd, opts.ExtractPartitionEndOperator(), quote, format)
+}
+
+func SQLCustomQuerySchemaQuery(query string, quote func(string) string) string {
+	return fmt.Sprintf("SELECT * FROM (%s) AS %s WHERE 1 = 0", normalizeCustomQuery(query), quote(customQueryAlias))
+}
+
+func SQLCustomQuerySelectQuery(query string, opts ReadOptions, quote func(string) string, format func(time.Time) string) string {
+	alias := quote(customQueryAlias)
+	qualifiedQuote := func(column string) string {
+		return alias + "." + quote(column)
+	}
+	conditions := SQLExtractPartitionConditions(opts, qualifiedQuote, format)
+
+	result := fmt.Sprintf("SELECT * FROM (%s) AS %s", normalizeCustomQuery(query), alias)
+	if len(conditions) > 0 {
+		result += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	return result
+}
+
+func SQLCustomQueryBoundsQuery(query, partitionColumn string, quote func(string) string) string {
+	alias := quote(customQueryAlias)
+	partition := alias + "." + quote(partitionColumn)
+	return fmt.Sprintf(
+		"SELECT MIN(%s), MAX(%s), COUNT(*), COUNT(%s) FROM (%s) AS %s",
+		partition,
+		partition,
+		partition,
+		normalizeCustomQuery(query),
+		alias,
+	)
+}
+
+func normalizeCustomQuery(query string) string {
+	query = strings.TrimSpace(query)
+	for strings.HasSuffix(query, ";") {
+		query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	}
+	return query
 }
 
 func SQLExtractPartitionBoundsQuery(table, partitionColumn, incrementalKey string, incrementalKeyDataType schema.DataType, intervalStart, intervalEnd *time.Time, quoteIdentifier, quoteTable func(string) string, format func(time.Time) string) string {
