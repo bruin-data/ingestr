@@ -379,7 +379,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
 	preFetchConfig.PrimaryKeys = resolvePrimaryKeys(p.config, table)
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
-	if err := validateExtractPartitionStrategy(p.config); err != nil {
+	if err := validateExtractPartitionStrategy(p.config, preFetchStrategy, dest); err != nil {
 		return err
 	}
 	if err := validateIncrementalPredicate(p.config, dest, preFetchStrategy); err != nil {
@@ -2447,8 +2447,20 @@ func validateExtractPartitionSupport(cfg *config.IngestConfig, table source.Sour
 	return nil
 }
 
-func validateExtractPartitionStrategy(cfg *config.IngestConfig) error {
-	if cfg.ExtractPartitionBy == "" || cfg.IncrementalStrategy != config.StrategyTruncateInsert {
+func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy, dest destination.Destination) error {
+	if cfg.ExtractPartitionBy == "" {
+		return nil
+	}
+	if cfg.IncrementalStrategy != config.StrategyTruncateInsert && resolvedStrategy == config.StrategyTruncateInsert {
+		if _, ok := dest.(destination.AtomicTruncateInsertStagingWriter); ok {
+			return nil
+		}
+		return &config.ValidationError{
+			Field:   "incremental-strategy",
+			Message: fmt.Sprintf("%q resolves to %q, but the destination cannot stage the complete extract before finalization", cfg.IncrementalStrategy, resolvedStrategy),
+		}
+	}
+	if cfg.IncrementalStrategy != config.StrategyTruncateInsert {
 		return nil
 	}
 	return &config.ValidationError{

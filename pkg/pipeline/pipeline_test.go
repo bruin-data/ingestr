@@ -31,6 +31,14 @@ type mockDestination struct {
 	scheme      string
 }
 
+type atomicTruncateInsertMockDestination struct {
+	mockDestination
+}
+
+func (*atomicTruncateInsertMockDestination) TruncateInsertFromStaging(context.Context, destination.TruncateInsertFromStagingOptions) error {
+	return nil
+}
+
 type mockConnectorLease struct {
 	done chan struct{}
 	err  error
@@ -1323,8 +1331,29 @@ func TestValidateExtractPartitionStrategyAllowsReplace(t *testing.T) {
 	cfg.ExtractPartitionBy = "created_at"
 	cfg.IncrementalStrategy = config.StrategyReplace
 
-	if err := validateExtractPartitionStrategy(cfg); err != nil {
+	if err := validateExtractPartitionStrategy(cfg, config.StrategyReplace, &mockDestination{}); err != nil {
 		t.Fatalf("expected replace to support extract partitioning, got %v", err)
+	}
+}
+
+func TestValidateExtractPartitionStrategyAllowsAtomicResolvedTruncateInsert(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.IncrementalStrategy = config.StrategyReplace
+
+	if err := validateExtractPartitionStrategy(cfg, config.StrategyTruncateInsert, &atomicTruncateInsertMockDestination{}); err != nil {
+		t.Fatalf("expected atomic resolved truncate+insert to support extract partitioning, got %v", err)
+	}
+}
+
+func TestValidateExtractPartitionStrategyRejectsNonAtomicResolvedTruncateInsert(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ExtractPartitionBy = "created_at"
+	cfg.IncrementalStrategy = config.StrategyReplace
+
+	err := validateExtractPartitionStrategy(cfg, config.StrategyTruncateInsert, &mockDestination{})
+	if err == nil || !strings.Contains(err.Error(), "cannot stage the complete extract") {
+		t.Fatalf("expected non-atomic resolved truncate+insert validation error, got %v", err)
 	}
 }
 
@@ -1333,7 +1362,7 @@ func TestValidateExtractPartitionStrategyRejectsExplicitTruncateInsert(t *testin
 	cfg.ExtractPartitionBy = "created_at"
 	cfg.IncrementalStrategy = config.StrategyTruncateInsert
 
-	err := validateExtractPartitionStrategy(cfg)
+	err := validateExtractPartitionStrategy(cfg, config.StrategyTruncateInsert, &atomicTruncateInsertMockDestination{})
 	if err == nil || !strings.Contains(err.Error(), "use replace") {
 		t.Fatalf("expected truncate+insert validation error, got %v", err)
 	}
