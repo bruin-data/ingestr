@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -13,6 +15,14 @@ import (
 
 type DuckLakeDestination struct {
 	*DuckDBDestination
+
+	// writeMu serializes the whole create/load/copy/drop staging sequence. The
+	// sequence toggles the shared connection's default catalog (USE memory /
+	// USE ducklake_catalog), so two DuckLake writes must never interleave.
+	writeMu sync.Mutex
+	// stageSeq makes each staging table name unique, even for the same target
+	// or targets whose names sanitize identically.
+	stageSeq atomic.Uint64
 }
 
 func NewDuckLakeDestination() *DuckLakeDestination {
@@ -38,9 +48,19 @@ func (d *DuckLakeDestination) WriteParallel(ctx context.Context, records <-chan 
 }
 
 func (d *DuckLakeDestination) writeViaMemoryStage(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	// The sequence below toggles the shared connection's default catalog, so it
+	// must run start-to-finish without another DuckLake write interleaving.
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+
 	target := opts.Table
-	memName := duckLakeMemStageName(target)
+	memName := fmt.Sprintf("%s_%d", duckLakeMemStageName(target), d.stageSeq.Add(1))
 	memQualified := "memory.main." + memName
+
+	// Restore and cleanup must run even if ctx is cancelled mid-write, otherwise
+	// the connection can stay pointed at `memory` and the stage table leaks for
+	// the connection's lifetime.
+	cleanupCtx := context.WithoutCancel(ctx)
 
 	// Mirror the DuckLake table's schema into a plain in-memory table.
 	if err := d.exec(ctx, fmt.Sprintf(
@@ -49,7 +69,7 @@ func (d *DuckLakeDestination) writeViaMemoryStage(ctx context.Context, records <
 	)); err != nil {
 		return fmt.Errorf("ducklake: create in-memory stage: %w", err)
 	}
-	defer func() { _ = d.exec(ctx, "DROP TABLE IF EXISTS "+memQualified) }()
+	defer func() { _ = d.exec(cleanupCtx, "DROP TABLE IF EXISTS "+memQualified) }()
 
 	// ADBC bulk-append cannot target a DuckLake table, and DuckDB rejects the
 	// ADBC target_catalog option — so switch the default catalog to `memory`,
@@ -57,7 +77,7 @@ func (d *DuckLakeDestination) writeViaMemoryStage(ctx context.Context, records <
 	if err := d.exec(ctx, "USE memory"); err != nil {
 		return fmt.Errorf("ducklake: switch to memory catalog: %w", err)
 	}
-	restore := func() error { return d.exec(ctx, "USE "+srcduckdb.AttachAlias) }
+	restore := func() error { return d.exec(cleanupCtx, "USE "+srcduckdb.AttachAlias) }
 
 	memOpts := opts
 	memOpts.Table = "main." + memName // schema-qualified only: no ADBC catalog option
