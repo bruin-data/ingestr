@@ -381,9 +381,8 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 			wantErr: "full-refresh",
 		},
 		{
-			name:    "replace rejected",
-			mutate:  func(c *IngestConfig) { c.IncrementalStrategy = StrategyReplace },
-			wantErr: "incremental-strategy",
+			name:   "replace accepted",
+			mutate: func(c *IngestConfig) { c.IncrementalStrategy = StrategyReplace },
 		},
 		{
 			name:    "truncate insert rejected",

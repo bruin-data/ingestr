@@ -59,7 +59,8 @@ func (s *TruncateInsertStrategy) Execute(ctx context.Context, job *IngestionJob)
 		return fmt.Errorf("destination does not support truncate+insert strategy; use replace instead")
 	}
 
-	if len(job.Config.PrimaryKeys) > 0 {
+	_, supportsAtomicStaging := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
+	if len(job.Config.PrimaryKeys) > 0 || (job.Config.ExtractPartitionBy != "" && supportsAtomicStaging) {
 		return s.executeWithStaging(ctx, job, truncator)
 	}
 	return s.executeDirect(ctx, job, truncator)
