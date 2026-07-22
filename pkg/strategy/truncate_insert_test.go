@@ -19,6 +19,72 @@ type atomicTruncateInsertDestination struct {
 	finalizeErr   error
 }
 
+type stagingInsertDestination struct {
+	*truncateCapableDestination
+	insertCalls []destination.InsertFromStagingOptions
+	insertErr   error
+}
+
+type preparedStagingInsertDestination struct {
+	*stagingInsertDestination
+	prepareErr error
+}
+
+type preparedStagingInsert struct {
+	destination *preparedStagingInsertDestination
+}
+
+func (i *preparedStagingInsert) Execute(_ context.Context) error {
+	i.destination.mu.Lock()
+	i.destination.calls = append(i.destination.calls, "PreparedInsertFromStaging")
+	i.destination.mu.Unlock()
+	return nil
+}
+
+func (d *preparedStagingInsertDestination) PrepareInsertFromStaging(_ context.Context, _ destination.InsertFromStagingOptions) (destination.PreparedStagingTableWrite, error) {
+	d.mu.Lock()
+	d.calls = append(d.calls, "PrepareInsertFromStaging")
+	d.mu.Unlock()
+	if d.prepareErr != nil {
+		return nil, d.prepareErr
+	}
+	return &preparedStagingInsert{destination: d}, nil
+}
+
+type preparedStagingMergeDestination struct {
+	*truncateCapableDestination
+	prepareErr error
+}
+
+type preparedStagingMerge struct {
+	destination *preparedStagingMergeDestination
+}
+
+func (m *preparedStagingMerge) Execute(_ context.Context) error {
+	m.destination.mu.Lock()
+	m.destination.calls = append(m.destination.calls, "PreparedMergeFromStaging")
+	m.destination.mu.Unlock()
+	return nil
+}
+
+func (d *preparedStagingMergeDestination) PrepareMergeTable(_ context.Context, _ destination.MergeOptions) (destination.PreparedStagingTableWrite, error) {
+	d.mu.Lock()
+	d.calls = append(d.calls, "PrepareMergeTable")
+	d.mu.Unlock()
+	if d.prepareErr != nil {
+		return nil, d.prepareErr
+	}
+	return &preparedStagingMerge{destination: d}, nil
+}
+
+func (d *stagingInsertDestination) InsertFromStaging(_ context.Context, opts destination.InsertFromStagingOptions) error {
+	d.mu.Lock()
+	d.calls = append(d.calls, "InsertFromStaging")
+	d.insertCalls = append(d.insertCalls, opts)
+	d.mu.Unlock()
+	return d.insertErr
+}
+
 func (d *atomicTruncateInsertDestination) TruncateInsertFromStaging(_ context.Context, opts destination.TruncateInsertFromStagingOptions) error {
 	d.finalizeCalls = append(d.finalizeCalls, opts)
 	return d.finalizeErr
@@ -30,7 +96,7 @@ func (d *atomicTruncateInsertDestination) SupportsMergeStrategy() bool {
 
 func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job, src, dest := minimalJob()
-	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Destination = &stagingInsertDestination{truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest}}
 	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
 	job.Config.FullRefresh = true
 	job.Config.CDCSlotSuffix = "current-destination-slot"
@@ -59,6 +125,151 @@ func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	if src.readOpts.CDCResumeLSN != "" {
 		t.Fatalf("full refresh unexpectedly supplied resume LSN %q, which could select a previous or legacy slot", src.readOpts.CDCResumeLSN)
 	}
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.NotEqual(t, job.Config.DestTable, dest.writeCalls[0].Table)
+	require.Equal(t, []string{job.Config.DestTable}, dest.truncateCalls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessFinalizesFromStaging(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = stagingDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.Len(t, stagingDest.insertCalls, 1)
+	require.Equal(t, dest.writeCalls[0].Table, stagingDest.insertCalls[0].StagingTable)
+	require.Equal(t, job.Config.DestTable, stagingDest.insertCalls[0].TargetTable)
+	require.Empty(t, dest.mergeCalls)
+	require.Equal(t, []string{
+		"PrepareTable",
+		"PrepareTable",
+		"WriteParallel",
+		"TruncateTable",
+		"InsertFromStaging",
+		"DropTable",
+	}, dest.calls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessRequiresStagingInsert(t *testing.T) {
+	job, _, dest := minimalJob()
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "does not support keyless truncate+insert from staging")
+	require.Empty(t, dest.prepareCalls)
+	require.Empty(t, dest.writeCalls)
+	require.Empty(t, dest.truncateCalls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessWriteFailureLeavesTargetUntouched(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = stagingDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	dest.writeErr = errors.New("write failed")
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to write to staging")
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.Empty(t, dest.truncateCalls)
+	require.Empty(t, stagingDest.insertCalls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessPreparationFailureLeavesTargetUntouched(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	preparedDest := &preparedStagingInsertDestination{
+		stagingInsertDestination: stagingDest,
+		prepareErr:               errors.New("metadata unavailable"),
+	}
+	job.Destination = preparedDest
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to prepare insert from staging: metadata unavailable")
+	require.Empty(t, dest.truncateCalls)
+	require.Empty(t, stagingDest.insertCalls)
+	require.Contains(t, dest.calls, "PrepareInsertFromStaging")
+}
+
+func TestTruncateInsertStrategy_Execute_KeylessPreparedInsertIsBuiltBeforeTruncate(t *testing.T) {
+	job, src, dest := minimalJob()
+	truncateDest := &truncateCapableDestination{fakeDestination: dest}
+	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
+	job.Destination = &preparedStagingInsertDestination{stagingInsertDestination: stagingDest}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.PrimaryKeys = nil
+	job.Schema.PrimaryKeys = nil
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Empty(t, stagingDest.insertCalls)
+	require.Equal(t, []string{
+		"PrepareTable",
+		"PrepareTable",
+		"WriteParallel",
+		"PrepareInsertFromStaging",
+		"TruncateTable",
+		"PreparedInsertFromStaging",
+		"DropTable",
+	}, dest.calls)
+}
+
+func TestTruncateInsertStrategy_Execute_KeyedPreparationFailureLeavesTargetUntouched(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &preparedStagingMergeDestination{
+		truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest},
+		prepareErr:                 errors.New("metadata unavailable"),
+	}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	src.readCh = mustClosedRecords()
+
+	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "failed to prepare merge from staging: metadata unavailable")
+	require.Empty(t, dest.truncateCalls)
+	require.Empty(t, dest.mergeCalls)
+	require.Contains(t, dest.calls, "PrepareMergeTable")
+}
+
+func TestTruncateInsertStrategy_Execute_KeyedPreparedMergeIsBuiltBeforeTruncate(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Destination = &preparedStagingMergeDestination{
+		truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest},
+	}
+	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.Empty(t, dest.mergeCalls)
+	require.Equal(t, []string{
+		"PrepareTable",
+		"PrepareTable",
+		"WriteParallel",
+		"PrepareMergeTable",
+		"TruncateTable",
+		"PreparedMergeFromStaging",
+		"DropTable",
+	}, dest.calls)
 }
 
 func TestTruncateInsertStrategy_ExecuteWithStaging_FullRefreshUsesLeasedSlotSuffix(t *testing.T) {

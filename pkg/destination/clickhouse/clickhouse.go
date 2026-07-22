@@ -584,6 +584,14 @@ func (d *ClickHouseDestination) TruncateTable(ctx context.Context, table string)
 	return nil
 }
 
+func (d *ClickHouseDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	return d.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: opts.StagingTable,
+		TargetTable:  opts.TargetTable,
+		Columns:      destination.DestinationColumns(opts.Columns),
+	})
+}
+
 func (d *ClickHouseDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
 	err := d.conn.Exec(ctx, sql, args...)
 	if err != nil {

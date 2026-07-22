@@ -197,7 +197,7 @@ func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
 		excludes string
 	}{
 		{
-			name: "without keys",
+			name: "keyless",
 			opts: destination.TruncateInsertFromStagingOptions{
 				StagingTable: "_bruin_staging.events",
 				TargetTable:  "public.events",
@@ -248,6 +248,13 @@ func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
 				t.Fatalf("insert SQL unexpectedly contains %q:\n%s", tt.excludes, insertSQL)
 			}
 		})
+	}
+}
+
+func TestBuildTruncateInsertFromStagingSQLRequiresColumns(t *testing.T) {
+	_, _, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{})
+	if err == nil {
+		t.Fatal("expected missing column error")
 	}
 }
 

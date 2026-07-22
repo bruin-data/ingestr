@@ -11,7 +11,7 @@ How ingestr writes data to BigQuery, including how partition/cluster changes are
 
 ## 1. Write Path
 
-Data flows through a staging table:
+Replace and truncate+insert flow through a staging table:
 
 ```
 source  ->  staging table  ->  destination table
@@ -19,7 +19,8 @@ source  ->  staging table  ->  destination table
 
 - The staging table is created first with the configured partition/clustering.
 - Data is loaded into staging.
-- Staging is then swapped into the destination.
+- Replace swaps staging into the destination; truncate+insert preserves the
+  existing target and copies the staged rows into it after truncating it.
 
 ## 2. Loading Data into Staging (load methods)
 
@@ -149,13 +150,26 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - **CDC ordering:** CDC matches use the primary key (plus safe partition pruning) without the user incremental predicate; that predicate applies only to matched updates so an existing row cannot become a duplicate insert. Matched updates require a greater `_cdc_lsn`, except an equal-LSN delete may supersede an active row. The merge source combines the latest active row image with the latest overall CDC metadata; row data is applied only when that active image is not older than the target, while newer delete metadata can still advance independently. Its synthetic composition aliases are allocated case-insensitively around source columns. An unknown delete-only key is materialized as a payload-null tombstone so its LSN fences stale replay. PostgreSQL CDC is admitted because its source lease serializes runs. Other incremental CDC sources are rejected for BigQuery unless the pipeline can acquire a managed run lease, because BigQuery's informational primary key cannot prevent two concurrent MERGEs from inserting the same absent key.
 - Operates in place on the existing destination; does not repartition. If the target was just created asynchronously by `PrepareTable` (the dedup path's normalised staging), MergeTable waits for that pending creation before running, so the MERGE doesn't 404.
 
-## 10. Append Strategy
+## 10. Truncate+Insert Strategy
+
+Truncate+insert always loads the complete source result into a managed staging
+table first, including keyless loads. Once staging is complete and schema
+evolution has been applied, the target is truncated in place so dependent
+objects survive. Keyed loads use `MergeTable` to deduplicate staging into the
+empty target. Keyless loads run an explicit insert-select query from staging.
+Both final writes are prepared before the target is truncated: table metadata,
+required type casts, and keyed merge SQL are resolved up front, so metadata
+failures leave the target untouched.
+BigQuery cannot include `TRUNCATE TABLE` in a transaction, so readers can
+observe an empty target between truncate and insert.
+
+## 11. Append Strategy
 
 - Inserts/appends rows directly into the destination table; no swap.
 
 (BigQuery also implements `DeleteInsertTable` — DELETE + INSERT wrapped in a `BEGIN TRANSACTION` script — and SCD2 SQL builders, used by the delete+insert and SCD2 strategies. Neither repartitions.)
 
-## 11. Relevant BigQuery Constraints (all verified live)
+## 12. Relevant BigQuery Constraints (all verified live)
 
 - A table's partitioning cannot be altered in place; changing it requires recreating the table.
 - `CREATE OR REPLACE TABLE` cannot replace a table with a different partitioning spec ("Instead, DROP the table, and then recreate it").
@@ -167,7 +181,7 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - An `expiration_timestamp` survives `ALTER TABLE RENAME`.
 - Copy jobs, RENAME, SET OPTIONS and DROP are free (0 bytes billed); CTAS is billed as a query.
 
-## 12. Key Files
+## 13. Key Files
 
 - `pkg/destination/bigquery/bigquery.go` — `PrepareTable`, `SwapTable`, `renameAsideSwap`, `renameTargetAside`, `restoreTargetFromAside`, `runCTASSwap`, `partitionOrClusterMismatch`, `recreateSpecGuard`, `effectiveClusterBy`, `MergeTable`, merge partition pruning helpers.
 - `pkg/destination/bigquery/load_job.go` — `swapTableWithCopyJob` (copy job), load-job writes.
@@ -175,4 +189,5 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - `pkg/destination/bigquery/mapper.go` — `BuildTableMetadata`, `BuildBigQuerySchema`, `defaultClusteringFromPrimaryKeys`.
 - `pkg/strategy/replace.go` — replace flow, `deduplicateStaging` (raw -> normalised).
 - `pkg/strategy/merge.go` — merge flow.
+- `pkg/strategy/truncate_insert.go` — staging-first truncate+insert flow.
 - `pkg/pipeline/pipeline.go` — naming convention, `partition_by`/`cluster_by` normalization.

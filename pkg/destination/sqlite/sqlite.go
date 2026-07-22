@@ -864,6 +864,23 @@ func (d *SQLiteDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *SQLiteDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		destination.QuoteTableName(opts.TargetTable), columnList, columnList, destination.QuoteTableName(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 // SupportsReplaceStrategy returns true as SQLite supports the replace strategy.
 func (d *SQLiteDestination) SupportsReplaceStrategy() bool { return true }
 

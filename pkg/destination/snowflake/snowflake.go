@@ -875,6 +875,35 @@ func (d *SnowflakeDestination) TruncateTable(ctx context.Context, table string) 
 	return nil
 }
 
+func (d *SnowflakeDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	quotedColumns := make([]string, len(columns))
+	selectColumns := make([]string, len(columns))
+	castMap, err := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	if err != nil {
+		return fmt.Errorf("failed to build insert-from-staging cast map: %w", err)
+	}
+	for i, column := range columns {
+		quotedColumns[i] = quoteIdentifier(column)
+		selectColumns[i] = castSourceCol(column, castMap)
+	}
+	columnList := strings.Join(quotedColumns, ", ")
+	targetTable := sfTable(opts.TargetTable)
+	stagingTable := sfTable(opts.StagingTable)
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s AS source",
+		quoteFQN(targetTable), columnList, strings.Join(selectColumns, ", "), quoteFQN(stagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 // annotate tags the context with the current operation's step and, when query
 // annotations are enabled, attaches the annotation payload to the session via
 // Snowflake's native QUERY_TAG. Snowflake strips leading SQL comments, so the

@@ -417,6 +417,51 @@ func (d *Destination) TruncateTable(ctx context.Context, table string) error {
 	return nil
 }
 
+func (d *Destination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	if d.catalog == nil {
+		return errors.New("iceberg destination not connected")
+	}
+	target, err := d.loadIcebergTable(ctx, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	staging, err := d.loadIcebergTable(ctx, opts.StagingTable)
+	if err != nil {
+		return err
+	}
+	writeSchema, err := tableWriteSchema(target)
+	if err != nil {
+		return err
+	}
+	stagingSchema, err := tableWriteSchema(staging)
+	if err != nil {
+		return err
+	}
+	projection := newRowProjection(writeSchema, arrowSchemaColumnNames(stagingSchema))
+	produce := func(sink func(arrow.RecordBatch) error) error {
+		emitter := newBatchEmitter(projection, sink)
+		defer emitter.release()
+		if err := forEachScannedRow(ctx, staging, iceberggo.AlwaysTrue{}, emitter.add); err != nil {
+			return fmt.Errorf("iceberg: staging table %s: %w", opts.StagingTable, err)
+		}
+		return emitter.flushBatch()
+	}
+
+	reader := streamingReader(writeSchema, produce)
+	defer reader.Release()
+	txn := target.NewTransaction()
+	if err := txn.Append(ctx, reader, snapshotProps("truncate+insert")); err != nil {
+		return fmt.Errorf("iceberg: failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	if err := reader.Err(); err != nil {
+		return fmt.Errorf("iceberg: failed to read staging table %s: %w", opts.StagingTable, err)
+	}
+	if _, err := txn.Commit(ctx); err != nil {
+		return fmt.Errorf("iceberg: failed to commit insert from staging into table %s: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *Destination) loadIcebergTable(ctx context.Context, table string) (*icebergtable.Table, error) {
 	ident, err := parseIdentifier(table)
 	if err != nil {

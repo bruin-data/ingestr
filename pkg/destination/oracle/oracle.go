@@ -253,6 +253,27 @@ func (d *OracleDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *OracleDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	quotedColumns := make([]string, len(columns))
+	for i, column := range columns {
+		quotedColumns[i] = quoteColumn(column)
+	}
+	columnList := strings.Join(quotedColumns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *OracleDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	return d.WriteParallel(ctx, records, opts)
 }

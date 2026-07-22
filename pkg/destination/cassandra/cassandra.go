@@ -537,6 +537,14 @@ func (d *CassandraDestination) TruncateTable(ctx context.Context, table string) 
 	return nil
 }
 
+func (d *CassandraDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	return d.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: opts.StagingTable,
+		TargetTable:  opts.TargetTable,
+		Columns:      destination.DestinationColumns(opts.Columns),
+	})
+}
+
 func (d *CassandraDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
 	sql = d.qualifyDefaultTableInAlter(sql)
 	if err := d.session.Query(sql, args...).ExecContext(ctx); err != nil {

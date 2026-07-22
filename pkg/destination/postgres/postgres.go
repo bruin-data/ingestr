@@ -1752,6 +1752,9 @@ func buildMergeStagingSelect(quotedStagingTable, pkList string, destQuoted []str
 
 func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
 	destQuoted := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(destQuoted) == 0 {
+		return "", "", fmt.Errorf("truncate+insert from staging requires at least one column")
+	}
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 	stagingSelect := fmt.Sprintf("SELECT %s FROM %s", strings.Join(destQuoted, ", "), quotedStagingTable)

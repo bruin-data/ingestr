@@ -879,6 +879,91 @@ func writeBigQueryTableMetadata(w http.ResponseWriter, fieldType string) {
 	})
 }
 
+func TestPrepareInsertFromStagingReturnsMetadataErrorsBeforeQuery(t *testing.T) {
+	tests := []struct {
+		name           string
+		failingDataset string
+		wantError      string
+	}{
+		{name: "target metadata", failingDataset: "target_ds", wantError: "failed to get target table metadata"},
+		{name: "staging metadata", failingDataset: "staging_ds", wantError: "failed to get staging table metadata"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var jobCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/"):
+					if strings.Contains(r.URL.Path, "/datasets/"+tt.failingDataset+"/") {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"error": map[string]interface{}{"code": http.StatusBadRequest, "message": "metadata unavailable"},
+						})
+						return
+					}
+					writeBigQueryTableMetadata(w, "INTEGER")
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+					jobCalls.Add(1)
+					http.Error(w, "unexpected query", http.StatusInternalServerError)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+			dest := &BigQueryDestination{client: client, projectID: "test-project"}
+
+			_, err = dest.PrepareInsertFromStaging(t.Context(), destination.InsertFromStagingOptions{
+				StagingTable: "staging_ds.events",
+				TargetTable:  "target_ds.events",
+				Columns:      []string{"id"},
+			})
+			require.ErrorContains(t, err, tt.wantError)
+			require.Zero(t, jobCalls.Load())
+		})
+	}
+}
+
+func TestPrepareMergeTableReturnsMetadataErrorBeforeQuery(t *testing.T) {
+	var jobCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/"):
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": http.StatusBadRequest, "message": "metadata unavailable"},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			jobCalls.Add(1)
+			http.Error(w, "unexpected query", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project"}
+
+	_, err = dest.PrepareMergeTable(t.Context(), destination.MergeOptions{
+		StagingTable: "staging_ds.events",
+		TargetTable:  "target_ds.events",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id"},
+		Schema:       &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+	})
+	require.ErrorContains(t, err, "failed to get target table metadata")
+	require.Zero(t, jobCalls.Load())
+}
+
 func TestIsAlreadyExistsErrorRejectsOtherConflicts(t *testing.T) {
 	err := &googleapi.Error{
 		Code:    http.StatusConflict,

@@ -511,6 +511,25 @@ func (d *DatabricksDestination) TruncateTable(ctx context.Context, table string)
 	return nil
 }
 
+func (d *DatabricksDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	_, stagingName := d.parseTableName(opts.StagingTable)
+	targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		d.quoteFullTable(targetSchema, targetName), columnList, columnList, d.quoteFullTable(stagingSchema, stagingName),
+	)
+	if err := d.executeStatement(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *DatabricksDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
 	if len(args) > 0 {
 		for i, arg := range args {

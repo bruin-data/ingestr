@@ -1989,24 +1989,44 @@ func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
 	return sqlBuilder.String(), nil
 }
 
-// MergeTable performs an atomic merge operation using BigQuery's MERGE statement.
-// This merges data from stagingTable into targetTable based on primary keys.
-func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+type preparedBigQueryMerge struct {
+	destination *BigQueryDestination
+	sql         string
+}
+
+func (m *preparedBigQueryMerge) Execute(ctx context.Context) error {
 	ctx = annotation.WithStep(ctx, annotation.StepMerge)
+	config.Debug("[MERGE] Executing MERGE statement")
+	config.Debug("[MERGE] SQL: %s", m.sql)
+
+	job, err := m.destination.runQueryJobWithRetry(ctx, m.sql, "MERGE")
+	if err != nil {
+		config.LogFailedQuery(m.sql, err)
+		if job == nil {
+			return fmt.Errorf("failed to start merge job: %w", err)
+		}
+		return fmt.Errorf("merge job failed (job %s): %w", jobRef(job), err)
+	}
+
+	config.Debug("[MERGE] Merge completed successfully (job %s)", jobRef(job))
+	return nil
+}
+
+func (d *BigQueryDestination) PrepareMergeTable(ctx context.Context, opts destination.MergeOptions) (destination.PreparedStagingTableWrite, error) {
 	if len(opts.PrimaryKeys) == 0 {
-		return errors.New("merge requires at least one primary key")
+		return nil, errors.New("merge requires at least one primary key")
 	}
 
 	// Staging is always co-located with the target (same project/dataset family),
 	// so a single resolved project qualifies both sides.
 	project, stagingDataset, stagingTableName, err := d.parseTable(opts.StagingTable)
 	if err != nil {
-		return fmt.Errorf("invalid staging table name: %w", err)
+		return nil, fmt.Errorf("invalid staging table name: %w", err)
 	}
 
 	_, targetDataset, targetTableName, err := d.parseTable(opts.TargetTable)
 	if err != nil {
-		return fmt.Errorf("invalid target table name: %w", err)
+		return nil, fmt.Errorf("invalid target table name: %w", err)
 	}
 
 	// The merge target may have just been created asynchronously by PrepareTable
@@ -2015,7 +2035,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	if _, _, _, tableKey, resolveErr := d.resolveTable(opts.TargetTable); resolveErr == nil {
 		if pendingErr := d.takePendingTableErr(tableKey); pendingErr != nil {
 			if err := <-pendingErr; err != nil {
-				return fmt.Errorf("failed to prepare merge target table: %w", err)
+				return nil, fmt.Errorf("failed to prepare merge target table: %w", err)
 			}
 		}
 	}
@@ -2025,7 +2045,10 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		config.Debug("[MERGE] Could not fetch target metadata for partition pruning: %v", err)
 	}
 	// Fetch target and staging table schemas to detect type mismatches
-	castMap := d.buildCastMap(ctx, project, targetDataset, targetTableName, stagingDataset, stagingTableName)
+	castMap, err := d.buildCastMap(ctx, project, targetDataset, targetTableName, stagingDataset, stagingTableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare target and staging schemas: %w", err)
+	}
 
 	nonNullablePKs := nonNullablePKColumns(targetMeta, opts.Schema, opts.PrimaryKeys)
 
@@ -2050,21 +2073,17 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 
 	// Build MERGE statement
 	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate)
+	return &preparedBigQueryMerge{destination: d, sql: mergeSQL}, nil
+}
 
-	config.Debug("[MERGE] Executing MERGE statement")
-	config.Debug("[MERGE] SQL: %s", mergeSQL)
-
-	job, err := d.runQueryJobWithRetry(ctx, mergeSQL, "MERGE")
+// MergeTable performs an atomic merge operation using BigQuery's MERGE statement.
+// This merges data from stagingTable into targetTable based on primary keys.
+func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	merge, err := d.PrepareMergeTable(ctx, opts)
 	if err != nil {
-		config.LogFailedQuery(mergeSQL, err)
-		if job == nil {
-			return fmt.Errorf("failed to start merge job: %w", err)
-		}
-		return fmt.Errorf("merge job failed (job %s): %w", jobRef(job), err)
+		return err
 	}
-
-	config.Debug("[MERGE] Merge completed successfully (job %s)", jobRef(job))
-	return nil
+	return merge.Execute(ctx)
 }
 
 // DeleteInsertTable performs a DELETE + INSERT operation for BigQuery.
@@ -2309,14 +2328,14 @@ func formatBigQueryValue(v interface{}, keyType schema.DataType) string {
 
 // buildCastMap compares target and staging table schemas and returns a map of
 // column name → target BigQuery type name for columns that need casting.
-func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetDataset, targetTable, stagingDataset, stagingTable string) map[string]string {
+func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetDataset, targetTable, stagingDataset, stagingTable string) (map[string]string, error) {
 	targetMeta, err := d.client.DatasetInProject(project, targetDataset).Table(targetTable).Metadata(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to get target table metadata: %w", err)
 	}
 	stagingMeta, err := d.client.DatasetInProject(project, stagingDataset).Table(stagingTable).Metadata(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to get staging table metadata: %w", err)
 	}
 
 	targetTypes := make(map[string]bigquery.FieldType)
@@ -2339,9 +2358,9 @@ func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetD
 	}
 
 	if len(castMap) == 0 {
-		return nil
+		return nil, nil
 	}
-	return castMap
+	return castMap, nil
 }
 
 // castSourceCol returns the source column reference, adding a CAST if the column
@@ -2675,6 +2694,61 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 	}
 	config.Debug("[DEST] Truncated table: %s", table)
 	return nil
+}
+
+type preparedBigQueryStagingInsert struct {
+	destination *BigQueryDestination
+	targetTable string
+	sql         string
+}
+
+func (i *preparedBigQueryStagingInsert) Execute(ctx context.Context) error {
+	job, err := i.destination.runQueryJobWithRetry(ctx, i.sql, "insert from staging")
+	if err != nil {
+		config.LogFailedQuery(i.sql, err)
+		return fmt.Errorf("failed to insert into table %s from staging (job %s): %w", i.targetTable, jobRef(job), err)
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) PrepareInsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) (destination.PreparedStagingTableWrite, error) {
+	destinationColumns := destination.DestinationColumns(opts.Columns)
+	if len(destinationColumns) == 0 {
+		return nil, errors.New("insert from staging requires at least one column")
+	}
+	targetProject, targetDataset, targetTable, _, err := d.resolveTable(opts.TargetTable)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target table name: %w", err)
+	}
+	stagingProject, stagingDataset, stagingTable, _, err := d.resolveTable(opts.StagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("invalid staging table name: %w", err)
+	}
+	columns := make([]string, len(destinationColumns))
+	selectColumns := make([]string, len(destinationColumns))
+	castMap, err := d.buildCastMap(ctx, targetProject, targetDataset, targetTable, stagingDataset, stagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare target and staging schemas: %w", err)
+	}
+	for i, column := range destinationColumns {
+		columns[i] = quoteIdentifier(column)
+		selectColumns[i] = castSourceCol(column, castMap)
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s.%s.%s (%s) SELECT %s FROM %s.%s.%s AS s",
+		quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTable), columnList,
+		strings.Join(selectColumns, ", "), quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable),
+	)
+	return &preparedBigQueryStagingInsert{destination: d, targetTable: opts.TargetTable, sql: insertSQL}, nil
+}
+
+func (d *BigQueryDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	insert, err := d.PrepareInsertFromStaging(ctx, opts)
+	if err != nil {
+		return err
+	}
+	return insert.Execute(ctx)
 }
 
 // SupportsReplaceStrategy returns true as BigQuery supports the replace strategy.
