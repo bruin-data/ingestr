@@ -63,10 +63,11 @@ type CDCConfig struct {
 }
 
 type MSSQLCDCSource struct {
-	db        *sql.DB
-	uri       string
-	cdcConfig CDCConfig
-	lag       *mssqlLagState
+	db             *sql.DB
+	uri            string
+	cdcConfig      CDCConfig
+	lag            *mssqlLagState
+	guidConversion bool
 }
 
 // mssqlLagState holds the last observed capture watermark and how far behind the
@@ -235,6 +236,7 @@ func (s *MSSQLCDCSource) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
 	}
+	s.guidConversion = mssql.GUIDConversionEnabled(connStr)
 
 	db, err := sql.Open(driverName, connStr)
 	if err != nil {
@@ -1120,7 +1122,7 @@ func (s *MSSQLCDCSource) rowsToSnapshotBatches(rows *sql.Rows, tableSchema *sche
 	syncedAt := time.Now().UTC()
 
 	for {
-		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, func(builders []array.Builder) {
+		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, func(builders []array.Builder) {
 			appendCDCValues(builders, len(sourceColumns), cdcLSN, false, syncedAt)
 		})
 		if err != nil {
@@ -1147,7 +1149,7 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema
 	}
 
 	for {
-		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, syncedAt, pairer)
+		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, syncedAt, pairer)
 		if err != nil {
 			return err
 		}
@@ -1278,7 +1280,21 @@ func cdcValueEqual(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
+// normalizeSourceValue converts driver-specific representations into the
+// values the Arrow builders expect. uniqueidentifier arrives as raw bytes
+// whose order depends on the connection's "guid conversion" setting.
+func normalizeSourceValue(col schema.Column, val any, guidConversion bool) (any, error) {
+	if col.DataType != schema.TypeUUID {
+		return val, nil
+	}
+	normalized, err := mssql.NormalizeUUIDValue(val, guidConversion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert uniqueidentifier column %q: %w", col.Name, err)
+	}
+	return normalized, nil
+}
+
+func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1300,7 +1316,12 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 		}
 
 		for i, dest := range scanDest {
-			arrowconv.AppendValue(builders[i], *dest.(*any))
+			val, err := normalizeSourceValue(sourceColumns[i], *dest.(*any), guidConversion)
+			if err != nil {
+				releaseBuilders(builders)
+				return nil, 0, err
+			}
+			arrowconv.AppendValue(builders[i], val)
 		}
 		appendCDC(builders)
 
@@ -1313,7 +1334,7 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 	return finishBatch(rows, arrowSchema, builders, rowCount)
 }
 
-func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
+func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1337,7 +1358,12 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 
 		values := make([]any, len(sourceColumns))
 		for i := range values {
-			values[i] = *scanDest[i].(*any)
+			val, err := normalizeSourceValue(sourceColumns[i], *scanDest[i].(*any), guidConversion)
+			if err != nil {
+				releaseBuilders(builders)
+				return nil, 0, err
+			}
+			values[i] = val
 		}
 		lsn := fmt.Sprintf("%v", *scanDest[len(sourceColumns)].(*any))
 		op, err := operationValue(*scanDest[len(sourceColumns)+1].(*any))
