@@ -41,6 +41,12 @@ const (
 	// change reads are retried per table before the failure is treated as
 	// permanent.
 	maxTransientReadFailures = 20
+
+	// captureHealthInterval throttles the best-effort sys.dm_cdc_errors
+	// probe that surfaces capture-job failures during streaming. Without it
+	// a dead capture job freezes the harvest watermark and the stream reads
+	// as caught up while the source backlog grows.
+	captureHealthInterval = 5 * time.Minute
 )
 
 func sleepPoll(ctx context.Context, interval time.Duration) error {
@@ -69,7 +75,63 @@ type MSSQLCDCSource struct {
 	uri            string
 	cdcConfig      CDCConfig
 	lag            *mssqlLagState
+	health         captureHealth
 	guidConversion bool
+}
+
+// captureHealth throttles capture-job error probes and deduplicates the
+// warnings they produce. Only errors recorded after the stream started are
+// reported, each once.
+type captureHealth struct {
+	mu            sync.Mutex
+	nextCheck     time.Time
+	warnedThrough time.Time
+}
+
+func (h *captureHealth) reset(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextCheck = now.Add(captureHealthInterval)
+	h.warnedThrough = now
+}
+
+func (h *captureHealth) shouldCheck(now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if now.Before(h.nextCheck) {
+		return false
+	}
+	h.nextCheck = now.Add(captureHealthInterval)
+	return true
+}
+
+func (h *captureHealth) claimWarn(entry time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !entry.After(h.warnedThrough) {
+		return false
+	}
+	h.warnedThrough = entry
+	return true
+}
+
+// checkCaptureHealth surfaces capture-job failures recorded in
+// sys.dm_cdc_errors. Best-effort: a missing VIEW DATABASE STATE permission or
+// an empty view stays silent.
+func (s *MSSQLCDCSource) checkCaptureHealth(ctx context.Context) {
+	if !s.health.shouldCheck(time.Now()) {
+		return
+	}
+	var entryTime sql.NullTime
+	var message sql.NullString
+	err := s.db.QueryRowContext(ctx, "SELECT TOP (1) entry_time, error_message FROM sys.dm_cdc_errors ORDER BY entry_time DESC").Scan(&entryTime, &message)
+	if err != nil || !entryTime.Valid {
+		return
+	}
+	if !s.health.claimWarn(entryTime.Time) {
+		return
+	}
+	output.Warnf("Warning: SQL Server CDC capture job error at %s: %s\n", entryTime.Time.Format(time.RFC3339), strings.TrimSpace(message.String))
 }
 
 // mssqlLagState holds the last observed capture watermark and how far behind the
@@ -262,6 +324,14 @@ func (s *MSSQLCDCSource) Connect(ctx context.Context, uri string) error {
 	if !cdcEnabled {
 		_ = db.Close()
 		return fmt.Errorf("SQL Server CDC is not enabled for the current database; run sys.sp_cdc_enable_db first")
+	}
+
+	// A NULL harvest watermark means the capture job has never processed the
+	// log — the most common cause is SQL Server Agent not running, which
+	// otherwise reads as an eternally idle, "caught up" stream.
+	var watermark sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_max_lsn(), 2)").Scan(&watermark); err == nil && !watermark.Valid {
+		output.Warnf("Warning: SQL Server CDC has not harvested any changes yet; ensure the CDC capture job is running (SQL Server Agent on self-hosted instances)\n")
 	}
 
 	s.db = db
@@ -1049,6 +1119,9 @@ func lowestLSN(byTable map[string]string) string {
 
 func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.SourceTableInfo, metas map[string]tableMetadata, startByTable map[string]string, reReadByTable map[string]bool, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	s.lag.streaming.Store(opts.Streaming)
+	if opts.Streaming {
+		s.health.reset(time.Now())
+	}
 	// Each table's initial position (a resume cursor or a snapshot stamp) may
 	// sit mid-transaction, so the first read includes it; see streamTable.
 	inclusiveByTable := make(map[string]bool, len(tables))
@@ -1057,6 +1130,9 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	}
 	transientFailures := make(map[string]int, len(tables))
 	for {
+		if opts.Streaming {
+			s.checkCaptureHealth(ctx)
+		}
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
 			return err
@@ -1143,6 +1219,9 @@ func planChangeWindow(start, target string, reReadBoundary bool) (string, bool) 
 
 func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, startLSN string, reReadBoundary bool, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
 	s.lag.streaming.Store(opts.Streaming)
+	if opts.Streaming {
+		s.health.reset(time.Now())
+	}
 	current := startLSN
 	// The initial position may sit mid-transaction: a resume cursor names the
 	// destination's last durable change row, whose transaction can continue
@@ -1154,6 +1233,9 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 	inclusive := true
 	transientFailures := 0
 	for {
+		if opts.Streaming {
+			s.checkCaptureHealth(ctx)
+		}
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
 			return err

@@ -462,6 +462,22 @@ func TestNewUpdatePairerRequiresCapturedKeys(t *testing.T) {
 	assert.ErrorContains(t, err, `primary key column "ssn"`)
 }
 
+func TestCaptureHealthThrottleAndDedup(t *testing.T) {
+	var h captureHealth
+	start := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+	h.reset(start)
+
+	assert.False(t, h.shouldCheck(start.Add(time.Minute)), "probe must wait out the interval")
+	assert.True(t, h.shouldCheck(start.Add(captureHealthInterval)))
+	assert.False(t, h.shouldCheck(start.Add(captureHealthInterval+time.Second)), "claiming the slot must re-arm the throttle")
+
+	assert.False(t, h.claimWarn(start.Add(-time.Hour)), "errors predating the stream are not reported")
+	errAt := start.Add(10 * time.Minute)
+	assert.True(t, h.claimWarn(errAt))
+	assert.False(t, h.claimWarn(errAt), "the same error is reported once")
+	assert.True(t, h.claimWarn(errAt.Add(time.Minute)), "a newer error is reported again")
+}
+
 func TestErrorClassifiers(t *testing.T) {
 	assert.True(t, isInvalidLSNRangeError(mssqldb.Error{Number: 313}))
 	assert.True(t, isInvalidLSNRangeError(fmt.Errorf("query: %w", mssqldb.Error{Number: 313})))
