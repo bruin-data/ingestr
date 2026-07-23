@@ -539,6 +539,8 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	sourceContainer, sourceURI, sourceDSN := mysqlStressContainer(t, ctx, []string{
 		"--server-id=21777",
 		"--log-bin=mysql-bin",
+		"--gtid-mode=ON",
+		"--enforce-gtid-consistency=ON",
 		"--binlog-format=ROW",
 		"--binlog-row-image=FULL",
 		// Non-UTC source: snapshot and binlog paths must agree on instants.

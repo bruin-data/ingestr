@@ -1541,7 +1541,7 @@ func compareCDCPositions(left, right string) int {
 	}
 }
 
-var mysqlCDCStatePositionRE = regexp.MustCompile(`^\d{20}:[^:]+:\d{20}:\d{20}$`)
+var mysqlCDCStatePositionRE = regexp.MustCompile(`^\d{20}:[^:]+:\d{20}:\d{20}(?::l1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*)?$`)
 
 const (
 	cdcStateIncarnationSeparator   = ";incarnation="

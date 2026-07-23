@@ -32,6 +32,8 @@ func setupMySQLCDCContainer(t *testing.T, ctx context.Context) (testcontainers.C
 			req.Cmd = []string{
 				"--server-id=17777",
 				"--log-bin=mysql-bin",
+				"--gtid-mode=ON",
+				"--enforce-gtid-consistency=ON",
 				"--binlog-format=ROW",
 				"--binlog-row-image=FULL",
 				// Non-UTC server time zone: snapshot and binlog rows must still

@@ -96,6 +96,15 @@ type MergeOptions struct {
 	Parallelism            int
 }
 
+type CDCAtomicTableMerge struct {
+	Options  MergeOptions
+	Truncate bool
+}
+
+type CDCMultiTableAtomicMerger interface {
+	MergeCDCTablesAtomically(ctx context.Context, merges []CDCAtomicTableMerge) error
+}
+
 // TruncateInsertFromStagingOptions configures an atomic replacement from a
 // populated staging table into an existing target table.
 type TruncateInsertFromStagingOptions struct {

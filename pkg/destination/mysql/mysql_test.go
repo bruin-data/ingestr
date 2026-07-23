@@ -812,6 +812,30 @@ func TestCDCMergeWithIncrementalPredicateInsertsBeforeUpdate(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestMultiTableCDCMergeUsesSingleTransaction(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	dest := &MySQLDestination{db: db}
+	mock.ExpectBegin()
+	for _, table := range []string{"orders", "users"} {
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE `" + table + "` AS target")).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `" + table + "`")).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE `" + table + "` AS target")).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `" + table + "`")).WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	mock.ExpectCommit()
+
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	err = dest.MergeCDCTablesAtomically(t.Context(), []destination.CDCAtomicTableMerge{
+		{Options: destination.MergeOptions{TargetTable: "orders", StagingTable: "orders_staging", PrimaryKeys: []string{"id"}, Columns: columns}},
+		{Options: destination.MergeOptions{TargetTable: "users", StagingTable: "users_staging", PrimaryKeys: []string{"id"}, Columns: columns}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestBuildMultiRowInsertSQL(t *testing.T) {
 	got := buildMultiRowInsertSQL("analytics.users", []string{"`id`", "`name`"}, 3)
 	want := "INSERT INTO `analytics`.`users` (`id`, `name`) VALUES (?, ?), (?, ?), (?, ?)"
