@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -341,23 +343,92 @@ func (s *MSSQLCDCSource) IsMultiTable() bool {
 }
 
 func (s *MSSQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
-	metas, err := s.getAllTableMetadata(ctx)
+	if s.cdcConfig.CaptureInstance != "" {
+		output.Warnf("Warning: capture_instance is ignored in multi-table SQL Server CDC mode; the newest capture instance of each table is used\n")
+	}
+	tables, skipped, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
+	for _, st := range skipped {
+		output.Warnf("Warning: skipping SQL Server CDC table %s: %s\n", st.name, st.reason)
+	}
+	return tables, nil
+}
+
+type skippedTable struct {
+	name   string
+	reason string
+}
+
+// selectTables applies the requested-table filter. A filter entry that
+// matches nothing is a hard error: silently ingesting nothing (and, in
+// streaming mode, polling forever) would hide a typo or an unqualified
+// table name.
+func selectTables(allTables []source.SourceTableInfo, skipped []skippedTable, requested []string) ([]source.SourceTableInfo, error) {
+	filter := map[string]string{}
+	for _, table := range requested {
+		table = strings.TrimSpace(table)
+		if table == "" {
+			continue
+		}
+		filter[strings.ToLower(table)] = table
+	}
+	filtered := len(filter) > 0
+
+	selected := make([]source.SourceTableInfo, 0, len(allTables))
+	for _, table := range allTables {
+		key := strings.ToLower(table.Name)
+		if filtered && filter[key] == "" {
+			continue
+		}
+		delete(filter, key)
+		selected = append(selected, table)
+	}
+
+	for _, st := range skipped {
+		if requestedName, ok := filter[strings.ToLower(st.name)]; ok {
+			return nil, fmt.Errorf("SQL Server CDC table %s cannot be ingested: %s", requestedName, st.reason)
+		}
+	}
+	if len(filter) > 0 {
+		missing := make([]string, 0, len(filter))
+		for _, requestedName := range filter {
+			missing = append(missing, requestedName)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("tables not found among SQL Server CDC-enabled tables: %s; use schema-qualified names (e.g. dbo.users)", strings.Join(missing, ", "))
+	}
+	return selected, nil
+}
+
+// getTables lists ingestible CDC-enabled tables. Tables that cannot join a
+// multi-table run (no primary key, so merge has nothing to apply changes by)
+// are returned separately instead of failing the run: one such table anywhere
+// in the database must not block ingesting the others.
+func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, []skippedTable, error) {
+	metas, err := s.getAllTableMetadata(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(metas) == 0 {
-		return nil, fmt.Errorf("no SQL Server CDC-enabled tables found")
+		return nil, nil, fmt.Errorf("no SQL Server CDC-enabled tables found")
 	}
 
 	tables := make([]source.SourceTableInfo, 0, len(metas))
+	var skipped []skippedTable
 	for _, meta := range metas {
 		tableSchema, err := s.getCapturedSchema(ctx, meta)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName(meta), err)
+			return nil, nil, fmt.Errorf("failed to get schema for %s: %w", tableName(meta), err)
 		}
 		tableSchema = addCDCColumns(tableSchema)
 		if len(tableSchema.PrimaryKeys) == 0 {
-			return nil, fmt.Errorf("SQL Server CDC table %s has no primary key; multi-table CDC requires source primary keys", tableName(meta))
+			skipped = append(skipped, skippedTable{
+				name:   tableName(meta),
+				reason: "it has no primary key; add one, or ingest it alone with --source-table and --primary-key",
+			})
+			continue
 		}
 
 		tables = append(tables, source.SourceTableInfo{
@@ -368,26 +439,20 @@ func (s *MSSQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 		})
 	}
 
-	return tables, nil
+	if len(tables) == 0 {
+		return nil, skipped, fmt.Errorf("no SQL Server CDC-enabled tables with a primary key found")
+	}
+	return tables, skipped, nil
 }
 
 func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	allTables, err := s.GetTables(ctx)
+	allTables, skipped, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	filter := map[string]bool{}
-	for _, table := range opts.Tables {
-		filter[strings.ToLower(table)] = true
-	}
-
-	selected := make([]source.SourceTableInfo, 0, len(allTables))
-	for _, table := range allTables {
-		if len(filter) > 0 && !filter[strings.ToLower(table.Name)] {
-			continue
-		}
-		selected = append(selected, table)
+	selected, err := selectTables(allTables, skipped, opts.Tables)
+	if err != nil {
+		return nil, err
 	}
 
 	results := make(chan source.RecordBatchResult, 16)

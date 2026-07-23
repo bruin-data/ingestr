@@ -301,6 +301,30 @@ func TestNormalizeSourceValueLeavesNonUUIDColumnsAlone(t *testing.T) {
 	assert.ErrorContains(t, err, `uniqueidentifier column "guid"`)
 }
 
+func TestSelectTables(t *testing.T) {
+	all := []source.SourceTableInfo{
+		{Name: "dbo.users"},
+		{Name: "sales.orders"},
+	}
+	skipped := []skippedTable{{name: "dbo.audit_log", reason: "it has no primary key"}}
+
+	selected, err := selectTables(all, skipped, nil)
+	require.NoError(t, err)
+	assert.Len(t, selected, 2, "no filter selects every ingestible table")
+
+	selected, err = selectTables(all, skipped, []string{"DBO.Users"})
+	require.NoError(t, err)
+	require.Len(t, selected, 1)
+	assert.Equal(t, "dbo.users", selected[0].Name)
+
+	_, err = selectTables(all, skipped, []string{"dbo.users", "dbo.missing"})
+	assert.ErrorContains(t, err, "dbo.missing")
+	assert.ErrorContains(t, err, "schema-qualified")
+
+	_, err = selectTables(all, skipped, []string{"dbo.audit_log"})
+	assert.ErrorContains(t, err, "no primary key")
+}
+
 func TestValidateCapturedPrimaryKeys(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Name:   "users",
