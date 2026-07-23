@@ -355,6 +355,48 @@ func TestMySQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
 	}
 }
 
+func TestMSSQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
+	for _, strategy := range []config.IncrementalStrategy{
+		config.StrategyAppend,
+		config.StrategyDeleteInsert,
+		config.StrategySCD2,
+		config.StrategyTruncateInsert,
+	} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "mssql+cdc://source/app"
+			cfg.IncrementalStrategy = strategy
+			err := validateManagedChangeConfig(cfg)
+			require.ErrorContains(t, err, "not supported for SQL Server CDC")
+		})
+	}
+
+	for _, strategy := range []config.IncrementalStrategy{"", config.StrategyMerge, config.StrategyReplace} {
+		cfg := config.DefaultConfig()
+		cfg.SourceURI = "mssql+cdc://source/app"
+		cfg.IncrementalStrategy = strategy
+		require.NoError(t, validateManagedChangeConfig(cfg))
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "sqlserver+cdc://source/app"
+	cfg.IncrementalStrategy = config.StrategySCD2
+	cfg.FullRefresh = true
+	require.NoError(t, validateManagedChangeConfig(cfg), "full refresh bypasses CDC strategy limits like the peers")
+}
+
+func TestMSSQLCDCRejectsSQLLimit(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mssql+cdc://source/app"
+	cfg.SQLLimit = 10
+	err := validateManagedChangeConfig(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sql-limit")
+
+	cfg.SQLLimit = 0
+	require.NoError(t, validateManagedChangeConfig(cfg))
+}
+
 func TestMySQLCDCRejectsUnsafeMetadataTransforms(t *testing.T) {
 	tests := []struct {
 		name  string

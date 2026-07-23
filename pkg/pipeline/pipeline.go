@@ -2522,6 +2522,18 @@ func isPostgresCDCSource(rawURI string) bool {
 	return scheme == "postgres+cdc" || scheme == "postgresql+cdc"
 }
 
+func isMSSQLCDCSource(rawURI string) bool {
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	switch strings.ToLower(rawURI[:schemeEnd]) {
+	case "mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc":
+		return true
+	}
+	return false
+}
+
 func isMySQLCDCSource(rawURI string) bool {
 	schemeEnd := strings.Index(rawURI, "://")
 	if schemeEnd == -1 {
@@ -2775,6 +2787,16 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			}
 		}
 	}
+	if isMSSQLCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+		switch cfg.IncrementalStrategy {
+		case "", config.StrategyMerge, config.StrategyReplace:
+		default:
+			return &config.ValidationError{
+				Field:   "incremental-strategy",
+				Message: fmt.Sprintf("%q is not supported for SQL Server CDC; use merge or replace", cfg.IncrementalStrategy),
+			}
+		}
+	}
 	if isMySQLCDCSource(cfg.SourceURI) {
 		if !cfg.FullRefresh {
 			switch cfg.IncrementalStrategy {
@@ -2820,6 +2842,9 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 	}
 	if isChangeTrackingSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
 		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
+	}
+	if isMSSQLCDCSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
+		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server CDC sources; the snapshot and change stream must be read completely to keep the resume cursor safe"}
 	}
 	return nil
 }

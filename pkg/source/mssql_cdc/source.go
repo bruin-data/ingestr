@@ -323,9 +323,14 @@ func (s *MSSQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	}
 	tableSchema.PrimaryKeys = pks
 
+	// Replace resolves to merge outside full-refresh runs, matching the
+	// pipeline's managed-change resolution. Anything else cannot represent
+	// CDC deletes and boundary re-deliveries correctly.
 	strategy := config.StrategyMerge
-	if req.Strategy != "" && req.Strategy != config.StrategyReplace {
-		strategy = req.Strategy
+	switch req.Strategy {
+	case "", config.StrategyMerge, config.StrategyReplace:
+	default:
+		return nil, fmt.Errorf("incremental strategy %q is not supported for SQL Server CDC; use merge or replace", req.Strategy)
 	}
 
 	return &CDCTable{
