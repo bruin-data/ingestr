@@ -239,6 +239,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Klaviyo", link: "/supported-sources/klaviyo.md" },
               { text: "Linear", link: "/supported-sources/linear.md" },
               { text: "LinkedIn Ads", link: "/supported-sources/linkedin_ads.md" },
+              { text: "Lumify", link: "/supported-sources/lumify.md" },
               { text: "Mailchimp", link: "/supported-sources/mailchimp.md" },
               { text: "Manifold", link: "/supported-sources/manifold.md" },
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
