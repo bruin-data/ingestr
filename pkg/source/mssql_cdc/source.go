@@ -882,8 +882,22 @@ func (s *MSSQLCDCSource) snapshotTable(ctx context.Context, meta tableMetadata, 
 	if err == nil {
 		return snapshotLSN, nil
 	}
-	config.Debug("[MSSQL CDC] SNAPSHOT isolation snapshot failed for %s: %v; retrying with table lock", tableName(meta), err)
+	// Only fall back when the database rejects SNAPSHOT isolation outright.
+	// Retrying every failure (a mid-scan network error, a cancelled context)
+	// would rescan the whole table under HOLDLOCK, holding shared locks on a
+	// live table for no benefit.
+	if !isSnapshotIsolationUnavailableError(err) {
+		return "", err
+	}
+	config.Debug("[MSSQL CDC] SNAPSHOT isolation is not allowed for this database (%v); retrying snapshot of %s with a table lock", err, tableName(meta))
 	return s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSerializable)
+}
+
+// isSnapshotIsolationUnavailableError matches error 3952: the database does
+// not allow SNAPSHOT isolation (ALLOW_SNAPSHOT_ISOLATION is OFF).
+func isSnapshotIsolationUnavailableError(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 3952
 }
 
 func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string, isolation sql.IsolationLevel) (string, error) {
@@ -952,6 +966,16 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	}
 
 	return snapshotLSN, nil
+}
+
+// isInvalidLSNRangeError matches error 313, which fn_cdc_get_all_changes
+// raises with a famously misleading message ("an insufficient number of
+// arguments were supplied") when the requested window falls outside the
+// capture instance's valid LSN range — in practice, when cleanup advanced the
+// low watermark past the cursor mid-stream.
+func isInvalidLSNRangeError(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 313
 }
 
 // isTransientMSSQLError reports errors SQL Server tells the client to retry:
@@ -1184,6 +1208,9 @@ func (s *MSSQLCDCSource) readChanges(ctx context.Context, meta tableMetadata, ta
 	query := buildChangesQuery(meta, sourceColumns, inclusive)
 	rows, err := s.db.QueryContext(ctx, query, fromLSN, toLSN)
 	if err != nil {
+		if isInvalidLSNRangeError(err) {
+			return fmt.Errorf("CDC changes for %s from LSN %s are no longer available: change-table cleanup advanced past the cursor (retention exceeded); the next run will take a fresh snapshot: %w", tableName(meta), fromLSN, err)
+		}
 		return fmt.Errorf("failed to query CDC changes for %s: %w", tableName(meta), err)
 	}
 	defer func() { _ = rows.Close() }()

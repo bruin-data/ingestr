@@ -462,6 +462,17 @@ func TestNewUpdatePairerRequiresCapturedKeys(t *testing.T) {
 	assert.ErrorContains(t, err, `primary key column "ssn"`)
 }
 
+func TestErrorClassifiers(t *testing.T) {
+	assert.True(t, isInvalidLSNRangeError(mssqldb.Error{Number: 313}))
+	assert.True(t, isInvalidLSNRangeError(fmt.Errorf("query: %w", mssqldb.Error{Number: 313})))
+	assert.False(t, isInvalidLSNRangeError(mssqldb.Error{Number: 1205}))
+	assert.False(t, isInvalidLSNRangeError(errors.New("boom")))
+
+	assert.True(t, isSnapshotIsolationUnavailableError(mssqldb.Error{Number: 3952}))
+	assert.False(t, isSnapshotIsolationUnavailableError(mssqldb.Error{Number: 1205}))
+	assert.False(t, isSnapshotIsolationUnavailableError(nil))
+}
+
 func TestIsTransientMSSQLError(t *testing.T) {
 	deadlock := mssqldb.Error{Number: 1205, Message: "deadlock victim"}
 	assert.True(t, isTransientMSSQLError(deadlock))
