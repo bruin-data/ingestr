@@ -973,19 +973,41 @@ func (s *MSSQLCDCSource) canResume(ctx context.Context, meta tableMetadata, star
 }
 
 func (s *MSSQLCDCSource) snapshotTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) (string, error) {
-	snapshotLSN, err := s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSnapshot)
-	if err == nil {
-		return snapshotLSN, nil
-	}
-	// Only fall back when the database rejects SNAPSHOT isolation outright.
-	// Retrying every failure (a mid-scan network error, a cancelled context)
-	// would rescan the whole table under HOLDLOCK, holding shared locks on a
-	// live table for no benefit.
-	if !isSnapshotIsolationUnavailableError(err) {
+	// Probe instead of try-and-fall-back: a failed SNAPSHOT attempt leaves
+	// the session isolation level set on the pooled connection (SQL Server
+	// scopes SET TRANSACTION ISOLATION LEVEL to the session, not the
+	// transaction), poisoning later queries with error 3952.
+	useSnapshot, err := s.snapshotIsolationAllowed(ctx)
+	if err != nil {
 		return "", err
 	}
-	config.Debug("[MSSQL CDC] SNAPSHOT isolation is not allowed for this database (%v); retrying snapshot of %s with a table lock", err, tableName(meta))
+	if useSnapshot {
+		snapshotLSN, err := s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSnapshot)
+		if err == nil {
+			return snapshotLSN, nil
+		}
+		// Only fall back when the database rejected SNAPSHOT isolation after
+		// all (the setting can flip between probe and scan). Retrying every
+		// failure would rescan the whole table under HOLDLOCK, holding shared
+		// locks on a live table for no benefit.
+		if !isSnapshotIsolationUnavailableError(err) {
+			return "", err
+		}
+		config.Debug("[MSSQL CDC] SNAPSHOT isolation became unavailable (%v); retrying snapshot of %s with a table lock", err, tableName(meta))
+	} else {
+		config.Debug("[MSSQL CDC] Snapshot isolation is not allowed for this database; snapshotting %s with a table lock", tableName(meta))
+	}
 	return s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSerializable)
+}
+
+// snapshotIsolationAllowed reports whether the database permits SNAPSHOT
+// isolation (sys.databases.snapshot_isolation_state = 1).
+func (s *MSSQLCDCSource) snapshotIsolationAllowed(ctx context.Context) (bool, error) {
+	var state int
+	if err := s.db.QueryRowContext(ctx, "SELECT CONVERT(int, snapshot_isolation_state) FROM sys.databases WHERE database_id = DB_ID()").Scan(&state); err != nil {
+		return false, fmt.Errorf("failed to check snapshot isolation state: %w", err)
+	}
+	return state == 1, nil
 }
 
 // isSnapshotIsolationUnavailableError matches error 3952: the database does
@@ -1028,9 +1050,18 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		// BeginTx's isolation level sticks to the session, so restore the
+		// default before the connection re-enters the pool.
+		_, _ = conn.ExecContext(ctx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+		_ = conn.Close()
+	}()
 
-	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: isolation == sql.LevelSnapshot})
+	// go-mssqldb rejects ReadOnly transactions outright ("read-only
+	// transactions are not supported"), so requesting one here used to fail
+	// every SNAPSHOT-isolation attempt and silently push all snapshots onto
+	// the SERIALIZABLE+HOLDLOCK fallback, which blocks writers.
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
 		return "", fmt.Errorf("failed to begin snapshot transaction: %w", err)
 	}
