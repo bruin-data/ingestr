@@ -191,7 +191,7 @@ func TestRowsToSnapshotBatchesMarksOnlyFinalBatchComplete(t *testing.T) {
 	s := &MSSQLCDCSource{}
 
 	const snapshotLSN = "0000002F0000010D0002"
-	err = s.rowsToSnapshotBatches(rows, tableSchema, source.ReadOptions{PageSize: 1}, snapshotLSN, results, "items")
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema, source.ReadOptions{PageSize: 1}, snapshotLSN, results, "items")
 	require.NoError(t, err)
 	close(results)
 
@@ -241,7 +241,7 @@ func TestRowsToSnapshotBatchesReturnsIteratorErrorForEmptyBatch(t *testing.T) {
 	results := make(chan source.RecordBatchResult, 1)
 	s := &MSSQLCDCSource{}
 
-	err = s.rowsToSnapshotBatches(rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
 	require.ErrorIs(t, err, iterErr)
 	assert.Empty(t, results)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -278,7 +278,7 @@ func TestRowsToSnapshotBatchesNormalizesUUIDColumns(t *testing.T) {
 	results := make(chan source.RecordBatchResult, 2)
 	s := &MSSQLCDCSource{}
 
-	err = s.rowsToSnapshotBatches(rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
 	require.NoError(t, err)
 
 	res := <-results

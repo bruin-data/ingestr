@@ -58,6 +58,20 @@ func sleepPoll(ctx context.Context, interval time.Duration) error {
 	}
 }
 
+// emitResult sends a result without wedging the producer goroutine when the
+// consumer has gone away: cancellation releases the batch and unblocks.
+func emitResult(ctx context.Context, results chan<- source.RecordBatchResult, res source.RecordBatchResult) error {
+	select {
+	case results <- res:
+		return nil
+	case <-ctx.Done():
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return ctx.Err()
+	}
+}
+
 var mssqlCDCColumns = []schema.Column{
 	{Name: destination.CDCLSNColumn, DataType: schema.TypeString, Nullable: false},
 	{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean, Nullable: false},
@@ -541,7 +555,7 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 		for _, table := range selected {
 			meta, err := s.getTableMetadata(ctx, table.Name, "")
 			if err != nil {
-				results <- source.RecordBatchResult{Err: err}
+				_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
 			}
 			metaByTable[table.Name] = meta
@@ -555,7 +569,7 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			if startHex != "" {
 				canResume, err := s.canResume(ctx, meta, startHex)
 				if err != nil {
-					results <- source.RecordBatchResult{Err: err}
+					_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 					return
 				}
 				if canResume {
@@ -567,14 +581,14 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 
 			snapshotLSN, err := s.snapshotTable(ctx, meta, table.Schema, opts.ReadOptions, results, table.Name)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed for %s: %w", table.Name, err)}
+				_ = emitResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed for %s: %w", table.Name, err)})
 				return
 			}
 			startByTable[table.Name] = snapshotLSN
 		}
 
 		if err := s.streamTables(ctx, selected, metaByTable, startByTable, reReadByTable, opts.ReadOptions, results); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 		}
 	}()
 
@@ -799,6 +813,17 @@ func (s *MSSQLCDCSource) getCapturedSchema(ctx context.Context, meta tableMetada
 		return nil, fmt.Errorf("CDC capture instance %s has no captured columns", meta.CaptureInstance)
 	}
 
+	// Captured columns the source table no longer has are snapshotted as
+	// NULL, so they must read as nullable regardless of the change table's
+	// original constraint.
+	if len(meta.CurrentColumns) > 0 {
+		for i := range columns {
+			if !meta.CurrentColumns[strings.ToLower(columns[i].Name)] {
+				columns[i].Nullable = true
+			}
+		}
+	}
+
 	primaryKeys, err := s.primaryKeys(ctx, meta)
 	if err != nil {
 		return nil, err
@@ -910,12 +935,12 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 		if startHex != "" {
 			canResume, err := t.source.canResume(ctx, t.metadata, startHex)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: err}
+				_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
 			}
 			if canResume {
 				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, !isSnapshotStamp(resume), opts, results, ""); err != nil {
-					results <- source.RecordBatchResult{Err: err}
+					_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 				}
 				return
 			}
@@ -924,12 +949,12 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 
 		snapshotLSN, err := t.source.snapshotTable(ctx, t.metadata, t.tableSchema, opts, results, "")
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)}
+			_ = emitResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
 			return
 		}
 
 		if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, snapshotLSN, false, opts, results, ""); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 		}
 	}()
 
@@ -1024,10 +1049,12 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 		// discard target rows left by an interrupted earlier attempt or a lost
 		// resume position, so source deletes missed while the position was
 		// invalid cannot linger.
-		results <- source.RecordBatchResult{Truncate: true, TableName: resultTable}
+		if err := emitResult(ctx, results, source.RecordBatchResult{Truncate: true, TableName: resultTable}); err != nil {
+			return "", err
+		}
 	}
 
-	if err := s.rowsToSnapshotBatches(rows, tableSchema, opts, snapshotLSN, results, resultTable); err != nil {
+	if err := s.rowsToSnapshotBatches(ctx, rows, tableSchema, opts, snapshotLSN, results, resultTable); err != nil {
 		return "", err
 	}
 
@@ -1297,10 +1324,10 @@ func (s *MSSQLCDCSource) readChanges(ctx context.Context, meta tableMetadata, ta
 	}
 	defer func() { _ = rows.Close() }()
 
-	return s.rowsToChangeBatches(rows, tableSchema, opts, results, resultTable)
+	return s.rowsToChangeBatches(ctx, rows, tableSchema, opts, results, resultTable)
 }
 
-func (s *MSSQLCDCSource) rowsToSnapshotBatches(rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, snapshotLSN string, results chan<- source.RecordBatchResult, resultTable string) error {
+func (s *MSSQLCDCSource) rowsToSnapshotBatches(ctx context.Context, rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, snapshotLSN string, results chan<- source.RecordBatchResult, resultTable string) error {
 	sourceColumns := sourceColumnsWithoutCDC(tableSchema)
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -1332,15 +1359,17 @@ func (s *MSSQLCDCSource) rowsToSnapshotBatches(rows *sql.Rows, tableSchema *sche
 			break
 		}
 		if pending != nil {
-			results <- source.RecordBatchResult{Batch: pending, TableName: resultTable}
+			if err := emitResult(ctx, results, source.RecordBatchResult{Batch: pending, TableName: resultTable}); err != nil {
+				record.Release()
+				return err
+			}
 		}
 		pending = record
 	}
 	if pending == nil {
 		return nil
 	}
-	results <- source.RecordBatchResult{Batch: restampSnapshotLSN(pending, len(sourceColumns), completeLSN), TableName: resultTable}
-	return nil
+	return emitResult(ctx, results, source.RecordBatchResult{Batch: restampSnapshotLSN(pending, len(sourceColumns), completeLSN), TableName: resultTable})
 }
 
 // restampSnapshotLSN rebuilds a snapshot batch's _cdc_lsn column with the
@@ -1366,7 +1395,7 @@ func restampSnapshotLSN(record arrow.RecordBatch, lsnCol int, lsn string) arrow.
 	return out
 }
 
-func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
+func (s *MSSQLCDCSource) rowsToChangeBatches(ctx context.Context, rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
 	sourceColumns := sourceColumnsWithoutCDC(tableSchema)
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -1387,7 +1416,9 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema
 		if count == 0 {
 			return nil
 		}
-		results <- source.RecordBatchResult{Batch: record, TableName: resultTable}
+		if err := emitResult(ctx, results, source.RecordBatchResult{Batch: record, TableName: resultTable}); err != nil {
+			return err
+		}
 	}
 }
 
