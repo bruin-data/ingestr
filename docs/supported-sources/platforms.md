@@ -110,4 +110,5 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Frankfurter](/supported-sources/frankfurter.md)
 - [Internet Society Pulse](/supported-sources/isoc-pulse.md)
 - [Kalshi](/supported-sources/kalshi.md)
+- [Lumify](/supported-sources/lumify.md)
 - [Polymarket](/supported-sources/polymarket.md)
