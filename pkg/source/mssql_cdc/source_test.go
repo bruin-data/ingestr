@@ -145,6 +145,76 @@ func TestPlanChangeWindowNeverRegressesCursor(t *testing.T) {
 	assert.True(t, read)
 }
 
+func TestSnapshotStampLifecycle(t *testing.T) {
+	const start = "0000002F0000010D0002"
+	incomplete := snapshotIncompleteLSN(start)
+	complete := snapshotCompleteLSN(start)
+
+	assert.True(t, isIncompleteSnapshotStamp(incomplete))
+	assert.False(t, isIncompleteSnapshotStamp(complete))
+	assert.True(t, isSnapshotStamp(incomplete))
+	assert.True(t, isSnapshotStamp(complete))
+	assert.False(t, isSnapshotStamp(formatStoredLSN(start, "0000002F0000010D0003", 4)))
+	assert.False(t, isIncompleteSnapshotStamp(""))
+
+	// The destination resumes from MAX(_cdc_lsn) as a string, so the stamps
+	// and change rows must order: incomplete < complete < any change row.
+	changeRow := formatStoredLSN(start, "0000002F0000010D0003", 1)
+	assert.Less(t, incomplete, complete)
+	assert.Less(t, complete, changeRow)
+}
+
+func TestRowsToSnapshotBatchesMarksOnlyFinalBatchComplete(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mockRows := sqlmock.NewRows([]string{"id", "name"}).
+		AddRow(int64(1), "a").
+		AddRow(int64(2), "b").
+		AddRow(int64(3), "c")
+	mock.ExpectQuery("SELECT").WillReturnRows(mockRows)
+
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 4)
+	s := &MSSQLCDCSource{}
+
+	const snapshotLSN = "0000002F0000010D0002"
+	err = s.rowsToSnapshotBatches(rows, tableSchema, source.ReadOptions{PageSize: 1}, snapshotLSN, results, "items")
+	require.NoError(t, err)
+	close(results)
+
+	var stamps []string
+	var ids []int64
+	for res := range results {
+		require.NoError(t, res.Err)
+		lsnCol, ok := res.Batch.Column(2).(*array.String)
+		require.True(t, ok)
+		require.EqualValues(t, 1, res.Batch.NumRows())
+		stamps = append(stamps, lsnCol.Value(0))
+		ids = append(ids, res.Batch.Column(0).(*array.Int64).Value(0))
+		res.Batch.Release()
+	}
+
+	require.Len(t, stamps, 3)
+	assert.Equal(t, []int64{1, 2, 3}, ids, "restamping the final batch must preserve its data columns")
+	assert.Equal(t, snapshotIncompleteLSN(snapshotLSN), stamps[0])
+	assert.Equal(t, snapshotIncompleteLSN(snapshotLSN), stamps[1])
+	assert.Equal(t, snapshotCompleteLSN(snapshotLSN), stamps[2], "only the final batch may carry the complete stamp")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestRowsToSnapshotBatchesReturnsIteratorErrorForEmptyBatch(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

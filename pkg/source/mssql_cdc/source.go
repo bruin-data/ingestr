@@ -407,6 +407,10 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			metaByTable[table.Name] = meta
 
 			resume := opts.CDCResumeLSNs[table.Name]
+			if isIncompleteSnapshotStamp(resume) {
+				config.Debug("[MSSQL CDC] Stored position %s marks an unfinished snapshot of %s; taking a fresh snapshot", strings.TrimSpace(resume), table.Name)
+				resume = ""
+			}
 			startHex := startLSNFromStored(resume)
 			if startHex != "" {
 				canResume, err := s.canResume(ctx, meta, startHex)
@@ -757,7 +761,12 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 	go func() {
 		defer close(results)
 
-		startHex := startLSNFromStored(opts.CDCResumeLSN)
+		resume := opts.CDCResumeLSN
+		if isIncompleteSnapshotStamp(resume) {
+			config.Debug("[MSSQL CDC] Stored position %s marks an unfinished snapshot of %s; taking a fresh snapshot", strings.TrimSpace(resume), t.tableName)
+			resume = ""
+		}
+		startHex := startLSNFromStored(resume)
 		if startHex != "" {
 			canResume, err := t.source.canResume(ctx, t.metadata, startHex)
 			if err != nil {
@@ -765,7 +774,7 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 				return
 			}
 			if canResume {
-				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, !isSnapshotStamp(opts.CDCResumeLSN), opts, results, ""); err != nil {
+				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, !isSnapshotStamp(resume), opts, results, ""); err != nil {
 					results <- source.RecordBatchResult{Err: err}
 				}
 				return
@@ -1118,21 +1127,64 @@ func (s *MSSQLCDCSource) rowsToSnapshotBatches(rows *sql.Rows, tableSchema *sche
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
-	cdcLSN := formatStoredLSN(snapshotLSN, "", 0)
+	// Snapshot rows are stamped incomplete until the last batch. Resume
+	// trusts the destination's MAX(_cdc_lsn), and streaming destinations
+	// commit batches incrementally, so a crash mid-snapshot leaves partial
+	// rows whose stamp must not read as a resumable position. Batches are
+	// emitted one behind the read, and only the final batch carries the
+	// complete stamp, which sorts above the incomplete one: MAX names a
+	// complete stamp exactly when the whole snapshot became durable.
+	incompleteLSN := snapshotIncompleteLSN(snapshotLSN)
+	completeLSN := snapshotCompleteLSN(snapshotLSN)
 	syncedAt := time.Now().UTC()
 
+	var pending arrow.RecordBatch
 	for {
 		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, func(builders []array.Builder) {
-			appendCDCValues(builders, len(sourceColumns), cdcLSN, false, syncedAt)
+			appendCDCValues(builders, len(sourceColumns), incompleteLSN, false, syncedAt)
 		})
 		if err != nil {
+			if pending != nil {
+				pending.Release()
+			}
 			return err
 		}
 		if count == 0 {
-			return nil
+			break
 		}
-		results <- source.RecordBatchResult{Batch: record, TableName: resultTable}
+		if pending != nil {
+			results <- source.RecordBatchResult{Batch: pending, TableName: resultTable}
+		}
+		pending = record
 	}
+	if pending == nil {
+		return nil
+	}
+	results <- source.RecordBatchResult{Batch: restampSnapshotLSN(pending, len(sourceColumns), completeLSN), TableName: resultTable}
+	return nil
+}
+
+// restampSnapshotLSN rebuilds a snapshot batch's _cdc_lsn column with the
+// given stamp. Used to mark the final batch of a snapshot complete after the
+// scan proves no rows follow it.
+func restampSnapshotLSN(record arrow.RecordBatch, lsnCol int, lsn string) arrow.RecordBatch {
+	mem := memory.NewGoAllocator()
+	b := array.NewStringBuilder(mem)
+	defer b.Release()
+	for range int(record.NumRows()) {
+		b.Append(lsn)
+	}
+	arr := b.NewArray()
+	defer arr.Release()
+
+	cols := make([]arrow.Array, record.NumCols())
+	for i := range cols {
+		cols[i] = record.Column(i)
+	}
+	cols[lsnCol] = arr
+	out := array.NewRecordBatch(record.Schema(), cols, record.NumRows())
+	record.Release()
+	return out
 }
 
 func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
@@ -1567,11 +1619,35 @@ func formatStoredLSN(startHex, seqHex string, op int) string {
 	return fmt.Sprintf("%s:%s:%02d", startHex, seqHex, op)
 }
 
+// Snapshot stamps carry a zero seqval, which no delivered change row can
+// have, plus a final byte encoding completeness. The incomplete stamp sorts
+// below the complete one so the destination's MAX(_cdc_lsn) only names a
+// complete stamp once the snapshot's final batch became durable.
+//
+// Positions written by versions that predate the completeness byte used the
+// incomplete encoding for finished snapshots; they re-snapshot once after an
+// upgrade, which is the safe direction (they cannot prove completeness).
+func snapshotIncompleteLSN(startHex string) string {
+	return formatStoredLSN(startHex, "", 0)
+}
+
+func snapshotCompleteLSN(startHex string) string {
+	return formatStoredLSN(startHex, "", 1)
+}
+
 // isSnapshotStamp reports whether a stored position was written by a snapshot
-// (zero seqval and operation) rather than by a delivered change row. Only a
-// change-row position can sit mid-transaction, so only it earns a boundary
-// re-read; a snapshot stamp already covers everything at its LSN.
+// (zero seqval) rather than by a delivered change row. Only a change-row
+// position can sit mid-transaction, so only it earns a boundary re-read; a
+// snapshot stamp already covers everything at its LSN.
 func isSnapshotStamp(stored string) bool {
+	s := strings.ToUpper(strings.TrimSpace(stored))
+	return strings.HasSuffix(s, ":00000000000000000000:00") || strings.HasSuffix(s, ":00000000000000000000:01")
+}
+
+// isIncompleteSnapshotStamp reports whether a stored position marks a
+// snapshot that never finished: resuming from it would skip every row the
+// interrupted scan had not reached, so it forces a fresh snapshot instead.
+func isIncompleteSnapshotStamp(stored string) bool {
 	return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(stored)), ":00000000000000000000:00")
 }
 
