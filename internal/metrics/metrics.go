@@ -71,23 +71,28 @@ var (
 	descReplStreaming = prometheus.NewDesc(
 		"ingestr_replication_streaming",
 		"1 when the source is actively streaming replication.",
-		[]string{"source"}, nil)
+		[]string{"source"}, nil,
+	)
 	descReplCaughtUp = prometheus.NewDesc(
 		"ingestr_replication_caught_up",
 		"1 when the durable position has caught up to the server position, 0 otherwise.",
-		[]string{"source"}, nil)
+		[]string{"source"}, nil,
+	)
 	descReplBytesBehind = prometheus.NewDesc(
 		"ingestr_replication_bytes_behind",
 		"Bytes the durable position lags behind the server write position.",
-		[]string{"source"}, nil)
+		[]string{"source"}, nil,
+	)
 	descReplSecondsBehind = prometheus.NewDesc(
 		"ingestr_replication_seconds_behind",
 		"Seconds the durable position lags behind the server.",
-		[]string{"source"}, nil)
+		[]string{"source"}, nil,
+	)
 	descReplUpdatedAt = prometheus.NewDesc(
 		"ingestr_replication_updated_at_timestamp_seconds",
 		"Unix timestamp when the lag snapshot was taken.",
-		[]string{"source"}, nil)
+		[]string{"source"}, nil,
+	)
 )
 
 // replicationCollector reads the active lag reporter on every scrape. Using a
