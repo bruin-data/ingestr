@@ -103,6 +103,7 @@ jobs:
               mcr.microsoft.com/mssql/server:2022-latest
               postgres:16-alpine
     env:
+      GOFLAGS: "-p=1"
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@v4
