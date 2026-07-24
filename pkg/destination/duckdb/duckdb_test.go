@@ -267,6 +267,121 @@ func TestConditionalMergeAndTruncateRejectRecreatedTarget(t *testing.T) {
 	require.ErrorContains(t, dest.TruncateCDCTableIfIncarnation(t.Context(), "target", expected), "physical incarnation changed")
 }
 
+func TestMergeCDCTablesAtomically(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	for _, name := range []string{"target_a", "target_b"} {
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`
+			CREATE TABLE %s (
+				id BIGINT PRIMARY KEY,
+				name VARCHAR,
+				"_cdc_lsn" VARCHAR,
+				"_cdc_deleted" BOOLEAN,
+				"_cdc_synced_at" TIMESTAMP
+			)`, name)))
+	}
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO target_a VALUES (1, 'old', '00000000000000000001', false, CURRENT_TIMESTAMP)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO target_b VALUES (1, 'stale', '00000000000000000001', false, CURRENT_TIMESTAMP), (2, 'stale', '00000000000000000001', false, CURRENT_TIMESTAMP)`))
+	incarnationA, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "target_a")
+	require.NoError(t, err)
+	require.True(t, exists)
+	incarnationB, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "target_b")
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	for _, name := range []string{"staging_a", "staging_b"} {
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`
+			CREATE TABLE %s (
+				id BIGINT,
+				name VARCHAR,
+				"_cdc_lsn" VARCHAR,
+				"_cdc_deleted" BOOLEAN,
+				"_cdc_synced_at" TIMESTAMP
+			)`, name)))
+	}
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_a VALUES
+		(1, 'updated', '00000000000000000002', false, CURRENT_TIMESTAMP),
+		(2, 'inserted', '00000000000000000002', false, CURRENT_TIMESTAMP)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_b VALUES (10, 'repopulated', '00000000000000000002', false, CURRENT_TIMESTAMP)`))
+
+	columns := []string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	require.NoError(t, dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{
+		{Options: destination.MergeOptions{
+			StagingTable:           "staging_a",
+			TargetTable:            "target_a",
+			PrimaryKeys:            []string{"id"},
+			Columns:                columns,
+			CDCExpectedIncarnation: incarnationA,
+		}},
+		{Options: destination.MergeOptions{
+			StagingTable:           "staging_b",
+			TargetTable:            "target_b",
+			PrimaryKeys:            []string{"id"},
+			Columns:                columns,
+			CDCExpectedIncarnation: incarnationB,
+		}, Truncate: true},
+	}))
+
+	db := openDuckDB(t, ctx, path)
+	var name string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name FROM target_a WHERE id = 1`).Scan(&name))
+	require.Equal(t, "updated", name)
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_a`).Scan(&count))
+	require.Equal(t, 2, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM target_b`).Scan(&count))
+	require.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name FROM target_b WHERE id = 10`).Scan(&name))
+	require.Equal(t, "repopulated", name)
+}
+
+func TestMergeCDCTablesAtomicallyRollsBackAllTablesOnFailure(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE target_a (
+			id BIGINT PRIMARY KEY,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO target_a VALUES (1, 'old', '00000000000000000001', false, CURRENT_TIMESTAMP)`))
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE staging_a (
+			id BIGINT,
+			name VARCHAR,
+			"_cdc_lsn" VARCHAR,
+			"_cdc_deleted" BOOLEAN,
+			"_cdc_synced_at" TIMESTAMP
+		)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_a VALUES (1, 'updated', '00000000000000000002', false, CURRENT_TIMESTAMP)`))
+
+	columns := []string{"id", "name", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	err := dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{
+		{Options: destination.MergeOptions{
+			StagingTable: "staging_a",
+			TargetTable:  "target_a",
+			PrimaryKeys:  []string{"id"},
+			Columns:      columns,
+		}},
+		{Options: destination.MergeOptions{
+			StagingTable: "staging_missing",
+			TargetTable:  "target_missing",
+			PrimaryKeys:  []string{"id"},
+			Columns:      columns,
+		}},
+	})
+	require.ErrorContains(t, err, "target_missing")
+
+	db := openDuckDB(t, ctx, path)
+	var name string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT name FROM target_a WHERE id = 1`).Scan(&name))
+	require.Equal(t, "old", name, "failed multi-table merge must roll back every table")
+}
+
 func TestConditionalSwapRebindsStagingIncarnationToTarget(t *testing.T) {
 	dest, path := connectTestDuckDB(t, t.Context())
 	require.NoError(t, dest.Exec(t.Context(), `CREATE TABLE target (id BIGINT, "_cdc_lsn" VARCHAR)`))

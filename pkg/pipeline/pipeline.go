@@ -2556,6 +2556,12 @@ func isMySQLCDCSource(rawURI string) bool {
 	}
 }
 
+func isMySQLFamilyScheme(scheme string) bool {
+	normalized := strings.ToLower(scheme)
+	return normalized == "mysql" || normalized == "mariadb" ||
+		strings.HasPrefix(normalized, "mysql+") || strings.HasPrefix(normalized, "mariadb+")
+}
+
 type mysqlServerIdentityProvider interface {
 	MySQLServerIdentity() string
 	MySQLDatabaseName() string
@@ -2570,18 +2576,25 @@ func validateMySQLCDCSourceDestination(cfg *config.IngestConfig, src source.Sour
 	if !ok || sourceIdentity.MySQLServerIdentity() == "" {
 		return fmt.Errorf("MySQL CDC source does not expose a verifiable server identity")
 	}
-	destinationIdentity, ok := dest.(mysqlServerIdentityProvider)
-	if !ok || destinationIdentity.MySQLServerIdentity() == "" {
+	destinationIdentity, hasIdentity := dest.(mysqlServerIdentityProvider)
+	if !hasIdentity || destinationIdentity.MySQLServerIdentity() == "" {
 		// A missing identity (e.g. a MariaDB destination predating
 		// @@GLOBAL.server_uid) is still safe when the destination flavor
 		// provably differs from the source's: identities are prefixed by
 		// flavor, so they can never refer to the same physical server.
-		if flavorProvider, ok := dest.(mysqlServerFlavorProvider); ok {
+		flavorProvider, hasFlavor := dest.(mysqlServerFlavorProvider)
+		if hasFlavor {
 			destinationFlavor := flavorProvider.MySQLServerFlavor()
 			sourceFlavor, _, _ := strings.Cut(sourceIdentity.MySQLServerIdentity(), ":")
 			if destinationFlavor != "" && destinationFlavor != sourceFlavor {
 				return nil
 			}
+		}
+		// Destinations that are not MySQL-family servers at all (DuckDB,
+		// PostgreSQL, ...) can never be the CDC source server, so no feedback
+		// loop is possible and no identity is required.
+		if !hasIdentity && !hasFlavor && !isMySQLFamilyScheme(dest.GetScheme()) {
+			return nil
 		}
 		return fmt.Errorf("destination scheme %q does not expose a verifiable MySQL server identity required to prevent CDC feedback loops", dest.GetScheme())
 	}

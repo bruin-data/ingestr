@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	internalregistry "github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -485,6 +486,16 @@ func TestMySQLCDCDestinationWithoutIdentity(t *testing.T) {
 
 	unknownFlavor := &mysqlIdentityDestination{mockDestination: mockDestination{scheme: "mysql"}, database: "app"}
 	require.ErrorContains(t, validateMySQLCDCSourceDestination(cfg, src, unknownFlavor), "verifiable MySQL server identity")
+
+	// Destinations that are not MySQL-family servers can never be the CDC
+	// source server, so they need no identity.
+	for _, scheme := range []string{"duckdb", "postgres", "bigquery"} {
+		require.NoError(t, validateMySQLCDCSourceDestination(cfg, src, &mockDestination{scheme: scheme}), scheme)
+	}
+	for _, scheme := range []string{"mysql", "mysql+pymysql", "mariadb"} {
+		require.ErrorContains(t, validateMySQLCDCSourceDestination(cfg, src, &mockDestination{scheme: scheme}),
+			"verifiable MySQL server identity", scheme)
+	}
 }
 
 func TestValidateCDCRunSerialization(t *testing.T) {
@@ -1382,6 +1393,8 @@ func TestValidateMySQLCDCMutationFencing(t *testing.T) {
 	unsupported := &mockManagedCDCStateDestination{}
 	require.ErrorContains(t, validateMySQLCDCMutationFencing(unsupported, false), "atomic target-incarnation fencing for merge")
 	require.NoError(t, validateMySQLCDCMutationFencing(&mockMySQLCDCFencedDestination{}, false))
+	require.NoError(t, validateMySQLCDCMutationFencing(postgresdest.NewPostgresDestination(), true),
+		"the PostgreSQL destination must satisfy every MySQL CDC fencing capability, including atomic multi-table merge")
 }
 
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {

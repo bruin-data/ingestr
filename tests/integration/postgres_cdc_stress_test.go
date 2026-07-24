@@ -5,8 +5,8 @@
 // never slows down CI; run it with `make cdc-postgres-stress-test`.
 //
 // Scenario: two streaming CDC pipelines replicate from one Postgres container
-// into PostgreSQL and DuckDB while parallel workers apply
-// ~1000 inserts/updates/deletes per second.
+// into PostgreSQL and DuckDB while the shared queue-based load generator
+// applies inserts/updates/deletes/PK-updates at the configured target rate.
 // During the load, tables with pre-existing rows are discovered and one table
 // goes through column add/drop/rename, a numeric type change, large JSONB
 // updates, primary-key updates, and TRUNCATE followed by inserts in the same
@@ -58,7 +58,7 @@ var (
 	stressNewTableEvery   = envDuration("STRESS_NEW_TABLE_EVERY", 1*time.Minute)
 	stressSchemaEvery     = envDuration("STRESS_SCHEMA_CHANGE_EVERY", 20*time.Second)
 	stressLateTables      = envInt("STRESS_LATE_TABLES", 2)
-	stressWorkers         = envInt("STRESS_WORKERS", 12)
+	stressWorkers         = envInt("STRESS_WORKERS", 32)
 )
 
 func envInt(name string, def int) int {
@@ -80,11 +80,12 @@ func envDuration(name string, def time.Duration) time.Duration {
 }
 
 type stressTable struct {
-	name      string
-	nextID    atomic.Int64
-	insertSQL string
-	updateSQL string
-	deleteSQL string
+	name        string
+	nextID      atomic.Int64
+	insertSQL   string
+	updateSQL   string
+	deleteSQL   string
+	pkUpdateSQL string
 }
 
 type stressTruth struct {
@@ -94,10 +95,11 @@ type stressTruth struct {
 
 func newStressTable(name string, seeded int64) *stressTable {
 	t := &stressTable{
-		name:      name,
-		insertSQL: fmt.Sprintf(`INSERT INTO public.%s (id, val, payload, updated_at) VALUES ($1, $2, $3, now())`, name),
-		updateSQL: fmt.Sprintf(`UPDATE public.%s SET val = val + 1, payload = $2, updated_at = now() WHERE id = $1`, name),
-		deleteSQL: fmt.Sprintf(`DELETE FROM public.%s WHERE id = $1`, name),
+		name:        name,
+		insertSQL:   fmt.Sprintf(`INSERT INTO public.%s (id, val, payload, updated_at) VALUES ($1, $2, $3, now())`, name),
+		updateSQL:   fmt.Sprintf(`UPDATE public.%s SET val = val + 1, payload = $2, updated_at = now() WHERE id = $1`, name),
+		deleteSQL:   fmt.Sprintf(`DELETE FROM public.%s WHERE id = $1`, name),
+		pkUpdateSQL: fmt.Sprintf(`UPDATE public.%s SET id = id + $1, updated_at = now() WHERE id = $2 AND id < $1`, name),
 	}
 	t.nextID.Store(seeded)
 	return t
@@ -407,62 +409,46 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 	loadCtx, stopLoad := context.WithTimeout(ctx, stressLoadDuration)
 	defer stopLoad()
 
-	var inserts, updates, deletes, opErrors, completedDDL atomic.Int64
-	var firstOpErr atomic.Value
-	recordOpErr := func(err error) {
-		opErrors.Add(1)
-		firstOpErr.CompareAndSwap(nil, err)
-	}
-
-	// Each worker paces itself at target/workers so the aggregate rate scales
-	// past what a single shared ticker channel can hand out.
-	workerInterval := time.Duration(stressWorkers) * time.Second / time.Duration(stressTargetOpsPerSec)
+	var completedDDL atomic.Int64
+	gen := newCDCStressLoadGen(t, stressWorkers, stressTargetOpsPerSec, stressLoadDuration)
+	recordOpErr := gen.recordOpErr
 
 	var wg sync.WaitGroup
-	for w := 0; w < stressWorkers; w++ {
-		wg.Add(1)
-		go func(seed int64) {
-			defer wg.Done()
-			rng := rand.New(rand.NewSource(seed))
-			ticker := time.NewTicker(workerInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-loadCtx.Done():
-					return
-				case <-ticker.C:
-				}
-				tbl := tables.pick(rng)
-				switch roll := rng.Intn(100); {
-				case roll < 45:
-					id := tbl.nextID.Add(1)
-					// ctx, not loadCtx: every issued op runs to completion so
-					// the post-load source state is settled when workers exit.
-					if _, err := srcPool.Exec(ctx, tbl.insertSQL, id, id, fmt.Sprintf("ins-%d-%d", seed, id)); err != nil {
-						recordOpErr(fmt.Errorf("insert %s id=%d: %w", tbl.name, id, err))
-					} else {
-						inserts.Add(1)
-					}
-				case roll < 85:
-					id := rng.Int63n(tbl.nextID.Load()) + 1
-					result, err := srcPool.Exec(ctx, tbl.updateSQL, id, fmt.Sprintf("upd-%d-%d", seed, id))
-					if err != nil {
-						recordOpErr(fmt.Errorf("update %s id=%d: %w", tbl.name, id, err))
-					} else {
-						updates.Add(result.RowsAffected())
-					}
-				default:
-					id := rng.Int63n(tbl.nextID.Load()) + 1
-					result, err := srcPool.Exec(ctx, tbl.deleteSQL, id)
-					if err != nil {
-						recordOpErr(fmt.Errorf("delete %s id=%d: %w", tbl.name, id, err))
-					} else {
-						deletes.Add(result.RowsAffected())
-					}
-				}
+	// ctx, not loadCtx, inside each op: every issued op runs to completion so
+	// the post-load source state is settled when workers exit.
+	gen.start(loadCtx, &wg, func(rng *rand.Rand) (string, int64, error) {
+		tbl := tables.pick(rng)
+		switch roll := rng.Intn(100); {
+		case roll < 40:
+			id := tbl.nextID.Add(1)
+			if _, err := srcPool.Exec(ctx, tbl.insertSQL, id, id, fmt.Sprintf("ins-%d", id)); err != nil {
+				return "insert", 0, fmt.Errorf("insert %s id=%d: %w", tbl.name, id, err)
 			}
-		}(int64(w + 1))
-	}
+			return "insert", 1, nil
+		case roll < 75:
+			id := rng.Int63n(tbl.nextID.Load()) + 1
+			result, err := srcPool.Exec(ctx, tbl.updateSQL, id, fmt.Sprintf("upd-%d", id))
+			if err != nil {
+				return "update", 0, fmt.Errorf("update %s id=%d: %w", tbl.name, id, err)
+			}
+			return "update", result.RowsAffected(), nil
+		case roll < 90:
+			id := rng.Int63n(tbl.nextID.Load()) + 1
+			result, err := srcPool.Exec(ctx, tbl.deleteSQL, id)
+			if err != nil {
+				return "delete", 0, fmt.Errorf("delete %s id=%d: %w", tbl.name, id, err)
+			}
+			return "delete", result.RowsAffected(), nil
+		default:
+			// Primary-key update: exercises the delete+insert change pair.
+			id := rng.Int63n(tbl.nextID.Load()) + 1
+			result, err := srcPool.Exec(ctx, tbl.pkUpdateSQL, stressPKMoveOffset, id)
+			if err != nil {
+				return "pk-update", 0, fmt.Errorf("pk-update %s id=%d: %w", tbl.name, id, err)
+			}
+			return "pk-update", result.RowsAffected(), nil
+		}
+	})
 
 	wg.Add(1)
 	go func() {
@@ -518,20 +504,13 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 			<-loadDone
 			t.Fatalf("%s stream exited during load phase: %v", exit.sink.name, exit.err)
 		case <-status.C:
-			t.Logf("t=%v: %d inserts, %d updates, %d deletes, %d/%d schema phases, %d op errors",
-				time.Since(started).Round(time.Second), inserts.Load(), updates.Load(), deletes.Load(), completedDDL.Load(), len(ddlPhases), opErrors.Load())
+			t.Logf("t=%v: %s, DDL=%d/%d",
+				time.Since(started).Round(time.Second), gen.status(), completedDDL.Load(), len(ddlPhases))
 		}
 	}
 
-	if n := opErrors.Load(); n > 0 {
-		t.Fatalf("%d load operations failed, first error: %v", n, firstOpErr.Load())
-	}
 	require.Equal(t, int64(len(ddlPhases)), completedDDL.Load(), "all schema phases must complete")
-	totalOps := inserts.Load() + updates.Load() + deletes.Load()
-	achieved := float64(totalOps) / stressLoadDuration.Seconds()
-	t.Logf("load complete: %d effective ops (%d inserts, %d updates, %d deletes), %.0f ops/sec achieved", totalOps, inserts.Load(), updates.Load(), deletes.Load(), achieved)
-	require.GreaterOrEqual(t, achieved, float64(stressTargetOpsPerSec)/2,
-		"load generator could not sustain enough pressure for the test to be meaningful")
+	gen.verify()
 	finalTables := tables.snapshot()
 	require.Len(t, finalTables, stressInitialTables+1+stressLateTables, "all initial, evolving, and late tables should exist")
 
@@ -544,12 +523,14 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		truths[tbl.name] = tr
 		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
+	// While the streams are writing, monitoring must open the file read-only;
+	// after shutdown the held read-write connection takes over.
 	var duckDB *sql.DB
 	withDuckDB := func(fn func(*sql.DB) error) error {
 		if duckDB != nil {
 			return fn(duckDB)
 		}
-		return withCDCStressDuckDB(duckDBPath, fn)
+		return withCDCStressDuckDBReadOnly(duckDBPath, fn)
 	}
 
 	type stressDestination struct {
@@ -715,7 +696,6 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		}
 		require.Positive(t, softDeleted, "%s destination should retain soft-deleted CDC rows outside truncated tables", destination.name)
 	}
-	require.Positive(t, deletes.Load(), "workload should execute real deletes")
 }
 
 func stressDumpReplicationState(t *testing.T, ctx context.Context, srcPool *pgxpool.Pool) {

@@ -1485,8 +1485,9 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		frac := (micros % 1000000)
 		return fmt.Sprintf("%02d:%02d:%02d.%06d", hours, mins, secs, frac)
 	case *array.Timestamp:
-		ts := a.Value(idx)
-		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit).Format("2006-01-02 15:04:05.000000")
+		// Arrow's own rendering ("2026-03-30T13:15:43.123456Z") so create-run
+		// inserts and merge-run schema-aligner casts store identical text.
+		return a.ValueStr(idx)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
 	case array.ExtensionArray:

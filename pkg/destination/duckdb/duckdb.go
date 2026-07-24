@@ -870,14 +870,6 @@ func (d *DuckDBDestination) CDCConditionalSwapIncarnations(ctx context.Context, 
 }
 
 func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	startMerge := time.Now()
-
-	stagingColumns := opts.Columns
-	destColumns := destination.DestinationColumns(stagingColumns)
-	stagingQuoted := quoteColumns(stagingColumns)
-	destQuoted := quoteColumns(destColumns)
-	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -890,13 +882,79 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			_ = d.exec(ctx, "ROLLBACK")
 		}
 	}()
-	if opts.CDCExpectedIncarnation != "" {
-		current, exists, err := d.cdcTargetIncarnationLocked(ctx, opts.TargetTable)
-		if err != nil {
-			return err
+	if err := d.mergeTableLocked(ctx, opts); err != nil {
+		return err
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	commit = true
+	return nil
+}
+
+// MergeCDCTablesAtomically applies one CDC batch's staged changes to every
+// target table inside a single transaction, so a crash cannot leave a torn
+// cross-table state.
+func (d *DuckDBDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.exec(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("failed to begin multi-table CDC transaction: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			_ = d.exec(ctx, "ROLLBACK")
 		}
-		if !exists || current != opts.CDCExpectedIncarnation {
-			return fmt.Errorf("DuckDB CDC target %s was replaced before mutation", opts.TargetTable)
+	}()
+	for _, merge := range merges {
+		if merge.Truncate {
+			if merge.Options.CDCExpectedIncarnation != "" {
+				if err := d.validateCDCIncarnationLocked(ctx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation); err != nil {
+					return err
+				}
+			}
+			if err := d.exec(ctx, "DELETE FROM "+destination.QuoteTableName(merge.Options.TargetTable)); err != nil {
+				return fmt.Errorf("failed to reset CDC target %s: %w", merge.Options.TargetTable, err)
+			}
+		}
+		if err := d.mergeTableLocked(ctx, merge.Options); err != nil {
+			return fmt.Errorf("failed to merge CDC target %s: %w", merge.Options.TargetTable, err)
+		}
+	}
+	if err := d.exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("failed to commit multi-table CDC transaction: %w", err)
+	}
+	commit = true
+	return nil
+}
+
+func (d *DuckDBDestination) validateCDCIncarnationLocked(ctx context.Context, table, expectedIncarnation string) error {
+	current, exists, err := d.cdcTargetIncarnationLocked(ctx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current != expectedIncarnation {
+		return fmt.Errorf("DuckDB CDC target %s was replaced before mutation", table)
+	}
+	return nil
+}
+
+// mergeTableLocked runs the merge inside the caller's open transaction;
+// d.mu must be held.
+func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destination.MergeOptions) error {
+	startMerge := time.Now()
+
+	stagingColumns := opts.Columns
+	destColumns := destination.DestinationColumns(stagingColumns)
+	stagingQuoted := quoteColumns(stagingColumns)
+	destQuoted := quoteColumns(destColumns)
+	nonPKColumns := filterColumns(destColumns, opts.PrimaryKeys)
+
+	if opts.CDCExpectedIncarnation != "" {
+		if err := d.validateCDCIncarnationLocked(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
 		}
 	}
 
@@ -1046,11 +1104,6 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			return fmt.Errorf("failed to insert new records: %w", err)
 		}
 
-		if err := d.exec(ctx, "COMMIT"); err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
-		commit = true
-
 		config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
 		return nil
 	}
@@ -1125,11 +1178,6 @@ func (d *DuckDBDestination) MergeTable(ctx context.Context, opts destination.Mer
 			return fmt.Errorf("failed to mark deleted records: %w", err)
 		}
 	}
-
-	if err := d.exec(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	commit = true
 
 	config.Debug("[DUCKDB MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil

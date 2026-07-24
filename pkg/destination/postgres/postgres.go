@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"slices"
 	"strings"
 	"sync"
@@ -727,6 +728,24 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != "" {
+		if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
+			return errors.New("PostgreSQL CDC conditional swap requires target, staging, and result incarnations")
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, targetRef, opts.CDCExpectedIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+			return err
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, stagingRef, opts.CDCExpectedStagingIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+			return err
+		}
+		// A PostgreSQL rename (and SET SCHEMA) keeps the relation's OID, so
+		// the staging table's incarnation is what the target name will hold
+		// after the swap.
+		if opts.CDCExpectedResultIncarnation != opts.CDCExpectedStagingIncarnation {
+			return fmt.Errorf("PostgreSQL CDC swap result incarnation %q cannot match the staging relation %q", opts.CDCExpectedResultIncarnation, opts.CDCExpectedStagingIncarnation)
+		}
+	}
+
 	// Postgres' ALTER TABLE … RENAME TO … is same-schema only. If staging lives in a
 	// different schema (the new _bruin_staging design), move it into the target's
 	// schema first via ALTER TABLE … SET SCHEMA (metadata-only, no data copy), then
@@ -854,7 +873,89 @@ func (t *pgTransaction) Rollback(ctx context.Context) error {
 // MergeTable performs an efficient upsert using INSERT ... ON CONFLICT.
 // For CDC sources (detected by presence of _cdc_deleted column), it handles
 // deleted rows specially by only updating CDC columns (preserving original data).
+// lockAndValidateCDCIncarnation locks the table by name inside the caller's
+// transaction and verifies its physical incarnation, so no swap or rebuild
+// can replace the relation between validation and the transaction's
+// mutations: replacing it requires ACCESS EXCLUSIVE, which conflicts with
+// every lock mode used here.
+func (d *PostgresDestination) lockAndValidateCDCIncarnation(ctx context.Context, tx pgx.Tx, table, expectedIncarnation, lockMode string) (string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, table)
+	if err != nil {
+		return "", err
+	}
+	resolved := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+resolved+" IN "+lockMode+" MODE"); err != nil {
+		return "", err
+	}
+	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
+	if err != nil {
+		return "", err
+	}
+	if !exists || current != expectedIncarnation {
+		return "", fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed", table)
+	}
+	return resolved, nil
+}
+
 func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	// Begin transaction for atomic merge
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if opts.CDCExpectedIncarnation != "" {
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation, "ROW EXCLUSIVE"); err != nil {
+			return err
+		}
+	}
+	if err := d.mergeTableInTx(ctx, tx, opts); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+// MergeCDCTablesAtomically applies one CDC batch's staged changes to every
+// target table inside a single transaction, so a crash cannot leave a torn
+// cross-table state.
+func (d *PostgresDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin multi-table CDC transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, merge := range merges {
+		resolved := merge.Options.TargetTable
+		if merge.Options.CDCExpectedIncarnation != "" {
+			resolved, err = d.lockAndValidateCDCIncarnation(ctx, tx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation, "ROW EXCLUSIVE")
+			if err != nil {
+				return err
+			}
+		}
+		if merge.Truncate {
+			if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
+				return fmt.Errorf("failed to reset CDC target %s: %w", merge.Options.TargetTable, err)
+			}
+		}
+		if err := d.mergeTableInTx(ctx, tx, merge.Options); err != nil {
+			return fmt.Errorf("failed to merge CDC target %s: %w", merge.Options.TargetTable, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit multi-table CDC transaction: %w", err)
+	}
+	return nil
+}
+
+// mergeTableInTx runs the merge inside the caller's open transaction.
+func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
 	stagingColumns := opts.Columns
@@ -870,13 +971,6 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
 	// and their staging tables have no such column to reference.
 	hasUnchangedCols := slices.Contains(stagingColumns, destination.CDCUnchangedColsColumn)
-
-	// Begin transaction for atomic merge
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
@@ -1027,10 +1121,6 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			config.LogFailedQuery(upsertSQL, err)
 			return fmt.Errorf("failed to upsert records: %w", err)
 		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
@@ -1364,7 +1454,7 @@ func (d *PostgresDestination) postgresTargetIncarnation(ctx context.Context, que
 	if err != nil {
 		return "", false, err
 	}
-	resolvedTable := destination.QuoteTableName(schemaName + "." + tableName)
+	resolvedTable := quotePostgresTable(schemaName, tableName)
 	var databaseOID, relationOID, relationKind string
 	err = queryer.QueryRow(ctx, `
 		SELECT d.oid::text, c.oid::text, c.relkind::text
@@ -1451,25 +1541,154 @@ func (d *PostgresDestination) TruncateCDCTableIfIncarnation(ctx context.Context,
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, table)
+	resolved, err := d.lockAndValidateCDCIncarnation(ctx, tx, table, expectedIncarnation, "ACCESS EXCLUSIVE")
 	if err != nil {
 		return err
-	}
-	resolved := schemaName + "." + tableName
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+destination.QuoteTableName(resolved)+" IN ACCESS EXCLUSIVE MODE"); err != nil {
-		return err
-	}
-	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
-	if err != nil {
-		return err
-	}
-	if !exists || current != expectedIncarnation {
-		return fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed", table)
 	}
 	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// SupportsCDCConditionalMerge advertises that MergeTable enforces
+// MergeOptions.CDCExpectedIncarnation in the same transaction as target DML.
+func (d *PostgresDestination) SupportsCDCConditionalMerge() bool { return true }
+
+func (d *PostgresDestination) SupportsCDCConditionalSwap() bool { return true }
+
+func (d *PostgresDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
+	stagingIncarnation, exists, err := d.CDCTargetIncarnation(ctx, stagingTable)
+	if err != nil {
+		return "", "", err
+	}
+	if !exists || stagingIncarnation == "" {
+		return "", "", fmt.Errorf("PostgreSQL CDC staging table %q has no durable physical incarnation", stagingTable)
+	}
+	// The incarnation key is name-independent (database OID, relation OID,
+	// relkind) and a rename or SET SCHEMA keeps the relation's OID, so the
+	// staging incarnation carries over to the target name unchanged.
+	_ = targetTable
+	return stagingIncarnation, stagingIncarnation, nil
+}
+
+func (d *PostgresDestination) ValidateManagedCDCState() error { return nil }
+
+type postgresManagedCDCRunLease struct {
+	conn        *pgxpool.Conn
+	classID     uint32
+	objID       uint32
+	done        chan struct{}
+	stop        chan struct{}
+	stopped     chan struct{}
+	doneOnce    sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	err         error
+	releaseErr  error
+}
+
+// AcquireManagedCDCRunLease serializes all target mutations for one managed
+// CDC connector via a session advisory lock held on a dedicated connection.
+// If the session dies, the server releases the lock and the monitor reports
+// the loss through the standard connector lease guard.
+func (d *PostgresDestination) AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error) {
+	if connectorID == "" {
+		return nil, errors.New("managed CDC connector ID is empty")
+	}
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reserve PostgreSQL CDC lease connection: %w", err)
+	}
+	key := postgresAdvisoryLockKey("ingestr_cdc_" + connectorID)
+	var acquired bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("failed to acquire PostgreSQL CDC run lease: %w", err)
+	}
+	if !acquired {
+		conn.Release()
+		return nil, fmt.Errorf("another PostgreSQL CDC run already owns connector %s", connectorID)
+	}
+	lease := &postgresManagedCDCRunLease{
+		conn:    conn,
+		classID: uint32(uint64(key) >> 32),
+		objID:   uint32(uint64(key) & 0xFFFFFFFF),
+		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	go lease.monitor()
+	return lease, nil
+}
+
+func postgresAdvisoryLockKey(name string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return int64(h.Sum64())
+}
+
+func (l *postgresManagedCDCRunLease) monitor() {
+	defer close(l.stopped)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			var held bool
+			err := l.conn.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_locks
+					WHERE locktype = 'advisory' AND objsubid = 1
+					  AND classid = $1 AND objid = $2
+					  AND pid = pg_backend_pid() AND granted
+				)`, int64(l.classID), int64(l.objID)).Scan(&held)
+			cancel()
+			if err == nil && held {
+				continue
+			}
+			if err == nil {
+				err = errors.New("advisory lock is no longer held by this session")
+			}
+			l.mu.Lock()
+			l.err = errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("PostgreSQL CDC run lease lost: %w", err))
+			l.mu.Unlock()
+			l.doneOnce.Do(func() { close(l.done) })
+			return
+		}
+	}
+}
+
+func (l *postgresManagedCDCRunLease) Done() <-chan struct{} {
+	return l.done
+}
+
+func (l *postgresManagedCDCRunLease) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
+}
+
+func (l *postgresManagedCDCRunLease) Release() error {
+	l.releaseOnce.Do(func() {
+		close(l.stop)
+		<-l.stopped
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		key := (int64(l.classID) << 32) | int64(l.objID)
+		var released bool
+		if err := l.conn.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", key).Scan(&released); err != nil {
+			l.releaseErr = fmt.Errorf("failed to release PostgreSQL CDC run lease: %w", err)
+		} else if !released {
+			l.releaseErr = errors.New("PostgreSQL CDC run lease was not held at release")
+		}
+		l.conn.Release()
+		l.doneOnce.Do(func() { close(l.done) })
+	})
+	return l.releaseErr
 }
 
 func (d *PostgresDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {

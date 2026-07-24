@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"reflect"
 	"regexp"
@@ -95,6 +94,12 @@ type MySQLCDCSource struct {
 	state             source.CDCStateCommitToken
 	schemaMu          sync.Mutex
 	discoveredSchemas map[string]*schema.TableSchema
+	// keylessWarned dedupes the append-only notice per table: discovery runs
+	// repeatedly (initial run, catch-up runs, streaming rediscovery) and the
+	// warning should print once per table, not once per pass.
+	keylessWarnedMu sync.Mutex
+	keylessWarned   map[string]bool
+	reloadPrivOnce  sync.Once
 }
 
 type mysqlCDCCheckpoint struct {
@@ -392,6 +397,9 @@ func (s *MySQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	if req.Strategy != "" && req.Strategy != config.StrategyMerge && req.Strategy != config.StrategyReplace {
 		return nil, fmt.Errorf("MySQL CDC only supports the merge strategy (replace is accepted as a request for the initial snapshot)")
 	}
+	if req.Strategy == config.StrategyReplace {
+		fmt.Printf("Warning: MySQL CDC runs --incremental-strategy replace as merge; the initial snapshot rebuilds the table and later runs apply changes incrementally\n")
+	}
 
 	return &MySQLCDCTable{
 		source:      s,
@@ -484,7 +492,11 @@ func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []st
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
 		if len(tableSchema.PrimaryKeys) == 0 {
-			return nil, fmt.Errorf("MySQL CDC table %s has no primary key; multi-table CDC requires source primary keys", tableName)
+			// Same policy as Postgres CDC: a table with no primary key has no
+			// row identity to merge on, so it lands as an append-only change
+			// log (updates arrive as delete+insert retract pairs) instead of
+			// blocking CDC for every other table in the database.
+			s.warnKeylessTable(tableName)
 		}
 
 		tables = append(tables, source.SourceTableInfo{
@@ -495,6 +507,21 @@ func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []st
 		})
 	}
 	return tables, nil
+}
+
+// warnKeylessTable tells the user (once per table) that a table with no
+// primary key is ingested as an append-only change log.
+func (s *MySQLCDCSource) warnKeylessTable(name string) {
+	s.keylessWarnedMu.Lock()
+	defer s.keylessWarnedMu.Unlock()
+	if s.keylessWarned == nil {
+		s.keylessWarned = make(map[string]bool)
+	}
+	if s.keylessWarned[name] {
+		return
+	}
+	s.keylessWarned[name] = true
+	fmt.Printf("Warning: table %s has no primary key; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
 func (s *MySQLCDCSource) getSelectedTables(ctx context.Context, opts source.MultiTableReadOptions) ([]source.SourceTableInfo, error) {
@@ -877,7 +904,12 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 		SELECT COLUMN_NAME, DATA_TYPE
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-		  AND LOWER(DATA_TYPE) IN ('enum', 'set', 'bit')
+		  AND LOWER(DATA_TYPE) IN (
+			'enum', 'set', 'bit',
+			'geometry', 'point', 'linestring', 'polygon',
+			'multipoint', 'multilinestring', 'multipolygon',
+			'geomcollection', 'geometrycollection'
+		  )
 		ORDER BY ORDINAL_POSITION
 	`, schemaName, tableName)
 	if err != nil {
@@ -897,7 +929,7 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 		return err
 	}
 	if len(unsupported) > 0 {
-		return fmt.Errorf("MySQL CDC does not support ENUM, SET, or BIT columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
+		return fmt.Errorf("MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
 	}
 	return nil
 }
@@ -1049,7 +1081,38 @@ func (s *MySQLCDCSource) canResume(ctx context.Context, checkpoint mysqlCDCCheck
 	return false, nil
 }
 
+// warnMissingReloadPrivilege checks (once per source) whether the connected
+// user shows evidence of the RELOAD/FLUSH_TABLES privilege the snapshot's
+// FLUSH TABLES WITH READ LOCK needs, and warns before per-table work starts.
+// Grant parsing cannot see role-granted privileges reliably, so a miss only
+// warns; the FTWRL itself still fails loudly when the privilege is absent.
+func (s *MySQLCDCSource) warnMissingReloadPrivilege(ctx context.Context) {
+	s.reloadPrivOnce.Do(func() {
+		rows, err := s.db.QueryContext(ctx, "SHOW GRANTS FOR CURRENT_USER()")
+		if err != nil {
+			return
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var grant string
+			if err := rows.Scan(&grant); err != nil {
+				return
+			}
+			upper := strings.ToUpper(grant)
+			if strings.Contains(upper, "RELOAD") || strings.Contains(upper, "FLUSH_TABLES") ||
+				strings.Contains(upper, "ALL PRIVILEGES ON *.*") {
+				return
+			}
+		}
+		if rows.Err() != nil {
+			return
+		}
+		fmt.Printf("Warning: the MySQL user does not appear to have the RELOAD (or FLUSH_TABLES) privilege; the CDC snapshot's FLUSH TABLES WITH READ LOCK will fail without it (GRANT RELOAD ON *.* TO <user>)\n")
+	})
+}
+
 func (s *MySQLCDCSource) snapshotTable(ctx context.Context, meta mysqlCDCTableMetadata, outputSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string, validateInventory func(context.Context, mysqlCDCPositionQueryer) error) (mysqlCDCCheckpoint, error) {
+	s.warnMissingReloadPrivilege(ctx)
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return mysqlCDCCheckpoint{}, fmt.Errorf("failed to acquire MySQL connection: %w", err)
@@ -1125,7 +1188,7 @@ func beginMySQLConsistentSnapshotWithValidation(ctx context.Context, conn mysqlC
 	}
 
 	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
-		return gomysql.Position{}, fmt.Errorf("failed to lock MySQL tables for snapshot: %w", err)
+		return gomysql.Position{}, fmt.Errorf("failed to lock MySQL tables for snapshot (FLUSH TABLES WITH READ LOCK requires the RELOAD privilege): %w", err)
 	}
 
 	locked := true
@@ -2048,8 +2111,18 @@ func (s *MySQLCDCSource) newBinlogSyncer() *replication.BinlogSyncer {
 	return replication.NewBinlogSyncer(s.binlogSyncerConfig())
 }
 
+// mysqlCDCSyncerLogWriter forwards go-mysql's internal logs (connection
+// losses, auto-reconnect attempts) to the debug log so a stalling stream is
+// diagnosable with --debug instead of silently retrying.
+type mysqlCDCSyncerLogWriter struct{}
+
+func (mysqlCDCSyncerLogWriter) Write(p []byte) (int, error) {
+	config.Debug("[MYSQL BINLOG] %s", strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
 func (s *MySQLCDCSource) binlogSyncerConfig() replication.BinlogSyncerConfig {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.NewTextHandler(mysqlCDCSyncerLogWriter{}, nil))
 	return replication.BinlogSyncerConfig{
 		ServerID:        s.cdcConfig.ServerID,
 		Flavor:          s.cdcConfig.Flavor,
@@ -2150,6 +2223,9 @@ func projectMySQLCDCRow(row []interface{}, fullSourceColumns []schema.Column, ou
 		if _, partialJSON := row[sourceIdx].(*replication.JsonDiff); partialJSON {
 			return nil, fmt.Errorf("binlog row image contains a partial JSON value; producer sessions must leave binlog_row_value_options empty")
 		}
+		if err := validateMySQLCDCTimeValue(row[sourceIdx], outputSourceColumns[i]); err != nil {
+			return nil, err
+		}
 		values[i] = convertMySQLCDCBinlogValue(row[sourceIdx], outputSourceColumns[i])
 	}
 	return values, nil
@@ -2188,6 +2264,9 @@ func convertMySQLCDCValue(value interface{}, col schema.Column) interface{} {
 	}
 	switch v := value.(type) {
 	case string:
+		if isMySQLCDCZeroDate(v, col.DataType) {
+			return nil
+		}
 		return strings.Clone(v)
 	case []byte:
 		if col.DataType == schema.TypeBinary {
@@ -2195,13 +2274,70 @@ func convertMySQLCDCValue(value interface{}, col schema.Column) interface{} {
 			copy(copied, v)
 			return copied
 		}
-		return string(v)
+		s := string(v)
+		if isMySQLCDCZeroDate(s, col.DataType) {
+			return nil
+		}
+		return s
+	case time.Time:
+		// The driver delivers MySQL zero dates ('0000-00-00') as Go's zero
+		// time; the binlog path delivers them as strings that fail to parse.
+		// Normalize both to NULL so snapshot and change rows agree.
+		if v.IsZero() {
+			return nil
+		}
+		return v
 	default:
 		return v
 	}
 }
 
+func isMySQLCDCZeroDate(value string, dataType schema.DataType) bool {
+	switch dataType {
+	case schema.TypeDate, schema.TypeTimestamp, schema.TypeTimestampTZ:
+		return strings.HasPrefix(value, "0000-00-00")
+	default:
+		return false
+	}
+}
+
+// mysqlCDCTimeLiteral matches MySQL TIME literals: an optional sign and an
+// hour count up to MySQL's ±838 hour range, with optional fractional seconds.
+var mysqlCDCTimeLiteral = regexp.MustCompile(`^(-?)(\d{1,3}):([0-5]\d):([0-5]\d)(?:\.\d{1,6})?$`)
+
+// validateMySQLCDCTimeValue rejects TIME values that cannot be represented as
+// an Arrow time of day. MySQL TIME is a signed duration spanning ±838 hours;
+// values outside 00:00:00–23:59:59 previously became NULL silently.
+func validateMySQLCDCTimeValue(value interface{}, col schema.Column) error {
+	if col.DataType != schema.TypeTime {
+		return nil
+	}
+	var literal string
+	switch v := value.(type) {
+	case string:
+		literal = v
+	case []byte:
+		literal = string(v)
+	default:
+		return nil
+	}
+	match := mysqlCDCTimeLiteral.FindStringSubmatch(literal)
+	if match == nil {
+		return nil
+	}
+	hours, _ := strconv.Atoi(match[2])
+	if match[1] == "-" || hours > 23 {
+		return fmt.Errorf("MySQL TIME value %q in column %s is outside 00:00:00-23:59:59 and cannot be represented as a time of day (MySQL TIME spans ±838 hours); cast the column to seconds or a string on the source, or exclude it", literal, col.Name)
+	}
+	return nil
+}
+
 func primaryKeyChanged(before, after []interface{}, pkIndexes []int) bool {
+	// Keyless change-log tables have no identity to match an update on, so
+	// every update is emitted as a delete+insert retract pair.
+	if len(pkIndexes) == 0 {
+		return true
+	}
 	for _, idx := range pkIndexes {
 		if idx < 0 || idx >= len(before) || idx >= len(after) {
 			continue
@@ -2297,7 +2433,12 @@ func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sour
 		}
 
 		for i, dest := range scanDest {
-			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(*dest.(*interface{}), sourceColumns[i]))
+			value := *dest.(*interface{})
+			if err := validateMySQLCDCTimeValue(value, sourceColumns[i]); err != nil {
+				releaseMySQLCDCBuilders(builders)
+				return nil, 0, err
+			}
+			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(value, sourceColumns[i]))
 		}
 		appendCDC(builders)
 
@@ -2648,11 +2789,35 @@ func removeMySQLCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema 
 	return &copied
 }
 
+// sourceColumnsWithoutMySQLCDC strips the CDC metadata columns from a table
+// schema. The metadata columns are normally appended at the end, so the fast
+// path verifies the suffix by name and returns a prefix slice; any other
+// layout falls back to name-based filtering instead of blindly chopping the
+// last columns.
 func sourceColumnsWithoutMySQLCDC(tableSchema *schema.TableSchema) []schema.Column {
-	if tableSchema == nil || len(tableSchema.Columns) < len(mysqlCDCColumns) {
+	if tableSchema == nil {
 		return nil
 	}
-	return tableSchema.Columns[:len(tableSchema.Columns)-len(mysqlCDCColumns)]
+	columns := tableSchema.Columns
+	if split := len(columns) - len(mysqlCDCColumns); split >= 0 {
+		suffixIsMeta := true
+		for _, col := range columns[split:] {
+			if !destination.IsCDCMetaColumn(col.Name) {
+				suffixIsMeta = false
+				break
+			}
+		}
+		if suffixIsMeta {
+			return columns[:split]
+		}
+	}
+	filtered := make([]schema.Column, 0, len(columns))
+	for _, col := range columns {
+		if !destination.IsCDCMetaColumn(col.Name) {
+			filtered = append(filtered, col)
+		}
+	}
+	return filtered
 }
 
 func minMySQLPosition(positions map[string]gomysql.Position) gomysql.Position {

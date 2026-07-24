@@ -599,6 +599,16 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 					reReadByTable[table.Name] = !isSnapshotStamp(resume)
 					continue
 				}
+				handoffStart, handed, err := s.handoffStartFromPreviousInstance(ctx, meta, table.Schema, startHex, opts.ReadOptions, results, table.Name)
+				if err != nil {
+					results <- source.RecordBatchResult{Err: err}
+					return
+				}
+				if handed {
+					startByTable[table.Name] = handoffStart
+					reReadByTable[table.Name] = true
+					continue
+				}
 			}
 
 			snapshotLSN, err := s.snapshotTable(ctx, meta, table.Schema, opts.ReadOptions, results, table.Name)
@@ -971,6 +981,17 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 				}
 				return
 			}
+			handoffStart, handed, err := t.source.handoffStartFromPreviousInstance(ctx, t.metadata, t.tableSchema, startHex, opts, results, "")
+			if err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
+			if handed {
+				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, handoffStart, true, opts, results, ""); err != nil {
+					results <- source.RecordBatchResult{Err: err}
+				}
+				return
+			}
 			config.Debug("[MSSQL CDC] Resume LSN %s is no longer valid for %s; taking a fresh snapshot", startHex, t.tableName)
 		}
 
@@ -1001,6 +1022,125 @@ func (s *MSSQLCDCSource) canResume(ctx context.Context, meta tableMetadata, star
 		return false, nil
 	}
 	return compareLSNHex(startHex, minLSN) >= 0, nil
+}
+
+// previousTableMetadata returns the second-newest active capture instance for
+// the table, if one exists. SQL Server allows at most two instances per
+// table; during an instance recreation the older one still covers the LSN
+// range before the new instance's start.
+func (s *MSSQLCDCSource) previousTableMetadata(ctx context.Context, meta tableMetadata) (tableMetadata, bool, error) {
+	var previous tableMetadata
+	err := s.db.QueryRowContext(ctx, `
+		SELECT TOP (1)
+			ss.name,
+			st.name,
+			ct.capture_instance,
+			OBJECT_SCHEMA_NAME(ct.object_id) + N'.' + OBJECT_NAME(ct.object_id)
+		FROM cdc.change_tables AS ct
+		JOIN sys.tables AS st ON st.object_id = ct.source_object_id
+		JOIN sys.schemas AS ss ON ss.schema_id = st.schema_id
+		WHERE ss.name = @p1
+		  AND st.name = @p2
+		  AND ct.end_lsn IS NULL
+		  AND ct.capture_instance <> @p3
+		ORDER BY ct.start_lsn DESC
+	`, meta.SourceSchema, meta.SourceName, meta.CaptureInstance).
+		Scan(&previous.SourceSchema, &previous.SourceName, &previous.CaptureInstance, &previous.ChangeTable)
+	if err == sql.ErrNoRows {
+		return previous, false, nil
+	}
+	if err != nil {
+		return previous, false, fmt.Errorf("failed to query previous capture instance for %s: %w", tableName(meta), err)
+	}
+	previous.CurrentColumns = meta.CurrentColumns
+	return previous, true, nil
+}
+
+// captureInstanceColumnSignature renders an instance's captured column layout
+// (name, type, length, precision, scale in ordinal order, metadata columns
+// excluded) so two instances can be compared for an identical capture shape.
+func (s *MSSQLCDCSource) captureInstanceColumnSignature(ctx context.Context, meta tableMetadata) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.name, ty.name, c.max_length, c.precision, c.scale
+		FROM cdc.change_tables AS ct
+		JOIN sys.columns AS c ON c.object_id = ct.object_id
+		JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
+		WHERE ct.capture_instance = @p1
+		  AND c.name NOT LIKE N'[_][_]$%'
+		ORDER BY c.column_id
+	`, meta.CaptureInstance)
+	if err != nil {
+		return "", fmt.Errorf("failed to query captured columns for instance %s: %w", meta.CaptureInstance, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var signature strings.Builder
+	for rows.Next() {
+		var name, typeName string
+		var maxLength, precision, scale int
+		if err := rows.Scan(&name, &typeName, &maxLength, &precision, &scale); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&signature, "%s:%s:%d:%d:%d;", strings.ToLower(name), strings.ToLower(typeName), maxLength, precision, scale)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return signature.String(), nil
+}
+
+// handoffStartFromPreviousInstance implements the documented capture-instance
+// recreation flow without a re-snapshot: when the resume cursor predates the
+// newest instance but a previous instance with an identical captured column
+// layout still covers it, the gap up to the new instance's start is drained
+// from the previous instance and the position moves onto the new one. A
+// changed column layout keeps the re-snapshot path — rows untouched since the
+// DDL would otherwise never receive the new columns' values in the
+// destination. Boundary rows can exist in both change tables; the caller
+// resumes the new instance with a re-read boundary and merge absorbs the
+// overlap.
+func (s *MSSQLCDCSource) handoffStartFromPreviousInstance(
+	ctx context.Context,
+	meta tableMetadata,
+	tableSchema *schema.TableSchema,
+	startHex string,
+	opts source.ReadOptions,
+	results chan<- source.RecordBatchResult,
+	resultTable string,
+) (string, bool, error) {
+	previous, ok, err := s.previousTableMetadata(ctx, meta)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	coveredByPrevious, err := s.canResume(ctx, previous, startHex)
+	if err != nil || !coveredByPrevious {
+		return "", false, err
+	}
+	newStart, err := s.minLSN(ctx, meta)
+	if err != nil {
+		return "", false, err
+	}
+	if newStart == "" || isZeroLSN(newStart) {
+		return "", false, nil
+	}
+	currentSignature, err := s.captureInstanceColumnSignature(ctx, meta)
+	if err != nil {
+		return "", false, err
+	}
+	previousSignature, err := s.captureInstanceColumnSignature(ctx, previous)
+	if err != nil {
+		return "", false, err
+	}
+	if currentSignature == "" || currentSignature != previousSignature {
+		return "", false, nil
+	}
+
+	config.Debug("[MSSQL CDC] Handing off %s from capture instance %s to %s: draining %s..%s before switching",
+		tableName(meta), previous.CaptureInstance, meta.CaptureInstance, startHex, newStart)
+	if err := s.readChanges(ctx, previous, tableSchema, startHex, newStart, true, opts, results, resultTable); err != nil {
+		return "", false, fmt.Errorf("failed to drain previous capture instance %s for %s: %w", previous.CaptureInstance, tableName(meta), err)
+	}
+	return newStart, true, nil
 }
 
 func (s *MSSQLCDCSource) snapshotTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) (string, error) {
@@ -1146,21 +1286,29 @@ func isInvalidLSNRangeError(err error) bool {
 
 // isTransientMSSQLError reports errors SQL Server tells the client to retry:
 // a deadlock victim (1205), most commonly the watermark or change-table reads
-// losing a lock race against the CDC capture job under write-heavy load.
+// losing a lock race against the CDC capture job under write-heavy load. CDC
+// procedures can also wrap the victim error inside their own error number,
+// where only the message text carries the 1205 cause.
 func isTransientMSSQLError(err error) bool {
 	var sqlErr mssqldb.Error
-	return errors.As(err, &sqlErr) && sqlErr.Number == 1205
+	if errors.As(err, &sqlErr) && sqlErr.Number == 1205 {
+		return true
+	}
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "deadlock")
 }
 
 func (s *MSSQLCDCSource) maxLSN(ctx context.Context) (string, error) {
 	var lsn sql.NullString
 	var err error
-	for attempt := 0; attempt < 4; attempt++ {
+	// Deadlock storms around capture-instance DDL or large transactions can
+	// outlast a short retry window, so back off progressively before treating
+	// the watermark read as fatal.
+	for attempt := 0; attempt < 8; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
 			}
 		}
 		err = s.db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_max_lsn(), 2)").Scan(&lsn)

@@ -325,9 +325,9 @@ func TestCustomQuery_WithIntervalParams(t *testing.T) {
 	var minTSStr, maxTSStr string
 	err = db.QueryRow("SELECT MIN(created_at), MAX(created_at) FROM interval_orders").Scan(&minTSStr, &maxTSStr)
 	require.NoError(t, err)
-	minTS, err := time.Parse("2006-01-02 15:04:05.000000", minTSStr)
+	minTS, err := time.Parse(time.RFC3339Nano, minTSStr)
 	require.NoError(t, err)
-	maxTS, err := time.Parse("2006-01-02 15:04:05.000000", maxTSStr)
+	maxTS, err := time.Parse(time.RFC3339Nano, maxTSStr)
 	require.NoError(t, err)
 	assert.False(t, minTS.Before(start), "min timestamp should be >= interval_start")
 	assert.True(t, maxTS.Before(end), "max timestamp should be < interval_end")
