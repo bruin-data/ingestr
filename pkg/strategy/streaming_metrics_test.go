@@ -2,36 +2,77 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
-	"expvar"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/pkg/source"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func rowsSyncedValue(t *testing.T) int64 {
+// gatherValue reads the current value of a metric series from the metrics
+// registry, matching every label in labels. It returns 0 when the series is
+// absent, which is sufficient for the delta-based assertions below.
+func gatherValue(t *testing.T, name string, labels map[string]string) float64 {
 	t.Helper()
-	v, ok := expvar.Get("ingestr_stream_rows_synced").(*expvar.Int)
-	require.True(t, ok, "ingestr_stream_rows_synced is not an expvar.Int")
-	return v.Value()
+	mfs, err := metrics.Gatherer().Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m, labels) {
+				return metricScalar(m)
+			}
+		}
+	}
+	return 0
 }
 
-func lastSyncedValue(t *testing.T) int64 {
+func labelsMatch(m *dto.Metric, want map[string]string) bool {
+	for k, v := range want {
+		found := false
+		for _, lp := range m.GetLabel() {
+			if lp.GetName() == k && lp.GetValue() == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func metricScalar(m *dto.Metric) float64 {
+	switch {
+	case m.Counter != nil:
+		return m.Counter.GetValue()
+	case m.Gauge != nil:
+		return m.Gauge.GetValue()
+	default:
+		return 0
+	}
+}
+
+func rowsSyncedValue(t *testing.T) float64 {
 	t.Helper()
-	v, ok := expvar.Get("ingestr_stream_last_synced_unix").(*expvar.Int)
-	require.True(t, ok, "ingestr_stream_last_synced_unix is not an expvar.Int")
-	return v.Value()
+	return gatherValue(t, "ingestr_stream_rows_synced_total", nil)
+}
+
+func lastSyncedValue(t *testing.T) float64 {
+	t.Helper()
+	return gatherValue(t, "ingestr_stream_last_synced_timestamp_seconds", nil)
 }
 
 func tableRowsSynced(t *testing.T, table string) float64 {
 	t.Helper()
-	var out map[string]map[string]float64
-	require.NoError(t, json.Unmarshal([]byte(expvar.Get("ingestr_stream_tables").String()), &out))
-	return out[table]["rows_synced"]
+	return gatherValue(t, "ingestr_stream_table_rows_synced_total", map[string]string{"table": table})
 }
 
 func TestStreaming_FlushRecordsRowsSynced(t *testing.T) {
@@ -52,7 +93,7 @@ func TestStreaming_FlushRecordsRowsSynced(t *testing.T) {
 	})
 	require.NoError(t, loop.flush(context.Background()))
 
-	assert.Equal(t, int64(4), rowsSyncedValue(t)-before)
+	assert.Equal(t, float64(4), rowsSyncedValue(t)-before)
 	// Single-table loops key l.tables on "", so the metric must fall back to
 	// the destination table name rather than publishing an empty key.
 	assert.Positive(t, tableRowsSynced(t, "ds.tbl"))

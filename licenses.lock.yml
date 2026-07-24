@@ -1399,6 +1399,7 @@ dependencies:
       version: v1.23.2
       licenses:
         - Apache-2.0
+        - BSD-3-Clause
       status: allowed
     - module: github.com/prometheus/client_model
       version: v0.6.2
