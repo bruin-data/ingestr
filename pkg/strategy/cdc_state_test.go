@@ -2152,6 +2152,37 @@ func TestCDCStatePositionComparisonIsNumeric(t *testing.T) {
 	}
 }
 
+func TestCDCStatePositionSupportsMSSQLFormat(t *testing.T) {
+	const (
+		snapshotIncomplete = "0000002F0000010D0002:00000000000000000000:00"
+		snapshotComplete   = "0000002F0000010D0002:00000000000000000000:01"
+		changeRow          = "0000002F0000010D0002:0000002F0000010D0003:04"
+		laterChange        = "0000003A0000010D0001:0000003A0000010D0002:02"
+	)
+
+	for _, position := range []string{snapshotIncomplete, snapshotComplete, changeRow, laterChange} {
+		if !cdcStatePositionValid(position) {
+			t.Fatalf("cdcStatePositionValid(%q) = false, want true", position)
+		}
+	}
+	if cdcStatePositionValid("0000002f0000010d0002") {
+		t.Fatal("bare LSN without seqval/op must not validate as an mssql position")
+	}
+
+	if got := compareCDCPositions(snapshotIncomplete, snapshotComplete); got >= 0 {
+		t.Fatalf("incomplete stamp must order below complete stamp, got %d", got)
+	}
+	if got := compareCDCPositions(snapshotComplete, changeRow); got >= 0 {
+		t.Fatalf("snapshot stamp must order below a change row at the same LSN, got %d", got)
+	}
+	if got := compareCDCPositions(changeRow, laterChange); got >= 0 {
+		t.Fatalf("earlier change must order below a later change, got %d", got)
+	}
+	if got := compareCDCPositions(changeRow, "0/10"); got != 0 {
+		t.Fatalf("cross-format comparison must be incomparable (0), got %d", got)
+	}
+}
+
 func TestCDCStatePruningPreservesUnparseablePositions(t *testing.T) {
 	const (
 		connectorID = "0123456789abcdef"
