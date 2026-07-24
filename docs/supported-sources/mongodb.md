@@ -118,7 +118,7 @@ ingestr ingest \
     {"$match": {
       "created_at": {
         "$gte": ":interval_start",
-        "$lt": ":interval_end"
+        "$lte": ":interval_end"
       }
     }},
     {"$project": {

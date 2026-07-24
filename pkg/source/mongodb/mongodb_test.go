@@ -174,6 +174,33 @@ func TestMongoExtractPartitionFilter(t *testing.T) {
 	}
 }
 
+func TestMongoIncrementalFilter(t *testing.T) {
+	start := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 24, 15, 59, 59, 999_000_000, time.UTC)
+
+	got, err := bson.Marshal(mongoIncrementalFilter(source.ReadOptions{
+		IncrementalKey: "updated_at",
+		IntervalStart:  &start,
+		IntervalEnd:    &end,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := bson.Marshal(bson.D{{
+		Key: "updated_at",
+		Value: bson.D{
+			{Key: "$gte", Value: start},
+			{Key: "$lte", Value: end},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("filter BSON = %v, want %v", got, want)
+	}
+}
+
 func TestValidateIncrementalKeyProjection(t *testing.T) {
 	tests := []struct {
 		name           string
