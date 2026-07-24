@@ -496,18 +496,8 @@ func (s *MongoDBSource) readFind(ctx context.Context, collection *mongo.Collecti
 
 		filters := make([]bson.D, 0, 2)
 		if opts.IncrementalKey != "" {
-			hasStart := opts.IntervalStart != nil
-			hasEnd := opts.IntervalEnd != nil
-
-			if hasStart || hasEnd {
-				rangeFilter := bson.D{}
-				if hasStart {
-					rangeFilter = append(rangeFilter, bson.E{Key: "$gte", Value: opts.IntervalStart})
-				}
-				if hasEnd {
-					rangeFilter = append(rangeFilter, bson.E{Key: "$lt", Value: opts.IntervalEnd})
-				}
-				filters = append(filters, bson.D{{Key: opts.IncrementalKey, Value: rangeFilter}})
+			if incrementalFilter := mongoIncrementalFilter(opts); len(incrementalFilter) > 0 {
+				filters = append(filters, incrementalFilter)
 			}
 
 			findOpts.SetSort(bson.D{{Key: opts.IncrementalKey, Value: 1}})
@@ -535,6 +525,21 @@ func (s *MongoDBSource) readFind(ctx context.Context, collection *mongo.Collecti
 	}()
 
 	return results, nil
+}
+
+func mongoIncrementalFilter(opts source.ReadOptions) bson.D {
+	if opts.IncrementalKey == "" || opts.IntervalStart == nil && opts.IntervalEnd == nil {
+		return nil
+	}
+
+	rangeFilter := bson.D{}
+	if opts.IntervalStart != nil {
+		rangeFilter = append(rangeFilter, bson.E{Key: "$gte", Value: opts.IntervalStart})
+	}
+	if opts.IntervalEnd != nil {
+		rangeFilter = append(rangeFilter, bson.E{Key: "$lte", Value: opts.IntervalEnd})
+	}
+	return bson.D{{Key: opts.IncrementalKey, Value: rangeFilter}}
 }
 
 func mongoExtractPartitionFilter(opts source.ReadOptions) bson.D {
