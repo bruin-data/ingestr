@@ -440,6 +440,51 @@ func TestDeleteInsertTableTimestampInterval(t *testing.T) {
 	require.Contains(t, rows, int64(4))
 }
 
+func TestDeleteInsertTableTimeInterval(t *testing.T) {
+	dest := newHadoopDestination(t)
+	ctx := context.Background()
+	target := "lake.di.time_target"
+	staging := "lake.di.time_staging"
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+			{Name: "observed_at", DataType: schema.TypeTime, Nullable: false},
+		},
+	}
+	atHour := func(hour int) int64 {
+		return int64(hour) * int64(time.Hour/time.Microsecond)
+	}
+	bound := func(hour int) time.Time {
+		return time.Date(2026, 3, 1, hour, 0, 0, 0, time.UTC)
+	}
+
+	writeTableRows(t, dest, target, tableSchema, false, [][]any{
+		{int64(1), "morning", atHour(9)},
+		{int64(2), "noon", atHour(12)},
+		{int64(3), "evening", atHour(18)},
+	})
+	writeTableRows(t, dest, staging, tableSchema, true, [][]any{
+		{int64(4), "afternoon", atHour(13)},
+	})
+
+	require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+		StagingTable:   staging,
+		TargetTable:    target,
+		IncrementalKey: "observed_at",
+		IntervalStart:  bound(11),
+		IntervalEnd:    bound(14),
+		Columns:        []string{"id", "name", "observed_at"},
+	}))
+
+	rows := singleRowByKey(t, readTableRows(t, dest, target), "id")
+	require.Len(t, rows, 3)
+	require.Contains(t, rows, int64(1))
+	require.NotContains(t, rows, int64(2), "row inside the time interval must be deleted")
+	require.Contains(t, rows, int64(3))
+	require.Contains(t, rows, int64(4))
+}
+
 func TestDeleteInsertTableDedupesStagingByPK(t *testing.T) {
 	dest := newHadoopDestination(t)
 	ctx := context.Background()

@@ -707,10 +707,14 @@ func normalizeBoundValue(field iceberggo.NestedField, v any) (any, error) {
 		}
 		return normalizeBoundValue(field, *val)
 	case time.Time:
-		if _, isDate := field.Type.(iceberggo.DateType); isDate {
+		switch field.Type.(type) {
+		case iceberggo.DateType:
 			return val.UTC().Truncate(24*time.Hour).Unix() / 86400, nil
+		case iceberggo.TimeType:
+			return timeOfDayMicros(val), nil
+		default:
+			return val.UTC().UnixMicro(), nil
 		}
-		return val.UTC().UnixMicro(), nil
 	case int:
 		return int64(val), nil
 	case int8:
@@ -757,6 +761,13 @@ func normalizeStringBound(field iceberggo.NestedField, val string) (any, error) 
 			}
 		}
 		return nil, fmt.Errorf("iceberg: invalid timestamp bound %q for column %q", val, field.Name)
+	case iceberggo.TimeType:
+		for _, layout := range []string{"15:04:05.999999999", "15:04:05", "15:04"} {
+			if parsed, err := time.Parse(layout, val); err == nil {
+				return timeOfDayMicros(parsed), nil
+			}
+		}
+		return nil, fmt.Errorf("iceberg: invalid time bound %q for column %q", val, field.Name)
 	case iceberggo.Int32Type, iceberggo.Int64Type:
 		parsed, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
@@ -774,6 +785,13 @@ func normalizeStringBound(field iceberggo.NestedField, val string) (any, error) 
 	default:
 		return val, nil
 	}
+}
+
+func timeOfDayMicros(val time.Time) int64 {
+	return int64(val.Hour())*int64(time.Hour/time.Microsecond) +
+		int64(val.Minute())*int64(time.Minute/time.Microsecond) +
+		int64(val.Second())*int64(time.Second/time.Microsecond) +
+		int64(val.Nanosecond())/int64(time.Microsecond)
 }
 
 func predicateTypeErr(field iceberggo.NestedField, v any) error {

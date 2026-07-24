@@ -74,9 +74,10 @@ func TestNormalizeDecimalString(t *testing.T) {
 func TestNormalizeBoundValue(t *testing.T) {
 	tsField := iceberggo.NestedField{Name: "ts", Type: iceberggo.TimestampTzType{}}
 	dateField := iceberggo.NestedField{Name: "d", Type: iceberggo.DateType{}}
+	timeField := iceberggo.NestedField{Name: "t", Type: iceberggo.TimeType{}}
 	intField := iceberggo.NestedField{Name: "i", Type: iceberggo.Int64Type{}}
 
-	at := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
+	at := time.Date(2026, 5, 1, 12, 30, 0, 123456000, time.UTC)
 	got, err := normalizeBoundValue(tsField, at)
 	require.NoError(t, err)
 	require.Equal(t, at.UnixMicro(), got)
@@ -99,7 +100,18 @@ func TestNormalizeBoundValue(t *testing.T) {
 
 	got, err = normalizeBoundValue(tsField, "2026-05-01T12:30:00Z")
 	require.NoError(t, err)
-	require.Equal(t, at.UnixMicro(), got)
+	require.Equal(t, time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC).UnixMicro(), got)
+
+	got, err = normalizeBoundValue(timeField, at)
+	require.NoError(t, err)
+	require.Equal(t, int64(45_000_123_456), got)
+
+	got, err = normalizeBoundValue(timeField, "12:30:00.123456")
+	require.NoError(t, err)
+	require.Equal(t, int64(45_000_123_456), got)
+
+	_, err = normalizeBoundValue(timeField, "not-a-time")
+	require.ErrorContains(t, err, `invalid time bound "not-a-time"`)
 
 	// The strategy layer passes interval bounds as *time.Time; ensure the
 	// pointer is dereferenced rather than rejected as an unsupported type.
