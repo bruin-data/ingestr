@@ -129,13 +129,25 @@ func TestMSSQLCDC_ResumeMidTransaction_Postgres(t *testing.T) {
 	}
 	assert.Equal(t, 5, count(`SELECT COUNT(*) FROM %q.items_dest`, destSchema), "both transaction rows delivered")
 
-	// Simulate a crash after only part of the transaction was flushed: remove
-	// the row carrying the newest change, leaving the cursor mid-transaction.
+	// Simulate a crash where the second run's write was only partially
+	// durable and its state commit never happened: remove the row carrying
+	// the newest change AND the recorded checkpoints. Resume then falls back
+	// to the completed-snapshot position and must re-deliver the transaction.
+	// (Deleting destination rows while keeping the checkpoint would be
+	// out-of-band tampering: managed state persists only after the write, so
+	// state never runs ahead of data in a real crash.)
 	var droppedID int64
 	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(
 		`DELETE FROM %q.items_dest WHERE "_cdc_lsn" = (SELECT MAX("_cdc_lsn") FROM %q.items_dest) RETURNING id`,
 		destSchema, destSchema,
 	)).Scan(&droppedID))
+	var stateSchema string
+	require.NoError(t, pg.QueryRowContext(ctx, `
+		SELECT table_schema FROM information_schema.tables
+		WHERE table_name = 'cdc_state'
+		ORDER BY table_schema LIMIT 1`).Scan(&stateSchema))
+	_, err = pg.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %q.cdc_state WHERE state_kind = 'checkpoint'`, stateSchema))
+	require.NoError(t, err)
 	assert.Contains(t, []int64{4, 5}, droppedID)
 	assert.Equal(t, 0, count(`SELECT COUNT(*) FROM %q.items_dest WHERE id = %d`, destSchema, droppedID))
 

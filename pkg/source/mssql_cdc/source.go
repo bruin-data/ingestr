@@ -532,7 +532,9 @@ func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInf
 		if err != nil {
 			return nil, nil, err
 		}
-		fingerprint, err := s.TableSchemaFingerprint(ctx, tableName(meta))
+		// Fingerprint the metadata this listing selected: multi-table reads
+		// ignore the configured capture_instance, so the fingerprint must too.
+		fingerprint, err := s.fingerprintCaptureInstance(ctx, meta)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1216,11 +1218,12 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	if opts.Streaming {
 		s.health.reset(time.Now())
 	}
-	// Each table's initial position (a resume cursor or a snapshot stamp) may
-	// sit mid-transaction, so the first read includes it; see streamTable.
+	// Only change-row resume cursors may sit mid-transaction and need an
+	// inclusive first read; snapshot stamps already cover their LSN. See
+	// streamTable.
 	inclusiveByTable := make(map[string]bool, len(tables))
 	for _, table := range tables {
-		inclusiveByTable[table.Name] = true
+		inclusiveByTable[table.Name] = reReadByTable[table.Name]
 	}
 	transientFailures := make(map[string]int, len(tables))
 	lastCheckpointLSN := ""
@@ -1328,14 +1331,13 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 		s.health.reset(time.Now())
 	}
 	current := startLSN
-	// The initial position may sit mid-transaction: a resume cursor names the
-	// destination's last durable change row, whose transaction can continue
-	// past it, and a snapshot stamp must re-deliver changes at the boundary
-	// LSN. The first read therefore includes the position; merge is idempotent
-	// for the rows this re-delivers. Once the stream has advanced to a harvest
-	// watermark, everything at that LSN has been delivered, so later polls
-	// start strictly after it.
-	inclusive := true
+	// Only a change-row resume cursor may sit mid-transaction: its transaction
+	// can continue past the stored row, so the first read includes the
+	// position and merge absorbs the re-delivered rows. A snapshot stamp or a
+	// delivered watermark already covers everything at its LSN, so the first
+	// read starts strictly after it — an inclusive read there would re-deliver
+	// whole transactions as change rows for no benefit.
+	inclusive := reReadBoundary
 	transientFailures := 0
 	for {
 		if opts.Streaming {

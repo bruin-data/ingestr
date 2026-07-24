@@ -117,20 +117,27 @@ func (s *MSSQLCDCSource) TableIncarnation(ctx context.Context, table string) (st
 }
 
 // TableSchemaFingerprint hashes the schema this source actually delivers: the
-// newest capture instance's identity and captured columns, plus the source
-// table's primary key. A recreated capture instance or a changed merge key
-// therefore changes the fingerprint and invalidates recorded resume state.
+// capture instance's identity and captured columns, plus the source table's
+// primary key. A recreated capture instance or a changed merge key therefore
+// changes the fingerprint and invalidates recorded resume state.
+//
+// The configured capture_instance applies here because single-table reads
+// honor it; multi-table reads ignore it and fingerprint their own selected
+// metadata via fingerprintCaptureInstance.
 func (s *MSSQLCDCSource) TableSchemaFingerprint(ctx context.Context, table string) (string, error) {
 	meta, err := s.getTableMetadata(ctx, table, s.cdcConfig.CaptureInstance)
 	if err != nil {
 		return "", err
 	}
+	return s.fingerprintCaptureInstance(ctx, meta)
+}
 
+func (s *MSSQLCDCSource) fingerprintCaptureInstance(ctx context.Context, meta tableMetadata) (string, error) {
 	h := sha256.New()
 	writeFingerprintValues(h, meta.CaptureInstance)
 
 	var startLSN string
-	err = s.db.QueryRowContext(
+	err := s.db.QueryRowContext(
 		ctx,
 		"SELECT CONVERT(varchar(20), start_lsn, 2) FROM cdc.change_tables WHERE capture_instance = @p1 AND end_lsn IS NULL",
 		meta.CaptureInstance,
@@ -148,7 +155,7 @@ func (s *MSSQLCDCSource) TableSchemaFingerprint(ctx context.Context, table strin
 		  AND c.name NOT LIKE '__$%'
 		ORDER BY c.column_id`, meta.ChangeTable)
 	if err != nil {
-		return "", fmt.Errorf("failed to fingerprint captured columns for %s: %w", table, err)
+		return "", fmt.Errorf("failed to fingerprint captured columns for %s: %w", tableName(meta), err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -157,13 +164,13 @@ func (s *MSSQLCDCSource) TableSchemaFingerprint(ctx context.Context, table strin
 		var name, typeName string
 		var nullable, precision, scale, maxLength int
 		if err := rows.Scan(&name, &typeName, &nullable, &precision, &scale, &maxLength); err != nil {
-			return "", fmt.Errorf("failed to scan captured-column fingerprint for %s: %w", table, err)
+			return "", fmt.Errorf("failed to scan captured-column fingerprint for %s: %w", tableName(meta), err)
 		}
 		writeFingerprintValues(h, name, typeName, fmt.Sprint(nullable), fmt.Sprint(precision), fmt.Sprint(scale), fmt.Sprint(maxLength))
 		columnCount++
 	}
 	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("failed to read captured-column fingerprint for %s: %w", table, err)
+		return "", fmt.Errorf("failed to read captured-column fingerprint for %s: %w", tableName(meta), err)
 	}
 	if columnCount == 0 {
 		return "", fmt.Errorf("capture instance %s has no captured columns", meta.CaptureInstance)
