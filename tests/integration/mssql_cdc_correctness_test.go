@@ -313,3 +313,57 @@ func TestMSSQLCDC_SnapshotConcurrentWriter_Postgres(t *testing.T) {
 	_ = dstRows.Close()
 	assert.Empty(t, srcIDs, "source rows missing from destination")
 }
+
+// TestMSSQLCDC_ManagedState_Postgres proves SQL Server CDC runs on
+// destination-managed state when the destination supports it: the run must
+// record a completed snapshot event, and a follow-up run must resume from
+// that state rather than re-snapshot (original rows keep their exact
+// _cdc_lsn stamps).
+func TestMSSQLCDC_ManagedState_Postgres(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	db, cfg, destSchema := setupMSSQLCDCPostgresRun(t, ctx, "mssqlstate")
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	pg := openPostgresDest(t)
+
+	var stateSchema string
+	err := pg.QueryRowContext(ctx, `
+		SELECT table_schema FROM information_schema.tables
+		WHERE table_name = 'cdc_state'
+		ORDER BY table_schema LIMIT 1`).Scan(&stateSchema)
+	require.NoError(t, err, "managed CDC state table must exist after an mssql+cdc run")
+
+	completeSnapshots := queryPostgresCount(t, ctx, pg, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %q.cdc_state WHERE state_kind = 'snapshot' AND state_status = 'complete' AND source_table = 'dbo.items'`,
+		stateSchema,
+	))
+	require.Positive(t, completeSnapshots, "a completed snapshot event must be recorded for dbo.items")
+
+	stampsBefore := map[int]string{}
+	rows, err := pg.QueryContext(ctx, fmt.Sprintf(`SELECT id, "_cdc_lsn" FROM %q.items_dest ORDER BY id`, destSchema))
+	require.NoError(t, err)
+	for rows.Next() {
+		var id int
+		var lsn string
+		require.NoError(t, rows.Scan(&id, &lsn))
+		stampsBefore[id] = lsn
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Len(t, stampsBefore, 3)
+
+	_, err = db.ExecContext(ctx, `INSERT INTO dbo.items (id, name, value) VALUES (4, N'item4', 400)`)
+	require.NoError(t, err)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_items", 4)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	assert.Equal(t, 4, queryPostgresCount(t, ctx, pg, fmt.Sprintf(`SELECT COUNT(*) FROM %q.items_dest`, destSchema)))
+	for id, before := range stampsBefore {
+		var after string
+		require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT "_cdc_lsn" FROM %q.items_dest WHERE id = $1`, destSchema), id).Scan(&after))
+		assert.Equal(t, before, after, "row %d must keep its stamp: a changed stamp means the second run re-snapshotted instead of resuming from managed state", id)
+	}
+}

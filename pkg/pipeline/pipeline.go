@@ -145,7 +145,15 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
 	managedMySQLCDC := isMySQLCDCSource(p.config.SourceURI)
-	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC
+	// SQL Server CDC joins destination-managed state only when the
+	// destination supports it; unlike the peers it keeps a legacy fallback
+	// (resume from MAX(_cdc_lsn) with completeness-encoded snapshot stamps)
+	// so destinations without state support keep working.
+	managedMSSQLCDC := isMSSQLCDCSource(p.config.SourceURI) && validateDestinationManagedCDCState(dest) == nil
+	if isMSSQLCDCSource(p.config.SourceURI) && !managedMSSQLCDC {
+		config.Debug("[PIPELINE] Destination %q does not support managed CDC state; SQL Server CDC uses destination-data resume", dest.GetScheme())
+	}
+	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC
 	if managedMySQLCDC {
 		if err := validateMySQLCDCSourceDestination(p.config, src, dest); err != nil {
 			return err
@@ -166,7 +174,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 		p.cdcConnectorID = resolvedCDCStateConnectorID(p.config, postgresCDCIdentity, destinationIdentity)
 	} else if isCDCSource(p.config.SourceURI) {
-		if managedMySQLCDC {
+		if managedMySQLCDC || managedMSSQLCDC {
 			destinationTarget = managedCDCDestinationTarget(p.config, dest)
 		}
 		p.cdcConnectorID = genericCDCConnectorID(p.config)
@@ -904,7 +912,7 @@ func rejectUnprovenLegacyCDCTarget(ctx context.Context, dest destination.Destina
 	if position == "" {
 		return nil
 	}
-	return fmt.Errorf("destination table %q contains PostgreSQL CDC data at LSN %s, but no matching completed CDC state exists for source table %q; rerun with --full-refresh or restore the completed v1 CDC state before upgrading", destTable, position, sourceTable)
+	return fmt.Errorf("destination table %q contains CDC data at position %s, but no matching completed CDC state exists for source table %q; rerun with --full-refresh to let this connector adopt the target", destTable, position, sourceTable)
 }
 
 func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.TableSchema, error) {
@@ -1448,7 +1456,8 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	var cdcStateManager *strategy.CDCStateManager
 	anchorTable := ""
-	if isPostgresCDCSource(p.config.SourceURI) || isMySQLCDCSource(p.config.SourceURI) {
+	managedMSSQLCDC := isMSSQLCDCSource(p.config.SourceURI) && validateDestinationManagedCDCState(p.dest) == nil
+	if isPostgresCDCSource(p.config.SourceURI) || isMySQLCDCSource(p.config.SourceURI) || managedMSSQLCDC {
 		for _, destTable := range tableDestNames {
 			if anchorTable == "" || destTable < anchorTable {
 				anchorTable = destTable
