@@ -47,4 +47,4 @@ The same URI structure can be used both for sources and destinations. You can re
 
 When using Databricks as a destination, ingestr supports `replace`, `append`, `merge`, `delete+insert`, and `truncate+insert`.
 
-`delete+insert` is executed as a Databricks `BEGIN ATOMIC ... END` compound statement so the delete and insert run together. `scd2` is not supported for Databricks destinations. ingestr does not expose a separate destination transaction API for Databricks; transaction requests fail instead of returning a no-op transaction wrapper.
+`delete+insert` and the final target update for `truncate+insert` are executed as Databricks `BEGIN ATOMIC ... END` compound statements so the delete and insert run together. These transactional loads require transaction-enabled Unity Catalog managed tables and supported Databricks compute. `scd2` is not supported for Databricks destinations. ingestr does not expose a separate destination transaction API for Databricks; transaction requests fail instead of returning a no-op transaction wrapper.

@@ -364,6 +364,47 @@ func (d *MSSQLDestination) InsertFromStaging(ctx context.Context, opts destinati
 	return nil
 }
 
+func (d *MSSQLDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, truncateSQL); err != nil {
+		config.LogFailedQuery(truncateSQL, err)
+		return fmt.Errorf("failed to truncate target: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert from staging: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return "", "", errors.New("truncate+insert from staging requires at least one column")
+	}
+
+	var insertSQL string
+	if len(opts.PrimaryKeys) > 0 && !opts.StagingPrimaryKeysUnique {
+		insertSQL = buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, columns, opts.IncrementalKey)
+	} else {
+		insertSQL = buildInsertDirectSQL(opts.TargetTable, opts.StagingTable, columns)
+	}
+	return fmt.Sprintf("TRUNCATE TABLE %s", quoteTable(opts.TargetTable)), insertSQL, nil
+}
+
 func (d *MSSQLDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	return d.WriteParallel(ctx, records, opts)
 }

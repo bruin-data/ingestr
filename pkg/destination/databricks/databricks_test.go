@@ -65,6 +65,36 @@ func TestBuildDeleteInsertSQLUsesAtomicBlock(t *testing.T) {
 	}
 }
 
+func TestBuildTruncateInsertFromStagingSQLUsesAtomicDMLBlock(t *testing.T) {
+	t.Parallel()
+	dest := &DatabricksDestination{catalog: "main"}
+	deleteSQL, insertSQL, atomicSQL, err := dest.buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{
+		StagingTable:   "scratch.orders_ti",
+		TargetTable:    "analytics.orders",
+		PrimaryKeys:    []string{"id"},
+		Columns:        []string{"id", "name", "updated_at"},
+		IncrementalKey: "updated_at",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteSQL != "DELETE FROM `main`.`analytics`.`orders`" {
+		t.Fatalf("deleteSQL = %q", deleteSQL)
+	}
+	for _, want := range []string{
+		"INSERT INTO `main`.`analytics`.`orders` (`id`, `name`, `updated_at`)",
+		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `updated_at` DESC)",
+		"FROM `main`.`ingestr_staging`.`orders_ti`",
+	} {
+		if !strings.Contains(insertSQL, want) {
+			t.Fatalf("insertSQL missing %q:\n%s", want, insertSQL)
+		}
+	}
+	if want := "BEGIN ATOMIC\n  " + deleteSQL + ";\n  " + insertSQL + ";\nEND;"; atomicSQL != want {
+		t.Fatalf("atomicSQL = %q, want %q", atomicSQL, want)
+	}
+}
+
 func TestBeginTransactionUnsupported(t *testing.T) {
 	t.Parallel()
 

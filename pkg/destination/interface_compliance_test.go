@@ -168,6 +168,16 @@ var (
 )
 
 var (
+	_ destination.AtomicTruncateInsertStagingWriter = (*databricks.DatabricksDestination)(nil)
+	_ destination.AtomicTruncateInsertStagingWriter = (*duckdb.DuckDBDestination)(nil)
+	_ destination.AtomicTruncateInsertStagingWriter = (*fabric.FabricDestination)(nil)
+	_ destination.AtomicTruncateInsertStagingWriter = (*mssql.MSSQLDestination)(nil)
+	_ destination.AtomicTruncateInsertStagingWriter = (*postgres.PostgresDestination)(nil)
+	_ destination.AtomicTruncateInsertStagingWriter = (*sqlite.SQLiteDestination)(nil)
+	_ destination.AtomicTruncateInsertStagingWriter = (*synapse.SynapseDestination)(nil)
+)
+
+var (
 	_ destination.Destination = (*athena.AthenaDestination)(nil)
 	_ destination.Destination = (*bigquery.BigQueryDestination)(nil)
 	_ destination.Destination = (*cassandra.CassandraDestination)(nil)
