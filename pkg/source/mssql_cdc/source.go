@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -1052,8 +1053,15 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	}
 	defer func() {
 		// BeginTx's isolation level sticks to the session, so restore the
-		// default before the connection re-enters the pool.
-		_, _ = conn.ExecContext(ctx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+		// default before the connection re-enters the pool. The reset must
+		// survive request cancellation — otherwise the poisoned session leaks
+		// back into the pool — and a connection that cannot be reset is
+		// discarded rather than returned.
+		resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := conn.ExecContext(resetCtx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 		_ = conn.Close()
 	}()
 
@@ -1349,13 +1357,25 @@ func (s *MSSQLCDCSource) readChanges(ctx context.Context, meta tableMetadata, ta
 	rows, err := s.db.QueryContext(ctx, query, fromLSN, toLSN)
 	if err != nil {
 		if isInvalidLSNRangeError(err) {
-			return fmt.Errorf("CDC changes for %s from LSN %s are no longer available: change-table cleanup advanced past the cursor (retention exceeded); the next run will take a fresh snapshot: %w", tableName(meta), fromLSN, err)
+			return cleanedUpLSNRangeError(meta, fromLSN, err)
 		}
 		return fmt.Errorf("failed to query CDC changes for %s: %w", tableName(meta), err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	return s.rowsToChangeBatches(ctx, rows, tableSchema, opts, results, resultTable)
+	// Error 313 can also surface during row iteration rather than on the
+	// initial query, so classify the read error too.
+	if err := s.rowsToChangeBatches(ctx, rows, tableSchema, opts, results, resultTable); err != nil {
+		if isInvalidLSNRangeError(err) {
+			return cleanedUpLSNRangeError(meta, fromLSN, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func cleanedUpLSNRangeError(meta tableMetadata, fromLSN string, err error) error {
+	return fmt.Errorf("CDC changes for %s from LSN %s are no longer available: change-table cleanup advanced past the cursor (retention exceeded); the next run will take a fresh snapshot: %w", tableName(meta), fromLSN, err)
 }
 
 func (s *MSSQLCDCSource) rowsToSnapshotBatches(ctx context.Context, rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, snapshotLSN string, results chan<- source.RecordBatchResult, resultTable string) error {
