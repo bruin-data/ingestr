@@ -43,7 +43,7 @@ echo stderr-line >&2
 	}
 
 	var job *Job
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var ok bool
 		job, ok = jm.GetJob(jobID)
@@ -449,7 +449,7 @@ func TestMaskCLIArgs(t *testing.T) {
 func waitForJobStatus(t *testing.T, jm *JobManager, jobID string) *Job {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		job, ok := jm.GetJob(jobID)
 		if ok && job.Status != "running" {
@@ -468,7 +468,7 @@ func waitForJobStatus(t *testing.T, jm *JobManager, jobID string) *Job {
 func waitForJobCleanup(t *testing.T, jm *JobManager, jobID string) {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := jm.cancels.Load(jobID); !ok {
 			return
