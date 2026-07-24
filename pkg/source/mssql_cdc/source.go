@@ -92,6 +92,9 @@ type MSSQLCDCSource struct {
 	lag            *mssqlLagState
 	health         captureHealth
 	guidConversion bool
+
+	stateMu sync.Mutex
+	state   source.CDCStateCommitToken
 }
 
 // captureHealth throttles capture-job error probes and deduplicates the
@@ -211,12 +214,15 @@ type tableMetadata struct {
 }
 
 type CDCTable struct {
-	source      *MSSQLCDCSource
-	tableName   string
-	metadata    tableMetadata
-	tableSchema *schema.TableSchema
-	primaryKeys []string
-	strategy    config.IncrementalStrategy
+	source    *MSSQLCDCSource
+	tableName string
+	// requestedName is the table name the pipeline asked for, which is the
+	// key it registers CDC state under; state recording must use it verbatim.
+	requestedName string
+	metadata      tableMetadata
+	tableSchema   *schema.TableSchema
+	primaryKeys   []string
+	strategy      config.IncrementalStrategy
 }
 
 func NewMSSQLCDCSource() *MSSQLCDCSource {
@@ -419,12 +425,13 @@ func (s *MSSQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	}
 
 	return &CDCTable{
-		source:      s,
-		tableName:   tableName(meta),
-		metadata:    meta,
-		tableSchema: tableSchema,
-		primaryKeys: pks,
-		strategy:    strategy,
+		source:        s,
+		tableName:     tableName(meta),
+		requestedName: req.Name,
+		metadata:      meta,
+		tableSchema:   tableSchema,
+		primaryKeys:   pks,
+		strategy:      strategy,
 	}, nil
 }
 
@@ -521,11 +528,22 @@ func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInf
 			continue
 		}
 
+		incarnation, err := s.TableIncarnation(ctx, tableName(meta))
+		if err != nil {
+			return nil, nil, err
+		}
+		fingerprint, err := s.TableSchemaFingerprint(ctx, tableName(meta))
+		if err != nil {
+			return nil, nil, err
+		}
+
 		tables = append(tables, source.SourceTableInfo{
-			Name:        tableName(meta),
-			Schema:      tableSchema,
-			PrimaryKeys: tableSchema.PrimaryKeys,
-			DestSchema:  s.cdcConfig.DestSchema,
+			Name:              tableName(meta),
+			Schema:            tableSchema,
+			PrimaryKeys:       tableSchema.PrimaryKeys,
+			DestSchema:        s.cdcConfig.DestSchema,
+			Incarnation:       incarnation,
+			SchemaFingerprint: fingerprint,
 		})
 	}
 
@@ -545,6 +563,7 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 		return nil, err
 	}
 
+	s.resetCDCState()
 	results := make(chan source.RecordBatchResult, 16)
 	go func() {
 		defer close(results)
@@ -586,6 +605,10 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 				return
 			}
 			startByTable[table.Name] = snapshotLSN
+			s.recordSnapshotState(table.Name, snapshotCompleteLSN(snapshotLSN))
+			if err := s.emitStateToken(ctx, opts.ReadOptions, results, table.Name); err != nil {
+				return
+			}
 		}
 
 		if err := s.streamTables(ctx, selected, metaByTable, startByTable, reReadByTable, opts.ReadOptions, results); err != nil {
@@ -922,6 +945,7 @@ func (t *CDCTable) GetSchema(ctx context.Context) (*schema.TableSchema, error) {
 }
 
 func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	t.source.resetCDCState()
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -951,6 +975,10 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 		snapshotLSN, err := t.source.snapshotTable(ctx, t.metadata, t.tableSchema, opts, results, "")
 		if err != nil {
 			_ = emitResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
+			return
+		}
+		t.source.recordSnapshotState(t.requestedName, snapshotCompleteLSN(snapshotLSN))
+		if err := t.source.emitStateToken(ctx, opts, results, ""); err != nil {
 			return
 		}
 
@@ -1195,6 +1223,7 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		inclusiveByTable[table.Name] = true
 	}
 	transientFailures := make(map[string]int, len(tables))
+	lastCheckpointLSN := ""
 	for {
 		if opts.Streaming {
 			s.checkCaptureHealth(ctx)
@@ -1250,6 +1279,16 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				return err
 			}
 			continue
+		}
+
+		// Every table has been read through targetLSN, so it is the globally
+		// safe position for this stream.
+		if targetLSN != lastCheckpointLSN {
+			s.recordCheckpointState(watermarkStoredLSN(targetLSN))
+			if err := s.emitStateToken(ctx, opts, results, ""); err != nil {
+				return err
+			}
+			lastCheckpointLSN = targetLSN
 		}
 
 		if !opts.Streaming {
@@ -1330,6 +1369,10 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 			inclusive = false
 			reReadBoundary = false
 			current = targetLSN
+			s.recordCheckpointState(watermarkStoredLSN(current))
+			if err := s.emitStateToken(ctx, opts, results, resultTable); err != nil {
+				return err
+			}
 		}
 
 		if !opts.Streaming {
