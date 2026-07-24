@@ -4,9 +4,10 @@
 // variants it is excluded from the regular integration suite (build tag
 // `stress`); run it with `make cdc-mssql-stress-test`.
 //
-// Scenario: a streaming multi-table CDC pipeline replicates from SQL Server
-// into Postgres while parallel workers apply ~1000 inserts/updates/deletes/
-// PK-updates per second. SQL Server CDC freezes captured columns per capture
+// Scenario: two streaming multi-table CDC pipelines replicate from SQL Server
+// into PostgreSQL and DuckDB while the shared queue-based load generator
+// applies inserts/updates/deletes/PK-updates at the configured target rate.
+// SQL Server CDC freezes captured columns per capture
 // instance and discovers tables only at stream start, so schema changes follow
 // the documented operational path — recreate the capture instance and restart
 // the stream, which must recover via resume-from-destination-LSN or the
@@ -24,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +53,6 @@ const (
 	msqStressLateSeed    = 2000
 	msqStressEvolving    = "stress_evolving"
 	msqStressTypes       = "stress_types"
-	msqStressPKOffset    = int64(1_000_000_000)
 	msqStressSentinelOld = int64(9_000_000_000_000)
 	msqStressSentinelNew = int64(9_000_000_000_001)
 	msqStressGiB         = uint64(1 << 30)
@@ -59,7 +60,6 @@ const (
 
 var (
 	msqStressSeedRows       = envInt("STRESS_SEED_ROWS", 5000)
-	msqStressWorkers        = envInt("STRESS_WORKERS", 32)
 	msqStressDataInitialMB  = envInt("MSSQL_STRESS_DATA_INITIAL_MB", 4096)
 	msqStressDataMaxMB      = envInt("MSSQL_STRESS_DATA_MAX_MB", 8192)
 	msqStressLogInitialMB   = envInt("MSSQL_STRESS_LOG_INITIAL_MB", 4096)
@@ -178,7 +178,7 @@ func msqStressAgentJobBusy(err error) bool {
 // run against tables the workers are hammering.
 func msqStressExec(ctx context.Context, db *sql.DB, query string, args ...any) (int64, error) {
 	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 8; attempt++ {
 		result, err := db.ExecContext(ctx, query, args...)
 		if err == nil {
 			affected, _ := result.RowsAffected()
@@ -188,14 +188,20 @@ func msqStressExec(ctx context.Context, db *sql.DB, query string, args ...any) (
 		if !msqStressIsDeadlock(err) {
 			return 0, err
 		}
-		time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
 	}
 	return 0, lastErr
 }
 
+// Deadlocks may surface directly (error 1205) or nested inside a CDC
+// procedure failure (e.g. sp_cdc_disable_table wrapping the victim error in
+// 22837/22933), where only the message text carries the 1205 cause.
 func msqStressIsDeadlock(err error) bool {
 	var sqlErr mssqldb.Error
-	return errors.As(err, &sqlErr) && sqlErr.Number == 1205
+	if errors.As(err, &sqlErr) && sqlErr.Number == 1205 {
+		return true
+	}
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "deadlock")
 }
 
 func msqStressEnableCDC(ctx context.Context, db *sql.DB, table, instance string) error {
@@ -286,18 +292,31 @@ func msqStressCreateTypes(ctx context.Context, db *sql.DB, seedRows int) error {
 	return err
 }
 
-// msqStreamCtrl runs the streaming pipeline and supports test-driven restarts:
-// SQL Server CDC discovers tables and capture instances only at stream start,
-// so topology changes are absorbed by restarting the run, which must resume
-// every unchanged table from the destination's max _cdc_lsn.
+// msqStreamCtrl runs one streaming pipeline per destination and supports
+// test-driven restarts: SQL Server CDC discovers tables and capture instances
+// only at stream start, so topology changes are absorbed by restarting every
+// run together, each of which must resume every unchanged table from its own
+// destination's max _cdc_lsn. Capture-instance swaps require all consumers
+// stopped, so the sinks always stop and start as a group.
+type msqStreamSink struct {
+	name   string
+	cfg    *config.IngestConfig
+	cancel context.CancelFunc
+	done   chan error
+}
+
+type msqStreamHandle struct {
+	name   string
+	cancel context.CancelFunc
+	done   chan error
+}
+
 type msqStreamCtrl struct {
-	cfg       *config.IngestConfig
+	sinks     []*msqStreamSink
 	mu        sync.Mutex
 	restartMu sync.Mutex
-	cancel    context.CancelFunc
-	done      chan error
 	restarts  int
-	// aborted unblocks every pending restart once the stream has failed for
+	// aborted unblocks every pending restart once a stream has failed for
 	// good; without it a stolen exit value leaves restarts waiting forever on
 	// an empty channel and deadlocks the whole test.
 	aborted   chan struct{}
@@ -306,13 +325,26 @@ type msqStreamCtrl struct {
 }
 
 func (c *msqStreamCtrl) start(ctx context.Context) {
-	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
 	c.mu.Lock()
-	c.cancel = cancel
-	c.done = done
-	c.mu.Unlock()
-	go func() { done <- pipeline.New(c.cfg).Run(runCtx) }()
+	defer c.mu.Unlock()
+	for _, sink := range c.sinks {
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		sink.cancel = cancel
+		sink.done = done
+		cfg := sink.cfg
+		go func() { done <- pipeline.New(cfg).Run(runCtx) }()
+	}
+}
+
+func (c *msqStreamCtrl) handles() []msqStreamHandle {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]msqStreamHandle, len(c.sinks))
+	for i, sink := range c.sinks {
+		out[i] = msqStreamHandle{name: sink.name, cancel: sink.cancel, done: sink.done}
+	}
+	return out
 }
 
 func msqStressIsCancel(err error) bool {
@@ -338,30 +370,34 @@ func (c *msqStreamCtrl) restart(ctx context.Context, t *testing.T, reason string
 	return c.withStreamStopped(ctx, t, reason, nil)
 }
 
-// withStreamStopped cancels the running stream, waits for it to wind down,
-// runs fn (nil-safe) while no consumer is querying the change tables, and
-// starts a fresh stream. Capture-instance swaps must run inside fn: dropping
-// an instance while the stream reads its change table fails with error 22837.
+// withStreamStopped cancels every running stream, waits for them to wind
+// down, runs fn (nil-safe) while no consumer is querying the change tables,
+// and starts fresh streams. Capture-instance swaps must run inside fn:
+// dropping an instance while any stream reads its change table fails with
+// error 22837.
 func (c *msqStreamCtrl) withStreamStopped(ctx context.Context, t *testing.T, reason string, fn func() error) error {
 	c.restartMu.Lock()
 	defer c.restartMu.Unlock()
-	c.mu.Lock()
-	cancel, done := c.cancel, c.done
-	c.mu.Unlock()
+	handles := c.handles()
 	waitStart := time.Now()
-	cancel()
-	select {
-	case err := <-done:
-		if !msqStressIsCancel(err) {
+	for _, handle := range handles {
+		handle.cancel()
+	}
+	deadline := time.After(3 * time.Minute)
+	for _, handle := range handles {
+		select {
+		case err := <-handle.done:
+			if !msqStressIsCancel(err) {
+				c.abort(err)
+				return fmt.Errorf("%s stream exited with unexpected error during restart (%s): %w", handle.name, reason, err)
+			}
+		case <-c.aborted:
+			return fmt.Errorf("restart (%s) aborted: stream already failed: %w", reason, c.fatal())
+		case <-deadline:
+			err := fmt.Errorf("%s stream did not exit within 3m of cancellation (%s)", handle.name, reason)
 			c.abort(err)
-			return fmt.Errorf("stream exited with unexpected error during restart (%s): %w", reason, err)
+			return err
 		}
-	case <-c.aborted:
-		return fmt.Errorf("restart (%s) aborted: stream already failed: %w", reason, c.fatal())
-	case <-time.After(3 * time.Minute):
-		err := fmt.Errorf("stream did not exit within 3m of cancellation (%s)", reason)
-		c.abort(err)
-		return err
 	}
 	windDown := time.Since(waitStart).Round(time.Millisecond)
 	var fnErr error
@@ -388,37 +424,41 @@ func (c *msqStreamCtrl) exitedUnexpectedly() (error, bool) {
 		return nil, false
 	}
 	defer c.restartMu.Unlock()
-	c.mu.Lock()
-	done := c.done
-	c.mu.Unlock()
-	select {
-	case err := <-done:
-		if err == nil {
-			err = errors.New("streaming pipeline returned nil while the load was still running")
+	for _, handle := range c.handles() {
+		select {
+		case err := <-handle.done:
+			if err == nil {
+				err = fmt.Errorf("%s streaming pipeline returned nil while the load was still running", handle.name)
+			} else {
+				err = fmt.Errorf("%s stream: %w", handle.name, err)
+			}
+			c.abort(err)
+			return err, true
+		default:
 		}
-		c.abort(err)
-		return err, true
-	default:
-		return nil, false
 	}
+	return nil, false
 }
 
 func (c *msqStreamCtrl) stop(t *testing.T) {
 	c.restartMu.Lock()
 	defer c.restartMu.Unlock()
-	c.mu.Lock()
-	cancel, done := c.cancel, c.done
-	c.mu.Unlock()
-	cancel()
-	select {
-	case err := <-done:
-		if !msqStressIsCancel(err) {
-			t.Fatalf("streaming pipeline exited with unexpected error on shutdown: %v", err)
+	handles := c.handles()
+	for _, handle := range handles {
+		handle.cancel()
+	}
+	deadline := time.After(60 * time.Second)
+	for _, handle := range handles {
+		select {
+		case err := <-handle.done:
+			if !msqStressIsCancel(err) {
+				t.Fatalf("%s streaming pipeline exited with unexpected error on shutdown: %v", handle.name, err)
+			}
+		case <-c.aborted:
+			t.Fatalf("streaming pipeline already failed: %v", c.fatal())
+		case <-deadline:
+			t.Fatal("streaming pipelines did not exit within 60s of cancellation")
 		}
-	case <-c.aborted:
-		t.Fatalf("streaming pipeline already failed: %v", c.fatal())
-	case <-time.After(60 * time.Second):
-		t.Fatal("streaming pipeline did not exit within 60s of cancellation")
 	}
 }
 
@@ -762,6 +802,178 @@ func msqStressDestTruth(ctx context.Context, pool *pgxpool.Pool, table string) (
 	return tr, err
 }
 
+func msqStressDuckDBTableRef(table string) string {
+	return quoteStressIdentifier(msqStressDestSchema) + "." + quoteStressIdentifier("dbo_"+table)
+}
+
+// msqStressDuckDBExpr mirrors msqStressDestExpr for DuckDB so both
+// destinations render each column to the value the SQL Server side produces.
+func msqStressDuckDBExpr(c msqStressColumn) string {
+	quoted := "t." + quoteStressIdentifier(strings.ToLower(c.name))
+	switch c.kind {
+	case msqKindNum, msqKindFloat:
+		return "CAST(" + quoted + " AS VARCHAR)"
+	case msqKindTimestamp, msqKindTimestampTZ:
+		return "epoch_us(" + quoted + ")"
+	case msqKindDate:
+		return "(" + quoted + " - DATE '1970-01-01')"
+	case msqKindBool:
+		return "CAST(" + quoted + " AS INTEGER)"
+	case msqKindHex:
+		return "UPPER(hex(" + quoted + "))"
+	default:
+		return quoted
+	}
+}
+
+func msqStressFetchDuckDBDestChunk(ctx context.Context, db *sql.DB, table string, columns []msqStressColumn, offset, limit int64) ([]msqStressRow, error) {
+	exprs := make([]string, len(columns))
+	for i, c := range columns {
+		exprs[i] = msqStressDuckDBExpr(c)
+	}
+	query := fmt.Sprintf(
+		`SELECT t.id AS row_pk, %s FROM %s AS t WHERE NOT t._cdc_deleted ORDER BY t.id LIMIT ? OFFSET ?`,
+		strings.Join(exprs, ", "), msqStressDuckDBTableRef(table),
+	)
+	rows, err := db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return msqStressScanRows(rows.Next, rows.Scan, rows.Err, columns)
+}
+
+func msqStressCompareDuckDBChunkRange(ctx context.Context, src, dst *sql.DB, table string, columns []msqStressColumn, offset, limit int64) error {
+	srcRows, err := msqStressFetchSourceChunk(ctx, src, table, columns, offset, limit)
+	if err != nil {
+		return fmt.Errorf("%s offset %d: source fetch: %w", table, offset, err)
+	}
+	dstRows, err := msqStressFetchDuckDBDestChunk(ctx, dst, table, columns, offset, limit)
+	if err != nil {
+		return fmt.Errorf("%s offset %d: DuckDB fetch: %w", table, offset, err)
+	}
+	if len(srcRows) != len(dstRows) {
+		return fmt.Errorf("%s offset %d: row count mismatch: source=%d DuckDB=%d", table, offset, len(srcRows), len(dstRows))
+	}
+	for i := range srcRows {
+		s, d := srcRows[i], dstRows[i]
+		if s.id != d.id || s.canonical != d.canonical {
+			return fmt.Errorf("%s: content mismatch at id=%d:\n  source: %s\n  DuckDB: {id:%d row:%s}",
+				table, s.id, s.canonical, d.id, d.canonical)
+		}
+	}
+	return nil
+}
+
+func msqStressCompareAllDuckDB(ctx context.Context, src, dst *sql.DB, tables []*msqStressTable) error {
+	type chunk struct {
+		table   string
+		columns []msqStressColumn
+		offset  int64
+	}
+	var chunks []chunk
+	for _, tbl := range tables {
+		columns, err := msqStressSourceColumns(ctx, src, tbl.name)
+		if err != nil {
+			return err
+		}
+		var count int64
+		if err := src.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT_BIG(*) FROM dbo.[%s]", tbl.name)).Scan(&count); err != nil {
+			return fmt.Errorf("count source table %s: %w", tbl.name, err)
+		}
+		for offset := int64(0); offset < count; offset += stressCompareChunk {
+			chunks = append(chunks, chunk{table: tbl.name, columns: columns, offset: offset})
+		}
+	}
+
+	sem := make(chan struct{}, stressCompareParallel)
+	errCh := make(chan error, len(chunks))
+	var wg sync.WaitGroup
+	for _, c := range chunks {
+		wg.Add(1)
+		go func(c chunk) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := msqStressCompareDuckDBChunkRange(ctx, src, dst, c.table, c.columns, c.offset, stressCompareChunk); err != nil {
+				errCh <- err
+			}
+		}(c)
+	}
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func msqStressDuckDBDestTruth(ctx context.Context, db *sql.DB, table string) (msqStressTruth, error) {
+	var tr msqStressTruth
+	err := db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COUNT(*), CAST(COALESCE(SUM(val), 0) AS VARCHAR) FROM %s WHERE NOT _cdc_deleted`,
+		msqStressDuckDBTableRef(table),
+	)).Scan(&tr.count, &tr.sum)
+	tr.sum = msqStressNormalizeNumeric(tr.sum)
+	return tr, err
+}
+
+// msqStressDuckDBDestColumns lists a destination table's columns via a
+// zero-row SELECT so lookup uses the same name resolution as the comparison
+// queries instead of information_schema string matching.
+func msqStressDuckDBDestColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s LIMIT 0", msqStressDuckDBTableRef(table)))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	names, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	columns := make(map[string]bool, len(names))
+	for _, name := range names {
+		columns[strings.ToLower(name)] = true
+	}
+	return columns, rows.Err()
+}
+
+func msqStressValidateDuckDBSchemas(ctx context.Context, src, dst *sql.DB, tables []*msqStressTable) error {
+	for _, tbl := range tables {
+		sourceColumns, err := msqStressSourceColumns(ctx, src, tbl.name)
+		if err != nil {
+			return fmt.Errorf("source schema %s: %w", tbl.name, err)
+		}
+		destColumns, err := msqStressDuckDBDestColumns(ctx, dst, tbl.name)
+		if err != nil {
+			return fmt.Errorf("DuckDB schema %s: %w", tbl.name, err)
+		}
+		for _, col := range sourceColumns {
+			if !destColumns[strings.ToLower(col.name)] {
+				return fmt.Errorf("DuckDB table %s is missing active source column %s", tbl.name, col.name)
+			}
+		}
+		for _, meta := range []string{"_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"} {
+			if !destColumns[meta] {
+				return fmt.Errorf("DuckDB table %s is missing CDC metadata column %s", tbl.name, meta)
+			}
+		}
+		if tbl.name == msqStressEvolving {
+			for _, removed := range []string{"legacy", "segment"} {
+				if !destColumns[removed] {
+					return fmt.Errorf("soft-removed DuckDB column %s is missing on %s", removed, tbl.name)
+				}
+			}
+			if !destColumns["cohort"] {
+				return fmt.Errorf("renamed column cohort is missing on DuckDB table %s", tbl.name)
+			}
+		}
+	}
+	return nil
+}
+
 // msqStressDiffIDs reports which live source ids are missing from the
 // destination and whether they are absent entirely (delivery loss) or present
 // only as tombstones (spurious delete), plus live destination ids the source
@@ -973,7 +1185,7 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 	`, msqStressDB, msqStressDataInitialMB, msqStressDataMaxMB, msqStressLogInitialMB, msqStressLogMaxMB))
 	require.NoError(t, err)
 
-	loadDB := msqStressOpenDB(t, host, port, msqStressDB, max(32, msqStressWorkers+8))
+	loadDB := msqStressOpenDB(t, host, port, msqStressDB, max(32, stressWorkers+8))
 	var recoveryModel string
 	require.NoError(t, loadDB.QueryRowContext(
 		ctx,
@@ -1044,7 +1256,7 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 	}
 	require.NoError(t, err, "restart CDC capture job with tuned parameters")
 
-	cfg := &config.IngestConfig{
+	postgresConfig := &config.IngestConfig{
 		SourceURI: fmt.Sprintf("mssql+cdc://sa:%s@%s:%s/%s?encrypt=disable&dest_schema=%s&poll_interval=500ms",
 			msqStressPasswordEnc, host, port, msqStressDB, msqStressDestSchema),
 		DestURI:             destConnString,
@@ -1054,185 +1266,85 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 		FlushRecords:        25000,
 		Progress:            config.ProgressLog,
 	}
-	ctrl := &msqStreamCtrl{cfg: cfg, aborted: make(chan struct{})}
+	duckDBPath := filepath.Join(t.TempDir(), "mssql-cdc-stress.duckdb")
+	duckDBConfig := *postgresConfig
+	duckDBConfig.DestURI = "duckdb:///" + duckDBPath
+	ctrl := &msqStreamCtrl{sinks: []*msqStreamSink{
+		{name: "postgres", cfg: postgresConfig},
+		{name: "duckdb", cfg: &duckDBConfig},
+	}, aborted: make(chan struct{})}
 	ctrl.start(ctx)
 
 	ddlDelay := stressEventDelay(stressSchemaEvery, stressLoadDuration, 6)
 	lateTableDelay := stressEventDelay(stressNewTableEvery, stressLoadDuration, stressLateTables)
 	t.Logf("load phase: %v at %d scheduled ops/sec across %d workers, %d late tables every %v, 6 schema phases every %v",
-		stressLoadDuration, stressTargetOpsPerSec, msqStressWorkers, stressLateTables, lateTableDelay, ddlDelay)
+		stressLoadDuration, stressTargetOpsPerSec, stressWorkers, stressLateTables, lateTableDelay, ddlDelay)
 
 	loadCtx, stopLoad := context.WithTimeout(ctx, stressLoadDuration)
 	defer stopLoad()
 
-	var inserts, updates, deletes, pkUpdates, opErrors, completedDDL atomic.Int64
-	var scheduled, enqueued, dropped, attempted, statementErrors, zeroAffected atomic.Int64
-	var inFlight, maxQueueDepth, totalLatencyNanos, maxLatencyNanos atomic.Int64
-	var latencyBuckets [7]atomic.Int64
-	// Boxed so atomic.Value always stores one concrete type; storing raw error
-	// values panics as soon as two distinct error types are recorded.
-	type opErrBox struct{ err error }
-	var firstOpErr atomic.Value
-	recordOpErr := func(err error) {
-		opErrors.Add(1)
-		firstOpErr.CompareAndSwap(nil, opErrBox{err: err})
-		t.Logf("load op error: %v", err)
-	}
+	var completedDDL atomic.Int64
+	gen := newCDCStressLoadGen(t, stressWorkers, stressTargetOpsPerSec, stressLoadDuration)
+	recordOpErr := gen.recordOpErr
 
-	recordLatency := func(elapsed time.Duration) {
-		nanos := elapsed.Nanoseconds()
-		totalLatencyNanos.Add(nanos)
-		for {
-			current := maxLatencyNanos.Load()
-			if nanos <= current || maxLatencyNanos.CompareAndSwap(current, nanos) {
-				break
-			}
-		}
-		bucket := 6
-		switch {
-		case elapsed < time.Millisecond:
-			bucket = 0
-		case elapsed < 5*time.Millisecond:
-			bucket = 1
-		case elapsed < 10*time.Millisecond:
-			bucket = 2
-		case elapsed < 50*time.Millisecond:
-			bucket = 3
-		case elapsed < 100*time.Millisecond:
-			bucket = 4
-		case elapsed < 500*time.Millisecond:
-			bucket = 5
-		}
-		latencyBuckets[bucket].Add(1)
-	}
-
-	queueCapacity := max(msqStressWorkers*8, stressTargetOpsPerSec/4)
-	operationQueue := make(chan struct{}, queueCapacity)
 	loadStarted := time.Now()
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(operationQueue)
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		var emitted int64
-		emitDue := func(elapsed time.Duration) {
-			if elapsed > stressLoadDuration {
-				elapsed = stressLoadDuration
+	gen.start(loadCtx, &wg, func(rng *rand.Rand) (string, int64, error) {
+		tbl := tables.pick(rng)
+		roll := rng.Intn(100)
+		var affected int64
+		var err error
+		var id int64
+		operation := "insert"
+		switch {
+		case roll < 40:
+			id = tbl.nextID.Add(1)
+			if tbl.types {
+				affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(`
+					INSERT INTO dbo.%s (id, val, ival, dec_amount, name, body, ts6, tzo, d, flag, bin, fval)
+					VALUES (@p1, @p1, @p1 %% 100000, CONVERT(decimal(18,4), @p1) / 7, CONCAT(N'name-', @p1),
+						CONCAT(N'body-', @p1, REPLICATE(N'x', @p1 %% 200)), SYSUTCDATETIME(), SYSDATETIMEOFFSET(),
+						CONVERT(date, SYSUTCDATETIME()), @p1 %% 2, CONVERT(varbinary(64), CONCAT('bin-', @p1)),
+						CONVERT(float, @p1) / 3.0)`, tbl.name), id)
+			} else {
+				affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(
+					"INSERT INTO dbo.%s (id, val, payload, updated_at) VALUES (@p1, @p2, @p3, SYSUTCDATETIME())", tbl.name,
+				),
+					id, id, fmt.Sprintf("ins-%d", id))
 			}
-			due := int64(elapsed) * int64(stressTargetOpsPerSec) / int64(time.Second)
-			for emitted < due {
-				emitted++
-				scheduled.Add(1)
-				select {
-				case operationQueue <- struct{}{}:
-					enqueued.Add(1)
-					depth := int64(len(operationQueue))
-					for {
-						current := maxQueueDepth.Load()
-						if depth <= current || maxQueueDepth.CompareAndSwap(current, depth) {
-							break
-						}
-					}
-				default:
-					dropped.Add(1)
-				}
+		case roll < 75:
+			operation = "update"
+			id = rng.Int63n(tbl.nextID.Load()) + 1
+			if tbl.types {
+				affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(`
+					UPDATE dbo.%s SET val = val + 1, dec_amount = dec_amount + CONVERT(decimal(18,4), 0.0001),
+						body = CONCAT(N'upd-', id, N'-', @p2), ts6 = SYSUTCDATETIME() WHERE id = @p1`, tbl.name),
+					id, rng.Int63n(1_000_000))
+			} else {
+				affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(
+					"UPDATE dbo.%s SET val = val + 1, payload = @p2, updated_at = SYSUTCDATETIME() WHERE id = @p1", tbl.name,
+				),
+					id, fmt.Sprintf("upd-%d", id))
 			}
+		case roll < 90 || tbl.types:
+			operation = "delete"
+			id = rng.Int63n(tbl.nextID.Load()) + 1
+			affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf("DELETE FROM dbo.%s WHERE id = @p1", tbl.name), id)
+		default:
+			// Primary-key move: exercises the update pairer's replay of the
+			// before-image as a delete of the old key.
+			operation = "pk-update"
+			id = rng.Int63n(tbl.nextID.Load()) + 1
+			affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(
+				"UPDATE dbo.%s SET id = id + @p1, updated_at = SYSUTCDATETIME() WHERE id = @p2 AND id < @p1", tbl.name,
+			),
+				stressPKMoveOffset, id)
 		}
-		for {
-			select {
-			case <-loadCtx.Done():
-				emitDue(stressLoadDuration)
-				return
-			case <-ticker.C:
-				emitDue(time.Since(loadStarted))
-			}
+		if err != nil {
+			return operation, 0, fmt.Errorf("%s %s id=%d: %w", operation, tbl.name, id, err)
 		}
-	}()
-
-	for w := 0; w < msqStressWorkers; w++ {
-		wg.Add(1)
-		go func(seed int64) {
-			defer wg.Done()
-			rng := rand.New(rand.NewSource(seed))
-			for range operationQueue {
-				attempted.Add(1)
-				inFlight.Add(1)
-				operationStarted := time.Now()
-				tbl := tables.pick(rng)
-				roll := rng.Intn(100)
-				var affected int64
-				var err error
-				var id int64
-				operation := "insert"
-				switch {
-				case roll < 40:
-					id = tbl.nextID.Add(1)
-					if tbl.types {
-						affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(`
-							INSERT INTO dbo.%s (id, val, ival, dec_amount, name, body, ts6, tzo, d, flag, bin, fval)
-							VALUES (@p1, @p1, @p1 %% 100000, CONVERT(decimal(18,4), @p1) / 7, CONCAT(N'name-', @p1),
-								CONCAT(N'body-', @p1, REPLICATE(N'x', @p1 %% 200)), SYSUTCDATETIME(), SYSDATETIMEOFFSET(),
-								CONVERT(date, SYSUTCDATETIME()), @p1 %% 2, CONVERT(varbinary(64), CONCAT('bin-', @p1)),
-								CONVERT(float, @p1) / 3.0)`, tbl.name), id)
-					} else {
-						affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(
-							"INSERT INTO dbo.%s (id, val, payload, updated_at) VALUES (@p1, @p2, @p3, SYSUTCDATETIME())", tbl.name,
-						),
-							id, id, fmt.Sprintf("ins-%d-%d", seed, id))
-					}
-				case roll < 75:
-					operation = "update"
-					id = rng.Int63n(tbl.nextID.Load()) + 1
-					if tbl.types {
-						affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(`
-							UPDATE dbo.%s SET val = val + 1, dec_amount = dec_amount + CONVERT(decimal(18,4), 0.0001),
-								body = CONCAT(N'upd-', id, N'-', @p2), ts6 = SYSUTCDATETIME() WHERE id = @p1`, tbl.name),
-							id, seed)
-					} else {
-						affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(
-							"UPDATE dbo.%s SET val = val + 1, payload = @p2, updated_at = SYSUTCDATETIME() WHERE id = @p1", tbl.name,
-						),
-							id, fmt.Sprintf("upd-%d-%d", seed, id))
-					}
-				case roll < 90 || tbl.types:
-					operation = "delete"
-					id = rng.Int63n(tbl.nextID.Load()) + 1
-					affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf("DELETE FROM dbo.%s WHERE id = @p1", tbl.name), id)
-				default:
-					// Primary-key move: exercises the update pairer's replay of the
-					// before-image as a delete of the old key.
-					operation = "pk-update"
-					id = rng.Int63n(tbl.nextID.Load()) + 1
-					affected, err = msqStressExec(ctx, loadDB, fmt.Sprintf(
-						"UPDATE dbo.%s SET id = id + @p1, updated_at = SYSUTCDATETIME() WHERE id = @p2 AND id < @p1", tbl.name,
-					),
-						msqStressPKOffset, id)
-				}
-				if err != nil {
-					statementErrors.Add(1)
-					recordOpErr(fmt.Errorf("%s %s id=%d: %w", operation, tbl.name, id, err))
-				} else {
-					switch operation {
-					case "insert":
-						inserts.Add(affected)
-					case "update":
-						updates.Add(affected)
-					case "delete":
-						deletes.Add(affected)
-					case "pk-update":
-						pkUpdates.Add(affected)
-					}
-					if affected == 0 {
-						zeroAffected.Add(1)
-					}
-				}
-				recordLatency(time.Since(operationStarted))
-				inFlight.Add(-1)
-			}
-		}(int64(w + 1))
-	}
+		return operation, affected, nil
+	})
 
 	wg.Add(1)
 	go func() {
@@ -1390,54 +1502,14 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 				<-loadDone
 				t.Fatalf("stream exited during load phase: %v", err)
 			}
-			elapsed := time.Since(loadStarted)
-			elapsedSeconds := elapsed.Seconds()
-			effective := inserts.Load() + updates.Load() + deletes.Load() + pkUpdates.Load()
-			completed := attempted.Load() - inFlight.Load()
-			averageLatency := time.Duration(0)
-			if completed > 0 {
-				averageLatency = time.Duration(totalLatencyNanos.Load() / completed)
-			}
-			t.Logf("t=%v: scheduled=%d attempted=%d (%.0f/sec), effective=%d (%.0f/sec), dropped=%d, queue=%d/%d (max=%d), latency avg=%v max=%v; mutations=%d/%d/%d/%d, DDL=%d/%d, restarts=%d, errors=%d",
-				elapsed.Round(time.Second), scheduled.Load(), attempted.Load(), float64(attempted.Load())/elapsedSeconds,
-				effective, float64(effective)/elapsedSeconds, dropped.Load(), len(operationQueue), queueCapacity, maxQueueDepth.Load(),
-				averageLatency.Round(time.Microsecond), time.Duration(maxLatencyNanos.Load()).Round(time.Microsecond),
-				inserts.Load(), updates.Load(), deletes.Load(), pkUpdates.Load(), completedDDL.Load(), len(ddlPhases),
-				ctrl.restartCount(), opErrors.Load())
+			t.Logf("t=%v: %s, DDL=%d/%d, restarts=%d",
+				time.Since(loadStarted).Round(time.Second), gen.status(),
+				completedDDL.Load(), len(ddlPhases), ctrl.restartCount())
 		}
 	}
 
-	if n := opErrors.Load(); n > 0 {
-		first, _ := firstOpErr.Load().(opErrBox)
-		t.Fatalf("%d load operations failed, first error: %v", n, first.err)
-	}
 	require.Equal(t, int64(len(ddlPhases)), completedDDL.Load(), "all schema phases must complete")
-	require.Equal(t, scheduled.Load(), enqueued.Load()+dropped.Load(), "every scheduled operation must be enqueued or explicitly dropped")
-	require.Equal(t, enqueued.Load(), attempted.Load(), "workers must drain every enqueued operation")
-	totalOps := inserts.Load() + updates.Load() + deletes.Load() + pkUpdates.Load()
-	achieved := float64(totalOps) / stressLoadDuration.Seconds()
-	attemptedRate := float64(attempted.Load()) / stressLoadDuration.Seconds()
-	dropPercent := float64(0)
-	if scheduled.Load() > 0 {
-		dropPercent = 100 * float64(dropped.Load()) / float64(scheduled.Load())
-	}
-	averageLatency := time.Duration(0)
-	if attempted.Load() > 0 {
-		averageLatency = time.Duration(totalLatencyNanos.Load() / attempted.Load())
-	}
-	t.Logf("load complete: scheduled=%d, enqueued/attempted=%d (%.0f/sec), dropped=%d (%.2f%%), no-op=%d, statement errors=%d, max queue=%d/%d",
-		scheduled.Load(), attempted.Load(), attemptedRate, dropped.Load(), dropPercent, zeroAffected.Load(), statementErrors.Load(),
-		maxQueueDepth.Load(), queueCapacity)
-	t.Logf("effective mutations: %d (%d inserts, %d updates, %d deletes, %d pk-updates), %.0f/sec; latency avg=%v max=%v; stream restarts=%d",
-		totalOps, inserts.Load(), updates.Load(), deletes.Load(), pkUpdates.Load(), achieved,
-		averageLatency.Round(time.Microsecond), time.Duration(maxLatencyNanos.Load()).Round(time.Microsecond), ctrl.restartCount())
-	t.Logf("statement latency buckets: <1ms=%d, 1-5ms=%d, 5-10ms=%d, 10-50ms=%d, 50-100ms=%d, 100-500ms=%d, >=500ms=%d",
-		latencyBuckets[0].Load(), latencyBuckets[1].Load(), latencyBuckets[2].Load(), latencyBuckets[3].Load(),
-		latencyBuckets[4].Load(), latencyBuckets[5].Load(), latencyBuckets[6].Load())
-	require.GreaterOrEqual(t, achieved, float64(stressTargetOpsPerSec)/2,
-		"load generator could not sustain enough pressure for the test to be meaningful")
-	require.Positive(t, pkUpdates.Load(), "workload should execute real primary-key updates")
-	require.Positive(t, deletes.Load(), "workload should execute real deletes")
+	achieved := gen.verify()
 	require.Positive(t, ctrl.restartCount(), "late tables and capture-instance recreation must exercise stream restarts")
 	finalTables := tables.snapshot()
 	require.Len(t, finalTables, stressInitialTables+2+stressLateTables, "all initial, evolving, types, and late tables should exist")
@@ -1451,21 +1523,97 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
 
+	// DuckDB access goes through transient read-only opens while the streams
+	// are running (convergence polling; a read-write open would corrupt the
+	// writer's WAL) and switches to one held read-write connection once the
+	// streams are stopped for the deep verification phase.
+	var duckDB *sql.DB
+	withDuckDB := func(fn func(*sql.DB) error) error {
+		if duckDB != nil {
+			return fn(duckDB)
+		}
+		return withCDCStressDuckDBReadOnly(duckDBPath, fn)
+	}
+
+	// Sentinel predicates use literal int64 values so the same SQL fragment
+	// runs on both destinations without placeholder-style differences.
+	type msqStressDestination struct {
+		name       string
+		aggregate  func(table string) (msqStressTruth, error)
+		compareAll func() error
+		validate   func() error
+		countWhere func(table, predicate string) (int64, error)
+	}
+	destinations := []msqStressDestination{
+		{
+			name: "postgres",
+			aggregate: func(table string) (msqStressTruth, error) {
+				return msqStressDestTruth(ctx, destPool, table)
+			},
+			compareAll: func() error { return msqStressCompareAll(ctx, loadDB, destPool, finalTables) },
+			validate:   func() error { return msqStressValidateSchemas(ctx, loadDB, destPool, finalTables) },
+			countWhere: func(table, predicate string) (int64, error) {
+				var count int64
+				err := destPool.QueryRow(ctx, fmt.Sprintf(
+					`SELECT COUNT(*) FROM %s.%s WHERE %s`,
+					quoteStressIdentifier(msqStressDestSchema), quoteStressIdentifier("dbo_"+table), predicate,
+				)).Scan(&count)
+				return count, err
+			},
+		},
+		{
+			name: "duckdb",
+			aggregate: func(table string) (msqStressTruth, error) {
+				var truth msqStressTruth
+				err := withDuckDB(func(db *sql.DB) error {
+					var err error
+					truth, err = msqStressDuckDBDestTruth(ctx, db, table)
+					return err
+				})
+				return truth, err
+			},
+			compareAll: func() error {
+				return withDuckDB(func(db *sql.DB) error {
+					return msqStressCompareAllDuckDB(ctx, loadDB, db, finalTables)
+				})
+			},
+			validate: func() error {
+				return withDuckDB(func(db *sql.DB) error {
+					return msqStressValidateDuckDBSchemas(ctx, loadDB, db, finalTables)
+				})
+			},
+			countWhere: func(table, predicate string) (int64, error) {
+				var count int64
+				err := withDuckDB(func(db *sql.DB) error {
+					return db.QueryRowContext(ctx, fmt.Sprintf(
+						`SELECT COUNT(*) FROM %s WHERE %s`, msqStressDuckDBTableRef(table), predicate,
+					)).Scan(&count)
+				})
+				return count, err
+			},
+		},
+	}
+
 	dumpDiagnostics := func() {
 		msqStressDumpCDCState(t, ctx, loadDB, finalTables)
-		for _, tbl := range finalTables {
-			got, err := msqStressDestTruth(ctx, destPool, tbl.name)
-			t.Logf("  %s: want %+v, got %+v (err=%v)", tbl.name, truths[tbl.name], got, err)
-			msqStressDiffIDs(t, ctx, loadDB, destPool, tbl.name)
+		for _, destination := range destinations {
+			for _, tbl := range finalTables {
+				got, err := destination.aggregate(tbl.name)
+				t.Logf("  %s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
+			}
+			if err := destination.compareAll(); err != nil {
+				t.Logf("  %s first content mismatch: %v", destination.name, err)
+			}
 		}
-		if err := msqStressCompareAll(ctx, loadDB, destPool, finalTables); err != nil {
-			t.Logf("  first content mismatch: %v", err)
+		for _, tbl := range finalTables {
+			msqStressDiffIDs(t, ctx, loadDB, destPool, tbl.name)
 		}
 		stressDumpContainerLogs(t, ctx, sourceContainer, 120)
 	}
 
-	// Convergence: the stream keeps polling; the capture job drains its backlog
-	// and every table's aggregates must match the quiescent source exactly.
+	// Convergence: the streams keep polling; the capture job drains its backlog
+	// and every table's aggregates must match the quiescent source exactly in
+	// both destinations.
 	deadline := time.Now().Add(stressConvergeTimeout)
 	lastProgressLog := time.Now()
 	for {
@@ -1474,10 +1622,15 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 			t.Fatalf("stream exited during convergence: %v", err)
 		}
 		pending := ""
-		for _, tbl := range finalTables {
-			got, err := msqStressDestTruth(ctx, destPool, tbl.name)
-			if err != nil || got != truths[tbl.name] {
-				pending = fmt.Sprintf("%s: want %+v, got %+v (err=%v)", tbl.name, truths[tbl.name], got, err)
+		for _, destination := range destinations {
+			for _, tbl := range finalTables {
+				got, err := destination.aggregate(tbl.name)
+				if err != nil || got != truths[tbl.name] {
+					pending = fmt.Sprintf("%s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
+					break
+				}
+			}
+			if pending != "" {
 				break
 			}
 		}
@@ -1490,60 +1643,59 @@ func TestMSSQLCDC_StressComplexWorkload(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			dumpDiagnostics()
-			t.Fatalf("destination did not converge within %v; still pending: %s", stressConvergeTimeout, pending)
+			t.Fatalf("destinations did not converge within %v; still pending: %s", stressConvergeTimeout, pending)
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Log("destination converged on count/sum aggregates for all tables")
+	t.Log("PostgreSQL and DuckDB destinations converged on count/sum aggregates for all tables")
 
-	// Aggregates can match while a final merge is still landing payload
-	// updates, so retry the deep comparison briefly before declaring failure.
-	var compareErr error
-	for attempt := 1; attempt <= 6; attempt++ {
-		if compareErr = msqStressCompareAll(ctx, loadDB, destPool, finalTables); compareErr == nil {
-			break
-		}
-		t.Logf("deep comparison attempt %d: %v", attempt, compareErr)
-		time.Sleep(5 * time.Second)
-	}
-	require.NoError(t, compareErr, "row-by-row content comparison failed")
-	t.Log("row-by-row content comparison passed for all tables")
-
-	require.NoError(t, msqStressValidateSchemas(ctx, loadDB, destPool, finalTables))
-
-	var softDeleted int64
-	for _, tbl := range finalTables {
-		var deleted int64
-		require.NoError(t, destPool.QueryRow(ctx, fmt.Sprintf(
-			`SELECT COUNT(*) FROM %s.%s WHERE "_cdc_deleted"`,
-			quoteStressIdentifier(msqStressDestSchema), quoteStressIdentifier("dbo_"+tbl.name),
-		)).Scan(&deleted))
-		softDeleted += deleted
-	}
-	require.Positive(t, softDeleted, "destination should retain soft-deleted CDC rows")
-
-	var movedLive int64
-	require.NoError(t, destPool.QueryRow(ctx, fmt.Sprintf(
-		`SELECT COUNT(*) FROM %s.%s WHERE id >= $1 AND NOT "_cdc_deleted"`,
-		quoteStressIdentifier(msqStressDestSchema), quoteStressIdentifier("dbo_"+stressTableName(0)),
-	),
-		msqStressPKOffset).Scan(&movedLive))
-	require.Positive(t, movedLive, "primary-key moves must land live rows under the new keys")
-
-	var sentinelLive, sentinelOldLive int64
-	evolvingDest := quoteStressIdentifier(msqStressDestSchema) + "." + quoteStressIdentifier("dbo_"+msqStressEvolving)
-	require.NoError(t, destPool.QueryRow(ctx, fmt.Sprintf(
-		`SELECT COUNT(*) FROM %s WHERE id = $1 AND cohort = 'sentinel' AND NOT "_cdc_deleted"`, evolvingDest,
-	),
-		msqStressSentinelNew).Scan(&sentinelLive))
-	require.NoError(t, destPool.QueryRow(ctx, fmt.Sprintf(
-		`SELECT COUNT(*) FROM %s WHERE id = $1 AND NOT "_cdc_deleted"`, evolvingDest,
-	),
-		msqStressSentinelOld).Scan(&sentinelOldLive))
-	require.Equal(t, int64(1), sentinelLive, "sentinel row must live under its moved primary key")
-	require.Zero(t, sentinelOldLive, "sentinel row must not remain live under its old primary key")
-
+	// Deep verification runs against quiescent destinations: stop the streams
+	// and hold one DuckDB connection so every check sees a settled catalog.
 	ctrl.stop(t)
-	t.Logf("PERF SUMMARY: %.0f attempted ops/sec, %.0f effective mutations/sec over %v across %d tables; %.2f%% scheduler drops; %d stream restarts; %d soft-deleted rows retained",
-		attemptedRate, achieved, stressLoadDuration, len(finalTables), dropPercent, ctrl.restartCount(), softDeleted)
+	duckDB = openCDCStressDuckDB(t, duckDBPath)
+
+	// Aggregates can match while a final merge was still landing payload
+	// updates when the streams stopped, so retry the deep comparison briefly
+	// before declaring failure.
+	var softDeletedTotal int64
+	for _, destination := range destinations {
+		var compareErr error
+		for attempt := 1; attempt <= 6; attempt++ {
+			if compareErr = destination.compareAll(); compareErr == nil {
+				break
+			}
+			t.Logf("%s deep comparison attempt %d: %v", destination.name, attempt, compareErr)
+			time.Sleep(5 * time.Second)
+		}
+		require.NoError(t, compareErr, "%s row-by-row content comparison failed", destination.name)
+		t.Logf("%s row-by-row content comparison passed for all tables", destination.name)
+
+		require.NoError(t, destination.validate(), "%s destination schema validation failed", destination.name)
+
+		var softDeleted int64
+		for _, tbl := range finalTables {
+			deleted, err := destination.countWhere(tbl.name, "_cdc_deleted")
+			require.NoError(t, err)
+			softDeleted += deleted
+		}
+		require.Positive(t, softDeleted, "%s destination should retain soft-deleted CDC rows", destination.name)
+		softDeletedTotal += softDeleted
+
+		movedLive, err := destination.countWhere(stressTableName(0),
+			fmt.Sprintf("id >= %d AND NOT _cdc_deleted", stressPKMoveOffset))
+		require.NoError(t, err)
+		require.Positive(t, movedLive, "%s: primary-key moves must land live rows under the new keys", destination.name)
+
+		sentinelLive, err := destination.countWhere(msqStressEvolving,
+			fmt.Sprintf("id = %d AND cohort = 'sentinel' AND NOT _cdc_deleted", msqStressSentinelNew))
+		require.NoError(t, err)
+		sentinelOldLive, err := destination.countWhere(msqStressEvolving,
+			fmt.Sprintf("id = %d AND NOT _cdc_deleted", msqStressSentinelOld))
+		require.NoError(t, err)
+		require.Equal(t, int64(1), sentinelLive, "%s: sentinel row must live under its moved primary key", destination.name)
+		require.Zero(t, sentinelOldLive, "%s: sentinel row must not remain live under its old primary key", destination.name)
+	}
+
+	t.Logf("PERF SUMMARY: %.0f effective mutations/sec over %v across %d tables into PostgreSQL and DuckDB; %d stream restarts; %d soft-deleted rows retained across destinations",
+		achieved, stressLoadDuration, len(finalTables), ctrl.restartCount(), softDeletedTotal)
 }

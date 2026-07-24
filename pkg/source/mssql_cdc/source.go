@@ -875,21 +875,29 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 
 // isTransientMSSQLError reports errors SQL Server tells the client to retry:
 // a deadlock victim (1205), most commonly the watermark or change-table reads
-// losing a lock race against the CDC capture job under write-heavy load.
+// losing a lock race against the CDC capture job under write-heavy load. CDC
+// procedures can also wrap the victim error inside their own error number,
+// where only the message text carries the 1205 cause.
 func isTransientMSSQLError(err error) bool {
 	var sqlErr mssqldb.Error
-	return errors.As(err, &sqlErr) && sqlErr.Number == 1205
+	if errors.As(err, &sqlErr) && sqlErr.Number == 1205 {
+		return true
+	}
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "deadlock")
 }
 
 func (s *MSSQLCDCSource) maxLSN(ctx context.Context) (string, error) {
 	var lsn sql.NullString
 	var err error
-	for attempt := 0; attempt < 4; attempt++ {
+	// Deadlock storms around capture-instance DDL or large transactions can
+	// outlast a short retry window, so back off progressively before treating
+	// the watermark read as fatal.
+	for attempt := 0; attempt < 8; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
 			}
 		}
 		err = s.db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_max_lsn(), 2)").Scan(&lsn)

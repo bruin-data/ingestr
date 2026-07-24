@@ -7,7 +7,8 @@
 // MySQL CDC is batch catch-up (snapshot, then replay the binlog to the
 // position captured at stream start, then exit), so instead of one streaming
 // pipeline this test drives parallel MySQL- and DuckDB-destination runs while
-// workers apply ~1000 inserts/updates/deletes/PK-updates per second — every
+// the shared queue-based load generator applies inserts/updates/deletes/
+// PK-updates at the configured target rate — every
 // mid-load run exercises the resume-from-LSN path under active writes. The source
 // server runs in a non-UTC time zone and a wide-types table covers unsigned
 // integer extremes, DECIMAL, JSON, DATE/DATETIME/TIMESTAMP, and binary
@@ -40,7 +41,6 @@ import (
 const (
 	mysqlStressLateSeedRows = 2000
 	mysqlStressTypesTable   = "mstress_types"
-	mysqlStressPKOffset     = int64(1_000_000_000)
 	// Lenient floor: even constrained CI machines snapshot far faster; a miss
 	// indicates a real regression in the snapshot path.
 	mysqlStressMinSnapshotRowsPerSec = 1000.0
@@ -611,91 +611,68 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	loadCtx, stopLoad := context.WithTimeout(ctx, stressLoadDuration)
 	defer stopLoad()
 
-	var inserts, updates, deletes, pkUpdates, opErrors atomic.Int64
-	var firstOpErr atomic.Value
-	recordOpErr := func(err error) {
-		opErrors.Add(1)
-		firstOpErr.CompareAndSwap(nil, err)
-	}
+	gen := newCDCStressLoadGen(t, stressWorkers, stressTargetOpsPerSec, stressLoadDuration)
+	recordOpErr := gen.recordOpErr
 
-	workerInterval := time.Duration(stressWorkers) * time.Second / time.Duration(stressTargetOpsPerSec)
 	var wg sync.WaitGroup
-	for w := 0; w < stressWorkers; w++ {
-		wg.Add(1)
-		go func(seed int64) {
-			defer wg.Done()
-			rng := rand.New(rand.NewSource(seed))
-			ticker := time.NewTicker(workerInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-loadCtx.Done():
-					return
-				case <-ticker.C:
-				}
-				tbl := tables.pick(rng)
-				roll := rng.Intn(100)
-				switch {
-				case roll < 40:
-					id := tbl.nextID.Add(1)
-					var err error
-					if tbl.types {
-						err = mysqlStressInsertTypes(ctx, loadDB, id)
-					} else {
-						_, err = loadDB.ExecContext(ctx,
-							fmt.Sprintf("INSERT INTO %s (id, val, payload, updated_at) VALUES (?, ?, ?, NOW(6))", tbl.name),
-							id, id, fmt.Sprintf("ins-%d-%d", seed, id))
-					}
-					if err != nil {
-						recordOpErr(fmt.Errorf("insert %s id=%d: %w", tbl.name, id, err))
-					} else {
-						inserts.Add(1)
-					}
-				case roll < 75:
-					id := rng.Int63n(tbl.nextID.Load()) + 1
-					var affected int64
-					var err error
-					if tbl.types {
-						affected, err = mysqlStressUpdateTypes(ctx, loadDB, id, seed)
-					} else {
-						var result sql.Result
-						result, err = loadDB.ExecContext(ctx,
-							fmt.Sprintf("UPDATE %s SET val = val + 1, payload = ?, updated_at = NOW(6) WHERE id = ?", tbl.name),
-							fmt.Sprintf("upd-%d-%d", seed, id), id)
-						if err == nil {
-							affected, _ = result.RowsAffected()
-						}
-					}
-					if err != nil {
-						recordOpErr(fmt.Errorf("update %s id=%d: %w", tbl.name, id, err))
-					} else {
-						updates.Add(affected)
-					}
-				case roll < 90 || tbl.types:
-					id := rng.Int63n(tbl.nextID.Load()) + 1
-					result, err := loadDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", tbl.name), id)
-					if err != nil {
-						recordOpErr(fmt.Errorf("delete %s id=%d: %w", tbl.name, id, err))
-					} else {
-						affected, _ := result.RowsAffected()
-						deletes.Add(affected)
-					}
-				default:
-					// Primary-key update: exercises the delete+insert change pair.
-					id := rng.Int63n(tbl.nextID.Load()) + 1
-					result, err := loadDB.ExecContext(ctx,
-						fmt.Sprintf("UPDATE %s SET id = id + ?, updated_at = NOW(6) WHERE id = ? AND id < ?", tbl.name),
-						mysqlStressPKOffset, id, mysqlStressPKOffset)
-					if err != nil {
-						recordOpErr(fmt.Errorf("pk-update %s id=%d: %w", tbl.name, id, err))
-					} else {
-						affected, _ := result.RowsAffected()
-						pkUpdates.Add(affected)
-					}
+	gen.start(loadCtx, &wg, func(rng *rand.Rand) (string, int64, error) {
+		tbl := tables.pick(rng)
+		roll := rng.Intn(100)
+		switch {
+		case roll < 40:
+			id := tbl.nextID.Add(1)
+			var err error
+			if tbl.types {
+				err = mysqlStressInsertTypes(ctx, loadDB, id)
+			} else {
+				_, err = loadDB.ExecContext(ctx,
+					fmt.Sprintf("INSERT INTO %s (id, val, payload, updated_at) VALUES (?, ?, ?, NOW(6))", tbl.name),
+					id, id, fmt.Sprintf("ins-%d", id))
+			}
+			if err != nil {
+				return "insert", 0, fmt.Errorf("insert %s id=%d: %w", tbl.name, id, err)
+			}
+			return "insert", 1, nil
+		case roll < 75:
+			id := rng.Int63n(tbl.nextID.Load()) + 1
+			var affected int64
+			var err error
+			if tbl.types {
+				affected, err = mysqlStressUpdateTypes(ctx, loadDB, id, rng.Int63n(1_000_000))
+			} else {
+				var result sql.Result
+				result, err = loadDB.ExecContext(ctx,
+					fmt.Sprintf("UPDATE %s SET val = val + 1, payload = ?, updated_at = NOW(6) WHERE id = ?", tbl.name),
+					fmt.Sprintf("upd-%d", id), id)
+				if err == nil {
+					affected, _ = result.RowsAffected()
 				}
 			}
-		}(int64(w + 1))
-	}
+			if err != nil {
+				return "update", 0, fmt.Errorf("update %s id=%d: %w", tbl.name, id, err)
+			}
+			return "update", affected, nil
+		case roll < 90 || tbl.types:
+			id := rng.Int63n(tbl.nextID.Load()) + 1
+			result, err := loadDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", tbl.name), id)
+			if err != nil {
+				return "delete", 0, fmt.Errorf("delete %s id=%d: %w", tbl.name, id, err)
+			}
+			affected, _ := result.RowsAffected()
+			return "delete", affected, nil
+		default:
+			// Primary-key update: exercises the delete+insert change pair.
+			id := rng.Int63n(tbl.nextID.Load()) + 1
+			result, err := loadDB.ExecContext(ctx,
+				fmt.Sprintf("UPDATE %s SET id = id + ?, updated_at = NOW(6) WHERE id = ? AND id < ?", tbl.name),
+				stressPKMoveOffset, id, stressPKMoveOffset)
+			if err != nil {
+				return "pk-update", 0, fmt.Errorf("pk-update %s id=%d: %w", tbl.name, id, err)
+			}
+			affected, _ := result.RowsAffected()
+			return "pk-update", affected, nil
+		}
+	})
 
 	wg.Add(1)
 	go func() {
@@ -760,9 +737,8 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 			<-loadDone
 			t.Fatalf("catch-up run failed during load phase: %v", err)
 		case <-status.C:
-			t.Logf("t=%v: %d inserts, %d updates, %d deletes, %d pk-updates, %d catch-up runs, %d op errors",
-				time.Since(started).Round(time.Second), inserts.Load(), updates.Load(), deletes.Load(),
-				pkUpdates.Load(), catchupRuns.Load(), opErrors.Load())
+			t.Logf("t=%v: %s, catch-up runs=%d",
+				time.Since(started).Round(time.Second), gen.status(), catchupRuns.Load())
 		}
 	}
 	select {
@@ -771,19 +747,10 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	case <-runnerDone:
 	}
 
-	if n := opErrors.Load(); n > 0 {
-		t.Fatalf("%d load operations failed, first error: %v", n, firstOpErr.Load())
-	}
-	totalOps := inserts.Load() + updates.Load() + deletes.Load() + pkUpdates.Load()
-	achieved := float64(totalOps) / stressLoadDuration.Seconds()
-	t.Logf("load complete: %d effective ops (%d inserts, %d updates, %d deletes, %d pk-updates), %.0f ops/sec achieved, %d mid-load catch-up runs (avg %v)",
-		totalOps, inserts.Load(), updates.Load(), deletes.Load(), pkUpdates.Load(), achieved,
+	achieved := gen.verify()
+	t.Logf("%d mid-load catch-up runs (avg %v)",
 		catchupRuns.Load(), (time.Duration(catchupTotal.Load()) / time.Duration(max(1, catchupRuns.Load()))).Round(time.Millisecond))
-	require.GreaterOrEqual(t, achieved, float64(stressTargetOpsPerSec)/2,
-		"load generator could not sustain enough pressure for the test to be meaningful")
 	require.Positive(t, catchupRuns.Load(), "at least one mid-load catch-up run must complete to exercise resume under load")
-	require.Positive(t, pkUpdates.Load(), "workload should execute real primary-key updates")
-	require.Positive(t, deletes.Load(), "workload should execute real deletes")
 
 	finalTables := tables.snapshot()
 	require.Len(t, finalTables, mysqlStressInitialTables+1+stressLateTables, "all initial, types, and late tables should exist")
@@ -821,12 +788,12 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 				var live, tombstones int64
 				if err := dstVerify.QueryRowContext(ctx, fmt.Sprintf(
 					"SELECT COUNT(*) FROM %s WHERE id >= ? AND `_cdc_deleted` = FALSE", table,
-				), mysqlStressPKOffset).Scan(&live); err != nil {
+				), stressPKMoveOffset).Scan(&live); err != nil {
 					return 0, 0, err
 				}
 				err := dstVerify.QueryRowContext(ctx, fmt.Sprintf(
 					"SELECT COUNT(*) FROM %s WHERE id < ? AND `_cdc_deleted` = TRUE", table,
-				), mysqlStressPKOffset).Scan(&tombstones)
+				), stressPKMoveOffset).Scan(&tombstones)
 				return live, tombstones, err
 			},
 		},
@@ -861,12 +828,12 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 					quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
 					if err := db.QueryRowContext(ctx, fmt.Sprintf(
 						"SELECT COUNT(*) FROM %s WHERE id >= ? AND _cdc_deleted = FALSE", quoted,
-					), mysqlStressPKOffset).Scan(&live); err != nil {
+					), stressPKMoveOffset).Scan(&live); err != nil {
 						return err
 					}
 					return db.QueryRowContext(ctx, fmt.Sprintf(
 						"SELECT COUNT(*) FROM %s WHERE id < ? AND _cdc_deleted = TRUE", quoted,
-					), mysqlStressPKOffset).Scan(&tombstones)
+					), stressPKMoveOffset).Scan(&tombstones)
 				})
 				return live, tombstones, err
 			},

@@ -66,6 +66,20 @@ func withCDCStressDuckDB(path string, fn func(*sql.DB) error) error {
 	return fn(db)
 }
 
+// withCDCStressDuckDBReadOnly opens a read-only monitoring connection. Any
+// query that runs while a pipeline may still be writing the file must use
+// this: in-process DuckDB instances do not conflict on the file lock, and a
+// read-write open replays and truncates the writer's WAL, corrupting the
+// database under load.
+func withCDCStressDuckDBReadOnly(path string, fn func(*sql.DB) error) error {
+	db, err := sql.Open("adbc_generic", "driver=duckdb;path="+path+";access_mode=read_only")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	return fn(db)
+}
+
 func canonicalizeCDCStressJSON(raw string) (string, error) {
 	decoder := json.NewDecoder(bytes.NewBufferString(raw))
 	decoder.UseNumber()
@@ -133,6 +147,8 @@ func normalizeCDCStressTime(value string) (string, bool) {
 	for _, layout := range []string{
 		"2006-01-02 15:04:05.999999999",
 		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05",
 	} {
 		if parsed, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
 			return parsed.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"), true
