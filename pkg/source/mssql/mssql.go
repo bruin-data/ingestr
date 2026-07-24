@@ -792,6 +792,21 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	return record, rowCount, nil
 }
 
+// NormalizeUUIDValue converts the driver's raw uniqueidentifier
+// representation into its canonical string form, honoring the connection's
+// "guid conversion" byte-order setting. Shared with the CDC source, which
+// scans the same driver values.
+func NormalizeUUIDValue(val interface{}, guidConversion bool) (interface{}, error) {
+	return normalizeUUIDValue(val, guidConversion)
+}
+
+// GUIDConversionEnabled reports whether the connection string enables the
+// go-mssqldb "guid conversion" setting, which changes uniqueidentifier byte
+// order on the wire.
+func GUIDConversionEnabled(connStr string) bool {
+	return guidConversionEnabled(connStr)
+}
+
 func normalizeUUIDValue(val interface{}, guidConversion bool) (interface{}, error) {
 	switch v := val.(type) {
 	case nil:

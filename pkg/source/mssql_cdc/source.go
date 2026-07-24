@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -39,6 +42,12 @@ const (
 	// change reads are retried per table before the failure is treated as
 	// permanent.
 	maxTransientReadFailures = 20
+
+	// captureHealthInterval throttles the best-effort sys.dm_cdc_errors
+	// probe that surfaces capture-job failures during streaming. Without it
+	// a dead capture job freezes the harvest watermark and the stream reads
+	// as caught up while the source backlog grows.
+	captureHealthInterval = 5 * time.Minute
 )
 
 func sleepPoll(ctx context.Context, interval time.Duration) error {
@@ -47,6 +56,20 @@ func sleepPoll(ctx context.Context, interval time.Duration) error {
 		return ctx.Err()
 	case <-time.After(interval):
 		return nil
+	}
+}
+
+// emitResult sends a result without wedging the producer goroutine when the
+// consumer has gone away: cancellation releases the batch and unblocks.
+func emitResult(ctx context.Context, results chan<- source.RecordBatchResult, res source.RecordBatchResult) error {
+	select {
+	case results <- res:
+		return nil
+	case <-ctx.Done():
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return ctx.Err()
 	}
 }
 
@@ -63,10 +86,70 @@ type CDCConfig struct {
 }
 
 type MSSQLCDCSource struct {
-	db        *sql.DB
-	uri       string
-	cdcConfig CDCConfig
-	lag       *mssqlLagState
+	db             *sql.DB
+	uri            string
+	cdcConfig      CDCConfig
+	lag            *mssqlLagState
+	health         captureHealth
+	guidConversion bool
+
+	stateMu sync.Mutex
+	state   source.CDCStateCommitToken
+}
+
+// captureHealth throttles capture-job error probes and deduplicates the
+// warnings they produce. Only errors recorded after the stream started are
+// reported, each once.
+type captureHealth struct {
+	mu            sync.Mutex
+	nextCheck     time.Time
+	warnedThrough time.Time
+}
+
+func (h *captureHealth) reset(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextCheck = now.Add(captureHealthInterval)
+	h.warnedThrough = now
+}
+
+func (h *captureHealth) shouldCheck(now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if now.Before(h.nextCheck) {
+		return false
+	}
+	h.nextCheck = now.Add(captureHealthInterval)
+	return true
+}
+
+func (h *captureHealth) claimWarn(entry time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !entry.After(h.warnedThrough) {
+		return false
+	}
+	h.warnedThrough = entry
+	return true
+}
+
+// checkCaptureHealth surfaces capture-job failures recorded in
+// sys.dm_cdc_errors. Best-effort: a missing VIEW DATABASE STATE permission or
+// an empty view stays silent.
+func (s *MSSQLCDCSource) checkCaptureHealth(ctx context.Context) {
+	if !s.health.shouldCheck(time.Now()) {
+		return
+	}
+	var entryTime sql.NullTime
+	var message sql.NullString
+	err := s.db.QueryRowContext(ctx, "SELECT TOP (1) entry_time, error_message FROM sys.dm_cdc_errors ORDER BY entry_time DESC").Scan(&entryTime, &message)
+	if err != nil || !entryTime.Valid {
+		return
+	}
+	if !s.health.claimWarn(entryTime.Time) {
+		return
+	}
+	output.Warnf("Warning: SQL Server CDC capture job error at %s: %s\n", entryTime.Time.Format(time.RFC3339), strings.TrimSpace(message.String))
 }
 
 // mssqlLagState holds the last observed capture watermark and how far behind the
@@ -131,12 +214,15 @@ type tableMetadata struct {
 }
 
 type CDCTable struct {
-	source      *MSSQLCDCSource
-	tableName   string
-	metadata    tableMetadata
-	tableSchema *schema.TableSchema
-	primaryKeys []string
-	strategy    config.IncrementalStrategy
+	source    *MSSQLCDCSource
+	tableName string
+	// requestedName is the table name the pipeline asked for, which is the
+	// key it registers CDC state under; state recording must use it verbatim.
+	requestedName string
+	metadata      tableMetadata
+	tableSchema   *schema.TableSchema
+	primaryKeys   []string
+	strategy      config.IncrementalStrategy
 }
 
 func NewMSSQLCDCSource() *MSSQLCDCSource {
@@ -235,6 +321,7 @@ func (s *MSSQLCDCSource) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server URI: %w", err)
 	}
+	s.guidConversion = mssql.GUIDConversionEnabled(connStr)
 
 	db, err := sql.Open(driverName, connStr)
 	if err != nil {
@@ -258,6 +345,14 @@ func (s *MSSQLCDCSource) Connect(ctx context.Context, uri string) error {
 	if !cdcEnabled {
 		_ = db.Close()
 		return fmt.Errorf("SQL Server CDC is not enabled for the current database; run sys.sp_cdc_enable_db first")
+	}
+
+	// A NULL harvest watermark means the capture job has never processed the
+	// log — the most common cause is SQL Server Agent not running, which
+	// otherwise reads as an eternally idle, "caught up" stream.
+	var watermark sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT CONVERT(varchar(20), sys.fn_cdc_get_max_lsn(), 2)").Scan(&watermark); err == nil && !watermark.Valid {
+		output.Warnf("Warning: SQL Server CDC has not harvested any changes yet; ensure the CDC capture job is running (SQL Server Agent on self-hosted instances)\n")
 	}
 
 	s.db = db
@@ -319,18 +414,24 @@ func (s *MSSQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	}
 	tableSchema.PrimaryKeys = pks
 
+	// Replace resolves to merge outside full-refresh runs, matching the
+	// pipeline's managed-change resolution. Anything else cannot represent
+	// CDC deletes and boundary re-deliveries correctly.
 	strategy := config.StrategyMerge
-	if req.Strategy != "" && req.Strategy != config.StrategyReplace {
-		strategy = req.Strategy
+	switch req.Strategy {
+	case "", config.StrategyMerge, config.StrategyReplace:
+	default:
+		return nil, fmt.Errorf("incremental strategy %q is not supported for SQL Server CDC; use merge or replace", req.Strategy)
 	}
 
 	return &CDCTable{
-		source:      s,
-		tableName:   tableName(meta),
-		metadata:    meta,
-		tableSchema: tableSchema,
-		primaryKeys: pks,
-		strategy:    strategy,
+		source:        s,
+		tableName:     tableName(meta),
+		requestedName: req.Name,
+		metadata:      meta,
+		tableSchema:   tableSchema,
+		primaryKeys:   pks,
+		strategy:      strategy,
 	}, nil
 }
 
@@ -339,55 +440,132 @@ func (s *MSSQLCDCSource) IsMultiTable() bool {
 }
 
 func (s *MSSQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
-	metas, err := s.getAllTableMetadata(ctx)
+	if s.cdcConfig.CaptureInstance != "" {
+		output.Warnf("Warning: capture_instance is ignored in multi-table SQL Server CDC mode; the newest capture instance of each table is used\n")
+	}
+	tables, skipped, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(metas) == 0 {
-		return nil, fmt.Errorf("no SQL Server CDC-enabled tables found")
+	for _, st := range skipped {
+		output.Warnf("Warning: skipping SQL Server CDC table %s: %s\n", st.name, st.reason)
 	}
-
-	tables := make([]source.SourceTableInfo, 0, len(metas))
-	for _, meta := range metas {
-		tableSchema, err := s.getCapturedSchema(ctx, meta)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName(meta), err)
-		}
-		tableSchema = addCDCColumns(tableSchema)
-		if len(tableSchema.PrimaryKeys) == 0 {
-			return nil, fmt.Errorf("SQL Server CDC table %s has no primary key; multi-table CDC requires source primary keys", tableName(meta))
-		}
-
-		tables = append(tables, source.SourceTableInfo{
-			Name:        tableName(meta),
-			Schema:      tableSchema,
-			PrimaryKeys: tableSchema.PrimaryKeys,
-			DestSchema:  s.cdcConfig.DestSchema,
-		})
-	}
-
 	return tables, nil
 }
 
+type skippedTable struct {
+	name   string
+	reason string
+}
+
+// selectTables applies the requested-table filter. A filter entry that
+// matches nothing is a hard error: silently ingesting nothing (and, in
+// streaming mode, polling forever) would hide a typo or an unqualified
+// table name.
+func selectTables(allTables []source.SourceTableInfo, skipped []skippedTable, requested []string) ([]source.SourceTableInfo, error) {
+	filter := map[string]string{}
+	for _, table := range requested {
+		table = strings.TrimSpace(table)
+		if table == "" {
+			continue
+		}
+		filter[strings.ToLower(table)] = table
+	}
+	filtered := len(filter) > 0
+
+	selected := make([]source.SourceTableInfo, 0, len(allTables))
+	for _, table := range allTables {
+		key := strings.ToLower(table.Name)
+		if filtered && filter[key] == "" {
+			continue
+		}
+		delete(filter, key)
+		selected = append(selected, table)
+	}
+
+	for _, st := range skipped {
+		if requestedName, ok := filter[strings.ToLower(st.name)]; ok {
+			return nil, fmt.Errorf("SQL Server CDC table %s cannot be ingested: %s", requestedName, st.reason)
+		}
+	}
+	if len(filter) > 0 {
+		missing := make([]string, 0, len(filter))
+		for _, requestedName := range filter {
+			missing = append(missing, requestedName)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("tables not found among SQL Server CDC-enabled tables: %s; use schema-qualified names (e.g. dbo.users)", strings.Join(missing, ", "))
+	}
+	return selected, nil
+}
+
+// getTables lists ingestible CDC-enabled tables. Tables that cannot join a
+// multi-table run (no primary key, so merge has nothing to apply changes by)
+// are returned separately instead of failing the run: one such table anywhere
+// in the database must not block ingesting the others.
+func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, []skippedTable, error) {
+	metas, err := s.getAllTableMetadata(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(metas) == 0 {
+		return nil, nil, fmt.Errorf("no SQL Server CDC-enabled tables found")
+	}
+
+	tables := make([]source.SourceTableInfo, 0, len(metas))
+	var skipped []skippedTable
+	for _, meta := range metas {
+		tableSchema, err := s.getCapturedSchema(ctx, meta)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get schema for %s: %w", tableName(meta), err)
+		}
+		tableSchema = addCDCColumns(tableSchema)
+		if len(tableSchema.PrimaryKeys) == 0 {
+			skipped = append(skipped, skippedTable{
+				name:   tableName(meta),
+				reason: "it has no primary key; add one, or ingest it alone with --source-table and --primary-key",
+			})
+			continue
+		}
+
+		incarnation, err := s.TableIncarnation(ctx, tableName(meta))
+		if err != nil {
+			return nil, nil, err
+		}
+		// Fingerprint the metadata this listing selected: multi-table reads
+		// ignore the configured capture_instance, so the fingerprint must too.
+		fingerprint, err := s.fingerprintCaptureInstance(ctx, meta)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		tables = append(tables, source.SourceTableInfo{
+			Name:              tableName(meta),
+			Schema:            tableSchema,
+			PrimaryKeys:       tableSchema.PrimaryKeys,
+			DestSchema:        s.cdcConfig.DestSchema,
+			Incarnation:       incarnation,
+			SchemaFingerprint: fingerprint,
+		})
+	}
+
+	if len(tables) == 0 {
+		return nil, skipped, fmt.Errorf("no SQL Server CDC-enabled tables with a primary key found")
+	}
+	return tables, skipped, nil
+}
+
 func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	allTables, err := s.GetTables(ctx)
+	allTables, skipped, err := s.getTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	selected, err := selectTables(allTables, skipped, opts.Tables)
 	if err != nil {
 		return nil, err
 	}
 
-	filter := map[string]bool{}
-	for _, table := range opts.Tables {
-		filter[strings.ToLower(table)] = true
-	}
-
-	selected := make([]source.SourceTableInfo, 0, len(allTables))
-	for _, table := range allTables {
-		if len(filter) > 0 && !filter[strings.ToLower(table.Name)] {
-			continue
-		}
-		selected = append(selected, table)
-	}
-
+	s.resetCDCState()
 	results := make(chan source.RecordBatchResult, 16)
 	go func() {
 		defer close(results)
@@ -399,17 +577,21 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 		for _, table := range selected {
 			meta, err := s.getTableMetadata(ctx, table.Name, "")
 			if err != nil {
-				results <- source.RecordBatchResult{Err: err}
+				_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
 			}
 			metaByTable[table.Name] = meta
 
 			resume := opts.CDCResumeLSNs[table.Name]
+			if isIncompleteSnapshotStamp(resume) {
+				config.Debug("[MSSQL CDC] Stored position %s marks an unfinished snapshot of %s; taking a fresh snapshot", strings.TrimSpace(resume), table.Name)
+				resume = ""
+			}
 			startHex := startLSNFromStored(resume)
 			if startHex != "" {
 				canResume, err := s.canResume(ctx, meta, startHex)
 				if err != nil {
-					results <- source.RecordBatchResult{Err: err}
+					_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 					return
 				}
 				if canResume {
@@ -421,14 +603,18 @@ func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 
 			snapshotLSN, err := s.snapshotTable(ctx, meta, table.Schema, opts.ReadOptions, results, table.Name)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed for %s: %w", table.Name, err)}
+				_ = emitResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed for %s: %w", table.Name, err)})
 				return
 			}
 			startByTable[table.Name] = snapshotLSN
+			s.recordSnapshotState(table.Name, snapshotCompleteLSN(snapshotLSN))
+			if err := s.emitStateToken(ctx, opts.ReadOptions, results, table.Name); err != nil {
+				return
+			}
 		}
 
 		if err := s.streamTables(ctx, selected, metaByTable, startByTable, reReadByTable, opts.ReadOptions, results); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 		}
 	}()
 
@@ -653,6 +839,17 @@ func (s *MSSQLCDCSource) getCapturedSchema(ctx context.Context, meta tableMetada
 		return nil, fmt.Errorf("CDC capture instance %s has no captured columns", meta.CaptureInstance)
 	}
 
+	// Captured columns the source table no longer has are snapshotted as
+	// NULL, so they must read as nullable regardless of the change table's
+	// original constraint.
+	if len(meta.CurrentColumns) > 0 {
+		for i := range columns {
+			if !meta.CurrentColumns[strings.ToLower(columns[i].Name)] {
+				columns[i].Nullable = true
+			}
+		}
+	}
+
 	primaryKeys, err := s.primaryKeys(ctx, meta)
 	if err != nil {
 		return nil, err
@@ -750,21 +947,27 @@ func (t *CDCTable) GetSchema(ctx context.Context) (*schema.TableSchema, error) {
 }
 
 func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	t.source.resetCDCState()
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
 		defer close(results)
 
-		startHex := startLSNFromStored(opts.CDCResumeLSN)
+		resume := opts.CDCResumeLSN
+		if isIncompleteSnapshotStamp(resume) {
+			config.Debug("[MSSQL CDC] Stored position %s marks an unfinished snapshot of %s; taking a fresh snapshot", strings.TrimSpace(resume), t.tableName)
+			resume = ""
+		}
+		startHex := startLSNFromStored(resume)
 		if startHex != "" {
 			canResume, err := t.source.canResume(ctx, t.metadata, startHex)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: err}
+				_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
 			}
 			if canResume {
-				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, !isSnapshotStamp(opts.CDCResumeLSN), opts, results, ""); err != nil {
-					results <- source.RecordBatchResult{Err: err}
+				if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, startHex, !isSnapshotStamp(resume), opts, results, ""); err != nil {
+					_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 				}
 				return
 			}
@@ -773,12 +976,16 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 
 		snapshotLSN, err := t.source.snapshotTable(ctx, t.metadata, t.tableSchema, opts, results, "")
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)}
+			_ = emitResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
+			return
+		}
+		t.source.recordSnapshotState(t.requestedName, snapshotCompleteLSN(snapshotLSN))
+		if err := t.source.emitStateToken(ctx, opts, results, ""); err != nil {
 			return
 		}
 
 		if err := t.source.streamTable(ctx, t.metadata, t.tableSchema, snapshotLSN, false, opts, results, ""); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			_ = emitResult(ctx, results, source.RecordBatchResult{Err: err})
 		}
 	}()
 
@@ -797,12 +1004,48 @@ func (s *MSSQLCDCSource) canResume(ctx context.Context, meta tableMetadata, star
 }
 
 func (s *MSSQLCDCSource) snapshotTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) (string, error) {
-	snapshotLSN, err := s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSnapshot)
-	if err == nil {
-		return snapshotLSN, nil
+	// Probe instead of try-and-fall-back: a failed SNAPSHOT attempt leaves
+	// the session isolation level set on the pooled connection (SQL Server
+	// scopes SET TRANSACTION ISOLATION LEVEL to the session, not the
+	// transaction), poisoning later queries with error 3952.
+	useSnapshot, err := s.snapshotIsolationAllowed(ctx)
+	if err != nil {
+		return "", err
 	}
-	config.Debug("[MSSQL CDC] SNAPSHOT isolation snapshot failed for %s: %v; retrying with table lock", tableName(meta), err)
+	if useSnapshot {
+		snapshotLSN, err := s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSnapshot)
+		if err == nil {
+			return snapshotLSN, nil
+		}
+		// Only fall back when the database rejected SNAPSHOT isolation after
+		// all (the setting can flip between probe and scan). Retrying every
+		// failure would rescan the whole table under HOLDLOCK, holding shared
+		// locks on a live table for no benefit.
+		if !isSnapshotIsolationUnavailableError(err) {
+			return "", err
+		}
+		config.Debug("[MSSQL CDC] SNAPSHOT isolation became unavailable (%v); retrying snapshot of %s with a table lock", err, tableName(meta))
+	} else {
+		config.Debug("[MSSQL CDC] Snapshot isolation is not allowed for this database; snapshotting %s with a table lock", tableName(meta))
+	}
 	return s.snapshotTableWithIsolation(ctx, meta, tableSchema, opts, results, resultTable, sql.LevelSerializable)
+}
+
+// snapshotIsolationAllowed reports whether the database permits SNAPSHOT
+// isolation (sys.databases.snapshot_isolation_state = 1).
+func (s *MSSQLCDCSource) snapshotIsolationAllowed(ctx context.Context) (bool, error) {
+	var state int
+	if err := s.db.QueryRowContext(ctx, "SELECT CONVERT(int, snapshot_isolation_state) FROM sys.databases WHERE database_id = DB_ID()").Scan(&state); err != nil {
+		return false, fmt.Errorf("failed to check snapshot isolation state: %w", err)
+	}
+	return state == 1, nil
+}
+
+// isSnapshotIsolationUnavailableError matches error 3952: the database does
+// not allow SNAPSHOT isolation (ALLOW_SNAPSHOT_ISOLATION is OFF).
+func isSnapshotIsolationUnavailableError(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 3952
 }
 
 func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string, isolation sql.IsolationLevel) (string, error) {
@@ -838,9 +1081,25 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		// BeginTx's isolation level sticks to the session, so restore the
+		// default before the connection re-enters the pool. The reset must
+		// survive request cancellation — otherwise the poisoned session leaks
+		// back into the pool — and a connection that cannot be reset is
+		// discarded rather than returned.
+		resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := conn.ExecContext(resetCtx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
 
-	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: isolation == sql.LevelSnapshot})
+	// go-mssqldb rejects ReadOnly transactions outright ("read-only
+	// transactions are not supported"), so requesting one here used to fail
+	// every SNAPSHOT-isolation attempt and silently push all snapshots onto
+	// the SERIALIZABLE+HOLDLOCK fallback, which blocks writers.
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
 		return "", fmt.Errorf("failed to begin snapshot transaction: %w", err)
 	}
@@ -859,10 +1118,12 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 		// discard target rows left by an interrupted earlier attempt or a lost
 		// resume position, so source deletes missed while the position was
 		// invalid cannot linger.
-		results <- source.RecordBatchResult{Truncate: true, TableName: resultTable}
+		if err := emitResult(ctx, results, source.RecordBatchResult{Truncate: true, TableName: resultTable}); err != nil {
+			return "", err
+		}
 	}
 
-	if err := s.rowsToSnapshotBatches(rows, tableSchema, opts, snapshotLSN, results, resultTable); err != nil {
+	if err := s.rowsToSnapshotBatches(ctx, rows, tableSchema, opts, snapshotLSN, results, resultTable); err != nil {
 		return "", err
 	}
 
@@ -871,6 +1132,16 @@ func (s *MSSQLCDCSource) snapshotTableWithIsolation(ctx context.Context, meta ta
 	}
 
 	return snapshotLSN, nil
+}
+
+// isInvalidLSNRangeError matches error 313, which fn_cdc_get_all_changes
+// raises with a famously misleading message ("an insufficient number of
+// arguments were supplied") when the requested window falls outside the
+// capture instance's valid LSN range — in practice, when cleanup advanced the
+// low watermark past the cursor mid-stream.
+func isInvalidLSNRangeError(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 313
 }
 
 // isTransientMSSQLError reports errors SQL Server tells the client to retry:
@@ -944,14 +1215,22 @@ func lowestLSN(byTable map[string]string) string {
 
 func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.SourceTableInfo, metas map[string]tableMetadata, startByTable map[string]string, reReadByTable map[string]bool, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	s.lag.streaming.Store(opts.Streaming)
-	// Each table's initial position (a resume cursor or a snapshot stamp) may
-	// sit mid-transaction, so the first read includes it; see streamTable.
+	if opts.Streaming {
+		s.health.reset(time.Now())
+	}
+	// Only change-row resume cursors may sit mid-transaction and need an
+	// inclusive first read; snapshot stamps already cover their LSN. See
+	// streamTable.
 	inclusiveByTable := make(map[string]bool, len(tables))
 	for _, table := range tables {
-		inclusiveByTable[table.Name] = true
+		inclusiveByTable[table.Name] = reReadByTable[table.Name]
 	}
 	transientFailures := make(map[string]int, len(tables))
+	lastCheckpointLSN := ""
 	for {
+		if opts.Streaming {
+			s.checkCaptureHealth(ctx)
+		}
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
 			return err
@@ -1005,6 +1284,16 @@ func (s *MSSQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			continue
 		}
 
+		// Every table has been read through targetLSN, so it is the globally
+		// safe position for this stream.
+		if targetLSN != lastCheckpointLSN {
+			s.recordCheckpointState(watermarkStoredLSN(targetLSN))
+			if err := s.emitStateToken(ctx, opts, results, ""); err != nil {
+				return err
+			}
+			lastCheckpointLSN = targetLSN
+		}
+
 		if !opts.Streaming {
 			return nil
 		}
@@ -1038,17 +1327,22 @@ func planChangeWindow(start, target string, reReadBoundary bool) (string, bool) 
 
 func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, tableSchema *schema.TableSchema, startLSN string, reReadBoundary bool, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
 	s.lag.streaming.Store(opts.Streaming)
+	if opts.Streaming {
+		s.health.reset(time.Now())
+	}
 	current := startLSN
-	// The initial position may sit mid-transaction: a resume cursor names the
-	// destination's last durable change row, whose transaction can continue
-	// past it, and a snapshot stamp must re-deliver changes at the boundary
-	// LSN. The first read therefore includes the position; merge is idempotent
-	// for the rows this re-delivers. Once the stream has advanced to a harvest
-	// watermark, everything at that LSN has been delivered, so later polls
-	// start strictly after it.
-	inclusive := true
+	// Only a change-row resume cursor may sit mid-transaction: its transaction
+	// can continue past the stored row, so the first read includes the
+	// position and merge absorbs the re-delivered rows. A snapshot stamp or a
+	// delivered watermark already covers everything at its LSN, so the first
+	// read starts strictly after it — an inclusive read there would re-deliver
+	// whole transactions as change rows for no benefit.
+	inclusive := reReadBoundary
 	transientFailures := 0
 	for {
+		if opts.Streaming {
+			s.checkCaptureHealth(ctx)
+		}
 		targetLSN, err := s.maxLSN(ctx)
 		if err != nil {
 			return err
@@ -1077,6 +1371,10 @@ func (s *MSSQLCDCSource) streamTable(ctx context.Context, meta tableMetadata, ta
 			inclusive = false
 			reReadBoundary = false
 			current = targetLSN
+			s.recordCheckpointState(watermarkStoredLSN(current))
+			if err := s.emitStateToken(ctx, opts, results, resultTable); err != nil {
+				return err
+			}
 		}
 
 		if !opts.Streaming {
@@ -1103,37 +1401,97 @@ func (s *MSSQLCDCSource) readChanges(ctx context.Context, meta tableMetadata, ta
 	query := buildChangesQuery(meta, sourceColumns, inclusive)
 	rows, err := s.db.QueryContext(ctx, query, fromLSN, toLSN)
 	if err != nil {
+		if isInvalidLSNRangeError(err) {
+			return cleanedUpLSNRangeError(meta, fromLSN, err)
+		}
 		return fmt.Errorf("failed to query CDC changes for %s: %w", tableName(meta), err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	return s.rowsToChangeBatches(rows, tableSchema, opts, results, resultTable)
+	// Error 313 can also surface during row iteration rather than on the
+	// initial query, so classify the read error too.
+	if err := s.rowsToChangeBatches(ctx, rows, tableSchema, opts, results, resultTable); err != nil {
+		if isInvalidLSNRangeError(err) {
+			return cleanedUpLSNRangeError(meta, fromLSN, err)
+		}
+		return err
+	}
+	return nil
 }
 
-func (s *MSSQLCDCSource) rowsToSnapshotBatches(rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, snapshotLSN string, results chan<- source.RecordBatchResult, resultTable string) error {
+func cleanedUpLSNRangeError(meta tableMetadata, fromLSN string, err error) error {
+	return fmt.Errorf("CDC changes for %s from LSN %s are no longer available: change-table cleanup advanced past the cursor (retention exceeded); the next run will take a fresh snapshot: %w", tableName(meta), fromLSN, err)
+}
+
+func (s *MSSQLCDCSource) rowsToSnapshotBatches(ctx context.Context, rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, snapshotLSN string, results chan<- source.RecordBatchResult, resultTable string) error {
 	sourceColumns := sourceColumnsWithoutCDC(tableSchema)
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
-	cdcLSN := formatStoredLSN(snapshotLSN, "", 0)
+	// Snapshot rows are stamped incomplete until the last batch. Resume
+	// trusts the destination's MAX(_cdc_lsn), and streaming destinations
+	// commit batches incrementally, so a crash mid-snapshot leaves partial
+	// rows whose stamp must not read as a resumable position. Batches are
+	// emitted one behind the read, and only the final batch carries the
+	// complete stamp, which sorts above the incomplete one: MAX names a
+	// complete stamp exactly when the whole snapshot became durable.
+	incompleteLSN := snapshotIncompleteLSN(snapshotLSN)
+	completeLSN := snapshotCompleteLSN(snapshotLSN)
 	syncedAt := time.Now().UTC()
 
+	var pending arrow.RecordBatch
 	for {
-		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, func(builders []array.Builder) {
-			appendCDCValues(builders, len(sourceColumns), cdcLSN, false, syncedAt)
+		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, func(builders []array.Builder) {
+			appendCDCValues(builders, len(sourceColumns), incompleteLSN, false, syncedAt)
 		})
 		if err != nil {
+			if pending != nil {
+				pending.Release()
+			}
 			return err
 		}
 		if count == 0 {
-			return nil
+			break
 		}
-		results <- source.RecordBatchResult{Batch: record, TableName: resultTable}
+		if pending != nil {
+			if err := emitResult(ctx, results, source.RecordBatchResult{Batch: pending, TableName: resultTable}); err != nil {
+				record.Release()
+				return err
+			}
+		}
+		pending = record
 	}
+	if pending == nil {
+		return nil
+	}
+	return emitResult(ctx, results, source.RecordBatchResult{Batch: restampSnapshotLSN(pending, len(sourceColumns), completeLSN), TableName: resultTable})
 }
 
-func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
+// restampSnapshotLSN rebuilds a snapshot batch's _cdc_lsn column with the
+// given stamp. Used to mark the final batch of a snapshot complete after the
+// scan proves no rows follow it.
+func restampSnapshotLSN(record arrow.RecordBatch, lsnCol int, lsn string) arrow.RecordBatch {
+	mem := memory.NewGoAllocator()
+	b := array.NewStringBuilder(mem)
+	defer b.Release()
+	for range int(record.NumRows()) {
+		b.Append(lsn)
+	}
+	arr := b.NewArray()
+	defer arr.Release()
+
+	cols := make([]arrow.Array, record.NumCols())
+	for i := range cols {
+		cols[i] = record.Column(i)
+	}
+	cols[lsnCol] = arr
+	out := array.NewRecordBatch(record.Schema(), cols, record.NumRows())
+	record.Release()
+	return out
+}
+
+func (s *MSSQLCDCSource) rowsToChangeBatches(ctx context.Context, rows *sql.Rows, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, resultTable string) error {
 	sourceColumns := sourceColumnsWithoutCDC(tableSchema)
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -1147,14 +1505,16 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(rows *sql.Rows, tableSchema *schema
 	}
 
 	for {
-		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, syncedAt, pairer)
+		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, syncedAt, pairer)
 		if err != nil {
 			return err
 		}
 		if count == 0 {
 			return nil
 		}
-		results <- source.RecordBatchResult{Batch: record, TableName: resultTable}
+		if err := emitResult(ctx, results, source.RecordBatchResult{Batch: record, TableName: resultTable}); err != nil {
+			return err
+		}
 	}
 }
 
@@ -1278,7 +1638,21 @@ func cdcValueEqual(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
+// normalizeSourceValue converts driver-specific representations into the
+// values the Arrow builders expect. uniqueidentifier arrives as raw bytes
+// whose order depends on the connection's "guid conversion" setting.
+func normalizeSourceValue(col schema.Column, val any, guidConversion bool) (any, error) {
+	if col.DataType != schema.TypeUUID {
+		return val, nil
+	}
+	normalized, err := mssql.NormalizeUUIDValue(val, guidConversion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert uniqueidentifier column %q: %w", col.Name, err)
+	}
+	return normalized, nil
+}
+
+func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1300,7 +1674,12 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 		}
 
 		for i, dest := range scanDest {
-			arrowconv.AppendValue(builders[i], *dest.(*any))
+			val, err := normalizeSourceValue(sourceColumns[i], *dest.(*any), guidConversion)
+			if err != nil {
+				releaseBuilders(builders)
+				return nil, 0, err
+			}
+			arrowconv.AppendValue(builders[i], val)
 		}
 		appendCDC(builders)
 
@@ -1313,7 +1692,7 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 	return finishBatch(rows, arrowSchema, builders, rowCount)
 }
 
-func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
+func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1337,7 +1716,12 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 
 		values := make([]any, len(sourceColumns))
 		for i := range values {
-			values[i] = *scanDest[i].(*any)
+			val, err := normalizeSourceValue(sourceColumns[i], *scanDest[i].(*any), guidConversion)
+			if err != nil {
+				releaseBuilders(builders)
+				return nil, 0, err
+			}
+			values[i] = val
 		}
 		lsn := fmt.Sprintf("%v", *scanDest[len(sourceColumns)].(*any))
 		op, err := operationValue(*scanDest[len(sourceColumns)+1].(*any))
@@ -1541,11 +1925,35 @@ func formatStoredLSN(startHex, seqHex string, op int) string {
 	return fmt.Sprintf("%s:%s:%02d", startHex, seqHex, op)
 }
 
+// Snapshot stamps carry a zero seqval, which no delivered change row can
+// have, plus a final byte encoding completeness. The incomplete stamp sorts
+// below the complete one so the destination's MAX(_cdc_lsn) only names a
+// complete stamp once the snapshot's final batch became durable.
+//
+// Positions written by versions that predate the completeness byte used the
+// incomplete encoding for finished snapshots; they re-snapshot once after an
+// upgrade, which is the safe direction (they cannot prove completeness).
+func snapshotIncompleteLSN(startHex string) string {
+	return formatStoredLSN(startHex, "", 0)
+}
+
+func snapshotCompleteLSN(startHex string) string {
+	return formatStoredLSN(startHex, "", 1)
+}
+
 // isSnapshotStamp reports whether a stored position was written by a snapshot
-// (zero seqval and operation) rather than by a delivered change row. Only a
-// change-row position can sit mid-transaction, so only it earns a boundary
-// re-read; a snapshot stamp already covers everything at its LSN.
+// (zero seqval) rather than by a delivered change row. Only a change-row
+// position can sit mid-transaction, so only it earns a boundary re-read; a
+// snapshot stamp already covers everything at its LSN.
 func isSnapshotStamp(stored string) bool {
+	s := strings.ToUpper(strings.TrimSpace(stored))
+	return strings.HasSuffix(s, ":00000000000000000000:00") || strings.HasSuffix(s, ":00000000000000000000:01")
+}
+
+// isIncompleteSnapshotStamp reports whether a stored position marks a
+// snapshot that never finished: resuming from it would skip every row the
+// interrupted scan had not reached, so it forces a fresh snapshot instead.
+func isIncompleteSnapshotStamp(stored string) bool {
 	return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(stored)), ":00000000000000000000:00")
 }
 

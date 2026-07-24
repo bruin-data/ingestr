@@ -1503,7 +1503,7 @@ func cdcStatePositionValid(position string) bool {
 	if _, err := pglogrepl.ParseLSN(position); err == nil {
 		return true
 	}
-	return mysqlCDCStatePositionRE.MatchString(position)
+	return mysqlCDCStatePositionRE.MatchString(position) || mssqlCDCStatePositionRE.MatchString(position)
 }
 
 func cdcStateEntryPositionValid(entry destination.CDCStateEntry) bool {
@@ -1529,6 +1529,11 @@ func compareCDCPositions(left, right string) int {
 		if mysqlCDCStatePositionRE.MatchString(left) && mysqlCDCStatePositionRE.MatchString(right) {
 			return strings.Compare(left, right)
 		}
+		// SQL Server CDC positions are fixed-width uppercase hex, so their
+		// lexicographic order is their LSN order.
+		if mssqlCDCStatePositionRE.MatchString(left) && mssqlCDCStatePositionRE.MatchString(right) {
+			return strings.Compare(left, right)
+		}
 		return 0
 	}
 	switch {
@@ -1542,6 +1547,11 @@ func compareCDCPositions(left, right string) int {
 }
 
 var mysqlCDCStatePositionRE = regexp.MustCompile(`^\d{20}:[^:]+:\d{20}:\d{20}(?::l1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*)?$`)
+
+// mssqlCDCStatePositionRE matches SQL Server CDC stored positions:
+// start LSN and seqval as fixed-width uppercase hex plus a two-digit
+// operation/completeness byte (see pkg/source/mssql_cdc formatStoredLSN).
+var mssqlCDCStatePositionRE = regexp.MustCompile(`^[0-9A-F]{20}:[0-9A-F]{20}:\d{2}$`)
 
 const (
 	cdcStateIncarnationSeparator   = ";incarnation="

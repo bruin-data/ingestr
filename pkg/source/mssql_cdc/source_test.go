@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -144,6 +145,76 @@ func TestPlanChangeWindowNeverRegressesCursor(t *testing.T) {
 	assert.True(t, read)
 }
 
+func TestSnapshotStampLifecycle(t *testing.T) {
+	const start = "0000002F0000010D0002"
+	incomplete := snapshotIncompleteLSN(start)
+	complete := snapshotCompleteLSN(start)
+
+	assert.True(t, isIncompleteSnapshotStamp(incomplete))
+	assert.False(t, isIncompleteSnapshotStamp(complete))
+	assert.True(t, isSnapshotStamp(incomplete))
+	assert.True(t, isSnapshotStamp(complete))
+	assert.False(t, isSnapshotStamp(formatStoredLSN(start, "0000002F0000010D0003", 4)))
+	assert.False(t, isIncompleteSnapshotStamp(""))
+
+	// The destination resumes from MAX(_cdc_lsn) as a string, so the stamps
+	// and change rows must order: incomplete < complete < any change row.
+	changeRow := formatStoredLSN(start, "0000002F0000010D0003", 1)
+	assert.Less(t, incomplete, complete)
+	assert.Less(t, complete, changeRow)
+}
+
+func TestRowsToSnapshotBatchesMarksOnlyFinalBatchComplete(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mockRows := sqlmock.NewRows([]string{"id", "name"}).
+		AddRow(int64(1), "a").
+		AddRow(int64(2), "b").
+		AddRow(int64(3), "c")
+	mock.ExpectQuery("SELECT").WillReturnRows(mockRows)
+
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 4)
+	s := &MSSQLCDCSource{}
+
+	const snapshotLSN = "0000002F0000010D0002"
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema, source.ReadOptions{PageSize: 1}, snapshotLSN, results, "items")
+	require.NoError(t, err)
+	close(results)
+
+	var stamps []string
+	var ids []int64
+	for res := range results {
+		require.NoError(t, res.Err)
+		lsnCol, ok := res.Batch.Column(2).(*array.String)
+		require.True(t, ok)
+		require.EqualValues(t, 1, res.Batch.NumRows())
+		stamps = append(stamps, lsnCol.Value(0))
+		ids = append(ids, res.Batch.Column(0).(*array.Int64).Value(0))
+		res.Batch.Release()
+	}
+
+	require.Len(t, stamps, 3)
+	assert.Equal(t, []int64{1, 2, 3}, ids, "restamping the final batch must preserve its data columns")
+	assert.Equal(t, snapshotIncompleteLSN(snapshotLSN), stamps[0])
+	assert.Equal(t, snapshotIncompleteLSN(snapshotLSN), stamps[1])
+	assert.Equal(t, snapshotCompleteLSN(snapshotLSN), stamps[2], "only the final batch may carry the complete stamp")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestRowsToSnapshotBatchesReturnsIteratorErrorForEmptyBatch(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -170,10 +241,88 @@ func TestRowsToSnapshotBatchesReturnsIteratorErrorForEmptyBatch(t *testing.T) {
 	results := make(chan source.RecordBatchResult, 1)
 	s := &MSSQLCDCSource{}
 
-	err = s.rowsToSnapshotBatches(rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
 	require.ErrorIs(t, err, iterErr)
 	assert.Empty(t, results)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRowsToSnapshotBatchesNormalizesUUIDColumns(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	// Wire-order bytes for FF19966F-868B-11D0-B42D-00C04FC964FF: the first
+	// three fields arrive little-endian from the driver.
+	wire := []byte{
+		0x6F, 0x96, 0x19, 0xFF,
+		0x8B, 0x86,
+		0xD0, 0x11,
+		0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+	}
+	mockRows := sqlmock.NewRows([]string{"id", "guid"}).AddRow(int64(1), wire)
+	mock.ExpectQuery("SELECT").WillReturnRows(mockRows)
+
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "guid", DataType: schema.TypeUUID, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 2)
+	s := &MSSQLCDCSource{}
+
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema, source.ReadOptions{}, "00000000000000000001", results, "items")
+	require.NoError(t, err)
+
+	res := <-results
+	require.NoError(t, res.Err)
+	defer res.Batch.Release()
+
+	guidCol, ok := res.Batch.Column(1).(*array.String)
+	require.True(t, ok, "UUID column must be an Arrow string column")
+	assert.Equal(t, "FF19966F-868B-11D0-B42D-00C04FC964FF", guidCol.Value(0))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNormalizeSourceValueLeavesNonUUIDColumnsAlone(t *testing.T) {
+	raw := []byte{0x01, 0x02}
+	got, err := normalizeSourceValue(schema.Column{Name: "blob", DataType: schema.TypeBinary}, raw, false)
+	require.NoError(t, err)
+	assert.Equal(t, raw, got)
+
+	_, err = normalizeSourceValue(schema.Column{Name: "guid", DataType: schema.TypeUUID}, raw, false)
+	assert.ErrorContains(t, err, `uniqueidentifier column "guid"`)
+}
+
+func TestSelectTables(t *testing.T) {
+	all := []source.SourceTableInfo{
+		{Name: "dbo.users"},
+		{Name: "sales.orders"},
+	}
+	skipped := []skippedTable{{name: "dbo.audit_log", reason: "it has no primary key"}}
+
+	selected, err := selectTables(all, skipped, nil)
+	require.NoError(t, err)
+	assert.Len(t, selected, 2, "no filter selects every ingestible table")
+
+	selected, err = selectTables(all, skipped, []string{"DBO.Users"})
+	require.NoError(t, err)
+	require.Len(t, selected, 1)
+	assert.Equal(t, "dbo.users", selected[0].Name)
+
+	_, err = selectTables(all, skipped, []string{"dbo.users", "dbo.missing"})
+	assert.ErrorContains(t, err, "dbo.missing")
+	assert.ErrorContains(t, err, "schema-qualified")
+
+	_, err = selectTables(all, skipped, []string{"dbo.audit_log"})
+	assert.ErrorContains(t, err, "no primary key")
 }
 
 func TestValidateCapturedPrimaryKeys(t *testing.T) {
@@ -311,6 +460,33 @@ func TestNewUpdatePairerRequiresCapturedKeys(t *testing.T) {
 
 	_, err := newUpdatePairer(tableSchema, columns)
 	assert.ErrorContains(t, err, `primary key column "ssn"`)
+}
+
+func TestCaptureHealthThrottleAndDedup(t *testing.T) {
+	var h captureHealth
+	start := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+	h.reset(start)
+
+	assert.False(t, h.shouldCheck(start.Add(time.Minute)), "probe must wait out the interval")
+	assert.True(t, h.shouldCheck(start.Add(captureHealthInterval)))
+	assert.False(t, h.shouldCheck(start.Add(captureHealthInterval+time.Second)), "claiming the slot must re-arm the throttle")
+
+	assert.False(t, h.claimWarn(start.Add(-time.Hour)), "errors predating the stream are not reported")
+	errAt := start.Add(10 * time.Minute)
+	assert.True(t, h.claimWarn(errAt))
+	assert.False(t, h.claimWarn(errAt), "the same error is reported once")
+	assert.True(t, h.claimWarn(errAt.Add(time.Minute)), "a newer error is reported again")
+}
+
+func TestErrorClassifiers(t *testing.T) {
+	assert.True(t, isInvalidLSNRangeError(mssqldb.Error{Number: 313}))
+	assert.True(t, isInvalidLSNRangeError(fmt.Errorf("query: %w", mssqldb.Error{Number: 313})))
+	assert.False(t, isInvalidLSNRangeError(mssqldb.Error{Number: 1205}))
+	assert.False(t, isInvalidLSNRangeError(errors.New("boom")))
+
+	assert.True(t, isSnapshotIsolationUnavailableError(mssqldb.Error{Number: 3952}))
+	assert.False(t, isSnapshotIsolationUnavailableError(mssqldb.Error{Number: 1205}))
+	assert.False(t, isSnapshotIsolationUnavailableError(nil))
 }
 
 func TestIsTransientMSSQLError(t *testing.T) {
