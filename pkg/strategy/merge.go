@@ -236,7 +236,13 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
-	records, err := job.GetRecords(ctx, readOpts)
+	// The read context is cancelable so a staging-write failure stops the
+	// source goroutine instead of leaving it parked on a channel send after
+	// the drain window closes (the multi-table path does the same via
+	// CancelSource).
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	records, err := job.GetRecords(readCtx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
 	}
@@ -248,7 +254,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 
 	// Write to staging table using parallel writes. Source TRUNCATE controls
 	// split the input into ordered segments and clear earlier staged changes.
-	sourceTruncated, err := destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, destination.WriteOptions{
+	sourceTruncated, err := destination.WriteWithTruncateBoundariesAfterCancel(ctx, job.Destination, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
 		Parallelism:      job.Config.EffectiveDestinationParallelism(),
@@ -257,7 +263,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
-	})
+	}, cancelRead)
 	if err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}

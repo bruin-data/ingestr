@@ -100,13 +100,11 @@ test-integration: generate
 
 # The CDC stress tests share one harness: a queue-based load generator that
 # tracks the target ops/sec (STRESS_OPS_PER_SEC, default 1000) as closely as
-# the source engine allows, parallel ingestion into two destinations at the
-# same time, and post-run verification that both destinations hold an exact
-# replica of the source (aggregates plus row-by-row canonical comparison).
-# PostgreSQL and MSSQL land into PostgreSQL + DuckDB; MySQL lands into
-# MySQL + DuckDB because only MySQL-family and DuckDB destinations implement
-# the CDC mutation-fencing interfaces MySQL CDC requires. Tune with
-# STRESS_OPS_PER_SEC, STRESS_LOAD_DURATION, STRESS_WORKERS, STRESS_SEED_ROWS:
+# the source engine allows, parallel ingestion into PostgreSQL and DuckDB
+# destinations at the same time, and post-run verification that both
+# destinations hold an exact replica of the source (aggregates plus row-by-row
+# canonical comparison). Tune with STRESS_OPS_PER_SEC, STRESS_LOAD_DURATION,
+# STRESS_WORKERS, STRESS_SEED_ROWS:
 #   STRESS_OPS_PER_SEC=5000 STRESS_LOAD_DURATION=5m make cdc-postgres-stress-test
 
 # Resolve DOCKER_HOST from the active docker context so testcontainers finds
@@ -133,7 +131,7 @@ cdc-postgres-stress-test: generate
 	INTEGRATION_BACKENDS=postgres,mysql $(TELEMETRY_ENV) go test -tags integration -count=1 -v -timeout 5m -run '^TestPostgresCDC_StreamingSchemaEvolution_(DuckDB|MySQL)$$' ./tests/integration/
 
 # High-volume MySQL CDC accuracy and performance test running parallel batch
-# ingestion processes into MySQL and DuckDB (~6 minutes with the default
+# ingestion processes into PostgreSQL and DuckDB (~6 minutes with the default
 # profile), plus focused correctness regressions for protocol modes and failure
 # recovery. Gated behind the `stress` build tag.
 cdc-mysql-stress-test: generate

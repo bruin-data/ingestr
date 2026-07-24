@@ -6,16 +6,16 @@
 //
 // MySQL CDC is batch catch-up (snapshot, then replay the binlog to the
 // position captured at stream start, then exit), so instead of one streaming
-// pipeline this test drives parallel MySQL- and DuckDB-destination runs while
-// the shared queue-based load generator applies inserts/updates/deletes/
+// pipeline this test drives parallel PostgreSQL- and DuckDB-destination runs
+// while the shared queue-based load generator applies inserts/updates/deletes/
 // PK-updates at the configured target rate — every
 // mid-load run exercises the resume-from-LSN path under active writes. The source
 // server runs in a non-UTC time zone and a wide-types table covers unsigned
 // integer extremes, DECIMAL, JSON, DATE/DATETIME/TIMESTAMP, and binary
-// columns. Afterwards the destination must converge to the exact source rows,
-// verified by aggregates and canonical row comparison. A final phase alters a
-// table mid-binlog and asserts the pipeline fails loudly and recovers via
-// --full-refresh.
+// columns. Afterwards both destinations must converge to the exact source
+// rows, verified by aggregates and canonical cross-engine row comparison. A
+// final phase alters a table mid-binlog and asserts the pipeline fails loudly
+// and recovers via --full-refresh.
 package integration
 
 import (
@@ -33,6 +33,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/testutil"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
@@ -324,33 +325,91 @@ func mysqlStressFetchChunk(ctx context.Context, db *sql.DB, table, canonical, ex
 	return out, rows.Err()
 }
 
-func mysqlStressCompareChunkRange(ctx context.Context, src, dst *sql.DB, table, canonical string, offset, limit int64) error {
-	srcRows, err := mysqlStressFetchChunk(ctx, src, table, canonical, "", offset, limit)
+// mysqlStressPostgresCanonicalExpr mirrors mysqlStressCanonicalExpr for the
+// PostgreSQL destination: binary columns as uppercase hex, everything else
+// embedded in a jsonb array whose text rendering both sides normalize through
+// canonicalizeCDCStressJSON.
+func mysqlStressPostgresCanonicalExpr(columns []mysqlStressColumn) string {
+	parts := make([]string, len(columns))
+	for i, column := range columns {
+		quoted := quoteStressIdentifier(column.name)
+		switch strings.ToLower(column.dataType) {
+		case "binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob", "bit":
+			parts[i] = "UPPER(encode(" + quoted + ", 'hex'))"
+		default:
+			parts[i] = quoted
+		}
+	}
+	return "jsonb_build_array(" + strings.Join(parts, ", ") + ")::text"
+}
+
+func mysqlStressFetchPostgresChunk(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	table, canonical string,
+	offset, limit int64,
+) ([]mysqlStressRow, error) {
+	rows, err := pool.Query(ctx, fmt.Sprintf(
+		`SELECT id, %s FROM %s WHERE _cdc_deleted = false ORDER BY id LIMIT $1 OFFSET $2`,
+		canonical, quoteStressIdentifier(table),
+	), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mysqlStressRow
+	for rows.Next() {
+		var row mysqlStressRow
+		var raw string
+		if err := rows.Scan(&row.id, &raw); err != nil {
+			return nil, err
+		}
+		row.canonical, err = canonicalizeCDCStressJSON(raw)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize PostgreSQL row %s id=%d: %w", table, row.id, err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func mysqlStressComparePostgresChunkRange(
+	ctx context.Context,
+	src *sql.DB,
+	dst *pgxpool.Pool,
+	table string,
+	columns []mysqlStressColumn,
+	offset, limit int64,
+) error {
+	srcRows, err := mysqlStressFetchChunk(ctx, src, table, mysqlStressCanonicalExpr(columns), "", offset, limit)
 	if err != nil {
 		return fmt.Errorf("%s offset %d: source fetch: %w", table, offset, err)
 	}
-	dstRows, err := mysqlStressFetchChunk(ctx, dst, table, canonical, " AND `_cdc_deleted` = FALSE", offset, limit)
+	dstRows, err := mysqlStressFetchPostgresChunk(ctx, dst, table, mysqlStressPostgresCanonicalExpr(columns), offset, limit)
 	if err != nil {
-		return fmt.Errorf("%s offset %d: destination fetch: %w", table, offset, err)
+		return fmt.Errorf("%s offset %d: PostgreSQL fetch: %w", table, offset, err)
 	}
 	if len(srcRows) != len(dstRows) {
-		return fmt.Errorf("%s offset %d: row count mismatch: source=%d destination=%d", table, offset, len(srcRows), len(dstRows))
+		return fmt.Errorf("%s offset %d: row count mismatch: source=%d PostgreSQL=%d", table, offset, len(srcRows), len(dstRows))
 	}
 	for i := range srcRows {
-		s, d := srcRows[i], dstRows[i]
-		if s.id != d.id || s.canonical != d.canonical {
-			return fmt.Errorf("%s: content mismatch at id=%d:\n  source:      %s\n  destination: {id:%d row:%s}",
-				table, s.id, s.canonical, d.id, d.canonical)
+		sourceCanonical, err := canonicalizeCDCStressJSON(srcRows[i].canonical)
+		if err != nil {
+			return fmt.Errorf("canonicalize MySQL row %s id=%d: %w", table, srcRows[i].id, err)
+		}
+		if srcRows[i].id != dstRows[i].id || sourceCanonical != dstRows[i].canonical {
+			return fmt.Errorf("%s: content mismatch at id=%d:\n  source:     %s\n  PostgreSQL: {id:%d row:%s}",
+				table, srcRows[i].id, sourceCanonical, dstRows[i].id, dstRows[i].canonical)
 		}
 	}
 	return nil
 }
 
-func mysqlStressCompareAll(ctx context.Context, src, dst *sql.DB, tables []*mysqlStressTable) error {
+func mysqlStressCompareAllPostgres(ctx context.Context, src *sql.DB, dst *pgxpool.Pool, tables []*mysqlStressTable) error {
 	type chunk struct {
-		table     string
-		canonical string
-		offset    int64
+		table   string
+		columns []mysqlStressColumn
+		offset  int64
 	}
 	var chunks []chunk
 	for _, tbl := range tables {
@@ -358,13 +417,12 @@ func mysqlStressCompareAll(ctx context.Context, src, dst *sql.DB, tables []*mysq
 		if err != nil {
 			return err
 		}
-		canonical := mysqlStressCanonicalExpr(columns)
 		var count int64
 		if err := src.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", tbl.name)).Scan(&count); err != nil {
 			return fmt.Errorf("count source table %s: %w", tbl.name, err)
 		}
 		for offset := int64(0); offset < count; offset += stressCompareChunk {
-			chunks = append(chunks, chunk{table: tbl.name, canonical: canonical, offset: offset})
+			chunks = append(chunks, chunk{table: tbl.name, columns: columns, offset: offset})
 		}
 	}
 
@@ -377,7 +435,7 @@ func mysqlStressCompareAll(ctx context.Context, src, dst *sql.DB, tables []*mysq
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if err := mysqlStressCompareChunkRange(ctx, src, dst, c.table, c.canonical, c.offset, stressCompareChunk); err != nil {
+			if err := mysqlStressComparePostgresChunkRange(ctx, src, dst, c.table, c.columns, c.offset, stressCompareChunk); err != nil {
 				errCh <- err
 			}
 		}(c)
@@ -399,10 +457,12 @@ func mysqlStressSourceTruth(ctx context.Context, db *sql.DB, table string) (mysq
 	return tr, err
 }
 
-func mysqlStressDestTruth(ctx context.Context, db *sql.DB, table string) (mysqlStressTruth, error) {
+func mysqlStressPostgresTruth(ctx context.Context, pool *pgxpool.Pool, table string) (mysqlStressTruth, error) {
 	var tr mysqlStressTruth
-	err := db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT COUNT(*), CAST(COALESCE(SUM(val), 0) AS CHAR) FROM %s WHERE `_cdc_deleted` = FALSE", table)).Scan(&tr.count, &tr.sum)
+	err := pool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT count(*), COALESCE(sum(val), 0)::text FROM %s WHERE _cdc_deleted = false`,
+		quoteStressIdentifier(table),
+	)).Scan(&tr.count, &tr.sum)
 	return tr, err
 }
 
@@ -552,15 +612,12 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		"--innodb-flush-log-at-trx-commit=0",
 		"--sync-binlog=0",
 	})
-	_, destURI, destDSN := mysqlStressContainer(t, ctx, []string{
-		"--max-connections=200",
-	})
+	destConnString, destPool := stressDestContainer(t, ctx)
 
 	loadDB := mysqlStressOpenDB(t, sourceDSN, stressWorkers+8)
-	// Verification sessions pin time_zone so TIMESTAMP columns render
-	// identically on both servers regardless of their server time zones.
+	// The source verification session pins time_zone to UTC so TIMESTAMP
+	// columns render the same instants the destinations store.
 	srcVerify := mysqlStressOpenDB(t, sourceDSN+"&time_zone=%27%2B00%3A00%27", stressCompareParallel+2)
-	dstVerify := mysqlStressOpenDB(t, destDSN+"&time_zone=%27%2B00%3A00%27", stressCompareParallel+2)
 	duckDBPath := filepath.Join(t.TempDir(), "mysql-cdc-stress.duckdb")
 
 	tables := &mysqlStressTableSet{}
@@ -578,16 +635,16 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	seededRows := (mysqlStressInitialTables + 1) * mysqlStressSeedRows
 	t.Logf("seeded %d rows across %d tables in %v", seededRows, mysqlStressInitialTables+1, time.Since(seedStart).Round(time.Millisecond))
 
-	nativeConfig := &config.IngestConfig{
+	postgresConfig := &config.IngestConfig{
 		SourceURI:           sourceURI[:len("mysql")] + "+cdc" + sourceURI[len("mysql"):] + "?server_id=21999",
-		DestURI:             destURI,
+		DestURI:             destConnString,
 		IncrementalStrategy: config.StrategyMerge,
 	}
-	duckDBConfig := *nativeConfig
+	duckDBConfig := *postgresConfig
 	duckDBConfig.SourceURI = sourceURI[:len("mysql")] + "+cdc" + sourceURI[len("mysql"):] + "?server_id=22000"
 	duckDBConfig.DestURI = "duckdb:///" + duckDBPath
 	pipelines := []cdcStressPipeline{
-		{name: "mysql", config: nativeConfig},
+		{name: "postgres", config: postgresConfig},
 		{name: "duckdb", config: &duckDBConfig},
 	}
 
@@ -773,26 +830,27 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 	}
 	destinations := []mysqlStressDestination{
 		{
-			name: "mysql",
+			name: "postgres",
 			aggregate: func(table string) (mysqlStressTruth, error) {
-				return mysqlStressDestTruth(ctx, dstVerify, table)
+				return mysqlStressPostgresTruth(ctx, destPool, table)
 			},
-			compareAll: func() error { return mysqlStressCompareAll(ctx, srcVerify, dstVerify, finalTables) },
+			compareAll: func() error { return mysqlStressCompareAllPostgres(ctx, srcVerify, destPool, finalTables) },
 			softDeleted: func(table string) (int64, error) {
 				var count int64
-				err := dstVerify.QueryRowContext(ctx,
-					fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE `_cdc_deleted` = TRUE", table)).Scan(&count)
+				err := destPool.QueryRow(ctx, fmt.Sprintf(
+					`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(table),
+				)).Scan(&count)
 				return count, err
 			},
 			movedCounts: func(table string) (int64, int64, error) {
 				var live, tombstones int64
-				if err := dstVerify.QueryRowContext(ctx, fmt.Sprintf(
-					"SELECT COUNT(*) FROM %s WHERE id >= ? AND `_cdc_deleted` = FALSE", table,
+				if err := destPool.QueryRow(ctx, fmt.Sprintf(
+					`SELECT count(*) FROM %s WHERE id >= $1 AND _cdc_deleted = false`, quoteStressIdentifier(table),
 				), stressPKMoveOffset).Scan(&live); err != nil {
 					return 0, 0, err
 				}
-				err := dstVerify.QueryRowContext(ctx, fmt.Sprintf(
-					"SELECT COUNT(*) FROM %s WHERE id < ? AND `_cdc_deleted` = TRUE", table,
+				err := destPool.QueryRow(ctx, fmt.Sprintf(
+					`SELECT count(*) FROM %s WHERE id < $1 AND _cdc_deleted = true`, quoteStressIdentifier(table),
 				), stressPKMoveOffset).Scan(&tombstones)
 				return live, tombstones, err
 			},
@@ -889,7 +947,7 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 	convergeDuration := time.Since(convergeStart)
-	t.Logf("MySQL and DuckDB destinations converged on count/sum aggregates for all tables in %v after load stop", convergeDuration.Round(time.Millisecond))
+	t.Logf("PostgreSQL and DuckDB destinations converged on count/sum aggregates for all tables in %v after load stop", convergeDuration.Round(time.Millisecond))
 
 	for _, destination := range destinations {
 		compareStart := time.Now()
@@ -958,7 +1016,7 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		for _, destination := range destinations {
 			require.NoError(t, destination.compareAll(), "phase %q: %s row-by-row comparison failed", phase, destination.name)
 		}
-		t.Logf("phase %q: aggregates and row-by-row content verified for %d tables in MySQL and DuckDB", phase, len(finalTables))
+		t.Logf("phase %q: aggregates and row-by-row content verified for %d tables in PostgreSQL and DuckDB", phase, len(finalTables))
 	}
 
 	execSQL := func(query string, args ...interface{}) error {
@@ -1011,9 +1069,9 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		return execSQL(fmt.Sprintf("INSERT INTO %s (id, val, drift_note, payload, updated_at) VALUES (?, ?, 'post-drift', 'post-drift', NOW(6))", driftTable), churnBase+1, churnBase+1)
 	})
 	var driftNote string
-	require.NoError(t, dstVerify.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT drift_note FROM %s WHERE id = ?", driftTable), churnBase+1).Scan(&driftNote))
-	require.Equal(t, "post-drift", driftNote, "the post-ALTER column must land after recovery")
+	require.NoError(t, destPool.QueryRow(ctx,
+		fmt.Sprintf(`SELECT drift_note FROM %s WHERE id = $1`, quoteStressIdentifier(driftTable)), churnBase+1).Scan(&driftNote))
+	require.Equal(t, "post-drift", driftNote, "the post-ALTER column must land in PostgreSQL after recovery")
 	require.NoError(t, withCDCStressDuckDB(duckDBPath, func(db *sql.DB) error {
 		return db.QueryRowContext(ctx, fmt.Sprintf(
 			`SELECT drift_note FROM "%s" WHERE id = ?`, strings.ReplaceAll(driftTable, `"`, `""`),
@@ -1073,8 +1131,8 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 		return execSQL(fmt.Sprintf("UPDATE %s SET val = val + 7, updated_at = NOW(6) WHERE id %% 5 = 0", tbl.name))
 	})
 
-	t.Logf("PERF SUMMARY: MySQL snapshot %.0f rows/sec in %v; DuckDB snapshot %.0f rows/sec in %v (%d rows each); load %.0f ops/sec sustained; %d parallel catch-up rounds; convergence %v after load stop; %d parallel full-refresh phases across 6 schema-churn phases",
-		snapshotRates["mysql"], snapshotResults[0].duration.Round(time.Millisecond),
+	t.Logf("PERF SUMMARY: PostgreSQL snapshot %.0f rows/sec in %v; DuckDB snapshot %.0f rows/sec in %v (%d rows each); load %.0f ops/sec sustained; %d parallel catch-up rounds; convergence %v after load stop; %d parallel full-refresh phases across 6 schema-churn phases",
+		snapshotRates["postgres"], snapshotResults[0].duration.Round(time.Millisecond),
 		snapshotRates["duckdb"], snapshotResults[1].duration.Round(time.Millisecond), seededRows,
 		achieved, catchupRuns.Load(), convergeDuration.Round(time.Millisecond), fullRefreshes)
 }

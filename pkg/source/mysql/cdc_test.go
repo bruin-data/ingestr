@@ -142,13 +142,15 @@ func TestValidateMySQLCDCTableSupportedRejectsNativeBinlogTypes(t *testing.T) {
 		WithArgs("app", "items").
 		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}).
 			AddRow("status", "enum").
-			AddRow("flags", "bit"))
+			AddRow("flags", "bit").
+			AddRow("location", "point"))
 
 	err = validateMySQLCDCTableSupported(context.Background(), db, "app", "items")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ENUM, SET, or BIT")
+	assert.Contains(t, err.Error(), "ENUM, SET, BIT, or spatial (GEOMETRY)")
 	assert.Contains(t, err.Error(), "status ENUM")
 	assert.Contains(t, err.Error(), "flags BIT")
+	assert.Contains(t, err.Error(), "location POINT")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -735,6 +737,44 @@ func TestConvertMySQLCDCBinlogValueUnsigned(t *testing.T) {
 	}
 }
 
+func TestConvertMySQLCDCValueNormalizesZeroDates(t *testing.T) {
+	cases := []struct {
+		name  string
+		value interface{}
+		col   schema.Column
+		want  interface{}
+	}{
+		{"zero date string", "0000-00-00", schema.Column{Name: "d", DataType: schema.TypeDate}, nil},
+		{"zero datetime string", "0000-00-00 00:00:00", schema.Column{Name: "dt", DataType: schema.TypeTimestamp}, nil},
+		{"zero timestamp bytes", []byte("0000-00-00 00:00:00"), schema.Column{Name: "ts", DataType: schema.TypeTimestampTZ}, nil},
+		{"driver zero time", time.Time{}, schema.Column{Name: "dt", DataType: schema.TypeTimestamp}, nil},
+		{"valid date string", "2026-07-24", schema.Column{Name: "d", DataType: schema.TypeDate}, "2026-07-24"},
+		{"zero-date-looking text column untouched", "0000-00-00", schema.Column{Name: "note", DataType: schema.TypeString}, "0000-00-00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, convertMySQLCDCValue(tc.value, tc.col))
+		})
+	}
+	valid := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+	assert.Equal(t, valid, convertMySQLCDCValue(valid, schema.Column{Name: "dt", DataType: schema.TypeTimestamp}))
+}
+
+func TestValidateMySQLCDCTimeValueRejectsOutOfRange(t *testing.T) {
+	timeCol := schema.Column{Name: "elapsed", DataType: schema.TypeTime}
+	require.NoError(t, validateMySQLCDCTimeValue("23:59:59", timeCol))
+	require.NoError(t, validateMySQLCDCTimeValue("00:00:00", timeCol))
+	require.NoError(t, validateMySQLCDCTimeValue([]byte("12:34:56.123456"), timeCol))
+	require.NoError(t, validateMySQLCDCTimeValue(nil, timeCol))
+	require.NoError(t, validateMySQLCDCTimeValue("838:59:59", schema.Column{Name: "note", DataType: schema.TypeString}))
+
+	err := validateMySQLCDCTimeValue("838:59:59", timeCol)
+	require.Error(t, err, "TIME above 24h must fail loudly instead of silently becoming NULL")
+	assert.Contains(t, err.Error(), "elapsed")
+	require.Error(t, validateMySQLCDCTimeValue("-12:34:56", timeCol))
+	require.Error(t, validateMySQLCDCTimeValue([]byte("24:00:00"), timeCol))
+}
+
 func mysqlCDCTestSchema() *schema.TableSchema {
 	return addMySQLCDCColumns(&schema.TableSchema{
 		Name: "items",
@@ -791,6 +831,29 @@ func TestMySQLRowsEventToChangesPKChangeEmitsDeleteAndInsert(t *testing.T) {
 	assert.Equal(t, []interface{}{int64(1), "a"}, changes[0].values)
 	assert.False(t, changes[1].deleted)
 	assert.Equal(t, []interface{}{int64(9), "a"}, changes[1].values)
+	assert.Less(t, changes[0].lsn, changes[1].lsn)
+}
+
+func TestMySQLRowsEventToChangesKeylessUpdateEmitsRetractPair(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "events",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+	})
+	pos := gomysql.Position{Name: "mysql-bin.000001", Pos: 500}
+
+	changes, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeUpdate, [][]interface{}{
+		{int64(1), "a"},
+		{int64(1), "a2"},
+	}, tableSchema, tableSchema, pos)
+	require.NoError(t, err)
+	require.Len(t, changes, 2, "keyless updates must land as delete+insert retract pairs")
+	assert.True(t, changes[0].deleted)
+	assert.Equal(t, []interface{}{int64(1), "a"}, changes[0].values)
+	assert.False(t, changes[1].deleted)
+	assert.Equal(t, []interface{}{int64(1), "a2"}, changes[1].values)
 	assert.Less(t, changes[0].lsn, changes[1].lsn)
 }
 
