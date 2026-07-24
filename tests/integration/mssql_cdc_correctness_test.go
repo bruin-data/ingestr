@@ -131,11 +131,12 @@ func TestMSSQLCDC_ResumeMidTransaction_Postgres(t *testing.T) {
 
 	// Simulate a crash where the second run's write was only partially
 	// durable and its state commit never happened: remove the row carrying
-	// the newest change AND the recorded checkpoints. Resume then falls back
-	// to the completed-snapshot position and must re-deliver the transaction.
-	// (Deleting destination rows while keeping the checkpoint would be
-	// out-of-band tampering: managed state persists only after the write, so
-	// state never runs ahead of data in a real crash.)
+	// the newest change AND every state event of the second run's generation,
+	// reverting the connector to the first run's completed-snapshot state.
+	// Resume must then re-deliver the transaction and restore the lost row.
+	// (Deleting destination rows while keeping the second run's state would
+	// be out-of-band tampering: managed state persists only after the write,
+	// so state never runs ahead of data in a real crash.)
 	var droppedID int64
 	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(
 		`DELETE FROM %q.items_dest WHERE "_cdc_lsn" = (SELECT MAX("_cdc_lsn") FROM %q.items_dest) RETURNING id`,
@@ -146,8 +147,20 @@ func TestMSSQLCDC_ResumeMidTransaction_Postgres(t *testing.T) {
 		SELECT table_schema FROM information_schema.tables
 		WHERE table_name = 'cdc_state'
 		ORDER BY table_schema LIMIT 1`).Scan(&stateSchema))
-	_, err = pg.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %q.cdc_state WHERE state_kind = 'checkpoint'`, stateSchema))
+	res, err := pg.ExecContext(ctx, fmt.Sprintf(`
+		DELETE FROM %q.cdc_state AS cs
+		USING (
+			SELECT connector_id, MAX(state_generation) AS max_gen
+			FROM %q.cdc_state
+			WHERE destination_table = $1
+			GROUP BY connector_id
+		) AS mine
+		WHERE cs.connector_id = mine.connector_id AND cs.state_generation = mine.max_gen`,
+		stateSchema, stateSchema), cfg.DestTable)
 	require.NoError(t, err)
+	deleted, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.Positive(t, deleted, "the second run's state generation must exist to be rolled back")
 	assert.Contains(t, []int64{4, 5}, droppedID)
 	assert.Equal(t, 0, count(`SELECT COUNT(*) FROM %q.items_dest WHERE id = %d`, destSchema, droppedID))
 
