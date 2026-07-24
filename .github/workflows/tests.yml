@@ -80,6 +80,50 @@ jobs:
       - name: Run integration tests
         run: make test-integration
 
+  cdc-stress:
+    name: ${{ matrix.name }}
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: postgres-cdc-stress-test
+            target: cdc-postgres-stress-test
+            images: |
+              postgres:16-alpine
+          - name: mysql-cdc-stress-test
+            target: cdc-mysql-stress-test
+            images: |
+              mysql:8.0
+              postgres:16-alpine
+          - name: mssql-cdc-stress-test
+            target: cdc-mssql-stress-test
+            images: |
+              mcr.microsoft.com/mssql/server:2022-latest
+              postgres:16-alpine
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pre-pull testcontainer images (background)
+        env:
+          TEST_IMAGES: ${{ matrix.images }}
+        run: |
+          while IFS= read -r img; do
+            docker pull "$img" >/dev/null 2>&1 &
+          done <<< "$TEST_IMAGES"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "go.sum"
+
+      - name: Run ${{ matrix.name }}
+        run: make ${{ matrix.target }}
+
   dockerBuild:
     runs-on: depot-ubuntu-latest
     name: Docker Build
