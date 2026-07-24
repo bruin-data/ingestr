@@ -53,9 +53,21 @@ func TestSwapTablePreservesQuotedDottedTargetBoundary(t *testing.T) {
 		INSERT INTO "public"."staging_for_order_events" VALUES (2);
 	`))
 
+	targetTable := `"public"."order.events"`
+	stagingTable := `"public"."staging_for_order_events"`
+	targetIncarnation, exists, err := dest.CDCTargetIncarnation(ctx, targetTable)
+	require.NoError(t, err)
+	require.True(t, exists)
+	stagingIncarnation, exists, err := dest.CDCTargetIncarnation(ctx, stagingTable)
+	require.NoError(t, err)
+	require.True(t, exists)
+
 	require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
-		StagingTable: `"public"."staging_for_order_events"`,
-		TargetTable:  `"public"."order.events"`,
+		StagingTable:                  stagingTable,
+		TargetTable:                   targetTable,
+		CDCExpectedIncarnation:        targetIncarnation,
+		CDCExpectedStagingIncarnation: stagingIncarnation,
+		CDCExpectedResultIncarnation:  stagingIncarnation,
 	}))
 
 	var targetID, sentinelID, oldCount int64

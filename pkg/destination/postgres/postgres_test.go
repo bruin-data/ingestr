@@ -62,6 +62,31 @@ func (r postgresResolverRow) Scan(dest ...any) error {
 	return nil
 }
 
+type postgresIncarnationTxStub struct {
+	pgx.Tx
+	execSQL   string
+	queryArgs []any
+}
+
+func (s *postgresIncarnationTxStub) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	s.execSQL = sql
+	return pgconn.NewCommandTag("LOCK TABLE"), nil
+}
+
+func (s *postgresIncarnationTxStub) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
+	s.queryArgs = args
+	return postgresIncarnationRow{}
+}
+
+type postgresIncarnationRow struct{}
+
+func (postgresIncarnationRow) Scan(dest ...any) error {
+	*dest[0].(*string) = "database-oid"
+	*dest[1].(*string) = "relation-oid"
+	*dest[2].(*string) = "r"
+	return nil
+}
+
 type postgresPrimaryKeyResolverStub struct {
 	query string
 	args  []any
@@ -424,6 +449,32 @@ func TestQuotePostgresTablePreservesDottedIdentifierBoundary(t *testing.T) {
 	got := quotePostgresTable("tenant", "order.events_old_123")
 	if got != `"tenant"."order.events_old_123"` {
 		t.Fatalf("quotePostgresTable() = %q", got)
+	}
+}
+
+func TestLockAndValidateCDCIncarnationPreservesDottedIdentifierBoundary(t *testing.T) {
+	dest := NewPostgresDestination()
+	tx := &postgresIncarnationTxStub{}
+	expected := destination.CDCTargetKey("database-oid", "relation-oid", "r")
+
+	resolved, err := dest.lockAndValidateCDCIncarnation(
+		t.Context(),
+		tx,
+		`"public"."order.events"`,
+		expected,
+		"ACCESS EXCLUSIVE",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != `"public"."order.events"` {
+		t.Fatalf("resolved table = %q", resolved)
+	}
+	if tx.execSQL != `LOCK TABLE "public"."order.events" IN ACCESS EXCLUSIVE MODE` {
+		t.Fatalf("lock SQL = %q", tx.execSQL)
+	}
+	if len(tx.queryArgs) != 1 || tx.queryArgs[0] != `"public"."order.events"` {
+		t.Fatalf("incarnation query args = %v", tx.queryArgs)
 	}
 }
 

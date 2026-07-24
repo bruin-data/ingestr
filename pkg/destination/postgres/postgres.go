@@ -732,10 +732,10 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 		if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
 			return errors.New("PostgreSQL CDC conditional swap requires target, staging, and result incarnations")
 		}
-		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, targetSchema+"."+targetName, opts.CDCExpectedIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, targetRef, opts.CDCExpectedIncarnation, "ACCESS EXCLUSIVE"); err != nil {
 			return err
 		}
-		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, stagingSchema+"."+stagingName, opts.CDCExpectedStagingIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, stagingRef, opts.CDCExpectedStagingIncarnation, "ACCESS EXCLUSIVE"); err != nil {
 			return err
 		}
 		// A PostgreSQL rename (and SET SCHEMA) keeps the relation's OID, so
@@ -883,8 +883,8 @@ func (d *PostgresDestination) lockAndValidateCDCIncarnation(ctx context.Context,
 	if err != nil {
 		return "", err
 	}
-	resolved := schemaName + "." + tableName
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+destination.QuoteTableName(resolved)+" IN "+lockMode+" MODE"); err != nil {
+	resolved := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+resolved+" IN "+lockMode+" MODE"); err != nil {
 		return "", err
 	}
 	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
@@ -1454,7 +1454,7 @@ func (d *PostgresDestination) postgresTargetIncarnation(ctx context.Context, que
 	if err != nil {
 		return "", false, err
 	}
-	resolvedTable := destination.QuoteTableName(schemaName + "." + tableName)
+	resolvedTable := quotePostgresTable(schemaName, tableName)
 	var databaseOID, relationOID, relationKind string
 	err = queryer.QueryRow(ctx, `
 		SELECT d.oid::text, c.oid::text, c.relkind::text
