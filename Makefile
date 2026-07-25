@@ -17,6 +17,7 @@ LINT_CHANGED_FLAGS := --new-from-merge-base=$(LINT_MERGE_BASE) --build-tags="$(L
 export INGESTR_DISABLE_TELEMETRY := true
 export DISABLE_TELEMETRY := true
 TELEMETRY_ENV := INGESTR_DISABLE_TELEMETRY=true DISABLE_TELEMETRY=true
+TEST_ENV := $(TELEMETRY_ENV) SF_DISABLE_MINICORE=true
 
 NO_COLOR=\033[0m
 OK_COLOR=\033[32;01m
@@ -82,13 +83,13 @@ run: build
 
 test: generate
 	@echo "$(OK_COLOR)==> Running unit tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -short -race -cover -timeout 5m ./...
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -short -race -cover -timeout 5m ./...
 	@$(MAKE) test-python
 
 test-python:
 	@echo "$(OK_COLOR)==> Running Python SDK tests$(NO_COLOR)"
 	@if command -v uv >/dev/null 2>&1; then \
-		uv run --extra sdk python tests/python/test_ingestr_package.py; \
+		$(TEST_ENV) uv run --extra sdk python tests/python/test_ingestr_package.py; \
 	else \
 		echo "uv not found; install uv to run Python SDK tests"; \
 		exit 1; \
@@ -96,7 +97,7 @@ test-python:
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
 
 # The CDC stress tests share one harness: a queue-based load generator that
 # tracks the target ops/sec (STRESS_OPS_PER_SEC, default 1000) as closely as
@@ -125,10 +126,10 @@ cdc-stress-test: cdc-postgres-stress-test cdc-mysql-stress-test cdc-mssql-stress
 cdc-postgres-stress-test: generate
 	@echo "$(OK_COLOR)==> Running PostgreSQL CDC complex-workload stress test (default profile: ~6m)$(NO_COLOR)"
 	@$(STRESS_ENV_SETUP); \
-	$(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestPostgresCDC_StressComplexWorkload$$' ./tests/integration/
+	$(TEST_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestPostgresCDC_StressComplexWorkload$$' ./tests/integration/
 	@echo "$(OK_COLOR)==> Running PostgreSQL CDC schema-evolution regressions for DuckDB and MySQL$(NO_COLOR)"
 	@$(STRESS_ENV_SETUP); \
-	INTEGRATION_BACKENDS=postgres,mysql $(TELEMETRY_ENV) go test -tags integration -count=1 -v -timeout 5m -run '^TestPostgresCDC_StreamingSchemaEvolution_(DuckDB|MySQL)$$' ./tests/integration/
+	INTEGRATION_BACKENDS=postgres,mysql $(TEST_ENV) go test -tags integration -count=1 -v -timeout 5m -run '^TestPostgresCDC_StreamingSchemaEvolution_(DuckDB|MySQL)$$' ./tests/integration/
 
 # High-volume MySQL CDC accuracy and performance test running parallel batch
 # ingestion processes into PostgreSQL and DuckDB (~6 minutes with the default
@@ -137,7 +138,7 @@ cdc-postgres-stress-test: generate
 cdc-mysql-stress-test: generate
 	@echo "$(OK_COLOR)==> Running MySQL CDC stress and correctness regression tests (default profile: ~6m)$(NO_COLOR)"
 	@$(STRESS_ENV_SETUP); \
-	$(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMySQLCDC_Stress' ./pkg/source/mysql ./tests/integration/
+	$(TEST_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMySQLCDC_Stress' ./pkg/source/mysql ./tests/integration/
 
 # High-volume SQL Server CDC accuracy and schema-churn test (~7 minutes with
 # the default profile). Streams multi-table CDC into PostgreSQL and DuckDB in
@@ -148,15 +149,15 @@ cdc-mysql-stress-test: generate
 cdc-mssql-stress-test: generate
 	@echo "$(OK_COLOR)==> Running SQL Server CDC complex-workload stress test (default profile: ~7m)$(NO_COLOR)"
 	@$(STRESS_ENV_SETUP); \
-	$(TELEMETRY_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMSSQLCDC_StressComplexWorkload$$' ./tests/integration/
+	$(TEST_ENV) go test -tags stress -count=1 -v -timeout 30m -run '^TestMSSQLCDC_StressComplexWorkload$$' ./tests/integration/
 
 test-db2-integration: generate
 	@echo "$(OK_COLOR)==> Running Db2 integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && INGESTR_TEST_DB2=1 $(TELEMETRY_ENV) go test -tags integration -count=1 -v -timeout 10m ./pkg/source/db2 -run TestDb2SourceWithIBMContainer
+	@if [ -f test.env ]; then . ./test.env; fi && INGESTR_TEST_DB2=1 $(TEST_ENV) go test -tags integration -count=1 -v -timeout 10m ./pkg/source/db2 -run TestDb2SourceWithIBMContainer
 
 test-conformance:
 	@echo "$(OK_COLOR)==> Running destination standards tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) go test -tags integration -v -timeout 10m ./tests/integration -run TestDestinations_
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -timeout 10m ./tests/integration -run TestDestinations_
 
 comma := ,
 # Run destination conformance for only the given backend(s), skipping the Docker
@@ -167,7 +168,7 @@ comma := ,
 test-conformance-only:
 	@if [ -z "$(BACKENDS)" ]; then echo "$(ERROR_COLOR)==> BACKENDS is required, e.g. make test-conformance-only BACKENDS=snowflake$(NO_COLOR)"; exit 1; fi
 	@echo "$(OK_COLOR)==> Running destination standards tests for: $(BACKENDS)$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TELEMETRY_ENV) \
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) \
 		INTEGRATION_BACKENDS=$(BACKENDS) go test -tags integration -v -timeout 15m ./tests/integration \
 		-run 'TestDestinations_.*/($(subst $(comma),|,$(BACKENDS)))'
 
