@@ -452,7 +452,6 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 
 func init() {
 	Register(&ReplaceStrategy{})
-	Register(&TruncateInsertStrategy{})
 	Register(&AppendStrategy{})
 	Register(&MergeStrategy{})
 	Register(&DeleteInsertStrategy{})

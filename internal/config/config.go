@@ -21,13 +21,12 @@ func Debug(format string, args ...any) {
 type IncrementalStrategy string
 
 const (
-	StrategyReplace        IncrementalStrategy = "replace"
-	StrategyTruncateInsert IncrementalStrategy = "truncate+insert"
-	StrategyAppend         IncrementalStrategy = "append"
-	StrategyDeleteInsert   IncrementalStrategy = "delete+insert"
-	StrategyMerge          IncrementalStrategy = "merge"
-	StrategySCD2           IncrementalStrategy = "scd2"
-	StrategyNone           IncrementalStrategy = "none"
+	StrategyReplace      IncrementalStrategy = "replace"
+	StrategyAppend       IncrementalStrategy = "append"
+	StrategyDeleteInsert IncrementalStrategy = "delete+insert"
+	StrategyMerge        IncrementalStrategy = "merge"
+	StrategySCD2         IncrementalStrategy = "scd2"
+	StrategyNone         IncrementalStrategy = "none"
 )
 
 type ProgressMode string
@@ -165,6 +164,12 @@ func (c *IngestConfig) Validate() error {
 			Message: fmt.Sprintf("must be earlier than interval-end (got start=%s, end=%s)", c.IntervalStart.Format(time.RFC3339), c.IntervalEnd.Format(time.RFC3339)),
 		}
 	}
+	if c.IncrementalStrategy == IncrementalStrategy("truncate+insert") {
+		return &ValidationError{
+			Field:   "incremental-strategy",
+			Message: `"truncate+insert" has been removed; use "replace"`,
+		}
+	}
 	if err := c.validateExtractPartitioning(); err != nil {
 		return err
 	}
@@ -266,9 +271,6 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	}
 	if c.FullRefresh {
 		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with extract partitioning"}
-	}
-	if c.IncrementalStrategy == StrategyTruncateInsert {
-		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning; use replace so the complete extract is staged before the destination is finalized", c.IncrementalStrategy)}
 	}
 	return nil
 }

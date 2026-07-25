@@ -59,7 +59,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "incremental-strategy",
-				Usage:   "The incremental strategy to use (replace, truncate+insert, append, delete+insert, merge, scd2, none)",
+				Usage:   "The incremental strategy to use (replace, append, delete+insert, merge, scd2, none)",
 				Value:   "replace",
 				Sources: cli.EnvVars("INCREMENTAL_STRATEGY", "INGESTR_INCREMENTAL_STRATEGY"),
 			},

@@ -634,10 +634,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	// re-appends them from this snapshot so staging keeps carrying them.
 	fullSchema := destSchema
 
-	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
+	// Schema contract handling: evolve destination schema if needed. Replace
+	// skips evolution when it recreates the target, while in-place replace must
+	// evolve the existing table.
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
-	if resolvedStrategy != config.StrategyReplace {
+	if resolvedStrategy != config.StrategyReplace || usesInPlaceReplace(resolvedStrategy, p.config.DestURI) {
 		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema, resolvedStrategy)
 		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
@@ -683,7 +685,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
-	strat, err := strategy.Get(resolvedStrategy)
+	strat, err := getWriteStrategy(resolvedStrategy, p.config.DestURI)
 	if err != nil {
 		return fmt.Errorf("failed to get strategy: %w", err)
 	}
@@ -2432,7 +2434,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	if cfg.FullRefresh {
 		s = config.StrategyReplace
 	}
-	return rewriteReplaceForPostgres(s, cfg.DestURI)
+	return s
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {
@@ -2477,40 +2479,34 @@ func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy
 	if cfg.ExtractPartitionBy == "" {
 		return nil
 	}
-	if cfg.IncrementalStrategy != config.StrategyTruncateInsert && resolvedStrategy == config.StrategyTruncateInsert {
-		if _, ok := dest.(destination.AtomicTruncateInsertStagingWriter); ok {
-			return nil
-		}
-		return &config.ValidationError{
-			Field:   "incremental-strategy",
-			Message: fmt.Sprintf("%q resolves to %q, but the destination cannot stage the complete extract before finalization", cfg.IncrementalStrategy, resolvedStrategy),
-		}
+	if !usesInPlaceReplace(resolvedStrategy, cfg.DestURI) {
+		return nil
 	}
-	if cfg.IncrementalStrategy != config.StrategyTruncateInsert {
+	if _, ok := dest.(destination.AtomicTruncateInsertStagingWriter); ok {
 		return nil
 	}
 	return &config.ValidationError{
 		Field:   "incremental-strategy",
-		Message: fmt.Sprintf("%q cannot be combined with extract partitioning; use replace so the complete extract is staged before the destination is finalized", cfg.IncrementalStrategy),
+		Message: fmt.Sprintf("%q uses an in-place replacement for this destination, but the destination cannot stage the complete extract before finalization", resolvedStrategy),
 	}
 }
 
-// rewriteReplaceForPostgres swaps the replace strategy for truncate+insert when
-// the destination is Postgres. Replace drops and recreates the table, which
-// breaks dependent views, grants, and foreign keys; truncate+insert preserves
-// the table definition.
-func rewriteReplaceForPostgres(strat config.IncrementalStrategy, destURI string) config.IncrementalStrategy {
+func usesInPlaceReplace(strat config.IncrementalStrategy, destURI string) bool {
 	if strat != config.StrategyReplace {
-		return strat
+		return false
 	}
 	scheme, err := uri.ExtractScheme(destURI)
 	if err != nil {
-		return strat
+		return false
 	}
-	if uri.NormalizeScheme(scheme) != "postgres" {
-		return strat
+	return uri.NormalizeScheme(scheme) == "postgres"
+}
+
+func getWriteStrategy(strat config.IncrementalStrategy, destURI string) (strategy.WriteStrategy, error) {
+	if usesInPlaceReplace(strat, destURI) {
+		return strategy.NewInPlaceReplaceStrategy(), nil
 	}
-	return config.StrategyTruncateInsert
+	return strategy.Get(strat)
 }
 
 // isCDCSource returns true if the source URI indicates a CDC source
@@ -2795,6 +2791,12 @@ func isManagedChangeSource(uri string) bool {
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
+	if cfg.IncrementalStrategy == "truncate+insert" {
+		return &config.ValidationError{
+			Field:   "incremental-strategy",
+			Message: `"truncate+insert" has been removed; use "replace"`,
+		}
+	}
 	if cfg.ExtractPartitionBy != "" || cfg.ExtractPartitionInterval != 0 || cfg.ExtractPartitionNumericInterval != 0 || cfg.ExtractPartitionAuto {
 		if err := cfg.Validate(); err != nil {
 			return err
@@ -2802,7 +2804,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 	}
 	if isPostgresCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
 		switch cfg.IncrementalStrategy {
-		case config.StrategyDeleteInsert, config.StrategySCD2, config.StrategyTruncateInsert:
+		case config.StrategyDeleteInsert, config.StrategySCD2:
 			return &config.ValidationError{
 				Field:   "incremental-strategy",
 				Message: fmt.Sprintf("%q is not supported for PostgreSQL CDC; use merge or replace", cfg.IncrementalStrategy),

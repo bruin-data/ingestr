@@ -94,10 +94,19 @@ func (d *atomicTruncateInsertDestination) SupportsMergeStrategy() bool {
 	return false
 }
 
-func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
+func TestInPlaceReplaceStrategyUsesReplaceName(t *testing.T) {
+	require.Equal(t, config.StrategyReplace, NewInPlaceReplaceStrategy().Name())
+}
+
+func TestTruncateInsertIsNotRegistered(t *testing.T) {
+	_, err := Get(config.IncrementalStrategy("truncate+insert"))
+	require.ErrorContains(t, err, "unknown strategy")
+}
+
+func TestInPlaceReplaceStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &stagingInsertDestination{truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest}}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.FullRefresh = true
 	job.Config.CDCSlotSuffix = "current-destination-slot"
 	job.Config.CDCLegacySlotSuffix = "legacy-destination-slot"
@@ -105,7 +114,7 @@ func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job.Schema.PrimaryKeys = nil
 	src.readCh = mustClosedRecords()
 
-	strat := &TruncateInsertStrategy{}
+	strat := &inPlaceReplaceStrategy{}
 	if err := strat.Execute(context.Background(), job); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
@@ -131,17 +140,17 @@ func TestTruncateInsertStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	require.Equal(t, []string{job.Config.DestTable}, dest.truncateCalls)
 }
 
-func TestTruncateInsertStrategy_Execute_KeylessFinalizesFromStaging(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeylessFinalizesFromStaging(t *testing.T) {
 	job, src, dest := minimalJob()
 	truncateDest := &truncateCapableDestination{fakeDestination: dest}
 	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
 	job.Destination = stagingDest
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.Len(t, dest.writeCalls, 1)
 	require.True(t, dest.writeCalls[0].StagingTable)
 	require.Len(t, stagingDest.insertCalls, 1)
@@ -158,32 +167,32 @@ func TestTruncateInsertStrategy_Execute_KeylessFinalizesFromStaging(t *testing.T
 	}, dest.calls)
 }
 
-func TestTruncateInsertStrategy_Execute_KeylessRequiresStagingInsert(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeylessRequiresStagingInsert(t *testing.T) {
 	job, _, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 
-	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
-	require.ErrorContains(t, err, "does not support keyless truncate+insert from staging")
+	err := (&inPlaceReplaceStrategy{}).Execute(t.Context(), job)
+	require.ErrorContains(t, err, "does not support keyless in-place replace from staging")
 	require.Empty(t, dest.prepareCalls)
 	require.Empty(t, dest.writeCalls)
 	require.Empty(t, dest.truncateCalls)
 }
 
-func TestTruncateInsertStrategy_Execute_KeylessWriteFailureLeavesTargetUntouched(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeylessWriteFailureLeavesTargetUntouched(t *testing.T) {
 	job, src, dest := minimalJob()
 	truncateDest := &truncateCapableDestination{fakeDestination: dest}
 	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
 	job.Destination = stagingDest
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 	dest.writeErr = errors.New("write failed")
 	src.readCh = mustClosedRecords()
 
-	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	err := (&inPlaceReplaceStrategy{}).Execute(t.Context(), job)
 	require.ErrorContains(t, err, "failed to write to staging")
 	require.Len(t, dest.writeCalls, 1)
 	require.True(t, dest.writeCalls[0].StagingTable)
@@ -191,7 +200,7 @@ func TestTruncateInsertStrategy_Execute_KeylessWriteFailureLeavesTargetUntouched
 	require.Empty(t, stagingDest.insertCalls)
 }
 
-func TestTruncateInsertStrategy_Execute_KeylessPreparationFailureLeavesTargetUntouched(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeylessPreparationFailureLeavesTargetUntouched(t *testing.T) {
 	job, src, dest := minimalJob()
 	truncateDest := &truncateCapableDestination{fakeDestination: dest}
 	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
@@ -200,29 +209,29 @@ func TestTruncateInsertStrategy_Execute_KeylessPreparationFailureLeavesTargetUnt
 		prepareErr:               errors.New("metadata unavailable"),
 	}
 	job.Destination = preparedDest
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 	src.readCh = mustClosedRecords()
 
-	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	err := (&inPlaceReplaceStrategy{}).Execute(t.Context(), job)
 	require.ErrorContains(t, err, "failed to prepare insert from staging: metadata unavailable")
 	require.Empty(t, dest.truncateCalls)
 	require.Empty(t, stagingDest.insertCalls)
 	require.Contains(t, dest.calls, "PrepareInsertFromStaging")
 }
 
-func TestTruncateInsertStrategy_Execute_KeylessPreparedInsertIsBuiltBeforeTruncate(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeylessPreparedInsertIsBuiltBeforeTruncate(t *testing.T) {
 	job, src, dest := minimalJob()
 	truncateDest := &truncateCapableDestination{fakeDestination: dest}
 	stagingDest := &stagingInsertDestination{truncateCapableDestination: truncateDest}
 	job.Destination = &preparedStagingInsertDestination{stagingInsertDestination: stagingDest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.Empty(t, stagingDest.insertCalls)
 	require.Equal(t, []string{
 		"PrepareTable",
@@ -235,31 +244,31 @@ func TestTruncateInsertStrategy_Execute_KeylessPreparedInsertIsBuiltBeforeTrunca
 	}, dest.calls)
 }
 
-func TestTruncateInsertStrategy_Execute_KeyedPreparationFailureLeavesTargetUntouched(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeyedPreparationFailureLeavesTargetUntouched(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &preparedStagingMergeDestination{
 		truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest},
 		prepareErr:                 errors.New("metadata unavailable"),
 	}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	src.readCh = mustClosedRecords()
 
-	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	err := (&inPlaceReplaceStrategy{}).Execute(t.Context(), job)
 	require.ErrorContains(t, err, "failed to prepare merge from staging: metadata unavailable")
 	require.Empty(t, dest.truncateCalls)
 	require.Empty(t, dest.mergeCalls)
 	require.Contains(t, dest.calls, "PrepareMergeTable")
 }
 
-func TestTruncateInsertStrategy_Execute_KeyedPreparedMergeIsBuiltBeforeTruncate(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_KeyedPreparedMergeIsBuiltBeforeTruncate(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &preparedStagingMergeDestination{
 		truncateCapableDestination: &truncateCapableDestination{fakeDestination: dest},
 	}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.Empty(t, dest.mergeCalls)
 	require.Equal(t, []string{
 		"PrepareTable",
@@ -272,30 +281,30 @@ func TestTruncateInsertStrategy_Execute_KeyedPreparedMergeIsBuiltBeforeTruncate(
 	}, dest.calls)
 }
 
-func TestTruncateInsertStrategy_ExecuteWithStaging_FullRefreshUsesLeasedSlotSuffix(t *testing.T) {
+func TestInPlaceReplaceStrategy_ExecuteWithStaging_FullRefreshUsesLeasedSlotSuffix(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.FullRefresh = true
 	job.Config.CDCSlotSuffix = "current-destination-slot"
 	job.Config.CDCLegacySlotSuffix = "legacy-destination-slot"
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.True(t, src.readOpts.FullRefresh)
 	require.Equal(t, job.Config.CDCSlotSuffix, src.readOpts.CDCSlotSuffix)
 	require.Equal(t, job.Config.CDCLegacySlotSuffix, src.readOpts.CDCLegacySlotSuffix)
 	require.Empty(t, src.readOpts.CDCResumeLSN, "full refresh must not select a previous or legacy slot")
 }
 
-func TestTruncateInsertStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.IncrementalKey = "updated_at"
 	src.readCh = mustClosedRecords()
 
-	strat := &TruncateInsertStrategy{}
+	strat := &inPlaceReplaceStrategy{}
 	if err := strat.Execute(context.Background(), job); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
@@ -308,41 +317,41 @@ func TestTruncateInsertStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema
 	}
 }
 
-func TestTruncateInsertStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	src.primaryKeysUnique = true
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.Len(t, dest.mergeCalls, 1)
 	require.True(t, dest.mergeCalls[0].StagingPrimaryKeysUnique)
 }
 
-func TestTruncateInsertStrategy_Execute_DedupsUncertainSourcePrimaryKeys(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_DedupsUncertainSourcePrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.Len(t, dest.mergeCalls, 1)
 	require.False(t, dest.mergeCalls[0].StagingPrimaryKeysUnique)
 }
 
-func TestTruncateInsertStrategy_Execute_PrefersAtomicStagingFinalizer(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_PrefersAtomicStagingFinalizer(t *testing.T) {
 	for _, primaryKeysUnique := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unique=%t", primaryKeysUnique), func(t *testing.T) {
 			job, src, dest := minimalJob()
 			truncateDest := &truncateCapableDestination{fakeDestination: dest}
 			atomicDest := &atomicTruncateInsertDestination{truncateCapableDestination: truncateDest}
 			job.Destination = atomicDest
-			job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+			job.Config.IncrementalStrategy = config.StrategyReplace
 			src.primaryKeysUnique = primaryKeysUnique
 			src.readCh = mustClosedRecords()
 
-			require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+			require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 			require.Len(t, atomicDest.finalizeCalls, 1)
 			require.Equal(t, primaryKeysUnique, atomicDest.finalizeCalls[0].StagingPrimaryKeysUnique)
 			require.Empty(t, dest.truncateCalls)
@@ -351,12 +360,12 @@ func TestTruncateInsertStrategy_Execute_PrefersAtomicStagingFinalizer(t *testing
 	}
 }
 
-func TestTruncateInsertStrategy_Execute_PartitionedExtractWithoutKeysUsesAtomicStaging(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_PartitionedExtractWithoutKeysUsesAtomicStaging(t *testing.T) {
 	job, src, dest := minimalJob()
 	truncateDest := &truncateCapableDestination{fakeDestination: dest}
 	atomicDest := &atomicTruncateInsertDestination{truncateCapableDestination: truncateDest}
 	job.Destination = atomicDest
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 	job.SourceSchema.PrimaryKeys = nil
@@ -365,7 +374,7 @@ func TestTruncateInsertStrategy_Execute_PartitionedExtractWithoutKeysUsesAtomicS
 	src.primaryKeys = nil
 	src.readCh = mustClosedRecords()
 
-	require.NoError(t, (&TruncateInsertStrategy{}).Execute(t.Context(), job))
+	require.NoError(t, (&inPlaceReplaceStrategy{}).Execute(t.Context(), job))
 	require.Len(t, dest.prepareCalls, 2)
 	require.Equal(t, job.Config.DestTable, dest.prepareCalls[0].Table)
 	require.True(t, dest.prepareCalls[1].DropFirst)
@@ -377,7 +386,7 @@ func TestTruncateInsertStrategy_Execute_PartitionedExtractWithoutKeysUsesAtomicS
 	require.Equal(t, job.Config.ExtractPartitionInterval, src.readOpts.ExtractPartitionInterval)
 }
 
-func TestTruncateInsertStrategy_Execute_PartitionedExtractFinalizeFailureDoesNotTruncateDirectly(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_PartitionedExtractFinalizeFailureDoesNotTruncateDirectly(t *testing.T) {
 	job, src, dest := minimalJob()
 	truncateDest := &truncateCapableDestination{fakeDestination: dest}
 	atomicDest := &atomicTruncateInsertDestination{
@@ -385,7 +394,7 @@ func TestTruncateInsertStrategy_Execute_PartitionedExtractFinalizeFailureDoesNot
 		finalizeErr:                errors.New("finalize failed"),
 	}
 	job.Destination = atomicDest
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.PrimaryKeys = nil
 	job.Schema.PrimaryKeys = nil
 	job.SourceSchema.PrimaryKeys = nil
@@ -394,19 +403,19 @@ func TestTruncateInsertStrategy_Execute_PartitionedExtractFinalizeFailureDoesNot
 	src.primaryKeys = nil
 	src.readCh = mustClosedRecords()
 
-	err := (&TruncateInsertStrategy{}).Execute(t.Context(), job)
+	err := (&inPlaceReplaceStrategy{}).Execute(t.Context(), job)
 	require.ErrorContains(t, err, "failed to atomically insert from staging")
 	require.Empty(t, dest.truncateCalls)
 }
 
-func TestTruncateInsertStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {
+func TestInPlaceReplaceStrategy_Execute_ReadFailsBeforeTruncateWithPrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Destination = &truncateCapableDestination{fakeDestination: dest}
-	job.Config.IncrementalStrategy = config.StrategyTruncateInsert
+	job.Config.IncrementalStrategy = config.StrategyReplace
 	src.primaryKeysUnique = true
 	src.readErr = errors.New("read failed")
 
-	strat := &TruncateInsertStrategy{}
+	strat := &inPlaceReplaceStrategy{}
 	err := strat.Execute(context.Background(), job)
 	if err == nil {
 		t.Fatal("expected error, got nil")

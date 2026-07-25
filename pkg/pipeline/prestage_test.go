@@ -84,17 +84,17 @@ func TestMaybeStartPreStageHappyPath(t *testing.T) {
 	}
 }
 
-func TestMaybeStartPreStageKeylessTruncateInsertUsesStagingTable(t *testing.T) {
+func TestMaybeStartPreStageKeylessReplaceUsesStagingTable(t *testing.T) {
 	cfg := baselinePreStageConfig()
 	dest := &mockPreStageDestination{writer: &mockPreStageWriter{}}
 	p := preStageTestPipeline(cfg, dest)
 
-	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyTruncateInsert, nil, time.Now())
+	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyReplace, nil, time.Now())
 	if writer == nil {
 		t.Fatal("expected pre-staging to start")
 	}
 	if dest.lastOpts == nil || !dest.lastOpts.StagingTable {
-		t.Fatal("keyless truncate+insert must pre-stage with staging-table chunking")
+		t.Fatal("keyless replace must pre-stage with staging-table chunking")
 	}
 }
 

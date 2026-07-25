@@ -82,6 +82,25 @@ func TestIngestConfigValidate_NoInferenceWithColumns(t *testing.T) {
 	}
 }
 
+func TestIngestConfigValidate_RemovedTruncateInsert(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "postgres://localhost/db"
+	cfg.SourceTable = "public.items"
+	cfg.DestURI = "duckdb://out.duckdb"
+	cfg.IncrementalStrategy = IncrementalStrategy("truncate+insert")
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "incremental-strategy") {
+		t.Fatalf("expected incremental-strategy validation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"truncate+insert" has been removed; use "replace"`) {
+		t.Fatalf("expected removal message, got %v", err)
+	}
+}
+
 func TestIngestConfigValidate_IncrementalPredicateDefersStrategyValidation(t *testing.T) {
 	newCfg := func() *IngestConfig {
 		cfg := DefaultConfig()
@@ -383,11 +402,6 @@ func TestIngestConfigValidate_ExtractPartitioning(t *testing.T) {
 		{
 			name:   "replace accepted",
 			mutate: func(c *IngestConfig) { c.IncrementalStrategy = StrategyReplace },
-		},
-		{
-			name:    "truncate insert rejected",
-			mutate:  func(c *IngestConfig) { c.IncrementalStrategy = StrategyTruncateInsert },
-			wantErr: "incremental-strategy",
 		},
 	}
 
