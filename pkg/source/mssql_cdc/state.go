@@ -117,9 +117,9 @@ func (s *MSSQLCDCSource) TableIncarnation(ctx context.Context, table string) (st
 }
 
 // TableSchemaFingerprint hashes the schema this source actually delivers: the
-// capture instance's identity and captured columns, plus the source table's
-// primary key. A recreated capture instance or a changed merge key therefore
-// changes the fingerprint and invalidates recorded resume state.
+// captured columns plus the source table's primary key. Capture-instance
+// identity is intentionally excluded so an identical-layout replacement can
+// retain its resume cursor and use the two-phase handoff path.
 //
 // The configured capture_instance applies here because single-table reads
 // honor it; multi-table reads ignore it and fingerprint their own selected
@@ -134,18 +134,6 @@ func (s *MSSQLCDCSource) TableSchemaFingerprint(ctx context.Context, table strin
 
 func (s *MSSQLCDCSource) fingerprintCaptureInstance(ctx context.Context, meta tableMetadata) (string, error) {
 	h := sha256.New()
-	writeFingerprintValues(h, meta.CaptureInstance)
-
-	var startLSN string
-	err := s.db.QueryRowContext(
-		ctx,
-		"SELECT CONVERT(varchar(20), start_lsn, 2) FROM cdc.change_tables WHERE capture_instance = @p1 AND end_lsn IS NULL",
-		meta.CaptureInstance,
-	).Scan(&startLSN)
-	if err != nil {
-		return "", fmt.Errorf("failed to fingerprint capture instance %s: %w", meta.CaptureInstance, err)
-	}
-	writeFingerprintValues(h, startLSN)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.name, t.name, CONVERT(int, c.is_nullable), CONVERT(int, c.precision), CONVERT(int, c.scale), CONVERT(int, c.max_length)

@@ -86,6 +86,54 @@ func TestSourceColumnsWithoutCDC(t *testing.T) {
 	assert.Equal(t, "name", got[1].Name)
 }
 
+func TestFingerprintCaptureInstanceIgnoresIdentityButTracksLayout(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	expectFingerprint := func(changeTable, valueType string) {
+		mock.ExpectQuery("SELECT c.name, t.name").
+			WithArgs(changeTable).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "type", "nullable", "precision", "scale", "max_length"}).
+				AddRow("id", "int", 0, 10, 0, 4).
+				AddRow("value", valueType, 0, 10, 0, 4))
+		mock.ExpectQuery("SELECT c.name").
+			WithArgs("dbo.items").
+			WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("id"))
+	}
+
+	s := &MSSQLCDCSource{db: db}
+	expectFingerprint("cdc.dbo_items_CT", "int")
+	first, err := s.fingerprintCaptureInstance(t.Context(), tableMetadata{
+		SourceSchema:    "dbo",
+		SourceName:      "items",
+		CaptureInstance: "dbo_items",
+		ChangeTable:     "cdc.dbo_items_CT",
+	})
+	require.NoError(t, err)
+
+	expectFingerprint("cdc.dbo_items_v2_CT", "int")
+	replacement, err := s.fingerprintCaptureInstance(t.Context(), tableMetadata{
+		SourceSchema:    "dbo",
+		SourceName:      "items",
+		CaptureInstance: "dbo_items_v2",
+		ChangeTable:     "cdc.dbo_items_v2_CT",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first, replacement)
+
+	expectFingerprint("cdc.dbo_items_v3_CT", "bigint")
+	changedLayout, err := s.fingerprintCaptureInstance(t.Context(), tableMetadata{
+		SourceSchema:    "dbo",
+		SourceName:      "items",
+		CaptureInstance: "dbo_items_v3",
+		ChangeTable:     "cdc.dbo_items_v3_CT",
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, first, changedLayout)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestBuildSnapshotQueryUsesNullForDroppedCapturedColumns(t *testing.T) {
 	meta := tableMetadata{
 		SourceSchema:   "dbo",
