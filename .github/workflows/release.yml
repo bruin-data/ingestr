@@ -220,7 +220,6 @@ jobs:
 
           build_one artifacts/ingestr_Linux_x86_64.tar.gz   ingestr     manylinux2014_x86_64
           build_one artifacts/ingestr_Linux_arm64.tar.gz    ingestr     manylinux2014_aarch64
-          build_one artifacts/ingestr_Darwin_x86_64.tar.gz  ingestr     macosx_10_15_x86_64
           build_one artifacts/ingestr_Darwin_arm64.tar.gz   ingestr     macosx_11_0_arm64
           build_one artifacts/ingestr_Windows_x86_64.zip    ingestr.exe win_amd64
 
