@@ -26,12 +26,14 @@ Supported catalog schemes:
 Common URI parameters:
 
 - `catalog_name` (optional): logical catalog name used by the Iceberg client. Defaults to `ingestr`.
+- `rest_use_ssl` (optional, REST catalog): use HTTPS for the REST catalog connection (default is HTTP). Alias: `catalog_use_ssl`.
 - `storage=s3`: use S3 or an S3-compatible object store.
 - `bucket`: S3 bucket name. Combined with `prefix` to produce the Iceberg warehouse location.
 - `prefix` (optional): path prefix inside the bucket.
 - `endpoint` (optional): S3-compatible endpoint such as `localhost:9000`.
 - `use_ssl=false` (optional): use plain HTTP for S3-compatible local storage.
 - `access_key_id`, `secret_access_key`, `session_token`, `region`: S3 or Glue credentials and region aliases.
+- `gcs.keypath` (optional, GCS): path to a Google Cloud service-account JSON key for a `gs://` warehouse. Without it, GCS uses Application Default Credentials.
 - `warehouse`: advanced override for the Iceberg warehouse location, such as `s3://bucket/warehouse`.
 - `warehouse_path`: local warehouse path alias for non-S3 catalog setups.
 - `create_namespace` (optional): create the destination namespace automatically. Defaults to `true`.
@@ -40,6 +42,10 @@ Common URI parameters:
 - `table.<key>` (optional): table properties passed to Iceberg table creation, for example `table.write.format.default=parquet`.
 
 Advanced Iceberg-Go catalog properties are still accepted and passed through, including the older `iceberg+sql://?uri=...` form.
+
+::: info
+For non-AWS S3-compatible stores (MinIO, GCS interop, Cloudflare R2), ingestr handles S3 compatibility automatically. Set `s3.compat-mode=false` to disable it.
+:::
 
 ## Examples
 
@@ -66,16 +72,48 @@ ingestr ingest \
   --incremental-strategy append
 ```
 
+::: warning Hadoop catalog on object storage needs `allow-unsafe-commits=true`
+The Hadoop catalog only commits atomically on a real local or HDFS filesystem. For an object-storage warehouse (`s3://…`, `gs://…`) you must add `allow-unsafe-commits=true`, otherwise ingestr fails to connect.
+
+```bash
+ingestr ingest \
+  --source-uri 'postgresql://user:pass@localhost:5432/app' \
+  --source-table public.orders \
+  --dest-uri 'iceberg+hadoop://?storage=s3&warehouse=s3://company-lake/warehouse&allow-unsafe-commits=true&region=eu-west-1' \
+  --dest-table analytics.orders \
+  --incremental-strategy append
+```
+:::
+
 ### REST catalog with S3 storage
 
 ```bash
 ingestr ingest \
   --source-uri 'mysql://user:pass@mysql.internal:3306/app' \
   --source-table orders \
-  --dest-uri 'iceberg+rest://catalog.internal:8181?storage=s3&bucket=warehouse&prefix=prod&region=us-east-1' \
+  --dest-uri 'iceberg+rest://catalog.internal:8181?storage=s3&bucket=warehouse&prefix=prod&region=us-east-1&rest_use_ssl=true' \
   --dest-table sales.orders \
   --incremental-strategy append
 ```
+
+::: info
+`iceberg+rest://host:port` uses HTTP by default; add `rest_use_ssl=true` for HTTPS. (`use_ssl` is separate — it's for the S3 storage endpoint, not the catalog.)
+:::
+
+::: tip A REST catalog server must be running and pre-configured
+Unlike the sqlite/postgres catalogs (which are plain databases ingestr writes to directly), `iceberg+rest` talks to a **running REST catalog server** at the URI's host:port — you start and configure it yourself. The server holds its **own warehouse location, storage backend, and credentials**, because it manages the table metadata (and typically writes `metadata.json` to storage itself). The `--dest-uri` still supplies the client's storage credentials for writing the data files.
+
+For example, the reference `apache/iceberg-rest-fixture` is configured through environment variables before you run ingestr:
+
+```bash
+docker run -d -p 8181:8181 \
+  -e CATALOG_WAREHOUSE=s3://warehouse/ \
+  -e CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO \
+  -e CATALOG_S3_ENDPOINT=http://minio:9000 \
+  -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_REGION=us-east-1 \
+  apache/iceberg-rest-fixture
+```
+:::
 
 ### AWS Glue catalog
 
@@ -95,10 +133,47 @@ ingestr ingest \
 ingestr ingest \
   --source-uri 'duckdb:///tmp/source.duckdb' \
   --source-table main.clicks \
-  --dest-uri 'iceberg+hive://localhost:9083?storage=s3&bucket=warehouse&endpoint=localhost:9000&use_ssl=false&access_key_id=minioadmin&secret_access_key=minioadmin&region=us-east-1' \
+  --dest-uri 'iceberg+hive://localhost:9083?storage=s3&warehouse=s3a://warehouse&endpoint=localhost:9000&use_ssl=false&access_key_id=minioadmin&secret_access_key=minioadmin&region=us-east-1' \
   --dest-table web.clicks \
   --incremental-strategy replace
 ```
+
+::: warning The metastore needs its own storage configuration
+The Hive metastore creates the table directory itself, so it must reach the storage independently — the `--dest-uri` credentials configure only the ingestr client and never reach the metastore. Use the Hadoop scheme in `warehouse` (`s3a://…`, not `s3://`), put the right connector jar on the metastore's classpath (`hadoop-aws` for S3, `gcs-connector` for GCS), and set the properties below in its `core-site.xml`. Without it the metastore fails with `No FileSystem for scheme "s3"` or `S3AFileSystem not found`. A `file://` warehouse needs none of this.
+:::
+
+#### Metastore `core-site.xml` per backend
+
+**MinIO / S3-compatible** — warehouse `s3a://bucket`, jar `hadoop-aws`:
+
+| property | value | why |
+|----------|-------|-----|
+| `fs.s3a.endpoint` | `http://minio:9000` | the S3-compatible endpoint |
+| `fs.s3a.access.key` | `minioadmin` | access key |
+| `fs.s3a.secret.key` | `minioadmin` | secret key |
+| `fs.s3a.path.style.access` | `true` | MinIO uses path-style URLs, not virtual-host |
+| `fs.s3a.connection.ssl.enabled` | `false` | endpoint is plain HTTP |
+
+**AWS S3** — warehouse `s3a://bucket`, jar `hadoop-aws` (omit `fs.s3a.endpoint` to use real AWS):
+
+| property | value | why |
+|----------|-------|-----|
+| `fs.s3a.access.key` | `AKIA…` | access key |
+| `fs.s3a.secret.key` | `…` | secret key |
+| `fs.s3a.session.token` | `…` | only for temporary (STS) credentials |
+| `fs.s3a.aws.credentials.provider` | `org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider` | only when a session token is used |
+| `fs.s3a.endpoint.region` | `eu-north-1` | the bucket's region |
+
+**Google Cloud Storage** — warehouse `gs://bucket`, jar `gcs-connector`:
+
+| property | value | why |
+|----------|-------|-----|
+| `fs.gs.impl` | `com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem` | register the `gs` filesystem |
+| `fs.AbstractFileSystem.gs.impl` | `com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS` | AbstractFileSystem binding |
+| `fs.gs.auth.service.account.enable` | `true` | authenticate with a service account |
+| `fs.gs.auth.service.account.json.keyfile` | `/path/to/sa.json` | the SA key file, mounted into the metastore |
+
+The credentials here are for the **metastore only**; the ingestr client still gets its own storage credentials from the `--dest-uri`.
 
 ### Postgres SQL catalog with S3
 
@@ -111,6 +186,14 @@ ingestr ingest \
   --incremental-strategy replace \
   --primary-key event_id
 ```
+
+The postgres catalog forwards standard PostgreSQL connection parameters from the URI to the catalog database connection, so you can secure or tune it — e.g. append `&sslmode=require` for a managed database like Neon, RDS, or Cloud SQL:
+
+```plaintext
+iceberg+postgres://user:pass@host:5432/iceberg_catalog?storage=s3&bucket=company-lake&sslmode=require&sslrootcert=/path/ca.pem
+```
+
+Recognized connection parameters: `sslmode`, `sslcert`, `sslkey`, `sslrootcert`, `sslpassword`, `sslcrl`, `sslcrldir`, `sslsni`, `sslcompression`, `requiressl`, `connect_timeout`, `application_name`, `fallback_application_name`, `target_session_attrs`, `tcp_user_timeout`, `options`, `service`, `servicefile`, `passfile`, `krbsrvname`, and `replication`. Any other query parameter is treated as an Iceberg/storage option, not a database connection setting.
 
 ## Table naming
 

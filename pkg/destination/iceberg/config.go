@@ -73,6 +73,20 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 		return icebergConfig{}, err
 	}
 	applyPropertyAliases(cfg.Properties)
+
+	// The generic sql catalog needs both; iceberg+postgres/iceberg+sqlite set them,
+	// iceberg+sql doesn't. Fail clearly instead of iceberg-go's opaque sql.Open error.
+	if cfg.Properties["type"] == "sql" && (cfg.Properties["sql.driver"] == "" || cfg.Properties["sql.dialect"] == "") {
+		return icebergConfig{}, fmt.Errorf("iceberg uri: sql catalog requires both sql.driver and sql.dialect (e.g. sql.driver=pgx&sql.dialect=postgres), or use the iceberg+postgres / iceberg+sqlite scheme which set them automatically")
+	}
+
+	// Non-AWS S3 endpoints (MinIO, GCS interop, R2) need iceberg-go's compat-mode;
+	// enable it by default unless set explicitly.
+	if cfg.Properties["s3.endpoint"] != "" {
+		if _, ok := cfg.Properties["s3.compat-mode"]; !ok {
+			cfg.Properties["s3.compat-mode"] = "true"
+		}
+	}
 	return cfg, nil
 }
 
