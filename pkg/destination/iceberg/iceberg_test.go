@@ -3,9 +3,13 @@ package iceberg
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -135,6 +139,106 @@ func TestDestinationConnectSQLiteCatalog(t *testing.T) {
 
 	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
 	require.NoError(t, dest.Close(ctx))
+}
+
+func TestDestinationDropTablePurgesSQLCatalogFiles(t *testing.T) {
+	ctx := context.Background()
+	dest := NewDestination()
+	root := t.TempDir()
+	catalogDB := filepath.Join(root, "catalog.db")
+	warehouse := filepath.Join(root, "warehouse")
+	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
+	t.Cleanup(func() { require.NoError(t, dest.Close(ctx)) })
+
+	tableName := "lake.cleanup.managed_staging"
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: tableName, Schema: tableSchema, ExpiresAfter: time.Hour,
+	}))
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 1)), destination.WriteOptions{
+		Table: tableName, Schema: tableSchema,
+	}))
+
+	tbl, err := dest.loadIcebergTable(ctx, tableName)
+	require.NoError(t, err)
+	location, ok := localFilesystemPath(tbl.Location())
+	require.True(t, ok)
+	require.NotEmpty(t, regularFiles(t, location))
+
+	require.NoError(t, dest.DropTable(ctx, tableName))
+	exists, err := dest.catalog.CheckTableExists(ctx, icebergCatalogIdentifier(t, tableName))
+	require.NoError(t, err)
+	require.False(t, exists, "purge must remove the catalog entry")
+	require.Empty(t, regularFiles(t, location), "purge must remove the table's data and metadata objects")
+}
+
+func TestDestinationPurgesExpiredManagedTables(t *testing.T) {
+	ctx := context.Background()
+	dest := NewDestination()
+	root := t.TempDir()
+	catalogDB := filepath.Join(root, "catalog.db")
+	warehouse := filepath.Join(root, "warehouse")
+	require.NoError(t, dest.Connect(ctx, "iceberg+sqlite://"+catalogDB+"?warehouse_path="+url.QueryEscape(warehouse)))
+	t.Cleanup(func() { require.NoError(t, dest.Close(ctx)) })
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	expiredTable := "lake.cleanup.expired_staging"
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: expiredTable, Schema: tableSchema, ExpiresAfter: time.Hour,
+	}))
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 1)), destination.WriteOptions{
+		Table: expiredTable, Schema: tableSchema,
+	}))
+
+	tbl, err := dest.loadIcebergTable(ctx, expiredTable)
+	require.NoError(t, err)
+	expiresAtMillis, err := strconv.ParseInt(tbl.Properties().Get(managedExpiresAtProperty, ""), 10, 64)
+	require.NoError(t, err)
+	require.True(t, time.UnixMilli(expiresAtMillis).After(time.Now()))
+	location, ok := localFilesystemPath(tbl.Location())
+	require.True(t, ok)
+	require.NotEmpty(t, regularFiles(t, location))
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(map[string]string{managedExpiresAtProperty: "0"}))
+	_, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "lake.cleanup.current_staging", Schema: tableSchema, ExpiresAfter: time.Hour,
+	}))
+	exists, err := dest.catalog.CheckTableExists(ctx, icebergCatalogIdentifier(t, expiredTable))
+	require.NoError(t, err)
+	require.False(t, exists, "preparing managed staging should remove expired catalog entries in its namespace")
+	require.Empty(t, regularFiles(t, location), "expiry cleanup must purge underlying objects")
+}
+
+func icebergCatalogIdentifier(t *testing.T, table string) []string {
+	t.Helper()
+	ident, err := parseIdentifier(table)
+	require.NoError(t, err)
+	return ident
+}
+
+func regularFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) {
+			return fs.SkipDir
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(t, err)
+	}
+	return files
 }
 
 func TestIcebergSchemaFromTableSchemaNormalizesJSON(t *testing.T) {
@@ -280,6 +384,31 @@ func TestRecordBatchReaderNormalizesUUIDStrings(t *testing.T) {
 	require.NoError(t, reader.Err())
 }
 
+func TestValidateRequiredColumnsReportsEveryViolation(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	builder.AppendNull()
+
+	first := builder.NewArray()
+	defer first.Release()
+	builder.AppendNull()
+	second := builder.NewArray()
+	defer second.Release()
+
+	batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "tenant_id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil), []arrow.Array{first, second}, 1)
+	defer batch.Release()
+
+	err := validateRequiredColumns(batch, []requiredColumn{
+		{name: "id", index: 0},
+		{name: "tenant_id", index: 1},
+	})
+	require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+	require.ErrorContains(t, err, `required field "tenant_id" contains 1 NULL value(s)`)
+}
+
 func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.events"
@@ -364,6 +493,54 @@ func TestDestinationWritesAppendAndReplaceWithHadoopCatalog(t *testing.T) {
 	require.Empty(t, icebergPartitionFieldNames(ctx, t, dest, tableName))
 }
 
+func TestDestinationDirectReplaceDeduplicatesPrimaryKeys(t *testing.T) {
+	withSpillRunRows(t, 2)
+
+	ctx := context.Background()
+	tableName := "lake.analytics.deduplicated_replace"
+	tableSchema := mergeTestSchema()
+	tableSchema.PrimaryKeys = []string{"id"}
+	dest := newHadoopDestination(t)
+
+	writeTableRows(t, dest, tableName, tableSchema, false, [][]any{
+		{int64(99), "old-snapshot", 99.0, int64(99)},
+	})
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		DropFirst:   true,
+		PrimaryKeys: []string{"id"},
+	}))
+
+	first, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{
+		{int64(1), "v1-old", 10.0, int64(1)},
+		{int64(2), "v2", 20.0, int64(2)},
+		{int64(1), "v1-latest", 11.0, int64(3)},
+	})
+	require.NoError(t, err)
+	second, err := buildRecordBatches(icebergArrowSchema(tableSchema), [][]any{
+		{int64(3), "v3-latest", 31.0, int64(4)},
+		{int64(3), "v3-old", 30.0, int64(5)},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(append(first, second...)...), destination.WriteOptions{
+		Table:                  tableName,
+		Schema:                 tableSchema,
+		PrimaryKeys:            []string{"id"},
+		DeduplicatePrimaryKeys: true,
+		IncrementalKey:         "score",
+	}))
+
+	rows := readTableRows(t, dest, tableName)
+	byID := singleRowByKey(t, rows, "id")
+	require.Len(t, byID, 3)
+	require.Equal(t, "v1-latest", rows.Value(byID[int64(1)], "name"))
+	require.Equal(t, "v3-latest", rows.Value(byID[int64(3)], "name"))
+	require.NotContains(t, byID, int64(99), "replace must remove the previous snapshot")
+}
+
 func TestDestinationStrategySupport(t *testing.T) {
 	dest := NewDestination()
 
@@ -375,7 +552,9 @@ func TestDestinationStrategySupport(t *testing.T) {
 	require.True(t, dest.SupportsCDCMerge())
 	require.True(t, dest.SupportsCDCUnchangedCols())
 	require.False(t, dest.SupportsAtomicSwap())
+	require.True(t, dest.SupportsDirectReplaceDeduplication())
 
+	require.ErrorContains(t, dest.SwapTable(context.Background(), destination.SwapOptions{}), "does not support atomic table swap")
 	require.ErrorContains(t, dest.MergeTable(context.Background(), destination.MergeOptions{PrimaryKeys: []string{"id"}}), "not connected")
 	require.ErrorContains(t, dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{IncrementalKey: "id"}), "not connected")
 	require.ErrorContains(t, dest.SCD2Table(context.Background(), destination.SCD2Options{PrimaryKeys: []string{"id"}}), "not connected")
@@ -418,6 +597,60 @@ func TestDestinationApplySchemaEvolutionPromotesColumnType(t *testing.T) {
 	require.True(t, icebergColumn(t, gotSchema, "id").Nullable)
 }
 
+func TestDestinationApplySchemaEvolutionPromotesArrayElementType(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.promoted_array_events"
+	initial := schema.Column{Name: "values", DataType: schema.TypeArray, ArrayType: schema.TypeInt32, Nullable: true}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() { require.NoError(t, dest.Close(ctx)) }()
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: tableName, Schema: &schema.TableSchema{Columns: []schema.Column{initial}},
+	}))
+
+	_, err := dest.ApplySchemaEvolution(ctx, tableName, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type: schemaevolution.ChangeWidenType, ColumnName: "values", OldColumn: &initial,
+			NewColumn: schema.Column{Name: "values", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true},
+		}},
+	})
+	require.NoError(t, err)
+
+	got, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.Equal(t, schema.TypeInt64, icebergColumn(t, got, "values").ArrayType)
+}
+
+func TestDestinationApplySchemaEvolutionRelaxesRequiredColumns(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.relaxed_events"
+	relaxed := schema.Column{Name: "relaxed", DataType: schema.TypeString, Nullable: false}
+	removed := schema.Column{Name: "removed", DataType: schema.TypeString, Nullable: false}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() { require.NoError(t, dest.Close(ctx)) }()
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: tableName, Schema: &schema.TableSchema{Columns: []schema.Column{relaxed, removed}},
+	}))
+
+	_, err := dest.ApplySchemaEvolution(ctx, tableName, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "relaxed", OldColumn: &relaxed},
+			{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "removed", OldColumn: &removed},
+		},
+	})
+	require.NoError(t, err)
+
+	got, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.True(t, icebergColumn(t, got, "relaxed").Nullable)
+	require.True(t, icebergColumn(t, got, "removed").Nullable)
+}
+
 func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.failed_append_events"
@@ -446,7 +679,80 @@ func TestDestinationAppendReturnsSourceErrorAfterBatch(t *testing.T) {
 	require.ErrorIs(t, err, writeErr)
 }
 
-func TestDestinationReplaceAddsNewRequiredColumns(t *testing.T) {
+func TestDestinationRejectsNullIdentifiers(t *testing.T) {
+	tests := []struct {
+		name          string
+		replace       bool
+		arrowNullable bool
+	}{
+		{name: "append", arrowNullable: true},
+		{name: "replace with non-nullable Arrow field", replace: true, arrowNullable: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tableName := "lake.analytics.null_identifier_events"
+			tableSchema := &schema.TableSchema{
+				Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+			}
+
+			dest := NewDestination()
+			require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+			defer func() { require.NoError(t, dest.Close(ctx)) }()
+
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table: tableName, Schema: tableSchema, PrimaryKeys: []string{"id"},
+			}))
+			require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 7)), destination.WriteOptions{
+				Table: tableName, Schema: tableSchema,
+			}))
+
+			prepareOpts := destination.PrepareOptions{
+				Table: tableName, Schema: tableSchema, DropFirst: tt.replace,
+			}
+			if tt.replace {
+				prepareOpts.PrimaryKeys = []string{"id"}
+			}
+			require.NoError(t, dest.PrepareTable(ctx, prepareOpts))
+
+			err := dest.WriteParallel(ctx, recordBatches(int64BatchWithValidity(
+				t, []int64{8, 0}, []bool{true, false}, tt.arrowNullable,
+			)), destination.WriteOptions{Table: tableName, Schema: tableSchema})
+			require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+			require.EqualValues(t, 1, icebergRowCount(ctx, t, dest, tableName))
+		})
+	}
+}
+
+func TestDestinationMakesNonIdentifierColumnsOptional(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.optional_events"
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "event_name", DataType: schema.TypeString, Nullable: false},
+		},
+	}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() { require.NoError(t, dest.Close(ctx)) }()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	}))
+
+	gotSchema, err := dest.GetTableSchema(ctx, tableName)
+	require.NoError(t, err)
+	require.False(t, icebergColumn(t, gotSchema, "id").Nullable)
+	require.True(t, icebergColumn(t, gotSchema, "event_name").Nullable)
+	require.False(t, tableSchema.Columns[1].Nullable, "PrepareTable must not mutate the caller schema")
+}
+
+func TestDestinationReplaceAddsNewOptionalColumns(t *testing.T) {
 	ctx := context.Background()
 	tableName := "lake.analytics.required_events"
 	initialSchema := &schema.TableSchema{
@@ -483,7 +789,7 @@ func TestDestinationReplaceAddsNewRequiredColumns(t *testing.T) {
 
 	gotSchema, err := dest.GetTableSchema(ctx, tableName)
 	require.NoError(t, err)
-	require.False(t, icebergColumn(t, gotSchema, "event_name").Nullable)
+	require.True(t, icebergColumn(t, gotSchema, "event_name").Nullable)
 }
 
 func TestDestinationReplaceWriteFailureDoesNotMutateExistingMetadata(t *testing.T) {
@@ -551,6 +857,23 @@ func int64Batch(t *testing.T, values ...int64) arrow.RecordBatch {
 	defer arr.Release()
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	return array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(len(values)))
+}
+
+func int64BatchWithValidity(t *testing.T, values []int64, valid []bool, nullable bool) arrow.RecordBatch {
+	t.Helper()
+	require.Len(t, valid, len(values))
+
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	builder.AppendValues(values, valid)
+
+	arr := builder.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: nullable,
+	}}, nil)
 	return array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(len(values)))
 }
 

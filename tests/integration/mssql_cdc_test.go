@@ -435,6 +435,105 @@ func TestMSSQLCDC_FreshCaptureInstanceResume_DuckDB(t *testing.T) {
 	assert.True(t, deleted, "delete after fresh snapshot must be applied")
 }
 
+// TestMSSQLCDC_CaptureInstanceHandoff_DuckDB verifies the two-phase capture
+// instance recreation flow: when a second instance with an identical captured
+// column layout is created, a run whose cursor predates the new instance
+// drains the gap from the old instance and switches to the new one WITHOUT
+// re-snapshotting. A canary row planted directly in the destination proves no
+// destination-cleaning re-snapshot happened.
+func TestMSSQLCDC_CaptureInstanceHandoff_DuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	dbName, db := setupMSSQLCDCDatabase(t, ctx)
+
+	_, err := db.ExecContext(ctx, `CREATE TABLE dbo.handoff (id INT NOT NULL PRIMARY KEY, v INT NOT NULL)`)
+	require.NoError(t, err)
+	enableMSSQLCDCOnTable(t, ctx, db, "handoff")
+	_, err = db.ExecContext(ctx, `INSERT INTO dbo.handoff (id, v) VALUES (1, 10), (2, 20), (3, 30)`)
+	require.NoError(t, err)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_handoff", 3)
+
+	tmpDir, err := os.MkdirTemp("", "mssql_cdc_handoff_*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	duckdbPath := tmpDir + "/test.duckdb"
+
+	cfg := &config.IngestConfig{
+		SourceURI:   mssqlURIForDatabase(t, mssqlDest.uri, "mssql+cdc", dbName, map[string]string{"mode": "batch"}),
+		SourceTable: "dbo.handoff",
+		DestURI:     "duckdb:///" + duckdbPath,
+		DestTable:   "handoff_dest",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	// Gap change: only the original capture instance covers it.
+	_, err = db.ExecContext(ctx, `INSERT INTO dbo.handoff (id, v) VALUES (4, 40)`)
+	require.NoError(t, err)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_handoff", 4)
+
+	// Recreate the capture instance with an identical layout (documented
+	// operational flow: create the new instance first, drop the old one only
+	// after consumers moved past its start).
+	_, err = db.ExecContext(ctx, `EXEC sys.sp_cdc_enable_table
+		@source_schema = N'dbo', @source_name = N'handoff', @role_name = NULL,
+		@capture_instance = N'dbo_handoff_v2', @supports_net_changes = 0`)
+	require.NoError(t, err)
+
+	// Post-recreation change: captured by both instances.
+	_, err = db.ExecContext(ctx, `INSERT INTO dbo.handoff (id, v) VALUES (5, 50)`)
+	require.NoError(t, err)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_handoff_v2", 1)
+
+	// Canary: a destination-only row with an LSN below every real stamp. It
+	// survives merges but not the destination-cleaning re-snapshot, so its
+	// survival proves the handoff path ran.
+	duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+	require.NoError(t, err)
+	_, err = duck.Exec(`INSERT INTO handoff_dest (id, v, "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at")
+		VALUES (999, 0, '00000000000000000000:00000000000000000000:00', false, CURRENT_TIMESTAMP)`)
+	require.NoError(t, err)
+	require.NoError(t, duck.Close())
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	queryDuckCount := func(query string) int64 {
+		duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+		require.NoError(t, err)
+		defer func() { _ = duck.Close() }()
+		var v int64
+		require.NoError(t, duck.QueryRow(query).Scan(&v))
+		return v
+	}
+
+	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM handoff_dest WHERE id = 999`),
+		"canary must survive: an instance recreation with an identical layout must hand off instead of re-snapshotting")
+	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM handoff_dest WHERE id = 4 AND v = 40 AND NOT "_cdc_deleted"`),
+		"the gap change covered only by the old instance must be drained during handoff")
+	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM handoff_dest WHERE id = 5 AND v = 50 AND NOT "_cdc_deleted"`),
+		"the post-recreation change must arrive from the new instance")
+	assert.EqualValues(t, 6, queryDuckCount(`SELECT COUNT(*) FROM handoff_dest`))
+
+	// Final documented step: drop the old instance now that the cursor moved
+	// past its range; subsequent runs resume normally on the new instance.
+	_, err = db.ExecContext(ctx, `EXEC sys.sp_cdc_disable_table
+		@source_schema = N'dbo', @source_name = N'handoff', @capture_instance = N'dbo_handoff'`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE dbo.handoff SET v = 51 WHERE id = 5`)
+	require.NoError(t, err)
+	// v2 captures insert5 (1) plus the update's before+after images (2).
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_handoff_v2", 3)
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM handoff_dest WHERE id = 5 AND v = 51 AND NOT "_cdc_deleted"`),
+		"post-handoff runs must resume incrementally on the new instance")
+	assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM handoff_dest WHERE id = 999`),
+		"canary must still survive the post-handoff resume")
+}
+
 func TestMSSQLCDC_MultiTable_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

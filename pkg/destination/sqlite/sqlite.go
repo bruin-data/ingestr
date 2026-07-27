@@ -2,7 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +36,8 @@ type SQLiteDestination struct {
 	// PrepareTable calls in multi-table runs.
 	schemas   map[string]*schema.TableSchema
 	schemasMu sync.Mutex
+
+	incarnationMu sync.Mutex
 }
 
 func NewSQLiteDestination() *SQLiteDestination {
@@ -101,7 +107,7 @@ func (d *SQLiteDestination) Connect(ctx context.Context, uri string) error {
 		_ = db.Close()
 		return fmt.Errorf("failed to set journal mode: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=NORMAL"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("failed to set synchronous mode: %w", err)
 	}
@@ -138,13 +144,17 @@ func (d *SQLiteDestination) ensureSchemaAttached(ctx context.Context, schemaName
 		config.LogFailedQuery(walSQL, err)
 		return fmt.Errorf("failed to set WAL on attached schema %s: %w", schemaName, err)
 	}
+	synchronousSQL := fmt.Sprintf("PRAGMA %s.synchronous=FULL", destination.QuoteIdentifier(schemaName))
+	if _, err := d.db.ExecContext(ctx, synchronousSQL); err != nil {
+		config.LogFailedQuery(synchronousSQL, err)
+		return fmt.Errorf("failed to set synchronous mode on attached schema %s: %w", schemaName, err)
+	}
 	d.attachedSchemas[schemaName] = stagingPath
 	config.Debug("[SQLITE] Attached schema %q at %s", schemaName, stagingPath)
 	return nil
 }
 
-// Leading underscores in the schema are stripped to keep the filename readable
-// (e.g. _bruin_staging → foo__bruin_staging.db, not foo___bruin_staging.db).
+// Leading underscores are omitted from the established attached-database filename.
 func stagingFilePath(targetFile, schemaName string) string {
 	ext := filepath.Ext(targetFile)
 	base := strings.TrimSuffix(targetFile, ext)
@@ -152,7 +162,7 @@ func stagingFilePath(targetFile, schemaName string) string {
 }
 
 func schemaOf(table string) string {
-	parts := strings.SplitN(table, ".", 2)
+	parts := tablename.Split(table)
 	if len(parts) == 2 {
 		return parts[0]
 	}
@@ -170,7 +180,6 @@ func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err := tablename.TwoLevel("sqlite").CheckName(opts.Table); err != nil {
 		return err
 	}
-	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	if err := d.ensureSchemaAttached(ctx, schemaOf(opts.Table)); err != nil {
 		return err
@@ -195,8 +204,50 @@ func (d *SQLiteDestination) PrepareTable(ctx context.Context, opts destination.P
 		}
 		config.Debug("[SQLITE] CREATE TABLE took %v", time.Since(startCreate))
 	}
+	if opts.RequirePrimaryKeyMatch {
+		actual, err := d.GetTableSchema(ctx, opts.Table)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if actual == nil || !sqlitePrimaryKeySetsEqual(opts.PrimaryKeys, actual.PrimaryKeys) {
+			var actualKeys []string
+			if actual != nil {
+				actualKeys = actual.PrimaryKeys
+			}
+			return fmt.Errorf("CDC merge target %s must have primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
+	d.recordSchema(opts.Table, opts.Schema, opts.PrimaryKeys)
 
 	return nil
+}
+
+func sqlitePrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[sqliteIdentifierKey(key)]++
+	}
+	for _, key := range actual {
+		normalized := sqliteIdentifierKey(key)
+		if remaining[normalized] == 0 {
+			return false
+		}
+		remaining[normalized]--
+	}
+	return true
+}
+
+func sqliteIdentifierKey(identifier string) string {
+	bytes := []byte(identifier)
+	for i, ch := range bytes {
+		if ch >= 'A' && ch <= 'Z' {
+			bytes[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(bytes)
 }
 
 func (d *SQLiteDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -212,13 +263,20 @@ func (d *SQLiteDestination) WriteParallel(ctx context.Context, records <-chan so
 
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
+		}
+		if result.Batch == nil {
+			continue
 		}
 
 		batchNum++
 		startBatch := time.Now()
 
 		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+		result.Batch.Release()
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -228,7 +286,6 @@ func (d *SQLiteDestination) WriteParallel(ctx context.Context, records <-chan so
 		config.Debug("[SQLITE] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
 			batchNum, rows, time.Since(startBatch), rate, totalRows)
 
-		result.Batch.Release()
 	}
 
 	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
@@ -427,7 +484,9 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 
 	columns := opts.Columns
 	quotedColumns := quoteColumns(columns)
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	targetColumns := destination.DestinationColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKColumns := filterColumns(targetColumns, opts.PrimaryKeys)
 
 	// Begin transaction for atomic merge
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -444,42 +503,129 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 	// row per PK wins, else arbitrary.
 	quotedPKs := quoteColumns(opts.PrimaryKeys)
 	isCDC := destination.HasCDCDeletedColumn(columns)
+	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
 	dedupOrderBy := "(SELECT NULL)"
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(destination.QuoteIdentifier)
 	} else if opts.IncrementalKey != "" {
 		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
 	}
-	dedupSource := func(where string) string {
+	usedInternalNames := make(map[string]struct{}, len(columns)+6)
+	for _, col := range columns {
+		usedInternalNames[strings.ToLower(col)] = struct{}{}
+	}
+	uniqueInternalName := func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedInternalNames[strings.ToLower(candidate)]; !exists {
+				usedInternalNames[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	dedupRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_dedup_rn"))
+	dedupSourceWithOrder := func(where, orderBy string) string {
 		return fmt.Sprintf(
-			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1) AS source`,
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1) AS source`,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedColumns, ", "),
 			strings.Join(quotedPKs, ", "),
-			dedupOrderBy,
+			orderBy,
+			dedupRowNumber,
 			destination.QuoteTableName(opts.StagingTable),
 			where,
+			dedupRowNumber,
 		)
 	}
+	dedupSource := func(where string) string { return dedupSourceWithOrder(where, dedupOrderBy) }
 
-	// For CDC, updates use the latest non-deleted change per PK so a delete
-	// followed by nothing doesn't clobber row data. Inserts use the latest
-	// change overall so delete-only keys can materialize tombstones for resume.
+	// For CDC, updates use the latest active image. Inserts combine that image
+	// with the latest overall CDC metadata; delete-only keys use their tombstone.
 	updateSource := dedupSource("")
 	insertSource := updateSource
+	equalDeleteMarker := ""
 	if isCDC {
-		updateSource = dedupSource(` WHERE "_cdc_deleted" = 0`)
-		insertSource = dedupSource("")
+		equalDeleteMarker = destination.QuoteIdentifier(uniqueInternalName("__ingestr_has_equal_lsn_delete"))
+		activeRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_active_rn"))
+		updateSource = fmt.Sprintf(
+			`(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, "_cdc_deleted" ORDER BY "_cdc_lsn" DESC) AS %s, MAX("_cdc_deleted") OVER (PARTITION BY %s, "_cdc_lsn") AS %s FROM %s) AS _numbered WHERE "_cdc_deleted" = 0 AND %s = 1) AS source`,
+			strings.Join(quotedColumns, ", "),
+			equalDeleteMarker,
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			activeRowNumber,
+			strings.Join(quotedPKs, ", "),
+			equalDeleteMarker,
+			destination.QuoteTableName(opts.StagingTable),
+			activeRowNumber,
+		)
+		imageRowNumber := destination.QuoteIdentifier(uniqueInternalName("__bruin_image_rn"))
+		latestLSN := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_lsn"))
+		latestDeleted := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_deleted"))
+		latestSyncedAt := destination.QuoteIdentifier(uniqueInternalName("__ingestr_latest_synced_at"))
+		insertColumns := make([]string, len(targetColumns))
+		for i, col := range targetColumns {
+			quoted := destination.QuoteIdentifier(col)
+			switch {
+			case strings.EqualFold(col, destination.CDCLSNColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestLSN, quoted)
+			case strings.EqualFold(col, destination.CDCDeletedColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestDeleted, quoted)
+			case strings.EqualFold(col, destination.CDCSyncedAtColumn):
+				insertColumns[i] = fmt.Sprintf("%s AS %s", latestSyncedAt, quoted)
+			default:
+				insertColumns[i] = quoted
+			}
+		}
+		insertSource = fmt.Sprintf(
+			`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY "_cdc_deleted" ASC, "_cdc_lsn" DESC) AS %s, FIRST_VALUE("_cdc_lsn") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_deleted") OVER (PARTITION BY %s ORDER BY %s) AS %s, FIRST_VALUE("_cdc_synced_at") OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1) AS source`,
+			strings.Join(insertColumns, ", "),
+			strings.Join(quotedColumns, ", "),
+			strings.Join(quotedPKs, ", "),
+			imageRowNumber,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestLSN,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestDeleted,
+			strings.Join(quotedPKs, ", "),
+			dedupOrderBy,
+			latestSyncedAt,
+			destination.QuoteTableName(opts.StagingTable),
+			imageRowNumber,
+		)
+	}
+	primaryKeyMatchCondition := buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source")
+	matchCondition := destination.MergeJoinCondition(
+		primaryKeyMatchCondition,
+		opts.IncrementalPredicate,
+	)
+	insertMatchCondition := matchCondition
+	if isCDC {
+		insertMatchCondition = primaryKeyMatchCondition
 	}
 
-	// UPDATE existing records using SQLite syntax
-	if len(nonPKColumns) > 0 {
+	runUpdate := func() error {
+		if len(nonPKColumns) == 0 {
+			return nil
+		}
+		updateTarget := quotedTargetTable + " AS target"
+		updateSet := buildUpdateSetSQLite(nonPKColumns, "source")
+		if isCDC && hasUnchangedCols {
+			updateSet = buildCDCUpdateSetSQLite(nonPKColumns, "target", "source", "source."+destination.QuoteIdentifier(destination.CDCUnchangedColsColumn))
+		}
+		updateMatchCondition := matchCondition
+		if isCDC {
+			updateMatchCondition += fmt.Sprintf(` AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0 AND source.%s = 1))`, equalDeleteMarker)
+		}
 		updateSQL := fmt.Sprintf(
 			`UPDATE %s SET %s FROM %s WHERE %s`,
-			quotedTargetTable,
-			buildUpdateSetSQLite(nonPKColumns, "source"),
+			updateTarget,
+			updateSet,
 			updateSource,
-			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
+			updateMatchCondition,
 		)
 		config.Debug("[MERGE] Executing UPDATE: %s", updateSQL)
 
@@ -487,33 +633,50 @@ func (d *SQLiteDestination) MergeTable(ctx context.Context, opts destination.Mer
 			config.LogFailedQuery(updateSQL, err)
 			return fmt.Errorf("failed to update existing records: %w", err)
 		}
+		return nil
 	}
 
-	// INSERT new records
-	insertSQL := fmt.Sprintf(
-		`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-		quotedTargetTable,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "),
-		insertSource,
-		quotedTargetTable,
-		buildJoinConditionSQLite(opts.PrimaryKeys, "target", "source"),
-	)
-	config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
+	runInsert := func() error {
+		insertSQL := fmt.Sprintf(
+			`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			quotedTargetTable,
+			strings.Join(quotedTargetColumns, ", "),
+			strings.Join(quotedTargetColumns, ", "),
+			insertSource,
+			quotedTargetTable,
+			insertMatchCondition,
+		)
+		config.Debug("[MERGE] Executing INSERT: %s", insertSQL)
 
-	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
-		config.LogFailedQuery(insertSQL, err)
-		return fmt.Errorf("failed to insert new records: %w", err)
+		if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
+			config.LogFailedQuery(insertSQL, err)
+			return fmt.Errorf("failed to insert new records: %w", err)
+		}
+		return nil
+	}
+
+	// With a predicate, the INSERT runs first so its anti-join sees the
+	// pre-update target: an UPDATE that moves a matched row out of the
+	// predicate window would otherwise make the INSERT re-add it as a
+	// duplicate. CDC anti-joins always use the primary key alone.
+	steps := []func() error{runUpdate, runInsert}
+	if strings.TrimSpace(opts.IncrementalPredicate) != "" {
+		steps = []func() error{runInsert, runUpdate}
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 
 	if isCDC {
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
-			`UPDATE %s SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1`,
+			`UPDATE %s AS target SET "_cdc_deleted" = 1, "_cdc_lsn" = source."_cdc_lsn", "_cdc_synced_at" = source."_cdc_synced_at" FROM %s WHERE %s AND source."_cdc_deleted" = 1 AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" > target."_cdc_lsn" OR (source."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", 0) = 0))`,
 			quotedTargetTable,
 			dedupSource(""),
-			buildJoinConditionSQLite(opts.PrimaryKeys, quotedTargetTable, "source"),
+			matchCondition,
 		)
 		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
 
@@ -701,6 +864,23 @@ func (d *SQLiteDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *SQLiteDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		destination.QuoteTableName(opts.TargetTable), columnList, columnList, destination.QuoteTableName(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 // SupportsReplaceStrategy returns true as SQLite supports the replace strategy.
 func (d *SQLiteDestination) SupportsReplaceStrategy() bool { return true }
 
@@ -709,6 +889,8 @@ func (d *SQLiteDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as SQLite supports the merge strategy.
 func (d *SQLiteDestination) SupportsMergeStrategy() bool { return true }
+
+func (d *SQLiteDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as SQLite supports the delete+insert strategy.
 func (d *SQLiteDestination) SupportsDeleteInsertStrategy() bool { return true }
@@ -720,6 +902,8 @@ func (d *SQLiteDestination) SupportsSCD2Strategy() bool { return true }
 func (d *SQLiteDestination) SupportsAtomicSwap() bool { return true }
 
 func (d *SQLiteDestination) SupportsCDCMerge() bool { return true }
+
+func (d *SQLiteDestination) SupportsCDCUnchangedCols() bool { return true }
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
@@ -742,14 +926,326 @@ func (d *SQLiteDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	return maxLSN.String, nil
 }
 
+func (d *SQLiteDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`SELECT "event_id", "source_table", "destination_table", "state_kind", "state_generation", "state_status", "_cdc_lsn" FROM %s WHERE "connector_id" = ?`, destination.QuoteTableName(table))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (d *SQLiteDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	targetSchema := schemaOf(claim.DestinationTable)
+	if targetSchema == "" {
+		targetSchema = "main"
+	}
+	canonicalTarget := destination.CDCTargetKey(strings.ToLower(targetSchema), strings.ToLower(extractTableName(claim.DestinationTable)))
+	query := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT("destination_table") DO UPDATE SET "claimed_at" = "claimed_at" RETURNING "connector_id"`, destination.QuoteTableName(claimTable))
+	var owner string
+	if err := d.db.QueryRowContext(ctx, query, canonicalTarget, ownerID).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return nil
+}
+
+func (d *SQLiteDestination) ClaimAndPrepareEmptyCDCTarget(
+	ctx context.Context,
+	claimTable string,
+	claim destination.CDCTargetClaim,
+	opts destination.PrepareOptions,
+) (string, error) {
+	if opts.Schema == nil {
+		return "", fmt.Errorf("schema is required")
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return "", err
+	}
+	schemaName := schemaOf(claim.DestinationTable)
+	if schemaName == "" {
+		schemaName = "main"
+	}
+	if err := d.ensureSchemaAttached(ctx, schemaName); err != nil {
+		return "", err
+	}
+
+	d.incarnationMu.Lock()
+	defer d.incarnationMu.Unlock()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+	createSQL := strings.Replace(
+		buildCreateTableSQL(destination.QuoteTableName(claim.DestinationTable), opts.Schema.Columns, opts.PrimaryKeys),
+		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
+	)
+	if _, err := tx.ExecContext(ctx, createSQL); err != nil {
+		return "", fmt.Errorf("failed to exclusively create CDC target: %w", err)
+	}
+	canonicalTarget := destination.CDCTargetKey(strings.ToLower(schemaName), strings.ToLower(extractTableName(claim.DestinationTable)))
+	claimSQL := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT("destination_table") DO UPDATE SET "claimed_at" = "claimed_at" RETURNING "connector_id"`, destination.QuoteTableName(claimTable))
+	var owner string
+	if err := tx.QueryRowContext(ctx, claimSQL, canonicalTarget, ownerID).Scan(&owner); err != nil {
+		return "", err
+	}
+	if owner != ownerID {
+		return "", fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	tableName := extractTableName(claim.DestinationTable)
+	marker, err := d.ensureSQLiteIncarnationMarker(ctx, tx, schemaName, tableName)
+	if err != nil {
+		return "", err
+	}
+	incarnation := destination.CDCTargetKey(strings.ToLower(schemaName), strings.ToLower(tableName), marker)
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	d.recordSchema(claim.DestinationTable, opts.Schema, opts.PrimaryKeys)
+	return incarnation, nil
+}
+
+func (d *SQLiteDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	schemaName := schemaOf(table)
+	if schemaName == "" {
+		schemaName = "main"
+	}
+	if err := d.ensureSchemaAttached(ctx, schemaName); err != nil {
+		return err
+	}
+	d.incarnationMu.Lock()
+	defer d.incarnationMu.Unlock()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	current, exists, err := d.sqliteTargetIncarnation(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || current == "" || current != expectedIncarnation {
+		return fmt.Errorf("SQLite CDC target %q physical incarnation changed", table)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+destination.QuoteTableName(table)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *SQLiteDestination) CanonicalCDCTarget(_ context.Context, table string) (string, error) {
+	targetSchema := schemaOf(table)
+	if targetSchema == "" {
+		targetSchema = "main"
+	}
+	return destination.CDCTargetKey(strings.ToLower(targetSchema), strings.ToLower(extractTableName(table))), nil
+}
+
+func (d *SQLiteDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	d.incarnationMu.Lock()
+	defer d.incarnationMu.Unlock()
+	return d.sqliteTargetIncarnation(ctx, d.db, table)
+}
+
+type sqliteIncarnationQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func (d *SQLiteDestination) sqliteTargetIncarnation(ctx context.Context, queryer sqliteIncarnationQueryer, table string) (string, bool, error) {
+	schemaName := schemaOf(table)
+	if schemaName == "" {
+		schemaName = "main"
+	}
+	if err := d.ensureSchemaAttached(ctx, schemaName); err != nil {
+		return "", false, err
+	}
+	tableName := extractTableName(table)
+	var actualName string
+	query := fmt.Sprintf(`SELECT name FROM %s.sqlite_schema WHERE type = 'table' AND name = ? COLLATE NOCASE`, destination.QuoteIdentifier(schemaName))
+	err := queryer.QueryRowContext(ctx, query, tableName).Scan(&actualName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to inspect SQLite CDC target %s: %w", table, err)
+	}
+	marker, err := d.readSQLiteIncarnationMarker(ctx, queryer, schemaName, actualName)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read SQLite CDC target incarnation for %s: %w", table, err)
+	}
+	if marker == "" {
+		return "", true, nil
+	}
+	return destination.CDCTargetKey(
+		strings.ToLower(schemaName),
+		strings.ToLower(actualName),
+		marker,
+	), true, nil
+}
+
+func (d *SQLiteDestination) readSQLiteIncarnationMarker(ctx context.Context, queryer sqliteIncarnationQueryer, schemaName, tableName string) (string, error) {
+	targetDigest := sha256.Sum256([]byte(destination.CDCTargetKey(strings.ToLower(schemaName), strings.ToLower(tableName))))
+	triggerPrefix := "_bruin_cdc_incarnation_" + hex.EncodeToString(targetDigest[:8]) + "_"
+	triggerSQLQuery := fmt.Sprintf(`SELECT name, sql FROM %s.sqlite_schema WHERE type = 'trigger' AND name GLOB ? AND tbl_name = ? COLLATE NOCASE ORDER BY name LIMIT 1`, destination.QuoteIdentifier(schemaName))
+	var triggerName, triggerSQL string
+	err := queryer.QueryRowContext(ctx, triggerSQLQuery, triggerPrefix+"*", tableName).Scan(&triggerName, &triggerSQL)
+	if err == nil {
+		return sqliteIncarnationMarker(triggerName, triggerSQL), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return "", nil
+}
+
+func (d *SQLiteDestination) ensureSQLiteIncarnationMarker(ctx context.Context, queryer sqliteIncarnationQueryer, schemaName, tableName string) (string, error) {
+	if marker, err := d.readSQLiteIncarnationMarker(ctx, queryer, schemaName, tableName); err != nil || marker != "" {
+		return marker, err
+	}
+	targetDigest := sha256.Sum256([]byte(destination.CDCTargetKey(strings.ToLower(schemaName), strings.ToLower(tableName))))
+	triggerPrefix := "_bruin_cdc_incarnation_" + hex.EncodeToString(targetDigest[:8]) + "_"
+	triggerSQLQuery := fmt.Sprintf(`SELECT name, sql FROM %s.sqlite_schema WHERE type = 'trigger' AND name GLOB ? AND tbl_name = ? COLLATE NOCASE ORDER BY name LIMIT 1`, destination.QuoteIdentifier(schemaName))
+
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return "", err
+	}
+	triggerName := triggerPrefix + hex.EncodeToString(token)
+	createTriggerSQL := fmt.Sprintf(
+		`CREATE TRIGGER %s.%s AFTER INSERT ON %s WHEN 0 BEGIN SELECT '%s'; END`,
+		destination.QuoteIdentifier(schemaName),
+		destination.QuoteIdentifier(triggerName),
+		destination.QuoteIdentifier(tableName),
+		hex.EncodeToString(token),
+	)
+	if _, err := queryer.ExecContext(ctx, createTriggerSQL); err != nil {
+		return "", err
+	}
+	var triggerSQL string
+	if err := queryer.QueryRowContext(ctx, triggerSQLQuery, triggerPrefix+"*", tableName).Scan(&triggerName, &triggerSQL); err != nil {
+		return "", err
+	}
+	return sqliteIncarnationMarker(triggerName, triggerSQL), nil
+}
+
+func (d *SQLiteDestination) EnsureCDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	d.incarnationMu.Lock()
+	defer d.incarnationMu.Unlock()
+	schemaName := schemaOf(table)
+	if schemaName == "" {
+		schemaName = "main"
+	}
+	if err := d.ensureSchemaAttached(ctx, schemaName); err != nil {
+		return "", false, err
+	}
+	tableName := extractTableName(table)
+	var actualName string
+	query := fmt.Sprintf(`SELECT name FROM %s.sqlite_schema WHERE type = 'table' AND name = ? COLLATE NOCASE`, destination.QuoteIdentifier(schemaName))
+	if err := d.db.QueryRowContext(ctx, query, tableName).Scan(&actualName); errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, err
+	}
+	marker, err := d.ensureSQLiteIncarnationMarker(ctx, d.db, schemaName, actualName)
+	if err != nil {
+		return "", false, err
+	}
+	return destination.CDCTargetKey(strings.ToLower(schemaName), strings.ToLower(actualName), marker), true, nil
+}
+
+func sqliteIncarnationMarker(triggerName, triggerSQL string) string {
+	digest := sha256.Sum256([]byte(destination.CDCTargetKey(triggerName, triggerSQL)))
+	return hex.EncodeToString(digest[:])
+}
+
+func (d *SQLiteDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	quotedTable := destination.QuoteTableName(table)
+	query := fmt.Sprintf(`SELECT DISTINCT "event_id", "state_generation" FROM %s WHERE "connector_id" = ? AND "state_kind" = 'run' AND "state_generation" = (SELECT MAX("state_generation") FROM %s WHERE "connector_id" = ? AND "state_kind" = 'run') ORDER BY "event_id"`, quotedTable, quotedTable)
+	rows, err := d.db.QueryContext(ctx, query, connectorID, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *SQLiteDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	if err := d.ensureSchemaAttached(ctx, schemaOf(table)); err != nil {
+		return err
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = "?"
+		args = append(args, eventID)
+	}
+	_, err := d.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = ? AND "event_id" IN (%s)`, destination.QuoteTableName(table), strings.Join(placeholders, ", ")), args...)
+	return err
+}
+
 // GetScheme returns the primary URI scheme for SQLite.
 func (d *SQLiteDestination) GetScheme() string { return "sqlite" }
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
+	schemaName := schemaOf(table)
 	tableName := extractTableName(table)
+	if err := d.ensureSchemaAttached(ctx, schemaName); err != nil {
+		return nil, err
+	}
+	if schemaName == "" {
+		schemaName = "main"
+	}
 
-	query := fmt.Sprintf("PRAGMA table_info(%s)", destination.QuoteIdentifier(tableName))
+	query := fmt.Sprintf("PRAGMA %s.table_info(%s)", destination.QuoteIdentifier(schemaName), destination.QuoteIdentifier(tableName))
 	rows, err := d.db.QueryContext(ctx, query)
 	if err != nil {
 		config.LogFailedQuery(query, err)
@@ -758,6 +1254,7 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	primaryKeysByOrdinal := make(map[int]string)
 	for rows.Next() {
 		var cid int
 		var name, colType string
@@ -774,6 +1271,9 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 			Nullable:     notNull == 0,
 			IsPrimaryKey: pk > 0,
 		})
+		if pk > 0 {
+			primaryKeysByOrdinal[pk] = name
+		}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -784,23 +1284,31 @@ func (d *SQLiteDestination) GetTableSchema(ctx context.Context, table string) (*
 		return nil, nil
 	}
 
-	return &schema.TableSchema{
-		Name:    tableName,
-		Columns: columns,
-	}, nil
+	primaryKeys := make([]string, len(primaryKeysByOrdinal))
+	for ordinal, name := range primaryKeysByOrdinal {
+		if ordinal > 0 && ordinal <= len(primaryKeys) {
+			primaryKeys[ordinal-1] = name
+		}
+	}
+
+	return &schema.TableSchema{Name: tableName, Columns: columns, PrimaryKeys: primaryKeys}, nil
 }
 
 func mapSQLiteTypeToSchema(colType string) schema.DataType {
-	colType = strings.ToUpper(colType)
+	colType = strings.ToUpper(strings.TrimSpace(colType))
 
 	switch {
-	case colType == "INTEGER" || colType == "INT" || colType == "BIGINT" || colType == "SMALLINT" || colType == "TINYINT":
-		return schema.TypeInt64
-	case colType == "REAL" || colType == "DOUBLE" || colType == "FLOAT":
-		return schema.TypeFloat64
-	case colType == "TEXT" || colType == "VARCHAR" || strings.HasPrefix(colType, "VARCHAR"):
+	case colType == "BOOLEAN" || colType == "BOOL":
+		return schema.TypeBoolean
+	case colType == "INTERVAL":
 		return schema.TypeString
-	case colType == "BLOB":
+	case strings.Contains(colType, "INT"):
+		return schema.TypeInt64
+	case strings.Contains(colType, "REAL") || strings.Contains(colType, "FLOA") || strings.Contains(colType, "DOUB"):
+		return schema.TypeFloat64
+	case strings.Contains(colType, "CHAR") || strings.Contains(colType, "CLOB") || strings.Contains(colType, "TEXT"):
+		return schema.TypeString
+	case strings.Contains(colType, "BLOB"):
 		return schema.TypeBinary
 	case colType == "NUMERIC" || strings.HasPrefix(colType, "DECIMAL"):
 		return schema.TypeDecimal
@@ -854,6 +1362,25 @@ func buildUpdateSetSQLite(columns []string, sourceAlias string) string {
 	return strings.Join(sets, ", ")
 }
 
+func buildCDCUpdateSetSQLite(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
+	sets := make([]string, len(columns))
+	for i, col := range columns {
+		quoted := destination.QuoteIdentifier(col)
+		source := sourceAlias + "." + quoted
+		if destination.IsCDCColumn(col) {
+			sets[i] = quoted + " = " + source
+			continue
+		}
+		unchanged := fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM json_each(COALESCE(%s, '[]')) WHERE value = '%s' COLLATE BINARY)",
+			unchangedRef,
+			strings.ReplaceAll(col, "'", "''"),
+		)
+		sets[i] = fmt.Sprintf("%s = CASE WHEN %s THEN %s.%s ELSE %s END", quoted, unchanged, targetAlias, quoted, source)
+	}
+	return strings.Join(sets, ", ")
+}
+
 // buildChangeConditionsSQLite builds change detection conditions using IS NOT.
 func buildChangeConditionsSQLite(columns []string, targetAlias, sourceAlias string) string {
 	if len(columns) == 0 {
@@ -890,8 +1417,7 @@ func parseSQLitePath(uri string) (string, error) {
 }
 
 func extractTableName(table string) string {
-	// Extract just the table name without schema prefix
-	parts := strings.Split(table, ".")
+	parts := tablename.Split(table)
 	return parts[len(parts)-1]
 }
 
@@ -959,8 +1485,9 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		frac := (micros % 1000000)
 		return fmt.Sprintf("%02d:%02d:%02d.%06d", hours, mins, secs, frac)
 	case *array.Timestamp:
-		ts := a.Value(idx)
-		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit).Format("2006-01-02 15:04:05.000000")
+		// Arrow's own rendering ("2026-03-30T13:15:43.123456Z") so create-run
+		// inserts and merge-run schema-aligner casts store identical text.
+		return a.ValueStr(idx)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
 	case array.ExtensionArray:

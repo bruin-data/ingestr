@@ -34,6 +34,19 @@ func TestNewMultiTableCDCReaderReconcilesPrimaryKeys(t *testing.T) {
 	})
 }
 
+func TestKeylessResumeFiltersEqualLSNButSnapshotBoundaryDoesNot(t *testing.T) {
+	keyless := source.SourceTableInfo{Name: "events", Schema: &schema.TableSchema{}, PrimaryKeys: nil}
+	r := NewMultiTableCDCReader(nil, []source.SourceTableInfo{keyless}, CDCConfig{}, map[string]string{"events": "0/64"}, "")
+	needsSnapshot, _ := r.determineResumeStrategy()
+	require.False(t, needsSnapshot)
+	assert.True(t, r.ShouldFilterChange("events", 0x64), "persisted append-only event must not be replayed")
+
+	r.setSnapshotBoundary("events", 0x64)
+	assert.False(t, r.ShouldFilterChange("events", 0x64), "transaction at an exported snapshot boundary is not in the snapshot")
+	r.updateProcessedLSN("events", 0x64)
+	assert.True(t, r.ShouldFilterChange("events", 0x64))
+}
+
 func TestChangesToBatchSequencesSyncedAt(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Name:   "accounts",
@@ -117,6 +130,30 @@ func pgoCommitMsg(commitLSN uint64) []byte {
 	return data
 }
 
+func pgoTruncateMsg(relationIDs ...uint32) []byte {
+	data := []byte{'T'}
+	data = binary.BigEndian.AppendUint32(data, uint32(len(relationIDs)))
+	data = append(data, 0) // no cascade/restart-identity flags
+	for _, relationID := range relationIDs {
+		data = binary.BigEndian.AppendUint32(data, relationID)
+	}
+	return data
+}
+
+func TestMultiTableDecoderEmitsTruncateAtCommit(t *testing.T) {
+	d := streamTestDecoder(t)
+	groups := decodeAll(t, d, [][]byte{
+		pgoBeginMsg(42),
+		pgoTruncateMsg(1, 999),
+		pgoCommitMsg(42),
+	}, 20)
+	require.Len(t, groups, 1)
+	assert.Equal(t, "t", groups[0].TableName)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, "TRUNCATE", groups[0].Changes[0].Operation)
+	assert.Equal(t, pglogrepl.LSN(42), groups[0].Changes[0].LSN)
+}
+
 // Protocol v2 streamed-transaction message builders.
 
 func pgoStreamStartMsg(xid uint32, firstSegment bool) []byte {
@@ -177,6 +214,66 @@ func streamTestDecoder(t *testing.T) *MultiTableDecoder {
 	_, err := d.Decode(pgoRelationMsg(1, "public", "t"), 10)
 	require.NoError(t, err)
 	return d
+}
+
+func TestMultiTableDecoderRejectsRecreatedTargetRelation(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Name:   "t",
+		Schema: "public",
+		Columns: append([]schema.Column{
+			{Name: "id", DataType: schema.TypeInt32},
+		}, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
+	d := NewMultiTableDecoder([]source.SourceTableInfo{{
+		Name:        "t",
+		Schema:      tableSchema,
+		Incarnation: "41",
+	}})
+
+	_, err := d.Decode(pgoRelationMsg(42, "public", "t"), 10)
+	var reincarnated *TableReincarnatedError
+	require.ErrorAs(t, err, &reincarnated)
+	assert.Equal(t, "t", reincarnated.Table)
+	assert.Equal(t, "41", reincarnated.Previous)
+	assert.Equal(t, "42", reincarnated.Current)
+	assert.NotContains(t, d.targetRelIDs, uint32(42))
+	assert.NotContains(t, d.relations, uint32(42))
+
+	_, err = d.Decode(pgoRelationMsg(41, "public", "t"), 11)
+	require.NoError(t, err)
+	assert.Equal(t, "t", d.targetRelIDs[41])
+	assert.Contains(t, d.relations, uint32(41))
+
+	// After the replacement snapshot, restarting at the last durable LSN can
+	// replay the old relation before reaching the new one. The explicitly
+	// recorded historical OID is accepted but all of its rows are skipped.
+	d = NewMultiTableDecoder([]source.SourceTableInfo{{
+		Name:        "t",
+		Schema:      tableSchema,
+		Incarnation: "42",
+	}})
+	d.AllowHistoricalRelationIDs(map[string]map[uint32]struct{}{
+		"t": {41: {}},
+	})
+	groups := decodeAll(t, d, [][]byte{
+		pgoRelationMsg(41, "public", "t"),
+		pgoBeginMsg(20),
+		pgoInsertMsg(41, "1"),
+		pgoCommitMsg(20),
+	}, 12)
+	assert.Empty(t, groups)
+	require.True(t, d.relations[41].Stale)
+
+	groups = decodeAll(t, d, [][]byte{
+		pgoRelationMsg(42, "public", "t"),
+		pgoBeginMsg(30),
+		pgoInsertMsg(42, "100"),
+		pgoCommitMsg(30),
+	}, 20)
+	require.Len(t, groups, 1)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, int32(100), groups[0].Changes[0].Values[0])
 }
 
 func decodeAll(t *testing.T, d *MultiTableDecoder, msgs [][]byte, startLSN uint64) []DecodedChanges {
@@ -250,7 +347,7 @@ func TestMultiTableDecoderStreamAbort(t *testing.T) {
 		assert.False(t, pending)
 	})
 
-	t.Run("subtransaction abort drops only its changes", func(t *testing.T) {
+	t.Run("subtransaction abort drops the buffered suffix", func(t *testing.T) {
 		d := streamTestDecoder(t)
 		groups := decodeAll(t, d, [][]byte{
 			pgoStreamStartMsg(700, true),
@@ -263,9 +360,30 @@ func TestMultiTableDecoderStreamAbort(t *testing.T) {
 		}, 100)
 
 		require.Len(t, groups, 1)
+		require.Len(t, groups[0].Changes, 1)
+		assert.Equal(t, int32(1), groups[0].Changes[0].Values[0])
+	})
+
+	t.Run("nested subtransaction abort drops descendants and later savepoints", func(t *testing.T) {
+		d := streamTestDecoder(t)
+		groups := decodeAll(t, d, [][]byte{
+			pgoStreamStartMsg(700, true),
+			pgoStreamedInsertMsg(700, 1, "1"),
+			pgoStreamedInsertMsg(701, 1, "2"),
+			pgoStreamedInsertMsg(702, 1, "3"),
+			pgoStreamedInsertMsg(700, 1, "4"),
+			pgoStreamStopMsg(),
+			pgoStreamAbortMsg(700, 701),
+			pgoStreamStartMsg(700, false),
+			pgoStreamedInsertMsg(700, 1, "5"),
+			pgoStreamStopMsg(),
+			pgoStreamCommitMsg(700, 500),
+		}, 100)
+
+		require.Len(t, groups, 1)
 		require.Len(t, groups[0].Changes, 2)
 		assert.Equal(t, int32(1), groups[0].Changes[0].Values[0])
-		assert.Equal(t, int32(3), groups[0].Changes[1].Values[0])
+		assert.Equal(t, int32(5), groups[0].Changes[1].Values[0])
 	})
 }
 

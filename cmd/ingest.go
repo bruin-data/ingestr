@@ -53,8 +53,13 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INCREMENTAL_KEY", "INGESTR_INCREMENTAL_KEY"),
 			},
 			&cli.StringFlag{
+				Name:    "incremental-predicate",
+				Usage:   "Additional destination-specific SQL predicate appended to the merge join condition",
+				Sources: cli.EnvVars("INCREMENTAL_PREDICATE", "INGESTR_INCREMENTAL_PREDICATE"),
+			},
+			&cli.StringFlag{
 				Name:    "incremental-strategy",
-				Usage:   "The incremental strategy to use (replace, truncate+insert, append, delete+insert, merge, scd2, none)",
+				Usage:   "The incremental strategy to use (replace, append, delete+insert, merge, scd2, none)",
 				Value:   "replace",
 				Sources: cli.EnvVars("INCREMENTAL_STRATEGY", "INGESTR_INCREMENTAL_STRATEGY"),
 			},
@@ -132,7 +137,7 @@ func IngestCommand() *cli.Command {
 			&cli.IntFlag{
 				Name:    "extract-parallelism",
 				Usage:   "The number of parallel jobs to run for extracting data from the source",
-				Value:   5,
+				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
 			&cli.StringFlag{
@@ -231,7 +236,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "metrics-addr",
-				Usage:   "Serve streaming metrics (expvar at /debug/vars) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Usage:   "Serve streaming metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
 				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
 			},
 			&cli.StringFlag{
@@ -265,6 +270,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.SourceTable = c.String("source-table")
 	cfg.DestTable = c.String("dest-table")
 	cfg.IncrementalKey = c.String("incremental-key")
+	cfg.IncrementalPredicate = c.String("incremental-predicate")
 	cfg.IncrementalStrategy = config.IncrementalStrategy(c.String("incremental-strategy"))
 	cfg.IncrementalStrategyExplicit = c.IsSet("incremental-strategy")
 	cfg.PrimaryKeys = c.StringSlice("primary-key")
@@ -278,6 +284,9 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
+	if c.IsSet("extract-parallelism") {
+		cfg.DestinationParallelism = cfg.ExtractParallelism
+	}
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")
 	cfg.DisablePreStaging = c.Bool("disable-prestaging")
 	cfg.SQLLimit = int(c.Int("sql-limit"))
@@ -359,7 +368,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		}
 		defer stop()
 		if !output.IsJSON() {
-			color.Green("Serving metrics on http://%s/debug/vars", boundAddr)
+			color.Green("Serving metrics on http://%s/metrics", boundAddr)
 		}
 	}
 

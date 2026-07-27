@@ -304,7 +304,14 @@ def check_tool_available(name: str, tool_cfg: dict) -> bool:
     return True
 
 
-def scenario_rule_matches(rule: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
+def scenario_rule_matches(
+    rule: dict,
+    src_type: str,
+    dst_type: str,
+    src_name: str,
+    dst_name: str,
+    size: str | None = None,
+) -> bool:
     checks = []
     if "source_type" in rule:
         checks.append(rule["source_type"] == src_type)
@@ -314,12 +321,24 @@ def scenario_rule_matches(rule: dict, src_type: str, dst_type: str, src_name: st
         checks.append(rule["source"] == src_name)
     if "destination" in rule:
         checks.append(rule["destination"] == dst_name)
+    if "sizes" in rule:
+        sizes = rule["sizes"]
+        if isinstance(sizes, str):
+            sizes = [sizes]
+        checks.append(size in sizes)
     return bool(checks) and all(checks)
 
 
-def should_skip_tool(tool_cfg: dict, src_type: str, dst_type: str, src_name: str, dst_name: str) -> bool:
+def should_skip_tool(
+    tool_cfg: dict,
+    src_type: str,
+    dst_type: str,
+    src_name: str,
+    dst_name: str,
+    size: str,
+) -> bool:
     for rule in tool_cfg.get("skip", []):
-        if scenario_rule_matches(rule, src_type, dst_type, src_name, dst_name):
+        if scenario_rule_matches(rule, src_type, dst_type, src_name, dst_name, size):
             return True
     return False
 
@@ -656,8 +675,8 @@ def run_benchmarks(
         for tool_name in tools:
             tool_cfg = tool_configs[tool_name]
 
-            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name):
-                console.print(f"  [dim]{tool_name}: skipped[/dim]")
+            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name, size):
+                console.print(f"  [dim]{tool_name}: skipped for {size}[/dim]")
                 continue
 
             cmd = build_tool_command(
@@ -1013,7 +1032,7 @@ def run_validation(
         for tool_name in tools:
             tool_cfg = tool_configs[tool_name]
 
-            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name):
+            if should_skip_tool(tool_cfg, src["type"], dst["type"], src_name, dst_name, size):
                 console.print(f"  [{tool_name}] [dim]SKIP (tool skip rule)[/dim]")
                 skipped += 1
                 continue

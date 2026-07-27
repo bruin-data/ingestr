@@ -23,7 +23,8 @@ ingestr ingest \
 
 - `--dest-table TEXT`: Designates the destination table to save the data. If not specified, defaults to the value of `--source-table`.
 - `--incremental-key TEXT`: Identifies the column used for incremental reads or replacement. For `append` and `merge`, ingestr passes it to the source read for interval filtering when the source supports it; `append` does not compare it with the destination table. For `delete+insert`, this is the interval column used to decide which destination rows to replace, and should normally be a date, timestamp, partition column, or numeric batch column rather than a row primary key. Numeric `delete+insert` keys work when bounds are inferred from staged rows; `--interval-start` and `--interval-end` are parsed as datetime values, not numeric values. Defaults to `None`.
-- `--incremental-strategy TEXT`: Defines the strategy for incremental updates. Options include `replace`, `truncate+insert`, `append`, `delete+insert`, `merge`, or `scd2`. The default strategy is `replace`. Not every source and destination supports every strategy; unsupported combinations fail at runtime.
+- `--incremental-predicate TEXT`: Appends a destination-specific SQL predicate to the target match condition for supported SQL destinations with single-table, non-full-refresh merges. Use `t` as the destination alias for BigQuery and Trino, and `target` for other supported destinations. For example: `t.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)` on BigQuery, or `target.event_date >= CURRENT_DATE - INTERVAL '7 days'` on PostgreSQL. Use only when every matching destination row is guaranteed to satisfy the predicate; an incorrect predicate can insert duplicates or fail a uniqueness constraint depending on the destination's merge mechanism.
+- `--incremental-strategy TEXT`: Defines the strategy for incremental updates. Options include `replace`, `append`, `delete+insert`, `merge`, or `scd2`. The default strategy is `replace`. Not every source and destination supports every strategy; unsupported combinations fail at runtime. The former `truncate+insert` strategy has been removed; existing configurations should use `replace`, which selects a destination-specific replacement implementation and preserves the table object for single-table PostgreSQL loads.
 - `--interval-start`: Sets the inclusive start of the interval for the incremental key and passes that start bound to the source read when the source supports interval filtering. For `delete+insert`, this becomes the lower delete bound. If omitted, ingestr can infer the lower bound from staged rows; if it cannot infer a required bound, `delete+insert` skips the delete and insert. Defaults to `None`.
 - `--interval-end`: Sets the inclusive end of the interval for the incremental key and passes that end bound to the source read when the source supports interval filtering. For `delete+insert`, this becomes the upper delete bound. If omitted, ingestr can infer the upper bound from staged rows; if it cannot infer a required bound, `delete+insert` skips the delete and insert. Defaults to `None`.
 - `--primary-key TEXT`: Specifies a column used to identify one logical row for `merge` and `scd2`. For `delete+insert`, some destinations can use it to deduplicate staged rows during the insert or overwrite step, but this is destination-specific. Use the flag multiple times for composite keys. Primary key values should be non-null: some destinations match null keys as equal during merge, while others reject or duplicate them. This is ingestr strategy configuration; do not rely only on a primary key constraint already existing in the destination database. Defaults to `None`.
@@ -77,14 +78,14 @@ ingestr ingest \
 > **Postgres publications.** Pass `publication=<name>` to use a publication you manage yourself. If you omit it, ingestr creates and maintains a publication named `ingestr_publication`, refreshing it on every run to include every logged table that has a replica identity (a primary key, `REPLICA IDENTITY FULL`, or a replica-identity index). Tables that are unlogged, or that lack a replica identity, are skipped with a warning — their changes either never reach the WAL or would make `UPDATE`/`DELETE` on the source fail.
 
 > [!INFO]
-> **New tables.** Postgres CDC picks up tables created after ingestion started. A batch run detects them at startup; a stream additionally re-checks the source on an interval (`discover_interval` URI parameter, default `30s`). When a new table is found, ingestr adds it to the managed publication (user-managed publications are respected: add the table to your publication yourself), snapshots its existing rows through a temporary replication slot so nothing is missed, creates the destination table, and then streams its changes live — all without restarting the stream or disturbing the other tables. See the [Postgres CDC documentation](../supported-sources/postgres.md#change-data-capture-postgrescdc) for details.
+> **New tables.** Postgres CDC picks up tables created after ingestion started. A batch run detects them at startup; a stream additionally re-checks the source on an interval (`discover_interval` URI parameter, default `30s`). When a running stream finds a new eligible table, it exits before changing destination data and asks its supervisor to restart it. The restarted process snapshots the table and then streams its retained WAL. User-managed publications are respected, so add the table to the publication yourself. See the [Postgres CDC documentation](../supported-sources/postgres.md#change-data-capture-postgrescdc) for details.
 
 > [!INFO]
 > Column-level schema changes are picked up at startup. If a table's columns change while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
 
 ### Monitoring a stream
 
-Passing `--metrics-addr` starts a small HTTP server for the lifetime of the stream that exposes Go [expvar](https://pkg.go.dev/expvar) metrics at `/debug/vars`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run.
+Passing `--metrics-addr` starts a small HTTP server for the lifetime of the stream that exposes [Prometheus](https://prometheus.io/docs/instrumenting/exposition_formats/) metrics at `/metrics`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run. Only ingestr's own metrics are served — the Go runtime and process collectors are deliberately excluded.
 
 ```bash
 ingestr ingest \
@@ -93,28 +94,28 @@ ingestr ingest \
    --stream \
    --metrics-addr 127.0.0.1:6060
 
-curl -s localhost:6060/debug/vars | jq '.ingestr_replication, .ingestr_stream_tables'
+curl -s localhost:6060/metrics | grep -E '^ingestr_replication|^ingestr_stream_table'
 ```
 
-Alongside Go's standard `cmdline` and `memstats`, ingestr publishes:
+ingestr publishes:
 
-| Key | Meaning |
+| Metric | Meaning |
 |---|---|
-| `ingestr_replication` | Replication lag for the current source (see below). `{"streaming": false}` when the source cannot report lag. |
-| `ingestr_stream_rows_synced` | Cumulative rows written **and** confirmed durable since the process started. |
-| `ingestr_stream_flush_cycles` | Number of completed flush cycles. |
-| `ingestr_stream_last_synced_unix` | Unix time of the last successful commit. |
-| `ingestr_stream_tables` | The same row counts and timestamp, broken out per destination table. |
+| `ingestr_replication_*{source}` | Replication lag for the current source (see below). Absent when the source cannot report lag. |
+| `ingestr_stream_rows_synced_total` | Cumulative rows written **and** confirmed durable since the process started. |
+| `ingestr_stream_flush_cycles_total` | Number of completed flush cycles. |
+| `ingestr_stream_last_synced_timestamp_seconds` | Unix time of the last successful commit. |
+| `ingestr_stream_table_*{table}` | The same row counts and timestamp, broken out per destination table. |
 
-The row counters advance only after a flush's destination write **and** its source-position commit have both succeeded, so they count durable rows rather than merely written ones. `ingestr_stream_last_synced_unix` also advances on cycles that commit a position without writing rows, which is what makes it usable as a staleness alarm: if it stops moving, the stream is stuck.
+The row counters advance only after a flush's destination write **and** its source-position commit have both succeeded, so they count durable rows rather than merely written ones. `ingestr_stream_last_synced_timestamp_seconds` also advances on cycles that commit a position without writing rows, which is what makes it usable as a staleness alarm: if it stops moving, the stream is stuck.
 
-What `ingestr_replication` contains depends on the engine, because "lag" is not the same quantity everywhere:
+The `ingestr_replication_*` series carry a `source` label and depend on the engine, because "lag" is not the same quantity everywhere:
 
-- **Postgres** (`postgres+cdc`) reports `bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This is the same number as `pg_current_wal_lsn() - confirmed_flush_lsn` for the replication slot, so it is what predicts unbounded WAL growth on the source. It is the value to alert on.
-- **MongoDB** (`mongodb+cdc`) reports `seconds_behind`: the gap between the server's `operationTime` and the cluster time of the last processed change event. Both clocks are server-side, so an idle collection converges to zero instead of drifting upward.
-- **SQL Server** (`mssql+cdc`) reports `seconds_behind`: the change time between the processed LSN and the capture watermark, via `sys.fn_cdc_map_lsn_to_time`. SQL Server's `binary(10)` LSNs are ordered but their difference is not a log distance, so no `bytes_behind` is published.
+- **Postgres** (`postgres+cdc`) reports `ingestr_replication_bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This is the same number as `pg_current_wal_lsn() - confirmed_flush_lsn` for the replication slot, so it is what predicts unbounded WAL growth on the source. It is the value to alert on.
+- **MongoDB** (`mongodb+cdc`) reports `ingestr_replication_seconds_behind`: the gap between the server's `operationTime` and the cluster time of the last processed change event. Both clocks are server-side, so an idle collection converges to zero instead of drifting upward.
+- **SQL Server** (`mssql+cdc`) reports `ingestr_replication_seconds_behind`: the change time between the processed LSN and the capture watermark, via `sys.fn_cdc_map_lsn_to_time`. SQL Server's `binary(10)` LSNs are ordered but their difference is not a log distance, so no `bytes_behind` is published.
 
-Fields that an engine cannot express are omitted rather than reported as a misleading zero. Postgres, for instance, has no per-LSN timestamp, so it publishes no `seconds_behind`. Message-broker sources report no lag block at all.
+Fields that an engine cannot express are omitted rather than reported as a misleading zero. Postgres, for instance, has no per-LSN timestamp, so it publishes no `ingestr_replication_seconds_behind`. Message-broker sources report no replication series at all.
 
 ## General flags
 

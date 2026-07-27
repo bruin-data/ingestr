@@ -3,8 +3,11 @@ package pipeline
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -26,11 +29,15 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/strategy"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"golang.org/x/term"
 )
 
-const oracleComparableStringLen = 4000
+const (
+	oracleComparableStringLen = 4000
+	resourceCloseTimeout      = 30 * time.Second
+)
 
 type Pipeline struct {
 	config                   *config.IngestConfig
@@ -44,6 +51,7 @@ type Pipeline struct {
 	ingestrColumnFiller      *schemaevolution.IngestrColumnFiller
 	droppedColumns           map[string]bool // columns dropped during schema inference (all-null nullable)
 	logWriter                io.Writer
+	cdcConnectorID           string
 }
 
 func New(cfg *config.IngestConfig) *Pipeline {
@@ -66,6 +74,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		return err
 	}
 	ctx = annotation.WithPayload(ctx, annotations)
+	cleanupBaseCtx := context.WithoutCancel(ctx)
 
 	if err := validateManagedChangeConfig(p.config); err != nil {
 		return err
@@ -80,7 +89,31 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := src.Connect(ctx, p.config.SourceURI); err != nil {
 		return fmt.Errorf("failed to connect to source: %w", err)
 	}
-	defer func() { _ = src.Close(ctx) }()
+	defer func() {
+		closeCtx, cancel := resourceCloseContext(cleanupBaseCtx)
+		defer cancel()
+		if err := src.Close(closeCtx); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to close source: %w", err))
+		}
+	}()
+
+	var postgresCDCIdentity source.ConnectorIdentity
+	if isPostgresCDCSource(p.config.SourceURI) {
+		identityProvider, ok := src.(source.ConnectorIdentityProvider)
+		if !ok {
+			return fmt.Errorf("postgres CDC source does not expose its resolved connector identity")
+		}
+		identity, err := identityProvider.ConnectorIdentity(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to resolve PostgreSQL CDC connector identity: %w", err)
+		}
+		postgresCDCIdentity = identity
+	}
+	if validator, ok := src.(source.ConnectorPreflightValidator); ok {
+		if err := validator.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{Streaming: p.config.Stream}); err != nil {
+			return fmt.Errorf("source connector preflight failed: %w", err)
+		}
+	}
 
 	if p.config.Stream {
 		ss, ok := src.(source.StreamingSource)
@@ -102,12 +135,123 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := dest.Connect(ctx, p.config.DestURI); err != nil {
 		return fmt.Errorf("failed to connect to destination: %w", err)
 	}
-	defer func() { _ = dest.Close(ctx) }()
+	defer func() {
+		closeCtx, cancel := resourceCloseContext(cleanupBaseCtx)
+		defer cancel()
+		if err := dest.Close(closeCtx); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to close destination: %w", err))
+		}
+	}()
+
+	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
+	managedMySQLCDC := isMySQLCDCSource(p.config.SourceURI)
+	// SQL Server CDC joins destination-managed state only when the
+	// destination supports it; unlike the peers it keeps a legacy fallback
+	// (resume from MAX(_cdc_lsn) with completeness-encoded snapshot stamps)
+	// so destinations without state support keep working.
+	managedMSSQLCDC := isMSSQLCDCSource(p.config.SourceURI) && validateDestinationManagedCDCState(dest) == nil
+	if isMSSQLCDCSource(p.config.SourceURI) && !managedMSSQLCDC {
+		config.Debug("[PIPELINE] Destination %q does not support managed CDC state; SQL Server CDC uses destination-data resume", dest.GetScheme())
+	}
+	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC
+	if managedMySQLCDC {
+		if err := validateMySQLCDCSourceDestination(p.config, src, dest); err != nil {
+			return err
+		}
+	}
+	if err := validateCDCRunSerialization(p.config, dest); err != nil {
+		return err
+	}
+	destinationTarget := ""
+	if managedPostgresCDC {
+		destinationTarget = managedCDCDestinationTarget(p.config, dest)
+		if err := validateMultiTableNamespace(p.config, dest, destinationTarget); err != nil {
+			return err
+		}
+		destinationIdentity, err := managedCDCDestinationIdentity(ctx, dest, destinationTarget)
+		if err != nil {
+			return fmt.Errorf("failed to resolve PostgreSQL CDC destination identity: %w", err)
+		}
+		p.cdcConnectorID = resolvedCDCStateConnectorID(p.config, postgresCDCIdentity, destinationIdentity)
+	} else if isCDCSource(p.config.SourceURI) {
+		if managedMySQLCDC || managedMSSQLCDC {
+			destinationTarget = managedCDCDestinationTarget(p.config, dest)
+		}
+		p.cdcConnectorID = genericCDCConnectorID(p.config)
+	}
+
+	var cdcStateManager *strategy.CDCStateManager
 
 	// For CDC sources, compute a destination-aware slot suffix
 	if isCDCSource(p.config.SourceURI) {
-		p.config.CDCSlotSuffix = cdcSlotSuffix(p.config.DestURI)
+		p.config.CDCSlotSuffix = cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI) + "\x00" + p.cdcConnectorID)
+		p.config.CDCLegacySlotSuffix = legacyCDCSlotSuffix(p.config.DestURI)
 		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
+	}
+
+	if managedDestinationCDC {
+		if err := validateDestinationManagedCDCState(dest); err != nil {
+			return err
+		}
+		if managedMySQLCDC {
+			if err := validateMySQLCDCMutationFencing(dest, p.config.SourceTable == ""); err != nil {
+				return err
+			}
+		}
+		if validator, ok := dest.(destination.ManagedCDCTargetValidator); ok {
+			if err := validator.ValidateManagedCDCTarget(ctx, destinationTarget); err != nil {
+				return fmt.Errorf("destination scheme %q cannot safely use managed CDC target %q: %w", dest.GetScheme(), destinationTarget, err)
+			}
+		}
+	}
+	if managedMySQLCDC {
+		leaser, ok := dest.(destination.ManagedCDCRunLeaser)
+		if !ok {
+			return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC without a connector run lease", dest.GetScheme())
+		}
+		lease, err := leaser.AcquireManagedCDCRunLease(ctx, p.cdcConnectorID)
+		if err != nil {
+			return err
+		}
+		leaseCtx, stopLeaseWatch := connectorLeaseContext(ctx, lease)
+		ctx = leaseCtx
+		defer func() {
+			stopLeaseWatch()
+			if err := lease.Release(); err != nil {
+				retErr = errors.Join(retErr, err)
+			}
+			if leaseErr := lease.Err(); leaseErr != nil {
+				retErr = errors.Join(retErr, leaseErr)
+			}
+		}()
+	}
+	if managedPostgresCDC {
+		leaser, ok := src.(source.ConnectorLeaser)
+		if !ok {
+			return fmt.Errorf("postgres CDC source does not support connector leases")
+		}
+		if preparer, ok := src.(source.ConnectorPreparer); ok {
+			if err := preparer.PrepareConnector(ctx); err != nil {
+				return err
+			}
+		}
+		lease, err := leaser.AcquireConnectorLease(ctx, source.ConnectorLeaseOptions{
+			ConnectorID:      p.cdcConnectorID,
+			SlotSuffix:       p.config.CDCSlotSuffix,
+			LegacySlotSuffix: p.config.CDCLegacySlotSuffix,
+			SourceTable:      p.config.SourceTable,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to acquire PostgreSQL CDC connector lease: %w", err)
+		}
+		leaseCtx, stopLeaseWatch := connectorLeaseContext(ctx, lease)
+		ctx = leaseCtx
+		defer func() {
+			stopLeaseWatch()
+			if leaseErr := lease.Err(); leaseErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("PostgreSQL CDC connector lease lost: %w", leaseErr))
+			}
+		}()
 	}
 
 	// Check if source is multi-table (only if no specific source table is requested)
@@ -116,15 +260,84 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			return p.runMultiTable(ctx, mtSource)
 		}
 	}
+	if hasIgnoredDestSchema(p.config) {
+		output.Warnf("Warning: dest_schema is ignored when --source-table is set; the destination is %q. Omit --source-table for multi-table mode, or qualify --dest-table instead\n", p.config.DestTable)
+	}
+	sourceIncarnation := ""
+	sourceSchemaFingerprint := ""
+	if managedDestinationCDC {
+		cdcStateManager, err = strategy.NewCDCStateManager(
+			dest,
+			p.cdcConnectorID,
+			p.config.DestTable,
+			p.config.StagingDataset,
+		)
+		if err != nil {
+			return err
+		}
+		if checker, ok := src.(source.TableExistenceChecker); ok {
+			exists, err := checker.TableExists(ctx, p.config.SourceTable)
+			if err != nil {
+				return fmt.Errorf("failed to verify source table %q: %w", p.config.SourceTable, err)
+			}
+			if !exists {
+				cdcStateManager.RegisterTableForRead(p.config.SourceTable, p.config.DestTable)
+				if err := cdcStateManager.BeginRun(ctx, false); err != nil {
+					return err
+				}
+				return fmt.Errorf("source table %q does not exist", p.config.SourceTable)
+			}
+		}
+		if provider, ok := src.(source.TableIncarnationProvider); ok {
+			sourceIncarnation, err = provider.TableIncarnation(ctx, p.config.SourceTable)
+			if err != nil {
+				return err
+			}
+		}
+		if provider, ok := src.(source.TableSchemaFingerprintProvider); ok {
+			sourceSchemaFingerprint, err = provider.TableSchemaFingerprint(ctx, p.config.SourceTable)
+			if err != nil {
+				return err
+			}
+		}
+		if err := cdcStateManager.RegisterTableState(ctx, p.config.SourceTable, p.config.DestTable, sourceIncarnation, sourceSchemaFingerprint); err != nil {
+			return err
+		}
+	}
 
 	if isChangeTrackingSource(p.config.SourceURI) {
 		if err := validateChangeTrackingDestination(dest); err != nil {
 			return err
 		}
 	}
-
 	// For managed change sources, check if we can resume from existing data
-	if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
+	if cdcStateManager != nil && !p.config.FullRefresh {
+		resumeLSN, err := cdcStateManager.ResumePosition(ctx, p.config.SourceTable)
+		if err != nil {
+			return err
+		}
+		if resumeLSN != "" {
+			p.config.CDCResumeLSN = resumeLSN
+			p.config.CDCResumeIncarnation = sourceIncarnation
+			p.config.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
+			config.Debug("[PIPELINE] Found destination-managed CDC state, resuming from: %s", resumeLSN)
+		} else {
+			// Once any state exists, replacement snapshots are authorized: this
+			// connector already owns the target. With no state at all, a target
+			// that contains CDC data belongs to an unmanaged (pre-state) run or
+			// to a lost state table, so fail closed.
+			stateEmpty, err := cdcStateManager.StateEmpty(ctx)
+			if err != nil {
+				return err
+			}
+			if stateEmpty {
+				if err := rejectUnprovenLegacyCDCTarget(ctx, dest, p.config.SourceTable, p.config.DestTable); err != nil {
+					return err
+				}
+			}
+			config.Debug("[PIPELINE] No completed CDC snapshot state found, will perform full snapshot")
+		}
+	} else if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
 		resumeProvider, ok := dest.(destination.CDCResumeProvider)
 		if !ok {
 			if isChangeTrackingSource(p.config.SourceURI) {
@@ -133,10 +346,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		} else {
 			maxLSN, err := resumeProvider.GetMaxCDCLSN(ctx, p.config.DestTable)
 			if err != nil {
-				if isChangeTrackingSource(p.config.SourceURI) {
-					return fmt.Errorf("failed to get SQL Server Change Tracking cursor from destination: %w", err)
-				}
-				config.Debug("[PIPELINE] Failed to get max change cursor from destination: %v", err)
+				return fmt.Errorf("failed to get CDC resume cursor from destination: %w", err)
 			} else if maxLSN != "" {
 				config.Debug("[PIPELINE] Found existing change data, will resume from cursor: %s", maxLSN)
 				p.config.CDCResumeLSN = maxLSN
@@ -145,7 +355,6 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			}
 		}
 	}
-
 	// Get the source table with user configuration
 	// Resolution of PKs, strategy, and incremental key happens inside GetTable
 	table, err := src.GetTable(ctx, source.TableRequest{
@@ -184,7 +393,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
 	preFetchConfig.PrimaryKeys = resolvePrimaryKeys(p.config, table)
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
-	if err := validateExtractPartitionStrategy(&preFetchConfig, preFetchStrategy); err != nil {
+	if err := validateExtractPartitionStrategy(p.config, preFetchStrategy, dest); err != nil {
+		return err
+	}
+	if err := validateIncrementalPredicate(p.config, dest, preFetchStrategy); err != nil {
 		return err
 	}
 	display.PrintSummary(&preFetchConfig)
@@ -216,6 +428,31 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	var preStageRpt *preStageReport
 	var preStageKeyTransform func(string) string
 	var preStagedForJob destination.PreStagedData
+	var extractReadSchema *schema.TableSchema
+
+	if p.config.ExtractPartitionBy != "" && !table.HasKnownSchema() {
+		provider, ok := table.(source.ReadSchemaProvider)
+		if ok && provider.SupportsReadSchema() {
+			extractReadSchema, err = provider.GetReadSchema(ctx, source.ReadOptions{
+				IncrementalKey:     table.IncrementalKey(),
+				IntervalStart:      p.config.IntervalStart,
+				IntervalEnd:        p.config.IntervalEnd,
+				ExtractPartitionBy: p.config.ExtractPartitionBy,
+				Columns:            p.config.Columns,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to get custom query schema for extract partitioning: %w", err)
+			}
+			if err := applyExtractReadSchemaOverrides(extractReadSchema, p.config.Columns, p.config.SchemaNaming); err != nil {
+				return fmt.Errorf("failed to apply column overrides to custom query schema: %w", err)
+			}
+			partitionColumn, err := source.ValidateExtractPartitionColumn(extractReadSchema, p.config.ExtractPartitionBy)
+			if err != nil {
+				return err
+			}
+			p.config.ExtractPartitionBy = partitionColumn
+		}
+	}
 
 	if table.HasKnownSchema() {
 		tableSchema, err = table.GetSchema(ctx)
@@ -233,7 +470,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
 		var preStage destination.PreStageWriter
 		preStage, preStageKeyTransform = p.maybeStartPreStage(ctx, preFetchStrategy, preFetchConfig.PrimaryKeys, loadTimestamp)
-		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage)
+		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage, extractReadSchema)
 		defer func() {
 			if preStagedData != nil {
 				preStagedData.Close()
@@ -251,7 +488,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			config.Debug("[PIPELINE] Inferred schema with %d columns", len(tableSchema.Columns))
 		} else {
 			config.Debug("[PIPELINE] Inferred schema is nil")
-			if fallback, err := table.GetSchema(ctx); err == nil && fallback != nil && len(fallback.Columns) > 0 {
+			if extractReadSchema != nil && len(extractReadSchema.Columns) > 0 {
+				tableSchema = extractReadSchema
+				config.Debug("[PIPELINE] Using custom query metadata schema (%d columns) for empty extract", len(extractReadSchema.Columns))
+			} else if fallback, err := table.GetSchema(ctx); err == nil && fallback != nil && len(fallback.Columns) > 0 {
 				tableSchema = fallback
 				config.Debug("[PIPELINE] Using source-provided schema (%d columns) for empty extract", len(fallback.Columns))
 			} else if synthetic, err := schemainfer.TableSchemaFromColumnOverrides(p.config.Columns, table.Name(), p.config.SchemaNaming); err != nil {
@@ -282,7 +522,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	if p.config.ExtractPartitionBy != "" {
-		partitionColumn, err := source.ValidateExtractPartitionColumn(tableSchema, p.config.ExtractPartitionBy)
+		partitionSchema := tableSchema
+		if extractReadSchema != nil {
+			partitionSchema = extractReadSchema
+		}
+		partitionColumn, err := source.ValidateExtractPartitionColumn(partitionSchema, p.config.ExtractPartitionBy)
 		if err != nil {
 			return err
 		}
@@ -390,10 +634,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	// re-appends them from this snapshot so staging keeps carrying them.
 	fullSchema := destSchema
 
-	// Schema contract handling: evolve destination schema if needed (skip for replace strategy)
+	// Schema contract handling: evolve destination schema if needed. Replace
+	// skips evolution when it recreates the target, while in-place replace must
+	// evolve the existing table.
 	// Build the evolution plan but do NOT apply it here. Strategies decide when to apply.
 	var evolutionPlan *schemaevolution.EvolutionPlan
-	if resolvedStrategy != config.StrategyReplace {
+	if resolvedStrategy != config.StrategyReplace || usesInPlaceReplace(resolvedStrategy, p.config.DestURI) {
 		evolutionPlan, err = p.evolveSchemaIfNeeded(ctx, p.config.DestTable, destSchema, resolvedStrategy)
 		if err != nil {
 			return fmt.Errorf("schema evolution failed: %w", err)
@@ -439,7 +685,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
-	strat, err := strategy.Get(resolvedStrategy)
+	strat, err := getWriteStrategy(resolvedStrategy, p.config.DestURI)
 	if err != nil {
 		return fmt.Errorf("failed to get strategy: %w", err)
 	}
@@ -450,9 +696,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.IncrementalKey = tableSchema.IncrementalKey
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
 
-	if resolvedConfig.PartitionBy == "" && tableSchema.PartitionBy != "" {
-		resolvedConfig.PartitionBy = tableSchema.PartitionBy
-	}
+	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
 
 	// Primary key columns must be NOT NULL
 	pkSet := make(map[string]bool, len(ingestSchema.PrimaryKeys))
@@ -505,23 +749,25 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	job := &strategy.IngestionJob{
-		Config:              &resolvedConfig,
-		Table:               table,
-		Destination:         dest,
-		Schema:              ingestSchema,
-		SourceSchema:        originalSourceSchema,
-		Tracker:             jobTracker,
-		BufferedRecords:     bufferedRecords,
-		PreStaged:           preStagedForJob,
-		SchemaComparison:    p.schemaComparison,
-		DestinationSchema:   p.destinationSchema,
-		ColumnRenamer:       p.columnRenamer,
-		IngestrColumnFiller: p.ingestrColumnFiller,
-		ColumnMasker:        columnMasker,
-		WhitespaceTrimmer:   whitespaceTrimmer,
-		LoadTimestamp:       loadTimestampTransformer,
-		SchemaAligner:       transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
-		EvolutionPlan:       evolutionPlan,
+		Config:                 &resolvedConfig,
+		Table:                  table,
+		Destination:            dest,
+		Schema:                 ingestSchema,
+		SourceSchema:           originalSourceSchema,
+		ExtractPartitionSchema: extractReadSchema,
+		Tracker:                jobTracker,
+		BufferedRecords:        bufferedRecords,
+		PreStaged:              preStagedForJob,
+		SchemaComparison:       p.schemaComparison,
+		DestinationSchema:      p.destinationSchema,
+		ColumnRenamer:          p.columnRenamer,
+		IngestrColumnFiller:    p.ingestrColumnFiller,
+		ColumnMasker:           columnMasker,
+		WhitespaceTrimmer:      whitespaceTrimmer,
+		LoadTimestamp:          loadTimestampTransformer,
+		SchemaAligner:          transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
+		EvolutionPlan:          evolutionPlan,
+		CDCStateManager:        cdcStateManager,
 	}
 
 	// For --no-inference, enforce the user-provided source schema even when
@@ -533,14 +779,36 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		// that converts Arrow batches from source types to the overridden types.
 		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
 	}
+	if cdcStateManager != nil {
+		var err error
+		if managedMySQLCDC {
+			err = cdcStateManager.ClaimAndPrepareTarget(ctx, p.config.SourceTable, p.config.DestTable, destination.PrepareOptions{
+				Table:       p.config.DestTable,
+				Schema:      ingestSchema,
+				PrimaryKeys: resolvedConfig.PrimaryKeys,
+				CDCMode:     true,
+			})
+		} else {
+			err = cdcStateManager.ClaimTarget(ctx, p.config.SourceTable, p.config.DestTable)
+		}
+		if err != nil {
+			return err
+		}
+		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
+			return err
+		}
+	}
 
 	if p.config.Stream {
 		committer, _ := src.(source.StreamCommitter)
+		legacyFinalizer, _ := src.(source.CDCLegacySlotFinalizer)
 		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
-			FlushInterval: p.config.FlushInterval,
-			FlushRecords:  int64(p.config.FlushRecords),
-			Strategy:      resolvedStrategy,
-			Committer:     committer,
+			FlushInterval:   p.config.FlushInterval,
+			FlushRecords:    int64(p.config.FlushRecords),
+			Strategy:        resolvedStrategy,
+			Committer:       committer,
+			StateManager:    cdcStateManager,
+			LegacyFinalizer: legacyFinalizer,
 		})
 		if err := exec.Execute(ctx, job); err != nil {
 			return fmt.Errorf("streaming ingestion failed: %w", err)
@@ -551,18 +819,102 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := strat.Execute(ctx, job); err != nil {
 		return fmt.Errorf("ingestion failed: %w", err)
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if cdcStateManager != nil {
+		stateProvider, ok := src.(source.CDCStateProvider)
+		if !ok {
+			return fmt.Errorf("managed CDC source does not expose completed batch state")
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := cdcStateManager.Persist(ctx, stateProvider.CDCState()); err != nil {
+			return fmt.Errorf("failed to persist destination CDC state: %w", err)
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
 
 	// After a successful, durable write, let CDC sources confirm the position
 	// they caught up to (e.g. advance the replication slot's flush LSN). Safe
 	// here because the write above committed. Best-effort: a failure to confirm
 	// must not fail an otherwise-successful run.
+	batchFinalized := false
 	if finalizer, ok := src.(source.CDCBatchFinalizer); ok {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
 		if err := finalizer.FinalizeBatch(ctx); err != nil {
+			if loss := source.ConnectorLeaseLoss(ctx); loss != nil {
+				return loss
+			}
 			config.Debug("[PIPELINE] CDC batch finalize failed: %v", err)
+			return nil
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		batchFinalized = true
+	}
+	if cdcStateManager != nil && batchFinalized {
+		if finalizer, ok := src.(source.CDCLegacySlotFinalizer); ok {
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				return err
+			}
+			if err := finalizer.FinalizeLegacySlot(ctx); err != nil {
+				return fmt.Errorf("failed to finalize legacy PostgreSQL CDC slot: %w", err)
+			}
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
+}
+
+func connectorLeaseContext(parent context.Context, lease source.ConnectorLease) (context.Context, context.CancelFunc) {
+	guard := source.NewConnectorLeaseGuard(lease)
+	ctx, cancel := context.WithCancelCause(source.WithConnectorLeaseGuard(parent, guard))
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-guard.Done():
+			cancel(guard.Err())
+		case <-stop:
+		}
+	}()
+	var stopOnce sync.Once
+	return ctx, func() {
+		stopOnce.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
+}
+
+func resourceCloseContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), resourceCloseTimeout)
+}
+
+func rejectUnprovenLegacyCDCTarget(ctx context.Context, dest destination.Destination, sourceTable, destTable string) error {
+	resumeProvider, ok := dest.(destination.CDCResumeProvider)
+	if !ok {
+		return nil
+	}
+	position, err := resumeProvider.GetMaxCDCLSN(ctx, destTable)
+	if err != nil {
+		return fmt.Errorf("failed to inspect legacy CDC cursor for %s: %w", sourceTable, err)
+	}
+	if position == "" {
+		return nil
+	}
+	return fmt.Errorf("destination table %q contains CDC data at position %s, but no matching completed CDC state exists for source table %q; rerun with --full-refresh to let this connector adopt the target", destTable, position, sourceTable)
 }
 
 func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.TableSchema, error) {
@@ -588,6 +940,24 @@ func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.
 	}
 
 	return tableSchema, nil
+}
+
+func applyExtractReadSchemaOverrides(tableSchema *schema.TableSchema, columnsSpec, schemaNaming string) error {
+	if tableSchema == nil {
+		return nil
+	}
+	overrides, err := schemaevolution.ParseColumnOverrides(columnsSpec)
+	if err != nil {
+		return err
+	}
+	for i, column := range tableSchema.Columns {
+		override, ok := overrides.GetForColumn(column.Name, schemaNaming)
+		if !ok || override.DataType == schema.TypeUnknown {
+			continue
+		}
+		tableSchema.Columns[i] = override.ApplyToColumn(column)
+	}
+	return nil
 }
 
 func (p *Pipeline) buildSourceSchemaCaster(sourceSchema *schema.TableSchema) *transformer.TypeCaster {
@@ -680,6 +1050,7 @@ func (p *Pipeline) inferSchemaFromData(
 	table source.SourceTable,
 	tracker progress.Tracker,
 	preStage destination.PreStageWriter,
+	readSchema *schema.TableSchema,
 ) (*schema.TableSchema, *databuffer.FileBuffer, destination.PreStagedData, *preStageReport, error) {
 	// Create schema inferrer and file-backed data buffer
 	inferrer := schemainfer.NewSchemaInferrer()
@@ -711,6 +1082,8 @@ func (p *Pipeline) inferSchemaFromData(
 		Parallelism:                     parallelism,
 		FullRefresh:                     p.config.FullRefresh,
 		Columns:                         p.config.Columns,
+		Schema:                          readSchema,
+		ExtractPartitionSchema:          readSchema,
 	}
 
 	records, err := table.Read(ctx, readOpts)
@@ -980,10 +1353,45 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	if len(tables) == 0 {
 		config.Debug("[PIPELINE] Multi-table source returned no tables")
-		return nil
+		if isPostgresCDCSource(p.config.SourceURI) && !p.config.Stream {
+			manager, err := strategy.NewCDCStateManager(
+				p.dest,
+				p.cdcConnectorID,
+				"",
+				p.config.StagingDataset,
+			)
+			if err != nil {
+				return err
+			}
+			if err := manager.BeginRun(ctx, false); err != nil {
+				return err
+			}
+			return nil
+		}
+		if !isPostgresCDCSource(p.config.SourceURI) {
+			return nil
+		}
 	}
 
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
+
+	namer, _ := p.dest.(destination.MultiTableNamer)
+	tableDestNames, err := multiTableDestinationNames(tables, p.dest.GetScheme(), namer)
+	if err != nil {
+		return err
+	}
+
+	columnRenamers := make(map[string]*transformer.ColumnRenamer)
+	for i := range tables {
+		normalized, renamer, err := p.normalizeMultiTableInfo(ctx, tables[i], tableDestNames[tables[i].Name])
+		if err != nil {
+			return fmt.Errorf("failed to normalize columns for table %s: %w", tables[i].Name, err)
+		}
+		tables[i] = normalized
+		if renamer != nil && renamer.HasRenames() {
+			columnRenamers[normalized.Name] = renamer
+		}
+	}
 
 	var loadTimestamp time.Time
 	if !p.config.NoLoadTimestamp {
@@ -993,6 +1401,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		for i := range tables {
 			tables[i].Schema = addLoadTimestampColumn(tables[i].Schema)
 		}
+	}
+
+	// A single predicate cannot apply across heterogeneous table schemas.
+	if strings.TrimSpace(p.config.IncrementalPredicate) != "" {
+		return fmt.Errorf("incremental-predicate is not supported in multi-table mode")
 	}
 
 	resolvedStrategy := p.config.IncrementalStrategy
@@ -1043,20 +1456,89 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		defer func() { tracker.Stop(retErr) }()
 	}
 
-	tableDestNames := make(map[string]string)
-	namer, _ := p.dest.(destination.MultiTableNamer)
-	for _, table := range tables {
-		// When funneling into a dest schema, the source-schema qualifier is
-		// flattened into the table name ("dbo.orders" -> "<dest>.dbo_orders") so
-		// the result is an unambiguous two-part name rather than something that
-		// looks like a catalog.schema.table reference. Without a dest schema the
-		// source layout is mirrored. Destinations with their own naming rules
-		// (e.g. BigQuery) override via MultiTableNamer.
-		destName := destination.DefaultMultiTableName(table.DestSchema, table.Name)
-		if namer != nil {
-			destName = namer.DestTableName(table.DestSchema, table.Name)
+	var cdcStateManager *strategy.CDCStateManager
+	anchorTable := ""
+	managedMSSQLCDC := isMSSQLCDCSource(p.config.SourceURI) && validateDestinationManagedCDCState(p.dest) == nil
+	if isPostgresCDCSource(p.config.SourceURI) || isMySQLCDCSource(p.config.SourceURI) || managedMSSQLCDC {
+		for _, destTable := range tableDestNames {
+			if anchorTable == "" || destTable < anchorTable {
+				anchorTable = destTable
+			}
 		}
-		tableDestNames[table.Name] = destName
+		cdcStateManager, err = strategy.NewCDCStateManager(
+			p.dest,
+			p.cdcConnectorID,
+			anchorTable,
+			p.config.StagingDataset,
+		)
+		if err != nil {
+			return err
+		}
+		for _, table := range tables {
+			if err := cdcStateManager.RegisterTableState(ctx, table.Name, tableDestNames[table.Name], table.Incarnation, table.SchemaFingerprint); err != nil {
+				return err
+			}
+		}
+	}
+
+	// For CDC sources, query per-table max LSNs for resume
+	var cdcResumeLSNs map[string]string
+	if cdcStateManager != nil && !p.config.FullRefresh {
+		cdcResumeLSNs = make(map[string]string)
+		stateEmpty, err := cdcStateManager.StateEmpty(ctx)
+		if err != nil {
+			return err
+		}
+		for _, table := range tables {
+			resumeLSN, err := cdcStateManager.ResumePosition(ctx, table.Name)
+			if err != nil {
+				return err
+			}
+			if resumeLSN != "" {
+				cdcResumeLSNs[table.Name] = resumeLSN
+				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
+			} else {
+				if stateEmpty {
+					if err := rejectUnprovenLegacyCDCTarget(ctx, p.dest, table.Name, tableDestNames[table.Name]); err != nil {
+						return err
+					}
+				}
+				config.Debug("[PIPELINE] No completed CDC snapshot state for %s, will snapshot", table.Name)
+			}
+		}
+	} else if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh {
+		if resumeProvider, ok := p.dest.(destination.CDCResumeProvider); ok {
+			cdcResumeLSNs = make(map[string]string)
+			for _, table := range tables {
+				destTable := tableDestNames[table.Name]
+				maxLSN, err := resumeProvider.GetMaxCDCLSN(ctx, destTable)
+				if err != nil {
+					return fmt.Errorf("failed to get CDC resume cursor from destination table %s: %w", destTable, err)
+				}
+				if maxLSN != "" {
+					cdcResumeLSNs[table.Name] = maxLSN
+				}
+			}
+		}
+	}
+
+	if cdcStateManager != nil {
+		for _, table := range tables {
+			var err error
+			if isMySQLCDCSource(p.config.SourceURI) {
+				err = cdcStateManager.ClaimAndPrepareTarget(ctx, table.Name, tableDestNames[table.Name], destination.PrepareOptions{
+					Table:       tableDestNames[table.Name],
+					Schema:      table.Schema,
+					PrimaryKeys: table.PrimaryKeys,
+					CDCMode:     true,
+				})
+			} else {
+				err = cdcStateManager.ClaimTarget(ctx, table.Name, tableDestNames[table.Name])
+			}
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	// Schema contract handling: build a per-table evolution plan so destination
@@ -1076,29 +1558,6 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			}
 		}
 	}
-
-	// For CDC sources, query per-table max LSNs for resume
-	var cdcResumeLSNs map[string]string
-	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh {
-		if resumeProvider, ok := p.dest.(destination.CDCResumeProvider); ok {
-			cdcResumeLSNs = make(map[string]string)
-			for _, table := range tables {
-				destTable := tableDestNames[table.Name]
-				maxLSN, err := resumeProvider.GetMaxCDCLSN(ctx, destTable)
-				if err != nil {
-					config.Debug("[PIPELINE] Failed to get max CDC LSN for table %s: %v", destTable, err)
-					continue
-				}
-				if maxLSN != "" {
-					cdcResumeLSNs[table.Name] = maxLSN
-					config.Debug("[PIPELINE] Found existing CDC data for %s, max LSN: %s", table.Name, maxLSN)
-				} else {
-					config.Debug("[PIPELINE] No existing CDC data for %s, will perform snapshot", table.Name)
-				}
-			}
-		}
-	}
-
 	var whitespaceTrimmer *transformer.WhitespaceTrimmer
 	if resolvedConfig.TrimWhitespace {
 		whitespaceTrimmer = transformer.NewWhitespaceTrimmer()
@@ -1118,17 +1577,30 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		Tracker:           tracker,
 		CDCResumeLSNs:     cdcResumeLSNs,
 		EvolutionPlans:    evolutionPlans,
+		CDCStateManager:   cdcStateManager,
 		WhitespaceTrimmer: whitespaceTrimmer,
 		LoadTimestamp:     loadTimestampTransformer,
+		ColumnRenamers:    columnRenamers,
+		NormalizeTableInfo: func(ctx context.Context, table source.SourceTableInfo, destTable string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
+			return p.normalizeMultiTableInfo(ctx, table, destTable)
+		},
+	}
+	if cdcStateManager != nil {
+		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
+			return err
+		}
 	}
 
 	if p.config.Stream {
 		committer, _ := src.(source.StreamCommitter)
+		legacyFinalizer, _ := src.(source.CDCLegacySlotFinalizer)
 		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
-			FlushInterval: p.config.FlushInterval,
-			FlushRecords:  int64(p.config.FlushRecords),
-			Strategy:      resolvedStrategy,
-			Committer:     committer,
+			FlushInterval:   p.config.FlushInterval,
+			FlushRecords:    int64(p.config.FlushRecords),
+			Strategy:        resolvedStrategy,
+			Committer:       committer,
+			StateManager:    cdcStateManager,
+			LegacyFinalizer: legacyFinalizer,
 		})
 		if err := exec.ExecuteMultiTable(ctx, job); err != nil {
 			return fmt.Errorf("streaming ingestion failed: %w", err)
@@ -1139,18 +1611,80 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	if err := mtStrat.ExecuteMultiTable(ctx, job); err != nil {
 		return fmt.Errorf("multi-table ingestion failed: %w", err)
 	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if cdcStateManager != nil {
+		stateProvider, ok := src.(source.CDCStateProvider)
+		if !ok {
+			return fmt.Errorf("managed CDC source does not expose completed batch state")
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := cdcStateManager.Persist(ctx, stateProvider.CDCState()); err != nil {
+			return fmt.Errorf("failed to persist destination CDC state: %w", err)
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
 
 	// After a successful, durable write, let CDC sources confirm the position
 	// they caught up to (e.g. advance the replication slot's flush LSN). This is
 	// safe here because the write above has committed. Best-effort: a failure to
 	// confirm must not fail an otherwise-successful run.
+	batchFinalized := false
 	if finalizer, ok := src.(source.CDCBatchFinalizer); ok {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
 		if err := finalizer.FinalizeBatch(ctx); err != nil {
+			if loss := source.ConnectorLeaseLoss(ctx); loss != nil {
+				return loss
+			}
 			config.Debug("[PIPELINE] CDC batch finalize failed: %v", err)
+			return nil
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		batchFinalized = true
+	}
+	if cdcStateManager != nil && batchFinalized {
+		if finalizer, ok := src.(source.CDCLegacySlotFinalizer); ok {
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				return err
+			}
+			if err := finalizer.FinalizeLegacySlot(ctx); err != nil {
+				return fmt.Errorf("failed to finalize legacy PostgreSQL CDC slot: %w", err)
+			}
+			if err := source.ConnectorLeaseLoss(ctx); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
+}
+
+func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, namer destination.MultiTableNamer) (map[string]string, error) {
+	destinations := make(map[string]string, len(tables))
+	sourcesByDestination := make(map[string]string, len(tables))
+	for _, table := range tables {
+		// When funneling into a dest schema, the source-schema qualifier is
+		// flattened into the table name ("dbo.orders" -> "<dest>.dbo_orders") so
+		// the result is an unambiguous two-part name rather than something that
+		// looks like a catalog.schema.table reference. Destinations with their own
+		// naming rules (e.g. BigQuery) override via MultiTableNamer.
+		destName := destination.ResolveMultiTableName(scheme, namer, table.DestSchema, table.Name)
+		if existingSource, exists := sourcesByDestination[destName]; exists && existingSource != table.Name {
+			return nil, fmt.Errorf("multi-table destination collision: source tables %q and %q both map to destination table %q", existingSource, table.Name, destName)
+		}
+		destinations[table.Name] = destName
+		sourcesByDestination[destName] = table.Name
+	}
+	return destinations, nil
 }
 
 // evolveSchemaIfNeeded inspects the destination's current schema and builds an
@@ -1193,7 +1727,10 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 
 	// Compare schemas with overrides. Staging-only CDC columns are not persisted on the destination.
-	opts := &schemaevolution.CompareOptions{Overrides: overrides}
+	opts := &schemaevolution.CompareOptions{Overrides: overrides, PrimaryKeys: sourceSchema.PrimaryKeys}
+	if normalizer, ok := p.dest.(destination.SchemaEvolutionColumnNormalizer); ok {
+		opts.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
+	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
@@ -1497,9 +2034,31 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 	return p.applyNamingConvention(sourceSchema, namingConv)
 }
 
+// applyPartitionNaming normalizes partition_by/cluster_by to the destination column
+// naming (no-op for direct); partition_by falls back to the source partition column.
+func applyPartitionNaming(cfg *config.IngestConfig, tableSchema *schema.TableSchema, namingConv naming.NamingConvention) {
+	switch {
+	case cfg.PartitionBy != "":
+		cfg.PartitionBy = namingConv.Normalize(cfg.PartitionBy)
+	case tableSchema.PartitionBy != "":
+		cfg.PartitionBy = namingConv.Normalize(tableSchema.PartitionBy)
+	}
+	if len(cfg.ClusterBy) > 0 {
+		clusterBy := make([]string, len(cfg.ClusterBy))
+		for i, col := range cfg.ClusterBy {
+			clusterBy[i] = namingConv.Normalize(col)
+		}
+		cfg.ClusterBy = clusterBy
+	}
+}
+
 // resolveNamingConvention determines which naming convention applies, resolving
 // the "auto" setting by inspecting the destination table. It never returns Auto.
 func (p *Pipeline) resolveNamingConvention(ctx context.Context, sourceSchema *schema.TableSchema) (naming.NamingConvention, error) {
+	return p.resolveNamingConventionForTable(ctx, sourceSchema, p.config.DestTable)
+}
+
+func (p *Pipeline) resolveNamingConventionForTable(ctx context.Context, sourceSchema *schema.TableSchema, destTable string) (naming.NamingConvention, error) {
 	convention, err := naming.ParseConvention(p.config.SchemaNaming)
 	if err != nil {
 		return nil, err
@@ -1507,7 +2066,7 @@ func (p *Pipeline) resolveNamingConvention(ctx context.Context, sourceSchema *sc
 
 	// For auto detection, check if destination exists and has snake_case naming
 	if convention == naming.Auto {
-		destSchema, err := p.dest.GetTableSchema(ctx, p.config.DestTable)
+		destSchema, err := p.dest.GetTableSchema(ctx, destTable)
 		if err != nil {
 			config.Debug("[NAMING] Failed to get destination schema for auto-detection: %v", err)
 			convention = naming.SnakeCase
@@ -1524,6 +2083,111 @@ func (p *Pipeline) resolveNamingConvention(ctx context.Context, sourceSchema *sc
 	return naming.Get(convention), nil
 }
 
+func (p *Pipeline) normalizeMultiTableInfo(ctx context.Context, table source.SourceTableInfo, destTable string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
+	if table.Schema == nil {
+		return source.SourceTableInfo{}, nil, fmt.Errorf("table has no schema")
+	}
+
+	normalized := table
+	normalized.Schema = cloneTableSchema(table.Schema)
+	normalized.PrimaryKeys = append([]string(nil), table.PrimaryKeys...)
+
+	convention, err := p.resolveNamingConventionForTable(ctx, table.Schema, destTable)
+	if err != nil {
+		return source.SourceTableInfo{}, nil, err
+	}
+
+	namingMapping := make(map[string]string)
+	if convention.Name() != string(naming.Direct) {
+		for sourceName, destinationName := range naming.BuildColumnMapping(table.Schema, convention) {
+			if destination.IsCDCMetaColumn(sourceName) {
+				continue
+			}
+			if destination.IsCDCMetaColumn(destinationName) {
+				return source.SourceTableInfo{}, nil, fmt.Errorf("source column %q normalizes to reserved CDC metadata column %q", sourceName, destinationName)
+			}
+			namingMapping[sourceName] = destinationName
+		}
+		applyColumnMappingToSchema(normalized.Schema, namingMapping)
+	}
+
+	maxLen := destination.MaxIdentifierLength(p.dest.GetScheme())
+	shorteningMapping := destination.ShortenColumnNames(normalized.Schema.Columns, maxLen, namingMapping)
+	for sourceName := range shorteningMapping {
+		if destination.IsCDCMetaColumn(sourceName) {
+			delete(shorteningMapping, sourceName)
+		}
+	}
+	applyColumnMappingToSchema(normalized.Schema, shorteningMapping)
+
+	combined := composeColumnMappings(namingMapping, shorteningMapping)
+	normalized.PrimaryKeys = mapColumnNames(normalized.PrimaryKeys, combined)
+	if len(normalized.PrimaryKeys) == 0 && len(normalized.Schema.PrimaryKeys) > 0 {
+		normalized.PrimaryKeys = append([]string(nil), normalized.Schema.PrimaryKeys...)
+	}
+	normalized.Schema.PrimaryKeys = append([]string(nil), normalized.PrimaryKeys...)
+	markPrimaryKeyColumns(normalized.Schema)
+
+	if len(combined) == 0 {
+		return normalized, nil, nil
+	}
+	return normalized, transformer.NewColumnRenamer(combined), nil
+}
+
+func cloneTableSchema(input *schema.TableSchema) *schema.TableSchema {
+	if input == nil {
+		return nil
+	}
+	cloned := *input
+	cloned.Columns = append([]schema.Column(nil), input.Columns...)
+	cloned.PrimaryKeys = append([]string(nil), input.PrimaryKeys...)
+	return &cloned
+}
+
+func composeColumnMappings(first, second map[string]string) map[string]string {
+	combined := make(map[string]string, len(first)+len(second))
+	for sourceName, intermediateName := range first {
+		if finalName, ok := second[intermediateName]; ok {
+			combined[sourceName] = finalName
+		} else {
+			combined[sourceName] = intermediateName
+		}
+	}
+	for sourceName, destinationName := range second {
+		combined[sourceName] = destinationName
+	}
+	return combined
+}
+
+func mapColumnNames(columns []string, mapping map[string]string) []string {
+	mapped := append([]string(nil), columns...)
+	for i, name := range mapped {
+		if destinationName, ok := mapping[name]; ok {
+			mapped[i] = destinationName
+		}
+	}
+	return dedupeStringsPreserveOrder(mapped)
+}
+
+func applyColumnMappingToSchema(s *schema.TableSchema, mapping map[string]string) {
+	if s == nil || len(mapping) == 0 {
+		return
+	}
+	for i := range s.Columns {
+		if newName, ok := mapping[s.Columns[i].Name]; ok {
+			s.Columns[i].Name = newName
+		}
+	}
+	s.Columns = dedupeMappedColumns(s.Columns)
+	s.PrimaryKeys = mapColumnNames(s.PrimaryKeys, mapping)
+	if newName, ok := mapping[s.IncrementalKey]; ok {
+		s.IncrementalKey = newName
+	}
+	if newName, ok := mapping[s.PartitionBy]; ok {
+		s.PartitionBy = newName
+	}
+}
+
 func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namingConv naming.NamingConvention) error {
 	// If using direct naming (no transformation), skip setup
 	if namingConv.Name() == string(naming.Direct) {
@@ -1538,6 +2202,17 @@ func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namin
 	if len(columnMapping) == 0 {
 		config.Debug("[NAMING] No column renames needed")
 		return nil
+	}
+	if isCDCSource(p.config.SourceURI) {
+		for sourceName, destinationName := range columnMapping {
+			if destination.IsCDCMetaColumn(sourceName) {
+				delete(columnMapping, sourceName)
+				continue
+			}
+			if destination.IsCDCMetaColumn(destinationName) {
+				return fmt.Errorf("source column %q normalizes to reserved CDC metadata column %q", sourceName, destinationName)
+			}
+		}
 	}
 
 	// Log the column mappings
@@ -1715,6 +2390,21 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 	return nil
 }
 
+// hasIgnoredDestSchema reports whether the source URI carries a dest_schema
+// that will not be honoured. dest_schema only names destination tables in
+// multi-table mode; with an explicit --source-table the destination is
+// --dest-table (or the source table name) and dest_schema is silently dropped.
+func hasIgnoredDestSchema(cfg *config.IngestConfig) bool {
+	if cfg.SourceTable == "" {
+		return false
+	}
+	parsed, err := url.Parse(cfg.SourceURI)
+	if err != nil {
+		return false
+	}
+	return parsed.Query().Get("dest_schema") != ""
+}
+
 // shouldWarnCDCStrategy returns true if the user should be warned about using
 // a non-merge strategy with a CDC source.
 func shouldWarnCDCStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy) bool {
@@ -1744,7 +2434,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	if cfg.FullRefresh {
 		s = config.StrategyReplace
 	}
-	return rewriteReplaceForPostgres(s, cfg.DestURI)
+	return s
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {
@@ -1778,44 +2468,45 @@ func validateExtractPartitionSupport(cfg *config.IngestConfig, table source.Sour
 	if cfg.ExtractPartitionBy == "" {
 		return nil
 	}
-	if table.Name() == source.CustomQueryTableName {
-		return fmt.Errorf("custom queries do not support extract partitioning")
-	}
 	provider, ok := table.(source.ExtractPartitioningProvider)
 	if !ok || !provider.SupportsExtractPartitioning() {
-		return fmt.Errorf("source table %q does not support extract partitioning; v1 supports normal SQL table scans for postgres, mysql, mssql, sqlite, and ADBC-backed sources", table.Name())
+		return fmt.Errorf("source table %q does not support extract partitioning; supported sources are postgres, mysql, mssql, sqlite, and ADBC-backed SQL sources", table.Name())
 	}
 	return nil
 }
 
-func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy) error {
+func validateExtractPartitionStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy, dest destination.Destination) error {
 	if cfg.ExtractPartitionBy == "" {
 		return nil
 	}
-	switch resolvedStrategy {
-	case config.StrategyReplace, config.StrategyTruncateInsert:
-		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", resolvedStrategy)}
-	default:
+	if !usesInPlaceReplace(resolvedStrategy, cfg.DestURI) {
 		return nil
+	}
+	if _, ok := dest.(destination.AtomicTruncateInsertStagingWriter); ok {
+		return nil
+	}
+	return &config.ValidationError{
+		Field:   "incremental-strategy",
+		Message: fmt.Sprintf("%q uses an in-place replacement for this destination, but the destination cannot stage the complete extract before finalization", resolvedStrategy),
 	}
 }
 
-// rewriteReplaceForPostgres swaps the replace strategy for truncate+insert when
-// the destination is Postgres. Replace drops and recreates the table, which
-// breaks dependent views, grants, and foreign keys; truncate+insert preserves
-// the table definition.
-func rewriteReplaceForPostgres(strat config.IncrementalStrategy, destURI string) config.IncrementalStrategy {
+func usesInPlaceReplace(strat config.IncrementalStrategy, destURI string) bool {
 	if strat != config.StrategyReplace {
-		return strat
+		return false
 	}
 	scheme, err := uri.ExtractScheme(destURI)
 	if err != nil {
-		return strat
+		return false
 	}
-	if uri.NormalizeScheme(scheme) != "postgres" {
-		return strat
+	return uri.NormalizeScheme(scheme) == "postgres"
+}
+
+func getWriteStrategy(strat config.IncrementalStrategy, destURI string) (strategy.WriteStrategy, error) {
+	if usesInPlaceReplace(strat, destURI) {
+		return strategy.NewInPlaceReplaceStrategy(), nil
 	}
-	return config.StrategyTruncateInsert
+	return strategy.Get(strat)
 }
 
 // isCDCSource returns true if the source URI indicates a CDC source
@@ -1825,6 +2516,269 @@ func isCDCSource(uri string) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(uri[:schemeEnd]), "+cdc")
+}
+
+func isPostgresCDCSource(rawURI string) bool {
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	scheme := strings.ToLower(rawURI[:schemeEnd])
+	return scheme == "postgres+cdc" || scheme == "postgresql+cdc"
+}
+
+func isMSSQLCDCSource(rawURI string) bool {
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	switch strings.ToLower(rawURI[:schemeEnd]) {
+	case "mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc":
+		return true
+	}
+	return false
+}
+
+func isMySQLCDCSource(rawURI string) bool {
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd == -1 {
+		return false
+	}
+	switch strings.ToLower(rawURI[:schemeEnd]) {
+	case "mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMySQLFamilyScheme(scheme string) bool {
+	normalized := strings.ToLower(scheme)
+	return normalized == "mysql" || normalized == "mariadb" ||
+		strings.HasPrefix(normalized, "mysql+") || strings.HasPrefix(normalized, "mariadb+")
+}
+
+type mysqlServerIdentityProvider interface {
+	MySQLServerIdentity() string
+	MySQLDatabaseName() string
+}
+
+type mysqlServerFlavorProvider interface {
+	MySQLServerFlavor() string
+}
+
+func validateMySQLCDCSourceDestination(cfg *config.IngestConfig, src source.Source, dest destination.Destination) error {
+	sourceIdentity, ok := src.(mysqlServerIdentityProvider)
+	if !ok || sourceIdentity.MySQLServerIdentity() == "" {
+		return fmt.Errorf("MySQL CDC source does not expose a verifiable server identity")
+	}
+	destinationIdentity, hasIdentity := dest.(mysqlServerIdentityProvider)
+	if !hasIdentity || destinationIdentity.MySQLServerIdentity() == "" {
+		// A missing identity (e.g. a MariaDB destination predating
+		// @@GLOBAL.server_uid) is still safe when the destination flavor
+		// provably differs from the source's: identities are prefixed by
+		// flavor, so they can never refer to the same physical server.
+		flavorProvider, hasFlavor := dest.(mysqlServerFlavorProvider)
+		if hasFlavor {
+			destinationFlavor := flavorProvider.MySQLServerFlavor()
+			sourceFlavor, _, _ := strings.Cut(sourceIdentity.MySQLServerIdentity(), ":")
+			if destinationFlavor != "" && destinationFlavor != sourceFlavor {
+				return nil
+			}
+		}
+		// Destinations that are not MySQL-family servers at all (DuckDB,
+		// PostgreSQL, ...) can never be the CDC source server, so no feedback
+		// loop is possible and no identity is required.
+		if !hasIdentity && !hasFlavor && !isMySQLFamilyScheme(dest.GetScheme()) {
+			return nil
+		}
+		return fmt.Errorf("destination scheme %q does not expose a verifiable MySQL server identity required to prevent CDC feedback loops", dest.GetScheme())
+	}
+	if sourceIdentity.MySQLServerIdentity() != destinationIdentity.MySQLServerIdentity() {
+		return nil
+	}
+
+	sourceDatabase := sourceIdentity.MySQLDatabaseName()
+	destinationDatabase := destinationIdentity.MySQLDatabaseName()
+	if cfg.SourceTable == "" {
+		if parsed, err := url.Parse(cfg.SourceURI); err == nil {
+			if mappedDatabase := strings.TrimSpace(parsed.Query().Get("dest_schema")); mappedDatabase != "" {
+				destinationDatabase = mappedDatabase
+			}
+		}
+		if strings.EqualFold(sourceDatabase, destinationDatabase) {
+			return fmt.Errorf("MySQL CDC source and multi-table destination resolve to the same server and database %q; choose a different destination database to prevent the connector from consuming its own writes", sourceDatabase)
+		}
+		return nil
+	}
+
+	sourceParts := tablename.Split(cfg.SourceTable)
+	destinationTable := cfg.DestTable
+	if strings.TrimSpace(destinationTable) == "" {
+		destinationTable = cfg.SourceTable
+	}
+	destinationParts := tablename.Split(destinationTable)
+	if len(sourceParts) == 0 || len(destinationParts) == 0 {
+		return fmt.Errorf("failed to resolve MySQL CDC source and destination table names for feedback-loop validation")
+	}
+	if len(destinationParts) > 1 {
+		destinationDatabase = destinationParts[len(destinationParts)-2]
+	}
+	if strings.EqualFold(sourceDatabase, destinationDatabase) && strings.EqualFold(sourceParts[len(sourceParts)-1], destinationParts[len(destinationParts)-1]) {
+		return fmt.Errorf("MySQL CDC source and destination resolve to the same physical table %s.%s; choose a different destination to prevent the connector from consuming its own writes", sourceDatabase, sourceParts[len(sourceParts)-1])
+	}
+	return nil
+}
+
+func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.ConnectorIdentity, destinationIdentity string) string {
+	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
+		if stateID := parsed.Query().Get("state_id"); stateID != "" {
+			seed := "explicit:" + stateID + "\x00" + identity.Database
+			if destinationIdentity != "" {
+				seed += "\x00" + destinationIdentity
+			}
+			sum := sha256.Sum256([]byte(seed))
+			return fmt.Sprintf("%x", sum[:8])
+		}
+	}
+
+	destinationTarget := cfg.DestTable
+	if destinationIdentity != "" {
+		destinationTarget = destinationIdentity
+	}
+	identityParts := []string{
+		identity.Connector,
+		canonicalCDCStateURI(cfg.DestURI),
+		cfg.SourceTable,
+		destinationTarget,
+	}
+	connectorIdentity := strings.Join(identityParts, "\x00")
+	sum := sha256.Sum256([]byte(connectorIdentity))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func managedCDCDestinationIdentity(ctx context.Context, dest destination.Destination, target string) (string, error) {
+	provider, ok := dest.(destination.CDCTargetIdentityProvider)
+	if !ok {
+		return target, nil
+	}
+	return provider.CanonicalCDCTarget(ctx, target)
+}
+
+// validateMultiTableNamespace rejects a multi-table CDC run whose destination
+// requires a namespace that neither dest_schema nor the destination URI
+// supplies. Left to the destination, the failure names an internal synthesized
+// table instead of the setting the user has to change.
+func validateMultiTableNamespace(cfg *config.IngestConfig, dest destination.Destination, target string) error {
+	if cfg.SourceTable != "" {
+		return nil
+	}
+	if cfg.DestTable != "" {
+		output.Warnf("Warning: --dest-table=%s is ignored in multi-table CDC mode; use ?dest_schema= on the source URI\n", cfg.DestTable)
+	}
+	capability, ok := destination.RequiresNamespace(dest.GetScheme())
+	if !ok || capability.CheckName(target) == nil {
+		return nil
+	}
+	namespace := capability.Labels[1]
+	return fmt.Errorf(
+		"multi-table CDC to %s requires a %s: add ?dest_schema=<%s> to the source URI, or a default %s to the destination URI",
+		dest.GetScheme(), namespace, namespace, namespace,
+	)
+}
+
+func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Destination) string {
+	if cfg.SourceTable != "" {
+		return cfg.DestTable
+	}
+
+	const namespaceTable = "__ingestr_cdc_namespace__"
+	destSchema := ""
+	if parsed, err := url.Parse(cfg.SourceURI); err == nil {
+		destSchema = parsed.Query().Get("dest_schema")
+	}
+	if namer, ok := dest.(destination.MultiTableNamer); ok {
+		return namer.DestTableName(destSchema, namespaceTable)
+	}
+	return destination.DefaultMultiTableName(destSchema, namespaceTable)
+}
+
+func genericCDCConnectorID(cfg *config.IngestConfig) string {
+	identity := strings.Join([]string{
+		canonicalCDCStateURI(cfg.SourceURI),
+		canonicalCDCStateURI(cfg.DestURI),
+		cfg.SourceTable,
+		cfg.DestTable,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func canonicalCDCStateURI(rawURI string) string {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return rawURI
+	}
+	normalizePostgresURI(parsed)
+	parsed.User = nil
+	query := parsed.Query()
+	for _, key := range []string{
+		"state_id", "mode", "binary", "discover_interval",
+		"database", "dbname",
+		"server_id", "xa_buffer_limit", "xa_buffer_bytes_limit", "xa_pending_limit",
+		"password", "pass", "token", "secret", "api_key", "private_key",
+	} {
+		query.Del(key)
+	}
+	for key := range query {
+		if strings.HasPrefix(key, "pool_") {
+			query.Del(key)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func normalizePostgresURI(parsed *url.URL) {
+	originalScheme := strings.ToLower(parsed.Scheme)
+	isPostgres := originalScheme == "postgres+cdc" || originalScheme == "postgresql+cdc" ||
+		originalScheme == "postgres" || originalScheme == "postgresql" || originalScheme == "postgresql+psycopg2"
+	switch originalScheme {
+	case "postgresql+cdc":
+		parsed.Scheme = "postgres+cdc"
+	case "postgresql", "postgresql+psycopg2":
+		parsed.Scheme = "postgres"
+	default:
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+	}
+	if isPostgres {
+		database := parsed.Query().Get("database")
+		if database == "" {
+			database = parsed.Query().Get("dbname")
+		}
+		if database == "" {
+			database = strings.TrimLeft(parsed.Path, "/")
+		}
+		if database == "" && parsed.User != nil {
+			database = parsed.User.Username()
+		}
+		if database != "" {
+			parsed.Path = "/" + database
+			parsed.RawPath = "/" + url.PathEscape(database)
+		}
+	}
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if port == "5432" {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
 }
 
 func isManagedChangeSource(uri string) bool {
@@ -1837,13 +2791,97 @@ func isManagedChangeSource(uri string) bool {
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
+	if cfg.IncrementalStrategy == "truncate+insert" {
+		return &config.ValidationError{
+			Field:   "incremental-strategy",
+			Message: `"truncate+insert" has been removed; use "replace"`,
+		}
+	}
 	if cfg.ExtractPartitionBy != "" || cfg.ExtractPartitionInterval != 0 || cfg.ExtractPartitionNumericInterval != 0 || cfg.ExtractPartitionAuto {
 		if err := cfg.Validate(); err != nil {
 			return err
 		}
 	}
+	if isPostgresCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+		switch cfg.IncrementalStrategy {
+		case config.StrategyDeleteInsert, config.StrategySCD2:
+			return &config.ValidationError{
+				Field:   "incremental-strategy",
+				Message: fmt.Sprintf("%q is not supported for PostgreSQL CDC; use merge or replace", cfg.IncrementalStrategy),
+			}
+		}
+	}
+	if isMSSQLCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+		switch cfg.IncrementalStrategy {
+		case "", config.StrategyMerge, config.StrategyReplace:
+		default:
+			return &config.ValidationError{
+				Field:   "incremental-strategy",
+				Message: fmt.Sprintf("%q is not supported for SQL Server CDC; use merge or replace", cfg.IncrementalStrategy),
+			}
+		}
+	}
+	if isMySQLCDCSource(cfg.SourceURI) {
+		if !cfg.FullRefresh {
+			switch cfg.IncrementalStrategy {
+			case "", config.StrategyMerge, config.StrategyReplace:
+			default:
+				return &config.ValidationError{
+					Field:   "incremental-strategy",
+					Message: fmt.Sprintf("%q is not supported for MySQL CDC; use merge or replace", cfg.IncrementalStrategy),
+				}
+			}
+		}
+		if cfg.SourceTable == "" {
+			switch {
+			case len(cfg.SQLExcludeColumns) > 0:
+				return &config.ValidationError{Field: "sql-exclude-columns", Message: "is not supported in multi-table MySQL CDC because exclusions are not applied consistently; select one table or remove the option"}
+			case len(cfg.Mask) > 0:
+				return &config.ValidationError{Field: "mask", Message: "is not supported in multi-table MySQL CDC because masks are not applied consistently; select one table or remove the option"}
+			case strings.TrimSpace(cfg.Columns) != "":
+				return &config.ValidationError{Field: "columns", Message: "is not supported in multi-table MySQL CDC because overrides are not applied consistently; select one table or remove the option"}
+			}
+		}
+		for _, column := range cfg.SQLExcludeColumns {
+			if destination.IsCDCMetaColumn(column) {
+				return &config.ValidationError{Field: "sql-exclude-columns", Message: fmt.Sprintf("cannot exclude reserved CDC metadata column %q", column)}
+			}
+		}
+		masker, err := transformer.NewColumnMasker(cfg.Mask)
+		if err == nil {
+			for _, column := range masker.MaskedColumns() {
+				if destination.IsCDCMetaColumn(column) {
+					return &config.ValidationError{Field: "mask", Message: fmt.Sprintf("cannot mask reserved CDC metadata column %q", column)}
+				}
+			}
+		}
+		overrides, err := schemaevolution.ParseColumnOverrides(cfg.Columns)
+		if err == nil {
+			for _, override := range overrides {
+				if destination.IsCDCMetaColumn(override.Name) || destination.IsCDCMetaColumn(override.RenameTo) {
+					return &config.ValidationError{Field: "columns", Message: "cannot rename or override reserved CDC metadata columns"}
+				}
+			}
+		}
+	}
 	if isChangeTrackingSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
 		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
+	}
+	if isMSSQLCDCSource(cfg.SourceURI) && cfg.SQLLimit > 0 {
+		return &config.ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server CDC sources; the snapshot and change stream must be read completely to keep the resume cursor safe"}
+	}
+	return nil
+}
+
+func validateIncrementalPredicate(cfg *config.IngestConfig, dest destination.Destination, resolvedStrategy config.IncrementalStrategy) error {
+	if strings.TrimSpace(cfg.IncrementalPredicate) == "" {
+		return nil
+	}
+	if resolvedStrategy != config.StrategyMerge {
+		return fmt.Errorf("incremental-predicate can only be used with the merge incremental strategy, but the resolved strategy is %q", resolvedStrategy)
+	}
+	if sup, ok := dest.(destination.IncrementalPredicateSupport); !ok || !sup.SupportsIncrementalPredicate() {
+		return fmt.Errorf("destination scheme %q does not support --incremental-predicate", dest.GetScheme())
 	}
 	return nil
 }
@@ -1851,6 +2889,98 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 func validateChangeTrackingDestination(dest destination.Destination) error {
 	if _, ok := dest.(destination.CDCResumeProvider); !ok {
 		return fmt.Errorf("destination scheme %q does not support resume cursors required by SQL Server Change Tracking", dest.GetScheme())
+	}
+	return nil
+}
+
+func validateCDCRunSerialization(cfg *config.IngestConfig, dest destination.Destination) error {
+	if cfg.FullRefresh || !isManagedChangeSource(cfg.SourceURI) {
+		return nil
+	}
+	requirement, ok := dest.(destination.SerializedCDCRunsRequired)
+	if !ok || !requirement.RequiresSerializedCDCRuns() {
+		return nil
+	}
+	if isPostgresCDCSource(cfg.SourceURI) {
+		return nil
+	}
+	if isMySQLCDCSource(cfg.SourceURI) {
+		if _, ok := dest.(destination.ManagedCDCRunLeaser); ok {
+			return nil
+		}
+	}
+	sourceScheme, err := uri.ExtractScheme(cfg.SourceURI)
+	if err != nil {
+		sourceScheme = "CDC"
+	}
+	return fmt.Errorf("destination scheme %q requires serialized CDC runs because it does not enforce primary-key uniqueness; source scheme %q has no pipeline-managed run lease", dest.GetScheme(), sourceScheme)
+}
+
+func supportsDestinationManagedCDCState(dest destination.Destination) bool {
+	if _, ok := dest.(destination.CDCStateReader); !ok {
+		return false
+	}
+	if _, ok := dest.(destination.CDCStateFenceReader); !ok {
+		return false
+	}
+	if _, ok := dest.(destination.CDCStatePruner); !ok {
+		return false
+	}
+	_, ok := dest.(destination.TruncateCapable)
+	return ok
+}
+
+func validateDestinationManagedCDCState(dest destination.Destination) error {
+	if !supportsDestinationManagedCDCState(dest) {
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: destination-managed state with fencing, pruning, and truncation is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCTargetClaimer); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: atomic destination-table claims are not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCTargetIncarnationProvider); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: destination-table incarnation checks are not supported", dest.GetScheme())
+	}
+	cdcMerge, ok := dest.(destination.CDCMergeAware)
+	if !ok || !cdcMerge.SupportsCDCMerge() {
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: CDC-aware merge is not supported", dest.GetScheme())
+	}
+	unchangedCols, ok := dest.(destination.CDCUnchangedColsAware)
+	if !ok || !unchangedCols.SupportsCDCUnchangedCols() {
+		return fmt.Errorf("destination scheme %q cannot safely run managed CDC: preserving unchanged TOAST columns is not supported", dest.GetScheme())
+	}
+	validator, ok := dest.(destination.ManagedCDCStateValidator)
+	if !ok {
+		return nil
+	}
+	if err := validator.ValidateManagedCDCState(); err != nil {
+		return fmt.Errorf("destination scheme %q cannot safely use managed CDC state: %w", dest.GetScheme(), err)
+	}
+	return nil
+}
+
+func validateMySQLCDCMutationFencing(dest destination.Destination, multiTable bool) error {
+	mergeFencer, ok := dest.(destination.CDCConditionalMergeCapable)
+	if !ok || !mergeFencer.SupportsCDCConditionalMerge() {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for merge is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCConditionalTruncater); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for source TRUNCATE is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.ManagedCDCRunLeaser); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: connector run leases are not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCMultiTableAtomicMerger); multiTable && !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic multi-table merge is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCLateTargetClaimPreparer); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target claim and creation are not supported", dest.GetScheme())
+	}
+	swapFencer, ok := dest.(destination.CDCConditionalSwapCapable)
+	if !ok || !swapFencer.SupportsCDCConditionalSwap() {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: atomic target-incarnation fencing for full-refresh swaps is not supported", dest.GetScheme())
+	}
+	if _, ok := dest.(destination.CDCConditionalSwapPlanner); !ok {
+		return fmt.Errorf("destination scheme %q cannot safely run MySQL CDC: full-refresh swap incarnation planning is not supported", dest.GetScheme())
 	}
 	return nil
 }
@@ -1863,10 +2993,15 @@ func isChangeTrackingSource(uri string) bool {
 	return strings.Contains(strings.ToLower(uri[:schemeEnd]), "+ct")
 }
 
-// cdcSlotSuffix returns a 6-hex-char hash of the destination URI for use as a
+// cdcSlotSuffix returns a 20-hex-char hash of the connector destination identity for use as a
 // replication slot name suffix, making auto-generated slot names unique per destination.
 func cdcSlotSuffix(destURI string) string {
 	h := sha256.Sum256([]byte(destURI))
+	return fmt.Sprintf("%x", h[:10])
+}
+
+func legacyCDCSlotSuffix(rawDestURI string) string {
+	h := sha256.Sum256([]byte(rawDestURI))
 	return fmt.Sprintf("%x", h[:3])
 }
 

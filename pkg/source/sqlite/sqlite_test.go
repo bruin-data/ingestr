@@ -1,6 +1,8 @@
 package sqlite
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -147,6 +149,57 @@ func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
 	if query != want {
 		t.Fatalf("query = %q, want %q", query, want)
 	}
+}
+
+func TestCustomQueryExtractPartitioning(t *testing.T) {
+	ctx := context.Background()
+	src := NewSQLiteSource()
+	uri := "sqlite:///" + filepath.Join(t.TempDir(), "source.db")
+	require.NoError(t, src.Connect(ctx, uri))
+	t.Cleanup(func() { require.NoError(t, src.Close(ctx)) })
+
+	_, err := src.db.ExecContext(ctx, `
+		CREATE TABLE events (id INTEGER, created_at TIMESTAMP);
+		INSERT INTO events VALUES
+			(1, '2026-01-01 00:00:00'),
+			(2, '2026-01-01 12:00:00'),
+			(3, '2026-01-02 00:00:00'),
+			(4, '2026-01-03 00:00:00');
+	`)
+	require.NoError(t, err)
+
+	table, err := src.GetTable(ctx, source.TableRequest{
+		Name:           "query:SELECT id, created_at AS partition_ts FROM events;",
+		IncrementalKey: "partition_ts",
+	})
+	require.NoError(t, err)
+
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+	opts := source.ReadOptions{
+		IncrementalKey:           "partition_ts",
+		IntervalStart:            &start,
+		IntervalEnd:              &end,
+		ExtractPartitionBy:       "partition_ts",
+		ExtractPartitionInterval: 24 * time.Hour,
+		Parallelism:              2,
+	}
+	provider, ok := table.(source.ReadSchemaProvider)
+	require.True(t, ok)
+	opts.Schema, err = provider.GetReadSchema(ctx, opts)
+	require.NoError(t, err)
+	_, err = source.ValidateExtractPartitionColumn(opts.Schema, opts.ExtractPartitionBy)
+	require.NoError(t, err)
+
+	records, err := table.Read(ctx, opts)
+	require.NoError(t, err)
+	rowCount := int64(0)
+	for result := range records {
+		require.NoError(t, result.Err)
+		rowCount += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	assert.Equal(t, int64(4), rowCount)
 }
 
 func TestExtractTableName(t *testing.T) {

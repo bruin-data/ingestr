@@ -2,17 +2,131 @@ package oracle
 
 import (
 	"context"
+	"database/sql/driver"
+	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/strategy"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type oracleDottedBackupArgument struct{}
+
+func (oracleDottedBackupArgument) Match(value driver.Value) bool {
+	name, ok := value.(string)
+	return ok && strings.HasPrefix(name, "order.events_OLD_") && name != "ORDER"
+}
+
+func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		actualKeys []string
+		wantError  string
+	}{
+		{name: "matching composite in different order", actualKeys: []string{"Part", "ID"}},
+		{name: "missing", wantError: "found []"},
+		{name: "mismatched quoted case", actualKeys: []string{"ID", "PART"}, wantError: "found [ID PART]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			dest := &OracleDestination{db: db, currentUser: "APP"}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")).
+				WithArgs("APP", "EVENTS").
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+			rows := sqlmock.NewRows([]string{"column_name"})
+			for _, key := range tt.actualKeys {
+				rows.AddRow(key)
+			}
+			mock.ExpectQuery(`FROM ALL_CONSTRAINTS c`).
+				WithArgs("APP", "EVENTS").
+				WillReturnRows(rows)
+
+			err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:                  "events",
+				Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}, {Name: `"Part"`, DataType: schema.TypeString}}},
+				PrimaryKeys:            []string{"id", `"Part"`},
+				CDCMode:                true,
+				CDCKeys:                []string{"id", `"Part"`},
+				RequirePrimaryKeyMatch: true,
+			})
+			if tt.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantError)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestOraclePrimaryKeyInspectionRequiresEnabledValidatedConstraint(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+	mock.ExpectQuery(`c\.STATUS = 'ENABLED'.*c\.VALIDATED = 'VALIDATED'`).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("ID"))
+
+	keys, err := dest.getEnforcedPrimaryKeys(t.Context(), "APP", "EVENTS")
+	require.NoError(t, err)
+	require.Equal(t, []string{"ID"}, keys)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPrepareTableValidatesConcurrentCreateWinnerPrimaryKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE "EVENTS"`).WillReturnError(assert.AnError)
+
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:                  "events",
+		Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+		PrimaryKeys:            []string{"id"},
+		RequirePrimaryKeyMatch: true,
+	})
+	require.ErrorIs(t, err, assert.AnError)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	db, mock, err = sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest = &OracleDestination{db: db, currentUser: "APP"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE "EVENTS"`).WillReturnError(errors.New("ORA-00955: name is already used by an existing object"))
+	mock.ExpectQuery(`FROM ALL_CONSTRAINTS c`).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("OTHER_ID"))
+
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:                  "events",
+		Schema:                 &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+		PrimaryKeys:            []string{"id"},
+		RequirePrimaryKeyMatch: true,
+	})
+	require.ErrorContains(t, err, "found [OTHER_ID]")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 func TestBuildConnStrings(t *testing.T) {
 	tests := []struct {
@@ -106,6 +220,11 @@ func TestQuoteTable(t *testing.T) {
 			table: `hr.user"events`,
 			want:  `"HR"."USER""EVENTS"`,
 		},
+		{
+			name:  "quoted identifiers preserve case",
+			table: `"sales.schema"."Orders"`,
+			want:  `"sales.schema"."Orders"`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -113,6 +232,154 @@ func TestQuoteTable(t *testing.T) {
 			assert.Equal(t, tt.want, quoteTable(tt.table))
 		})
 	}
+}
+
+func TestCanonicalCDCTargetUsesOracleIdentifierSemantics(t *testing.T) {
+	dest := &OracleDestination{currentUser: "INGESTR"}
+
+	unquoted := dest.canonicalCDCTarget("orders")
+	require.Equal(t, destination.CDCTargetKey("INGESTR", "ORDERS"), unquoted)
+	require.Equal(t, unquoted, dest.canonicalCDCTarget(`"ORDERS"`))
+	require.NotEqual(t, unquoted, dest.canonicalCDCTarget(`"orders"`))
+	require.NotEqual(
+		t,
+		dest.canonicalCDCTarget(`sales.orders`),
+		dest.canonicalCDCTarget(`"sales".orders`),
+	)
+}
+
+func TestCanonicalCDCTargetAliasesQuotedCurrentUser(t *testing.T) {
+	dest := &OracleDestination{currentUser: "appUser"}
+
+	unqualified, err := dest.CanonicalCDCTarget(t.Context(), "orders")
+	require.NoError(t, err)
+	quotedCurrent, err := dest.CanonicalCDCTarget(t.Context(), `"appUser".orders`)
+	require.NoError(t, err)
+	unquotedSchema, err := dest.CanonicalCDCTarget(t.Context(), `appUser.orders`)
+	require.NoError(t, err)
+	require.Equal(t, unqualified, quotedCurrent)
+	require.NotEqual(t, unqualified, unquotedSchema)
+}
+
+func TestMixedCaseCurrentUserIsQuotedForManagedState(t *testing.T) {
+	dest := &OracleDestination{currentUser: "appUser"}
+	policy := dest.ManagedStagingPolicy()
+	require.Equal(t, `"appUser"`, policy.DefaultTargetSchema)
+	require.Equal(t, `"appUser"."CDC_STATE"`, quoteTable(policy.DefaultTargetSchema+".cdc_state"))
+}
+
+func TestOracleStagingNamesPreserveQuotedSchemaSemantics(t *testing.T) {
+	dest := &OracleDestination{currentUser: "appUser"}
+	policy := dest.ManagedStagingPolicy()
+
+	for _, suffix := range []string{"staging", "merge", "stream"} {
+		t.Run(suffix, func(t *testing.T) {
+			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy)
+			require.True(t, strings.HasPrefix(quoteTable(quoted), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), quoted)
+
+			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy)
+			require.True(t, strings.HasPrefix(quoteTable(unquoted), `"APPUSER"."ORDERS_`+strings.ToUpper(suffix)+`_`), unquoted)
+
+			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy)
+			require.True(t, strings.HasPrefix(quoteTable(defaultSchema), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), defaultSchema)
+		})
+	}
+}
+
+func TestOracleStagingNamesEncodeQuotedTableDots(t *testing.T) {
+	dest := &OracleDestination{currentUser: "appUser"}
+	policy := dest.ManagedStagingPolicy()
+
+	for _, suffix := range []string{"staging", "merge", "stream"} {
+		t.Run(suffix, func(t *testing.T) {
+			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy)
+			require.NoError(t, tablename.TwoLevel("oracle").CheckName(staging))
+			parts := splitOracleIdentifiers(staging)
+			require.Len(t, parts, 2)
+			require.Equal(t, `"appUser"`, parts[0])
+			require.NotContains(t, parts[1], ".")
+			require.Contains(t, quoteTable(staging), `"appUser"."_INGESTR_HEX_`)
+		})
+	}
+}
+
+func TestMixedCaseCurrentUserIncarnationUsesExactOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "appUser"}
+	mock.ExpectQuery(`SELECT OBJECT_ID FROM ALL_OBJECTS`).
+		WithArgs("appUser", "ORDERS").
+		WillReturnRows(sqlmock.NewRows([]string{"object_id"}).AddRow(10))
+
+	_, exists, err := dest.CDCTargetIncarnation(t.Context(), "orders")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCDCTargetIncarnationChangesWithOracleObjectIdentity(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+	query := `SELECT OBJECT_ID FROM ALL_OBJECTS`
+	mock.ExpectQuery(query).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"object_id"}).AddRow(10))
+	mock.ExpectQuery(query).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"object_id"}).AddRow(11))
+
+	first, exists, err := dest.CDCTargetIncarnation(t.Context(), "orders")
+	require.NoError(t, err)
+	require.True(t, exists)
+	second, exists, err := dest.CDCTargetIncarnation(t.Context(), "orders")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NotEqual(t, first, second)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTableSchemaPreservesQuotedCaseDistinctPrimaryKeyIdentity(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+
+	mock.ExpectQuery(`FROM ALL_TAB_COLUMNS`).WithArgs("APP", "ITEMS").WillReturnRows(
+		sqlmock.NewRows([]string{"column_name", "data_type", "nullable", "data_precision", "data_scale", "char_length"}).
+			AddRow("Foo", "VARCHAR2", "N", nil, nil, 100).
+			AddRow("foo", "CLOB", "Y", nil, nil, nil),
+	)
+	mock.ExpectQuery(`FROM ALL_CONSTRAINTS`).WithArgs("APP", "ITEMS").WillReturnRows(
+		sqlmock.NewRows([]string{"column_name"}).AddRow("Foo"),
+	)
+
+	got, err := dest.GetTableSchema(t.Context(), "items")
+	require.NoError(t, err)
+	require.Equal(t, []string{`"Foo"`}, got.PrimaryKeys)
+	require.Equal(t, `"Foo"`, got.Columns[0].Name)
+	require.True(t, got.Columns[0].IsPrimaryKey)
+	require.Equal(t, `"foo"`, got.Columns[1].Name)
+	require.False(t, got.Columns[1].IsPrimaryKey)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTableSchemaKeepsUppercaseMetadataComparableToSourceNames(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "APP"}
+
+	mock.ExpectQuery(`FROM ALL_TAB_COLUMNS`).WithArgs("APP", "ITEMS").WillReturnRows(
+		sqlmock.NewRows([]string{"column_name", "data_type", "nullable", "data_precision", "data_scale", "char_length"}).
+			AddRow("_INGESTR_LOADED_AT", "TIMESTAMP WITH TIME ZONE", "Y", nil, nil, nil),
+	)
+	mock.ExpectQuery(`FROM ALL_CONSTRAINTS`).WithArgs("APP", "ITEMS").WillReturnRows(
+		sqlmock.NewRows([]string{"column_name"}),
+	)
+
+	got, err := dest.GetTableSchema(t.Context(), "items")
+	require.NoError(t, err)
+	require.Equal(t, "_INGESTR_LOADED_AT", got.Columns[0].Name)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestMapDataTypeToOracle(t *testing.T) {
@@ -212,6 +479,19 @@ func TestBuildCreateTableSQL_SchemaPrimaryKeyUsesVarcharWithoutConstraint(t *tes
 )`, got)
 }
 
+func TestBuildCreateTableSQLKeepsQuotedCaseDistinctPayloadAsCLOB(t *testing.T) {
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: `"Foo"`, DataType: schema.TypeString},
+		{Name: `"foo"`, DataType: schema.TypeString},
+	}}
+
+	got := buildCreateTableSQL("items", tableSchema, []string{`"Foo"`})
+
+	assert.Contains(t, got, `"Foo" VARCHAR2(4000 CHAR)`)
+	assert.Contains(t, got, `"foo" CLOB`)
+	assert.Contains(t, got, `PRIMARY KEY ("Foo")`)
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	source := oracleDedupSource(
 		[]string{"id", "name", "updated_at"},
@@ -231,10 +511,105 @@ func TestBuildMergeSQL(t *testing.T) {
 	)
 
 	assert.Equal(t, `MERGE INTO "USERS" target
-USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "UPDATED_AT" DESC) bruin_dedup_rn FROM "_BRUIN_STAGING"."USERS_MERGE_123") bruin_numbered WHERE bruin_dedup_rn = 1) source
+USING (SELECT "ID", "NAME", "UPDATED_AT" FROM (SELECT "ID", "NAME", "UPDATED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "UPDATED_AT" DESC) "BRUIN_DEDUP_RN" FROM "_BRUIN_STAGING"."USERS_MERGE_123") bruin_numbered WHERE "BRUIN_DEDUP_RN" = 1) source
 ON (target."ID" = source."ID")
 WHEN MATCHED THEN UPDATE SET target."NAME" = source."NAME", target."UPDATED_AT" = source."UPDATED_AT"
 WHEN NOT MATCHED THEN INSERT ("ID", "NAME", "UPDATED_AT") VALUES (source."ID", source."NAME", source."UPDATED_AT")`, got)
+}
+
+func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
+	source := oracleDedupSource(
+		[]string{"id", "event_date"},
+		[]string{"id"},
+		quoteTable("users_staging"),
+		"1",
+		"",
+		"source",
+	)
+	got := buildMergeSQLWithPredicate(
+		"users",
+		source,
+		[]string{"id", "event_date"},
+		[]string{"id"},
+		[]string{"event_date"},
+		`target."EVENT_DATE" >= TRUNC(SYSDATE) - 7`,
+	)
+
+	assert.Contains(t, got, `MERGE INTO (SELECT * FROM "USERS" target WHERE target."EVENT_DATE" >= TRUNC(SYSDATE) - 7) target`)
+	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
+}
+
+func TestBuildCDCMergeSQLFencesUpdatesWithoutChangingPKMatch(t *testing.T) {
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
+	got := buildMergeSQLWithPredicate(
+		"items",
+		source,
+		columns,
+		[]string{"id"},
+		filterColumns(destination.DestinationColumns(columns), []string{"id"}),
+		`target."PAYLOAD" = 'eligible'`,
+	)
+
+	assert.Contains(t, got, `MERGE INTO "ITEMS" target`)
+	assert.NotContains(t, got, `MERGE INTO (SELECT`)
+	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
+	assert.Contains(t, got, `WHERE (target."PAYLOAD" = 'eligible') AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND NVL(target."_CDC_DELETED", 0) = 0 AND source."__INGESTR_HAS_EQUAL_LSN_DELETE" = 1))`)
+	assert.Contains(t, got, `WHEN NOT MATCHED THEN INSERT`)
+}
+
+func TestOracleCDCInternalAliasesAvoidCanonicalIdentifierCollisions(t *testing.T) {
+	columns := []string{
+		"id",
+		"payload",
+		"BrUiN_DeDuP_Rn",
+		"bruin_dedup_rn_2",
+		"BrUiN_Active_Rn",
+		"bruin_active_rn_2",
+		`"__INGESTR_HAS_EQUAL_LSN_DELETE"`,
+		`"__ingestr_has_equal_lsn_delete_2"`,
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+	}
+	aliases := newOracleCDCInternalAliases(columns)
+	require.Equal(t, "bruin_active_rn_3", aliases.activeRowNumber)
+	require.Equal(t, "__ingestr_has_equal_lsn_delete_3", aliases.equalLSNDeleteMarker)
+
+	source := oracleCDCActiveSourceWithAliases(columns, []string{"id"}, quoteTable("items_staging"), "source", aliases)
+	got := buildMergeSQLWithCDCMarker(
+		"items",
+		source,
+		columns,
+		[]string{"id"},
+		filterColumns(destination.DestinationColumns(columns), []string{"id"}),
+		"",
+		aliases.equalLSNDeleteMarker,
+	)
+
+	assert.Contains(t, source, `ROW_NUMBER() OVER (PARTITION BY "ID", "_CDC_DELETED" ORDER BY "_CDC_LSN" DESC) "BRUIN_ACTIVE_RN_3"`)
+	assert.Contains(t, source, `MAX("_CDC_DELETED") OVER (PARTITION BY "ID", "_CDC_LSN") "__INGESTR_HAS_EQUAL_LSN_DELETE_3"`)
+	assert.Contains(t, source, `AND "BRUIN_ACTIVE_RN_3" = 1`)
+	assert.Contains(t, got, `source."__INGESTR_HAS_EQUAL_LSN_DELETE_3" = 1`)
+	assert.Contains(t, got, `source."BRUIN_ACTIVE_RN"`)
+	assert.Contains(t, got, `source."__ingestr_has_equal_lsn_delete_2"`)
+	dedup := oracleDedupSelect(columns, []string{"id"}, quoteTable("items_staging"), destination.CDCLatestOverallOrderBy(quoteColumn))
+	assert.Contains(t, dedup, `ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) "BRUIN_DEDUP_RN_3"`)
+	assert.Contains(t, dedup, `WHERE "BRUIN_DEDUP_RN_3" = 1`)
+}
+
+func TestBuildCDCDeleteMarkSQLUsesOverallLSNOrder(t *testing.T) {
+	got := buildCDCDeleteMarkSQL(
+		"items",
+		`"ITEMS_STAGING" source`,
+		[]string{"id"},
+		`target."PAYLOAD" = 'eligible'`,
+	)
+
+	assert.Contains(t, got, `MERGE INTO "ITEMS" target`)
+	assert.Contains(t, got, `ON (target."ID" = source."ID")`)
+	assert.Contains(t, got, `WHERE source."_CDC_DELETED" = 1 AND (target."PAYLOAD" = 'eligible')`)
+	assert.Contains(t, got, `(target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND NVL(target."_CDC_DELETED", 0) = 0))`)
 }
 
 func TestBuildCDCDeleteTombstoneInsertSQL(t *testing.T) {
@@ -254,7 +629,78 @@ func TestBuildCDCDeleteTombstoneInsertSQL(t *testing.T) {
 		[]string{"id"},
 	)
 
-	assert.Equal(t, `INSERT INTO "USERS" ("ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT") SELECT source."ID", source."NAME", source."_CDC_LSN", source."_CDC_DELETED", source."_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) bruin_dedup_rn FROM "USERS_STAGING") bruin_numbered WHERE bruin_dedup_rn = 1) source WHERE source."_CDC_DELETED" = 1 AND NOT EXISTS (SELECT 1 FROM "USERS" target WHERE target."ID" = source."ID")`, got)
+	assert.Equal(t, `INSERT INTO "USERS" ("ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT") SELECT source."ID", source."NAME", source."_CDC_LSN", source."_CDC_DELETED", source."_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT" FROM (SELECT "ID", "NAME", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", ROW_NUMBER() OVER (PARTITION BY "ID" ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC) "BRUIN_DEDUP_RN" FROM "USERS_STAGING") bruin_numbered WHERE "BRUIN_DEDUP_RN" = 1) source WHERE source."_CDC_DELETED" = 1 AND NOT EXISTS (SELECT 1 FROM "USERS" target WHERE target."ID" = source."ID")`, got)
+}
+
+func TestBuildCDCMergeSQLPreservesMarkedColumnsAndOmitsMarkerFromTarget(t *testing.T) {
+	columns := []string{
+		"id",
+		"payload",
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+		destination.CDCUnchangedColsColumn,
+	}
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
+	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
+
+	assert.Contains(t, got, `JSON_EXISTS(COALESCE(source."_CDC_UNCHANGED_COLS", '[]'), '$[*]?(@ == $marker)' PASSING 'payload' AS "marker")`)
+	assert.Contains(t, got, `THEN target."PAYLOAD" ELSE source."PAYLOAD" END`)
+	assert.Contains(t, got, `(target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND NVL(target."_CDC_DELETED", 0) = 0 AND source."__INGESTR_HAS_EQUAL_LSN_DELETE" = 1))`)
+	assert.Contains(t, got, `INSERT ("ID", "PAYLOAD", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT")`)
+	assert.NotContains(t, got, `INSERT ("ID", "PAYLOAD", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS")`)
+	assert.True(t, NewOracleDestination().SupportsCDCUnchangedCols())
+}
+
+func TestBuildCDCMergeSQLWithoutUnchangedColsMarkerUsesPlainUpdateSet(t *testing.T) {
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
+	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
+
+	assert.NotContains(t, got, "_CDC_UNCHANGED_COLS")
+	assert.NotContains(t, got, "JSON_EXISTS")
+	assert.Contains(t, got, `target."PAYLOAD" = source."PAYLOAD"`)
+}
+
+func TestBuildCDCMergeSQLMatchesUnchangedMarkersCaseSensitively(t *testing.T) {
+	columns := []string{"id", `"Foo"`, `"foo"`, destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
+	source := oracleCDCActiveSource(columns, []string{"id"}, quoteTable("items_staging"), "source")
+	got := buildMergeSQL("items", source, columns, []string{"id"}, filterColumns(destination.DestinationColumns(columns), []string{"id"}))
+
+	assert.Contains(t, got, `PASSING '"Foo"' AS "marker"`)
+	assert.Contains(t, got, `PASSING '"foo"' AS "marker"`)
+	assert.Contains(t, got, `THEN target."Foo" ELSE source."Foo" END`)
+	assert.Contains(t, got, `THEN target."foo" ELSE source."foo" END`)
+	assert.NotContains(t, got, "LOWER(")
+}
+
+func TestBuildCDCMergeSQLKeepsCaseDistinctPayloadSeparateFromPrimaryKey(t *testing.T) {
+	columns := []string{`"Foo"`, `"foo"`, destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
+	source := oracleCDCActiveSource(columns, []string{`"Foo"`}, quoteTable("items_staging"), "source")
+	got := buildMergeSQL("items", source, columns, []string{`"Foo"`}, filterColumns(destination.DestinationColumns(columns), []string{`"Foo"`}))
+
+	assert.Contains(t, got, `ON (target."Foo" = source."Foo")`)
+	assert.Contains(t, got, `target."foo" = CASE WHEN`)
+	assert.Contains(t, got, `THEN target."foo" ELSE source."foo" END`)
+	assert.NotContains(t, got, `target."Foo" = CASE`)
+}
+
+func TestFilterColumnsRetainsOrdinaryCaseInsensitiveOracleMatching(t *testing.T) {
+	assert.Equal(t, []string{"Name"}, filterColumns([]string{"ID", "Name"}, []string{"id"}))
+	assert.Equal(t, []string{`"foo"`}, filterColumns([]string{`"Foo"`, `"foo"`}, []string{`"Foo"`}))
+}
+
+func TestBuildChangeConditionsKeepsCaseDistinctLOBTypes(t *testing.T) {
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: `"Foo"`, DataType: schema.TypeString, MaxLength: 100},
+		{Name: `"foo"`, DataType: schema.TypeJSON},
+	}}
+
+	got := buildChangeConditions([]string{`"Foo"`, `"foo"`}, "target", "source", tableSchema)
+
+	assert.Contains(t, got, `target."Foo" <> source."Foo"`)
+	assert.Contains(t, got, `DBMS_LOB.COMPARE(target."foo", source."foo")`)
+	assert.NotContains(t, got, `DBMS_LOB.COMPARE(target."Foo", source."Foo")`)
 }
 
 func TestMergeTableRequiresPrimaryKey(t *testing.T) {
@@ -339,6 +785,46 @@ func TestBackupTableName(t *testing.T) {
 	assert.True(t, strings.HasPrefix(got, "hr.EMPLOYEES_OLD_"), got)
 	_, tableName := parseTableName(got)
 	assert.LessOrEqual(t, len(tableName), destination.MaxIdentifierLength("oracle"))
+
+	quoted := backupTableName(`"appUser"`, `"order.events"`)
+	parts := splitOracleIdentifiers(quoted)
+	require.Len(t, parts, 2)
+	require.Equal(t, `"appUser"`, parts[0])
+	require.Contains(t, parts[1], `"order.events_OLD_`)
+	require.NotEqual(t, "ORDER", canonicalIdentifier(parts[1]))
+	require.Equal(t, 2, len(splitOracleIdentifiers(quoteTable(quoted))))
+}
+
+func TestOracleSwapRejectsOverQualifiedNames(t *testing.T) {
+	dest := &OracleDestination{}
+	err := dest.SwapTable(t.Context(), destination.SwapOptions{StagingTable: "app.staging", TargetTable: "catalog.app.orders"})
+	require.ErrorContains(t, err, "oracle table name")
+}
+
+func TestOracleSwapQuotedDotTargetDoesNotAddressUnrelatedOrder(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	dest := &OracleDestination{db: db, currentUser: "appUser"}
+	countQuery := regexp.QuoteMeta("SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2")
+	mock.ExpectQuery(countQuery).WithArgs("appUser", "order.events").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(countQuery).WithArgs("appUser", oracleDottedBackupArgument{}).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE "appUser"\."order\.events" RENAME TO "order\.events_OLD_[0-9]+"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER TABLE "appUser"\."staging_for_order_events" RENAME TO "order\.events"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(countQuery).WithArgs("appUser", oracleDottedBackupArgument{}).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`DROP TABLE "appUser"\."order\.events_OLD_[0-9]+" PURGE`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	require.NoError(t, dest.SwapTable(t.Context(), destination.SwapOptions{
+		StagingTable: `"appUser"."staging_for_order_events"`,
+		TargetTable:  `"appUser"."order.events"`,
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestOracleDialectDoesNotSupportDirectTypeAlter(t *testing.T) {

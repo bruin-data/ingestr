@@ -168,6 +168,10 @@ func (d *Dialect) QuoteIdentifier(name string) string {
 	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
 }
 
+func (d *Dialect) QuoteCustomQueryIdentifier(name string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
+}
+
 func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {
 	if rawValue == nil {
 		return nil

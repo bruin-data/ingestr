@@ -184,56 +184,73 @@ func shake128Base64(input string) string {
 	return strings.TrimRight(base64.StdEncoding.EncodeToString(digest), "=")
 }
 
-func TestGenerateMsgID(t *testing.T) {
-	id1 := generateMsgID("my-topic", 0, 100, "key1")
-	id2 := generateMsgID("my-topic", 0, 100, "key1")
+func TestPhysicalMsgID(t *testing.T) {
+	id1 := physicalMsgID("my-topic", 0, 100)
+	id2 := physicalMsgID("my-topic", 0, 100)
 	if id1 != id2 {
-		t.Errorf("generateMsgID not deterministic: %q != %q", id1, id2)
+		t.Errorf("physicalMsgID not deterministic: %q != %q", id1, id2)
 	}
 
 	// SHAKE-128 → 15 bytes → base64 without padding = 20 chars
 	if len(id1) != 20 {
-		t.Errorf("generateMsgID length = %d, want 20", len(id1))
+		t.Errorf("physicalMsgID length = %d, want 20", len(id1))
 	}
 
-	// Verify it matches SHAKE-128 base64 of concatenated string (Python-compatible)
-	expected := shake128Base64(fmt.Sprintf("%s%d%s", "my-topic", 0, "key1"))
+	// Verify it matches SHAKE-128 base64 of the injective "topic:partition:offset"
+	// coordinate — the message's unique location within the topic.
+	expected := shake128Base64("my-topic:0:100")
 	if id1 != expected {
-		t.Errorf("generateMsgID = %q, want %q", id1, expected)
+		t.Errorf("physicalMsgID = %q, want %q", id1, expected)
 	}
 
-	// Different inputs produce different IDs
-	id3 := generateMsgID("my-topic", 1, 100, "key1")
-	if id1 == id3 {
-		t.Error("generateMsgID collision for different partitions")
+	// The regression this fix targets: ids differing only by offset must be
+	// distinct (a null-key stream on one partition previously collapsed to one id).
+	idOff := physicalMsgID("my-topic", 0, 101)
+	if id1 == idOff {
+		t.Error("physicalMsgID collision for different offsets")
 	}
 
-	id4 := generateMsgID("other-topic", 0, 100, "key1")
-	if id1 == id4 {
-		t.Error("generateMsgID collision for different topics")
+	// The input encoding must be injective across the (partition, offset) split:
+	// partition 1/offset 10 and partition 11/offset 0 are different messages and
+	// must not produce the same id (a separator-less encoding would collide here).
+	if a, b := physicalMsgID("t", 1, 10), physicalMsgID("t", 11, 0); a == b {
+		t.Errorf("physicalMsgID collision across partition/offset boundary: %q", a)
 	}
 
-	id5 := generateMsgID("my-topic", 0, 100, "key2")
-	if id1 == id5 {
-		t.Error("generateMsgID collision for different keys")
+	if id3 := physicalMsgID("my-topic", 1, 100); id1 == id3 {
+		t.Error("physicalMsgID collision for different partitions")
+	}
+	if id4 := physicalMsgID("other-topic", 0, 100); id1 == id4 {
+		t.Error("physicalMsgID collision for different topics")
 	}
 }
 
-func TestGenerateMsgID_NilKey(t *testing.T) {
-	idNil := generateMsgID("my-topic", 0, 50, nil)
-	if len(idNil) != 20 {
-		t.Errorf("generateMsgID nil key length = %d, want 20", len(idNil))
+func TestKeyedMsgID(t *testing.T) {
+	id1 := keyedMsgID("my-topic", 0, "key1")
+	id2 := keyedMsgID("my-topic", 0, "key1")
+	if id1 != id2 {
+		t.Errorf("keyedMsgID not deterministic: %q != %q", id1, id2)
 	}
 
-	// nil key should use "None" (Python compatibility)
-	expected := shake128Base64(fmt.Sprintf("%s%d%s", "my-topic", 0, "None"))
-	if idNil != expected {
-		t.Errorf("generateMsgID nil key = %q, want %q", idNil, expected)
+	if len(id1) != 20 {
+		t.Errorf("keyedMsgID length = %d, want 20", len(id1))
 	}
 
-	idStr := generateMsgID("my-topic", 0, 50, "key1")
-	if idNil == idStr {
-		t.Error("generateMsgID collision for nil vs string key")
+	// Stable per key (topic + partition + key), offset excluded — this is the
+	// changelog/compaction identity used by the streaming envelope's keyed branch.
+	expected := shake128Base64(fmt.Sprintf("%s%d%s", "my-topic", 0, "key1"))
+	if id1 != expected {
+		t.Errorf("keyedMsgID = %q, want %q", id1, expected)
+	}
+
+	if id3 := keyedMsgID("my-topic", 1, "key1"); id1 == id3 {
+		t.Error("keyedMsgID collision for different partitions")
+	}
+	if id4 := keyedMsgID("other-topic", 0, "key1"); id1 == id4 {
+		t.Error("keyedMsgID collision for different topics")
+	}
+	if id5 := keyedMsgID("my-topic", 0, "key2"); id1 == id5 {
+		t.Error("keyedMsgID collision for different keys")
 	}
 }
 
@@ -334,6 +351,26 @@ func TestMessageToItem_NilKey(t *testing.T) {
 	tsMeta := meta["ts"].(map[string]interface{})
 	if tsMeta["type"] != 0 {
 		t.Errorf("ts.type = %v, want 0 for zero time", tsMeta["type"])
+	}
+}
+
+// Keyless messages on one partition differing only by offset must produce
+// distinct _kafka_msg_id values; previously they all collapsed to one id.
+func TestMessageToItem_KeylessDistinctPerOffset(t *testing.T) {
+	base := kafkago.Message{Topic: "test-topic", Partition: 0, Key: nil, Value: []byte("data")}
+
+	seen := make(map[string]int64)
+	for off := int64(0); off < 500; off++ {
+		msg := base
+		msg.Offset = off
+		id, ok := messageToItem(msg)["_kafka_msg_id"].(string)
+		if !ok {
+			t.Fatalf("offset %d: _kafka_msg_id is not a string", off)
+		}
+		if prev, dup := seen[id]; dup {
+			t.Fatalf("offset %d and %d collide on _kafka_msg_id %q", prev, off, id)
+		}
+		seen[id] = off
 	}
 }
 

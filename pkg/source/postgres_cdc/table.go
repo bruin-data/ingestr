@@ -22,6 +22,16 @@ func FormatLSN(lsn pglogrepl.LSN) string {
 	return fmt.Sprintf("%08X/%08X", uint32(lsn>>32), uint32(lsn))
 }
 
+// FormatChangeLSN extends the durable PostgreSQL position with a fixed-width
+// transaction-local sequence. The raw LSN remains the sortable prefix used by
+// checkpoints, while row merges gain a deterministic last-operation order.
+func FormatChangeLSN(lsn pglogrepl.LSN, sequence uint64) string {
+	if sequence == 0 {
+		return FormatLSN(lsn)
+	}
+	return fmt.Sprintf("%s/%016X", FormatLSN(lsn), sequence)
+}
+
 type CDCTable struct {
 	source      *PostgresCDCSource
 	tableName   string
@@ -32,6 +42,9 @@ type CDCTable struct {
 
 func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, error) {
 	ctx := context.Background()
+	if err := src.validateTablePublished(ctx, req.Name); err != nil {
+		return nil, err
+	}
 
 	// Fetch schema from database
 	tableSchema, err := getTableSchema(ctx, src.queryPool, req.Name)
@@ -107,7 +120,7 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 		// Start reading
 		batches, err := reader.Read(ctx, opts)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to start CDC read: %w", err)}
+			_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("failed to start CDC read: %w", err)})
 			return
 		}
 
@@ -116,7 +129,8 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 
 		for batch := range batches {
 			if batch.Err != nil {
-				results <- batch
+				_ = sendResult(ctx, results, batch)
+				drainRecordBatchResults(batches)
 				return
 			}
 
@@ -128,13 +142,24 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 				config.Debug("[CDC] Batch %d: %d rows (total: %d)", batchNum, batch.Batch.NumRows(), totalRows)
 			}
 
-			results <- batch
+			if err := sendResult(ctx, results, batch); err != nil {
+				drainRecordBatchResults(batches)
+				return
+			}
 		}
 
 		config.Debug("[CDC] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
 	}()
 
 	return results, nil
+}
+
+func drainRecordBatchResults(results <-chan source.RecordBatchResult) {
+	for result := range results {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
 }
 
 func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*schema.TableSchema, error) {

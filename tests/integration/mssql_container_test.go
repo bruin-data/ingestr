@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -29,8 +30,15 @@ func startMSSQLContainerRaw(ctx context.Context, name string) (testcontainers.Co
 		testcontainers.WithWaitStrategy(
 			wait.ForAll(
 				wait.ForListeningPort("1433/tcp"),
-				wait.ForLog("SQL Server is now ready for client connections"),
-			).WithDeadline(2*time.Minute),
+				wait.ForLog("Recovery is complete."),
+				// The "ready for client connections" log line precedes login
+				// availability by several seconds on slower hosts; probe with a
+				// real authenticated query so the first test cannot hit it.
+				wait.ForSQL("1433/tcp", "sqlserver", func(host string, port string) string {
+					portNum, _, _ := strings.Cut(port, "/")
+					return fmt.Sprintf("server=%s;user id=sa;password=%s;port=%s;database=master;encrypt=disable", host, mssqlPassword, portNum)
+				}),
+			).WithDeadline(3*time.Minute),
 		),
 	)
 	if err != nil {

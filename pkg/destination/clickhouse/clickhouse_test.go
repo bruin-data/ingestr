@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,61 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
+
+func TestWaitForMutationCompletion(t *testing.T) {
+	t.Run("completes", func(t *testing.T) {
+		calls := 0
+		err := waitForMutationCompletion(context.Background(), 3, 0, func(context.Context) (uint64, string, error) {
+			calls++
+			if calls == 1 {
+				return 1, "", nil
+			}
+			return 0, "", nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		want := errors.New("query failed")
+		err := waitForMutationCompletion(context.Background(), 1, 0, func(context.Context) (uint64, string, error) {
+			return 0, "", want
+		})
+		if !errors.Is(err, want) {
+			t.Fatalf("error = %v, want %v", err, want)
+		}
+	})
+
+	t.Run("mutation failure", func(t *testing.T) {
+		err := waitForMutationCompletion(context.Background(), 1, 0, func(context.Context) (uint64, string, error) {
+			return 1, "cannot read part", nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "cannot read part") {
+			t.Fatalf("error = %v, want mutation failure", err)
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		err := waitForMutationCompletion(ctx, 2, time.Hour, func(context.Context) (uint64, string, error) {
+			cancel()
+			return 1, "", nil
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		err := waitForMutationCompletion(context.Background(), 2, 0, func(context.Context) (uint64, string, error) {
+			return 1, "", nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("error = %v, want timeout", err)
+		}
+	})
+}
 
 func TestValidateEngineType(t *testing.T) {
 	tests := []struct {

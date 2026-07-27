@@ -30,6 +30,7 @@ type StorageWriteArrowClient struct {
 	projectID string
 
 	appendWorker func(ctx context.Context, tablePath string, records <-chan arrow.RecordBatch, workerID int) error
+	streamOpener func(ctx context.Context, workerID int) (*streamState, error)
 }
 
 // grpcErrorDetail extracts detailed information from a gRPC error, including
@@ -186,6 +187,7 @@ distributeLoop:
 
 	// Wait for all workers to complete
 	wg.Wait()
+	drainArrowBatchChannels(workerChans)
 
 	if firstErr != nil {
 		return firstErr
@@ -266,6 +268,9 @@ dispatchLoop:
 				break dispatchLoop
 			}
 			if result.Err != nil {
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
 				sourceErr = result.Err
 				cancel()
 				break dispatchLoop
@@ -305,6 +310,7 @@ dispatchLoop:
 	}
 
 	wg.Wait()
+	drainArrowBatchChannels(workerChans)
 
 	if firstErr != nil {
 		return errors.Join(firstErr, sourceErr)
@@ -396,6 +402,9 @@ dispatchLoop:
 				break dispatchLoop
 			}
 			if result.Err != nil {
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
 				sourceErr = result.Err
 				cancel()
 				break dispatchLoop
@@ -435,6 +444,7 @@ dispatchLoop:
 	}
 
 	wg.Wait()
+	drainArrowBatchChannels(workerChans)
 
 	if firstErr != nil {
 		return errors.Join(firstErr, sourceErr)
@@ -458,6 +468,16 @@ dispatchLoop:
 	}
 
 	return nil
+}
+
+func drainArrowBatchChannels(channels []chan arrow.RecordBatch) {
+	for _, ch := range channels {
+		for batch := range ch {
+			if batch != nil {
+				batch.Release()
+			}
+		}
+	}
 }
 
 func (c *StorageWriteArrowClient) createPendingWriteStreamWithRetry(ctx context.Context, tablePath string, workerID int) (string, error) {
@@ -715,8 +735,9 @@ func (c *StorageWriteArrowClient) appendPendingStreamWorker(
 			nextOffset += record.NumRows()
 		} else {
 			subBatches := splitRecordBatch(record, maxAppendRequestBytes)
-			for _, sub := range subBatches {
-				stream, streamInitialized, err = c.appendPendingSerializedBatch(
+			err = consumeSplitBatches(subBatches, func(sub splitBatch) error {
+				var appendErr error
+				stream, streamInitialized, appendErr = c.appendPendingSerializedBatch(
 					ctx,
 					stream,
 					streamName,
@@ -726,13 +747,15 @@ func (c *StorageWriteArrowClient) appendPendingStreamWorker(
 					workerID,
 					streamInitialized,
 				)
-				if err != nil {
-					sub.record.Release()
-					record.Release()
-					return 0, err
+				if appendErr != nil {
+					return appendErr
 				}
 				nextOffset += sub.record.NumRows()
-				sub.record.Release()
+				return nil
+			})
+			if err != nil {
+				record.Release()
+				return 0, err
 			}
 		}
 
@@ -939,7 +962,11 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 func (c *StorageWriteArrowClient) openStreamWithRetry(ctx context.Context, workerID int) (*streamState, error) {
-	ss, err := c.openStream(ctx, workerID)
+	openStream := c.openStream
+	if c.streamOpener != nil {
+		openStream = c.streamOpener
+	}
+	ss, err := openStream(ctx, workerID)
 	if err == nil {
 		return ss, nil
 	}
@@ -963,7 +990,7 @@ func (c *StorageWriteArrowClient) openStreamWithRetry(ctx context.Context, worke
 			return nil, err
 		}
 
-		ss, err = c.openStream(ctx, workerID)
+		ss, err = openStream(ctx, workerID)
 		if err == nil {
 			return ss, nil
 		}
@@ -1065,6 +1092,9 @@ func (c *StorageWriteArrowClient) appendArrowStreamWorker(ctx context.Context, t
 			var err error
 			ss, err = c.openStreamWithRetry(ctx, workerID)
 			if err != nil {
+				if record != nil {
+					record.Release()
+				}
 				return err
 			}
 		}
@@ -1121,7 +1151,7 @@ func (c *StorageWriteArrowClient) appendArrowStreamWorker(ctx context.Context, t
 			needSchema = false
 		} else {
 			subBatches := splitRecordBatch(record, maxAppendRequestBytes)
-			for _, sub := range subBatches {
+			err := consumeSplitBatches(subBatches, func(sub splitBatch) error {
 				req := &storagepb.AppendRowsRequest{
 					WriteStream: tablePath,
 					Rows: &storagepb.AppendRowsRequest_ArrowRows{
@@ -1136,13 +1166,15 @@ func (c *StorageWriteArrowClient) appendArrowStreamWorker(ctx context.Context, t
 				writerSchema = nil
 				nextStream, err := c.sendRequestWithRetry(ctx, workerID, ss, req, record.Schema())
 				if err != nil {
-					sub.record.Release()
-					record.Release()
 					return err
 				}
 				ss = nextStream
 				needSchema = false
-				sub.record.Release()
+				return nil
+			})
+			if err != nil {
+				record.Release()
+				return err
 			}
 		}
 
@@ -1212,6 +1244,25 @@ func serializeArrowRecordBatch(record arrow.RecordBatch) ([]byte, error) {
 type splitBatch struct {
 	record arrow.RecordBatch
 	data   []byte // pre-serialized bytes, ready to send
+}
+
+func consumeSplitBatches(batches []splitBatch, consume func(splitBatch) error) error {
+	defer func() {
+		for _, batch := range batches {
+			if batch.record != nil {
+				batch.record.Release()
+			}
+		}
+	}()
+
+	for i := range batches {
+		if err := consume(batches[i]); err != nil {
+			return err
+		}
+		batches[i].record.Release()
+		batches[i].record = nil
+	}
+	return nil
 }
 
 // splitRecordBatch splits a record batch into sub-batches whose serialized size

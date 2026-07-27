@@ -49,12 +49,18 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		PartitionBy: job.Config.PartitionBy,
 		ClusterBy:   job.Config.ClusterBy,
 		CDCMode:     isCDC,
+		CDCKeys:     job.Schema.PrimaryKeys,
 	}); err != nil {
 		return fmt.Errorf("failed to prepare table: %w", err)
 	}
 
 	if err := job.ApplyEvolution(ctx); err != nil {
 		return fmt.Errorf("failed to apply schema evolution: %w", err)
+	}
+	if job.CDCStateManager != nil {
+		if err := job.CDCStateManager.BindDestinationIncarnation(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
+			return fmt.Errorf("failed to bind CDC destination before append: %w", err)
+		}
 	}
 
 	parallelism := job.Config.ExtractParallelism
@@ -75,6 +81,12 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
+		CDCResumeLSN:                    job.Config.CDCResumeLSN,
+		CDCResumeIncarnation:            job.Config.CDCResumeIncarnation,
+		CDCResumeSchemaFingerprint:      job.Config.CDCResumeSchemaFingerprint,
+		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
+		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
+		CDCSnapshotReplace:              isCDC && supportsCDCSnapshotReplace(job.Destination),
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
@@ -87,16 +99,23 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		records = job.Tracker.Wrap(records)
 	}
 
-	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
+	writeOpts := destination.WriteOptions{
 		Table:            job.Config.DestTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
-	}); err != nil {
-		return fmt.Errorf("failed to write data: %w", err)
+	}
+	var writeErr error
+	if isCDC {
+		_, writeErr = destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, writeOpts)
+	} else {
+		writeErr = job.Destination.WriteParallel(ctx, records, writeOpts)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("failed to write data: %w", writeErr)
 	}
 
 	return nil
@@ -142,9 +161,16 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 				DropFirst:   false,
 				PrimaryKeys: ti.PrimaryKeys,
 				CDCMode:     isCDC,
+				CDCKeys:     ti.PrimaryKeys,
 			}); err != nil {
 				errChan <- fmt.Errorf("failed to prepare table %s: %w", ti.Name, err)
 				return
+			}
+			if job.CDCStateManager != nil {
+				if err := job.CDCStateManager.BindDestinationIncarnation(ctx, ti.Name, destTable); err != nil {
+					errChan <- fmt.Errorf("failed to bind CDC destination table %s: %w", ti.Name, err)
+					return
+				}
 			}
 
 			mu.Lock()
@@ -169,14 +195,30 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 		parallelism = 4
 	}
 
-	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
+	anyTableHasCDC := false
+	for _, table := range job.Tables {
+		if hasCDCColumns(table.Schema) {
+			anyTableHasCDC = true
+			break
+		}
+	}
+
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	resumeIncarnations, resumeSchemas := cdcResumeMetadata(job.Tables)
+	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism: parallelism,
-			PageSize:    job.Config.PageSize,
-			Limit:       job.Config.SQLLimit,
-			FullRefresh: job.Config.FullRefresh,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			Limit:               job.Config.SQLLimit,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			CDCSnapshotReplace:  anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			FullRefresh:         job.Config.FullRefresh,
 		},
-		CDCResumeLSNs: job.CDCResumeLSNs,
+		CDCResumeLSNs:               job.CDCResumeLSNs,
+		CDCResumeIncarnations:       resumeIncarnations,
+		CDCResumeSchemaFingerprints: resumeSchemas,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
@@ -188,10 +230,11 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 
 	if err := multitable.Write(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		CancelSource:     cancelRead,
 	}); err != nil {
 		return fmt.Errorf("failed to write multi-table data: %w", err)
 	}

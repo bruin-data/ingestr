@@ -110,6 +110,8 @@ func TestPostgresPartitionedExtraction(t *testing.T) {
 			(9, '2026-01-10 00:00:00', '2026-02-01 00:00:00', 90)
 	`, sourceSchema))
 	require.NoError(t, err)
+	_, err = sourceDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE %s.orders_without_pk AS TABLE %s.orders`, sourceSchema, sourceSchema))
+	require.NoError(t, err)
 
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 1, 22, 0, 0, 0, 0, time.UTC)
@@ -194,6 +196,49 @@ func TestPostgresPartitionedExtraction(t *testing.T) {
 	assert.Equal(t, 8, distinctCount)
 	assert.Equal(t, 1, endRows)
 	assert.Equal(t, 1, oldCreatedRows)
+	assert.Equal(t, 0, excludedRows)
+
+	_, err = destDB.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE %s.orders_replace (
+			id INTEGER,
+			created_at TIMESTAMP,
+			updated_at TIMESTAMP,
+			amount INTEGER
+		);
+		INSERT INTO %s.orders_replace VALUES (100, '2020-01-01', '2020-01-01', -1);
+		CREATE VIEW %s.orders_replace_view AS SELECT id, amount FROM %s.orders_replace;
+	`, destSchema, destSchema, destSchema, destSchema))
+	require.NoError(t, err)
+
+	var targetOIDBefore uint32
+	require.NoError(t, destDB.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT '%s.orders_replace'::regclass::oid`, destSchema,
+	)).Scan(&targetOIDBefore))
+
+	replaceCfg := *cfg
+	replaceCfg.SourceTable = sourceSchema + ".orders_without_pk"
+	replaceCfg.DestTable = destSchema + ".orders_replace"
+	replaceCfg.IncrementalStrategy = config.StrategyReplace
+	replaceCfg.DestinationParallelism = 8
+	replaceCfg.NoLoadTimestamp = true
+	require.NoError(t, pipeline.New(&replaceCfg).Run(ctx))
+
+	var targetOIDAfter uint32
+	require.NoError(t, destDB.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT '%s.orders_replace'::regclass::oid`, destSchema,
+	)).Scan(&targetOIDAfter))
+	assert.Equal(t, targetOIDBefore, targetOIDAfter, "partitioned replace should preserve the PostgreSQL target table")
+
+	err = destDB.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COUNT(DISTINCT id),
+			COUNT(*) FILTER (WHERE id = 100)
+		FROM %s.orders_replace_view
+	`, destSchema)).Scan(&count, &distinctCount, &excludedRows)
+	require.NoError(t, err)
+	assert.Equal(t, 8, count)
+	assert.Equal(t, 8, distinctCount)
 	assert.Equal(t, 0, excludedRows)
 }
 

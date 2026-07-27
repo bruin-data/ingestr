@@ -65,13 +65,12 @@ type destCase struct {
 	sqlBackend             *sqlBackend
 	mergeCapable           bool
 	deleteInsertCapable    bool
-	truncateInsertCapable  bool
 	scd2Capable            bool
 	schemaEvolutionCapable bool
 	// replaceDedupCapable marks destinations that deduplicate by primary key on
 	// replace, so the dedup conformance tests run against them. Most swap+merge
 	// destinations do this via the strategy's pre-swap normalised table; Postgres
-	// via truncate+insert. Excludes ClickHouse (dedup is engine-dependent) and
+	// via its in-place replace implementation. Excludes ClickHouse (dedup is engine-dependent) and
 	// destinations without atomic swap (which write directly, no dedup).
 	replaceDedupCapable  bool
 	validateNonSQL       func(t *testing.T, destURI, destTable string)
@@ -100,7 +99,6 @@ func destinationCases() []destCase {
 			sqlBackend:             postgresBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -117,7 +115,6 @@ func destinationCases() []destCase {
 			sqlBackend:             sqliteBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // SQLite doesn't support ALTER COLUMN TYPE
 			replaceDedupCapable:    true,
@@ -133,7 +130,6 @@ func destinationCases() []destCase {
 			sqlBackend:             duckdbBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -197,7 +193,6 @@ func destinationCases() []destCase {
 			sqlBackend:             bigqueryBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -223,7 +218,6 @@ func destinationCases() []destCase {
 			sqlBackend:             clickhouseBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 		},
@@ -247,7 +241,6 @@ func destinationCases() []destCase {
 			sqlBackend:             mysqlBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			replaceDedupCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
@@ -272,7 +265,6 @@ func destinationCases() []destCase {
 			sqlBackend:             oracleBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			replaceDedupCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // Oracle needs a data-preserving rewrite path for type changes like NUMBER -> CLOB.
@@ -321,7 +313,6 @@ func destinationCases() []destCase {
 			sqlBackend:             mssqlBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -344,11 +335,10 @@ func destinationCases() []destCase {
 				}
 				return fabricURI, table, cleanup
 			},
-			sqlBackend:            fabricBackend(),
-			mergeCapable:          true,
-			deleteInsertCapable:   true,
-			truncateInsertCapable: true,
-			scd2Capable:           true,
+			sqlBackend:          fabricBackend(),
+			mergeCapable:        true,
+			deleteInsertCapable: true,
+			scd2Capable:         true,
 		},
 		{
 			name: "cratedb",
@@ -369,7 +359,6 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             cratedbBackend(),
 			mergeCapable:           true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false,
 		},
@@ -393,7 +382,6 @@ func destinationCases() []destCase {
 			sqlBackend:             snowflakeBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -424,7 +412,7 @@ func destinationCases() []destCase {
 			validateAppendNonSQL: validateAthenaAppend,
 		},
 		{
-			// Merge, delete+insert, truncate+insert and SCD2 cannot be
+			// Merge, delete+insert and SCD2 cannot be
 			// validated through sqlBackend (no database/sql driver for
 			// Iceberg); they run in iceberg_strategies_test.go against the
 			// same fixtures and expectations.
@@ -789,115 +777,6 @@ func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 			assert.Equal(t, 4, countRows(), "interval delete+insert should replace id=3 and add net-new id=4")
 			assert.Equal(t, "v2-3", nameByID(3), "id=3 inside the interval should be replaced")
 			assert.Equal(t, "v2-4", nameByID(4), "net-new id=4 inside the interval should be inserted")
-		})
-	}
-}
-
-// TestDestinations_TruncateInsert validates truncate+insert semantics:
-//   - seed the destination with a small set of rows via replace
-//   - run truncate+insert with a larger source fixture
-//   - verify the final row count matches the new source (old rows are gone,
-//     not appended) and the replacement values are queryable
-func TestDestinations_TruncateInsert(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	if _, err := strategy.Get(config.StrategyTruncateInsert); err != nil {
-		t.Skip("truncate+insert strategy not implemented yet")
-	}
-
-	ctx := context.Background()
-	seedURI := jsonlURI(t, "testdata/conformance_append_initial.jsonl")
-	truncateURI := jsonlURI(t, "testdata/conformance.jsonl")
-
-	for _, tc := range destinationCases() {
-		tc := tc
-		if tc.sqlBackend == nil || !tc.truncateInsertCapable {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Skip("destination does not support truncate+insert")
-			})
-			continue
-		}
-
-		t.Run(tc.name, func(t *testing.T) {
-			destURI, destTable, cleanup := tc.setup(t, ctx)
-			defer cleanup()
-
-			// Seed with 5 rows via replace so the table exists.
-			seedCfg := &config.IngestConfig{
-				SourceURI:           seedURI,
-				SourceTable:         "truncate_seed",
-				DestURI:             destURI,
-				DestTable:           destTable,
-				IncrementalStrategy: config.StrategyReplace,
-			}
-			require.NoError(t, pipeline.New(seedCfg).Run(ctx))
-
-			// Truncate+insert with 10 rows. Final count should be 10 (not 15).
-			cfg := &config.IngestConfig{
-				SourceURI:           truncateURI,
-				SourceTable:         "truncate_source",
-				DestURI:             destURI,
-				DestTable:           destTable,
-				IncrementalStrategy: config.StrategyTruncateInsert,
-			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-			validateTruncateInsertSQL(t, tc.sqlBackend, destURI, destTable)
-		})
-	}
-}
-
-// TestDestinations_TruncateInsert_Dedup validates that truncate+insert
-// deduplicates source rows by primary key. The fixture contains 10 rows with
-// only 5 distinct ids (each id appearing twice). After the run, the target
-// must contain exactly 5 rows.
-func TestDestinations_TruncateInsert_Dedup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	if _, err := strategy.Get(config.StrategyTruncateInsert); err != nil {
-		t.Skip("truncate+insert strategy not implemented yet")
-	}
-
-	ctx := context.Background()
-	dupesURI := jsonlURI(t, "testdata/conformance_truncate_dupes.jsonl")
-
-	for _, tc := range destinationCases() {
-		tc := tc
-		if tc.sqlBackend == nil || !tc.truncateInsertCapable {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Skip("destination does not support truncate+insert")
-			})
-			continue
-		}
-
-		t.Run(tc.name, func(t *testing.T) {
-			destURI, destTable, cleanup := tc.setup(t, ctx)
-			defer cleanup()
-
-			cfg := &config.IngestConfig{
-				SourceURI:           dupesURI,
-				SourceTable:         "truncate_dupes",
-				DestURI:             destURI,
-				DestTable:           destTable,
-				IncrementalStrategy: config.StrategyTruncateInsert,
-				PrimaryKeys:         []string{"id"},
-			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-			db, err := tc.sqlBackend.openDB(destURI)
-			if err != nil {
-				t.Skipf("Could not open SQL backend for truncate+insert dedup validation: %v", err)
-				return
-			}
-			defer func() { _ = db.Close() }()
-
-			var count int
-			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(destTable)).Scan(&count))
-			assert.Equal(t, 5, count, "expected 5 distinct ids after dedup")
 		})
 	}
 }
@@ -1472,26 +1351,6 @@ func validateAppendSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	var newNameRaw []byte
 	require.NoError(t, db.QueryRow(backend.nameByIDQuery(table, 11)).Scan(&newNameRaw))
 	assert.Equal(t, "kilo", string(newNameRaw))
-}
-
-func validateTruncateInsertSQL(t *testing.T, backend *sqlBackend, uri, table string) {
-	t.Helper()
-	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend for truncate+insert validation: %v", err)
-		return
-	}
-	defer func() { _ = db.Close() }()
-
-	var count int
-	require.NoError(t, db.QueryRow(backend.countQuery(table)).Scan(&count))
-	assert.Equal(t, replaceFixtureRows, count)
-
-	// id=10 only exists in the truncate+insert source; seeing it proves the
-	// new batch is present and the seed's 5-row table was emptied (not appended).
-	var nameRaw []byte
-	require.NoError(t, db.QueryRow(backend.nameByIDQuery(table, 10)).Scan(&nameRaw))
-	assert.Equal(t, "juliet", string(nameRaw))
 }
 
 func validateDeleteInsertSQL(t *testing.T, backend *sqlBackend, uri, table string) {

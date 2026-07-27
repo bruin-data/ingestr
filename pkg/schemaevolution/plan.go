@@ -1,6 +1,8 @@
 package schemaevolution
 
 import (
+	"strings"
+
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -34,7 +36,7 @@ func BuildFinalSchema(destSchema *schema.TableSchema, comparison *SchemaComparis
 	}
 
 	result := *destSchema
-	result.Columns = append([]schema.Column{}, destSchema.Columns...)
+	result.Columns = append([]schema.Column(nil), destSchema.Columns...)
 	result.PrimaryKeys = append([]string{}, destSchema.PrimaryKeys...)
 
 	if comparison == nil || !comparison.HasChanges {
@@ -47,17 +49,29 @@ func BuildFinalSchema(destSchema *schema.TableSchema, comparison *SchemaComparis
 			result.Columns = append(result.Columns, change.NewColumn)
 
 		case ChangeWidenType, ChangeOverrideType:
-			for i, col := range result.Columns {
-				if col.Name == change.ColumnName {
-					result.Columns[i] = change.NewColumn
-					break
-				}
-			}
+			applyColumnChange(result.Columns, change.ColumnName, func(col *schema.Column) {
+				name := col.Name
+				*col = change.NewColumn
+				col.Name = name
+			})
 
 		case ChangeRemoveColumn:
-			// Soft remove: dest keeps the column, future rows have NULL there.
+			applyColumnChange(result.Columns, change.ColumnName, func(col *schema.Column) { col.Nullable = true })
+		case ChangeRelaxNullability:
+			applyColumnChange(result.Columns, change.ColumnName, func(col *schema.Column) { col.Nullable = true })
 		}
 	}
 
 	return &result
+}
+
+func applyColumnChange(columns []schema.Column, name string, apply func(*schema.Column)) bool {
+	for i := range columns {
+		if !strings.EqualFold(columns[i].Name, name) {
+			continue
+		}
+		apply(&columns[i])
+		return true
+	}
+	return false
 }

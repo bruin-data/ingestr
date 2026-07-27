@@ -26,7 +26,33 @@ func replaceShouldDedup(dest destination.Destination, primaryKeys []string) bool
 		dest.GetScheme() != "clickhouse"
 }
 
-func sourcePrimaryKeysSafeForReplaceFastPath(job *IngestionJob) bool {
+func supportsDirectReplaceDeduplication(dest destination.Destination) bool {
+	deduplicator, ok := dest.(destination.DirectReplaceDeduplicator)
+	return ok && deduplicator.SupportsDirectReplaceDeduplication()
+}
+
+func replaceShouldDeferStagingPrimaryKey(job *IngestionJob) bool {
+	provider, ok := job.Destination.(destination.ReplaceStagingPrimaryKeyDeferrer)
+	return ok && provider.DeferReplaceStagingPrimaryKey() && effectivePrimaryKeysGuaranteedUnique(job)
+}
+
+func replaceWriteParallelism(job *IngestionJob, deferredPrimaryKey bool) int {
+	parallelism := job.Config.EffectiveDestinationParallelism()
+	if !deferredPrimaryKey || job.Config.DestinationParallelism > 0 || job.Config.ExtractParallelism != config.DefaultExtractParallelism {
+		return parallelism
+	}
+
+	provider, ok := job.Destination.(destination.ReplaceStagingPrimaryKeyDeferrer)
+	if !ok {
+		return parallelism
+	}
+	if preferred := provider.DeferredReplaceStagingParallelism(); preferred > 0 {
+		return preferred
+	}
+	return parallelism
+}
+
+func effectivePrimaryKeysGuaranteedUnique(job *IngestionJob) bool {
 	return sourcePrimaryKeysGuaranteedUnique(job) &&
 		!primaryKeyValuesMayChange(job)
 }
@@ -185,6 +211,56 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 
 type ReplaceStrategy struct{}
 
+func bindCDCReplaceTarget(ctx context.Context, manager *CDCStateManager, dest destination.Destination, sourceTable, destTable string) (string, error) {
+	if manager == nil {
+		return "", nil
+	}
+	capable, ok := dest.(destination.CDCConditionalSwapCapable)
+	if !ok || !capable.SupportsCDCConditionalSwap() {
+		if dest.GetScheme() == "mysql" {
+			return "", fmt.Errorf("MySQL CDC full refresh requires atomic target-incarnation fencing for swaps")
+		}
+		return "", nil
+	}
+	if _, ok := dest.(destination.CDCConditionalSwapPlanner); !ok {
+		return "", fmt.Errorf("destination scheme %q cannot plan a conditionally fenced CDC swap", dest.GetScheme())
+	}
+	if provider, ok := dest.(destination.CDCTargetIncarnationProvider); ok {
+		_, exists, err := provider.CDCTargetIncarnation(ctx, destTable)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			// Nothing to fence: the target does not exist yet (only the
+			// MySQL-CDC pipeline pre-creates targets) and the swap creates it.
+			return "", nil
+		}
+	}
+	if err := manager.BindDestinationIncarnation(ctx, sourceTable, destTable); err != nil {
+		return "", err
+	}
+	return manager.BoundDestinationIncarnation(sourceTable)
+}
+
+func prepareCDCConditionalSwap(ctx context.Context, dest destination.Destination, targetTable, stagingTable, expectedTarget string) (destination.SwapOptions, error) {
+	opts := destination.SwapOptions{StagingTable: stagingTable, TargetTable: targetTable}
+	if expectedTarget == "" {
+		return opts, nil
+	}
+	planner, ok := dest.(destination.CDCConditionalSwapPlanner)
+	if !ok {
+		return destination.SwapOptions{}, fmt.Errorf("destination scheme %q cannot plan a conditionally fenced CDC swap", dest.GetScheme())
+	}
+	stagingIncarnation, resultIncarnation, err := planner.CDCConditionalSwapIncarnations(ctx, targetTable, stagingTable)
+	if err != nil {
+		return destination.SwapOptions{}, err
+	}
+	opts.CDCExpectedIncarnation = expectedTarget
+	opts.CDCExpectedStagingIncarnation = stagingIncarnation
+	opts.CDCExpectedResultIncarnation = resultIncarnation
+	return opts, nil
+}
+
 func replaceStagingTableName(dest destination.Destination, targetTable, stagingDataset string) string {
 	policy := defaultReplaceStagingPolicy()
 	if provider, ok := dest.(destination.ReplaceStagingPolicyProvider); ok {
@@ -223,22 +299,30 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
 	}
 
-	// Deduplicated replace: Load a PK-free staging table so duplicate keys can land.
-	dedup := useStaging &&
-		!sourcePrimaryKeysSafeForReplaceFastPath(job) &&
+	shouldDedup := !effectivePrimaryKeysGuaranteedUnique(job) &&
 		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
+	stagedDedup := useStaging && shouldDedup
+	directDedup := !useStaging && shouldDedup && supportsDirectReplaceDeduplication(job.Destination)
+	deferStagingPrimaryKey := useStaging && replaceShouldDeferStagingPrimaryKey(job)
+
+	// Staged dedup loads into a PK-free table so duplicate keys can land.
 	stagingPrimaryKeys := job.Config.PrimaryKeys
-	if dedup {
+	deferredPrimaryKeys := []string(nil)
+	if deferStagingPrimaryKey {
+		deferredPrimaryKeys = job.Config.PrimaryKeys
+		stagingPrimaryKeys = nil
+	} else if stagedDedup {
 		stagingPrimaryKeys = nil
 	}
 
 	prepareOpts := destination.PrepareOptions{
-		Table:       writeTable,
-		Schema:      job.Schema,
-		DropFirst:   true,
-		PrimaryKeys: stagingPrimaryKeys,
-		PartitionBy: job.Config.PartitionBy,
-		ClusterBy:   job.Config.ClusterBy,
+		Table:               writeTable,
+		Schema:              job.Schema,
+		DropFirst:           true,
+		PrimaryKeys:         stagingPrimaryKeys,
+		DeferredPrimaryKeys: deferredPrimaryKeys,
+		PartitionBy:         job.Config.PartitionBy,
+		ClusterBy:           job.Config.ClusterBy,
 	}
 	if useStaging {
 		prepareOpts.ExpiresAfter = destination.ManagedStagingTTL
@@ -246,6 +330,10 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 
 	if err := job.Destination.PrepareTable(ctx, prepareOpts); err != nil {
 		return fmt.Errorf("failed to prepare table: %w", err)
+	}
+	expectedTargetIncarnation, err := bindCDCReplaceTarget(ctx, job.CDCStateManager, job.Destination, job.Config.SourceTable, targetTable)
+	if err != nil {
+		return fmt.Errorf("failed to bind CDC destination before replace: %w", err)
 	}
 
 	parallelism := job.Config.ExtractParallelism
@@ -266,10 +354,14 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
 		Schema:                          job.SourceSchema,
+		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
+		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
-	records, err := job.GetRecords(ctx, readOpts)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	records, err := job.GetRecords(readCtx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
 	}
@@ -282,12 +374,17 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	writeOpts := destination.WriteOptions{
 		Table:            writeTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      replaceWriteParallelism(job, deferStagingPrimaryKey),
 		StagingTable:     useStaging,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
+	}
+	if directDedup {
+		writeOpts.PrimaryKeys = job.Config.PrimaryKeys
+		writeOpts.DeduplicatePrimaryKeys = true
+		writeOpts.IncrementalKey = job.Config.IncrementalKey
 	}
 	if useStaging {
 		if atomicWriter, ok := job.Destination.(destination.AtomicCommitWriter); ok && atomicWriter.SupportsAtomicCommitWrites() {
@@ -301,6 +398,8 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 
 	if err := job.Destination.WriteParallel(ctx, records, writeOpts); err != nil {
+		cancelRead()
+		drainAndReleaseUntil(records, streamAbortDrainTimeout)
 		if useStaging {
 			if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
@@ -329,7 +428,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		}
 		swapTable := writeTable
 		swapPrimaryKeys := job.Config.PrimaryKeys
-		if dedup {
+		if stagedDedup {
 			normalised, err := deduplicateStaging(ctx, job.Destination, writeTable, targetTable,
 				job.Config.StagingDataset, job.Config.IncrementalKey, job.Schema,
 				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy)
@@ -340,17 +439,23 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 			swapPrimaryKeys = nil
 		}
 
-		if err := job.Destination.SwapTable(ctx, destination.SwapOptions{
-			StagingTable:   swapTable,
-			TargetTable:    targetTable,
-			PrimaryKeys:    swapPrimaryKeys,
-			IncrementalKey: job.Config.IncrementalKey,
-			Schema:         job.Schema,
-		}); err != nil {
+		swapOpts, err := prepareCDCConditionalSwap(ctx, job.Destination, targetTable, swapTable, expectedTargetIncarnation)
+		if err != nil {
+			return err
+		}
+		swapOpts.PrimaryKeys = swapPrimaryKeys
+		swapOpts.IncrementalKey = job.Config.IncrementalKey
+		swapOpts.Schema = job.Schema
+		if err := job.Destination.SwapTable(ctx, swapOpts); err != nil {
 			if dropErr := job.Destination.DropTable(ctx, swapTable); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
 			}
 			return fmt.Errorf("failed to swap tables: %w", err)
+		}
+		if expectedTargetIncarnation != "" {
+			if err := job.CDCStateManager.CompleteConditionalSwap(ctx, job.Config.SourceTable, targetTable, expectedTargetIncarnation, swapOpts.CDCExpectedResultIncarnation); err != nil {
+				return fmt.Errorf("failed to bind CDC destination after replace: %w", err)
+			}
 		}
 	}
 
@@ -378,10 +483,12 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 	}
 
 	useStaging := job.Destination.SupportsAtomicSwap()
+	directDedup := !useStaging && supportsDirectReplaceDeduplication(job.Destination)
 	config.Debug("[STRATEGY] Multi-table replace with %d tables, staging=%v", len(job.Tables), useStaging)
 
 	stagingTables := make(map[string]string)
 	tableConfigs := make(map[string]destination.TableWriteConfig)
+	expectedTargetIncarnations := make(map[string]string)
 	var mu sync.Mutex
 
 	var wg sync.WaitGroup
@@ -398,10 +505,10 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 				writeTable = replaceStagingTableName(job.Destination, destTable, job.Config.StagingDataset)
 			}
 
-			prepareOpts := destination.PrepareOptions{
-				Table:     writeTable,
-				Schema:    ti.Schema,
-				DropFirst: true,
+			dedup := directDedup && replaceShouldDedup(job.Destination, ti.PrimaryKeys)
+			prepareOpts := destination.PrepareOptions{Table: writeTable, Schema: ti.Schema, DropFirst: true}
+			if dedup {
+				prepareOpts.PrimaryKeys = ti.PrimaryKeys
 			}
 			if useStaging {
 				prepareOpts.ExpiresAfter = destination.ManagedStagingTTL
@@ -411,13 +518,22 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 				errChan <- fmt.Errorf("failed to prepare table %s: %w", ti.Name, err)
 				return
 			}
+			expectedTarget, err := bindCDCReplaceTarget(ctx, job.CDCStateManager, job.Destination, ti.Name, destTable)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to bind CDC destination table %s before replace: %w", ti.Name, err)
+				return
+			}
 
 			mu.Lock()
 			stagingTables[ti.Name] = writeTable
-			tableConfigs[ti.Name] = destination.TableWriteConfig{
-				DestTable: writeTable,
-				Schema:    ti.Schema,
+			expectedTargetIncarnations[ti.Name] = expectedTarget
+			tableConfig := destination.TableWriteConfig{DestTable: writeTable, Schema: ti.Schema}
+			if dedup {
+				tableConfig.PrimaryKeys = ti.PrimaryKeys
+				tableConfig.DeduplicatePrimaryKeys = true
+				tableConfig.IncrementalKey = ti.Schema.IncrementalKey
 			}
+			tableConfigs[ti.Name] = tableConfig
 			mu.Unlock()
 		}(tableInfo)
 	}
@@ -434,12 +550,16 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		parallelism = 4
 	}
 
-	records, err := job.ReadAll(ctx, source.MultiTableReadOptions{
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	records, err := job.ReadAll(readCtx, source.MultiTableReadOptions{
 		ReadOptions: source.ReadOptions{
-			Parallelism: parallelism,
-			PageSize:    job.Config.PageSize,
-			Limit:       job.Config.SQLLimit,
-			FullRefresh: job.Config.FullRefresh,
+			Parallelism:         parallelism,
+			PageSize:            job.Config.PageSize,
+			Limit:               job.Config.SQLLimit,
+			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
+			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
+			FullRefresh:         job.Config.FullRefresh,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})
@@ -453,11 +573,12 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 
 	if err := multitable.Write(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     useStaging,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,
 		LoaderFileFormat: job.Config.LoaderFileFormat,
+		CancelSource:     cancelRead,
 	}); err != nil {
 		for _, stagingTable := range stagingTables {
 			if dropErr := job.Destination.DropTable(ctx, stagingTable); dropErr != nil {
@@ -483,13 +604,20 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 				swapPrimaryKeys = nil
 			}
 
-			if err := job.Destination.SwapTable(ctx, destination.SwapOptions{
-				StagingTable: swapTable,
-				TargetTable:  destTable,
-				PrimaryKeys:  swapPrimaryKeys,
-				Schema:       tableInfo.Schema,
-			}); err != nil {
+			expectedTarget := expectedTargetIncarnations[tableInfo.Name]
+			swapOpts, err := prepareCDCConditionalSwap(ctx, job.Destination, destTable, swapTable, expectedTarget)
+			if err != nil {
+				return fmt.Errorf("failed to plan conditional swap for table %s: %w", tableInfo.Name, err)
+			}
+			swapOpts.PrimaryKeys = swapPrimaryKeys
+			swapOpts.Schema = tableInfo.Schema
+			if err := job.Destination.SwapTable(ctx, swapOpts); err != nil {
 				return fmt.Errorf("failed to swap table %s: %w", tableInfo.Name, err)
+			}
+			if expectedTarget != "" {
+				if err := job.CDCStateManager.CompleteConditionalSwap(ctx, tableInfo.Name, destTable, expectedTarget, swapOpts.CDCExpectedResultIncarnation); err != nil {
+					return fmt.Errorf("failed to bind CDC destination table %s after replace: %w", tableInfo.Name, err)
+				}
 			}
 		}
 	}

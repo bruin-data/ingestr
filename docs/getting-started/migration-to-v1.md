@@ -21,13 +21,12 @@ You can think of v1 as the same product, version 2 point oh.
 
 ## What's new
 
-### New strategies
+### Strategy changes
 
-On top of the existing strategies (`replace`, `append`, `merge`, `delete+insert`), v1 adds:
+V1 adds a new strategy and improves the existing replace flow:
 
-- **`truncate+insert`** — empty the destination table and load the new rows in one go.
 - **`scd2`** — Slowly Changing Dimension Type 2: keeps a row history per primary key (with `valid_from` / `valid_to` columns) so you can see how a record changed over time.
-- **`replace`** — Now uses double buffering to reduce transaction times duration large loads.
+- **`replace`** — Now uses double buffering to reduce transaction times during large loads.
 
 
 ## Things to watch out for

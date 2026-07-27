@@ -1,9 +1,11 @@
 package databuffer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -265,9 +268,14 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 	if isUnknownType(arr.DataType()) {
 		return castUnknownArray(arr, target)
 	}
+	if target.ID() == arrow.LIST {
+		if values, ok := arr.(array.VarLenListLike); ok {
+			return castVariableListToList(ctx, values, target.(*arrow.ListType), safe)
+		}
+	}
 
 	if isJSONType(target) {
-		return castArrayToJSON(ctx, arr, target)
+		return castArrayToJSON(arr, target)
 	}
 
 	if isJSONType(arr.DataType()) && target.ID() == arrow.STRING {
@@ -320,6 +328,66 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 	}
 
 	return nil, err
+}
+
+func castVariableListToList(ctx context.Context, values array.VarLenListLike, target *arrow.ListType, safe bool) (arrow.Array, error) {
+	validity := make([]byte, bitutil.BytesForBits(int64(values.Len())))
+	offsets := make([]int32, values.Len()+1)
+	slices := make([]arrow.Array, 0, values.Len())
+	defer func() {
+		for _, value := range slices {
+			value.Release()
+		}
+	}()
+
+	var total int64
+	nullCount := 0
+	items := values.ListValues()
+	for i := 0; i < values.Len(); i++ {
+		if values.IsNull(i) {
+			nullCount++
+			offsets[i+1] = int32(total)
+			continue
+		}
+		bitutil.SetBit(validity, i)
+		start, end := values.ValueOffsets(i)
+		if start < 0 || end < start || end > int64(items.Len()) {
+			return nil, fmt.Errorf("invalid list offsets [%d:%d] for %d values", start, end, items.Len())
+		}
+		total += end - start
+		if total > math.MaxInt32 {
+			return nil, fmt.Errorf("list contains %d values, exceeding the int32 offset limit", total)
+		}
+		offsets[i+1] = int32(total)
+		if end > start {
+			slices = append(slices, array.NewSlice(items, start, end))
+		}
+	}
+
+	var flattened arrow.Array
+	var err error
+	if len(slices) == 0 {
+		flattened = array.NewSlice(items, 0, 0)
+	} else {
+		flattened, err = array.Concatenate(slices, memory.DefaultAllocator)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concatenate list values: %w", err)
+		}
+	}
+	defer flattened.Release()
+	castedValues, err := castArrayToType(ctx, flattened, target.Elem(), safe)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cast list values from %s to %s: %w", flattened.DataType(), target.Elem(), err)
+	}
+	defer castedValues.Release()
+
+	validityBuffer := memory.NewBufferBytes(validity)
+	defer validityBuffer.Release()
+	offsetBuffer := memory.NewBufferBytes(arrow.Int32Traits.CastToBytes(offsets))
+	defer offsetBuffer.Release()
+	data := array.NewData(target, values.Len(), []*memory.Buffer{validityBuffer, offsetBuffer}, []arrow.ArrayData{castedValues.Data()}, nullCount, 0)
+	defer data.Release()
+	return array.NewListData(data), nil
 }
 
 func normalizeArrayOffset(arr arrow.Array) (arrow.Array, bool, error) {
@@ -432,20 +500,200 @@ func castUnknownArrayToJSON(ext array.ExtensionArray, target arrow.DataType) (ar
 	return array.NewExtensionArrayWithStorage(extType, storageArr), nil
 }
 
-func castArrayToJSON(ctx context.Context, arr arrow.Array, target arrow.DataType) (arrow.Array, error) {
+func castArrayToJSON(arr arrow.Array, target arrow.DataType) (arrow.Array, error) {
 	extType, ok := target.(arrow.ExtensionType)
 	if !ok {
 		return nil, fmt.Errorf("target type is not an extension type")
 	}
 
-	strArr, err := castArrayToString(ctx, arr)
-	if err != nil {
-		return nil, err
+	builder := array.NewStringBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+	for i := 0; i < arr.Len(); i++ {
+		if arr.IsNull(i) {
+			builder.AppendNull()
+			continue
+		}
+		value, err := marshalArrowJSONValue(arr, i)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode row %d as JSON: %w", i, err)
+		}
+		builder.Append(string(value))
 	}
 
-	extArr := array.NewExtensionArrayWithStorage(extType, strArr)
-	strArr.Release()
-	return extArr, nil
+	storage := builder.NewArray()
+	defer storage.Release()
+	return array.NewExtensionArrayWithStorage(extType, storage), nil
+}
+
+func marshalArrowJSONValue(arr arrow.Array, i int) ([]byte, error) {
+	if i < 0 || i >= arr.Len() {
+		return nil, fmt.Errorf("array index %d is out of range", i)
+	}
+	if arr.IsNull(i) {
+		return []byte("null"), nil
+	}
+
+	switch values := arr.(type) {
+	case *array.Struct:
+		return marshalArrowStructJSON(values, i)
+	case *array.Map:
+		return marshalArrowMapJSON(values, i)
+	case array.ListLike:
+		return marshalArrowListJSON(values, i)
+	case array.ExtensionArray:
+		if isJSONType(values.DataType()) {
+			raw, ok := schemainfer.StringValueAt(values.Storage(), i)
+			if !ok || !json.Valid([]byte(raw)) {
+				return nil, fmt.Errorf("JSON extension contains invalid JSON")
+			}
+			return []byte(raw), nil
+		}
+		return marshalArrowJSONValue(values.Storage(), i)
+	case *array.Dictionary:
+		return marshalArrowJSONValue(values.Dictionary(), values.GetValueIndex(i))
+	case *array.RunEndEncoded:
+		return marshalArrowJSONValue(values.Values(), values.GetPhysicalIndex(i))
+	case interface{ Value(int) []byte }:
+		return json.Marshal(values.Value(i))
+	}
+
+	raw := arr.ValueStr(i)
+	switch arr.DataType().ID() {
+	case arrow.STRING, arrow.LARGE_STRING, arrow.STRING_VIEW,
+		arrow.DATE32, arrow.DATE64, arrow.TIME32, arrow.TIME64, arrow.TIMESTAMP,
+		arrow.DURATION, arrow.INTERVAL_MONTHS, arrow.INTERVAL_DAY_TIME, arrow.INTERVAL_MONTH_DAY_NANO:
+		return json.Marshal(raw)
+	default:
+		if !json.Valid([]byte(raw)) {
+			return nil, fmt.Errorf("arrow %s value %q has no lossless JSON representation", arr.DataType(), raw)
+		}
+		return []byte(raw), nil
+	}
+}
+
+func marshalArrowStructJSON(values *array.Struct, i int) ([]byte, error) {
+	fields := values.DataType().(*arrow.StructType).Fields()
+	seen := make(map[string]struct{}, len(fields))
+	var result bytes.Buffer
+	result.WriteByte('{')
+	for fieldIndex, field := range fields {
+		if _, ok := seen[field.Name]; ok {
+			return nil, fmt.Errorf("struct contains duplicate field %q", field.Name)
+		}
+		seen[field.Name] = struct{}{}
+		if fieldIndex > 0 {
+			result.WriteByte(',')
+		}
+		name, _ := json.Marshal(field.Name)
+		result.Write(name)
+		result.WriteByte(':')
+		value, err := marshalArrowJSONValue(values.Field(fieldIndex), i)
+		if err != nil {
+			return nil, fmt.Errorf("field %q: %w", field.Name, err)
+		}
+		result.Write(value)
+	}
+	result.WriteByte('}')
+	return result.Bytes(), nil
+}
+
+func marshalArrowListJSON(values array.ListLike, i int) ([]byte, error) {
+	start, end := values.ValueOffsets(i)
+	items := values.ListValues()
+	if start < 0 || end < start || end > int64(items.Len()) {
+		return nil, fmt.Errorf("invalid list offsets [%d:%d] for %d values", start, end, items.Len())
+	}
+	var result bytes.Buffer
+	result.WriteByte('[')
+	for itemIndex := start; itemIndex < end; itemIndex++ {
+		if itemIndex > start {
+			result.WriteByte(',')
+		}
+		value, err := marshalArrowJSONValue(items, int(itemIndex))
+		if err != nil {
+			return nil, fmt.Errorf("element %d: %w", itemIndex-start, err)
+		}
+		result.Write(value)
+	}
+	result.WriteByte(']')
+	return result.Bytes(), nil
+}
+
+func marshalArrowMapJSON(values *array.Map, i int) ([]byte, error) {
+	start, end := values.ValueOffsets(i)
+	keys, items := values.Keys(), values.Items()
+	if start < 0 || end < start || end > int64(keys.Len()) || end > int64(items.Len()) {
+		return nil, fmt.Errorf("invalid map offsets [%d:%d] for %d keys and %d values", start, end, keys.Len(), items.Len())
+	}
+	if !arrowMapKeysUseJSONObject(keys.DataType()) {
+		return marshalArrowMapEntriesJSON(keys, items, start, end)
+	}
+	seen := make(map[string]struct{}, end-start)
+	var result bytes.Buffer
+	result.WriteByte('{')
+	for itemIndex := start; itemIndex < end; itemIndex++ {
+		keyJSON, err := marshalArrowJSONValue(keys, int(itemIndex))
+		if err != nil {
+			return nil, fmt.Errorf("map key %d: %w", itemIndex-start, err)
+		}
+		key := string(keyJSON)
+		if len(keyJSON) > 0 && keyJSON[0] == '"' {
+			if err := json.Unmarshal(keyJSON, &key); err != nil {
+				return nil, fmt.Errorf("map key %d: %w", itemIndex-start, err)
+			}
+		}
+		if _, ok := seen[key]; ok {
+			return nil, fmt.Errorf("map contains duplicate JSON key %q", key)
+		}
+		seen[key] = struct{}{}
+		if itemIndex > start {
+			result.WriteByte(',')
+		}
+		encodedKey, _ := json.Marshal(key)
+		result.Write(encodedKey)
+		result.WriteByte(':')
+		value, err := marshalArrowJSONValue(items, int(itemIndex))
+		if err != nil {
+			return nil, fmt.Errorf("map value for key %q: %w", key, err)
+		}
+		result.Write(value)
+	}
+	result.WriteByte('}')
+	return result.Bytes(), nil
+}
+
+func marshalArrowMapEntriesJSON(keys, items arrow.Array, start, end int64) ([]byte, error) {
+	var result bytes.Buffer
+	result.WriteByte('[')
+	for itemIndex := start; itemIndex < end; itemIndex++ {
+		if itemIndex > start {
+			result.WriteByte(',')
+		}
+		key, err := marshalArrowJSONValue(keys, int(itemIndex))
+		if err != nil {
+			return nil, fmt.Errorf("map key %d: %w", itemIndex-start, err)
+		}
+		value, err := marshalArrowJSONValue(items, int(itemIndex))
+		if err != nil {
+			return nil, fmt.Errorf("map value %d: %w", itemIndex-start, err)
+		}
+		result.WriteString(`{"key":`)
+		result.Write(key)
+		result.WriteString(`,"value":`)
+		result.Write(value)
+		result.WriteByte('}')
+	}
+	result.WriteByte(']')
+	return result.Bytes(), nil
+}
+
+func arrowMapKeysUseJSONObject(dt arrow.DataType) bool {
+	switch typed := dt.(type) {
+	case *arrow.DictionaryType:
+		return arrowMapKeysUseJSONObject(typed.ValueType)
+	default:
+		return dt.ID() == arrow.STRING || dt.ID() == arrow.LARGE_STRING || dt.ID() == arrow.STRING_VIEW
+	}
 }
 
 func castArrayToString(ctx context.Context, arr arrow.Array) (arrow.Array, error) {

@@ -214,3 +214,15 @@ ingestr ingest \
 
 > [!WARNING]
 > Salesforce API limits may affect the frequency and volume of data ingestion. Incremental loading is supported for objects with a timestamp field such as `SystemModstamp`, `CreatedDate`, or `LastModifiedDate`, but some objects require full-refresh loads. This is indicated by the strategy in the table above: tables with strategy `replace` don't support incremental loads, while the ones with `merge` do.
+
+## Field-level security
+
+ingestr ingests only the fields the authenticating user is permitted to read. Its query is built from what Salesforce returns for that user, so a field the user cannot read is not fetched.
+
+If you want a field to be ingested, make sure the user (or its permission set or profile) has **Read** access to it, for example through its field-level security (FLS) settings. You can see which fields the user can read by describing the object as that user:
+
+```plaintext
+GET https://<your-domain>.my.salesforce.com/services/data/v59.0/sobjects/<object>/describe
+```
+
+Only the fields listed in the response are ingested. Grant Read access to the fields you want and run the ingestion again.

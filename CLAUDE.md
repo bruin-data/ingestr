@@ -13,8 +13,8 @@
 make build                    # Builds to bin/ingestr
 
 # Run unit tests
-make test                     # All unit tests with race detection
-go test -short ./...          # Unit tests only
+make test                     # Fast Go unit tests
+make test-full                # Race detection, coverage, and Python SDK tests
 
 # Run integration tests (gated by the `integration` build tag)
 make test-integration
@@ -30,8 +30,10 @@ make run ARGS="ingest --source-uri=postgres://... --dest-uri=sqlite://... --sour
 go run . ingest --source-uri=<uri> --dest-uri=<uri> --source-table=<table>
 
 # Format and lint
-make format                   # gci + gofumpt + go vet + golangci-lint
-make lint                     # Linters only
+make format                   # gci + gofumpt + fast lint
+make lint                     # fast linters on changed Go packages
+make lint-fast                # alias for make lint
+make lint-full                # all linters, all packages, integration-tagged files
 
 # After changing dependencies (go.mod/go.sum), refresh the license audit lock
 make licenses-audit-update    # CI runs `make licenses-audit` (--check) and fails if the lock is stale
@@ -120,6 +122,9 @@ Database-specific dialects in `pkg/source/{database}/dialect.go`:
 
 ### Code Standards
 Do NOT write comments everywhere. If the code is self-explanatory, do not write comments.
+
+### BigQuery Destination
+Before changing `pkg/destination/bigquery/` or BigQuery-affecting behavior in the replace/merge strategies, read the `bigquery-destination` skill (`.claude/skills/bigquery-destination/SKILL.md`) — it documents the design (write path, dedup, swap selection, partition/cluster change handling). Update it in the same change if you alter that behavior.
 
 ### Type Mapping
 Each source must map its native types to the `schema.DataType` enum. The ADBC dialect system delegates this via `MapDataType(dbType string)`. Native sources implement mapping directly (e.g., `pkg/source/postgres/mapper.go`).

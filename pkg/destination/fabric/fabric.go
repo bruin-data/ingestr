@@ -3,6 +3,7 @@ package fabric
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -246,6 +247,23 @@ func (d *FabricDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *FabricDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *FabricDestination) DropTable(ctx context.Context, table string) error {
 	dropSQL := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s",
 		escapeTableName(table), quoteTable(table))
@@ -472,7 +490,7 @@ func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.Mer
 	quotedColumns := quoteColumns(opts.Columns)
 	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns)
+	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalPredicate)
 	config.Debug("[Fabric MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -484,7 +502,7 @@ func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.Mer
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
+func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalPredicate string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
@@ -523,7 +541,7 @@ ON %s
 WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		dedupSource,
-		strings.Join(onConditions, " AND "),
+		destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate),
 		updateSet,
 		insertCols,
 		strings.Join(sourceCols, ", "),
@@ -707,6 +725,7 @@ func (t *fabricTransaction) Rollback(ctx context.Context) error {
 func (d *FabricDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *FabricDestination) SupportsAppendStrategy() bool       { return true }
 func (d *FabricDestination) SupportsMergeStrategy() bool        { return true }
+func (d *FabricDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *FabricDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *FabricDestination) SupportsSCD2Strategy() bool         { return true }
 

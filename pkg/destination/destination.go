@@ -2,6 +2,10 @@ package destination
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,14 +16,20 @@ import (
 const ManagedStagingTTL = 24 * time.Hour
 
 type PrepareOptions struct {
-	Table        string
-	Schema       *schema.TableSchema
-	DropFirst    bool
-	PrimaryKeys  []string
-	PartitionBy  string   // Column to partition by (BigQuery)
-	ClusterBy    []string // Columns to cluster by (BigQuery)
-	CDCMode      bool     // If true, make non-PK columns nullable for staging tables (CDC delete handling)
-	ExpiresAfter time.Duration
+	Table                  string
+	Schema                 *schema.TableSchema
+	DropFirst              bool
+	PrimaryKeys            []string
+	DeferredPrimaryKeys    []string // PK columns whose constraint is created after loading.
+	PartitionBy            string   // Column to partition by (BigQuery)
+	ClusterBy              []string // Columns to cluster by (BigQuery)
+	CDCMode                bool     // If true, make non-PK columns nullable for CDC delete handling.
+	CDCKeys                []string // CDC keys kept non-nullable without declaring a table constraint.
+	RequirePrimaryKeyMatch bool     // Require the physical target PK to match PrimaryKeys for CDC merge safety.
+	ExpiresAfter           time.Duration
+	PreserveExistingLayout bool // Leave an existing table's properties, partition spec, and sort order unchanged.
+	TableProperties        map[string]string
+	OwnershipToken         string
 }
 
 type WriteOptions struct {
@@ -32,6 +42,26 @@ type WriteOptions struct {
 	StagingBucket    string
 	LoaderFileSize   int
 	LoaderFileFormat string
+	// CommitToken identifies the exact payload in this write. Destinations that
+	// support durable token commits use it to make exact replays idempotent.
+	CommitToken source.DurableID
+	// CDCResumeLSN is the source position made durable by this write. It must
+	// become visible atomically with the data commit.
+	CDCResumeLSN string
+	// SkipCDCResume prevents destinations from inferring a resume cursor from
+	// CDC columns. It is used for durable snapshot chunks that are individually
+	// idempotent but cannot safely advance the source checkpoint yet.
+	SkipCDCResume bool
+	// CDCExpectedIncarnation fences a managed CDC write to the physical target
+	// that was bound before the source read began.
+	CDCExpectedIncarnation string
+	// DeduplicatePrimaryKeys requests one output row per configured primary
+	// key. IncrementalKey selects the greatest value; arrival order breaks ties.
+	DeduplicatePrimaryKeys bool
+	IncrementalKey         string
+	// AtomicSnapshotAttemptID identifies the logical snapshot attempt. It must
+	// remain stable across retries of that attempt.
+	AtomicSnapshotAttemptID string
 
 	// PreStaged holds load files written during extract by a PreStager
 	// destination. When set, the destination loads these files instead of
@@ -47,12 +77,51 @@ type Transaction interface {
 
 // MergeOptions contains parameters for merge operations.
 type MergeOptions struct {
-	StagingTable   string
-	TargetTable    string
-	PrimaryKeys    []string
-	Columns        []string
-	IncrementalKey string
-	Schema         *schema.TableSchema
+	StagingTable string
+	TargetTable  string
+	PrimaryKeys  []string
+	// StagingPrimaryKeysUnique allows destinations to skip per-key staging
+	// deduplication when the caller guarantees the effective keys are unique.
+	StagingPrimaryKeysUnique bool
+	Columns                  []string
+	IncrementalKey           string
+	IncrementalPredicate     string
+	Schema                   *schema.TableSchema
+	CommitToken              source.DurableID
+	CDCResumeLSN             string
+	SkipCDCResume            bool
+	// CDCExpectedIncarnation fences a managed CDC merge to the physical target
+	// that was bound before the source read began.
+	CDCExpectedIncarnation string
+	Parallelism            int
+}
+
+type CDCAtomicTableMerge struct {
+	Options  MergeOptions
+	Truncate bool
+}
+
+type CDCMultiTableAtomicMerger interface {
+	MergeCDCTablesAtomically(ctx context.Context, merges []CDCAtomicTableMerge) error
+}
+
+// TruncateInsertFromStagingOptions configures an atomic replacement from a
+// populated staging table into an existing target table.
+type TruncateInsertFromStagingOptions struct {
+	StagingTable             string
+	TargetTable              string
+	PrimaryKeys              []string
+	StagingPrimaryKeysUnique bool
+	Columns                  []string
+	IncrementalKey           string
+}
+
+// InsertFromStagingOptions configures a keyless insert from a populated
+// staging table into an empty destination table.
+type InsertFromStagingOptions struct {
+	StagingTable string
+	TargetTable  string
+	Columns      []string
 }
 
 // DeleteInsertOptions contains parameters for delete+insert operations.
@@ -68,11 +137,14 @@ type DeleteInsertOptions struct {
 }
 
 type SwapOptions struct {
-	StagingTable   string
-	TargetTable    string
-	PrimaryKeys    []string
-	IncrementalKey string
-	Schema         *schema.TableSchema
+	StagingTable                  string
+	TargetTable                   string
+	PrimaryKeys                   []string
+	IncrementalKey                string
+	Schema                        *schema.TableSchema
+	CDCExpectedIncarnation        string
+	CDCExpectedStagingIncarnation string
+	CDCExpectedResultIncarnation  string
 }
 
 // SCD2Options contains parameters for SCD2 (Slowly Changing Dimensions Type 2) operations.
@@ -119,11 +191,36 @@ type Destination interface {
 	SupportsAtomicSwap() bool
 }
 
+// IncrementalPredicateSupport is implemented by destinations whose MergeTable
+// honors MergeOptions.IncrementalPredicate; others silently ignore it, so the
+// pipeline rejects the flag for them.
+type IncrementalPredicateSupport interface {
+	SupportsIncrementalPredicate() bool
+}
+
+func MergeJoinCondition(condition, incrementalPredicate string) string {
+	predicate := strings.TrimSpace(incrementalPredicate)
+	if predicate == "" {
+		return condition
+	}
+	return condition + " AND (" + predicate + ")"
+}
+
+// SchemaEvolutionColumnNormalizer lets a destination compare logical source
+// types using the canonical types it can recover from its physical schema.
+type SchemaEvolutionColumnNormalizer interface {
+	NormalizeSchemaEvolutionColumn(schema.Column) schema.Column
+}
+
 // TableWriteConfig contains per-table write configuration for multi-table writes.
 type TableWriteConfig struct {
-	DestTable   string
-	Schema      *schema.TableSchema
-	PrimaryKeys []string
+	DestTable              string
+	Schema                 *schema.TableSchema
+	PrimaryKeys            []string
+	DeduplicatePrimaryKeys bool
+	IncrementalKey         string
+	SkipCDCResume          bool
+	CDCExpectedIncarnation string
 }
 
 // MultiTableWriteOptions configures multi-table write behavior.
@@ -134,14 +231,272 @@ type MultiTableWriteOptions struct {
 	StagingBucket    string
 	LoaderFileSize   int
 	LoaderFileFormat string
+	// CancelSource stops the producer when a per-table writer fails. The writer
+	// drains records after invoking it so producer-owned resources can unwind.
+	CancelSource context.CancelFunc
+	// TableWriter overrides the destination's per-table write path. Its boolean
+	// result reports whether it applied at least one source truncate boundary.
+	TableWriter func(context.Context, string, <-chan source.RecordBatchResult, WriteOptions) (bool, error)
 }
 
 // CDCResumeProvider is an optional interface that destinations can implement
 // to support CDC resume functionality. If implemented, the pipeline will query
-// the destination for the max CDC LSN to resume from.
+// the destination for its latest durable CDC position.
 type CDCResumeProvider interface {
-	// GetMaxCDCLSN returns the maximum _cdc_lsn value from the table, or empty string if none found.
+	// GetMaxCDCLSN returns the latest durable CDC cursor, or an empty string if
+	// no CDC data or checkpoint has committed.
 	GetMaxCDCLSN(ctx context.Context, table string) (string, error)
+}
+
+const CDCStateStatusComplete = "complete"
+
+// CDCStateEntry is one append-only event from the shared destination CDC state
+// table. Consumers reduce entries by source table, state kind, and generation.
+type CDCStateEntry struct {
+	EventID          string
+	SourceTable      string
+	DestinationTable string
+	StateKind        string
+	Generation       int64
+	Status           string
+	Position         string
+	RecordedAt       time.Time
+}
+
+// CDCStateReader loads all state events for one logical connector from the
+// destination's shared managed-state table.
+type CDCStateReader interface {
+	LoadCDCState(ctx context.Context, table, connectorID string) ([]CDCStateEntry, error)
+}
+
+// CDCStateFence identifies every run sentinel at a connector's latest run
+// generation. Multiple event IDs mean ownership of that generation conflicts.
+type CDCStateFence struct {
+	Generation  int64
+	RunEventIDs []string
+}
+
+// CDCStateFenceReader loads only the latest-generation run sentinels needed to
+// fence checkpoint writes, without scanning snapshot or checkpoint events.
+type CDCStateFenceReader interface {
+	LoadCDCStateFence(ctx context.Context, table, connectorID string) (CDCStateFence, error)
+}
+
+// CDCStateWriter persists CDC state using destination-specific durability
+// guarantees that may be stronger than ordinary data writes.
+type CDCStateWriter interface {
+	WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
+}
+
+// CDCStatePositionMigrator widens state tables created by older releases whose
+// position column was bounded too narrowly for every supported CDC cursor.
+type CDCStatePositionMigrator interface {
+	EnsureCDCStatePositionColumn(ctx context.Context, table string) error
+}
+
+type CDCTargetClaim struct {
+	DestinationTable string
+	ConnectorID      string
+	SourceTable      string
+}
+
+func (c CDCTargetClaim) OwnerID() (string, error) {
+	if c.ConnectorID == "" || c.SourceTable == "" {
+		return "", fmt.Errorf("CDC target claim requires non-empty connector and source table identifiers")
+	}
+	return CDCTargetOwnerID(c.ConnectorID, c.SourceTable), nil
+}
+
+func CDCTargetOwnerID(connectorID, sourceTable string) string {
+	sum := sha256.Sum256([]byte(connectorID + "\x00" + sourceTable))
+	return hex.EncodeToString(sum[:])
+}
+
+// CDCTargetKey encodes identifier components without collisions between dots
+// inside quoted identifiers and qualification separators.
+func CDCTargetKey(components ...string) string {
+	var key strings.Builder
+	for _, component := range components {
+		encoded := hex.EncodeToString([]byte(component))
+		key.WriteString(strconv.Itoa(len(encoded)))
+		key.WriteByte(':')
+		key.WriteString(encoded)
+	}
+	return key.String()
+}
+
+func CDCTargetKeyDigest(components ...string) string {
+	sum := sha256.Sum256([]byte(CDCTargetKey(components...)))
+	return hex.EncodeToString(sum[:])
+}
+
+// CDCTargetClaimer durably assigns one canonical destination table to one CDC
+// connector. Claims are permanent, idempotent for the current owner, and must
+// atomically reject a different connector even across concurrent processes.
+type CDCTargetClaimer interface {
+	ClaimCDCTarget(ctx context.Context, claimTable string, claim CDCTargetClaim) error
+}
+
+// CDCLateTargetClaimPreparer atomically reserves an absent CDC target and
+// creates it empty. If the target already exists or the reservation conflicts,
+// neither the target nor its claim may be changed.
+type CDCLateTargetClaimPreparer interface {
+	ClaimAndPrepareEmptyCDCTarget(ctx context.Context, claimTable string, claim CDCTargetClaim, opts PrepareOptions) (incarnation string, err error)
+}
+
+// CDCConditionalTruncater empties a CDC target only when its current physical
+// identity is exactly the expected incarnation. The comparison and truncate
+// must be protected by one destination-level transaction or lock.
+type CDCConditionalTruncater interface {
+	TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error
+}
+
+// CDCConditionalMergeCapable advertises that MergeTable enforces
+// MergeOptions.CDCExpectedIncarnation in the same transaction as target DML.
+type CDCConditionalMergeCapable interface {
+	SupportsCDCConditionalMerge() bool
+}
+
+// ManagedCDCRunLeaser serializes all target mutations for one managed CDC
+// connector and reports loss through the standard connector lease guard.
+type ManagedCDCRunLeaser interface {
+	AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error)
+}
+
+// SerializedCDCRunsRequired is implemented by destinations whose primary-key
+// constraints do not prevent concurrent CDC merges from inserting the same
+// previously absent key.
+type SerializedCDCRunsRequired interface {
+	RequiresSerializedCDCRuns() bool
+}
+
+// CDCConditionalSwapCapable advertises that SwapTable enforces both expected
+// target and staging incarnations in the same atomic operation that replaces
+// the target.
+type CDCConditionalSwapCapable interface {
+	SupportsCDCConditionalSwap() bool
+}
+
+// CDCConditionalSwapPlanner derives the physical staging incarnation checked
+// by SwapTable and the incarnation that same physical table will have under
+// the target name after the atomic rename.
+type CDCConditionalSwapPlanner interface {
+	CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (stagingIncarnation, resultIncarnation string, err error)
+}
+
+// CDCTargetIncarnationInitializer establishes destination-specific physical
+// identity metadata after a target claim succeeds. It must not be called while
+// validating an unclaimed target.
+type CDCTargetIncarnationInitializer interface {
+	EnsureCDCTargetIncarnation(ctx context.Context, table string) (incarnation string, exists bool, err error)
+}
+
+// CDCTargetIdentityProvider resolves a configured target to the destination's
+// canonical physical namespace. Managed CDC uses it to distinguish unqualified
+// targets that resolve differently under different connection identities.
+type CDCTargetIdentityProvider interface {
+	CanonicalCDCTarget(ctx context.Context, table string) (string, error)
+}
+
+// CDCTargetIncarnationProvider returns an opaque identity for the current
+// physical table. The identity must change when the table is dropped,
+// recreated, or otherwise replaced outside the CDC run.
+type CDCTargetIncarnationProvider interface {
+	CDCTargetIncarnation(ctx context.Context, table string) (incarnation string, exists bool, err error)
+}
+
+// ManagedCDCStateValidator checks destination-specific durability requirements
+// before a managed CDC run acquires a lease or mutates destination state.
+type ManagedCDCStateValidator interface {
+	ValidateManagedCDCState() error
+}
+
+// ManagedCDCTargetValidator checks requirements that depend on the resolved
+// destination table, such as a database-scoped SQL compatibility level.
+type ManagedCDCTargetValidator interface {
+	ValidateManagedCDCTarget(ctx context.Context, table string) error
+}
+
+// CDCStatePruner removes superseded events belonging to one connector. State
+// managers append replacement events before pruning, so cleanup is retryable
+// and never participates in the durability decision for a checkpoint.
+type CDCStatePruner interface {
+	DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error
+}
+
+// CDCStatePruneBatchSizer advertises how many exact event IDs a destination
+// can accept in one state-pruning phase. Implementations may chunk internally.
+type CDCStatePruneBatchSizer interface {
+	CDCStatePruneBatchSize() int
+}
+
+// DurableCommitTokenWriter is an optional interface for destinations that can
+// durably record a source flush token without changing table rows. Streaming
+// uses it when a source position advances during an otherwise empty flush.
+type DurableCommitTokenWriter interface {
+	CommitWriteToken(ctx context.Context, table string, commitToken source.DurableID, cdcResumeLSN string) error
+}
+
+// IdempotentCommitTokenWriter is implemented by destinations whose row-write
+// path atomically records WriteOptions.CommitToken and skips the rows when the
+// same token is retried. Keyless CDC streaming requires this because it has no
+// row identity with which to deduplicate a replayed transaction.
+type IdempotentCommitTokenWriter interface {
+	SupportsIdempotentCommitTokenWrites() bool
+}
+
+// AtomicSnapshotOptions describes a streamed source snapshot whose pages must
+// remain hidden until its final durable source position is available.
+type AtomicSnapshotOptions struct {
+	Table         string
+	Schema        *schema.TableSchema
+	TargetSchema  *schema.TableSchema
+	PrimaryKeys   []string
+	PartitionBy   string
+	ClusterBy     []string
+	Parallelism   int
+	CommitToken   source.DurableID
+	CDCResumeLSN  string
+	SkipCDCResume bool
+	// CDCExpectedIncarnation fences publication to the physical target that was
+	// bound before the source snapshot began.
+	CDCExpectedIncarnation string
+	// AttemptID must be non-empty and stable across every retry of one logical
+	// snapshot. A new logical snapshot must use a new value.
+	AttemptID string
+}
+
+// AtomicSnapshotPublisher is implemented by destinations that can durably
+// stage snapshot pages and publish the completed snapshot in one table commit.
+// It does not provide atomic publication across multiple destination tables.
+// Streaming falls back to its historical truncate-and-page behavior when this
+// interface is not implemented. Begin, write, and publish must be idempotent for
+// one AttemptID. Once publication becomes durable, retrying publish for that
+// AttemptID must report success without duplicating rows or replacing a newer
+// attempt, including when the original success response was lost.
+type AtomicSnapshotPublisher interface {
+	BeginAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
+	EvolveAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
+	WriteAtomicSnapshot(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
+	PublishAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
+}
+
+// AtomicSnapshotAborter reclaims an owned snapshot stage only when the caller
+// knows publication was never attempted. It is separate from
+// AtomicSnapshotPublisher so existing publishers remain compatible.
+type AtomicSnapshotAborter interface {
+	AbortAtomicSnapshot(ctx context.Context, opts AtomicSnapshotOptions) error
+}
+
+type OwnedTableDropper interface {
+	DropTableIfOwned(ctx context.Context, table, ownershipToken string) error
+}
+
+// ConnectionChecker is an optional end-to-end connection check. Unlike
+// Connect, it verifies that the destination can create, write, read, and clean
+// up data using the configured credentials and storage.
+type ConnectionChecker interface {
+	CheckConnection(ctx context.Context) error
 }
 
 // CDCMergeAware is an optional interface that destinations can implement
@@ -154,6 +509,13 @@ type CDCMergeAware interface {
 // write atomically visible after the write phase completes.
 type AtomicCommitWriter interface {
 	SupportsAtomicCommitWrites() bool
+}
+
+// DirectReplaceDeduplicator is implemented by destinations that can collapse
+// duplicate primary keys as part of a direct replace write. Destinations must
+// not opt in unless the deduplication and data replacement commit atomically.
+type DirectReplaceDeduplicator interface {
+	SupportsDirectReplaceDeduplication() bool
 }
 
 // MultiTableNamer is an optional interface for destinations that need full
@@ -187,10 +549,60 @@ type ExactRowCountWaiter interface {
 }
 
 // TruncateCapable is an optional interface for destinations that can empty a
-// table in place without dropping it. Used by the truncate+insert strategy so
-// dependent objects (views, grants, foreign keys) survive the reload.
+// table in place without dropping it. In-place replace implementations use it
+// so dependent objects (views, grants, foreign keys) survive the reload.
 type TruncateCapable interface {
 	TruncateTable(ctx context.Context, table string) error
+}
+
+// CDCTruncateCapable empties a CDC target without replacing its physical table
+// identity. Native TRUNCATE implementations may otherwise use drop/create.
+type CDCTruncateCapable interface {
+	TruncateCDCTable(ctx context.Context, table string) error
+}
+
+// AtomicTruncateInsertWriter replaces all table rows in one destination
+// commit. Strategies prefer it over a separate truncate followed by writes so
+// readers never observe an empty or partially reloaded target.
+type AtomicTruncateInsertWriter interface {
+	TruncateInsertRecords(ctx context.Context, records <-chan source.RecordBatchResult, opts WriteOptions) error
+}
+
+// AtomicTruncateInsertStagingWriter replaces all target rows from a populated
+// staging table in one destination transaction.
+type AtomicTruncateInsertStagingWriter interface {
+	TruncateInsertFromStaging(ctx context.Context, opts TruncateInsertFromStagingOptions) error
+}
+
+// StagingTableInserter copies rows from a staging table into an empty target.
+// In-place replace implementations use this for keyless loads after the complete
+// source result has landed in staging.
+type StagingTableInserter interface {
+	InsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) error
+}
+
+// PreparedStagingTableWrite executes a staging write that was validated before
+// the target table was truncated.
+type PreparedStagingTableWrite interface {
+	Execute(ctx context.Context) error
+}
+
+// StagingTableInsertPreparer validates and prepares a staging insert before a
+// non-atomic in-place replacement starts.
+type StagingTableInsertPreparer interface {
+	PrepareInsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) (PreparedStagingTableWrite, error)
+}
+
+// StagingTableMergePreparer validates and prepares a staging merge before a
+// non-atomic in-place replacement starts.
+type StagingTableMergePreparer interface {
+	PrepareMergeTable(ctx context.Context, opts MergeOptions) (PreparedStagingTableWrite, error)
+}
+
+// AtomicTruncateInsertSchemaEvolver marks an atomic in-place replacement writer that
+// commits supported schema evolution and the replacement rows together.
+type AtomicTruncateInsertSchemaEvolver interface {
+	EvolvesTruncateInsertSchemaAtomically() bool
 }
 
 // ConcurrentFlusher is an optional interface for destinations whose
@@ -201,6 +613,12 @@ type TruncateCapable interface {
 // it — or returning a value < 2 — are flushed one table at a time.
 type ConcurrentFlusher interface {
 	MaxConcurrentFlushes() int
+}
+
+// DirectMergeWriter atomically merges record batches into a target without a
+// remote staging-table write/read round trip.
+type DirectMergeWriter interface {
+	MergeRecords(ctx context.Context, records <-chan source.RecordBatchResult, writeOpts WriteOptions, mergeOpts MergeOptions) error
 }
 
 // ReplaceStagingPlacement declares the default schema placement for replace
@@ -229,8 +647,21 @@ type ReplaceStagingPolicyProvider interface {
 	ReplaceStagingPolicy() ReplaceStagingPolicy
 }
 
+// ReplaceStagingPrimaryKeyDeferrer lets a destination bulk-load a known-unique
+// replace staging table before creating its primary key during the swap.
+type ReplaceStagingPrimaryKeyDeferrer interface {
+	DeferReplaceStagingPrimaryKey() bool
+	DeferredReplaceStagingParallelism() int
+}
+
 // ManagedStagingPolicyProvider lets a destination declare where strategy-owned
 // staging tables should live when the user did not configure a staging dataset.
 type ManagedStagingPolicyProvider interface {
 	ManagedStagingPolicy() ReplaceStagingPolicy
+}
+
+// ManagedCDCStateCatalogProvider supplies the connected catalog/project when
+// a CDC state table has no target anchor from which to derive one.
+type ManagedCDCStateCatalogProvider interface {
+	ManagedCDCStateCatalog() string
 }

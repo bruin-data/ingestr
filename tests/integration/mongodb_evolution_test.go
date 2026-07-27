@@ -228,6 +228,71 @@ func TestMongoDB_SchemaEvolution_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestMongoDB_NumericExtractPartitioning_EndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	mc, err := tcmongo.Run(
+		ctx, "mongo:7",
+		tcmongo.WithUsername("admin"),
+		tcmongo.WithPassword("admin"),
+	)
+	require.NoError(t, err, "start mongo container")
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(mc) })
+
+	mongoURI, err := mc.ConnectionString(ctx)
+	require.NoError(t, err)
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Disconnect(ctx) })
+
+	coll := client.Database("partitioned").Collection("events")
+	docs := make([]any, 0, 1002)
+	for i := int64(1); i <= 1000; i++ {
+		docs = append(docs, bson.M{"id": i, "payload": bson.M{"value": i}})
+	}
+	docs = append(
+		docs,
+		bson.M{"id": nil, "payload": bson.M{"value": "null"}},
+		bson.M{"payload": bson.M{"value": "missing"}},
+	)
+	_, err = coll.InsertMany(ctx, docs)
+	require.NoError(t, err)
+	_, err = coll.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "id", Value: 1}}})
+	require.NoError(t, err)
+
+	sqlitePath := filepath.Join(t.TempDir(), "partitioned.db")
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = mongoURI
+	cfg.SourceTable = "partitioned.events"
+	cfg.DestURI = "sqlite:///" + sqlitePath
+	cfg.DestTable = "events"
+	cfg.IncrementalStrategy = config.StrategyAppend
+	cfg.ExtractPartitionBy = "id"
+	cfg.ExtractPartitionAuto = true
+	cfg.ExtractParallelism = 4
+	cfg.PageSize = 25
+	cfg.Yes = true
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	conn, err := sql.Open("sqlite3", sqlitePath)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	var count, idCount, distinctIDs int
+	var idSum int64
+	require.NoError(t, conn.QueryRow(`
+		SELECT COUNT(*), COUNT(id), COUNT(DISTINCT id), COALESCE(SUM(id), 0)
+		FROM events
+	`).Scan(&count, &idCount, &distinctIDs, &idSum))
+	require.Equal(t, 1002, count)
+	require.Equal(t, 1000, idCount)
+	require.Equal(t, 1000, distinctIDs)
+	require.Equal(t, int64(500500), idSum)
+}
+
 func mixedBatchDocs(numInts, numStrings int) []any {
 	docs := make([]any, 0, numInts+numStrings)
 	for i := range numInts {

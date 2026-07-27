@@ -120,13 +120,12 @@ For nested namespaces, use dot-separated identifiers such as `lake.analytics.eve
 
 ## Supported write dispositions
 
-Iceberg supports `append`, `replace`, `merge`, `delete+insert`, `truncate+insert`, and `scd2`.
+Iceberg supports `append`, `replace`, `merge`, `delete+insert`, and `scd2`.
 
 `replace` writes a new Iceberg overwrite snapshot for the destination table. The incremental strategies are implemented natively: each run stages the incoming rows in a temporary Iceberg table and then commits a single atomic snapshot with the changes.
 
 - `merge` upserts by primary key: rows with duplicate primary keys are deduplicated (the highest `--incremental-key` value wins when one is set), existing rows are updated in place, and net-new rows are inserted. CDC streams are merged with delete awareness.
 - `delete+insert` deletes the rows whose incremental key falls inside the loaded interval and inserts the staged rows (deduplicated by primary key when one is set).
-- `truncate+insert` empties the table in place (keeping schema, partition spec, and history) and reloads it.
 - `scd2` maintains slowly-changing-dimension history with `_scd_valid_from`, `_scd_valid_to`, and `_scd_is_current` columns.
 
 ### Merge modes and memory usage

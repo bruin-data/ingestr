@@ -449,8 +449,8 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 }
 
 func TestDialect_SupportsAlterType(t *testing.T) {
-	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse"}
-	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "fabric", "maxcompute", "oracle"}
+	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse", "fabric"}
+	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "maxcompute", "oracle"}
 
 	for _, scheme := range dialectsWithAlter {
 		t.Run(scheme+"_supports", func(t *testing.T) {

@@ -2,7 +2,10 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,15 +14,475 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type postgresStatementDescriberStub struct {
+	name         string
+	sql          string
+	paramOIDs    []uint32
+	prepareCalls int
+	description  *pgconn.StatementDescription
+}
+
+func (s *postgresStatementDescriberStub) Prepare(_ context.Context, name, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+	s.name = name
+	s.sql = sql
+	s.paramOIDs = paramOIDs
+	s.prepareCalls++
+	if s.description != nil {
+		return s.description, nil
+	}
+	return &pgconn.StatementDescription{}, nil
+}
+
+type postgresResolverStub struct {
+	query  string
+	schema string
+	table  string
+}
+
+func (s *postgresResolverStub) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
+	s.query = query
+	return postgresResolverRow{schema: s.schema, table: s.table}
+}
+
+type postgresResolverRow struct {
+	schema string
+	table  string
+}
+
+func (r postgresResolverRow) Scan(dest ...any) error {
+	*dest[0].(*string) = r.schema
+	*dest[1].(*string) = r.table
+	return nil
+}
+
+type postgresIncarnationTxStub struct {
+	pgx.Tx
+	execSQL   string
+	queryArgs []any
+}
+
+func (s *postgresIncarnationTxStub) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	s.execSQL = sql
+	return pgconn.NewCommandTag("LOCK TABLE"), nil
+}
+
+func (s *postgresIncarnationTxStub) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
+	s.queryArgs = args
+	return postgresIncarnationRow{}
+}
+
+type postgresIncarnationRow struct{}
+
+func (postgresIncarnationRow) Scan(dest ...any) error {
+	*dest[0].(*string) = "database-oid"
+	*dest[1].(*string) = "relation-oid"
+	*dest[2].(*string) = "r"
+	return nil
+}
+
+type postgresPrimaryKeyResolverStub struct {
+	query string
+	args  []any
+	keys  []string
+	err   error
+}
+
+func (s *postgresPrimaryKeyResolverStub) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
+	s.query = query
+	s.args = args
+	return postgresPrimaryKeyRow{keys: s.keys, err: s.err}
+}
+
+type postgresPrimaryKeyRow struct {
+	keys []string
+	err  error
+}
+
+func (r postgresPrimaryKeyRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*dest[0].(*[]string) = slices.Clone(r.keys)
+	return nil
+}
+
+func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
+	dest := NewPostgresDestination()
+	resolver := &postgresResolverStub{schema: "tenant_a", table: "orders"}
+
+	schemaName, tableName, err := dest.resolveSchemaTable(t.Context(), resolver, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schemaName != "tenant_a" || tableName != "orders" {
+		t.Fatalf("resolveSchemaTable() = %q.%q", schemaName, tableName)
+	}
+	if !strings.Contains(resolver.query, "to_regclass($1)") || !strings.Contains(resolver.query, "current_schema()") {
+		t.Fatalf("resolver query does not honor existing table resolution and search_path: %s", resolver.query)
+	}
+}
+
+func TestPostgresPrimaryKeyColumnsUsesResolvedIdentifiers(t *testing.T) {
+	resolver := &postgresPrimaryKeyResolverStub{keys: []string{"part", "id"}}
+
+	got, err := postgresPrimaryKeyColumns(t.Context(), resolver, "CaseSchema", "order.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"part", "id"}) {
+		t.Fatalf("postgresPrimaryKeyColumns() = %v", got)
+	}
+	if !reflect.DeepEqual(resolver.args, []any{"CaseSchema", "order.events"}) {
+		t.Fatalf("query args = %v", resolver.args)
+	}
+	if !strings.Contains(resolver.query, "FROM pg_catalog.pg_constraint") ||
+		!strings.Contains(resolver.query, "ORDER BY key_column.ordinality") {
+		t.Fatalf("primary key query does not select the ordered constraint columns: %s", resolver.query)
+	}
+}
+
+func TestPostgresPrimaryKeySetsEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected []string
+		actual   []string
+		want     bool
+	}{
+		{name: "single", expected: []string{"id"}, actual: []string{"id"}, want: true},
+		{name: "composite order is irrelevant", expected: []string{"id", "part"}, actual: []string{"part", "id"}, want: true},
+		{name: "missing", expected: []string{"id", "part"}, actual: []string{"id"}},
+		{name: "extra", expected: []string{"id"}, actual: []string{"id", "part"}},
+		{name: "different", expected: []string{"id"}, actual: []string{"part"}},
+		{name: "quoted identifiers remain case sensitive", expected: []string{"id"}, actual: []string{"ID"}},
+		{name: "duplicate expected key is not collapsed", expected: []string{"id", "id"}, actual: []string{"id", "part"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := postgresPrimaryKeySetsEqual(tt.expected, tt.actual); got != tt.want {
+				t.Fatalf("postgresPrimaryKeySetsEqual(%v, %v) = %v, want %v", tt.expected, tt.actual, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildPredicateMergeSQLUsesPredicateForUpdateAndInsertMatch(t *testing.T) {
+	predicate := `target."event_date" >= CURRENT_DATE - INTERVAL '7 days'`
+	sql := buildPredicateMergeSQL(
+		`"public"."events"`,
+		`"staging"."events"`,
+		[]string{"id"},
+		quoteColumns([]string{"id", "event_date", "value"}),
+		[]string{"event_date", "value"},
+		`"id"`,
+		predicate,
+		false,
+	)
+
+	matchCondition := `target."id" = source."id" AND (` + predicate + `)`
+	if count := strings.Count(sql, matchCondition); count != 2 {
+		t.Fatalf("predicate match condition appears %d times, want 2:\n%s", count, sql)
+	}
+	if !strings.Contains(sql, `UPDATE "public"."events" AS target`) {
+		t.Fatalf("expected target update in predicate merge SQL:\n%s", sql)
+	}
+	if !strings.Contains(sql, `WHERE NOT EXISTS (SELECT 1 FROM "public"."events" AS target WHERE `+matchCondition+`)`) {
+		t.Fatalf("expected guarded insert in predicate merge SQL:\n%s", sql)
+	}
+	if strings.Contains(sql, "ON CONFLICT") {
+		t.Fatalf("predicate merge SQL must not use ON CONFLICT:\n%s", sql)
+	}
+}
+
+func TestBuildMergeStagingSelectSkipsDedupForUniquePrimaryKeys(t *testing.T) {
+	columns := quoteColumns([]string{"id", "value"})
+	unique := buildMergeStagingSelect(`"staging"."events"`, `"id"`, columns, `"id"`, true)
+	if strings.Contains(unique, "DISTINCT ON") {
+		t.Fatalf("unique staging select unexpectedly deduplicates: %s", unique)
+	}
+
+	uncertain := buildMergeStagingSelect(`"staging"."events"`, `"id"`, columns, `"id"`, false)
+	if !strings.Contains(uncertain, `DISTINCT ON ("id")`) {
+		t.Fatalf("uncertain staging select does not deduplicate: %s", uncertain)
+	}
+}
+
+func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     destination.TruncateInsertFromStagingOptions
+		contains string
+		excludes string
+	}{
+		{
+			name: "keyless",
+			opts: destination.TruncateInsertFromStagingOptions{
+				StagingTable: "_bruin_staging.events",
+				TargetTable:  "public.events",
+				Columns:      []string{"id", "value"},
+			},
+			contains: `SELECT "id", "value" FROM "_bruin_staging"."events"`,
+			excludes: "DISTINCT ON",
+		},
+		{
+			name: "unique keys",
+			opts: destination.TruncateInsertFromStagingOptions{
+				StagingTable:             "_bruin_staging.events",
+				TargetTable:              "public.events",
+				PrimaryKeys:              []string{"id"},
+				StagingPrimaryKeysUnique: true,
+				Columns:                  []string{"id", "value"},
+			},
+			contains: `SELECT "id", "value" FROM "_bruin_staging"."events"`,
+			excludes: "DISTINCT ON",
+		},
+		{
+			name: "uncertain keys",
+			opts: destination.TruncateInsertFromStagingOptions{
+				StagingTable:   "_bruin_staging.events",
+				TargetTable:    "public.events",
+				PrimaryKeys:    []string{"id"},
+				Columns:        []string{"id", "updated_at", "value"},
+				IncrementalKey: "updated_at",
+			},
+			contains: `SELECT DISTINCT ON ("id") "id", "updated_at", "value" FROM "_bruin_staging"."events" ORDER BY "id", "updated_at" DESC`,
+			excludes: "ON CONFLICT",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(tt.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if truncateSQL != `TRUNCATE TABLE "public"."events"` {
+				t.Fatalf("truncate SQL = %q", truncateSQL)
+			}
+			if !strings.Contains(insertSQL, tt.contains) {
+				t.Fatalf("insert SQL does not contain %q:\n%s", tt.contains, insertSQL)
+			}
+			if strings.Contains(insertSQL, tt.excludes) {
+				t.Fatalf("insert SQL unexpectedly contains %q:\n%s", tt.excludes, insertSQL)
+			}
+		})
+	}
+}
+
+func TestBuildTruncateInsertFromStagingSQLRequiresColumns(t *testing.T) {
+	_, _, err := buildTruncateInsertFromStagingSQL(destination.TruncateInsertFromStagingOptions{})
+	if err == nil {
+		t.Fatal("expected missing column error")
+	}
+}
+
+func TestDescribePostgresStatementUsesAnonymousPreparedStatement(t *testing.T) {
+	describer := &postgresStatementDescriberStub{}
+	const sql = `select "id" from "public"."events"`
+
+	if _, err := describePostgresStatement(t.Context(), describer, sql); err != nil {
+		t.Fatal(err)
+	}
+	if describer.name != "" {
+		t.Fatalf("prepared statement name = %q, want anonymous statement", describer.name)
+	}
+	if describer.sql != sql {
+		t.Fatalf("prepared statement SQL = %q, want %q", describer.sql, sql)
+	}
+	if describer.paramOIDs != nil {
+		t.Fatalf("prepared statement parameter OIDs = %v, want nil", describer.paramOIDs)
+	}
+}
+
+func TestPostgresCopyPlanCacheReusesDescriptionForRecordSchema(t *testing.T) {
+	builder := array.NewInt32Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	values := builder.NewArray()
+	builder.Release()
+	defer values.Release()
+
+	recordSchema := arrow.NewSchema([]arrow.Field{{Name: "event id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	record := array.NewRecordBatch(recordSchema, []arrow.Array{values}, 1)
+	defer record.Release()
+
+	describer := &postgresStatementDescriberStub{
+		description: &pgconn.StatementDescription{
+			Fields: []pgconn.FieldDescription{{DataTypeOID: pgtype.Int4OID}},
+		},
+	}
+	cache := make(postgresCopyPlanCache)
+
+	first, err := cache.get(t.Context(), describer, record, "analytics.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := cache.get(t.Context(), describer, record, "analytics.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first != second {
+		t.Fatal("copy plan cache returned a different plan for the same Arrow schema")
+	}
+	if describer.prepareCalls != 1 {
+		t.Fatalf("Prepare() calls = %d, want 1", describer.prepareCalls)
+	}
+	if !reflect.DeepEqual(first.oids, []uint32{pgtype.Int4OID}) {
+		t.Fatalf("copy plan OIDs = %v, want [%d]", first.oids, pgtype.Int4OID)
+	}
+	if first.copySQL != `copy "analytics"."events" ("event id") from stdin binary` {
+		t.Fatalf("copy plan SQL = %q", first.copySQL)
+	}
+}
+
+func TestClaimCDCTargetRejectsInvalidNameBeforeTransaction(t *testing.T) {
+	dest := NewPostgresDestination()
+	claim := func(table string) destination.CDCTargetClaim {
+		return destination.CDCTargetClaim{DestinationTable: table, ConnectorID: "connector-a", SourceTable: "public.orders"}
+	}
+
+	for _, table := range []string{
+		"db.public.orders",
+		strings.Repeat("s", 64) + ".orders",
+		"public." + strings.Repeat("t", 64),
+	} {
+		t.Run(table, func(t *testing.T) {
+			err := dest.ClaimCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim(table))
+			if err == nil {
+				t.Fatal("ClaimCDCTarget() returned nil, want validation error before transaction")
+			}
+		})
+	}
+}
+
+func TestValidatePostgresClaimTargetAcceptsIdentifierLimit(t *testing.T) {
+	wantSchema := strings.Repeat("s", 63)
+	wantTable := strings.Repeat("t", 63)
+	parts, err := validatePostgresClaimTarget(wantSchema + "." + wantTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parts, []string{wantSchema, wantTable}) {
+		t.Fatalf("validatePostgresClaimTarget() = %v", parts)
+	}
+}
+
+func TestMapPostgresColumnTypePreservesArrayElementType(t *testing.T) {
+	tests := []struct {
+		udt  string
+		want schema.DataType
+	}{
+		{"_bool", schema.TypeBoolean},
+		{"_int2", schema.TypeInt16},
+		{"_int4", schema.TypeInt32},
+		{"_int8", schema.TypeInt64},
+		{"_float4", schema.TypeFloat32},
+		{"_float8", schema.TypeFloat64},
+		{"_numeric", schema.TypeDecimal},
+		{"_text", schema.TypeString},
+		{"_varchar", schema.TypeString},
+		{"_bpchar", schema.TypeString},
+		{"_bytea", schema.TypeBinary},
+		{"_date", schema.TypeDate},
+		{"_time", schema.TypeTime},
+		{"_timestamp", schema.TypeTimestamp},
+		{"_timestamptz", schema.TypeTimestampTZ},
+		{"_interval", schema.TypeInterval},
+		{"_json", schema.TypeJSON},
+		{"_jsonb", schema.TypeJSON},
+		{"_uuid", schema.TypeUUID},
+		{"_custom_enum", schema.TypeString},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.udt, func(t *testing.T) {
+			dataType, arrayType := mapPostgresColumnType("ARRAY", tt.udt)
+			if dataType != schema.TypeArray || arrayType != tt.want {
+				t.Fatalf("mapPostgresColumnType(ARRAY, %q) = (%v, %v), want (%v, %v)", tt.udt, dataType, arrayType, schema.TypeArray, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapPostgresColumnTypeScalarHasNoArrayElement(t *testing.T) {
+	dataType, arrayType := mapPostgresColumnType("integer", "int4")
+	if dataType != schema.TypeInt32 || arrayType != schema.TypeUnknown {
+		t.Fatalf("mapPostgresColumnType(integer, int4) = (%v, %v), want (%v, %v)", dataType, arrayType, schema.TypeInt32, schema.TypeUnknown)
+	}
+}
+
+func TestResolvedMultiTableNameFitsPostgresClaimLimit(t *testing.T) {
+	sourceTable := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
+	resolved := destination.ResolveMultiTableName("postgres", nil, "landing", sourceTable)
+	parts, err := validatePostgresClaimTarget(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 || parts[0] != "landing" || len(parts[1]) > destination.MaxIdentifierLength("postgres") {
+		t.Fatalf("resolved PostgreSQL multi-table target = %q (%v)", resolved, parts)
+	}
+}
 
 func TestBuildDeleteInsertLockSQL(t *testing.T) {
 	got := buildDeleteInsertLockSQL(`"public"."orders"`)
 	want := `LOCK TABLE "public"."orders" IN EXCLUSIVE MODE`
 	if got != want {
 		t.Fatalf("buildDeleteInsertLockSQL() = %q, want %q", got, want)
+	}
+}
+
+func TestParseSchemaTableCanonicalizesQuotedComponents(t *testing.T) {
+	schemaName, tableName := parseSchemaTable(`"public"."orders"`)
+	if schemaName != "public" || tableName != "orders" {
+		t.Fatalf("parseSchemaTable() = %q.%q", schemaName, tableName)
+	}
+}
+
+func TestQuotePostgresTablePreservesDottedIdentifierBoundary(t *testing.T) {
+	got := quotePostgresTable("tenant", "order.events_old_123")
+	if got != `"tenant"."order.events_old_123"` {
+		t.Fatalf("quotePostgresTable() = %q", got)
+	}
+}
+
+func TestLockAndValidateCDCIncarnationPreservesDottedIdentifierBoundary(t *testing.T) {
+	dest := NewPostgresDestination()
+	tx := &postgresIncarnationTxStub{}
+	expected := destination.CDCTargetKey("database-oid", "relation-oid", "r")
+
+	resolved, err := dest.lockAndValidateCDCIncarnation(
+		t.Context(),
+		tx,
+		`"public"."order.events"`,
+		expected,
+		"ACCESS EXCLUSIVE",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != `"public"."order.events"` {
+		t.Fatalf("resolved table = %q", resolved)
+	}
+	if tx.execSQL != `LOCK TABLE "public"."order.events" IN ACCESS EXCLUSIVE MODE` {
+		t.Fatalf("lock SQL = %q", tx.execSQL)
+	}
+	if len(tx.queryArgs) != 1 || tx.queryArgs[0] != `"public"."order.events"` {
+		t.Fatalf("incarnation query args = %v", tx.queryArgs)
+	}
+}
+
+func TestPostgresSwapRejectsOverQualifiedNames(t *testing.T) {
+	dest := NewPostgresDestination()
+	err := dest.SwapTable(t.Context(), destination.SwapOptions{StagingTable: "public.staging", TargetTable: "database.public.orders"})
+	if err == nil || !strings.Contains(err.Error(), "postgres table name") {
+		t.Fatalf("SwapTable() error = %v", err)
 	}
 }
 
@@ -61,6 +524,14 @@ func TestPostgresValueGetterMatchesArrowutilValue(t *testing.T) {
 	}
 }
 
+func TestDialectRelaxColumnNullabilitySQL(t *testing.T) {
+	got := (&Dialect{}).RelaxColumnNullabilitySQL("public.events", "Payload")
+	want := `ALTER TABLE "public"."events" ALTER COLUMN "Payload" DROP NOT NULL`
+	if got != want {
+		t.Fatalf("RelaxColumnNullabilitySQL() = %q, want %q", got, want)
+	}
+}
+
 func TestPostgresValueGettersConvertsUUIDColumns(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	t.Cleanup(func() { mem.AssertSize(t, 0) })
@@ -97,6 +568,35 @@ func TestPostgresValueGettersConvertsUUIDColumns(t *testing.T) {
 	}
 }
 
+func TestPostgresValueGetterPreservesDecimalPrecision(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+
+	dt := &arrow.Decimal128Type{Precision: 38, Scale: 4}
+	b := array.NewDecimal128Builder(mem, dt)
+	defer b.Release()
+	want, err := decimal128.FromString("123456789012345678901234567890.1234", dt.Precision, dt.Scale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Append(want)
+	b.AppendNull()
+	arr := b.NewArray()
+	defer arr.Release()
+
+	get := postgresValueGetter(arr)
+	got, ok := get(0).(pgtype.Numeric)
+	if !ok {
+		t.Fatalf("decimal getter returned %T, want pgtype.Numeric", get(0))
+	}
+	if !got.Valid || got.Exp != -dt.Scale || got.Int.Cmp(want.BigInt()) != 0 {
+		t.Fatalf("decimal getter returned %#v, want unscaled %s with exponent %d", got, want.BigInt(), -dt.Scale)
+	}
+	if got := get(1); got != nil {
+		t.Fatalf("decimal getter null = %#v, want nil", got)
+	}
+}
+
 func postgresTestValuesEqual(left, right any) bool {
 	switch l := left.(type) {
 	case []byte:
@@ -105,6 +605,13 @@ func postgresTestValuesEqual(left, right any) bool {
 	case time.Time:
 		r, ok := right.(time.Time)
 		return ok && l.Equal(r)
+	case pgtype.Numeric:
+		r, ok := right.(float64)
+		if !ok {
+			return false
+		}
+		converted, err := l.Float64Value()
+		return err == nil && converted.Valid && converted.Float64 == r
 	default:
 		return reflect.DeepEqual(left, right)
 	}
