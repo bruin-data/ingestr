@@ -17,12 +17,14 @@ env:
 
 jobs:
   integration-tests:
+    env:
+      TEST_CONCURRENCY: "1"
     strategy:
       matrix:
         platform:
           - depot-ubuntu-latest
           - macos-15
-        suite: ["test", "test-integration"]
+        suite: ["test-full", "test-integration"]
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
