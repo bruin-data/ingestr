@@ -549,8 +549,8 @@ type ExactRowCountWaiter interface {
 }
 
 // TruncateCapable is an optional interface for destinations that can empty a
-// table in place without dropping it. Used by the truncate+insert strategy so
-// dependent objects (views, grants, foreign keys) survive the reload.
+// table in place without dropping it. In-place replace implementations use it
+// so dependent objects (views, grants, foreign keys) survive the reload.
 type TruncateCapable interface {
 	TruncateTable(ctx context.Context, table string) error
 }
@@ -575,7 +575,7 @@ type AtomicTruncateInsertStagingWriter interface {
 }
 
 // StagingTableInserter copies rows from a staging table into an empty target.
-// The truncate+insert strategy uses this for keyless loads after the complete
+// In-place replace implementations use this for keyless loads after the complete
 // source result has landed in staging.
 type StagingTableInserter interface {
 	InsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) error
@@ -588,18 +588,18 @@ type PreparedStagingTableWrite interface {
 }
 
 // StagingTableInsertPreparer validates and prepares a staging insert before a
-// non-atomic truncate+insert finalization starts.
+// non-atomic in-place replacement starts.
 type StagingTableInsertPreparer interface {
 	PrepareInsertFromStaging(ctx context.Context, opts InsertFromStagingOptions) (PreparedStagingTableWrite, error)
 }
 
 // StagingTableMergePreparer validates and prepares a staging merge before a
-// non-atomic truncate+insert finalization starts.
+// non-atomic in-place replacement starts.
 type StagingTableMergePreparer interface {
 	PrepareMergeTable(ctx context.Context, opts MergeOptions) (PreparedStagingTableWrite, error)
 }
 
-// AtomicTruncateInsertSchemaEvolver marks an atomic truncate+insert writer that
+// AtomicTruncateInsertSchemaEvolver marks an atomic in-place replacement writer that
 // commits supported schema evolution and the replacement rows together.
 type AtomicTruncateInsertSchemaEvolver interface {
 	EvolvesTruncateInsertSchemaAtomically() bool

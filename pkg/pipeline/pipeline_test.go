@@ -245,6 +245,20 @@ func TestSourcePreflightRunsBeforeDestinationAndMutatingPreparation(t *testing.T
 	require.False(t, dest.connected, "destination connected before source preflight")
 }
 
+func TestRemovedTruncateInsertIsRejectedBeforeConnectorLookup(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "unregistered-source://source/db"
+	cfg.DestURI = "unregistered-destination://destination/db"
+	cfg.SourceTable = "public.items"
+	cfg.DestTable = "raw.items"
+	cfg.IncrementalStrategy = config.IncrementalStrategy("truncate+insert")
+
+	err := New(cfg).Run(t.Context())
+	require.ErrorContains(t, err, "incremental-strategy")
+	require.ErrorContains(t, err, `"truncate+insert" has been removed; use "replace"`)
+	require.NotContains(t, err.Error(), "failed to get source")
+}
+
 func TestPostgresCDCRejectsUnsupportedStrategiesBeforeConnectorAndStateWork(t *testing.T) {
 	oldSource, err := internalregistry.Default.GetSourceConstructor("postgres+cdc")
 	require.NoError(t, err)
@@ -260,8 +274,7 @@ func TestPostgresCDCRejectsUnsupportedStrategiesBeforeConnectorAndStateWork(t *t
 		{name: "single table effective scd2", strategy: config.StrategySCD2, sourceTable: "public.items"},
 		{name: "multi table effective delete insert", strategy: config.StrategyDeleteInsert},
 		{name: "multi table explicit scd2", strategy: config.StrategySCD2, explicit: true},
-		{name: "single table explicit truncate insert", strategy: config.StrategyTruncateInsert, sourceTable: "public.items", explicit: true},
-		{name: "multi table effective truncate insert", strategy: config.StrategyTruncateInsert},
+		{name: "single table removed truncate insert", strategy: config.IncrementalStrategy("truncate+insert"), sourceTable: "public.items", explicit: true},
 	}
 
 	for _, tt := range tests {
@@ -317,7 +330,6 @@ func TestPostgresCDCManagedStrategyDefaultsRemainValid(t *testing.T) {
 		{name: "empty strategy resolves later"},
 		{name: "explicit replace rewrites to merge", strategy: config.StrategyReplace, explicit: true},
 		{name: "full refresh overrides scd2 with replace", strategy: config.StrategySCD2, explicit: true, fullRefresh: true},
-		{name: "full refresh permits truncate insert override", strategy: config.StrategyTruncateInsert, explicit: true, fullRefresh: true},
 	}
 
 	for _, tt := range tests {
@@ -337,7 +349,6 @@ func TestMySQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
 		config.StrategyAppend,
 		config.StrategyDeleteInsert,
 		config.StrategySCD2,
-		config.StrategyTruncateInsert,
 	} {
 		t.Run(string(strategy), func(t *testing.T) {
 			cfg := config.DefaultConfig()
@@ -361,7 +372,6 @@ func TestMSSQLCDCRejectsNonMergeIncrementalStrategies(t *testing.T) {
 		config.StrategyAppend,
 		config.StrategyDeleteInsert,
 		config.StrategySCD2,
-		config.StrategyTruncateInsert,
 	} {
 		t.Run(string(strategy), func(t *testing.T) {
 			cfg := config.DefaultConfig()
@@ -1481,35 +1491,26 @@ func TestValidateExtractPartitionStrategyAllowsReplace(t *testing.T) {
 	}
 }
 
-func TestValidateExtractPartitionStrategyAllowsAtomicResolvedTruncateInsert(t *testing.T) {
+func TestValidateExtractPartitionStrategyAllowsAtomicPostgresReplace(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ExtractPartitionBy = "created_at"
 	cfg.IncrementalStrategy = config.StrategyReplace
+	cfg.DestURI = "postgres://localhost/db"
 
-	if err := validateExtractPartitionStrategy(cfg, config.StrategyTruncateInsert, &atomicTruncateInsertMockDestination{}); err != nil {
-		t.Fatalf("expected atomic resolved truncate+insert to support extract partitioning, got %v", err)
+	if err := validateExtractPartitionStrategy(cfg, config.StrategyReplace, &atomicTruncateInsertMockDestination{}); err != nil {
+		t.Fatalf("expected atomic PostgreSQL replace to support extract partitioning, got %v", err)
 	}
 }
 
-func TestValidateExtractPartitionStrategyRejectsNonAtomicResolvedTruncateInsert(t *testing.T) {
+func TestValidateExtractPartitionStrategyRejectsNonAtomicPostgresReplace(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ExtractPartitionBy = "created_at"
 	cfg.IncrementalStrategy = config.StrategyReplace
+	cfg.DestURI = "postgres://localhost/db"
 
-	err := validateExtractPartitionStrategy(cfg, config.StrategyTruncateInsert, &mockDestination{})
+	err := validateExtractPartitionStrategy(cfg, config.StrategyReplace, &mockDestination{})
 	if err == nil || !strings.Contains(err.Error(), "cannot stage the complete extract") {
-		t.Fatalf("expected non-atomic resolved truncate+insert validation error, got %v", err)
-	}
-}
-
-func TestValidateExtractPartitionStrategyRejectsExplicitTruncateInsert(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.ExtractPartitionBy = "created_at"
-	cfg.IncrementalStrategy = config.StrategyTruncateInsert
-
-	err := validateExtractPartitionStrategy(cfg, config.StrategyTruncateInsert, &atomicTruncateInsertMockDestination{})
-	if err == nil || !strings.Contains(err.Error(), "use replace") {
-		t.Fatalf("expected truncate+insert validation error, got %v", err)
+		t.Fatalf("expected non-atomic PostgreSQL replace validation error, got %v", err)
 	}
 }
 

@@ -273,7 +273,7 @@ func (s *MSSQLChangeTrackingSource) ensureTableChangeTracking(ctx context.Contex
 func resolveChangeTrackingStrategy(strategy config.IncrementalStrategy, strategySet, fullRefresh bool) (config.IncrementalStrategy, error) {
 	if fullRefresh {
 		switch strategy {
-		case "", config.StrategyReplace, config.StrategyTruncateInsert, config.StrategyAppend, config.StrategyDeleteInsert, config.StrategyMerge, config.StrategySCD2, config.StrategyNone:
+		case "", config.StrategyReplace, config.StrategyAppend, config.StrategyDeleteInsert, config.StrategyMerge, config.StrategySCD2, config.StrategyNone:
 			return config.StrategyMerge, nil
 		default:
 			return "", fmt.Errorf("SQL Server Change Tracking sources require a valid incremental strategy when full-refresh is enabled; got %q", strategy)

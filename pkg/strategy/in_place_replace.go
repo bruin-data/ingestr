@@ -11,10 +11,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-// TruncateInsertStrategy empties the destination table in place and writes new
-// rows into it. Unlike ReplaceStrategy (which drops + recreates via a staging
-// swap), this preserves the table definition and any dependent objects
-// (views, grants, foreign keys).
+// inPlaceReplaceStrategy implements replace by emptying the destination
+// table in place and loading the replacement rows from staging. It is selected
+// internally for destinations where replacing the table object would break
+// dependent views, grants, or foreign keys.
 //
 // Rows are first written to a staging table and only copied into the target
 // after the source read succeeds. Destinations can finalize the replacement
@@ -22,59 +22,57 @@ import (
 // With primary keys, staging is deduplicated unless the source guarantees that
 // its effective primary keys are unique.
 //
-// Destinations without atomic truncate+insert support retain these tradeoffs:
+// Destinations without atomic finalization retain these tradeoffs:
 //   - Non-atomic: the target is empty between TRUNCATE and the final insert,
 //     so concurrent readers may see an empty result set.
 //   - No rollback: if the insert fails after truncate, the target is left empty.
-//
-// All truncate+insert paths retain these tradeoffs:
-//   - Schema drift: the existing table's schema is preserved as-is; this
-//     strategy does not drop and recreate to pick up schema changes.
-//   - ClickHouse caveat: ClickHouse's merge implementation relies on
-//     ReplacingMergeTree semantics for dedup rather than pre-filtering, so
-//     duplicate PKs in staging will only be collapsed if the target table is
-//     a ReplacingMergeTree.
-type TruncateInsertStrategy struct{}
+type inPlaceReplaceStrategy struct{}
 
-func (s *TruncateInsertStrategy) Name() config.IncrementalStrategy {
-	return config.StrategyTruncateInsert
+// NewInPlaceReplaceStrategy returns the replace implementation used by
+// destinations that must preserve the target table object.
+func NewInPlaceReplaceStrategy() WriteStrategy {
+	return &inPlaceReplaceStrategy{}
 }
 
-func (s *TruncateInsertStrategy) Validate(cfg *config.IngestConfig) error {
+func (s *inPlaceReplaceStrategy) Name() config.IncrementalStrategy {
+	return config.StrategyReplace
+}
+
+func (s *inPlaceReplaceStrategy) Validate(cfg *config.IngestConfig) error {
 	return nil
 }
 
-func (s *TruncateInsertStrategy) RequiresPrimaryKey() bool {
+func (s *inPlaceReplaceStrategy) RequiresPrimaryKey() bool {
 	return false
 }
 
-func (s *TruncateInsertStrategy) RequiresIncrementalKey() bool {
+func (s *inPlaceReplaceStrategy) RequiresIncrementalKey() bool {
 	return false
 }
 
-func (s *TruncateInsertStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+func (s *inPlaceReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	truncator, ok := job.Destination.(destination.TruncateCapable)
 	if !ok {
-		return fmt.Errorf("destination does not support truncate+insert strategy; use replace instead")
+		return fmt.Errorf("destination does not support in-place replace")
 	}
 	return s.executeWithStaging(ctx, job, truncator)
 }
 
-func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
+func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *IngestionJob, truncator destination.TruncateCapable) error {
 	atomicWriter, supportsAtomicFinalize := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
 	stagingInserter, supportsStagingInsert := job.Destination.(destination.StagingTableInserter)
 	stagingInsertPreparer, supportsPreparedStagingInsert := job.Destination.(destination.StagingTableInsertPreparer)
 	stagingMergePreparer, supportsPreparedStagingMerge := job.Destination.(destination.StagingTableMergePreparer)
 	if len(job.Config.PrimaryKeys) > 0 && !supportsAtomicFinalize && !job.Destination.SupportsMergeStrategy() {
-		return fmt.Errorf("destination does not support deduplicated truncate+insert (merge not supported); use replace instead")
+		return fmt.Errorf("destination does not support deduplicated in-place replace (merge not supported)")
 	}
 	if len(job.Config.PrimaryKeys) == 0 && !supportsAtomicFinalize && !supportsStagingInsert && !supportsPreparedStagingInsert {
-		return fmt.Errorf("destination does not support keyless truncate+insert from staging; use replace instead")
+		return fmt.Errorf("destination does not support keyless in-place replace from staging")
 	}
 
 	targetTable := job.Config.DestTable
 	stagingTable := managedStagingTableName(job.Destination, targetTable, "ti", job.Config.StagingDataset)
-	output.Statusf("[TRUNCATE+INSERT] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	output.Statusf("[REPLACE] %s | Using in-place replacement with staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       targetTable,
@@ -179,7 +177,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 		}
 	}
 	if supportsAtomicFinalize {
-		config.Debug("[TRUNCATE+INSERT] Executing atomic insert from staging")
+		config.Debug("[REPLACE] Executing atomic in-place replacement from staging")
 		if err := atomicWriter.TruncateInsertFromStaging(ctx, destination.TruncateInsertFromStagingOptions{
 			StagingTable:             stagingTable,
 			TargetTable:              targetTable,
@@ -209,7 +207,7 @@ func (s *TruncateInsertStrategy) executeWithStaging(ctx context.Context, job *In
 
 	if !job.Config.KeepStaging {
 		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-			config.Debug("[TRUNCATE+INSERT] Warning: failed to drop staging table: %v", err)
+			config.Debug("[REPLACE] Warning: failed to drop staging table: %v", err)
 		}
 	}
 

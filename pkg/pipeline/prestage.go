@@ -26,7 +26,7 @@ type preStageReport struct {
 // files is equivalent.
 func preStageStrategyAllowed(strategy config.IncrementalStrategy) bool {
 	switch strategy {
-	case config.StrategyMerge, config.StrategyReplace, config.StrategyAppend, config.StrategyTruncateInsert:
+	case config.StrategyMerge, config.StrategyReplace, config.StrategyAppend:
 		return true
 	default:
 		return false
@@ -76,8 +76,7 @@ func (p *Pipeline) maybeStartPreStage(
 	}
 
 	usesStagingTable := strategy == config.StrategyMerge ||
-		strategy == config.StrategyReplace ||
-		strategy == config.StrategyTruncateInsert
+		strategy == config.StrategyReplace
 
 	writer, err := prestager.NewPreStageWriter(ctx, destination.PreStageOptions{
 		Table:               p.config.DestTable,

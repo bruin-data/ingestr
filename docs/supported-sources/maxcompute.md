@@ -42,6 +42,6 @@ ingestr ingest \
 
 ## Supported destination strategies
 
-When using MaxCompute as a destination, ingestr supports `replace`, `append`, and `truncate+insert`.
+When using MaxCompute as a destination, ingestr supports `replace` and `append`.
 
 `merge`, `delete+insert`, and `scd2` are not supported for MaxCompute destinations. ingestr also does not expose destination transactions for MaxCompute. The test emulator may use a local SQL transaction internally, but real MaxCompute destinations fail transaction requests instead of returning a no-op transaction wrapper.

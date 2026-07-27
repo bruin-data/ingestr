@@ -242,61 +242,6 @@ func TestIcebergConformance_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 	assert.Equal(t, "v2-4", icebergNameByID(t, rows, 4))
 }
 
-func TestIcebergConformance_TruncateInsert(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	destURI := icebergConformanceDestURI(t)
-	destTable := icebergConformanceTable()
-
-	seedCfg := &config.IngestConfig{
-		SourceURI:           jsonlURI(t, "testdata/conformance_append_initial.jsonl"),
-		SourceTable:         "truncate_seed",
-		DestURI:             destURI,
-		DestTable:           destTable,
-		IncrementalStrategy: config.StrategyReplace,
-	}
-	require.NoError(t, pipeline.New(seedCfg).Run(ctx))
-
-	cfg := &config.IngestConfig{
-		SourceURI:           jsonlURI(t, "testdata/conformance.jsonl"),
-		SourceTable:         "truncate_source",
-		DestURI:             destURI,
-		DestTable:           destTable,
-		IncrementalStrategy: config.StrategyTruncateInsert,
-	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	rows := readIcebergRows(t, ctx, destURI, destTable)
-	assert.Len(t, rows, replaceFixtureRows, "old rows must be gone, not appended")
-	assert.Equal(t, "juliet", icebergNameByID(t, rows, 10))
-}
-
-func TestIcebergConformance_TruncateInsert_Dedup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	destURI := icebergConformanceDestURI(t)
-	destTable := icebergConformanceTable()
-
-	cfg := &config.IngestConfig{
-		SourceURI:           jsonlURI(t, "testdata/conformance_truncate_dupes.jsonl"),
-		SourceTable:         "truncate_dupes",
-		DestURI:             destURI,
-		DestTable:           destTable,
-		IncrementalStrategy: config.StrategyTruncateInsert,
-		PrimaryKeys:         []string{"id"},
-	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	rows := readIcebergRows(t, ctx, destURI, destTable)
-	assert.Len(t, rows, 5, "expected 5 distinct ids after dedup")
-}
-
 func TestIcebergConformance_SCD2(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

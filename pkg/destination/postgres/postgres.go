@@ -1152,7 +1152,7 @@ func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opt
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	config.Debug("[TRUNCATE+INSERT] Atomic staging finalization completed in %v", time.Since(start))
+	config.Debug("[REPLACE] Atomic truncate+insert finalization completed in %v", time.Since(start))
 	return nil
 }
 
