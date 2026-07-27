@@ -3,6 +3,7 @@ package synapse
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -180,6 +181,23 @@ func (d *SynapseDestination) TruncateTable(ctx context.Context, table string) er
 		return fmt.Errorf("failed to truncate table %s: %w", table, err)
 	}
 	config.Debug("[Synapse] Truncated table: %s", table)
+	return nil
+}
+
+func (d *SynapseDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
 	return nil
 }
 
@@ -403,7 +421,7 @@ func (d *SynapseDestination) MergeTable(ctx context.Context, opts destination.Me
 	quotedColumns := quoteColumns(columns)
 	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalKey)
+	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalKey, opts.IncrementalPredicate)
 	config.Debug("[Synapse MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -415,7 +433,7 @@ func (d *SynapseDestination) MergeTable(ctx context.Context, opts destination.Me
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalKey string) string {
+func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalKey, incrementalPredicate string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
@@ -458,7 +476,7 @@ ON %s
 WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		dedupSource,
-		strings.Join(onConditions, " AND "),
+		destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate),
 		updateSet,
 		insertCols,
 		strings.Join(sourceCols, ", "),
@@ -640,6 +658,7 @@ func (t *synapseTransaction) Rollback(ctx context.Context) error {
 func (d *SynapseDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *SynapseDestination) SupportsAppendStrategy() bool       { return true }
 func (d *SynapseDestination) SupportsMergeStrategy() bool        { return true }
+func (d *SynapseDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *SynapseDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *SynapseDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *SynapseDestination) SupportsAtomicSwap() bool           { return true }

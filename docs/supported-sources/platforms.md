@@ -24,6 +24,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 ## Analytics, feedback, and media
 
+- [Adapty](/supported-sources/adapty.md)
 - [G2](/supported-sources/g2.md)
 - [Google Analytics](/supported-sources/google_analytics.md)
 - [Mixpanel](/supported-sources/mixpanel.md)
@@ -48,6 +49,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 - [Apple App Store](/supported-sources/appstore.md)
 - [Chargebee](/supported-sources/chargebee.md)
+- [FastSpring](/supported-sources/fastspring.md)
 - [FundraiseUp](/supported-sources/fundraiseup.md)
 - [Hostaway](/supported-sources/hostaway.md)
 - [Paddle](/supported-sources/paddle.md)

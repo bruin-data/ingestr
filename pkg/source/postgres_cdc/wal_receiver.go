@@ -23,14 +23,23 @@ const standbyStatusInterval = 10 * time.Second
 
 // walMessage is one replication-stream event, delivered to the decoder in
 // arrival order: an XLogData payload (data != nil) or a keepalive's server
-// WAL end position (data == nil). Keepalives travel through the same channel
-// so the decode side's processed position advances strictly in stream order —
-// it must never move past WAL data that has not been decoded yet, or a batch
-// run could confirm undrained WAL to the slot.
+// WAL end observation (data == nil). Keepalives travel through the same channel
+// so the decode side can observe catch-up without treating the server WAL head
+// as decoded or durable progress.
 type walMessage struct {
 	data         []byte
 	walStart     pglogrepl.LSN
 	serverWALEnd pglogrepl.LSN
+	budget       *byteBudget
+	budgetBytes  int64
+}
+
+func (m *walMessage) release() {
+	if m.budget != nil {
+		m.budget.release(m.budgetBytes)
+		m.budget = nil
+		m.budgetBytes = 0
+	}
 }
 
 // walReceiver owns the replication connection after StartReplication: it is
@@ -49,7 +58,7 @@ type walReceiver struct {
 	pos       *streamPosition
 	lag       *lagState
 
-	received atomic.Uint64 // highest LSN received from the server
+	received atomic.Uint64 // highest XLogData WAL start received from the server
 
 	msgs   chan walMessage
 	errc   chan error
@@ -59,16 +68,17 @@ type walReceiver struct {
 	// savedErr caches the receiver's terminal error after the decode side
 	// first reads it (errc only delivers once). Decode-side access only.
 	savedErr error
+	budget   *byteBudget
 }
 
-func startWALReceiver(ctx context.Context, conn *pgconn.PgConn, streaming bool, startLSN pglogrepl.LSN, pos *streamPosition, lag *lagState) *walReceiver {
-	return startWALReceiverFuncs(
+func startWALReceiverWithBudget(ctx context.Context, conn *pgconn.PgConn, streaming bool, startLSN pglogrepl.LSN, pos *streamPosition, lag *lagState, budget *byteBudget) *walReceiver {
+	return startWALReceiverFuncsWithBudget(
 		ctx,
 		conn.ReceiveMessage,
 		func(ctx context.Context, ssu pglogrepl.StandbyStatusUpdate) error {
-			return pglogrepl.SendStandbyStatusUpdate(ctx, conn, ssu)
+			return sendStandbyStatusUpdate(ctx, conn, ssu)
 		},
-		streaming, startLSN, pos, lag,
+		streaming, startLSN, pos, lag, budget,
 	)
 }
 
@@ -80,6 +90,19 @@ func startWALReceiverFuncs(
 	startLSN pglogrepl.LSN,
 	pos *streamPosition,
 	lag *lagState,
+) *walReceiver {
+	return startWALReceiverFuncsWithBudget(ctx, receive, sendStatusUpdate, streaming, startLSN, pos, lag, newByteBudget(defaultWALBufferBytes))
+}
+
+func startWALReceiverFuncsWithBudget(
+	ctx context.Context,
+	receive func(ctx context.Context) (pgproto3.BackendMessage, error),
+	sendStatusUpdate func(ctx context.Context, ssu pglogrepl.StandbyStatusUpdate) error,
+	streaming bool,
+	startLSN pglogrepl.LSN,
+	pos *streamPosition,
+	lag *lagState,
+	budget *byteBudget,
 ) *walReceiver {
 	rctx, cancel := context.WithCancel(ctx)
 	r := &walReceiver{
@@ -93,6 +116,7 @@ func startWALReceiverFuncs(
 		errc:             make(chan error, 1),
 		done:             make(chan struct{}),
 		cancel:           cancel,
+		budget:           budget,
 	}
 	r.received.Store(uint64(startLSN))
 	go r.run(rctx)
@@ -103,6 +127,14 @@ func startWALReceiverFuncs(
 func (r *walReceiver) stop() {
 	r.cancel()
 	<-r.done
+	for {
+		select {
+		case message := <-r.msgs:
+			message.release()
+		default:
+			return
+		}
+	}
 }
 
 func (r *walReceiver) receivedLSN() pglogrepl.LSN {
@@ -206,7 +238,6 @@ func (r *walReceiver) run(ctx context.Context) {
 				r.fail(fmt.Errorf("failed to parse keepalive: %w", err))
 				return
 			}
-			r.noteReceived(pkm.ServerWALEnd)
 			r.lag.observe(pkm.ServerWALEnd)
 			if pkm.ReplyRequested {
 				if err := r.sendStatus(ctx, false); err != nil {
@@ -229,10 +260,24 @@ func (r *walReceiver) run(ctx context.Context) {
 			// ServerWALEnd, not WALStart: during a long burst with no
 			// interleaved keepalive it is the only fresh view of the head.
 			r.lag.observe(xld.ServerWALEnd)
+			if err := r.budget.reserveWithHeartbeat(ctx, int64(len(xld.WALData)), standbyStatusInterval, func() error {
+				if err := r.sendStatus(ctx, false); err != nil {
+					return fmt.Errorf("failed to send standby status while waiting for WAL buffer space (replication connection lost): %w", err)
+				}
+				lastStatus = time.Now()
+				return nil
+			}); err != nil {
+				if ctx.Err() == nil {
+					r.fail(err)
+				}
+				return
+			}
 			// Copy: pgconn's message buffer is only valid until the next
 			// receive, and this payload sits in the channel while the socket
 			// keeps draining.
-			if !r.deliver(ctx, walMessage{data: append([]byte(nil), xld.WALData...), walStart: xld.WALStart}, &lastStatus) {
+			message := walMessage{data: append([]byte(nil), xld.WALData...), walStart: xld.WALStart, serverWALEnd: xld.ServerWALEnd, budget: r.budget, budgetBytes: int64(len(xld.WALData))}
+			if !r.deliver(ctx, message, &lastStatus) {
+				message.release()
 				return
 			}
 		}

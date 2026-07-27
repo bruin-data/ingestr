@@ -5,16 +5,48 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
+type releaseCountingBatch struct{ releases *atomic.Int64 }
+
+func (b *releaseCountingBatch) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (b *releaseCountingBatch) Release()                     { b.releases.Add(1) }
+func (b *releaseCountingBatch) Retain()                      {}
+func (b *releaseCountingBatch) Schema() *arrow.Schema        { return nil }
+func (b *releaseCountingBatch) NumRows() int64               { return 0 }
+func (b *releaseCountingBatch) NumCols() int64               { return 0 }
+func (b *releaseCountingBatch) Columns() []arrow.Array       { return nil }
+func (b *releaseCountingBatch) Column(int) arrow.Array       { return nil }
+func (b *releaseCountingBatch) ColumnName(int) string        { return "" }
+func (b *releaseCountingBatch) SetColumn(int, arrow.Array) (arrow.RecordBatch, error) {
+	return nil, nil
+}
+func (b *releaseCountingBatch) NewSlice(int64, int64) arrow.RecordBatch { return b }
+
 type fakeDestination struct {
 	writeFn func(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error
+}
+
+type truncatingFakeDestination struct {
+	*fakeDestination
+	mu        sync.Mutex
+	truncated []string
+}
+
+func (d *truncatingFakeDestination) TruncateTable(_ context.Context, table string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.truncated = append(d.truncated, table)
+	return nil
 }
 
 func (d *fakeDestination) Schemes() []string                             { return nil }
@@ -191,6 +223,74 @@ func TestWriteRouterDeadlock(t *testing.T) {
 	}
 }
 
+func TestWriteFailureCancelsProducerAndReleasesEveryBatchOnce(t *testing.T) {
+	dest := &fakeDestination{writeFn: func(context.Context, <-chan source.RecordBatchResult, destination.WriteOptions) error {
+		return errors.New("early write failure")
+	}}
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	releases := make([]atomic.Int64, 32)
+	records := make(chan source.RecordBatchResult)
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer close(records)
+		for i := range releases {
+			batch := &releaseCountingBatch{releases: &releases[i]}
+			select {
+			case records <- source.RecordBatchResult{TableName: "items", Batch: batch}:
+			case <-readCtx.Done():
+				batch.Release()
+				for j := i + 1; j < len(releases); j++ {
+					(&releaseCountingBatch{releases: &releases[j]}).Release()
+				}
+				return
+			}
+		}
+	}()
+
+	err := Write(context.Background(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{"items": {DestTable: "raw.items"}},
+		CancelSource: cancelRead,
+	})
+	if err == nil || !strings.Contains(err.Error(), "early write failure") {
+		t.Fatalf("Write() error = %v, want early write failure", err)
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("source producer remained blocked after table writer failure")
+	}
+	for i := range releases {
+		if got := releases[i].Load(); got != 1 {
+			t.Fatalf("batch %d release count = %d, want 1", i, got)
+		}
+	}
+}
+
+func TestWriteFailureReturnsWhenCanceledProducerNeverCloses(t *testing.T) {
+	dest := &fakeDestination{writeFn: func(context.Context, <-chan source.RecordBatchResult, destination.WriteOptions) error {
+		return errors.New("early write failure")
+	}}
+	var releases atomic.Int64
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: "items", Batch: &releaseCountingBatch{releases: &releases}}
+
+	started := time.Now()
+	err := Write(context.Background(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{"items": {DestTable: "raw.items"}},
+		CancelSource: func() {},
+	})
+	if err == nil || !strings.Contains(err.Error(), "early write failure") {
+		t.Fatalf("Write() error = %v, want early write failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Write() waited %s for a canceled producer that never closed", elapsed)
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("batch release count = %d, want 1", got)
+	}
+}
+
 // TestWriteDoesNotDeadlockWithScarceSharedResourceScopedPerBatch models the
 // Snowflake connection-pool exhaustion deadlock generically: many tables
 // each spawn several workers (numTables * parallelism exceeds the size of a
@@ -279,5 +379,47 @@ func TestWriteReturnsParentContextError(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Write error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWriteWithResultSplitsTableAtTruncate(t *testing.T) {
+	var (
+		mu            sync.Mutex
+		segmentCounts []int
+	)
+	base := &fakeDestination{writeFn: func(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+		count := 0
+		for range records {
+			count++
+		}
+		mu.Lock()
+		segmentCounts = append(segmentCounts, count)
+		mu.Unlock()
+		return nil
+	}}
+	dest := &truncatingFakeDestination{fakeDestination: base}
+	records := make(chan source.RecordBatchResult, 4)
+	records <- source.RecordBatchResult{TableName: "items"}
+	records <- source.RecordBatchResult{TableName: "items"}
+	records <- source.RecordBatchResult{TableName: "items", Truncate: true}
+	records <- source.RecordBatchResult{TableName: "items"}
+	close(records)
+
+	result, err := WriteWithResult(context.Background(), dest, records, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{
+			"items": {DestTable: "raw.items"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TruncatedTables["items"] {
+		t.Fatal("truncate was not reported for items")
+	}
+	if got := dest.truncated; len(got) != 1 || got[0] != "raw.items" {
+		t.Fatalf("truncate calls = %v, want [raw.items]", got)
+	}
+	if len(segmentCounts) != 2 || segmentCounts[0] != 2 || segmentCounts[1] != 1 {
+		t.Fatalf("segment counts = %v, want [2 1]", segmentCounts)
 	}
 }

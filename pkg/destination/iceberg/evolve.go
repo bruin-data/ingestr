@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	iceberggo "github.com/apache/iceberg-go"
 	icebergtable "github.com/apache/iceberg-go/table"
@@ -68,6 +69,13 @@ func (d *Destination) stageSchemaComparisonUpdate(txn *icebergtable.Transaction,
 				return false, err
 			}
 			changed = changed || applied
+
+		case schemaevolution.ChangeRemoveColumn, schemaevolution.ChangeRelaxNullability:
+			applied, err := stageIcebergRelaxColumn(update, tbl, change.ColumnName)
+			if err != nil {
+				return false, err
+			}
+			changed = changed || applied
 		}
 	}
 
@@ -102,13 +110,25 @@ func stageIcebergUpdateColumn(update *icebergtable.UpdateSchema, tbl *icebergtab
 
 	changed := false
 	if !field.Type.Equals(targetType) {
-		if _, err := iceberggo.PromoteType(field.Type, targetType); err != nil {
-			return false, fmt.Errorf("iceberg: column %q type change from %s to %s is not supported: %w", colName, field.Type, targetType, err)
+		oldList, oldIsList := field.Type.(*iceberggo.ListType)
+		newList, newIsList := targetType.(*iceberggo.ListType)
+		if oldIsList && newIsList {
+			if _, err := iceberggo.PromoteType(oldList.Element, newList.Element); err != nil {
+				return false, fmt.Errorf("iceberg: column %q array element change from %s to %s is not supported: %w", colName, oldList.Element, newList.Element, err)
+			}
+			update.UpdateColumn([]string{colName, "element"}, icebergtable.ColumnUpdate{
+				FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: newList.Element},
+			})
+			changed = true
+		} else {
+			if _, err := iceberggo.PromoteType(field.Type, targetType); err != nil {
+				return false, fmt.Errorf("iceberg: column %q type change from %s to %s is not supported: %w", colName, field.Type, targetType, err)
+			}
+			update.UpdateColumn([]string{colName}, icebergtable.ColumnUpdate{
+				FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: targetType},
+			})
+			changed = true
 		}
-		update.UpdateColumn([]string{colName}, icebergtable.ColumnUpdate{
-			FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: targetType},
-		})
-		changed = true
 	}
 	if field.Required && col.Nullable {
 		update.UpdateColumn([]string{colName}, icebergtable.ColumnUpdate{
@@ -117,4 +137,18 @@ func stageIcebergUpdateColumn(update *icebergtable.UpdateSchema, tbl *icebergtab
 		changed = true
 	}
 	return changed, nil
+}
+
+func stageIcebergRelaxColumn(update *icebergtable.UpdateSchema, tbl *icebergtable.Table, colName string) (bool, error) {
+	field, ok := tbl.Schema().FindFieldByName(colName)
+	if !ok || !field.Required {
+		return false, nil
+	}
+	if slices.Contains(tbl.Schema().IdentifierFieldIDs, field.ID) {
+		return false, fmt.Errorf("iceberg: cannot relax identifier column %q", colName)
+	}
+	update.UpdateColumn([]string{colName}, icebergtable.ColumnUpdate{
+		Required: iceberggo.Optional[bool]{Valid: true, Val: false},
+	})
+	return true, nil
 }

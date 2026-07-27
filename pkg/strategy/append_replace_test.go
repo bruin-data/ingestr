@@ -3,16 +3,20 @@ package strategy
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/stretchr/testify/require"
 )
 
 func singleBatchRecords(t *testing.T, rows ...int64) <-chan source.RecordBatchResult {
@@ -170,6 +174,83 @@ func TestAppendStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+func TestAppendStrategy_CDCForwardsResumeAndAppliesSnapshotBoundary(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	job.Config.CDCResumeLSN = "00000000/0000002A"
+	job.Config.CDCSlotSuffix = "abc123"
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Truncate: true})
+
+	if err := (&AppendStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if src.readOpts.CDCResumeLSN != job.Config.CDCResumeLSN {
+		t.Fatalf("CDCResumeLSN = %q, want %q", src.readOpts.CDCResumeLSN, job.Config.CDCResumeLSN)
+	}
+	if src.readOpts.CDCSlotSuffix != job.Config.CDCSlotSuffix {
+		t.Fatalf("CDCSlotSuffix = %q, want %q", src.readOpts.CDCSlotSuffix, job.Config.CDCSlotSuffix)
+	}
+	if !src.readOpts.CDCSnapshotReplace {
+		t.Fatal("snapshot replacement not enabled for truncate-capable CDC destination")
+	}
+	if len(dest.truncateCalls) != 1 || dest.truncateCalls[0] != job.Config.DestTable {
+		t.Fatalf("truncate calls = %v, want [%s]", dest.truncateCalls, job.Config.DestTable)
+	}
+}
+
+func TestAppendStrategy_CDCResumeStillReplacesOnSnapshotFallback(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	job.Config.CDCResumeLSN = "00000000/0000002A"
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Truncate: true})
+
+	if err := (&AppendStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !src.readOpts.CDCSnapshotReplace {
+		t.Fatal("CDC resume must replace the target if the source falls back to a snapshot")
+	}
+	if len(dest.truncateCalls) != 1 {
+		t.Fatalf("truncate calls = %v, want one", dest.truncateCalls)
+	}
+}
+
+func TestAppendStrategyBindsFreshSnapshotDestinationBeforeWrite(t *testing.T) {
+	job, src, _ := minimalJob()
+	dest := newCDCStateDestination()
+	manager, err := NewCDCStateManager(dest, "batch-destination-binding", job.Config.DestTable, "")
+	require.NoError(t, err)
+	require.NoError(t, manager.RegisterTableIncarnation(t.Context(), job.Config.SourceTable, job.Config.DestTable, "100"))
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+	job.Destination = dest
+	job.CDCStateManager = manager
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&AppendStrategy{}).Execute(t.Context(), job))
+	dest.stateMu.Lock()
+	dest.incarnations[job.Config.DestTable] = "externally-replaced"
+	dest.stateMu.Unlock()
+
+	err = manager.Persist(t.Context(), source.CDCStateCommitToken{
+		Position:             "00000000/00000020",
+		SnapshotPositions:    map[string]string{job.Config.SourceTable: "00000000/00000010"},
+		SnapshotIncarnations: map[string]string{job.Config.SourceTable: "100"},
+	})
+	require.ErrorContains(t, err, "was replaced during its snapshot")
+}
+
 func TestAppendStrategy_Execute_DefaultParallelism(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.ExtractParallelism = 0
@@ -257,6 +338,34 @@ func TestReplaceStrategy_Execute_HappyPath(t *testing.T) {
 	}
 }
 
+type directReplaceDedupDestination struct {
+	*fakeDestination
+}
+
+func (d *directReplaceDedupDestination) SupportsAtomicSwap() bool { return false }
+func (d *directReplaceDedupDestination) SupportsDirectReplaceDeduplication() bool {
+	return true
+}
+
+func TestReplaceStrategy_Execute_RequestsDirectReplaceDeduplication(t *testing.T) {
+	job, src, base := minimalJob()
+	dest := &directReplaceDedupDestination{fakeDestination: base}
+	job.Destination = dest
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&ReplaceStrategy{}).Execute(t.Context(), job))
+
+	require.Len(t, base.prepareCalls, 1)
+	require.Equal(t, job.Config.DestTable, base.prepareCalls[0].Table)
+	require.Equal(t, job.Config.PrimaryKeys, base.prepareCalls[0].PrimaryKeys)
+	require.Len(t, base.writeCalls, 1)
+	require.Equal(t, job.Config.PrimaryKeys, base.writeCalls[0].PrimaryKeys)
+	require.True(t, base.writeCalls[0].DeduplicatePrimaryKeys)
+	require.Equal(t, job.Config.IncrementalKey, base.writeCalls[0].IncrementalKey)
+	require.Empty(t, base.mergeCalls)
+	require.Empty(t, base.swapCalls)
+}
+
 func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing.T) {
 	job, src, dest := minimalJob()
 	src.primaryKeysUnique = true
@@ -278,6 +387,48 @@ func TestReplaceStrategy_Execute_SkipsDedupForUniqueSourcePrimaryKeys(t *testing
 	}
 	if len(dest.swapCalls) != 1 || dest.swapCalls[0][0] != dest.prepareCalls[0].Table {
 		t.Fatalf("expected staging table to be swapped directly, got swaps=%v prepares=%v", dest.swapCalls, dest.prepareCalls)
+	}
+}
+
+func TestReplaceStrategy_Execute_DefersPrimaryKeyForBulkLoadDestination(t *testing.T) {
+	job, src, base := minimalJob()
+	job.Config.ExtractParallelism = config.DefaultExtractParallelism
+	src.primaryKeysUnique = true
+	src.readCh = mustClosedRecords()
+	job.Destination = &fakeReplaceStagingPrimaryKeyDeferrer{fakeDestination: base}
+
+	if err := (&ReplaceStrategy{}).Execute(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(base.prepareCalls) != 1 {
+		t.Fatalf("expected 1 PrepareTable call, got %d", len(base.prepareCalls))
+	}
+	if got := base.prepareCalls[0].PrimaryKeys; len(got) != 0 {
+		t.Fatalf("staging table should defer primary keys, got %v", got)
+	}
+	if got := base.prepareCalls[0].DeferredPrimaryKeys; !slices.Equal(got, job.Config.PrimaryKeys) {
+		t.Fatalf("staging table should preserve deferred primary key columns, got %v", got)
+	}
+	if len(base.mergeCalls) != 0 {
+		t.Fatalf("expected no MergeTable calls on unique-PK fast path, got %d", len(base.mergeCalls))
+	}
+	if got := base.writeCalls[0].Parallelism; got != 12 {
+		t.Fatalf("deferred staging write parallelism = %d, want 12", got)
+	}
+	if len(base.swapOptions) != 1 || !slices.Equal(base.swapOptions[0].PrimaryKeys, job.Config.PrimaryKeys) {
+		t.Fatalf("swap should create primary keys, got %+v", base.swapOptions)
+	}
+}
+
+func TestReplaceWriteParallelism_PreservesExplicitValue(t *testing.T) {
+	job, _, base := minimalJob()
+	job.Config.ExtractParallelism = config.DefaultExtractParallelism
+	job.Config.DestinationParallelism = 7
+	job.Destination = &fakeReplaceStagingPrimaryKeyDeferrer{fakeDestination: base}
+
+	if got := replaceWriteParallelism(job, true); got != 7 {
+		t.Fatalf("replace write parallelism = %d, want explicit value 7", got)
 	}
 }
 
@@ -450,6 +601,8 @@ func TestReplaceStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	job, src, _ := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyReplace
 	job.Config.FullRefresh = true
+	job.Config.CDCSlotSuffix = "current-destination-slot"
+	job.Config.CDCLegacySlotSuffix = "legacy-destination-slot"
 	src.readCh = mustClosedRecords()
 
 	strat := &ReplaceStrategy{}
@@ -462,6 +615,67 @@ func TestReplaceStrategy_Execute_PassesFullRefreshToRead(t *testing.T) {
 	if !src.readOpts.FullRefresh {
 		t.Fatalf("ReadOptions.FullRefresh = false, want true")
 	}
+	if src.readOpts.CDCSlotSuffix != job.Config.CDCSlotSuffix {
+		t.Fatalf("ReadOptions.CDCSlotSuffix = %q, want leased slot suffix %q", src.readOpts.CDCSlotSuffix, job.Config.CDCSlotSuffix)
+	}
+	if src.readOpts.CDCLegacySlotSuffix != job.Config.CDCLegacySlotSuffix {
+		t.Fatalf("full-refresh legacy slot suffix = %q, want %q",
+			src.readOpts.CDCLegacySlotSuffix, job.Config.CDCLegacySlotSuffix)
+	}
+	if src.readOpts.CDCResumeLSN != "" {
+		t.Fatalf("full refresh unexpectedly supplied resume LSN %q, which could select a previous or legacy slot", src.readOpts.CDCResumeLSN)
+	}
+}
+
+func TestReplaceStrategy_ExecuteMultiTable_FullRefreshUsesLeasedSlotSuffix(t *testing.T) {
+	table := newTableInfo("public.orders")
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
+	job := &MultiTableIngestionJob{
+		Config: &config.IngestConfig{
+			FullRefresh:         true,
+			CDCSlotSuffix:       "current-destination-slot",
+			CDCLegacySlotSuffix: "legacy-destination-slot",
+		},
+		Source:         src,
+		Destination:    &fakeDestination{},
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "landing.orders"},
+	}
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job))
+	require.True(t, src.readOpts.FullRefresh)
+	require.Equal(t, job.Config.CDCSlotSuffix, src.readOpts.CDCSlotSuffix)
+	require.Equal(t, job.Config.CDCLegacySlotSuffix, src.readOpts.CDCLegacySlotSuffix)
+	require.Empty(t, src.readOpts.CDCResumeLSNs, "full refresh must not select a previous or legacy slot")
+}
+
+func TestReplaceStrategy_ExecuteMultiTable_RequestsDirectReplaceDeduplication(t *testing.T) {
+	table := newTableInfo("public.orders")
+	table.Schema.IncrementalKey = "id"
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: table.Name}
+	close(records)
+	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{table}, records: records}
+	base := &fakeDestination{}
+	dest := &directReplaceDedupDestination{fakeDestination: base}
+	job := &MultiTableIngestionJob{
+		Config:         &config.IngestConfig{},
+		Source:         src,
+		Destination:    dest,
+		Tables:         src.tables,
+		TableDestNames: map[string]string{table.Name: "landing.orders"},
+	}
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job))
+	require.Len(t, base.prepareCalls, 1)
+	require.Equal(t, table.PrimaryKeys, base.prepareCalls[0].PrimaryKeys)
+	require.Len(t, base.writeCalls, 1)
+	require.Equal(t, table.PrimaryKeys, base.writeCalls[0].PrimaryKeys)
+	require.True(t, base.writeCalls[0].DeduplicatePrimaryKeys)
+	require.Equal(t, table.Schema.IncrementalKey, base.writeCalls[0].IncrementalKey)
+	require.Empty(t, base.swapCalls)
 }
 
 func TestReplaceStrategy_Execute_WriteFails_DropsStaging(t *testing.T) {
@@ -487,6 +701,122 @@ func TestReplaceStrategy_Execute_WriteFails_DropsStaging(t *testing.T) {
 	}
 	if len(dest.swapCalls) != 0 {
 		t.Fatalf("expected SwapTable not to be called on write failure")
+	}
+}
+
+type releaseCountingRecordBatch struct {
+	arrow.RecordBatch
+	releases *atomic.Int64
+}
+
+func (b *releaseCountingRecordBatch) Release() {
+	b.releases.Add(1)
+	b.RecordBatch.Release()
+}
+
+type cancellationJoinSourceTable struct {
+	*fakeSourceTable
+	batches []arrow.RecordBatch
+	done    chan struct{}
+}
+
+func (t *cancellationJoinSourceTable) Read(ctx context.Context, _ source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	records := make(chan source.RecordBatchResult, 2)
+	go func() {
+		defer close(records)
+		defer close(t.done)
+		for i, batch := range t.batches {
+			select {
+			case records <- source.RecordBatchResult{Batch: batch}:
+			case <-ctx.Done():
+				batch.Release()
+				for _, remaining := range t.batches[i+1:] {
+					remaining.Release()
+				}
+				return
+			}
+		}
+	}()
+	return records, nil
+}
+
+type nonDrainingFailureDestination struct {
+	*fakeDestination
+}
+
+func (d *nonDrainingFailureDestination) WriteParallel(context.Context, <-chan source.RecordBatchResult, destination.WriteOptions) error {
+	return errors.New("write failed without draining")
+}
+
+func TestReplaceStrategy_Execute_WriteFailureCancelsDrainsAndJoinsProducer(t *testing.T) {
+	job, baseSource, baseDestination := minimalJob()
+	const batchCount = 32
+
+	releaseCounts := make([]*atomic.Int64, 0, batchCount)
+	batches := make([]arrow.RecordBatch, 0, batchCount)
+	for i := 0; i < batchCount; i++ {
+		count := &atomic.Int64{}
+		releaseCounts = append(releaseCounts, count)
+		batches = append(batches, &releaseCountingRecordBatch{
+			RecordBatch: int64RecordBatch(t, "id", []int64{int64(i)}, nil),
+			releases:    count,
+		})
+	}
+	src := &cancellationJoinSourceTable{
+		fakeSourceTable: baseSource,
+		batches:         batches,
+		done:            make(chan struct{}),
+	}
+	job.Table = src
+	job.Destination = &nonDrainingFailureDestination{fakeDestination: baseDestination}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- (&ReplaceStrategy{}).Execute(context.Background(), job)
+	}()
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "failed to write data") {
+			t.Fatalf("Execute() error = %v, want write failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute() deadlocked after the destination stopped consuming")
+	}
+
+	select {
+	case <-src.done:
+	default:
+		t.Fatal("Execute() returned before the source producer exited")
+	}
+	for i, count := range releaseCounts {
+		if got := count.Load(); got != 1 {
+			t.Fatalf("batch %d release count = %d, want exactly 1", i, got)
+		}
+	}
+}
+
+func TestReplaceStrategyWriteFailureReturnsWhenCanceledProducerNeverCloses(t *testing.T) {
+	job, src, baseDestination := minimalJob()
+	var releases atomic.Int64
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: &releaseCountingRecordBatch{
+		RecordBatch: int64RecordBatch(t, "id", []int64{1}, nil),
+		releases:    &releases,
+	}}
+	src.readCh = records
+	job.Destination = &nonDrainingFailureDestination{fakeDestination: baseDestination}
+
+	started := time.Now()
+	err := (&ReplaceStrategy{}).Execute(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "failed to write data") {
+		t.Fatalf("Execute() error = %v, want write failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Execute() waited %s for a canceled producer that never closed", elapsed)
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("batch release count = %d, want 1", got)
 	}
 }
 

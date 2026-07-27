@@ -214,3 +214,37 @@ func mustBuildUnknownArray(t *testing.T, values []string, valid []bool) arrow.Ar
 
 	return arr
 }
+
+func TestDecodeUnknownValue_ScalarFastPaths(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want any
+	}{
+		{`"hello"`, "hello"},
+		{`"123"`, "123"},
+		{`""`, ""},
+		{`"with \"escaped\" quotes"`, `with "escaped" quotes`},
+		{`"tab\there"`, "tab\there"},
+		{`null`, nil},
+		{`true`, true},
+		{`false`, false},
+		{`42`, json.Number("42")},
+		{`-1.5`, json.Number("-1.5")},
+	}
+	for _, tt := range tests {
+		got, err := DecodeUnknownValue(tt.raw)
+		if err != nil {
+			t.Fatalf("DecodeUnknownValue(%q) error: %v", tt.raw, err)
+		}
+		if got != tt.want {
+			t.Errorf("DecodeUnknownValue(%q) = %#v; want %#v", tt.raw, got, tt.want)
+		}
+	}
+}
+
+func TestDecodeUnknownValue_MalformedStringReturnsError(t *testing.T) {
+	_, err := DecodeUnknownValue("\"line\nbreak\"")
+	if err == nil {
+		t.Fatal("expected an error for a JSON string containing an unescaped newline")
+	}
+}

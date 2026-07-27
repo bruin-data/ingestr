@@ -1,7 +1,1 @@
 version: "2"
-
-# Integration tests are behind the `integration` build tag. Without this,
-# golangci-lint would silently drop those files from analysis.
-run:
-  build-tags:
-    - integration

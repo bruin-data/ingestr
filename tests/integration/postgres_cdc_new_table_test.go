@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -123,10 +124,162 @@ func TestPostgresCDC_NewTableBetweenBatchRuns(t *testing.T) {
 	assert.True(t, deleted, "delete should be reflected via merge")
 }
 
-// TestPostgresCDC_StreamingNewTableDetection verifies that a table created on
-// the source while a stream is running is detected, added to the managed
-// publication, backfilled, and then replicated live — without restarting the
-// stream and without disturbing the original table.
+func TestPostgresCDC_StreamingRestartRecoversOfflineDDLAndTableRecreation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.offline_stable (id BIGINT PRIMARY KEY, value TEXT);
+		CREATE TABLE public.offline_ddl (id BIGINT PRIMARY KEY, amount BIGINT);
+		CREATE TABLE public.offline_default (id BIGINT PRIMARY KEY, value TEXT);
+		CREATE TABLE public.offline_recreated (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.offline_stable VALUES (1, 'stable-1');
+		INSERT INTO public.offline_ddl VALUES (1, 10);
+		INSERT INTO public.offline_default VALUES (1, 'default-1');
+		INSERT INTO public.offline_recreated VALUES (1, 'old-1'), (2, 'old-2');
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	destConnString, destPool := setupNewTableDest(t, ctx)
+	cfg := &config.IngestConfig{
+		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&discover_interval=1h",
+		DestURI:             destConnString,
+		IncrementalStrategy: config.StrategyMerge,
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        10,
+		Progress:            config.ProgressLog,
+	}
+
+	start := func() (context.CancelFunc, <-chan error) {
+		streamCtx, cancel := context.WithCancel(ctx)
+		runErr := make(chan error, 1)
+		go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+		return cancel, runErr
+	}
+	stop := func(cancel context.CancelFunc, runErr <-chan error) {
+		cancel()
+		select {
+		case runErr := <-runErr:
+			if runErr != nil {
+				require.ErrorIs(t, runErr, context.Canceled)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+		}
+	}
+	rowCount := func(table string) int {
+		var count int
+		if err := destPool.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE _cdc_deleted = false`).Scan(&count); err != nil {
+			return -1
+		}
+		return count
+	}
+
+	cancel, runErr := start()
+	require.Eventually(t, func() bool {
+		return rowCount("offline_stable") == 1 && rowCount("offline_ddl") == 1 && rowCount("offline_default") == 1 && rowCount("offline_recreated") == 2
+	}, 60*time.Second, 500*time.Millisecond)
+	stop(cancel, runErr)
+
+	// All changes below occur after the durable checkpoint and before restart.
+	// The DDL table keeps its OID, while the recreated table gets a new OID and
+	// shares the persistent slot with the independently resumable stable table.
+	_, err = srcPool.Exec(ctx, `
+		INSERT INTO public.offline_ddl VALUES (2, 20);
+		ALTER TABLE public.offline_ddl ADD COLUMN status TEXT NOT NULL DEFAULT 'ready';
+		ALTER TABLE public.offline_ddl ALTER COLUMN amount TYPE NUMERIC(30,4) USING amount::numeric;
+		UPDATE public.offline_ddl SET amount = amount + 0.1250;
+		ALTER TABLE public.offline_default ADD COLUMN status TEXT NOT NULL DEFAULT 'ready';
+		INSERT INTO public.offline_default (id, value) VALUES (2, 'default-2');
+		DROP TABLE public.offline_recreated;
+		CREATE TABLE public.offline_recreated (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.offline_recreated VALUES (100, 'new-100'), (101, 'new-101');
+		INSERT INTO public.offline_stable VALUES (2, 'stable-2');
+	`)
+	require.NoError(t, err)
+
+	cancel, runErr = start()
+	require.Eventually(t, func() bool {
+		if rowCount("offline_stable") != 2 || rowCount("offline_ddl") != 2 || rowCount("offline_default") != 2 || rowCount("offline_recreated") != 2 {
+			return false
+		}
+		var amount string
+		if err := destPool.QueryRow(ctx, `SELECT amount::text FROM offline_ddl WHERE id = 2 AND _cdc_deleted = false`).Scan(&amount); err != nil || amount != "20.1250" {
+			return false
+		}
+		var statuses []string
+		statusRows, err := destPool.Query(ctx, `SELECT status FROM offline_ddl WHERE _cdc_deleted = false ORDER BY id`)
+		if err != nil {
+			return false
+		}
+		for statusRows.Next() {
+			var status string
+			if err := statusRows.Scan(&status); err != nil {
+				statusRows.Close()
+				return false
+			}
+			statuses = append(statuses, status)
+		}
+		statusRows.Close()
+		if !assert.ObjectsAreEqual([]string{"ready", "ready"}, statuses) {
+			return false
+		}
+		var defaultStatuses []string
+		defaultRows, err := destPool.Query(ctx, `SELECT status FROM offline_default WHERE _cdc_deleted = false ORDER BY id`)
+		if err != nil {
+			return false
+		}
+		for defaultRows.Next() {
+			var status string
+			if err := defaultRows.Scan(&status); err != nil {
+				defaultRows.Close()
+				return false
+			}
+			defaultStatuses = append(defaultStatuses, status)
+		}
+		defaultRows.Close()
+		if !assert.ObjectsAreEqual([]string{"ready", "ready"}, defaultStatuses) {
+			return false
+		}
+		var ids []int64
+		rows, err := destPool.Query(ctx, `SELECT id FROM offline_recreated WHERE _cdc_deleted = false ORDER BY id`)
+		if err != nil {
+			return false
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return false
+			}
+			ids = append(ids, id)
+		}
+		return assert.ObjectsAreEqual([]int64{100, 101}, ids)
+	}, 90*time.Second, 500*time.Millisecond, "restart must replace both affected snapshots and continue shared-slot replay")
+
+	_, err = srcPool.Exec(ctx, `
+		INSERT INTO public.offline_ddl (id, amount) VALUES (3, 30.5000);
+		INSERT INTO public.offline_recreated VALUES (102, 'new-102');
+	`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return rowCount("offline_ddl") == 3 && rowCount("offline_recreated") == 3
+	}, 60*time.Second, 500*time.Millisecond, "live replication must continue after offline recovery")
+	stop(cancel, runErr)
+}
+
+// TestPostgresCDC_StreamingNewTableDetection verifies that mid-stream table
+// discovery is a side-effect-free restart boundary. The restarted stream sees
+// the table in its startup set, backfills it, and then replicates live changes.
 func TestPostgresCDC_StreamingNewTableDetection(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -162,9 +315,13 @@ func TestPostgresCDC_StreamingNewTableDetection(t *testing.T) {
 		Progress:            config.ProgressLog,
 	}
 
-	streamCtx, cancelStream := context.WithCancel(ctx)
-	runErr := make(chan error, 1)
-	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+	start := func() (context.CancelFunc, <-chan error) {
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		runErr := make(chan error, 1)
+		go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+		return cancelStream, runErr
+	}
+	cancelStream, runErr := start()
 
 	tableCount := func(table string) int {
 		var n int
@@ -185,11 +342,36 @@ func TestPostgresCDC_StreamingNewTableDetection(t *testing.T) {
 	`)
 	require.NoError(t, err)
 
-	// 3. It is detected, provisioned in the destination, and backfilled.
-	require.Eventually(t, func() bool { return tableCount("late") == 40 }, 60*time.Second, 500*time.Millisecond,
-		"new table should be backfilled mid-stream, got %d rows", tableCount("late"))
+	// 3. Discovery stops the first run before creating, claiming, truncating, or
+	// writing the late destination. The already-running target stays intact.
+	select {
+	case err := <-runErr:
+		require.ErrorContains(t, err, "requires restarting the stream")
+	case <-time.After(60 * time.Second):
+		cancelStream()
+		t.Fatal("stream did not stop after discovering the new table")
+	}
+	assert.Equal(t, 100, tableCount("evt"), "late discovery changed an existing destination")
+	var lateTargetExists bool
+	require.NoError(t, destPool.QueryRow(ctx, `SELECT to_regclass('public.late') IS NOT NULL`).Scan(&lateTargetExists))
+	assert.False(t, lateTargetExists, "first run created the late destination before restart")
+	var lateClaims, lateStateEvents int
+	require.NoError(t, destPool.QueryRow(ctx, `
+		SELECT count(*) FROM _bruin_staging.cdc_targets WHERE destination_table = $1
+	`, destination.CDCTargetKey("public", "late")).Scan(&lateClaims))
+	require.NoError(t, destPool.QueryRow(ctx, `
+		SELECT count(*) FROM _bruin_staging.cdc_state WHERE source_table = 'late'
+	`).Scan(&lateStateEvents))
+	assert.Zero(t, lateClaims, "first run claimed the late destination before restart")
+	assert.Zero(t, lateStateEvents, "first run registered late-table CDC state before restart")
 
-	// 4. Live changes on both the new and the original table keep flowing.
+	// 4. On restart the table belongs to the startup KnownTables set and follows
+	// the normal snapshot path.
+	cancelStream, runErr = start()
+	require.Eventually(t, func() bool { return tableCount("late") == 40 }, 60*time.Second, 500*time.Millisecond,
+		"restarted stream should backfill the new table, got %d rows", tableCount("late"))
+
+	// 5. Live changes on both the new and the original table keep flowing.
 	_, err = srcPool.Exec(ctx, `
 		INSERT INTO public.late SELECT g, g FROM generate_series(41, 60) g;
 		UPDATE public.late SET val = -1 WHERE id = 1;
@@ -208,7 +390,338 @@ func TestPostgresCDC_StreamingNewTableDetection(t *testing.T) {
 	require.NoError(t, destPool.QueryRow(ctx, `SELECT val FROM late WHERE id = 1`).Scan(&val))
 	assert.Equal(t, int64(-1), val)
 
-	// 5. Graceful shutdown.
+	// 6. Graceful shutdown.
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
+}
+
+func TestPostgresCDC_StreamingColumnRenameAcrossHistoricalRelations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.rename_history (id BIGINT PRIMARY KEY, legacy TEXT);
+		INSERT INTO public.rename_history SELECT g, 'legacy-' || g FROM generate_series(1, 100) g;
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	destConnString, destPool := setupNewTableDest(t, ctx)
+	cfg := &config.IngestConfig{
+		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):],
+		DestURI:             destConnString,
+		IncrementalStrategy: config.StrategyMerge,
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        50,
+		Progress:            config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	liveCount := func() int {
+		var count int
+		if err := destPool.QueryRow(ctx, `SELECT count(*) FROM rename_history WHERE _cdc_deleted = false`).Scan(&count); err != nil {
+			return -1
+		}
+		return count
+	}
+	require.Eventually(t, func() bool { return liveCount() == 100 }, 60*time.Second, 500*time.Millisecond)
+
+	_, err = srcPool.Exec(ctx, `
+		ALTER TABLE public.rename_history ADD COLUMN segment TEXT NOT NULL DEFAULT 'initial';
+		UPDATE public.rename_history SET segment = 'segment-' || id;
+	`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var value string
+		return destPool.QueryRow(ctx, `SELECT segment FROM rename_history WHERE id = 1 AND _cdc_deleted = false`).Scan(&value) == nil && value == "segment-1"
+	}, 60*time.Second, 500*time.Millisecond)
+
+	_, err = srcPool.Exec(ctx, `
+		ALTER TABLE public.rename_history DROP COLUMN legacy;
+		UPDATE public.rename_history SET segment = 'pre-rename-' || id;
+	`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var value string
+		return destPool.QueryRow(ctx, `SELECT segment FROM rename_history WHERE id = 1 AND _cdc_deleted = false`).Scan(&value) == nil && value == "pre-rename-1"
+	}, 60*time.Second, 500*time.Millisecond)
+
+	_, err = srcPool.Exec(ctx, `
+		ALTER TABLE public.rename_history RENAME COLUMN segment TO cohort;
+		UPDATE public.rename_history SET cohort = 'cohort-' || id;
+	`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var value string
+		return destPool.QueryRow(ctx, `SELECT cohort FROM rename_history WHERE id = 1 AND _cdc_deleted = false`).Scan(&value) == nil && value == "cohort-1"
+	}, 60*time.Second, 500*time.Millisecond, "stream must progress from repeated historical segment relations to the live cohort relation")
+
+	select {
+	case err := <-runErr:
+		t.Fatalf("stream exited after column rename: %v", err)
+	default:
+	}
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
+}
+
+func TestPostgresCDC_StreamingNumericTypeChangesRefreshCopyEncoding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.numeric_history (id BIGINT PRIMARY KEY, val BIGINT NOT NULL);
+		INSERT INTO public.numeric_history SELECT g, g * 10 FROM generate_series(1, 100) g;
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	destConnString, destPool := setupNewTableDest(t, ctx)
+	cfg := &config.IngestConfig{
+		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):],
+		DestURI:             destConnString,
+		IncrementalStrategy: config.StrategyMerge,
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        50,
+		Progress:            config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	waitForValue := func(want string) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			select {
+			case err := <-runErr:
+				t.Fatalf("stream exited during numeric type replay: %v", err)
+			default:
+			}
+			var value string
+			return destPool.QueryRow(ctx, `SELECT val::text FROM numeric_history WHERE id = 1 AND _cdc_deleted = false`).Scan(&value) == nil && value == want
+		}, 60*time.Second, 500*time.Millisecond)
+	}
+	waitForValue("10")
+
+	_, err = srcPool.Exec(ctx, `
+		ALTER TABLE public.numeric_history ALTER COLUMN val TYPE NUMERIC(30,0) USING val::numeric;
+		UPDATE public.numeric_history SET val = val + 1000000000000;
+	`)
+	require.NoError(t, err)
+	waitForValue("1000000000010")
+
+	_, err = srcPool.Exec(ctx, `
+		ALTER TABLE public.numeric_history ALTER COLUMN val TYPE NUMERIC(35,4) USING val::numeric;
+		UPDATE public.numeric_history SET val = val + 0.1250;
+	`)
+	require.NoError(t, err)
+	waitForValue("1000000000010.1250")
+
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
+}
+
+func TestPostgresCDC_SingleTableStreamingReplacesRecreatedTable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.recreated (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.recreated VALUES (1, 'old-1'), (2, 'old-2'), (3, 'old-3');
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	destConnString, destPool := setupNewTableDest(t, ctx)
+	cfg := &config.IngestConfig{
+		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&discover_interval=1s",
+		DestURI:             destConnString,
+		SourceTable:         "public.recreated",
+		DestTable:           "recreated",
+		PrimaryKeys:         []string{"id"},
+		IncrementalStrategy: config.StrategyMerge,
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        10,
+		Progress:            config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	liveIDs := func() []int64 {
+		rows, err := destPool.Query(ctx, `SELECT id FROM recreated WHERE _cdc_deleted = false ORDER BY id`)
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]int64{1, 2, 3}, liveIDs())
+	}, 60*time.Second, 500*time.Millisecond)
+
+	_, err = srcPool.Exec(ctx, `
+		DROP TABLE public.recreated;
+		CREATE TABLE public.recreated (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.recreated VALUES (100, 'new-100'), (101, 'new-101');
+	`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]int64{100, 101}, liveIDs())
+	}, 60*time.Second, 500*time.Millisecond, "replacement snapshot must remove rows from the old table incarnation")
+
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.recreated VALUES (102, 'new-102')`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]int64{100, 101, 102}, liveIDs())
+	}, 60*time.Second, 500*time.Millisecond, "live replication must continue after table recreation")
+
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
+}
+
+func TestPostgresCDC_MultiTableStreamingRejectsReplacementRelationBeforeResnapshot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.recreated_multi (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.recreated_multi VALUES (1, 'old-1'), (2, 'old-2'), (3, 'old-3');
+		CREATE TABLE public.recreated_stable (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.recreated_stable VALUES (1, 'stable');
+		CREATE PUBLICATION ingestr_reincarnation_all FOR ALL TABLES;
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	destConnString, destPool := setupNewTableDest(t, ctx)
+	cfg := &config.IngestConfig{
+		SourceURI:           "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=ingestr_reincarnation_all&discover_interval=1h",
+		DestURI:             destConnString,
+		IncrementalStrategy: config.StrategyMerge,
+		Stream:              true,
+		FlushInterval:       500 * time.Millisecond,
+		FlushRecords:        10,
+		Progress:            config.ProgressLog,
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	liveIDs := func() []int64 {
+		rows, err := destPool.Query(ctx, `SELECT id FROM recreated_multi WHERE _cdc_deleted = false ORDER BY id`)
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]int64{1, 2, 3}, liveIDs())
+	}, 60*time.Second, 500*time.Millisecond)
+
+	_, err = srcPool.Exec(ctx, `
+		DROP TABLE public.recreated_multi;
+		CREATE TABLE public.recreated_multi (id BIGINT PRIMARY KEY, value TEXT);
+		INSERT INTO public.recreated_multi VALUES (100, 'new-100'), (101, 'new-101');
+	`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-runErr:
+			t.Fatalf("stream exited after seeing the replacement relation: %v", err)
+		default:
+		}
+		return assert.ObjectsAreEqual([]int64{100, 101}, liveIDs())
+	}, 60*time.Second, 500*time.Millisecond, "replacement relation must trigger an immediate resnapshot even with periodic discovery disabled")
+
+	_, err = srcPool.Exec(ctx, `INSERT INTO public.recreated_multi VALUES (102, 'new-102')`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]int64{100, 101, 102}, liveIDs())
+	}, 60*time.Second, 500*time.Millisecond)
+
 	cancelStream()
 	select {
 	case err := <-runErr:

@@ -16,6 +16,20 @@ func TestCDCLatestOverallOrderBy(t *testing.T) {
 	assert.Equal(t, "[_cdc_lsn] DESC, [_cdc_deleted] DESC", CDCLatestOverallOrderBy(bracket))
 }
 
+func TestCDCTargetKeyIsInjectiveForDottedComponents(t *testing.T) {
+	left := CDCTargetKey("a.b", "c")
+	right := CDCTargetKey("a", "b.c")
+	assert.NotEqual(t, left, right)
+	assert.Equal(t, left, CDCTargetKey("a.b", "c"))
+}
+
+func TestCDCTargetOwnerIDIncludesLogicalSource(t *testing.T) {
+	assert.Equal(t, CDCTargetOwnerID("connector", "public.orders"), CDCTargetOwnerID("connector", "public.orders"))
+	assert.NotEqual(t, CDCTargetOwnerID("connector", "public.orders"), CDCTargetOwnerID("connector", "public.customers"))
+	_, err := (CDCTargetClaim{ConnectorID: "connector"}).OwnerID()
+	assert.Error(t, err)
+}
+
 func TestCDCSupersedes(t *testing.T) {
 	tests := []struct {
 		name        string

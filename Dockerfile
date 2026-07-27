@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 # Build arguments for version information (passed from CI)
 ARG VERSION=dev

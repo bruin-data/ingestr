@@ -25,3 +25,12 @@ func TestDataTypeToArrowType_ArrayDecimalPreservesPrecisionScale(t *testing.T) {
 	require.Equal(t, int32(18), decimalType.Precision)
 	require.Equal(t, int32(5), decimalType.Scale)
 }
+
+func TestTableSchemaSameColumnShapeIncludesMaxLength(t *testing.T) {
+	left := &TableSchema{Columns: []Column{{Name: "name", DataType: TypeString, MaxLength: 20}}}
+	right := &TableSchema{Columns: []Column{{Name: "name", DataType: TypeString, MaxLength: 40}}}
+
+	if left.SameColumnShape(right) {
+		t.Fatal("schemas with different declared character lengths must not have the same shape")
+	}
+}

@@ -179,11 +179,11 @@ func TestGenerateAttachStatements_OrderAndShape(t *testing.T) {
 		"LOAD httpfs",
 		"INSTALL postgres",
 		"LOAD postgres",
-		"CREATE OR REPLACE SECRET ingestr_lake_storage",
-		"CREATE OR REPLACE SECRET ingestr_lake_catalog",
+		"CREATE OR REPLACE SECRET ingestr_ducklake_catalog_storage",
+		"CREATE OR REPLACE SECRET ingestr_ducklake_catalog_catalog",
 		"SELECT COUNT(*) FROM glob(", // storage probe — fails fast on missing bucket
 		"ATTACH 'ducklake:postgres:'",
-		"CREATE SCHEMA IF NOT EXISTS lake.main",
+		"CREATE SCHEMA IF NOT EXISTS ducklake_catalog.main",
 		"USE " + AttachAlias,
 	}
 	if len(stmts) != len(wantPrefixes) {
@@ -330,7 +330,7 @@ func TestGenerateS3Secret_MinIO(t *testing.T) {
 
 	got := NewLakehouseAttacher().generateS3Secret(defaultSecretName(AttachAlias, "storage"), cfg.Storage)
 	for _, want := range []string{
-		"CREATE OR REPLACE SECRET ingestr_lake_storage (",
+		"CREATE OR REPLACE SECRET ingestr_ducklake_catalog_storage (",
 		"TYPE s3",
 		"KEY_ID 'AKID'",
 		"SECRET 'SECRET'",
@@ -345,6 +345,132 @@ func TestGenerateS3Secret_MinIO(t *testing.T) {
 	}
 }
 
+func TestParseLakehouseURI_AzureStorage_ConnectionString(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustParseLakehouse(t, "ducklake://?"+
+		"catalog_type=sqlite&catalog_path=/tmp/catalog.sqlite"+
+		"&storage_type=azure&storage_path=az://ducklake/warehouse"+
+		"&storage_connection_string=DefaultEndpointsProtocol%3Dhttps%3BAccountName%3Dacct%3BAccountKey%3Dkey")
+
+	if cfg.Storage.Type != StorageTypeAzure || cfg.Storage.Path != "az://ducklake/warehouse" {
+		t.Errorf("storage type/path: %+v", cfg.Storage)
+	}
+	if cfg.Storage.ConnectionString != "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=key" {
+		t.Errorf("connection string: %q", cfg.Storage.ConnectionString)
+	}
+}
+
+func TestParseLakehouseURI_AzureStorage_AccountName(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustParseLakehouse(t, "ducklake://?"+
+		"catalog_type=sqlite&catalog_path=/tmp/catalog.sqlite"+
+		"&storage_type=azure&storage_path=az://ducklake/warehouse&storage_account_name=acct")
+
+	if cfg.Storage.AccountName != "acct" || cfg.Storage.ConnectionString != "" {
+		t.Errorf("azure account auth: %+v", cfg.Storage)
+	}
+}
+
+func TestParseLakehouseURI_AzureStorage_RequiresAuth(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseLakehouseURI("ducklake://?" +
+		"catalog_type=sqlite&catalog_path=/tmp/catalog.sqlite" +
+		"&storage_type=azure&storage_path=az://ducklake/warehouse")
+	if err == nil || !strings.Contains(err.Error(), "storage_connection_string or storage_account_name is required") {
+		t.Errorf("expected azure auth error, got: %v", err)
+	}
+}
+
+func TestGetRequiredExtensions_Azure(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustParseLakehouse(t, "ducklake://?"+
+		"catalog_type=postgres&catalog_host=h&catalog_database=d&catalog_username=u&catalog_password=p"+
+		"&storage_type=azure&storage_path=az://ducklake/warehouse&storage_account_name=acct")
+
+	exts := NewLakehouseAttacher().getRequiredExtensions(*cfg)
+	for _, want := range []string{"ducklake", "azure", "postgres"} {
+		found := false
+		for _, e := range exts {
+			if e == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected extension %q in %v", want, exts)
+		}
+	}
+}
+
+func TestGenerateAzureSecret_ConnectionString(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustParseLakehouse(t, "ducklake://?"+
+		"catalog_type=sqlite&catalog_path=/tmp/m.sqlite"+
+		"&storage_type=azure&storage_path=az://ducklake/warehouse"+
+		"&storage_connection_string=DefaultEndpointsProtocol%3Dhttps%3BAccountName%3Dacct%3BAccountKey%3Dkey")
+
+	got := NewLakehouseAttacher().generateAzureSecret(defaultSecretName(AttachAlias, "storage"), cfg.Storage)
+	for _, want := range []string{
+		"CREATE OR REPLACE SECRET ingestr_ducklake_catalog_storage (",
+		"TYPE azure",
+		"CONNECTION_STRING 'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=key'",
+		"SCOPE 'az://ducklake/warehouse'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("azure secret missing %q\nfull:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "credential_chain") {
+		t.Errorf("connection-string secret must not use credential_chain\nfull:\n%s", got)
+	}
+}
+
+func TestGenerateAzureSecret_CredentialChain(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustParseLakehouse(t, "ducklake://?"+
+		"catalog_type=sqlite&catalog_path=/tmp/m.sqlite"+
+		"&storage_type=azure&storage_path=az://ducklake/warehouse&storage_account_name=acct")
+
+	got := NewLakehouseAttacher().generateAzureSecret(defaultSecretName(AttachAlias, "storage"), cfg.Storage)
+	for _, want := range []string{
+		"TYPE azure",
+		"PROVIDER credential_chain",
+		"ACCOUNT_NAME 'acct'",
+		"SCOPE 'az://ducklake/warehouse'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("azure credential-chain secret missing %q\nfull:\n%s", want, got)
+		}
+	}
+}
+
+func TestGenerateAttachStatements_AzureSetsCurlTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustParseLakehouse(t, "ducklake://?"+
+		"catalog_type=sqlite&catalog_path=/tmp/m.sqlite"+
+		"&storage_type=azure&storage_path=az://ducklake/warehouse&storage_account_name=acct")
+
+	stmts, err := NewLakehouseAttacher().GenerateAttachStatements(cfg, AttachAlias)
+	if err != nil {
+		t.Fatalf("GenerateAttachStatements: %v", err)
+	}
+	found := false
+	for _, s := range stmts {
+		if strings.Contains(s, "SET GLOBAL azure_transport_option_type = 'curl'") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected azure curl transport statement, got:\n%s", strings.Join(stmts, "\n"))
+	}
+}
+
 func TestGeneratePostgresSecret(t *testing.T) {
 	t.Parallel()
 
@@ -355,7 +481,7 @@ func TestGeneratePostgresSecret(t *testing.T) {
 
 	got := NewLakehouseAttacher().generatePostgresSecret(defaultSecretName(AttachAlias, "catalog"), cfg.Catalog)
 	for _, want := range []string{
-		"CREATE OR REPLACE SECRET ingestr_lake_catalog (",
+		"CREATE OR REPLACE SECRET ingestr_ducklake_catalog_catalog (",
 		"TYPE postgres",
 		"HOST 'meta.host'",
 		"PORT 5433",
@@ -380,17 +506,17 @@ func TestGenerateDuckLakeAttach(t *testing.T) {
 		{
 			"duckdb catalog",
 			"ducklake://?catalog_type=duckdb&catalog_path=/tmp/meta.duckdb&storage_type=s3&storage_path=s3://b/p&storage_access_key=a&storage_secret_key=b",
-			"ATTACH 'ducklake:/tmp/meta.duckdb' AS lake (DATA_PATH 's3://b/p', OVERRIDE_DATA_PATH true)",
+			"ATTACH 'ducklake:/tmp/meta.duckdb' AS ducklake_catalog (DATA_PATH 's3://b/p', OVERRIDE_DATA_PATH true)",
 		},
 		{
 			"sqlite catalog",
 			"ducklake://?catalog_type=sqlite&catalog_path=/tmp/meta.sqlite&storage_type=s3&storage_path=s3://b/p&storage_access_key=a&storage_secret_key=b",
-			"ATTACH 'ducklake:sqlite:/tmp/meta.sqlite' AS lake (DATA_PATH 's3://b/p', OVERRIDE_DATA_PATH true)",
+			"ATTACH 'ducklake:sqlite:/tmp/meta.sqlite' AS ducklake_catalog (DATA_PATH 's3://b/p', OVERRIDE_DATA_PATH true)",
 		},
 		{
 			"postgres catalog",
 			"ducklake://?catalog_type=postgres&catalog_host=h&catalog_database=d&catalog_username=u&catalog_password=p&storage_type=s3&storage_path=s3://b/p&storage_access_key=a&storage_secret_key=b",
-			"ATTACH 'ducklake:postgres:' AS lake (DATA_PATH 's3://b/p', META_SECRET 'ingestr_lake_catalog', OVERRIDE_DATA_PATH true)",
+			"ATTACH 'ducklake:postgres:' AS ducklake_catalog (DATA_PATH 's3://b/p', META_SECRET 'ingestr_ducklake_catalog_catalog', OVERRIDE_DATA_PATH true)",
 		},
 	}
 

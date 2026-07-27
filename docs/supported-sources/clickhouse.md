@@ -82,6 +82,6 @@ ingestr ingest \
 
 ## Supported destination strategies
 
-When using ClickHouse as a destination, ingestr supports `replace`, `append`, `merge`, `delete+insert`, `truncate+insert`, and `scd2`.
+When using ClickHouse as a destination, ingestr supports `replace`, `append`, `merge`, `delete+insert`, and `scd2`.
 
 `delete+insert` does not use ClickHouse's experimental transaction feature. Concurrent ingestr runs writing to the same ClickHouse table can still interleave between the delete and insert steps.

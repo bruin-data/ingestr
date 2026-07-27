@@ -53,6 +53,7 @@ const (
 	extractAutoPartitionsPerWorker = 4
 	maxExtractPartitionWindows     = 100000
 	extractPartitionReadBufferSize = 1
+	customQueryAlias               = "__ingestr_query"
 )
 
 type (
@@ -187,7 +188,8 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	opts.ExtractPartitionBy = partitionColumn.Name
 	opts.ExtractPartitionKind = kind
 	opts.ExtractPartitionDataType = partitionColumn.DataType
-	if opts.IntervalStart == nil || opts.IntervalEnd == nil {
+	fullNumericExtract := kind == ExtractPartitionKindNumeric && strings.TrimSpace(opts.IncrementalKey) == ""
+	if !fullNumericExtract && (opts.IntervalStart == nil || opts.IntervalEnd == nil) {
 		return nil, fmt.Errorf("extract partitioning requires interval start and end")
 	}
 	if opts.ExtractPartitionAuto {
@@ -205,10 +207,6 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 			return nil, fmt.Errorf("extract partition interval must be a positive integer for numeric partition column %q", opts.ExtractPartitionBy)
 		}
 	}
-	if kind == ExtractPartitionKindNumeric && strings.TrimSpace(opts.IncrementalKey) == "" {
-		return nil, fmt.Errorf("numeric extract partitioning requires an incremental key to discover bounded partition ranges")
-	}
-
 	jobsToRun, err := extractPartitionJobs(ctx, opts, discover)
 	if err != nil {
 		return nil, err
@@ -226,7 +224,7 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	out := make(chan RecordBatchResult, parallelism)
+	out := make(chan RecordBatchResult, extractPartitionReadBufferSize)
 	jobs := make(chan extractPartitionJob)
 
 	var wg sync.WaitGroup
@@ -323,10 +321,12 @@ func ReadExtractPartitions(ctx context.Context, opts ReadOptions, tableSchema *s
 
 func extractPartitionJobs(ctx context.Context, opts ReadOptions, discover ExtractPartitionBoundsFunc) ([]extractPartitionJob, error) {
 	bounds := ExtractPartitionBounds{
-		Start:    *opts.IntervalStart,
-		End:      *opts.IntervalEnd,
-		Kind:     opts.ExtractPartitionKind,
-		HasRange: true,
+		Kind: opts.ExtractPartitionKind,
+	}
+	if opts.IntervalStart != nil && opts.IntervalEnd != nil {
+		bounds.Start = *opts.IntervalStart
+		bounds.End = *opts.IntervalEnd
+		bounds.HasRange = true
 	}
 	if opts.ExtractPartitionBoundsDiscoveryEnabled() {
 		if discover == nil {
@@ -554,6 +554,45 @@ func SQLExtractPartitionConditions(opts ReadOptions, quote func(string) string, 
 		return SQLNumericRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionNumericStart, opts.ExtractPartitionNumericEnd, opts.ExtractPartitionEndOperator(), quote)
 	}
 	return SQLTemporalRangeConditions(opts.ExtractPartitionBy, opts.ExtractPartitionDataType, opts.ExtractPartitionStart, opts.ExtractPartitionEnd, opts.ExtractPartitionEndOperator(), quote, format)
+}
+
+func SQLCustomQuerySchemaQuery(query string, quote func(string) string) string {
+	return fmt.Sprintf("SELECT * FROM (%s) AS %s WHERE 1 = 0", normalizeCustomQuery(query), quote(customQueryAlias))
+}
+
+func SQLCustomQuerySelectQuery(query string, opts ReadOptions, quote func(string) string, format func(time.Time) string) string {
+	alias := quote(customQueryAlias)
+	qualifiedQuote := func(column string) string {
+		return alias + "." + quote(column)
+	}
+	conditions := SQLExtractPartitionConditions(opts, qualifiedQuote, format)
+
+	result := fmt.Sprintf("SELECT * FROM (%s) AS %s", normalizeCustomQuery(query), alias)
+	if len(conditions) > 0 {
+		result += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	return result
+}
+
+func SQLCustomQueryBoundsQuery(query, partitionColumn string, quote func(string) string) string {
+	alias := quote(customQueryAlias)
+	partition := alias + "." + quote(partitionColumn)
+	return fmt.Sprintf(
+		"SELECT MIN(%s), MAX(%s), COUNT(*), COUNT(%s) FROM (%s) AS %s",
+		partition,
+		partition,
+		partition,
+		normalizeCustomQuery(query),
+		alias,
+	)
+}
+
+func normalizeCustomQuery(query string) string {
+	query = strings.TrimSpace(query)
+	for strings.HasSuffix(query, ";") {
+		query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	}
+	return query
 }
 
 func SQLExtractPartitionBoundsQuery(table, partitionColumn, incrementalKey string, incrementalKeyDataType schema.DataType, intervalStart, intervalEnd *time.Time, quoteIdentifier, quoteTable func(string) string, format func(time.Time) string) string {

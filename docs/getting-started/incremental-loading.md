@@ -11,7 +11,6 @@ Before you use incremental loading, you should understand 3 important keys:
 - `strategy`: the strategy to use for loading, the available strategies are:
   - `replace`: replace the existing destination table with the source directly, this is the default strategy and the simplest one.
     - This strategy isn't recommended for large tables, as it will replace the entire table and can be slow.
-  - `truncate+insert`: empty the existing destination table in place, then insert the rows read from the source.
   - `append`: simply append the new rows to the destination table.
   - `merge`: merge the new rows with the existing rows in the destination table, insert the new ones and update the existing ones with the new values.
   - `delete+insert`: delete existing destination rows inside the incremental-key interval and then insert the staged rows.
@@ -34,14 +33,14 @@ Here's how the replace strategy works:
 - The source table is downloaded.
 - The source table is uploaded to the destination, replacing the destination table.
 
+Replace can use `--extract-partition-by` to read a bounded incremental-key interval through parallel source queries. All extract windows are loaded before the destination replacement is finalized. On destinations with a staging-based or transactional in-place replace implementation, a failed extract or load leaves the existing destination data unchanged.
+
+The interval still defines the complete replacement data set: destination rows outside `--interval-start` and `--interval-end` are not retained. Use `merge` or `delete+insert` instead when the destination should keep rows outside the extracted interval.
+
+Destinations choose the safest replace implementation they support. For example, single-table PostgreSQL loads replace rows in place so dependent views, grants, and foreign keys continue to refer to the same table object.
 
 > [!CAUTION]
-> This strategy will delete the entire destination table and replace it with the source table, use with caution.
-
-## Truncate+Insert
-Truncate+Insert empties the existing destination table in place and then inserts the rows read from the source. Unlike `replace`, it keeps the same destination table object, which can help preserve dependent views, grants, and foreign keys on destinations that support truncation.
-
-This strategy is only available for destinations that support truncating a table in place. It is not atomic on every destination: readers may see an empty table between the truncate and the insert, and a failed insert can leave the table empty.
+> This strategy removes all existing destination rows and replaces them with the source rows, use with caution.
 
 ## Append
 Append writes every row returned by the source to the destination table. By default, it appends all rows read from the source. `incremental_key` is only used for source-side filtering when the source supports it, usually together with `--interval-start` and `--interval-end`; append does not look at the destination table to find the latest value.
@@ -187,6 +186,27 @@ The behavior is the same for any rows matching the source-side filter. ingestr d
 > [!CAUTION]
 > For the cases where there's a primary key match, the `merge` strategy will **update** the existing rows in the destination table with the new values from the source table. Use with caution, as it can lead to data loss if not used properly, as well as data processing charges if your data warehouse charges for updates.
 
+### Limiting the destination scan
+
+`--incremental-predicate` appends a destination-specific SQL condition to the target match for supported SQL destinations. This can prune old partitions that cannot contain matching rows:
+
+```bash
+ingestr ingest \
+    --source-uri 'duckdb:///tmp/source.duckdb' \
+    --source-table 'updates' \
+    --dest-uri 'bigquery://my-project/analytics' \
+    --dest-table 'events' \
+    --incremental-strategy merge \
+    --primary-key id \
+    --incremental-predicate "t.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+```
+
+The destination alias is `t` for BigQuery and Trino, and `target` for Snowflake, Redshift, Databricks, Microsoft SQL Server, Azure Synapse, Microsoft Fabric, Oracle, MySQL, PlanetScale, Vitess, PostgreSQL, SQLite, DuckDB, and DuckLake. Source aliases are destination-specific; predicates should normally reference only destination columns.
+
+The predicate does not filter source rows. It only limits which destination rows can match or be updated. Use a predicate only when every destination row that may match the incoming primary keys is inside the selected range. Otherwise, the merge can insert a duplicate or a constrained destination can reject the insert.
+
+Destinations whose merge implementation has no target-side SQL match condition do not accept this option. This includes ClickHouse, StarRocks, CrateDB, Cassandra, DynamoDB, MongoDB, Iceberg, OneLake, and discard.
+
 ## Delete+Insert
 Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination. When you provide `--interval-start` or `--interval-end`, ingestr also passes those bounds to the source read, so sources that support interval filtering may return only that slice before the destination replacement happens.
 
@@ -299,7 +319,6 @@ SCD2 is destination-specific. Use it only on destinations that support the `scd2
 Incremental loading allows you to ingest a bounded source slice into the destination table. It's useful when you want to keep the destination table up-to-date with the source table, as well as when you want to keep a version history of your data in the destination table. However, there are a few things to keep in mind when using incremental loading:
 
 - If you can and your data is not huge, use the `replace` strategy, as it's the simplest strategy and it will replace the entire destination table with the source table, which will always give you a clean exact replica of the source table.
-- If you need to preserve the existing destination table object, and your destination supports it, use `truncate+insert`.
 - If you want to keep a version history of your data, use the `append` strategy, as it will keep appending the new rows to the destination table, which will give you a version history of your data.
 - If you want to keep the latest version of your data in the destination table and your table has a natural primary key, such as a user ID, use the `merge` strategy, as it will update the existing rows in the destination table with the new values from the source table.
 - If you want to replace complete slices of the destination table or backfill data, use the `delete+insert` strategy with a date, timestamp, or batch interval.

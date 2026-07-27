@@ -61,6 +61,12 @@ type Dialect interface {
 	ParsePrimaryKeyResult(rawValue interface{}) []string
 }
 
+// CustomQueryIdentifierQuoter preserves identifiers returned by custom-query
+// metadata when a dialect's normal identifier rules canonicalize names.
+type CustomQueryIdentifierQuoter interface {
+	QuoteCustomQueryIdentifier(name string) string
+}
+
 // DatasetAwareDialect is implemented by databases like BigQuery where the
 // dataset (schema) must be embedded in INFORMATION_SCHEMA query paths rather
 // than passed as parameters.

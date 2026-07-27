@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
@@ -31,10 +32,43 @@ func TestMergeStrategy_Validate(t *testing.T) {
 	}
 }
 
+func TestPrepareMergeTablesEnablesCDCModeForTargetAndStaging(t *testing.T) {
+	dest := &fakeDestination{}
+	err := prepareMergeTables(t.Context(), dest, mergeTableParams{
+		DestTable:    "ds.items",
+		StagingTable: "ds.items_staging",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+		}},
+		PrimaryKeys: []string{"id"},
+		IsCDC:       true,
+	})
+	if err != nil {
+		t.Fatalf("prepareMergeTables() error = %v", err)
+	}
+	if len(dest.prepareCalls) != 2 {
+		t.Fatalf("PrepareTable calls = %d, want 2", len(dest.prepareCalls))
+	}
+	if !dest.prepareCalls[0].CDCMode || !dest.prepareCalls[1].CDCMode {
+		t.Fatalf("CDCMode = (%v, %v), want true for target and staging", dest.prepareCalls[0].CDCMode, dest.prepareCalls[1].CDCMode)
+	}
+	if !dest.prepareCalls[0].RequirePrimaryKeyMatch || dest.prepareCalls[1].RequirePrimaryKeyMatch {
+		t.Fatalf("RequirePrimaryKeyMatch = (%v, %v), want true only for target", dest.prepareCalls[0].RequirePrimaryKeyMatch, dest.prepareCalls[1].RequirePrimaryKeyMatch)
+	}
+	if strings.Join(dest.prepareCalls[0].CDCKeys, ",") != "id" || strings.Join(dest.prepareCalls[1].CDCKeys, ",") != "id" {
+		t.Fatalf("CDCKeys = (%v, %v), want [id] for target and staging", dest.prepareCalls[0].CDCKeys, dest.prepareCalls[1].CDCKeys)
+	}
+	if len(dest.prepareCalls[1].PrimaryKeys) != 0 {
+		t.Fatalf("staging PrimaryKeys = %v, want no declared constraint", dest.prepareCalls[1].PrimaryKeys)
+	}
+}
+
 func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyMerge
 	job.Config.PrimaryKeys = []string{"id"}
+	job.Config.IncrementalPredicate = "t.updated_at >= DATE '2026-07-01'"
 	job.Config.LoaderFileSize = 222
 	src.readCh = mustClosedRecords()
 
@@ -80,6 +114,9 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	if dest.mergeCalls[0].IncrementalKey != "id" {
 		t.Fatalf("MergeOptions.IncrementalKey = %q, want id", dest.mergeCalls[0].IncrementalKey)
 	}
+	if dest.mergeCalls[0].IncrementalPredicate != job.Config.IncrementalPredicate {
+		t.Fatalf("MergeOptions.IncrementalPredicate = %q, want %q", dest.mergeCalls[0].IncrementalPredicate, job.Config.IncrementalPredicate)
+	}
 	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
 		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)
 	}
@@ -88,6 +125,103 @@ func TestMergeStrategy_Execute_HappyPath(t *testing.T) {
 	defer src.mu.Unlock()
 	if !src.readCalled {
 		t.Fatalf("expected Source.Read to be called")
+	}
+}
+
+func TestMergeStrategyPropagatesBoundDestinationIncarnation(t *testing.T) {
+	job, src, _ := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyMerge
+	job.Config.PrimaryKeys = []string{"id"}
+	src.readCh = mustClosedRecords()
+	dest := newCDCStateDestination()
+	dest.incarnations[job.Config.DestTable] = "physical-target-42"
+	manager, err := NewCDCStateManager(dest, "merge-incarnation", job.Config.DestTable, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RegisterTable(context.Background(), job.Config.SourceTable, job.Config.DestTable); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.BeginRun(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	job.Destination = dest
+	job.CDCStateManager = manager
+
+	if err := (&MergeStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if len(dest.mergeCalls) != 1 {
+		t.Fatalf("merge calls = %d, want 1", len(dest.mergeCalls))
+	}
+	if got := dest.mergeCalls[0].CDCExpectedIncarnation; got != "physical-target-42" {
+		t.Fatalf("CDCExpectedIncarnation = %q, want physical-target-42", got)
+	}
+}
+
+func TestMergeStrategy_LeaseLossAfterStagingWriteSkipsLaterMutations(t *testing.T) {
+	job, src, base := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyMerge
+	job.Config.PrimaryKeys = []string{"id"}
+	src.readCh = mustClosedRecords()
+	dest := &stageBlockingDestination{
+		truncateCapableDestination: &truncateCapableDestination{fakeDestination: base},
+		stage:                      "write",
+		entered:                    make(chan struct{}),
+		release:                    make(chan struct{}),
+	}
+	job.Destination = dest
+	lease := &streamingTestLease{done: make(chan struct{}), err: errors.New("lease lost after batch staging write")}
+
+	done := make(chan error, 1)
+	go func() { done <- (&MergeStrategy{}).Execute(guardedStreamingContext(lease), job) }()
+	<-dest.entered
+	close(lease.done)
+	close(dest.release)
+
+	err := <-done
+	if !errors.Is(err, source.ErrConnectorLeaseLost) {
+		t.Fatalf("Execute error = %v, want connector lease loss", err)
+	}
+	base.mu.Lock()
+	defer base.mu.Unlock()
+	if len(base.mergeCalls) != 0 || len(base.truncateCalls) != 0 || len(base.dropCalls) != 0 {
+		t.Fatalf("mutations after lease loss: merge=%d truncate=%d drop=%d", len(base.mergeCalls), len(base.truncateCalls), len(base.dropCalls))
+	}
+}
+
+func TestMergeStrategy_EnablesSnapshotReplacementOnlyForCapableCDCDestination(t *testing.T) {
+	job, src, _ := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	src.readCh = mustClosedRecords()
+
+	if err := (&MergeStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute without truncate capability returned error: %v", err)
+	}
+	if src.readOpts.CDCSnapshotReplace {
+		t.Fatal("snapshot replacement enabled for destination without truncate capability")
+	}
+
+	job, src, dest := minimalJob()
+	job.Schema.Columns = append(job.Schema.Columns, schema.Column{
+		Name:     "_cdc_deleted",
+		DataType: schema.TypeBoolean,
+		Nullable: false,
+	})
+	job.SourceSchema = job.Schema
+	job.Destination = &truncateCapableDestination{fakeDestination: dest}
+	src.readCh = mustClosedRecords()
+
+	if err := (&MergeStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute with truncate capability returned error: %v", err)
+	}
+	if !src.readOpts.CDCSnapshotReplace {
+		t.Fatal("snapshot replacement not enabled for truncate-capable CDC destination")
 	}
 }
 
@@ -141,6 +275,20 @@ func TestDeleteInsertStrategy_Validate(t *testing.T) {
 	cfg.IncrementalKey = "updated_at"
 	if err := strat.Validate(cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDeleteInsertStrategy_RejectsCDCBeforeDestinationOrSourceWork(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Schema = keylessCDCSchema()
+	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+
+	err := (&DeleteInsertStrategy{}).Execute(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "not supported for CDC records") {
+		t.Fatalf("Execute() error = %v, want CDC rejection", err)
+	}
+	if len(dest.prepareCalls) != 0 || len(dest.writeCalls) != 0 || src.readCalled {
+		t.Fatalf("CDC rejection performed work: prepare=%d write=%d read=%v", len(dest.prepareCalls), len(dest.writeCalls), src.readCalled)
 	}
 }
 

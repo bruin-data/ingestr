@@ -2,9 +2,12 @@ package iceberg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -150,7 +153,7 @@ var errStreamStopped = fmt.Errorf("iceberg: batch stream consumer stopped")
 
 // commitRowDelta writes the data and delete files produced by the two
 // streaming passes and commits them as one atomic snapshot.
-func commitRowDelta(
+func (d *Destination) commitRowDelta(
 	ctx context.Context,
 	tbl *icebergtable.Table,
 	operation string,
@@ -162,6 +165,14 @@ func commitRowDelta(
 	txn := tbl.NewTransaction()
 
 	var dataFiles []iceberggo.DataFile
+	var deleteFiles []iceberggo.DataFile
+	cleanupFiles := true
+	defer func() {
+		if cleanupFiles {
+			removeUncommittedFiles(ctx, tbl, dataFiles, deleteFiles)
+		}
+	}()
+
 	for df, err := range icebergtable.WriteRecords(ctx, tbl, writeSchema, batchStream(writeSchema, true, produceData)) {
 		if err != nil {
 			return fmt.Errorf("iceberg: %s failed to write data files: %w", operation, err)
@@ -169,7 +180,6 @@ func commitRowDelta(
 		dataFiles = append(dataFiles, df)
 	}
 
-	var deleteFiles []iceberggo.DataFile
 	if produceDeletes != nil && tbl.CurrentSnapshot() != nil {
 		deleteFieldIDs, err := fieldIDsByName(tbl.Schema(), deleteKeyColumns)
 		if err != nil {
@@ -193,10 +203,47 @@ func commitRowDelta(
 	if err := rowDelta.Commit(ctx); err != nil {
 		return fmt.Errorf("iceberg: %s failed to stage row delta: %w", operation, err)
 	}
-	if _, err := txn.Commit(ctx); err != nil {
+	committed, err := txn.Commit(ctx)
+	if err != nil {
+		if !errors.Is(err, icebergtable.ErrCommitFailed) {
+			cleanupFiles = false
+		}
 		return fmt.Errorf("iceberg: failed to commit %s on table %s: %w", operation, tbl.Identifier(), err)
 	}
+	cleanupFiles = false
+	d.cleanupOldOrphans(ctx, committed)
 	return nil
+}
+
+func removeUncommittedFiles(ctx context.Context, tbl *icebergtable.Table, fileGroups ...[]iceberggo.DataFile) {
+	fileCount := 0
+	for _, files := range fileGroups {
+		fileCount += len(files)
+	}
+	if fileCount == 0 {
+		return
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	fs, err := tbl.FS(cleanupCtx)
+	if err != nil {
+		log.Printf("Warning: failed to load Iceberg filesystem for uncommitted-file cleanup on %s: %v", tbl.Identifier(), err)
+		return
+	}
+	seen := make(map[string]struct{})
+	for _, files := range fileGroups {
+		for _, file := range files {
+			path := file.FilePath()
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			if err := fs.Remove(path); err != nil {
+				log.Printf("Warning: failed to delete uncommitted Iceberg file %s: %v", path, err)
+			}
+		}
+	}
 }
 
 // mergeRowDelta merges the staging table using merge-on-read: an equality
@@ -261,7 +308,7 @@ func (d *Destination) mergeRowDelta(ctx context.Context, target, staging *iceber
 	deleteProjection := newRowProjection(deleteSchema, stagingCols)
 
 	config.Debug("[ICEBERG MERGE] Row-delta merge of %d staged row(s) into %s", sorter.Len(), opts.TargetTable)
-	return commitRowDelta(
+	return d.commitRowDelta(
 		ctx, target, "merge", writeSchema,
 		emitWinners(dataProjection),
 		opts.PrimaryKeys,
@@ -325,7 +372,7 @@ func (d *Destination) scd2RowDelta(ctx context.Context, target, staging *iceberg
 	deleteProjection := newRowProjection(deleteSchema, deleteKeyColumns)
 
 	config.Debug("[ICEBERG SCD2] Row-delta SCD2 of %d staged row(s) into %s", stagingSorter.Len(), opts.TargetTable)
-	return commitRowDelta(
+	return d.commitRowDelta(
 		ctx, target, "scd2", writeSchema,
 		func(emit rowEmit) error {
 			return join.run(stagingSorter, currentSorter, scd2Emitters{

@@ -3,11 +3,17 @@ package destination
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type fixedMultiTableNamer string
+
+func (n fixedMultiTableNamer) DestTableName(string, string) string { return string(n) }
 
 func TestShortenIdentifier(t *testing.T) {
 	t.Run("under limit unchanged", func(t *testing.T) {
@@ -70,6 +76,26 @@ func TestShortenIdentifier(t *testing.T) {
 		assert.Equal(t, r1, r2, "same input should always produce same output")
 	})
 
+	t.Run("multibyte names keep rune boundaries and byte limit", func(t *testing.T) {
+		name := strings.Repeat("é", 40)
+		first := ShortenIdentifier(name, name, 63)
+		second := ShortenIdentifier(name, name, 63)
+		require.Equal(t, first, second)
+		require.True(t, utf8.ValidString(first))
+		require.LessOrEqual(t, len(first), 63)
+	})
+
+	t.Run("multibyte same-prefix candidates remain distinct", func(t *testing.T) {
+		prefix := strings.Repeat("界", 24)
+		first := ShortenIdentifier(prefix+"一", prefix+"一", 63)
+		second := ShortenIdentifier(prefix+"二", prefix+"二", 63)
+		require.NotEqual(t, first, second)
+		require.True(t, utf8.ValidString(first))
+		require.True(t, utf8.ValidString(second))
+		require.LessOrEqual(t, len(first), 63)
+		require.LessOrEqual(t, len(second), 63)
+	})
+
 	// Regression guard for the orphan-cleanup LIKE pattern in
 	// tests/integration/swap_table_test.go::TestMySQLSwapTable_LongTargetName.
 	// That test relies on ShortenIdentifier preserving at least the first 20
@@ -92,6 +118,41 @@ func TestShortenIdentifier(t *testing.T) {
 		assert.NotEqual(t, r1, r2, "different hashSource should produce different tags")
 		assert.Equal(t, 63, len(r1))
 		assert.Equal(t, 63, len(r2))
+	})
+}
+
+func TestResolveMultiTableName(t *testing.T) {
+	t.Run("shortens flattened final component deterministically", func(t *testing.T) {
+		source := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
+		first := ResolveMultiTableName("postgres", nil, "landing", source)
+		second := ResolveMultiTableName("postgres", nil, "landing", source)
+		require.Equal(t, first, second)
+		parts := strings.Split(first, ".")
+		require.Equal(t, []string{"landing", parts[1]}, parts)
+		require.LessOrEqual(t, len(parts[1]), MaxIdentifierLength("postgres"))
+		require.NotEqual(t, "landing."+strings.ReplaceAll(source, ".", "_"), first)
+	})
+
+	t.Run("full path differentiates same-prefix candidates", func(t *testing.T) {
+		prefix := strings.Repeat("same_prefix_", 8)
+		first := ResolveMultiTableName("postgres", nil, "landing", "source."+prefix+"one")
+		second := ResolveMultiTableName("postgres", nil, "landing", "source."+prefix+"two")
+		require.NotEqual(t, first, second)
+		require.LessOrEqual(t, len(strings.TrimPrefix(first, "landing.")), MaxIdentifierLength("postgres"))
+		require.LessOrEqual(t, len(strings.TrimPrefix(second, "landing.")), MaxIdentifierLength("postgres"))
+	})
+
+	t.Run("preserves raw qualified identifier delimiters", func(t *testing.T) {
+		longTable := strings.Repeat("Table]Name", 20)
+		raw := "[Catalog].[Landing].[" + strings.ReplaceAll(longTable, "]", "]]") + "]"
+		got := ResolveMultiTableName("mssql", fixedMultiTableNamer(raw), "", "ignored")
+		require.True(t, strings.HasPrefix(got, "[Catalog].[Landing].["))
+		require.True(t, strings.HasSuffix(got, "]"))
+		parts := tablename.Split(got)
+		require.Len(t, parts, 3)
+		require.Equal(t, "Catalog", parts[0])
+		require.Equal(t, "Landing", parts[1])
+		require.LessOrEqual(t, len(parts[2]), MaxIdentifierLength("mssql"))
 	})
 }
 
@@ -171,5 +232,19 @@ func TestShortenColumnNames(t *testing.T) {
 		require.NotNil(t, withoutOrig)
 		assert.NotEqual(t, withOrig[columns[0].Name], withoutOrig[columns[0].Name],
 			"different hash source should produce different shortened names")
+	})
+
+	t.Run("normalized collisions choose hash source deterministically", func(t *testing.T) {
+		const normalized = "configuration_data_with_a_name_that_exceeds_the_destination_identifier_limit"
+		columns := []schema.Column{{Name: normalized}}
+		first := ShortenColumnNames(columns, 63, map[string]string{
+			"configurationDataWithANameThatExceedsTheDestinationIdentifierLimit": normalized,
+			"ConfigurationDataWithANameThatExceedsTheDestinationIdentifierLimit": normalized,
+		})
+		second := ShortenColumnNames(columns, 63, map[string]string{
+			"ConfigurationDataWithANameThatExceedsTheDestinationIdentifierLimit": normalized,
+			"configurationDataWithANameThatExceedsTheDestinationIdentifierLimit": normalized,
+		})
+		require.Equal(t, first, second)
 	})
 }

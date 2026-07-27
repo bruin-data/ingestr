@@ -41,24 +41,24 @@ func TestStreamPosition_ConcurrentMax(t *testing.T) {
 
 func TestStandbyUpdate(t *testing.T) {
 	tests := []struct {
-		name        string
-		streaming   bool
-		received    pglogrepl.LSN
-		committed   pglogrepl.LSN
-		start       pglogrepl.LSN
-		wantWrite   pglogrepl.LSN
-		wantFlush   pglogrepl.LSN
-		wantApply   pglogrepl.LSN
-		flushIsZero bool
+		name      string
+		streaming bool
+		received  pglogrepl.LSN
+		committed pglogrepl.LSN
+		start     pglogrepl.LSN
+		wantWrite pglogrepl.LSN
+		wantFlush pglogrepl.LSN
+		wantApply pglogrepl.LSN
 	}{
 		{
-			name:        "batch mode reports only write position",
-			streaming:   false,
-			received:    500,
-			committed:   300,
-			start:       100,
-			wantWrite:   500,
-			flushIsZero: true, // pglogrepl defaults flush:=write when 0
+			name:      "batch mode keeps flush and apply at durable start",
+			streaming: false,
+			received:  500,
+			committed: 300,
+			start:     100,
+			wantWrite: 500,
+			wantFlush: 100,
+			wantApply: 100,
 		},
 		{
 			name:      "streaming reports committed as flush/apply",
@@ -80,16 +80,32 @@ func TestStandbyUpdate(t *testing.T) {
 			wantFlush: 100,
 			wantApply: 100,
 		},
+		{
+			name:      "streaming write covers later durable commit",
+			streaming: true,
+			received:  300,
+			committed: 500,
+			start:     100,
+			wantWrite: 500,
+			wantFlush: 500,
+			wantApply: 500,
+		},
+		{
+			name:      "batch write covers durable start",
+			streaming: false,
+			received:  50,
+			committed: 500,
+			start:     100,
+			wantWrite: 100,
+			wantFlush: 100,
+			wantApply: 100,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ssu := standbyUpdate(tt.streaming, tt.received, tt.committed, tt.start)
 			assert.Equal(t, tt.wantWrite, ssu.WALWritePosition)
-			if tt.flushIsZero {
-				assert.Equal(t, pglogrepl.LSN(0), ssu.WALFlushPosition, "flush must stay 0 in batch mode so behavior is unchanged")
-				return
-			}
 			assert.Equal(t, tt.wantFlush, ssu.WALFlushPosition)
 			assert.Equal(t, tt.wantApply, ssu.WALApplyPosition)
 		})

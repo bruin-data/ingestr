@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -33,8 +32,13 @@ func setupMySQLCDCContainer(t *testing.T, ctx context.Context) (testcontainers.C
 			req.Cmd = []string{
 				"--server-id=17777",
 				"--log-bin=mysql-bin",
+				"--gtid-mode=ON",
+				"--enforce-gtid-consistency=ON",
 				"--binlog-format=ROW",
 				"--binlog-row-image=FULL",
+				// Non-UTC server time zone: snapshot and binlog rows must still
+				// agree on TIMESTAMP instants.
+				"--default-time-zone=+03:00",
 			}
 			return nil
 		}),
@@ -90,13 +94,14 @@ func insertMySQLCDCItems(t *testing.T, ctx context.Context, db *sql.DB, startID 
 	}
 }
 
-func TestMySQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
+func TestMySQLCDC_SnapshotAndIncremental_MySQL(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
 	const initialRows = 10000
 	const newID = initialRows + 1
+	const pathAgreementID = initialRows + 2
 
 	ctx := context.Background()
 	sourceContainer, sourceURI := setupMySQLCDCContainer(t, ctx)
@@ -110,38 +115,34 @@ func TestMySQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 		id INT NOT NULL PRIMARY KEY,
 		name VARCHAR(100) NOT NULL,
 		value INT NULL,
+		big_unsigned BIGINT UNSIGNED NULL,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	)`)
 	require.NoError(t, err)
 	insertMySQLCDCItems(t, ctx, sourceDB, 1, initialRows)
-
-	tmpDir, err := os.MkdirTemp("", "mysql_cdc_sqlite_*")
+	// Row 5 arrives via the snapshot; a row with identical values arrives later
+	// via the binlog. The destination must agree on both paths.
+	_, err = sourceDB.ExecContext(ctx, `UPDATE items SET big_unsigned = 18446744073709551615, updated_at = '2026-01-02 03:04:05' WHERE id = 5`)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
-	sqlitePath := tmpDir + "/test.db"
 
 	cfg := &config.IngestConfig{
 		SourceURI:   mysqlCDCURI(t, sourceURI, map[string]string{"mode": "batch", "server_id": "18888"}),
 		SourceTable: "items",
-		DestURI:     "sqlite:///" + sqlitePath,
+		DestURI:     sourceURI,
 		DestTable:   "items_dest",
 	}
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-	dest, err := sql.Open("sqlite3", sqlitePath)
-	require.NoError(t, err)
-	defer func() { _ = dest.Close() }()
-
 	queryCount := func(query string) int {
 		t.Helper()
 		var n int
-		require.NoError(t, dest.QueryRow(query).Scan(&n))
+		require.NoError(t, sourceDB.QueryRow(query).Scan(&n))
 		return n
 	}
 
 	assert.Equal(t, initialRows, queryCount(`SELECT COUNT(*) FROM items_dest`))
-	assert.Equal(t, 0, queryCount(`SELECT COUNT(*) FROM items_dest WHERE "_cdc_deleted" = true`))
-	firstDistinctLSNs := queryCount(`SELECT COUNT(DISTINCT "_cdc_lsn") FROM items_dest`)
+	assert.Equal(t, 0, queryCount("SELECT COUNT(*) FROM items_dest WHERE `_cdc_deleted` = true"))
+	firstDistinctLSNs := queryCount("SELECT COUNT(DISTINCT `_cdc_lsn`) FROM items_dest")
 	assert.Equal(t, 1, firstDistinctLSNs)
 
 	_, err = sourceDB.ExecContext(ctx, `INSERT INTO items (id, name, value) VALUES (?, ?, ?)`, newID, fmt.Sprintf("item%d", newID), 400)
@@ -154,15 +155,22 @@ func TestMySQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sourceDB.ExecContext(ctx, `DELETE FROM items WHERE id = 3`)
 	require.NoError(t, err)
+	_, err = sourceDB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO items (id, name, value, big_unsigned, updated_at) VALUES (%d, 'twin', 500, 18446744073709551615, '2026-01-02 03:04:05')`, pathAgreementID))
+	require.NoError(t, err)
 
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	require.NoError(t, pipeline.New(cfg).Run(ctxWithTimeout))
 
-	assert.Equal(t, initialRows+1, queryCount(`SELECT COUNT(*) FROM items_dest`))
-	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id = 1 AND value = 150 AND "_cdc_deleted" = false`), "plain update should be applied")
-	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id = 2 AND value = 200 AND "_cdc_deleted" = true`), "delete should be soft-applied")
-	assert.Equal(t, 1, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id = 3 AND name = 'item3_final' AND value = 999 AND "_cdc_deleted" = true`), "update then delete should keep last values")
-	assert.Equal(t, 1, queryCount(fmt.Sprintf(`SELECT COUNT(*) FROM items_dest WHERE id = %d AND name = 'item%d' AND value = 400 AND "_cdc_deleted" = false`, newID, newID)), "insert should be applied")
-	assert.Greater(t, queryCount(`SELECT COUNT(DISTINCT "_cdc_lsn") FROM items_dest`), firstDistinctLSNs)
+	assert.Equal(t, initialRows+2, queryCount(`SELECT COUNT(*) FROM items_dest`))
+	assert.Equal(t, 1, queryCount("SELECT COUNT(*) FROM items_dest WHERE id = 1 AND value = 150 AND `_cdc_deleted` = false"), "plain update should be applied")
+	assert.Equal(t, 1, queryCount("SELECT COUNT(*) FROM items_dest WHERE id = 2 AND value = 200 AND `_cdc_deleted` = true"), "delete should be soft-applied")
+	assert.Equal(t, 1, queryCount("SELECT COUNT(*) FROM items_dest WHERE id = 3 AND name = 'item3_final' AND value = 999 AND `_cdc_deleted` = true"), "update then delete should keep last values")
+	assert.Equal(t, 1, queryCount(fmt.Sprintf("SELECT COUNT(*) FROM items_dest WHERE id = %d AND name = 'item%d' AND value = 400 AND `_cdc_deleted` = false", newID, newID)), "insert should be applied")
+	assert.Greater(t, queryCount("SELECT COUNT(DISTINCT `_cdc_lsn`) FROM items_dest"), firstDistinctLSNs)
+
+	agreementIDs := fmt.Sprintf("(5, %d)", pathAgreementID)
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(DISTINCT updated_at) FROM items_dest WHERE id IN `+agreementIDs), "snapshot and binlog rows must agree on TIMESTAMP instants despite the non-UTC server time zone")
+	assert.Equal(t, 1, queryCount(`SELECT COUNT(DISTINCT big_unsigned) FROM items_dest WHERE id IN `+agreementIDs), "snapshot and binlog rows must agree on BIGINT UNSIGNED values")
+	assert.Equal(t, 2, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id IN `+agreementIDs+` AND big_unsigned > 9.3e18`), "BIGINT UNSIGNED must keep its unsigned range instead of clamping to MaxInt64 or wrapping negative")
 }

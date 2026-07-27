@@ -107,7 +107,7 @@ uvx crash -c 'SELECT * FROM doc.sample'
 
 ### Supported destination strategies
 
-When using CrateDB as a destination, ingestr supports `replace`, `append`, `merge`, `truncate+insert`, and `scd2`.
+When using CrateDB as a destination, ingestr supports `replace`, `append`, `merge`, and `scd2`.
 
 `delete+insert` is not supported for CrateDB destinations. CrateDB accepts transaction-control statements such as `BEGIN` and `START TRANSACTION` for PostgreSQL wire compatibility, but it does not provide transaction control; every statement commits immediately. Because ingestr cannot make the delete and insert steps atomic on CrateDB, it fails this strategy before loading staging data.
 

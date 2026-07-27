@@ -376,7 +376,7 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	for i, pk := range opts.PrimaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
-	onClause := strings.Join(onConditions, " AND ")
+	onClause := destination.MergeJoinCondition(strings.Join(onConditions, " AND "), opts.IncrementalPredicate)
 
 	pkMap := make(map[string]bool)
 	for _, pk := range opts.PrimaryKeys {
@@ -511,6 +511,25 @@ func (d *DatabricksDestination) TruncateTable(ctx context.Context, table string)
 	return nil
 }
 
+func (d *DatabricksDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	_, stagingName := d.parseTableName(opts.StagingTable)
+	targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		d.quoteFullTable(targetSchema, targetName), columnList, columnList, d.quoteFullTable(stagingSchema, stagingName),
+	)
+	if err := d.executeStatement(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *DatabricksDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
 	if len(args) > 0 {
 		for i, arg := range args {
@@ -533,6 +552,7 @@ func (d *DatabricksDestination) BeginTransaction(ctx context.Context) (destinati
 func (d *DatabricksDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *DatabricksDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DatabricksDestination) SupportsMergeStrategy() bool        { return true }
+func (d *DatabricksDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *DatabricksDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DatabricksDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *DatabricksDestination) SupportsAtomicSwap() bool           { return true }

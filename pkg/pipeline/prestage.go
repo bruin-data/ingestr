@@ -26,7 +26,7 @@ type preStageReport struct {
 // files is equivalent.
 func preStageStrategyAllowed(strategy config.IncrementalStrategy) bool {
 	switch strategy {
-	case config.StrategyMerge, config.StrategyReplace, config.StrategyAppend, config.StrategyTruncateInsert:
+	case config.StrategyMerge, config.StrategyReplace, config.StrategyAppend:
 		return true
 	default:
 		return false
@@ -40,7 +40,7 @@ func preStageStrategyAllowed(strategy config.IncrementalStrategy) bool {
 func (p *Pipeline) maybeStartPreStage(
 	ctx context.Context,
 	strategy config.IncrementalStrategy,
-	primaryKeys []string,
+	_ []string,
 	loadTimestamp time.Time,
 ) (destination.PreStageWriter, func(string) string) {
 	if p.config.DisablePreStaging {
@@ -76,8 +76,7 @@ func (p *Pipeline) maybeStartPreStage(
 	}
 
 	usesStagingTable := strategy == config.StrategyMerge ||
-		strategy == config.StrategyReplace ||
-		(strategy == config.StrategyTruncateInsert && len(primaryKeys) > 0)
+		strategy == config.StrategyReplace
 
 	writer, err := prestager.NewPreStageWriter(ctx, destination.PreStageOptions{
 		Table:               p.config.DestTable,
@@ -88,7 +87,7 @@ func (p *Pipeline) maybeStartPreStage(
 		StagingBucket:       p.config.StagingBucket,
 		LoaderFileSize:      p.config.LoaderFileSize,
 		LoaderFileFormat:    p.config.LoaderFileFormat,
-		Parallelism:         p.config.ExtractParallelism,
+		Parallelism:         p.config.EffectiveDestinationParallelism(),
 	})
 	if err != nil {
 		if !errors.Is(err, destination.ErrPreStageUnsupported) {

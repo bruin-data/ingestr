@@ -136,7 +136,8 @@ func TestNATS_Streaming(t *testing.T) {
 	publishNATSMessages(t, js, subject, 1, 20)
 
 	destURI, destSchema, destPool := streamingPostgresDest(t, ctx, "nats")
-	sourceURI := natsURI + "?subject=" + url.QueryEscape(subject) + "&durable=ingestr_" + stream + "&batch_timeout=1"
+	durable := "ingestr_" + stream
+	sourceURI := natsURI + "?subject=" + url.QueryEscape(subject) + "&durable=" + durable + "&batch_timeout=1"
 	cfg := &config.IngestConfig{
 		SourceURI:     sourceURI,
 		SourceTable:   stream,
@@ -160,6 +161,10 @@ func TestNATS_Streaming(t *testing.T) {
 		assertStreamStillRunning(t, runErr)
 		return rowCount() == 30
 	}, 60*time.Second, 500*time.Millisecond)
+	require.Eventually(t, func() bool {
+		info, err := js.ConsumerInfo(stream, durable)
+		return err == nil && info.NumAckPending == 0 && info.AckFloor.Stream == 30
+	}, 30*time.Second, 500*time.Millisecond, "destination flush should acknowledge all durable consumer messages")
 
 	cancel()
 	assertStreamStopped(t, runErr)
@@ -302,7 +307,10 @@ func startNATSContainer(t *testing.T, ctx context.Context) string {
 		Image:        "nats:2.10-alpine",
 		ExposedPorts: []string{"4222/tcp"},
 		Cmd:          []string{"-js"},
-		WaitingFor:   wait.ForListeningPort("4222/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("4222/tcp"),
+			wait.ForLog("Server is ready"),
+		).WithDeadline(60 * time.Second),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -320,8 +328,15 @@ func startNATSContainer(t *testing.T, ctx context.Context) string {
 
 func newNATSClient(t *testing.T, natsURI string) (*natsgo.Conn, natsgo.JetStreamContext) {
 	t.Helper()
-	nc, err := natsgo.Connect(natsURI)
-	require.NoError(t, err)
+	var nc *natsgo.Conn
+	require.Eventually(t, func() bool {
+		conn, err := natsgo.Connect(natsURI)
+		if err != nil {
+			return false
+		}
+		nc = conn
+		return true
+	}, 30*time.Second, 500*time.Millisecond, "connect to NATS test container")
 	js, err := nc.JetStream()
 	require.NoError(t, err)
 	return nc, js

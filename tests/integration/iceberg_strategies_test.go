@@ -125,6 +125,32 @@ func icebergNameByID(t *testing.T, rows []map[string]any, id int64) string {
 	return name
 }
 
+func TestIcebergConformance_Replace_DedupesByPK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	destURI := icebergConformanceDestURI(t)
+	destTable := icebergConformanceTable()
+
+	cfg := &config.IngestConfig{
+		SourceURI:           jsonlURI(t, "testdata/conformance_replace_dedup.jsonl"),
+		SourceTable:         "replace_dedup",
+		DestURI:             destURI,
+		DestTable:           destTable,
+		IncrementalStrategy: config.StrategyReplace,
+		IncrementalKey:      "score",
+		PrimaryKeys:         []string{"id"},
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	rows := readIcebergRows(t, ctx, destURI, destTable)
+	assert.Len(t, rows, 3, "duplicate primary keys should collapse to one row per key")
+	assert.Equal(t, "v1-latest", icebergNameByID(t, rows, 1))
+	assert.Equal(t, "v3-latest", icebergNameByID(t, rows, 3))
+}
+
 func TestIcebergConformance_Merge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -214,61 +240,6 @@ func TestIcebergConformance_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 	assert.Len(t, rows, 4, "interval delete+insert should replace id=3 and add net-new id=4")
 	assert.Equal(t, "v2-3", icebergNameByID(t, rows, 3))
 	assert.Equal(t, "v2-4", icebergNameByID(t, rows, 4))
-}
-
-func TestIcebergConformance_TruncateInsert(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	destURI := icebergConformanceDestURI(t)
-	destTable := icebergConformanceTable()
-
-	seedCfg := &config.IngestConfig{
-		SourceURI:           jsonlURI(t, "testdata/conformance_append_initial.jsonl"),
-		SourceTable:         "truncate_seed",
-		DestURI:             destURI,
-		DestTable:           destTable,
-		IncrementalStrategy: config.StrategyReplace,
-	}
-	require.NoError(t, pipeline.New(seedCfg).Run(ctx))
-
-	cfg := &config.IngestConfig{
-		SourceURI:           jsonlURI(t, "testdata/conformance.jsonl"),
-		SourceTable:         "truncate_source",
-		DestURI:             destURI,
-		DestTable:           destTable,
-		IncrementalStrategy: config.StrategyTruncateInsert,
-	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	rows := readIcebergRows(t, ctx, destURI, destTable)
-	assert.Len(t, rows, replaceFixtureRows, "old rows must be gone, not appended")
-	assert.Equal(t, "juliet", icebergNameByID(t, rows, 10))
-}
-
-func TestIcebergConformance_TruncateInsert_Dedup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	destURI := icebergConformanceDestURI(t)
-	destTable := icebergConformanceTable()
-
-	cfg := &config.IngestConfig{
-		SourceURI:           jsonlURI(t, "testdata/conformance_truncate_dupes.jsonl"),
-		SourceTable:         "truncate_dupes",
-		DestURI:             destURI,
-		DestTable:           destTable,
-		IncrementalStrategy: config.StrategyTruncateInsert,
-		PrimaryKeys:         []string{"id"},
-	}
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-	rows := readIcebergRows(t, ctx, destURI, destTable)
-	assert.Len(t, rows, 5, "expected 5 distinct ids after dedup")
 }
 
 func TestIcebergConformance_SCD2(t *testing.T) {

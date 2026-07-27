@@ -39,6 +39,9 @@ func (s *SCD2Strategy) RequiresIncrementalKey() bool {
 }
 
 func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if hasCDCColumns(job.Schema) {
+		return fmt.Errorf("scd2 strategy is not supported for CDC records; use merge or replace")
+	}
 	// Capture a single timestamp at the start of the process for consistency
 	processTimestamp := time.Now().UTC()
 
@@ -130,7 +133,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           extendedSchema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

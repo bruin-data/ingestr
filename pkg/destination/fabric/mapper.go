@@ -73,3 +73,13 @@ func MapDataTypeToFabric(col schema.Column) string {
 		return "VARCHAR(MAX)"
 	}
 }
+
+func (d *FabricDestination) NormalizeSchemaEvolutionColumn(col schema.Column) schema.Column {
+	switch col.DataType {
+	case schema.TypeTimestampTZ:
+		col.DataType = schema.TypeTimestamp
+	case schema.TypeInt8:
+		col.DataType = schema.TypeInt16
+	}
+	return col
+}

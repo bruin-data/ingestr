@@ -82,6 +82,11 @@ type Column struct {
 	MaxLength    int
 	IsPrimaryKey bool
 	ArrayType    DataType
+	// Unsigned marks integer columns whose source type is unsigned. DataType is
+	// already widened to fit the unsigned range; sources whose wire format
+	// delivers raw signed values (e.g. MySQL binlog rows) use this to
+	// reinterpret them.
+	Unsigned bool
 }
 
 type TableSchema struct {
@@ -114,7 +119,8 @@ func (ts *TableSchema) ColumnNames() []string {
 }
 
 // SameColumnShape reports whether two schemas describe the same column layout
-// for ingestion purposes (name, type, array element type, precision, scale).
+// for ingestion purposes (name, type, array element type, precision, scale,
+// and declared character length).
 // Metadata like primary-key flags and nullability is ignored.
 func (ts *TableSchema) SameColumnShape(other *TableSchema) bool {
 	if ts == nil || other == nil {
@@ -126,7 +132,7 @@ func (ts *TableSchema) SameColumnShape(other *TableSchema) bool {
 	for i := range ts.Columns {
 		a, b := ts.Columns[i], other.Columns[i]
 		if !strings.EqualFold(a.Name, b.Name) || a.DataType != b.DataType ||
-			a.ArrayType != b.ArrayType || a.Precision != b.Precision || a.Scale != b.Scale {
+			a.ArrayType != b.ArrayType || a.Precision != b.Precision || a.Scale != b.Scale || a.MaxLength != b.MaxLength {
 			return false
 		}
 	}
