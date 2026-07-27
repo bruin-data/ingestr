@@ -12,6 +12,8 @@ LICENSE_AUDIT_TARGETS ?= $(LICENSE_CHECK_TARGETS)
 LICENSE_AUDIT_INCLUDE_TESTS ?= $(LICENSE_CHECK_INCLUDE_TESTS)
 LICENSE_AUDIT_NEW_STATUS ?= needs-review
 LINT_MERGE_BASE ?= origin/main
+GCI_VERSION ?= v0.14.0
+GOFUMPT_VERSION ?= v0.11.0
 # Pinned, not @latest. v2.12.x made its cache checkout-independent, but cached
 # diagnostics still contain absolute paths from the checkout that produced
 # them. That makes shared-cache results unsafe across worktrees. Re-test before
@@ -53,15 +55,17 @@ deps:
 
 setup:
 	@printf "$(OK_COLOR)==> Installing development tools$(NO_COLOR)\n"
-	@command -v gci >/dev/null 2>&1 || go install github.com/daixiang0/gci@latest
-	@command -v gofumpt >/dev/null 2>&1 || go install mvdan.cc/gofumpt@latest
+	@current_version="$$(gci --version 2>/dev/null | awk '{ print "v"$$NF; exit }')"; \
+	if [ "$$current_version" != "$(GCI_VERSION)" ]; then go install github.com/daixiang0/gci@$(GCI_VERSION); fi
+	@current_version="$$(gofumpt -version 2>/dev/null | awk '{ print $$1; exit }')"; \
+	if [ "$$current_version" != "$(GOFUMPT_VERSION)" ]; then go install mvdan.cc/gofumpt@$(GOFUMPT_VERSION); fi
 	@current_version="$$(golangci-lint version 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($$i == "version") { print "v"$$(i+1); exit } }')"; \
 	if [ "$$current_version" != "$(GOLANGCI_LINT_VERSION)" ]; then $(GOLANGCI_LINT_INSTALL); fi
 
 tools-update:
 	@printf "$(OK_COLOR)==> Installing development tools$(NO_COLOR)\n"
-	go install github.com/daixiang0/gci@latest
-	go install mvdan.cc/gofumpt@latest
+	go install github.com/daixiang0/gci@$(GCI_VERSION)
+	go install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
 	$(GOLANGCI_LINT_INSTALL)
 
 generate: $(REGISTRY_OUTPUT)
