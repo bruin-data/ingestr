@@ -236,7 +236,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "metrics-addr",
-				Usage:   "Serve streaming metrics (expvar at /debug/vars) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Usage:   "Serve streaming metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
 				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
 			},
 			&cli.StringFlag{
@@ -368,7 +368,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		}
 		defer stop()
 		if !output.IsJSON() {
-			color.Green("Serving metrics on http://%s/debug/vars", boundAddr)
+			color.Green("Serving metrics on http://%s/metrics", boundAddr)
 		}
 	}
 

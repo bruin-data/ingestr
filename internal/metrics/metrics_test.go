@@ -1,16 +1,17 @@
 package metrics
 
 import (
-	"encoding/json"
-	"expvar"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 type fakeReporter struct {
@@ -20,60 +21,70 @@ type fakeReporter struct {
 
 func (f fakeReporter) ReplicationLag() (source.LagSnapshot, bool) { return f.snap, f.ok }
 
-func scrapeReplication(t *testing.T) map[string]any {
+// replicationValue gathers the current value of a source-labeled replication
+// metric. found is false when the series is absent, which is how the collector
+// signals a dimension the engine cannot express.
+func replicationValue(t *testing.T, name string) (value float64, found bool) {
 	t.Helper()
-	var out map[string]any
-	if err := json.Unmarshal([]byte(expvar.Get("ingestr_replication").String()), &out); err != nil {
-		t.Fatalf("failed to decode ingestr_replication: %v", err)
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather failed: %v", err)
 	}
-	return out
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		m := mf.GetMetric()
+		if len(m) == 0 {
+			return 0, false
+		}
+		return metricValue(m[0]), true
+	}
+	return 0, false
 }
 
-func scrapeTables(t *testing.T) map[string]map[string]any {
-	t.Helper()
-	var out map[string]map[string]any
-	if err := json.Unmarshal([]byte(expvar.Get("ingestr_stream_tables").String()), &out); err != nil {
-		t.Fatalf("failed to decode ingestr_stream_tables: %v", err)
+func metricValue(m *dto.Metric) float64 {
+	switch {
+	case m.Gauge != nil:
+		return m.Gauge.GetValue()
+	case m.Counter != nil:
+		return m.Counter.GetValue()
+	default:
+		return 0
 	}
-	return out
 }
 
-// resetState clears the package globals so each test starts clean. expvar has
-// no deregister, so the vars themselves are reused across tests.
+// resetState clears the per-table series and the reporter so each test starts
+// clean. The plain counters (rowsSynced, flushCycles) cannot be reset, so tests
+// that assert their totals measure a before/after delta instead.
 func resetState(t *testing.T) {
 	t.Helper()
 	SetLagReporter(nil)
-	tablesMu.Lock()
-	tables = map[string]*tableStat{}
-	tablesMu.Unlock()
-	rowsSynced.Set(0)
-	flushCycles.Set(0)
+	tableRowsSynced.Reset()
+	tableLastFlushRows.Reset()
+	tableLastSyncedTS.Reset()
 	lastSyncedTS.Set(0)
 	t.Cleanup(func() { SetLagReporter(nil) })
 }
 
-func TestReplicationVarsWithoutReporter(t *testing.T) {
+func TestReplicationWithoutReporter(t *testing.T) {
 	resetState(t)
 
-	got := scrapeReplication(t)
-	if got["streaming"] != false {
-		t.Fatalf("expected streaming=false with no reporter, got %v", got)
-	}
-	if _, ok := got["bytes_behind"]; ok {
-		t.Fatalf("expected no bytes_behind with no reporter, got %v", got)
+	if _, found := replicationValue(t, "ingestr_replication_streaming"); found {
+		t.Fatal("expected no replication series without a reporter")
 	}
 }
 
-func TestReplicationVarsReporterNotReady(t *testing.T) {
+func TestReplicationReporterNotReady(t *testing.T) {
 	resetState(t)
 	SetLagReporter(fakeReporter{ok: false})
 
-	if got := scrapeReplication(t); got["streaming"] != false {
-		t.Fatalf("expected streaming=false when reporter is not ready, got %v", got)
+	if _, found := replicationValue(t, "ingestr_replication_streaming"); found {
+		t.Fatal("expected no replication series when the reporter is not ready")
 	}
 }
 
-func TestReplicationVarsBytesBehind(t *testing.T) {
+func TestReplicationBytesBehind(t *testing.T) {
 	resetState(t)
 	behind := uint64(4096)
 	SetLagReporter(fakeReporter{
@@ -87,27 +98,26 @@ func TestReplicationVarsBytesBehind(t *testing.T) {
 		},
 	})
 
-	got := scrapeReplication(t)
-	if got["streaming"] != true {
-		t.Fatalf("expected streaming=true, got %v", got)
+	if v, found := replicationValue(t, "ingestr_replication_streaming"); !found || v != 1 {
+		t.Fatalf("expected streaming=1, got %v (found=%v)", v, found)
 	}
-	if got["bytes_behind"] != float64(4096) {
-		t.Fatalf("expected bytes_behind=4096, got %v", got["bytes_behind"])
+	if v, found := replicationValue(t, "ingestr_replication_bytes_behind"); !found || v != 4096 {
+		t.Fatalf("expected bytes_behind=4096, got %v (found=%v)", v, found)
 	}
-	if got["caught_up"] != false {
-		t.Fatalf("expected caught_up=false, got %v", got["caught_up"])
+	if v, found := replicationValue(t, "ingestr_replication_caught_up"); !found || v != 0 {
+		t.Fatalf("expected caught_up=0, got %v (found=%v)", v, found)
 	}
-	if got["server_position"] != "0/1A2B3C0" {
-		t.Fatalf("unexpected server_position: %v", got["server_position"])
+	if v, found := replicationValue(t, "ingestr_replication_updated_at_timestamp_seconds"); !found || v != 1700000000 {
+		t.Fatalf("expected updated_at=1700000000, got %v (found=%v)", v, found)
 	}
 	// seconds_behind is not applicable to Postgres and must be omitted rather
 	// than reported as a misleading zero.
-	if _, ok := got["seconds_behind"]; ok {
-		t.Fatalf("expected seconds_behind to be omitted, got %v", got)
+	if _, found := replicationValue(t, "ingestr_replication_seconds_behind"); found {
+		t.Fatal("expected seconds_behind to be omitted for postgres")
 	}
 }
 
-func TestReplicationVarsSecondsBehindOnly(t *testing.T) {
+func TestReplicationSecondsBehindOnly(t *testing.T) {
 	resetState(t)
 	secs := 12.0
 	SetLagReporter(fakeReporter{
@@ -115,52 +125,52 @@ func TestReplicationVarsSecondsBehindOnly(t *testing.T) {
 		snap: source.LagSnapshot{Source: "mongodb", SecondsBehind: &secs},
 	})
 
-	got := scrapeReplication(t)
-	if got["seconds_behind"] != float64(12) {
-		t.Fatalf("expected seconds_behind=12, got %v", got["seconds_behind"])
+	if v, found := replicationValue(t, "ingestr_replication_seconds_behind"); !found || v != 12 {
+		t.Fatalf("expected seconds_behind=12, got %v (found=%v)", v, found)
 	}
-	if _, ok := got["bytes_behind"]; ok {
-		t.Fatalf("expected bytes_behind to be omitted for mongodb, got %v", got)
+	if _, found := replicationValue(t, "ingestr_replication_bytes_behind"); found {
+		t.Fatal("expected bytes_behind to be omitted for mongodb")
 	}
 }
 
 func TestRecordSyncAccumulates(t *testing.T) {
 	resetState(t)
 
+	beforeRows := testutil.ToFloat64(rowsSynced)
+	beforeCycles := testutil.ToFloat64(flushCycles)
+
 	RecordSync(map[string]int64{"public.users": 100, "public.orders": 50}, time.Unix(1000, 0))
 	RecordSync(map[string]int64{"public.users": 25, "public.items": 7}, time.Unix(2000, 0))
 
-	if got := rowsSynced.Value(); got != 182 {
-		t.Fatalf("expected 182 rows synced in total, got %d", got)
+	if got := testutil.ToFloat64(rowsSynced) - beforeRows; got != 182 {
+		t.Fatalf("expected 182 rows synced in total, got %v", got)
 	}
-	if got := flushCycles.Value(); got != 2 {
-		t.Fatalf("expected 2 flush cycles, got %d", got)
+	if got := testutil.ToFloat64(flushCycles) - beforeCycles; got != 2 {
+		t.Fatalf("expected 2 flush cycles, got %v", got)
 	}
-	if got := lastSyncedTS.Value(); got != 2000 {
-		t.Fatalf("expected last synced 2000, got %d", got)
+	if got := testutil.ToFloat64(lastSyncedTS); got != 2000 {
+		t.Fatalf("expected last synced 2000, got %v", got)
 	}
-
-	tbl := scrapeTables(t)
 
 	// rows_synced accumulates across cycles; last_flush_rows is replaced.
-	if tbl["public.users"]["rows_synced"] != float64(125) {
-		t.Fatalf("expected users rows_synced=125, got %v", tbl["public.users"]["rows_synced"])
+	if got := testutil.ToFloat64(tableRowsSynced.WithLabelValues("public.users")); got != 125 {
+		t.Fatalf("expected users rows_synced=125, got %v", got)
 	}
-	if tbl["public.users"]["last_flush_rows"] != float64(25) {
-		t.Fatalf("expected users last_flush_rows=25, got %v", tbl["public.users"]["last_flush_rows"])
+	if got := testutil.ToFloat64(tableLastFlushRows.WithLabelValues("public.users")); got != 25 {
+		t.Fatalf("expected users last_flush_rows=25, got %v", got)
 	}
 
 	// A table absent from cycle 2 keeps its totals and its older timestamp.
-	if tbl["public.orders"]["rows_synced"] != float64(50) {
-		t.Fatalf("expected orders rows_synced=50, got %v", tbl["public.orders"]["rows_synced"])
+	if got := testutil.ToFloat64(tableRowsSynced.WithLabelValues("public.orders")); got != 50 {
+		t.Fatalf("expected orders rows_synced=50, got %v", got)
 	}
-	if tbl["public.orders"]["last_synced_unix"] != float64(1000) {
-		t.Fatalf("expected orders to keep last_synced_unix=1000, got %v", tbl["public.orders"]["last_synced_unix"])
+	if got := testutil.ToFloat64(tableLastSyncedTS.WithLabelValues("public.orders")); got != 1000 {
+		t.Fatalf("expected orders to keep last_synced=1000, got %v", got)
 	}
 
 	// A table first seen in cycle 2 appears.
-	if tbl["public.items"]["rows_synced"] != float64(7) {
-		t.Fatalf("expected items rows_synced=7, got %v", tbl["public.items"]["rows_synced"])
+	if got := testutil.ToFloat64(tableRowsSynced.WithLabelValues("public.items")); got != 7 {
+		t.Fatalf("expected items rows_synced=7, got %v", got)
 	}
 }
 
@@ -169,18 +179,21 @@ func TestRecordSyncAccumulates(t *testing.T) {
 func TestRecordSyncIdleCycleAdvancesTimestamp(t *testing.T) {
 	resetState(t)
 
+	beforeRows := testutil.ToFloat64(rowsSynced)
 	RecordSync(map[string]int64{}, time.Unix(500, 0))
 
-	if got := rowsSynced.Value(); got != 0 {
-		t.Fatalf("expected no rows synced, got %d", got)
+	if got := testutil.ToFloat64(rowsSynced) - beforeRows; got != 0 {
+		t.Fatalf("expected no rows synced, got %v", got)
 	}
-	if got := lastSyncedTS.Value(); got != 500 {
-		t.Fatalf("expected last synced 500, got %d", got)
+	if got := testutil.ToFloat64(lastSyncedTS); got != 500 {
+		t.Fatalf("expected last synced 500, got %v", got)
 	}
 }
 
 func TestRecordSyncConcurrentWithScrape(t *testing.T) {
 	resetState(t)
+
+	beforeRows := testutil.ToFloat64(rowsSynced)
 
 	var wg sync.WaitGroup
 	for i := range 8 {
@@ -188,17 +201,17 @@ func TestRecordSyncConcurrentWithScrape(t *testing.T) {
 			RecordSync(map[string]int64{fmt.Sprintf("t%d", i%3): 1}, time.Unix(int64(i), 0))
 		})
 		wg.Go(func() {
-			_ = expvar.Get("ingestr_stream_tables").String()
+			_, _ = registry.Gather()
 		})
 	}
 	wg.Wait()
 
-	if got := rowsSynced.Value(); got != 8 {
-		t.Fatalf("expected 8 rows synced, got %d", got)
+	if got := testutil.ToFloat64(rowsSynced) - beforeRows; got != 8 {
+		t.Fatalf("expected 8 rows synced, got %v", got)
 	}
 }
 
-func TestServeExposesDebugVars(t *testing.T) {
+func TestServeExposesMetrics(t *testing.T) {
 	resetState(t)
 	RecordSync(map[string]int64{"public.users": 3}, time.Unix(1234, 0))
 
@@ -208,7 +221,7 @@ func TestServeExposesDebugVars(t *testing.T) {
 	}
 	t.Cleanup(stop)
 
-	resp, err := http.Get("http://" + addr + "/debug/vars")
+	resp, err := http.Get("http://" + addr + "/metrics")
 	if err != nil {
 		t.Fatalf("could not reach metrics server: %v", err)
 	}
@@ -218,20 +231,20 @@ func TestServeExposesDebugVars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read body: %v", err)
 	}
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("expvar output is not valid JSON: %v", err)
+	text := string(body)
+
+	if !strings.Contains(text, "ingestr_stream_rows_synced_total") {
+		t.Fatalf("expected ingestr_stream_rows_synced_total in /metrics, got:\n%s", text)
 	}
-	if _, ok := out["ingestr_stream_rows_synced"]; !ok {
-		t.Fatalf("expected ingestr_stream_rows_synced in /debug/vars, got keys %v", out)
+	if !strings.Contains(text, `ingestr_stream_table_rows_synced_total{table="public.users"}`) {
+		t.Fatalf("expected per-table series in /metrics, got:\n%s", text)
 	}
 
-	// expvar injects cmdline and memstats into the shared registry; the handler
-	// must filter them out so scrapes never trigger runtime.ReadMemStats or leak
-	// the process arguments.
-	for _, builtin := range []string{"memstats", "cmdline"} {
-		if _, ok := out[builtin]; ok {
-			t.Fatalf("expected %q to be excluded from /debug/vars, got keys %v", builtin, out)
+	// The dedicated registry must not carry the default registry's Go runtime or
+	// process collectors, so scrapes never trigger runtime.ReadMemStats.
+	for _, builtin := range []string{"go_goroutines", "go_memstats_", "process_"} {
+		if strings.Contains(text, builtin) {
+			t.Fatalf("expected %q to be absent from /metrics", builtin)
 		}
 	}
 }

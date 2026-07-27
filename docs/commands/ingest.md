@@ -85,7 +85,7 @@ ingestr ingest \
 
 ### Monitoring a stream
 
-Passing `--metrics-addr` starts a small HTTP server for the lifetime of the stream that exposes Go [expvar](https://pkg.go.dev/expvar) metrics at `/debug/vars`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run.
+Passing `--metrics-addr` starts a small HTTP server for the lifetime of the stream that exposes [Prometheus](https://prometheus.io/docs/instrumenting/exposition_formats/) metrics at `/metrics`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run. Only ingestr's own metrics are served — the Go runtime and process collectors are deliberately excluded.
 
 ```bash
 ingestr ingest \
@@ -94,28 +94,28 @@ ingestr ingest \
    --stream \
    --metrics-addr 127.0.0.1:6060
 
-curl -s localhost:6060/debug/vars | jq '.ingestr_replication, .ingestr_stream_tables'
+curl -s localhost:6060/metrics | grep -E '^ingestr_replication|^ingestr_stream_table'
 ```
 
-Alongside Go's standard `cmdline` and `memstats`, ingestr publishes:
+ingestr publishes:
 
-| Key | Meaning |
+| Metric | Meaning |
 |---|---|
-| `ingestr_replication` | Replication lag for the current source (see below). `{"streaming": false}` when the source cannot report lag. |
-| `ingestr_stream_rows_synced` | Cumulative rows written **and** confirmed durable since the process started. |
-| `ingestr_stream_flush_cycles` | Number of completed flush cycles. |
-| `ingestr_stream_last_synced_unix` | Unix time of the last successful commit. |
-| `ingestr_stream_tables` | The same row counts and timestamp, broken out per destination table. |
+| `ingestr_replication_*{source}` | Replication lag for the current source (see below). Absent when the source cannot report lag. |
+| `ingestr_stream_rows_synced_total` | Cumulative rows written **and** confirmed durable since the process started. |
+| `ingestr_stream_flush_cycles_total` | Number of completed flush cycles. |
+| `ingestr_stream_last_synced_timestamp_seconds` | Unix time of the last successful commit. |
+| `ingestr_stream_table_*{table}` | The same row counts and timestamp, broken out per destination table. |
 
-The row counters advance only after a flush's destination write **and** its source-position commit have both succeeded, so they count durable rows rather than merely written ones. `ingestr_stream_last_synced_unix` also advances on cycles that commit a position without writing rows, which is what makes it usable as a staleness alarm: if it stops moving, the stream is stuck.
+The row counters advance only after a flush's destination write **and** its source-position commit have both succeeded, so they count durable rows rather than merely written ones. `ingestr_stream_last_synced_timestamp_seconds` also advances on cycles that commit a position without writing rows, which is what makes it usable as a staleness alarm: if it stops moving, the stream is stuck.
 
-What `ingestr_replication` contains depends on the engine, because "lag" is not the same quantity everywhere:
+The `ingestr_replication_*` series carry a `source` label and depend on the engine, because "lag" is not the same quantity everywhere:
 
-- **Postgres** (`postgres+cdc`) reports `bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This is the same number as `pg_current_wal_lsn() - confirmed_flush_lsn` for the replication slot, so it is what predicts unbounded WAL growth on the source. It is the value to alert on.
-- **MongoDB** (`mongodb+cdc`) reports `seconds_behind`: the gap between the server's `operationTime` and the cluster time of the last processed change event. Both clocks are server-side, so an idle collection converges to zero instead of drifting upward.
-- **SQL Server** (`mssql+cdc`) reports `seconds_behind`: the change time between the processed LSN and the capture watermark, via `sys.fn_cdc_map_lsn_to_time`. SQL Server's `binary(10)` LSNs are ordered but their difference is not a log distance, so no `bytes_behind` is published.
+- **Postgres** (`postgres+cdc`) reports `ingestr_replication_bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This is the same number as `pg_current_wal_lsn() - confirmed_flush_lsn` for the replication slot, so it is what predicts unbounded WAL growth on the source. It is the value to alert on.
+- **MongoDB** (`mongodb+cdc`) reports `ingestr_replication_seconds_behind`: the gap between the server's `operationTime` and the cluster time of the last processed change event. Both clocks are server-side, so an idle collection converges to zero instead of drifting upward.
+- **SQL Server** (`mssql+cdc`) reports `ingestr_replication_seconds_behind`: the change time between the processed LSN and the capture watermark, via `sys.fn_cdc_map_lsn_to_time`. SQL Server's `binary(10)` LSNs are ordered but their difference is not a log distance, so no `bytes_behind` is published.
 
-Fields that an engine cannot express are omitted rather than reported as a misleading zero. Postgres, for instance, has no per-LSN timestamp, so it publishes no `seconds_behind`. Message-broker sources report no lag block at all.
+Fields that an engine cannot express are omitted rather than reported as a misleading zero. Postgres, for instance, has no per-LSN timestamp, so it publishes no `ingestr_replication_seconds_behind`. Message-broker sources report no replication series at all.
 
 ## General flags
 
