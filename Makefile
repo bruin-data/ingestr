@@ -208,7 +208,7 @@ test-conformance-only:
 # Format code and run the fast changed-package lint for local cleanup.
 format:
 	@echo "$(OK_COLOR)==> Formatting code$(NO_COLOR)"
-	@gci write cmd pkg internal tests main.go
+	@for path in cmd pkg internal tests main.go; do gci write "$$path"; done
 	@gofumpt -w cmd pkg internal tests main.go
 	@$(MAKE) lint
 
@@ -228,7 +228,7 @@ lint-full: generate
 # CI: Check formatting without modifying files (fails if changes needed)
 format-ci: generate
 	@echo "$(OK_COLOR)==> Checking code formatting$(NO_COLOR)"
-	@DIFF="$$(gci diff cmd pkg internal tests main.go 2>&1)$$(gofumpt -d cmd pkg internal tests main.go 2>&1)"; \
+	@DIFF="$$(for path in cmd pkg internal tests main.go; do gci diff "$$path" 2>&1; done)$$(gofumpt -d cmd pkg internal tests main.go 2>&1)"; \
 	if [ -n "$$DIFF" ]; then \
 		echo "$(ERROR_COLOR)Files need formatting:$(NO_COLOR)"; \
 		echo "$$DIFF"; \
