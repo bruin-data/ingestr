@@ -1937,7 +1937,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: google.golang.org/grpc
-      version: v1.82.0
+      version: v1.82.1
       licenses:
         - Apache-2.0
       status: allowed
