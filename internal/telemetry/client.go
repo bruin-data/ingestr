@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultDataPlaneURL = "https://getbruinbumlky.dataplane.rudderstack.com"
+	defaultDataPlaneURL = "https://events-rs.getbruin.com"
 	defaultTimeout      = 2 * time.Second
 )
 
