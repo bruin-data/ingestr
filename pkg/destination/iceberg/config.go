@@ -246,8 +246,27 @@ func applyStorageShorthand(query url.Values, cfg *icebergConfig) error {
 	bucket := firstQueryValue(query, "bucket", "warehouse_bucket", "warehouse-bucket")
 	prefix := query.Get("prefix")
 
-	if storage != "" && storage != "s3" {
-		return fmt.Errorf("iceberg uri: unsupported storage %q", storage)
+	// storage is optional; when set it must name a supported backend.
+	switch storage {
+	case "", "s3", "gcs", "local":
+	default:
+		return fmt.Errorf("iceberg uri: unsupported storage %q (supported: s3, gcs, local)", storage)
+	}
+
+	// bucket/prefix name an object store but carry no scheme, so storage must say
+	// which one; without a bucket the warehouse URI scheme decides the backend.
+	scheme := ""
+	if bucket != "" {
+		switch storage {
+		case "s3":
+			scheme = "s3://"
+		case "gcs":
+			scheme = "gs://"
+		case "local":
+			return fmt.Errorf("iceberg uri: bucket/prefix are not valid for local storage; use warehouse_path (a file:// path)")
+		default: // storage == ""
+			return fmt.Errorf("iceberg uri: bucket/prefix require storage=s3 or storage=gcs to set the warehouse scheme")
+		}
 	}
 
 	if _, ok := cfg.Properties["warehouse"]; !ok {
@@ -255,7 +274,7 @@ func applyStorageShorthand(query url.Values, cfg *icebergConfig) error {
 		case firstQueryValue(query, "warehouse_path", "warehouse-path") != "":
 			cfg.Properties["warehouse"] = firstQueryValue(query, "warehouse_path", "warehouse-path")
 		case bucket != "":
-			cfg.Properties["warehouse"] = s3Location(bucket, prefix, true)
+			cfg.Properties["warehouse"] = objectLocation(scheme, bucket, prefix, true)
 		}
 	}
 
@@ -272,8 +291,8 @@ func applyStorageShorthand(query url.Values, cfg *icebergConfig) error {
 	tablePath := firstQueryValue(query, "table_path", "table-path")
 	if tablePath != "" && cfg.TableLocation == "" {
 		if bucket != "" {
-			cfg.TableLocation = s3Location(bucket, joinPathParts(prefix, tablePath), false)
-		} else if warehouse := cfg.Properties.Get("warehouse", ""); strings.HasPrefix(warehouse, "s3://") {
+			cfg.TableLocation = objectLocation(scheme, bucket, joinPathParts(prefix, tablePath), false)
+		} else if warehouse := cfg.Properties.Get("warehouse", ""); hasObjectStoreScheme(warehouse) {
 			cfg.TableLocation = joinPathParts(warehouse, tablePath)
 		}
 	}
@@ -308,10 +327,12 @@ func normalizeStorageEndpoint(endpoint, useSSL string) (string, error) {
 	return scheme + "://" + endpoint, nil
 }
 
-func s3Location(bucket, path string, trailingSlash bool) string {
-	bucket = strings.TrimPrefix(bucket, "s3://")
+// objectLocation builds a "<scheme>bucket/path" warehouse URI (scheme is "s3://"
+// or "gs://"), trimming any duplicate scheme and stray slashes.
+func objectLocation(scheme, bucket, path string, trailingSlash bool) string {
+	bucket = strings.TrimPrefix(bucket, scheme)
 	bucket = strings.Trim(bucket, "/")
-	out := "s3://" + bucket
+	out := scheme + bucket
 	if path != "" {
 		out += "/" + strings.Trim(path, "/")
 	}
@@ -319,6 +340,12 @@ func s3Location(bucket, path string, trailingSlash bool) string {
 		out += "/"
 	}
 	return out
+}
+
+// hasObjectStoreScheme reports whether the warehouse is an object-store URI
+// (s3:// or gs://) under which a table location can be derived.
+func hasObjectStoreScheme(warehouse string) bool {
+	return strings.HasPrefix(warehouse, "s3://") || strings.HasPrefix(warehouse, "gs://")
 }
 
 func joinPathParts(parts ...string) string {
