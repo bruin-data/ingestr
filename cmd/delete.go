@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
@@ -32,9 +33,9 @@ func DeleteCommand() *cli.Command {
 }
 
 func runDelete(ctx context.Context, c *cli.Command) (err error) {
-	trackCommandTriggered(ctx, "delete")
+	startedAt := time.Now()
 	defer func() {
-		trackCommandFinished(ctx, "delete", err, nil)
+		trackCommandFinished(ctx, "delete", startedAt, err, nil)
 	}()
 
 	sourceURI := c.String("uri")

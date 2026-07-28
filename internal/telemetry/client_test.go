@@ -42,7 +42,7 @@ func TestTrackSendsRudderStackPayload(t *testing.T) {
 		},
 	}
 
-	err := client.Track(context.Background(), "command_triggered", map[string]any{"command": "ingest"}, "v1.2.3")
+	err := client.Track(context.Background(), "command_finished", map[string]any{"command": "ingest"}, "v1.2.3")
 	require.NoError(t, err)
 
 	require.True(t, hasAuth)
@@ -50,7 +50,7 @@ func TestTrackSendsRudderStackPayload(t *testing.T) {
 	require.Empty(t, authPassword)
 
 	require.Equal(t, "machine-123", got["userId"])
-	require.Equal(t, "command_triggered", got["event"])
+	require.Equal(t, "command_finished", got["event"])
 	require.Equal(t, "2026-05-25T17:08:00Z", got["timestamp"])
 
 	properties := got["properties"].(map[string]any)
@@ -81,7 +81,7 @@ func TestTrackHonorsDisableTelemetryEnv(t *testing.T) {
 		},
 	}
 
-	err := client.Track(context.Background(), "command_triggered", nil, "dev")
+	err := client.Track(context.Background(), "command_finished", nil, "dev")
 	require.NoError(t, err)
 	require.False(t, called)
 }
@@ -114,7 +114,7 @@ func TestTrackFallsBackWhenMachineIDFails(t *testing.T) {
 		},
 	}
 
-	err := client.Track(context.Background(), "command_triggered", nil, "dev")
+	err := client.Track(context.Background(), "command_finished", nil, "dev")
 	require.NoError(t, err)
 	require.NotEmpty(t, got["userId"])
 }

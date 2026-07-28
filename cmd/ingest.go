@@ -12,9 +12,11 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
@@ -250,11 +252,11 @@ func IngestCommand() *cli.Command {
 }
 
 func runIngest(ctx context.Context, c *cli.Command) (err error) {
-	trackCommandTriggered(ctx, "ingest")
-	var finishedProperties map[string]any
+	startedAt := time.Now()
+	var cfg *config.IngestConfig
 	defer func() {
 		output.EnsureTerminal(err)
-		trackCommandFinished(ctx, "ingest", err, finishedProperties)
+		trackCommandFinished(ctx, "ingest", startedAt, err, ingestTelemetryProperties(cfg))
 	}()
 
 	config.DebugMode = c.Bool("debug")
@@ -263,7 +265,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		outputMode = output.ModeJSON
 	}
 	output.Init(os.Stdout, os.Stderr, outputMode)
-	cfg := config.DefaultConfig()
+	cfg = config.DefaultConfig()
 
 	cfg.SourceURI = c.String("source-uri")
 	cfg.DestURI = c.String("dest-uri")
@@ -303,7 +305,6 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Stream = c.Bool("stream")
 	cfg.FlushInterval = c.Duration("flush-interval")
 	cfg.FlushRecords = int(c.Int("flush-records"))
-	finishedProperties = ingestTelemetryProperties(cfg)
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
@@ -397,21 +398,91 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 
 func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
 	properties := map[string]any{}
-	if sourceType := telemetryScheme(cfg.SourceURI); sourceType != "" {
+	if cfg == nil {
+		return properties
+	}
+	if sourceType := telemetrySourceScheme(cfg.SourceURI); sourceType != "" {
 		properties["source_platform"] = sourceType
 	}
-	if destinationType := telemetryScheme(cfg.DestURI); destinationType != "" {
+	if destinationType := telemetryDestinationScheme(cfg.DestURI); destinationType != "" {
 		properties["destination_platform"] = destinationType
+	}
+	properties["execution_mode"] = telemetryExecutionMode(cfg)
+	properties["full_refresh"] = cfg.FullRefresh
+	properties["multi_table"] = cfg.IsCDCSource() && cfg.SourceTable == ""
+	properties["schema_inference_disabled"] = cfg.NoInference
+	properties["masking_enabled"] = len(cfg.Mask) > 0
+	properties["partitioned_extract"] = cfg.ExtractPartitionBy != ""
+	properties["trim_whitespace"] = cfg.TrimWhitespace
+	properties["load_timestamp_enabled"] = !cfg.NoLoadTimestamp
+	properties["strategy_selection"] = "default"
+	if cfg.IncrementalStrategyExplicit {
+		properties["strategy_selection"] = "explicit"
+		properties["requested_strategy"] = telemetryStrategy(cfg.IncrementalStrategy)
+	}
+	if schemaContract := telemetrySchemaContract(cfg.SchemaContract); schemaContract != "" {
+		properties["schema_contract"] = schemaContract
 	}
 	return properties
 }
 
-func telemetryScheme(rawURI string) string {
+func telemetrySourceScheme(rawURI string) string {
 	parsed, err := uri.Parse(rawURI)
 	if err != nil {
 		return ""
 	}
-	return parsed.Scheme
+	scheme := uri.NormalizeScheme(parsed.Scheme)
+	if _, err := registry.Default.GetSourceConstructor(scheme); err != nil {
+		return ""
+	}
+	return scheme
+}
+
+func telemetryDestinationScheme(rawURI string) string {
+	parsed, err := uri.Parse(rawURI)
+	if err != nil {
+		return ""
+	}
+	scheme := uri.NormalizeScheme(parsed.Scheme)
+	if _, err := registry.Default.GetDestinationConstructor(scheme); err != nil {
+		return ""
+	}
+	return scheme
+}
+
+func telemetryExecutionMode(cfg *config.IngestConfig) string {
+	switch {
+	case cfg.Stream && cfg.IsCDCSource():
+		return "cdc_stream"
+	case cfg.Stream:
+		return "stream"
+	case cfg.IsCDCSource():
+		return "cdc_batch"
+	default:
+		return "batch"
+	}
+}
+
+func telemetryStrategy(strategy config.IncrementalStrategy) string {
+	switch strategy {
+	case config.StrategyReplace,
+		config.StrategyAppend,
+		config.StrategyDeleteInsert,
+		config.StrategyMerge,
+		config.StrategySCD2,
+		config.StrategyNone:
+		return string(strategy)
+	default:
+		return "invalid"
+	}
+}
+
+func telemetrySchemaContract(contract string) string {
+	mode, err := schemaevolution.ParseContractMode(contract)
+	if err != nil {
+		return ""
+	}
+	return string(mode)
 }
 
 func parseDateTime(s string) (time.Time, error) {

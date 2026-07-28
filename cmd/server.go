@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/server"
 	"github.com/urfave/cli/v3"
@@ -47,9 +48,9 @@ func ServerCommand() *cli.Command {
 }
 
 func runServer(ctx context.Context, c *cli.Command) (err error) {
-	trackCommandTriggered(ctx, "server")
+	startedAt := time.Now()
 	defer func() {
-		trackCommandFinished(ctx, "server", err, nil)
+		trackCommandFinished(ctx, "server", startedAt, err, nil)
 	}()
 
 	port := int(c.Int("port"))
