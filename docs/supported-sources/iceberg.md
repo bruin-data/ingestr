@@ -27,27 +27,21 @@ Common URI parameters:
 
 - `catalog_name` (optional): logical catalog name used by the Iceberg client. Defaults to `ingestr`.
 - `rest_use_ssl` (optional, REST catalog): use HTTPS for the REST catalog connection (default is HTTP). Alias: `catalog_use_ssl`.
-- `storage` (optional): `s3` or `gcs`. Only needed with `bucket`/`prefix`, where it selects the warehouse scheme (`s3://` vs `gs://`). With a full `warehouse` URI it is not needed — the scheme decides the backend.
-- `bucket` + `prefix` (optional): builds the warehouse from a bucket and optional key prefix — `s3://bucket/prefix` with `storage=s3`, `gs://bucket/prefix` with `storage=gcs`. Not valid for local storage (use `warehouse_path`).
-- `endpoint` (optional): S3-compatible endpoint, e.g. `localhost:9000` (MinIO/R2) or `storage.googleapis.com` (GCS S3-interop).
-- `use_ssl=false` (optional): use plain HTTP for an S3-compatible endpoint.
+- `storage` (optional): `s3` (default) or `gcs` — selects the scheme for the `bucket`/`prefix` shorthand (`s3://…` or `gs://…`). With a full `warehouse` URI the scheme already decides the backend, so this isn't needed.
+- `bucket`: bucket name for the `bucket`/`prefix` shorthand, producing `s3://bucket/prefix` (or `gs://bucket/prefix` with `storage=gcs`).
+- `prefix` (optional): path prefix inside the bucket.
+- `endpoint` (optional): S3-compatible endpoint such as `localhost:9000`.
+- `use_ssl=false` (optional): use plain HTTP for S3-compatible local storage.
 - `access_key_id`, `secret_access_key`, `session_token`, `region`: S3 or Glue credentials and region aliases.
-- `gcs.keypath` / `gcs.jsonkey` (optional, GCS native): path to, or inline contents of, a Google Cloud service-account JSON key for a `gs://` warehouse. Without either, GCS uses Application Default Credentials.
-- `warehouse`: full warehouse URI — `s3://…`, `gs://…`, or `file://…`. Its scheme determines the storage backend.
-- `warehouse_path`: warehouse location for setups that don't use `bucket`, e.g. a local `file://…` path.
+- `gcs.keypath` (optional, GCS): path to a Google Cloud service-account JSON key for a `gs://` warehouse. Without it, GCS uses Application Default Credentials.
+- `warehouse`: advanced override for the Iceberg warehouse location, such as `s3://bucket/warehouse`.
+- `warehouse_path`: local warehouse path alias for non-S3 catalog setups.
 - `create_namespace` (optional): create the destination namespace automatically. Defaults to `true`.
 - `table_location` (optional): explicit table location template. Supports `{namespace}`, `{namespace_dot}`, `{table}`, `{identifier}`, and `{identifier_dot}`.
 - `table_path` (optional): path template appended under `bucket` and `prefix`, for example `{namespace}/{table}`.
 - `table.<key>` (optional): table properties passed to Iceberg table creation, for example `table.write.format.default=parquet`.
 
 Advanced Iceberg-Go catalog properties are still accepted and passed through, including the older `iceberg+sql://?uri=...` form.
-
-**How the storage backend is chosen:** the `warehouse` URI scheme decides it — `s3://` → S3, `gs://` → native GCS, `file://` → local filesystem. `storage` is only a helper for the `bucket`/`prefix` shorthand (to pick the scheme); with a full `warehouse` it is optional. The four setups:
-
-- **AWS S3 / MinIO / R2** — `warehouse=s3://…` (or `storage=s3&bucket=…`), plus `endpoint`/`use_ssl` for S3-compatible stores and `access_key_id`/`secret_access_key`.
-- **GCS via S3-interop (HMAC)** — same as S3 but `endpoint=storage.googleapis.com` with HMAC keys; it is literally the S3 API pointed at Google's endpoint.
-- **GCS native** — `warehouse=gs://…` (or `storage=gcs&bucket=…`) plus `gcs.keypath`/`gcs.jsonkey`.
-- **Local filesystem** — `warehouse=file://…` (or `warehouse_path=…`); no credentials.
 
 ::: info
 For non-AWS S3-compatible stores (MinIO, GCS interop, Cloudflare R2), ingestr handles S3 compatibility automatically. Set `s3.compat-mode=false` to disable it.

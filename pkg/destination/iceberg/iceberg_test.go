@@ -112,31 +112,22 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 		},
 		{
 			name: "gcs bucket with storage=gcs builds a gs:// warehouse",
-			uri:  "iceberg+sqlite:///tmp/cat.db?storage=gcs&bucket=company-lake&prefix=warehouse&gcs.keypath=/creds/sa.json&table_path={namespace}/{table}",
+			uri:  "iceberg+sqlite:///tmp/cat.db?storage=gcs&bucket=company-lake&prefix=warehouse&gcs.keypath=/sa.json&table_path={namespace}/{table}",
 			want: map[string]string{
 				"table_location": "gs://company-lake/warehouse/{namespace}/{table}",
 			},
 			wantProp: map[string]string{
 				"type":        "sql",
 				"warehouse":   "gs://company-lake/warehouse/",
-				"gcs.keypath": "/creds/sa.json",
+				"gcs.keypath": "/sa.json",
 			},
 		},
 		{
-			name: "gcs native via gs:// warehouse needs no storage",
-			uri:  "iceberg+sqlite:///tmp/cat.db?warehouse=gs://company-lake/wh&gcs.keypath=/creds/sa.json",
-			wantProp: map[string]string{
-				"type":        "sql",
-				"warehouse":   "gs://company-lake/wh",
-				"gcs.keypath": "/creds/sa.json",
-			},
-		},
-		{
-			name: "local via file:// warehouse needs no storage",
-			uri:  "iceberg+sqlite:///tmp/cat.db?warehouse_path=file:///tmp/wh",
+			name: "bucket without storage still defaults to s3",
+			uri:  "iceberg+sqlite:///tmp/cat.db?bucket=company-lake&prefix=warehouse",
 			wantProp: map[string]string{
 				"type":      "sql",
-				"warehouse": "file:///tmp/wh",
+				"warehouse": "s3://company-lake/warehouse/",
 			},
 		},
 	}
@@ -156,37 +147,6 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 			for key, want := range tt.wantProp {
 				require.Equal(t, want, cfg.Properties[key], key)
 			}
-		})
-	}
-}
-
-func TestParseIcebergConfigStorageValidation(t *testing.T) {
-	tests := []struct {
-		name    string
-		uri     string
-		wantErr string
-	}{
-		{
-			name:    "bucket without storage",
-			uri:     "iceberg+sqlite:///tmp/cat.db?bucket=my-lake",
-			wantErr: "bucket/prefix require storage=s3 or storage=gcs",
-		},
-		{
-			name:    "bucket with local storage",
-			uri:     "iceberg+sqlite:///tmp/cat.db?storage=local&bucket=my-lake",
-			wantErr: "not valid for local storage",
-		},
-		{
-			name:    "unsupported storage value",
-			uri:     "iceberg+sqlite:///tmp/cat.db?storage=azure&warehouse=az://x/y",
-			wantErr: `unsupported storage "azure"`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseIcebergConfig(tt.uri)
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }
