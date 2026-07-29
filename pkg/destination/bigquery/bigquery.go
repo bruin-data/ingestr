@@ -2813,6 +2813,10 @@ func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) 
 			col.Precision, col.Scale = normalizeBigQueryDecimalPrecisionScale(field.Type, field.Precision, field.Scale)
 		}
 
+		if (col.DataType == schema.TypeString || col.DataType == schema.TypeBinary) && field.MaxLength > 0 {
+			col.MaxLength = int(field.MaxLength)
+		}
+
 		columns = append(columns, col)
 	}
 
