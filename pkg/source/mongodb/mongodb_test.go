@@ -24,32 +24,46 @@ var benchmarkJSONString string
 
 func TestGetTablePrimaryKeyUniqueness(t *testing.T) {
 	tests := []struct {
-		name       string
-		table      string
-		primaryKey []string
-		wantUnique bool
+		name             string
+		table            string
+		primaryKey       []string
+		collectionUnique bool
+		wantUnique       bool
 	}{
 		{
-			name:       "normal collection",
-			table:      "bench.events",
-			wantUnique: true,
+			name:             "normal collection",
+			table:            "bench.events",
+			collectionUnique: true,
+			wantUnique:       true,
 		},
 		{
-			name:       "aggregation pipeline",
-			table:      `bench.events:[{"$unwind":"$items"}]`,
+			name:       "view",
+			table:      "bench.events_view",
 			wantUnique: false,
 		},
 		{
-			name:       "user-provided key",
-			table:      "bench.events",
-			primaryKey: []string{"external_id"},
-			wantUnique: false,
+			name:             "aggregation pipeline",
+			table:            `bench.events:[{"$unwind":"$items"}]`,
+			collectionUnique: true,
+			wantUnique:       false,
+		},
+		{
+			name:             "user-provided key",
+			table:            "bench.events",
+			primaryKey:       []string{"external_id"},
+			collectionUnique: true,
+			wantUnique:       false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			table, err := (&MongoDBSource{}).GetTable(t.Context(), source.TableRequest{
+			mongoSource := &MongoDBSource{
+				collectionPrimaryKeyUniqueFn: func(context.Context, string, string) (bool, error) {
+					return tt.collectionUnique, nil
+				},
+			}
+			table, err := mongoSource.GetTable(t.Context(), source.TableRequest{
 				Name:        tt.table,
 				PrimaryKeys: tt.primaryKey,
 			})
