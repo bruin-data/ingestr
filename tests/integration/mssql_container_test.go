@@ -5,9 +5,9 @@ package integration
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mssql"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -34,9 +34,8 @@ func startMSSQLContainerRaw(ctx context.Context, name string) (testcontainers.Co
 				// The "ready for client connections" log line precedes login
 				// availability by several seconds on slower hosts; probe with a
 				// real authenticated query so the first test cannot hit it.
-				wait.ForSQL("1433/tcp", "sqlserver", func(host string, port string) string {
-					portNum, _, _ := strings.Cut(port, "/")
-					return fmt.Sprintf("server=%s;user id=sa;password=%s;port=%s;database=master;encrypt=disable", host, mssqlPassword, portNum)
+				wait.ForSQL("1433/tcp", "sqlserver", func(host string, port network.Port) string {
+					return fmt.Sprintf("server=%s;user id=sa;password=%s;port=%s;database=master;encrypt=disable", host, mssqlPassword, port.Port())
 				}),
 			).WithDeadline(3*time.Minute),
 		),
