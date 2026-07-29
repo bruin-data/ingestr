@@ -367,7 +367,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/apache/arrow-adbc/go/adbc
-      version: v1.12.0
+      version: v0.0.0-20260729182025-74d5395a880c
       licenses:
         - Apache-2.0
       status: allowed
@@ -2009,7 +2009,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: modernc.org/libc
-      version: v1.73.4
+      version: v1.74.1
       licenses:
         - MIT
       status: allowed
@@ -2019,7 +2019,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: modernc.org/sqlite
-      version: v1.53.0
+      version: v1.54.0
       licenses:
         - BSD-3-Clause
       status: allowed

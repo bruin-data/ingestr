@@ -20,7 +20,7 @@ require (
 	github.com/SAP/go-hdb v1.16.2
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/aliyun/aliyun-odps-go-sdk v0.4.22
-	github.com/apache/arrow-adbc/go/adbc v1.12.0
+	github.com/apache/arrow-adbc/go/adbc v0.0.0-20260729182025-74d5395a880c
 	github.com/apache/arrow-go/v18 v18.7.0
 	github.com/apache/cassandra-gocql-driver/v2 v2.1.1
 	github.com/apache/iceberg-go v0.6.1-0.20260728165154-3f482bda0cbd
@@ -106,7 +106,7 @@ require (
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/inf.v0 v0.9.1
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.53.0
+	modernc.org/sqlite v1.54.0
 	resty.dev/v3 v3.0.0-beta.5
 	vitess.io/vitess v0.23.3
 )
@@ -433,7 +433,7 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
-	modernc.org/libc v1.73.4 // indirect
+	modernc.org/libc v1.74.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
