@@ -49,6 +49,11 @@ Two places dedup by primary key, both using `QUALIFY ROW_NUMBER()`:
 
 So the swap reads either the normalised staging (dedup already done) or the raw staging (no dedup needed).
 
+The guaranteed-unique fast path is source-declared. Connectors only declare
+auto-detected, database-enforced primary keys unique; user-supplied keys,
+custom-query keys, and informational constraints remain untrusted and continue
+through deduplication.
+
 ## 5. Swap: Staging -> Destination (replace strategy, `SwapTable`)
 
 Two swap mechanisms:

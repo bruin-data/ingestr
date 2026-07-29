@@ -22,6 +22,48 @@ import (
 
 var benchmarkJSONString string
 
+func TestGetTablePrimaryKeyUniqueness(t *testing.T) {
+	tests := []struct {
+		name       string
+		table      string
+		primaryKey []string
+		wantUnique bool
+	}{
+		{
+			name:       "normal collection",
+			table:      "bench.events",
+			wantUnique: true,
+		},
+		{
+			name:       "aggregation pipeline",
+			table:      `bench.events:[{"$unwind":"$items"}]`,
+			wantUnique: false,
+		},
+		{
+			name:       "user-provided key",
+			table:      "bench.events",
+			primaryKey: []string{"external_id"},
+			wantUnique: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			table, err := (&MongoDBSource{}).GetTable(t.Context(), source.TableRequest{
+				Name:        tt.table,
+				PrimaryKeys: tt.primaryKey,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := table.(source.PrimaryKeyUniquenessProvider).PrimaryKeysUnique()
+			if got != tt.wantUnique {
+				t.Fatalf("PrimaryKeysUnique() = %v, want %v", got, tt.wantUnique)
+			}
+		})
+	}
+}
+
 func TestParseTableSpec(t *testing.T) {
 	tests := []struct {
 		name      string

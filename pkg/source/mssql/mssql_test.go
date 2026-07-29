@@ -1,15 +1,50 @@
 package mssql
 
 import (
+	"database/sql"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
+
+func TestGetTableMarksDetectedPrimaryKeysUnique(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery(`(?s)FROM INFORMATION_SCHEMA\.COLUMNS`).
+		WithArgs("dbo", "events").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME",
+			"DATA_TYPE",
+			"IS_NULLABLE",
+			"NUMERIC_PRECISION",
+			"NUMERIC_SCALE",
+			"CHARACTER_MAXIMUM_LENGTH",
+		}).AddRow("id", "int", "NO", sql.NullInt64{Int64: 10, Valid: true}, sql.NullInt64{}, sql.NullInt64{}))
+	mock.ExpectQuery(`(?s)FROM INFORMATION_SCHEMA\.TABLE_CONSTRAINTS`).
+		WithArgs("dbo", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("id"))
+
+	table, err := (&MSSQLSource{db: db}).GetTable(t.Context(), source.TableRequest{Name: "dbo.events"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !table.(source.PrimaryKeyUniquenessProvider).PrimaryKeysUnique() {
+		t.Fatal("auto-detected SQL Server primary key should be unique")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestURIToConnString(t *testing.T) {
 	tests := []struct {

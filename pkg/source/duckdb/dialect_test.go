@@ -2,7 +2,16 @@ package duckdb
 
 import (
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/source/adbc"
 )
+
+func TestDialectEnforcesPrimaryKeys(t *testing.T) {
+	var provider adbc.PrimaryKeyEnforcementProvider = NewDialect()
+	if !provider.EnforcesPrimaryKeys() {
+		t.Fatal("DuckDB primary keys should be enforced")
+	}
+}
 
 func TestParseDBPath_MotherDuck(t *testing.T) {
 	tests := []struct {

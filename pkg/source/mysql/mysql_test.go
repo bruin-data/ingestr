@@ -64,6 +64,39 @@ func TestReplaceGCRestoreReleasesPreviousLease(t *testing.T) {
 	}
 }
 
+func TestGetTableMarksDetectedPrimaryKeysUnique(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery(`(?s)FROM INFORMATION_SCHEMA\.COLUMNS`).
+		WithArgs("bench", "events").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME",
+			"COLUMN_TYPE",
+			"IS_NULLABLE",
+			"NUMERIC_PRECISION",
+			"NUMERIC_SCALE",
+			"CHARACTER_MAXIMUM_LENGTH",
+		}).AddRow("id", "int", "NO", 10, 0, nil))
+	mock.ExpectQuery(`(?s)FROM INFORMATION_SCHEMA\.KEY_COLUMN_USAGE`).
+		WithArgs("bench", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("id"))
+
+	table, err := (&MySQLSource{db: db, database: "bench"}).GetTable(t.Context(), source.TableRequest{Name: "events"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !table.(source.PrimaryKeyUniquenessProvider).PrimaryKeysUnique() {
+		t.Fatal("auto-detected MySQL primary key should be unique")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIsVitessServer(t *testing.T) {
 	cases := []struct {
 		version string

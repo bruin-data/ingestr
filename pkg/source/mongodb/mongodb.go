@@ -96,14 +96,13 @@ func (s *MongoDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 		strategy = config.StrategyReplace
 	}
 
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = []string{"_id"}
-	}
+	_, _, pipeline, parseErr := s.parseTableSpec(tableName)
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, []string{"_id"}, parseErr == nil && pipeline == nil)
 
 	return &source.DynamicSourceTable{
 		TableName:                        tableName,
 		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
 		TableIncrementalKey:              req.IncrementalKey,
 		TableStrategy:                    strategy,
 		TableSupportsExtractPartitioning: true,

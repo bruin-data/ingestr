@@ -212,11 +212,7 @@ func (s *MySQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		return nil, err
 	}
 
-	// Use user-provided PKs if available, otherwise use auto-detected
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = tableSchema.PrimaryKeys
-	}
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, tableSchema.PrimaryKeys, true)
 
 	// Use user's strategy or default to replace
 	strategy := req.Strategy
@@ -228,6 +224,7 @@ func (s *MySQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 	return &source.DynamicSourceTable{
 		TableName:                        tableName,
 		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
 		TableIncrementalKey:              req.IncrementalKey,
 		TableStrategy:                    strategy,
 		TableSupportsExtractPartitioning: true,
