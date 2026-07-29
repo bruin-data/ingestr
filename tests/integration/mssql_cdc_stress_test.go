@@ -39,6 +39,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/jackc/pgx/v5/pgxpool"
 	mssqldb "github.com/microsoft/go-mssqldb"
+	"github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcmssql "github.com/testcontainers/testcontainers-go/modules/mssql"
@@ -119,9 +120,8 @@ func msqStressSourceContainer(t *testing.T, ctx context.Context) (testcontainers
 			wait.ForAll(
 				wait.ForListeningPort("1433/tcp"),
 				wait.ForLog("Recovery is complete."),
-				wait.ForSQL("1433/tcp", "sqlserver", func(host string, port string) string {
-					portNum, _, _ := strings.Cut(port, "/")
-					return fmt.Sprintf("server=%s;user id=sa;password=%s;port=%s;database=master;encrypt=disable", host, msqStressPassword, portNum)
+				wait.ForSQL("1433/tcp", "sqlserver", func(host string, port network.Port) string {
+					return fmt.Sprintf("server=%s;user id=sa;password=%s;port=%s;database=master;encrypt=disable", host, msqStressPassword, port.Port())
 				}),
 			).WithDeadline(4*time.Minute),
 		),

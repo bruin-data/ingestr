@@ -110,6 +110,26 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 				"s3.region":   "eu-west-1",
 			},
 		},
+		{
+			name: "gcs bucket with storage=gcs builds a gs:// warehouse",
+			uri:  "iceberg+sqlite:///tmp/cat.db?storage=gcs&bucket=company-lake&prefix=warehouse&gcs.keypath=/sa.json&table_path={namespace}/{table}",
+			want: map[string]string{
+				"table_location": "gs://company-lake/warehouse/{namespace}/{table}",
+			},
+			wantProp: map[string]string{
+				"type":        "sql",
+				"warehouse":   "gs://company-lake/warehouse/",
+				"gcs.keypath": "/sa.json",
+			},
+		},
+		{
+			name: "bucket without storage still defaults to s3",
+			uri:  "iceberg+sqlite:///tmp/cat.db?bucket=company-lake&prefix=warehouse",
+			wantProp: map[string]string{
+				"type":      "sql",
+				"warehouse": "s3://company-lake/warehouse/",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -129,6 +149,48 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseIcebergConfigSQLCatalogRequiresDriverDialect(t *testing.T) {
+	// Generic sql catalog without driver/dialect: clear error, not the opaque
+	// "must provide driver to pass to sql.Open" from iceberg-go.
+	_, err := parseIcebergConfig("iceberg+sql://?uri=postgresql://user@host:5432/db")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sql.driver")
+	require.Contains(t, err.Error(), "sql.dialect")
+
+	// With both provided explicitly, it parses.
+	cfg, err := parseIcebergConfig("iceberg+sql://?uri=postgresql://user@host:5432/db&sql.driver=pgx&sql.dialect=postgres")
+	require.NoError(t, err)
+	require.Equal(t, "sql", cfg.Properties["type"])
+	require.Equal(t, "pgx", cfg.Properties["sql.driver"])
+	require.Equal(t, "postgres", cfg.Properties["sql.dialect"])
+
+	// The dedicated shorthands still set them automatically (no error).
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db")
+	require.NoError(t, err)
+	require.Equal(t, "sqlite", cfg.Properties["sql.driver"])
+	require.Equal(t, "sqlite", cfg.Properties["sql.dialect"])
+}
+
+func TestParseIcebergConfigPreservesPlusInCredentials(t *testing.T) {
+	// STS tokens/secrets commonly contain '+','/','='. Percent-encode them in the
+	// URI (a raw '+' would decode to a space); '%2B' decodes back to '+'.
+	sessionVal := "aa+bb/cc=="
+	secretVal := "dd+ee/ff"
+
+	q := url.Values{}
+	q.Set("storage", "s3")
+	q.Set("warehouse", "s3://b/w")
+	q.Set("region", "eu-north-1")
+	q.Set("access_key_id", "ASIA123")
+	q.Set("secret_access_key", secretVal)
+	q.Set("session_token", sessionVal)
+	cfg, err := parseIcebergConfig("iceberg+postgres://postgres:pgpass@localhost:5432/cat?" + q.Encode())
+	require.NoError(t, err)
+	require.Equal(t, sessionVal, cfg.Properties["s3.session-token"])
+	require.Equal(t, secretVal, cfg.Properties["s3.secret-access-key"])
+	require.Equal(t, "ASIA123", cfg.Properties["s3.access-key-id"])
 }
 
 func TestDestinationConnectSQLiteCatalog(t *testing.T) {

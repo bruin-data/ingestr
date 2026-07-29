@@ -71,7 +71,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/bigquery
-      version: v1.74.0
+      version: v1.77.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -81,37 +81,37 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/iam
-      version: v1.7.0
+      version: v1.11.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/longrunning
-      version: v0.9.0
+      version: v1.2.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/monitoring
-      version: v1.24.3
+      version: v1.29.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/pubsub
-      version: v1.50.1
+      version: v1.50.2
       licenses:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/pubsub/v2
-      version: v2.3.0
+      version: v2.5.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/spanner
-      version: v1.88.0
+      version: v1.91.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: cloud.google.com/go/storage
-      version: v1.62.2
+      version: v1.63.1
       licenses:
         - Apache-2.0
       status: allowed
@@ -121,7 +121,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: filippo.io/edwards25519
-      version: v1.1.1
+      version: v1.2.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -131,12 +131,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/Azure/azure-sdk-for-go/sdk/azcore
-      version: v1.21.1
+      version: v1.22.0
       licenses:
         - MIT
       status: allowed
     - module: github.com/Azure/azure-sdk-for-go/sdk/azidentity
-      version: v1.13.1
+      version: v1.14.0
       licenses:
         - MIT
       status: allowed
@@ -146,7 +146,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/Azure/azure-sdk-for-go/sdk/storage/azblob
-      version: v1.7.0
+      version: v1.8.0
       licenses:
         - MIT
       status: allowed
@@ -154,11 +154,6 @@ dependencies:
       version: v1.4.4
       licenses:
         - MIT
-      status: allowed
-    - module: github.com/Azure/go-autorest/autorest/to
-      version: v0.4.1
-      licenses:
-        - Apache-2.0
       status: allowed
     - module: github.com/AzureAD/microsoft-authentication-library-for-go
       version: v1.7.2
@@ -291,17 +286,17 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp
-      version: v1.31.0
+      version: v1.32.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric
-      version: v0.55.0
+      version: v0.57.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping
-      version: v0.55.0
+      version: v0.57.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -326,7 +321,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/RoaringBitmap/roaring/v2
-      version: v2.18.2
+      version: v2.21.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -361,7 +356,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/andybalholm/brotli
-      version: v1.2.1
+      version: v1.2.2
       licenses:
         - BSD-3-Clause
         - MIT
@@ -372,12 +367,12 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/apache/arrow-adbc/go/adbc
-      version: v1.11.0
+      version: v0.0.0-20260729182025-74d5395a880c
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/apache/arrow-go/v18
-      version: v18.6.0
+      version: v18.7.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -392,7 +387,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/apache/iceberg-go
-      version: v0.6.1-0.20260608195837-914dd635527f
+      version: v0.6.1-0.20260728165154-3f482bda0cbd
       licenses:
         - Apache-2.0
       status: allowed
@@ -402,7 +397,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/apache/thrift
-      version: v0.23.0
+      version: v0.24.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -427,23 +422,23 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2
-      version: v1.41.9
+      version: v1.42.1
       licenses:
         - Apache-2.0
         - BSD-3-Clause
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream
-      version: v1.7.11
+      version: v1.7.14
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/config
-      version: v1.32.20
+      version: v1.32.30
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/credentials
-      version: v1.19.19
+      version: v1.19.29
       licenses:
         - Apache-2.0
       status: allowed
@@ -453,7 +448,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/feature/ec2/imds
-      version: v1.18.25
+      version: v1.18.30
       licenses:
         - Apache-2.0
       status: allowed
@@ -462,18 +457,23 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager
+      version: v0.2.3
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/aws/aws-sdk-go-v2/internal/configsources
-      version: v1.4.25
+      version: v1.4.30
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/internal/endpoints/v2
-      version: v2.7.25
+      version: v2.7.30
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/internal/v4a
-      version: v1.4.26
+      version: v1.4.31
       licenses:
         - Apache-2.0
       status: allowed
@@ -493,17 +493,17 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/glue
-      version: v1.142.2
+      version: v1.148.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding
-      version: v1.13.10
+      version: v1.13.13
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/internal/checksum
-      version: v1.9.18
+      version: v1.9.23
       licenses:
         - Apache-2.0
       status: allowed
@@ -513,12 +513,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/internal/presigned-url
-      version: v1.13.25
+      version: v1.13.30
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/internal/s3shared
-      version: v1.19.25
+      version: v1.19.31
       licenses:
         - Apache-2.0
       status: allowed
@@ -528,37 +528,37 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/s3
-      version: v1.102.2
+      version: v1.105.2
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/signin
-      version: v1.1.1
+      version: v1.4.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/sqs
-      version: v1.42.20
+      version: v1.42.24
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/sso
-      version: v1.30.19
+      version: v1.32.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/ssooidc
-      version: v1.36.2
+      version: v1.37.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/aws-sdk-go-v2/service/sts
-      version: v1.42.3
+      version: v1.44.1
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/aws/smithy-go
-      version: v1.26.0
+      version: v1.27.4
       licenses:
         - Apache-2.0
         - BSD-3-Clause
@@ -584,7 +584,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/bits-and-blooms/bitset
-      version: v1.24.2
+      version: v1.24.4
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -749,7 +749,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/docker/go-connections
-      version: v0.6.0
+      version: v0.7.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -876,7 +876,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/go-sql-driver/mysql
-      version: v1.9.3
+      version: v1.10.0
       licenses:
         - MPL-2.0
       status: allowed
@@ -976,12 +976,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/googleapis/enterprise-certificate-proxy
-      version: v0.3.16
+      version: v0.3.18
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/googleapis/gax-go/v2
-      version: v2.22.0
+      version: v2.23.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1112,14 +1112,14 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/klauspost/compress
-      version: v1.18.6
+      version: v1.19.0
       licenses:
         - Apache-2.0
         - BSD-3-Clause
         - MIT
       status: allowed
     - module: github.com/klauspost/cpuid/v2
-      version: v2.3.0
+      version: v2.4.0
       licenses:
         - MIT
       status: allowed
@@ -1195,12 +1195,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/moby/moby/api
-      version: v1.54.1
+      version: v1.54.2
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/moby/moby/client
-      version: v0.4.0
+      version: v0.4.1
       licenses:
         - Apache-2.0
       status: allowed
@@ -1351,7 +1351,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/pierrec/lz4/v4
-      version: v4.1.26
+      version: v4.1.27
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1467,7 +1467,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/secure-systems-lab/go-securesystemslib
-      version: v0.10.0
+      version: v0.11.0
       licenses:
         - MIT
       status: allowed
@@ -1482,7 +1482,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/shirou/gopsutil/v4
-      version: v4.26.3
+      version: v4.26.5
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1592,7 +1592,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/testcontainers/testcontainers-go
-      version: v0.42.0
+      version: v0.43.0
       licenses:
         - MIT
       status: allowed
@@ -1640,6 +1640,11 @@ dependencies:
       version: v1.1.8
       licenses:
         - BSD-3-Clause
+      status: allowed
+    - module: github.com/twpayne/go-geom
+      version: v1.6.1
+      licenses:
+        - BSD-2-Clause
       status: allowed
     - module: github.com/uber/jaeger-client-go
       version: v2.30.0+incompatible
@@ -1792,12 +1797,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/contrib/detectors/gcp
-      version: v1.42.0
+      version: v1.43.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc
-      version: v0.67.0
+      version: v0.68.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -1807,27 +1812,27 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/otel
-      version: v1.43.0
+      version: v1.44.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/otel/metric
-      version: v1.43.0
+      version: v1.44.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/otel/sdk
-      version: v1.43.0
+      version: v1.44.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/otel/sdk/metric
-      version: v1.43.0
+      version: v1.44.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: go.opentelemetry.io/otel/trace
-      version: v1.43.0
+      version: v1.44.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -1862,12 +1867,12 @@ dependencies:
         - MIT
       status: allowed
     - module: gocloud.dev
-      version: v0.45.0
+      version: v0.46.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: golang.org/x/crypto
-      version: v0.53.0
+      version: v0.54.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1877,12 +1882,12 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/mod
-      version: v0.36.0
+      version: v0.38.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/net
-      version: v0.56.0
+      version: v0.57.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1892,22 +1897,22 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/sync
-      version: v0.21.0
+      version: v0.22.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/sys
-      version: v0.46.0
+      version: v0.47.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/term
-      version: v0.44.0
+      version: v0.45.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/text
-      version: v0.38.0
+      version: v0.40.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1922,27 +1927,27 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: google.golang.org/api
-      version: v0.282.0
+      version: v0.289.0
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: google.golang.org/genproto
-      version: v0.0.0-20260319201613-d00831a3d3e7
+      version: v0.0.0-20260519071638-aa98bba5eb94
       licenses:
         - Apache-2.0
       status: allowed
     - module: google.golang.org/genproto/googleapis/api
-      version: v0.0.0-20260401024825-9d38bb4040a9
+      version: v0.0.0-20260630182238-925bb5da69e7
       licenses:
         - Apache-2.0
       status: allowed
     - module: google.golang.org/genproto/googleapis/rpc
-      version: v0.0.0-20260523011958-0a33c5d7ca68
+      version: v0.0.0-20260706201446-f0a921348800
       licenses:
         - Apache-2.0
       status: allowed
     - module: google.golang.org/grpc
-      version: v1.81.1
+      version: v1.82.1
       licenses:
         - Apache-2.0
       status: allowed
@@ -2004,7 +2009,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: modernc.org/libc
-      version: v1.72.0
+      version: v1.74.1
       licenses:
         - MIT
       status: allowed
@@ -2014,7 +2019,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: modernc.org/sqlite
-      version: v1.49.1
+      version: v1.54.0
       licenses:
         - BSD-3-Clause
       status: allowed

@@ -73,6 +73,20 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 		return icebergConfig{}, err
 	}
 	applyPropertyAliases(cfg.Properties)
+
+	// The generic sql catalog needs both; iceberg+postgres/iceberg+sqlite set them,
+	// iceberg+sql doesn't. Fail clearly instead of iceberg-go's opaque sql.Open error.
+	if cfg.Properties["type"] == "sql" && (cfg.Properties["sql.driver"] == "" || cfg.Properties["sql.dialect"] == "") {
+		return icebergConfig{}, fmt.Errorf("iceberg uri: sql catalog requires both sql.driver and sql.dialect (e.g. sql.driver=pgx&sql.dialect=postgres), or use the iceberg+postgres / iceberg+sqlite scheme which set them automatically")
+	}
+
+	// Non-AWS S3 endpoints (MinIO, GCS interop, R2) need iceberg-go's compat-mode;
+	// enable it by default unless set explicitly.
+	if cfg.Properties["s3.endpoint"] != "" {
+		if _, ok := cfg.Properties["s3.compat-mode"]; !ok {
+			cfg.Properties["s3.compat-mode"] = "true"
+		}
+	}
 	return cfg, nil
 }
 
@@ -232,8 +246,13 @@ func applyStorageShorthand(query url.Values, cfg *icebergConfig) error {
 	bucket := firstQueryValue(query, "bucket", "warehouse_bucket", "warehouse-bucket")
 	prefix := query.Get("prefix")
 
-	if storage != "" && storage != "s3" {
+	// storage is optional; s3 (default) or gcs picks the bucket-shorthand scheme.
+	if storage != "" && storage != "s3" && storage != "gcs" {
 		return fmt.Errorf("iceberg uri: unsupported storage %q", storage)
+	}
+	scheme := "s3://"
+	if storage == "gcs" {
+		scheme = "gs://"
 	}
 
 	if _, ok := cfg.Properties["warehouse"]; !ok {
@@ -241,7 +260,7 @@ func applyStorageShorthand(query url.Values, cfg *icebergConfig) error {
 		case firstQueryValue(query, "warehouse_path", "warehouse-path") != "":
 			cfg.Properties["warehouse"] = firstQueryValue(query, "warehouse_path", "warehouse-path")
 		case bucket != "":
-			cfg.Properties["warehouse"] = s3Location(bucket, prefix, true)
+			cfg.Properties["warehouse"] = objectLocation(scheme, bucket, prefix, true)
 		}
 	}
 
@@ -258,8 +277,8 @@ func applyStorageShorthand(query url.Values, cfg *icebergConfig) error {
 	tablePath := firstQueryValue(query, "table_path", "table-path")
 	if tablePath != "" && cfg.TableLocation == "" {
 		if bucket != "" {
-			cfg.TableLocation = s3Location(bucket, joinPathParts(prefix, tablePath), false)
-		} else if warehouse := cfg.Properties.Get("warehouse", ""); strings.HasPrefix(warehouse, "s3://") {
+			cfg.TableLocation = objectLocation(scheme, bucket, joinPathParts(prefix, tablePath), false)
+		} else if warehouse := cfg.Properties.Get("warehouse", ""); strings.HasPrefix(warehouse, "s3://") || strings.HasPrefix(warehouse, "gs://") {
 			cfg.TableLocation = joinPathParts(warehouse, tablePath)
 		}
 	}
@@ -294,10 +313,12 @@ func normalizeStorageEndpoint(endpoint, useSSL string) (string, error) {
 	return scheme + "://" + endpoint, nil
 }
 
-func s3Location(bucket, path string, trailingSlash bool) string {
-	bucket = strings.TrimPrefix(bucket, "s3://")
+// objectLocation builds a "<scheme>bucket/path" warehouse URI (scheme "s3://" or
+// "gs://"), trimming any duplicate scheme and stray slashes.
+func objectLocation(scheme, bucket, path string, trailingSlash bool) string {
+	bucket = strings.TrimPrefix(bucket, scheme)
 	bucket = strings.Trim(bucket, "/")
-	out := "s3://" + bucket
+	out := scheme + bucket
 	if path != "" {
 		out += "/" + strings.Trim(path, "/")
 	}
