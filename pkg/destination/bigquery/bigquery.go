@@ -859,7 +859,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
-		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts)
+		// The table existed at evolution-planning time, so a planned ALTER
+		// backs any type-kind difference.
+		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)
 	}
 	if !isNotFoundError(err) {
 		return fmt.Errorf("failed to check table existence: %w", err)
@@ -884,14 +886,16 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 			if waitErr != nil {
 				return fmt.Errorf("concurrently created table did not become visible: %w", waitErr)
 			}
-			return d.reconcileExistingTable(ctx, tableRef, winnerMeta, opts)
+			// Evolution planning saw this table absent, so no ALTER is planned
+			// to reconcile a mismatching column — reject instead of deferring.
+			return d.reconcileExistingTable(ctx, tableRef, winnerMeta, opts, false)
 		}
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	return nil
 }
 
-func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableRef *bigquery.Table, existingMeta *bigquery.TableMetadata, opts destination.PrepareOptions) error {
+func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableRef *bigquery.Table, existingMeta *bigquery.TableMetadata, opts destination.PrepareOptions, deferTypeChanges bool) error {
 	cdcKeyColumns := opts.CDCKeys
 	if len(cdcKeyColumns) == 0 {
 		cdcKeyColumns = opts.PrimaryKeys
@@ -906,7 +910,7 @@ func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableR
 			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 		}
 		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
-		if err := validateBigQuerySchemaCompatibility(existingMeta, tableSchema); err != nil {
+		if err := validateBigQuerySchemaCompatibility(existingMeta, tableSchema, deferTypeChanges); err != nil {
 			return err
 		}
 		if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
@@ -954,7 +958,10 @@ func waitForBigQueryTableMetadata(ctx context.Context, tableRef *bigquery.Table)
 	return nil, errors.New("table metadata visibility retry exhausted")
 }
 
-func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, desired *schema.TableSchema) error {
+// validateBigQuerySchemaCompatibility checks the desired schema against an
+// existing table. deferTypeChanges leaves a differing scalar type kind to
+// schema evolution's ALTER; a Repeated mismatch is always rejected.
+func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, desired *schema.TableSchema, deferTypeChanges bool) error {
 	if existingMeta == nil || desired == nil {
 		return nil
 	}
@@ -968,6 +975,9 @@ func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, d
 			continue
 		}
 		if field.Type != desiredField.Type || field.Repeated != desiredField.Repeated {
+			if deferTypeChanges && field.Repeated == desiredField.Repeated {
+				continue
+			}
 			return fmt.Errorf("bigquery table has incompatible column %q: got %s repeated=%t, want %s repeated=%t", desiredField.Name, field.Type, field.Repeated, desiredField.Type, desiredField.Repeated)
 		}
 		if err := validateBigQueryParameterizedField(field, desiredField); err != nil {
