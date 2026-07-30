@@ -782,7 +782,15 @@ func TestPrepareTableRejectsIncompatibleConcurrentCreateWinner(t *testing.T) {
 				})
 				return
 			}
-			writeBigQueryTableMetadata(w, "STRING")
+			// The winner created `id` as a REPEATED (array) column; a scalar desired
+			// cannot be reconciled with it, so PrepareTable must reject the winner.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"tableReference": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+				"etag":           "winner-etag",
+				"schema": map[string]interface{}{
+					"fields": []map[string]interface{}{{"name": "id", "type": "INTEGER", "mode": "REPEATED"}},
+				},
+			})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables"):
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -859,6 +867,69 @@ func TestValidateBigQuerySchemaCompatibilityParameterizedTypes(t *testing.T) {
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validateBigQuerySchemaCompatibility() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateBigQuerySchemaCompatibility() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateBigQuerySchemaCompatibilityTypeKinds(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *bigquery.FieldSchema
+		desired  schema.Column
+		wantErr  string
+	}{
+		{
+			// The reported bug: table was created INTEGER on a prior run, this run
+			// infers FLOAT. The gate defers to schema evolution, which widens the column.
+			name:     "integer vs float deferred to evolution",
+			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType},
+			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeFloat64},
+		},
+		{
+			name:     "integer vs string deferred to evolution",
+			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType},
+			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeString},
+		},
+		{
+			name:     "integer vs timestamp deferred to evolution",
+			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.TimestampFieldType},
+			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeInt64},
+		},
+		{
+			name:     "string vs decimal deferred to evolution",
+			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.StringFieldType},
+			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
+		},
+		{
+			// scalar<->array is not a widening evolution can perform, so it is rejected here.
+			name:     "repeated existing scalar desired rejected",
+			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType, Repeated: true},
+			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeInt64},
+			wantErr:  "incompatible column",
+		},
+		{
+			name:     "scalar existing repeated desired rejected",
+			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType},
+			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeArray, ArrayType: schema.TypeInt64},
+			wantErr:  "incompatible column",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBigQuerySchemaCompatibility(
+				&bigquery.TableMetadata{Schema: bigquery.Schema{tt.existing}},
+				&schema.TableSchema{Columns: []schema.Column{tt.desired}},
+			)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateBigQuerySchemaCompatibility() error = %v, want nil", err)
 				}
 				return
 			}

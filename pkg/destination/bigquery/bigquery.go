@@ -967,11 +967,15 @@ func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, d
 		if !ok {
 			continue
 		}
-		if field.Type != desiredField.Type || field.Repeated != desiredField.Repeated {
+		if field.Repeated != desiredField.Repeated {
 			return fmt.Errorf("bigquery table has incompatible column %q: got %s repeated=%t, want %s repeated=%t", desiredField.Name, field.Type, field.Repeated, desiredField.Type, desiredField.Repeated)
 		}
-		if err := validateBigQueryParameterizedField(field, desiredField); err != nil {
-			return fmt.Errorf("bigquery table has incompatible column %q: %w", desiredField.Name, err)
+		// A differing type kind is left to schema evolution, which widens the column
+		// (or fails loudly) via the same CanWiden contract. Bounds only compare within a type.
+		if field.Type == desiredField.Type {
+			if err := validateBigQueryParameterizedField(field, desiredField); err != nil {
+				return fmt.Errorf("bigquery table has incompatible column %q: %w", desiredField.Name, err)
+			}
 		}
 	}
 	return nil
