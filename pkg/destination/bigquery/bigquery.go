@@ -859,7 +859,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
-		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts)
+		// Table existed at schema-evolution planning time, so a type-kind
+		// difference is backed by a planned ALTER — defer it to evolution.
+		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)
 	}
 	if !isNotFoundError(err) {
 		return fmt.Errorf("failed to check table existence: %w", err)
@@ -884,14 +886,17 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 			if waitErr != nil {
 				return fmt.Errorf("concurrently created table did not become visible: %w", waitErr)
 			}
-			return d.reconcileExistingTable(ctx, tableRef, winnerMeta, opts)
+			// A concurrent writer created the table after evolution planning saw
+			// it absent, so no plan exists to alter a mismatching column — reject
+			// an incompatible winner rather than defer to a nonexistent ALTER.
+			return d.reconcileExistingTable(ctx, tableRef, winnerMeta, opts, false)
 		}
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	return nil
 }
 
-func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableRef *bigquery.Table, existingMeta *bigquery.TableMetadata, opts destination.PrepareOptions) error {
+func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableRef *bigquery.Table, existingMeta *bigquery.TableMetadata, opts destination.PrepareOptions, deferTypeChanges bool) error {
 	cdcKeyColumns := opts.CDCKeys
 	if len(cdcKeyColumns) == 0 {
 		cdcKeyColumns = opts.PrimaryKeys
@@ -906,7 +911,7 @@ func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableR
 			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 		}
 		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
-		if err := validateBigQuerySchemaCompatibility(existingMeta, tableSchema); err != nil {
+		if err := validateBigQuerySchemaCompatibility(existingMeta, tableSchema, deferTypeChanges); err != nil {
 			return err
 		}
 		if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
@@ -954,7 +959,15 @@ func waitForBigQueryTableMetadata(ctx context.Context, tableRef *bigquery.Table)
 	return nil, errors.New("table metadata visibility retry exhausted")
 }
 
-func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, desired *schema.TableSchema) error {
+// validateBigQuerySchemaCompatibility checks the desired schema against an
+// existing table. When deferTypeChanges is true (the table existed at schema-
+// evolution planning time), a differing scalar type kind is left to schema
+// evolution, which widens the column via ALTER. When false (the concurrent-
+// create-winner path, where the table was absent at planning time so no
+// evolution plan exists to alter it), a type-kind difference is rejected rather
+// than letting the later write hit an incompatible physical column. A Repeated
+// (scalar<->array) mismatch is never reconcilable and is always rejected.
+func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, desired *schema.TableSchema, deferTypeChanges bool) error {
 	if existingMeta == nil || desired == nil {
 		return nil
 	}
@@ -967,15 +980,14 @@ func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, d
 		if !ok {
 			continue
 		}
-		if field.Repeated != desiredField.Repeated {
+		if field.Type != desiredField.Type || field.Repeated != desiredField.Repeated {
+			if deferTypeChanges && field.Repeated == desiredField.Repeated {
+				continue
+			}
 			return fmt.Errorf("bigquery table has incompatible column %q: got %s repeated=%t, want %s repeated=%t", desiredField.Name, field.Type, field.Repeated, desiredField.Type, desiredField.Repeated)
 		}
-		// A differing type kind is left to schema evolution, which widens the column
-		// (or fails loudly) via the same CanWiden contract. Bounds only compare within a type.
-		if field.Type == desiredField.Type {
-			if err := validateBigQueryParameterizedField(field, desiredField); err != nil {
-				return fmt.Errorf("bigquery table has incompatible column %q: %w", desiredField.Name, err)
-			}
+		if err := validateBigQueryParameterizedField(field, desiredField); err != nil {
+			return fmt.Errorf("bigquery table has incompatible column %q: %w", desiredField.Name, err)
 		}
 	}
 	return nil
