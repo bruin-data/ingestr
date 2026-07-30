@@ -782,10 +782,8 @@ func TestPrepareTableRejectsIncompatibleConcurrentCreateWinner(t *testing.T) {
 				})
 				return
 			}
-			// The winner created `id` as STRING while we want INTEGER. Evolution
-			// planning ran before the table existed, so no ALTER is planned to
-			// reconcile it — PrepareTable must reject the incompatible winner
-			// rather than let the write hit the mismatched physical column.
+			// The winner created `id` as STRING while we want INTEGER, and no
+			// ALTER is planned to reconcile it.
 			writeBigQueryTableMetadata(w, "STRING")
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables"):
 			w.WriteHeader(http.StatusConflict)
@@ -883,9 +881,8 @@ func TestValidateBigQuerySchemaCompatibilityTypeKinds(t *testing.T) {
 		wantErr          string
 	}{
 		{
-			// The reported bug: table was created INTEGER on a prior run, this run
-			// infers FLOAT. With a table present at planning time, the gate defers
-			// to schema evolution, which widens the column.
+			// The reported bug: created INTEGER on a prior run, inferred FLOAT
+			// on this one.
 			name:             "integer vs float deferred to evolution",
 			existing:         &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType},
 			desired:          schema.Column{Name: "transaction_fee", DataType: schema.TypeFloat64},
@@ -904,8 +901,6 @@ func TestValidateBigQuerySchemaCompatibilityTypeKinds(t *testing.T) {
 			deferTypeChanges: true,
 		},
 		{
-			// Concurrent-create-winner path (no evolution plan): a type-kind
-			// difference must be rejected, not deferred to a nonexistent ALTER.
 			name:     "integer vs float rejected without evolution plan",
 			existing: &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType},
 			desired:  schema.Column{Name: "transaction_fee", DataType: schema.TypeFloat64},
@@ -918,8 +913,7 @@ func TestValidateBigQuerySchemaCompatibilityTypeKinds(t *testing.T) {
 			wantErr:  "incompatible column",
 		},
 		{
-			// scalar<->array is never a widening evolution can perform, so it is
-			// rejected regardless of deferTypeChanges.
+			// scalar<->array is never a widening evolution can perform.
 			name:             "repeated existing scalar desired rejected even when deferring",
 			existing:         &bigquery.FieldSchema{Name: "transaction_fee", Type: bigquery.IntegerFieldType, Repeated: true},
 			desired:          schema.Column{Name: "transaction_fee", DataType: schema.TypeInt64},

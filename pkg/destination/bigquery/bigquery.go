@@ -859,8 +859,8 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
-		// Table existed at schema-evolution planning time, so a type-kind
-		// difference is backed by a planned ALTER — defer it to evolution.
+		// The table existed at evolution-planning time, so a planned ALTER
+		// backs any type-kind difference.
 		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)
 	}
 	if !isNotFoundError(err) {
@@ -886,9 +886,8 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 			if waitErr != nil {
 				return fmt.Errorf("concurrently created table did not become visible: %w", waitErr)
 			}
-			// A concurrent writer created the table after evolution planning saw
-			// it absent, so no plan exists to alter a mismatching column — reject
-			// an incompatible winner rather than defer to a nonexistent ALTER.
+			// Evolution planning saw this table absent, so no ALTER is planned
+			// to reconcile a mismatching column — reject instead of deferring.
 			return d.reconcileExistingTable(ctx, tableRef, winnerMeta, opts, false)
 		}
 		return fmt.Errorf("failed to create table: %w", err)
@@ -960,13 +959,8 @@ func waitForBigQueryTableMetadata(ctx context.Context, tableRef *bigquery.Table)
 }
 
 // validateBigQuerySchemaCompatibility checks the desired schema against an
-// existing table. When deferTypeChanges is true (the table existed at schema-
-// evolution planning time), a differing scalar type kind is left to schema
-// evolution, which widens the column via ALTER. When false (the concurrent-
-// create-winner path, where the table was absent at planning time so no
-// evolution plan exists to alter it), a type-kind difference is rejected rather
-// than letting the later write hit an incompatible physical column. A Repeated
-// (scalar<->array) mismatch is never reconcilable and is always rejected.
+// existing table. deferTypeChanges leaves a differing scalar type kind to
+// schema evolution's ALTER; a Repeated mismatch is always rejected.
 func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, desired *schema.TableSchema, deferTypeChanges bool) error {
 	if existingMeta == nil || desired == nil {
 		return nil
