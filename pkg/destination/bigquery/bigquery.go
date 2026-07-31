@@ -22,6 +22,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -36,6 +37,10 @@ const (
 	exactRowCountPollInterval          = 1 * time.Second
 	queryJobMaxAttempts                = 4
 	deleteInsertTransactionMaxAttempts = 8
+	// queryJobStartMaxAttempts caps retries of the job-submission call so a
+	// persistently retryable error (e.g. a sustained rateLimitExceeded from too
+	// many DDL ops) fails cleanly instead of retrying the start forever.
+	queryJobStartMaxAttempts = 5
 )
 
 type bigQueryLoadMethod string
@@ -1736,7 +1741,18 @@ func (d *BigQueryDestination) startQueryJobWithRetry(ctx context.Context, sql st
 			_ = d.resolveCDCJob(context.Background(), jobID)
 			return nil, err
 		}
-		config.Debug("[%s] Retrying ambiguous start with stable job ID %s: %v", opLabel, jobID, err)
+		if attempt >= queryJobStartMaxAttempts {
+			// The job may have been accepted under its stable ID despite the
+			// retryable error, so reconcile (cancel/confirm) rather than abandon it
+			// with its fence cleared. reconcile resolves the fence in every path; a
+			// (nil, nil) result means the job never landed, so surface a clear error.
+			job, recErr := d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+			if job == nil && recErr == nil {
+				return nil, fmt.Errorf("failed to start %s query job %s after %d attempts: %w", opLabel, jobID, attempt, err)
+			}
+			return job, recErr
+		}
+		output.Warnf("[%s] job %s start failed (attempt %d/%d): %v; retrying\n", opLabel, jobID, attempt, queryJobStartMaxAttempts, err)
 		if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(min(attempt, queryJobMaxAttempts), err)); sleepErr != nil {
 			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
 		}
