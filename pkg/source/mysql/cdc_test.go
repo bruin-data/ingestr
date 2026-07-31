@@ -806,7 +806,7 @@ func TestAppendMySQLCDCBufferedChangesTokenIncludesPendingXA(t *testing.T) {
 	beforeEvent := gomysql.Position{Name: "mysql-bin.000001", Pos: 100}
 	lsn := formatStoredMySQLPosition(current, 0)
 	pendingXA := map[string]*mysqlCDCXAChanges{
-		"xa": &mysqlCDCXAChanges{start: pendingStart},
+		"xa": {start: pendingStart},
 	}
 
 	err := appendMySQLCDCBufferedChangesWithTokenContext(
@@ -842,7 +842,7 @@ func TestSafeMySQLCDCCheckpointIncludesUnflushedBuffers(t *testing.T) {
 	pendingCheckpoint := gomysql.Position{Name: "mysql-bin.000001", Pos: 120}
 
 	got := safeMySQLCDCCheckpoint(current, nil, map[string]*mysqlCDCChangeBuffer{
-		"orders": &mysqlCDCChangeBuffer{
+		"orders": {
 			changes: []mysqlCDCChange{{
 				lsn:        formatStoredMySQLPosition(gomysql.Position{Name: "mysql-bin.000001", Pos: 220}, 0),
 				checkpoint: bufferCheckpoint,
@@ -852,9 +852,9 @@ func TestSafeMySQLCDCCheckpointIncludesUnflushedBuffers(t *testing.T) {
 	assert.Equal(t, bufferCheckpoint, got)
 
 	got = safeMySQLCDCCheckpoint(current, map[string]*mysqlCDCXAChanges{
-		"xa": &mysqlCDCXAChanges{start: pendingCheckpoint},
+		"xa": {start: pendingCheckpoint},
 	}, map[string]*mysqlCDCChangeBuffer{
-		"orders": &mysqlCDCChangeBuffer{
+		"orders": {
 			changes: []mysqlCDCChange{{
 				lsn:        formatStoredMySQLPosition(gomysql.Position{Name: "mysql-bin.000001", Pos: 220}, 0),
 				checkpoint: bufferCheckpoint,
