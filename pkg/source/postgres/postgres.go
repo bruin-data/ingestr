@@ -92,12 +92,7 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 		return nil, fmt.Errorf("failed to get schema: %w", err)
 	}
 
-	// Auto-detect primary keys from database if user didn't provide
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = tableSchema.PrimaryKeys
-	}
-	pksUnique := len(req.PrimaryKeys) == 0 && len(tableSchema.PrimaryKeys) > 0
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, tableSchema.PrimaryKeys, true)
 
 	// Use user's strategy or default to replace
 	strategy := req.Strategy

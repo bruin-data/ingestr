@@ -44,7 +44,7 @@ type Dialect interface {
 	SchemaQuery() string
 
 	// PrimaryKeyQuery returns the SQL query for fetching primary key columns.
-	// The query should accept parameters based on the database's needs.
+	// The query should accept two parameters: schemaName, tableName.
 	// Returns empty string if PK detection is not supported.
 	PrimaryKeyQuery() string
 
@@ -115,7 +115,7 @@ type CatalogSQLDialect interface {
 	SchemaQueryForCatalog() string
 
 	// PrimaryKeyQueryForCatalog returns a PK query whose parameters are
-	// (catalog, tableName). Returns "" if PK detection is unsupported.
+	// (catalog, schemaName, tableName). Returns "" if PK detection is unsupported.
 	PrimaryKeyQueryForCatalog() string
 }
 
@@ -126,6 +126,12 @@ type SchemaProvider interface {
 	// GetSchema retrieves the schema for a table using native APIs.
 	// Returns the table schema with columns and primary keys.
 	GetSchema(ctx context.Context, table string) (*schema.TableSchema, error)
+}
+
+// PrimaryKeyEnforcementProvider identifies dialects whose detected primary-key
+// constraints enforce uniqueness.
+type PrimaryKeyEnforcementProvider interface {
+	EnforcesPrimaryKeys() bool
 }
 
 // StorageReader is an optional interface for dialects that support native

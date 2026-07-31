@@ -82,6 +82,15 @@ var (
 	_ ReadSchemaProvider = (*DynamicSourceTable)(nil)
 )
 
+// ResolvePrimaryKeys prefers user-provided keys over detected keys. Detected
+// keys are unique only when the source confirms that the database enforces them.
+func ResolvePrimaryKeys(requested, detected []string, detectedUnique bool) ([]string, bool) {
+	if len(requested) > 0 {
+		return requested, false
+	}
+	return detected, detectedUnique && len(detected) > 0
+}
+
 // IsCustomQuery checks if a table name has the "query:" prefix indicating a custom SQL query.
 func IsCustomQuery(tableName string) (string, bool) {
 	query, ok := strings.CutPrefix(tableName, "query:")

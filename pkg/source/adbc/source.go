@@ -116,11 +116,11 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 		return nil, err
 	}
 
-	// Use user-provided PKs if available, otherwise use auto-detected
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = tableSchema.PrimaryKeys
+	detectedPKsUnique := false
+	if provider, ok := s.dialect.(PrimaryKeyEnforcementProvider); ok {
+		detectedPKsUnique = provider.EnforcesPrimaryKeys()
 	}
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, tableSchema.PrimaryKeys, detectedPKsUnique)
 
 	// Use user's strategy or default to replace
 	strategy := req.Strategy
@@ -132,6 +132,7 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 	return &source.DynamicSourceTable{
 		TableName:                        tableName,
 		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
 		TableIncrementalKey:              req.IncrementalKey,
 		TableStrategy:                    strategy,
 		TableSupportsExtractPartitioning: true,
@@ -319,10 +320,10 @@ func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, 
 		args = []any{tableName}
 	case catalog != "" && isCatalogSQL(s.dialect):
 		pkSQL = s.dialect.(CatalogSQLDialect).PrimaryKeyQueryForCatalog()
-		args = []any{catalog, tableName}
+		args = []any{catalog, schemaName, tableName}
 	default:
 		pkSQL = s.dialect.PrimaryKeyQuery()
-		args = []any{tableName}
+		args = []any{schemaName, tableName}
 	}
 	if pkSQL == "" {
 		return nil

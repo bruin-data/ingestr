@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,54 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
+
+func TestResolvePrimaryKeys(t *testing.T) {
+	tests := []struct {
+		name           string
+		requested      []string
+		detected       []string
+		detectedUnique bool
+		want           []string
+		wantUnique     bool
+	}{
+		{
+			name:           "enforced detected keys are unique",
+			detected:       []string{"tenant_id", "id"},
+			detectedUnique: true,
+			want:           []string{"tenant_id", "id"},
+			wantUnique:     true,
+		},
+		{
+			name:           "informational detected keys are not unique",
+			detected:       []string{"id"},
+			detectedUnique: false,
+			want:           []string{"id"},
+		},
+		{
+			name:           "user keys are never assumed unique",
+			requested:      []string{"external_id"},
+			detected:       []string{"id"},
+			detectedUnique: true,
+			want:           []string{"external_id"},
+		},
+		{
+			name:           "empty detected keys are not unique",
+			detectedUnique: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, gotUnique := ResolvePrimaryKeys(tt.requested, tt.detected, tt.detectedUnique)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("ResolvePrimaryKeys() keys = %v, want %v", got, tt.want)
+			}
+			if gotUnique != tt.wantUnique {
+				t.Fatalf("ResolvePrimaryKeys() unique = %v, want %v", gotUnique, tt.wantUnique)
+			}
+		})
+	}
+}
 
 func TestIsCustomQuery(t *testing.T) {
 	tests := []struct {

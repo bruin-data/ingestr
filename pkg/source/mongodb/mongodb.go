@@ -32,9 +32,10 @@ import (
 const defaultBatchSize = 10000
 
 type MongoDBSource struct {
-	client   *mongo.Client
-	database string
-	uri      string
+	client                       *mongo.Client
+	database                     string
+	uri                          string
+	collectionPrimaryKeyUniqueFn func(context.Context, string, string) (bool, error)
 }
 
 func NewMongoDBSource() *MongoDBSource {
@@ -96,14 +97,22 @@ func (s *MongoDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 		strategy = config.StrategyReplace
 	}
 
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = []string{"_id"}
+	detectedPKUnique := false
+	db, collection, pipeline, parseErr := s.parseTableSpec(tableName)
+	if len(req.PrimaryKeys) == 0 && parseErr == nil && pipeline == nil {
+		unique, err := s.collectionPrimaryKeyUnique(ctx, db, collection)
+		if err != nil {
+			config.Debug("[MONGODB] Failed to inspect collection type: %v", err)
+		} else {
+			detectedPKUnique = unique
+		}
 	}
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, []string{"_id"}, detectedPKUnique)
 
 	return &source.DynamicSourceTable{
 		TableName:                        tableName,
 		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
 		TableIncrementalKey:              req.IncrementalKey,
 		TableStrategy:                    strategy,
 		TableSupportsExtractPartitioning: true,
@@ -115,6 +124,24 @@ func (s *MongoDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 			return s.read(ctx, tableName, opts)
 		},
 	}, nil
+}
+
+func (s *MongoDBSource) collectionPrimaryKeyUnique(ctx context.Context, database, collection string) (bool, error) {
+	if s.collectionPrimaryKeyUniqueFn != nil {
+		return s.collectionPrimaryKeyUniqueFn(ctx, database, collection)
+	}
+	if s.client == nil {
+		return false, nil
+	}
+
+	collections, err := s.client.Database(database).ListCollectionNames(ctx, bson.D{
+		{Key: "name", Value: collection},
+		{Key: "type", Value: "collection"},
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(collections) == 1, nil
 }
 
 // parseTableSpec parses the table string into database, collection, and optional custom query.
