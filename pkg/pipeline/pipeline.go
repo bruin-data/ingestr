@@ -118,7 +118,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if p.config.Stream {
 		ss, ok := src.(source.StreamingSource)
 		if !ok || !ss.SupportsStreaming() {
-			return fmt.Errorf("--stream is not supported by this source; streaming requires a CDC source (postgres+cdc, mssql+cdc) or a message broker source (kafka, amqp, mqtt, sqs, pubsub, kinesis)")
+			return fmt.Errorf("--stream is not supported by this source; streaming requires a CDC source (postgres+cdc, mysql+cdc/mariadb+cdc, mssql+cdc, mongodb+cdc) or a message broker source")
 		}
 		if lr, ok := src.(source.LagReporter); ok {
 			metrics.SetLagReporter(lr)
