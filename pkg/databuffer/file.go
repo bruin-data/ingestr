@@ -167,7 +167,7 @@ func (b *FileBuffer) readAndCastBatch(path string, targetSchema *arrow.Schema) (
 	}
 	defer func() { _ = file.Close() }()
 
-	reader, err := ipc.NewFileReader(file, ipc.WithAllocator(memory.DefaultAllocator))
+	reader, err := ipc.NewFileReader(file, ipc.WithAllocator(memory.DefaultAllocator), ipc.WithBodySizeLimit(0))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create arrow reader: %w", err)
 	}
