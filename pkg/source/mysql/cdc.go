@@ -1512,9 +1512,6 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			// terminal event alone is benign.
 			return nil
 		}
-		pendingXAChanges -= pending.count
-		pendingXABytes -= pending.bytes
-		delete(pendingXA, xaID)
 		if activeXA == xaID {
 			activeXA = ""
 		}
@@ -1532,6 +1529,9 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				}
 			}
 		}
+		pendingXAChanges -= pending.count
+		pendingXABytes -= pending.bytes
+		delete(pendingXA, xaID)
 		return nil
 	}
 	lastDelivery := time.Now()

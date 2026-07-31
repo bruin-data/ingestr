@@ -790,6 +790,52 @@ func TestAppendMySQLCDCBufferedChangesTokenExcludesFlushedBuffer(t *testing.T) {
 	assert.Equal(t, formatStoredMySQLPosition(current, 0), token.Position)
 }
 
+func TestAppendMySQLCDCBufferedChangesTokenIncludesPendingXA(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 1)
+	buffers := map[string]*mysqlCDCChangeBuffer{}
+	pendingStart := gomysql.Position{Name: "mysql-bin.000001", Pos: 80}
+	current := gomysql.Position{Name: "mysql-bin.000001", Pos: 200}
+	beforeEvent := gomysql.Position{Name: "mysql-bin.000001", Pos: 100}
+	lsn := formatStoredMySQLPosition(current, 0)
+	pendingXA := map[string]*mysqlCDCXAChanges{
+		"xa": &mysqlCDCXAChanges{start: pendingStart},
+	}
+
+	err := appendMySQLCDCBufferedChangesWithTokenContext(
+		context.Background(),
+		buffers,
+		"items",
+		tableSchema,
+		"items",
+		[]mysqlCDCChange{{values: []interface{}{int64(1), "item1"}, lsn: lsn, checkpoint: beforeEvent}},
+		1,
+		results,
+		func(lastLSN string) (any, error) {
+			position, ok := parseStoredMySQLPosition(lastLSN)
+			require.True(t, ok)
+			safe := safeMySQLCDCCheckpoint(position, pendingXA, buffers)
+			return source.CDCStateCommitToken{Position: formatStoredMySQLPosition(safe, 0)}, nil
+		},
+	)
+	require.NoError(t, err)
+
+	result := <-results
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+	token, ok := result.CommitToken.(source.CDCStateCommitToken)
+	require.True(t, ok)
+	assert.Equal(t, formatStoredMySQLPosition(pendingStart, 0), token.Position)
+}
+
 func TestSafeMySQLCDCCheckpointIncludesUnflushedBuffers(t *testing.T) {
 	current := gomysql.Position{Name: "mysql-bin.000001", Pos: 300}
 	bufferCheckpoint := gomysql.Position{Name: "mysql-bin.000001", Pos: 200}
