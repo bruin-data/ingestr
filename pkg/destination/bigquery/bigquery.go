@@ -1742,8 +1742,15 @@ func (d *BigQueryDestination) startQueryJobWithRetry(ctx context.Context, sql st
 			return nil, err
 		}
 		if attempt >= queryJobStartMaxAttempts {
-			_ = d.resolveCDCJob(context.Background(), jobID)
-			return nil, fmt.Errorf("failed to start %s query job %s after %d attempts: %w", opLabel, jobID, attempt, err)
+			// The job may have been accepted under its stable ID despite the
+			// retryable error, so reconcile (cancel/confirm) rather than abandon it
+			// with its fence cleared. reconcile resolves the fence in every path; a
+			// (nil, nil) result means the job never landed, so surface a clear error.
+			job, recErr := d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+			if job == nil && recErr == nil {
+				return nil, fmt.Errorf("failed to start %s query job %s after %d attempts: %w", opLabel, jobID, attempt, err)
+			}
+			return job, recErr
 		}
 		output.Warnf("[%s] job %s start failed (attempt %d/%d): %v; retrying\n", opLabel, jobID, attempt, queryJobStartMaxAttempts, err)
 		if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(min(attempt, queryJobMaxAttempts), err)); sleepErr != nil {
