@@ -71,6 +71,13 @@ ingestr ingest \
     --incremental-strategy append
 ```
 
+With the default `--schema-contract evolve`, ingestr reads the current Delta
+metadata before an incremental load. New source columns are added to the table
+through a metadata-only Delta commit and are always declared nullable, because
+data files written before the commit do not contain them. Required columns
+removed from the source are retained and relaxed to nullable, matching
+ingestr's soft-removal behavior.
+
 ## Incremental strategies
 
 For **Tables** (Delta) mode, ingestr supports `replace`, `append`, `merge`, `delete+insert` and `scd2`:
@@ -103,6 +110,9 @@ ingestr ingest \
 
 - **Replace** is not atomic — there is a brief window where the table is empty.
 - **Copy-on-write** strategies load the entire target table into memory and rewrite it on every run.
-- **Partitioning**: Delta tables are written non-partitioned; `partition_by` is ignored in Tables mode for now.
+- **Partitioning**: Delta tables are written non-partitioned; `partition_by` is ignored in Tables mode for now. An existing partitioned table is rejected by the copy-on-write strategies, because its partition values live in the Delta log rather than in the Parquet files; `append` and `replace` do not check for this.
 - **Type mapping**: timestamps are stored as Delta `timestamp` (microseconds, UTC); JSON and UUID columns are stored as `string`; `TIME` columns are carried as microsecond `long` values (Delta has no time type).
+- **Schema evolution**: adding columns and relaxing nullability are supported for Tables mode. Changing an existing column's Delta type fails the load rather than being skipped with a warning — recreate the table or pin the column with `--columns`. Because Delta types are coarser than ingestr's, source type changes that collapse to the same Delta type (`timestamp` ↔ `timestamptz`, `string` ↔ `json`/`uuid`) are accepted and need no rewrite.
+- **Delta column mapping**: tables with `delta.columnMapping.mode` set to anything other than `none` are rejected by schema evolution and by the copy-on-write strategies (`merge`, `delete+insert`, `scd2`), because ingestr reads the Parquet files by their physical column names. `append` and `replace` do not check for this and will write files that Fabric reads back incorrectly.
+- **Delta protocol and table features**: schema evolution and the copy-on-write strategies check the table's `protocol` action and reject tables that require reader or writer capabilities ingestr does not have (for example row tracking or Iceberg compatibility). Rewrites are also rejected when a data file carries a deletion vector (rewriting it would restore the deleted rows), or when the table uses `delta.appendOnly`, `delta.enableChangeDataFeed`, CHECK constraints, column invariants, or generated/identity columns — guarantees a plain remove-and-add commit would not keep. Rewrites also reject tables whose transaction log no longer starts at commit 0 (checkpointed logs cleaned up by the engine), because ingestr does not read checkpoints and cannot reconstruct the full set of active data files. `append` and `replace` do not check for this.
 - **CDC-aware merge** (soft-deletes via `_cdc_deleted`) is not implemented; CDC delete markers are merged as regular rows.

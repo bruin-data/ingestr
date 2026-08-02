@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -310,4 +312,464 @@ func TestRenderLayout(t *testing.T) {
 
 	d2 := &OneLakeDestination{relPath: "exports/users", layout: "{table_name}.{ext}"}
 	assert.Equal(t, "users.parquet", d2.renderLayout("x", 0))
+}
+
+func TestDeltaMetadataEvolvesWhenSourceAddsColumn(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata([]schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+	}, "table-id", 1700000000000)
+	require.NoError(t, err)
+	metadata["description"] = json.RawMessage(`"raw landing table"`)
+
+	deltaSchema, err := deltaSchemaFromMetadata(metadata)
+	require.NoError(t, err)
+	destinationSchema, err := tableSchemaFromDelta("Tables/users", deltaSchema)
+	require.NoError(t, err)
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+		{Name: "email", DataType: schema.TypeString, Nullable: false},
+	}}
+	normalizer := (&OneLakeDestination{}).NormalizeSchemaEvolutionColumn
+	comparison, err := schemaevolution.Compare(sourceSchema, destinationSchema, &schemaevolution.CompareOptions{
+		NormalizeColumn: normalizer,
+	})
+	require.NoError(t, err)
+	require.Len(t, comparison.Changes, 1)
+	require.Equal(t, schemaevolution.ChangeAddColumn, comparison.Changes[0].Type)
+
+	updated, changed, err := evolveDeltaMetadata(metadata, comparison)
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.JSONEq(t, `"raw landing table"`, string(updated["description"]))
+
+	evolvedSchema, err := deltaSchemaFromMetadata(updated)
+	require.NoError(t, err)
+	require.Len(t, evolvedSchema.Fields, 3)
+	assert.Equal(t, "email", evolvedSchema.Fields[2].Name)
+	assert.Equal(t, "string", evolvedSchema.Fields[2].Type)
+	assert.True(t, evolvedSchema.Fields[2].Nullable, "new columns must be nullable for pre-evolution files")
+
+	originalSchema, err := deltaSchemaFromMetadata(metadata)
+	require.NoError(t, err)
+	require.Len(t, originalSchema.Fields, 2, "evolution must not mutate the snapshot used to build the plan")
+}
+
+func TestBuildSchemaEvolutionCommitContainsMetadataOnly(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, "table-id", 1)
+	require.NoError(t, err)
+	commit, err := buildSchemaEvolutionCommit(metadata, 1700000000000)
+	require.NoError(t, err)
+
+	lines := parseCommitLines(t, commit)
+	require.Len(t, lines, 2)
+	_, hasMetadata := lines[0]["metaData"]
+	assert.True(t, hasMetadata)
+	_, hasAdd := lines[0]["add"]
+	assert.False(t, hasAdd)
+
+	var info struct {
+		Operation string `json:"operation"`
+	}
+	require.NoError(t, json.Unmarshal(lines[1]["commitInfo"], &info))
+	assert.Equal(t, "ALTER TABLE", info.Operation)
+}
+
+func TestReplayDeltaCommitsKeepsLatestSchemaAndActiveFiles(t *testing.T) {
+	t.Parallel()
+
+	initial, err := buildInitialCommit(
+		[]schema.Column{{Name: "id", DataType: schema.TypeInt64}},
+		[]deltaAddFile{{Path: "part-a.parquet", Size: 10}},
+		"table-id",
+		1,
+	)
+	require.NoError(t, err)
+	metadata, err := newDeltaMetadata([]schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "email", DataType: schema.TypeString, Nullable: true},
+	}, "table-id", 1)
+	require.NoError(t, err)
+	evolution, err := buildSchemaEvolutionCommit(metadata, 2)
+	require.NoError(t, err)
+	rewrite, err := buildRewriteCommit(
+		[]string{"part-a.parquet"},
+		[]deltaAddFile{{Path: "part-b.parquet", Size: 20}},
+		"MERGE",
+		3,
+	)
+	require.NoError(t, err)
+
+	snapshot := &deltaSnapshot{exists: true}
+	active := make(map[string]bool)
+	var order []string
+	for _, commit := range [][]byte{initial, evolution, rewrite} {
+		require.NoError(t, replayDeltaCommit(snapshot, active, &order, commit))
+	}
+
+	var activeFiles []string
+	for _, path := range order {
+		if _, ok := active[path]; ok {
+			activeFiles = append(activeFiles, path)
+		}
+	}
+	assert.Equal(t, []string{"part-b.parquet"}, activeFiles)
+	deltaSchema, err := deltaSchemaFromMetadata(snapshot.metadata)
+	require.NoError(t, err)
+	require.Len(t, deltaSchema.Fields, 2)
+	assert.Equal(t, "email", deltaSchema.Fields[1].Name)
+	require.NotNil(t, snapshot.protocol)
+	assert.Equal(t, 1, snapshot.protocol.MinReaderVersion)
+	assert.Equal(t, 2, snapshot.protocol.MinWriterVersion)
+}
+
+func TestReplayDeltaCommitTracksDeletionVectors(t *testing.T) {
+	t.Parallel()
+
+	commit := []byte(`{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}
+{"add":{"path":"part-plain.parquet","size":1,"dataChange":true}}
+{"add":{"path":"part-null-dv.parquet","size":1,"dataChange":true,"deletionVector":null}}
+{"add":{"path":"part-dv.parquet","size":1,"dataChange":true,"deletionVector":{"storageType":"u","pathOrInlineDv":"x","offset":1,"sizeInBytes":36,"cardinality":2}}}
+`)
+
+	snapshot := &deltaSnapshot{exists: true}
+	active := make(map[string]bool)
+	var order []string
+	require.NoError(t, replayDeltaCommit(snapshot, active, &order, commit))
+
+	assert.False(t, active["part-plain.parquet"])
+	assert.False(t, active["part-null-dv.parquet"])
+	assert.True(t, active["part-dv.parquet"])
+	require.NotNil(t, snapshot.protocol)
+	assert.Equal(t, []string{"deletionVectors"}, snapshot.protocol.ReaderFeatures)
+
+	// A later add of the same file without a deletion vector replaces the entry.
+	require.NoError(t, replayDeltaCommit(snapshot, active, &order,
+		[]byte(`{"add":{"path":"part-dv.parquet","size":1,"dataChange":true}}`)))
+	assert.False(t, active["part-dv.parquet"])
+}
+
+func TestCheckSupportedDeltaProtocol(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		protocol *deltaProtocol
+		wantErr  string
+	}{
+		{"missing", nil, "carries no protocol action"},
+		{"legacy", &deltaProtocol{MinReaderVersion: 1, MinWriterVersion: 2}, ""},
+		{
+			"table features within allowlist",
+			&deltaProtocol{
+				MinReaderVersion: 3, MinWriterVersion: 7,
+				ReaderFeatures: []string{"deletionVectors", "timestampNtz"},
+				WriterFeatures: []string{"deletionVectors", "appendOnly", "invariants"},
+			},
+			"",
+		},
+		{
+			"unknown reader feature",
+			&deltaProtocol{MinReaderVersion: 3, MinWriterVersion: 7, ReaderFeatures: []string{"typeWidening"}},
+			`reader feature "typeWidening"`,
+		},
+		{
+			"unknown writer feature",
+			&deltaProtocol{MinReaderVersion: 3, MinWriterVersion: 7, WriterFeatures: []string{"icebergCompatV2"}},
+			`writer feature "icebergCompatV2"`,
+		},
+		{
+			"future versions",
+			&deltaProtocol{MinReaderVersion: 4, MinWriterVersion: 8},
+			"reader version 4 and writer version 8",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkSupportedDeltaProtocol(tt.protocol, "merge")
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestEvolveDeltaMetadataRelaxesColumnsAndRejectsTypeChanges(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata([]schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: false}}, "table-id", 1)
+	require.NoError(t, err)
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeRemoveColumn, ColumnName: "id",
+	}}}
+
+	updated, changed, err := evolveDeltaMetadata(metadata, comparison)
+	require.NoError(t, err)
+	require.True(t, changed)
+	deltaSchema, err := deltaSchemaFromMetadata(updated)
+	require.NoError(t, err)
+	assert.True(t, deltaSchema.Fields[0].Nullable)
+
+	oldColumn := schema.Column{Name: "id", DataType: schema.TypeInt64}
+	_, changed, err = evolveDeltaMetadata(metadata, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type: schemaevolution.ChangeWidenType, ColumnName: "id", OldColumn: &oldColumn,
+			NewColumn: schema.Column{Name: "id", DataType: schema.TypeString},
+		}},
+	})
+	require.ErrorContains(t, err, "requires changing its Delta type from long to string")
+	assert.False(t, changed)
+}
+
+func TestEvolveDeltaMetadataRejectsUnmappableExistingColumn(t *testing.T) {
+	t.Parallel()
+
+	// tableSchemaFromDelta omits the Fabric-authored struct column, so a source
+	// column with the same name arrives as an add; it must fail loudly instead
+	// of redeclaring the struct as a string.
+	metadata, err := newDeltaMetadata(nil, "table-id", 1)
+	require.NoError(t, err)
+	metadata["schemaString"], err = json.Marshal(`{"type":"struct","fields":[` +
+		`{"name":"profile","type":{"type":"struct","fields":[]},"nullable":true,"metadata":{}}]}`)
+	require.NoError(t, err)
+
+	_, _, err = evolveDeltaMetadata(metadata, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type: schemaevolution.ChangeAddColumn, ColumnName: "profile",
+			NewColumn: schema.Column{Name: "profile", DataType: schema.TypeString},
+		}},
+	})
+	require.ErrorContains(t, err, `column "profile"`)
+	require.ErrorContains(t, err, "unsupported delta type")
+
+	// An unknown column must not be mistaken for a string just because that is
+	// deltaTypeFor's fallback.
+	_, _, err = evolveDeltaMetadata(metadata, &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{{
+			Type: schemaevolution.ChangeWidenType, ColumnName: "profile",
+			OldColumn: &schema.Column{Name: "profile", DataType: schema.TypeUnknown, Nullable: true},
+			NewColumn: schema.Column{Name: "profile", DataType: schema.TypeString},
+		}},
+	})
+	require.ErrorContains(t, err, `requires changing its Delta type from {"fields":[],"type":"struct"} to string`)
+}
+
+func TestTableSchemaFromDeltaSkipsUnmappableColumns(t *testing.T) {
+	t.Parallel()
+
+	deltaSchema := &deltaStruct{Type: "struct", Fields: []deltaField{
+		{Name: "id", Type: "long"},
+		{Name: "profile", Type: map[string]any{"type": "struct", "fields": []any{}}, Nullable: true},
+	}}
+
+	tableSchema, err := tableSchemaFromDelta("Tables/users", deltaSchema)
+	require.NoError(t, err, "a Delta type ingestr cannot map must not fail the whole load")
+	require.Len(t, tableSchema.Columns, 1,
+		"unmappable columns must stay out of the write schema so appended files omit them")
+	assert.Equal(t, schema.TypeInt64, tableSchema.Columns[0].DataType)
+}
+
+// TestArrowFieldToColumnRoundTripsDeltaTypes pins the two directions of the
+// type map against each other. The first copy-on-write commit derives the Delta
+// metadata from the Arrow schema of the file it just wrote, and every later run
+// aligns that file to the declared metadata, so a column that does not round
+// trip breaks the table on its second run.
+func TestArrowFieldToColumnRoundTripsDeltaTypes(t *testing.T) {
+	t.Parallel()
+
+	columns := []schema.Column{
+		{Name: "bool", DataType: schema.TypeBoolean},
+		{Name: "i8", DataType: schema.TypeInt8},
+		{Name: "i16", DataType: schema.TypeInt16},
+		{Name: "i32", DataType: schema.TypeInt32},
+		{Name: "i64", DataType: schema.TypeInt64},
+		{Name: "f32", DataType: schema.TypeFloat32},
+		{Name: "f64", DataType: schema.TypeFloat64},
+		{Name: "dec", DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
+		{Name: "dec_default", DataType: schema.TypeDecimal},
+		{Name: "str", DataType: schema.TypeString, MaxLength: 64},
+		{Name: "json", DataType: schema.TypeJSON},
+		{Name: "uuid", DataType: schema.TypeUUID},
+		{Name: "bin", DataType: schema.TypeBinary},
+		{Name: "date", DataType: schema.TypeDate},
+		{Name: "time", DataType: schema.TypeTime},
+		{Name: "ts", DataType: schema.TypeTimestamp},
+		{Name: "tstz", DataType: schema.TypeTimestampTZ},
+		{Name: "arr_str", DataType: schema.TypeArray, ArrayType: schema.TypeString},
+		{Name: "arr_i64", DataType: schema.TypeArray, ArrayType: schema.TypeInt64},
+		{Name: "arr_dec", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 10, Scale: 2},
+		{Name: "arr_ts", DataType: schema.TypeArray, ArrayType: schema.TypeTimestampTZ},
+	}
+
+	for _, column := range columns {
+		t.Run(column.Name, func(t *testing.T) {
+			roundTripped := arrowFieldToColumn(arrow.Field{
+				Name: column.Name, Type: schema.DataTypeToArrowType(column),
+			})
+			assert.Equal(t, deltaTypeFor(column), deltaTypeFor(roundTripped))
+		})
+	}
+}
+
+func TestDeltaTypeForArrayKeepsElementPrecision(t *testing.T) {
+	t.Parallel()
+
+	deltaType := deltaTypeFor(schema.Column{
+		DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 10, Scale: 2,
+	})
+	encoded, err := json.Marshal(deltaType)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"array","elementType":"decimal(10,2)","containsNull":true}`, string(encoded))
+}
+
+func TestEvolveDeltaMetadataAllowsMissingConfiguration(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, "table-id", 1)
+	require.NoError(t, err)
+	delete(metadata, "configuration")
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeAddColumn,
+		ColumnName: "email",
+		NewColumn:  schema.Column{Name: "email", DataType: schema.TypeString},
+	}}}
+
+	updated, changed, err := evolveDeltaMetadata(metadata, comparison)
+	require.NoError(t, err)
+	require.True(t, changed)
+	evolved, err := deltaSchemaFromMetadata(updated)
+	require.NoError(t, err)
+	require.Len(t, evolved.Fields, 2)
+}
+
+// TestEvolveDeltaMetadataKeepsFieldMetadataObject covers tables written by
+// other engines, which may omit the per-field metadata object the Delta
+// protocol requires. Committing it back as null makes the table unreadable.
+func TestEvolveDeltaMetadataKeepsFieldMetadataObject(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, "table-id", 1)
+	require.NoError(t, err)
+	schemaString, err := json.Marshal(`{"type":"struct","fields":[{"name":"id","type":"long","nullable":true}]}`)
+	require.NoError(t, err)
+	metadata["schemaString"] = schemaString
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeAddColumn,
+		ColumnName: "email",
+		NewColumn:  schema.Column{Name: "email", DataType: schema.TypeString},
+	}}}
+
+	updated, changed, err := evolveDeltaMetadata(metadata, comparison)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var encoded string
+	require.NoError(t, json.Unmarshal(updated["schemaString"], &encoded))
+	assert.NotContains(t, encoded, `"metadata":null`)
+	assert.JSONEq(t, `{"type":"struct","fields":[`+
+		`{"name":"id","type":"long","nullable":true,"metadata":{}},`+
+		`{"name":"email","type":"string","nullable":true,"metadata":{}}]}`, encoded)
+}
+
+func TestNormalizeSchemaEvolutionColumn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   schema.Column
+		want schema.Column
+	}{
+		// Delta has no JSON, UUID, TIME or naive timestamp type, so these are
+		// the columns GetTableSchema reports back differently from what the
+		// source declared. Without the normalization the second run of a
+		// pipeline sees a type change and fails.
+		{"json", schema.Column{DataType: schema.TypeJSON}, schema.Column{DataType: schema.TypeString}},
+		{"uuid", schema.Column{DataType: schema.TypeUUID}, schema.Column{DataType: schema.TypeString}},
+		{"time", schema.Column{DataType: schema.TypeTime}, schema.Column{DataType: schema.TypeInt64}},
+		{"timestamp", schema.Column{DataType: schema.TypeTimestamp}, schema.Column{DataType: schema.TypeTimestampTZ}},
+		{"timestamptz", schema.Column{DataType: schema.TypeTimestampTZ}, schema.Column{DataType: schema.TypeTimestampTZ}},
+		{
+			"max length is not carried by delta",
+			schema.Column{DataType: schema.TypeString, MaxLength: 64},
+			schema.Column{DataType: schema.TypeString},
+		},
+		{
+			"decimal keeps precision and scale",
+			schema.Column{DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
+			schema.Column{DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
+		},
+		{
+			"array element",
+			schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeJSON},
+			schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeString},
+		},
+		{
+			"array of time",
+			schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeTime},
+			schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeInt64},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, normalizeSchemaEvolutionColumn(tt.in))
+		})
+	}
+}
+
+// TestNormalizedSchemaSurvivesTheNextRun ties the normalizer to what it exists
+// for: the schema GetTableSchema reports must compare equal to the source
+// schema that produced the table, or every run after the first fails.
+func TestNormalizedSchemaSurvivesTheNextRun(t *testing.T) {
+	t.Parallel()
+
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64},
+		{Name: "PAYLOAD", DataType: schema.TypeJSON},
+		{Name: "EXTERNAL_ID", DataType: schema.TypeUUID},
+		{Name: "DURATION", DataType: schema.TypeTime},
+		{Name: "SEEN_AT", DataType: schema.TypeTimestamp},
+		{Name: "NAME", DataType: schema.TypeString, MaxLength: 64},
+	}}
+	metadata, err := newDeltaMetadata(sourceSchema.Columns, "table-id", 1)
+	require.NoError(t, err)
+	deltaSchema, err := deltaSchemaFromMetadata(metadata)
+	require.NoError(t, err)
+	reported, err := tableSchemaFromDelta("analytics.events", deltaSchema)
+	require.NoError(t, err)
+
+	dest := &OneLakeDestination{}
+	comparison, err := schemaevolution.Compare(sourceSchema, reported, &schemaevolution.CompareOptions{
+		NormalizeColumn: dest.NormalizeSchemaEvolutionColumn,
+	})
+	require.NoError(t, err)
+	assert.False(t, comparison.HasChanges, "the lossy Delta types must not read back as schema changes: %+v", comparison.Changes)
+}
+
+func TestEvolveDeltaMetadataRejectsColumnMapping(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, "table-id", 1)
+	require.NoError(t, err)
+	metadata["configuration"] = json.RawMessage(`{"delta.columnMapping.mode":"name"}`)
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeAddColumn,
+		ColumnName: "email",
+		NewColumn:  schema.Column{Name: "email", DataType: schema.TypeString},
+	}}}
+
+	_, changed, err := evolveDeltaMetadata(metadata, comparison)
+	require.ErrorContains(t, err, "column mapping mode")
+	assert.False(t, changed)
 }
