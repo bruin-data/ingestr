@@ -9,6 +9,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/hana"
 	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/destination/mysql"
 	"github.com/bruin-data/ingestr/pkg/destination/oracle"
@@ -31,6 +32,7 @@ func TestDestinationWritersReleaseBatchAttachedToError(t *testing.T) {
 		{name: "mysql", dest: mysql.NewMySQLDestination(), write: writeParallel},
 		{name: "mssql serial", dest: mssql.NewMSSQLDestination(), write: writeParallel},
 		{name: "mssql parallel", dest: mssql.NewMSSQLDestination(), opts: destination.WriteOptions{StagingTable: true, Parallelism: 2}, write: writeParallel},
+		{name: "hana", dest: hana.NewHanaDestination(), write: writeParallel},
 		{name: "sqlite", dest: sqlite.NewSQLiteDestination(), write: writeParallel},
 		{name: "oracle", dest: oracle.NewOracleDestination(), write: writeParallel},
 		{name: "redshift", dest: redshift.NewRedshiftDestination(), write: writeParallel},

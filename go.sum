@@ -1009,8 +1009,8 @@ github.com/ProtonMail/gopenpgp/v3 v3.3.0/go.mod h1:J+iNPt0/5EO9wRt7Eit9dRUlzyu3h
 github.com/RaveNoX/go-jsoncommentstrip v1.0.0/go.mod h1:78ihd09MekBnJnxpICcwzCMzGrKSKYe4AqU6PDYYpjk=
 github.com/RoaringBitmap/roaring/v2 v2.21.0 h1:RKVgkD+c9ouyCydF2PW/mztDyZTsb7ksas/IofnguDg=
 github.com/RoaringBitmap/roaring/v2 v2.21.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
-github.com/SAP/go-hdb v1.16.2 h1:JEFwumHG/5qbBISYpTcR22e20nX4yYxZ5ZwhGNKskms=
-github.com/SAP/go-hdb v1.16.2/go.mod h1:LNpXz+MoCtka8RqefdbjwXXCXpqngFcsF3qpARsCR3U=
+github.com/SAP/go-hdb v1.17.2 h1:bxQfX6tw3twRIeCUf4HCcagORVPtLF5/vigFRQkh1UA=
+github.com/SAP/go-hdb v1.17.2/go.mod h1:UyvW+7VKLmwEYhV3KGEqrR63BWPP22LWWYG6WK0BHSc=
 github.com/Shopify/goreferrer v0.0.0-20220729165902-8cddb4f5de06/go.mod h1:7erjKLwalezA0k99cWs5L11HWOAPNjdUZ6RxH1BXbbM=
 github.com/Shopify/sarama v1.38.1/go.mod h1:iwv9a67Ha8VNa+TifujYoWGxWnu2kNVAQdSdZ4X2o5g=
 github.com/Shopify/toxiproxy/v2 v2.12.0/go.mod h1:R9Z38Pw6k2cGZWXHe7tbxjGW9azmY1KbDQJ1kd+h7Tk=

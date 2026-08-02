@@ -264,7 +264,7 @@ func GetConnectors() []ConnectorType {
 			Name:          "SAP HANA",
 			Schemes:       []string{"hana", "saphana"},
 			IsSource:      true,
-			IsDestination: false,
+			IsDestination: true,
 			Fields: []ConnectorField{
 				{Name: "host", Label: "Host", Type: "string", Required: true, Placeholder: "localhost"},
 				{Name: "port", Label: "Port", Type: "number", Required: false, Default: "30015", Placeholder: "30015"},

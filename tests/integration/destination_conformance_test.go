@@ -17,10 +17,12 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"github.com/ClickHouse/clickhouse-go/v2"
+	hdbdriver "github.com/SAP/go-hdb/driver"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/hanautil"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/snowflake"
@@ -97,6 +99,31 @@ func destinationCases() []destCase {
 				return pgDest.uri, table, cleanup
 			},
 			sqlBackend:             postgresBackend(),
+			mergeCapable:           true,
+			deleteInsertCapable:    true,
+			scd2Capable:            true,
+			schemaEvolutionCapable: true,
+			replaceDedupCapable:    true,
+		},
+		{
+			name: "hana",
+			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
+				hanaURI := os.Getenv("GONG_TEST_HANA_URI")
+				if hanaURI == "" {
+					t.Skip("Set GONG_TEST_HANA_URI to run SAP HANA destination conformance tests")
+				}
+
+				table := fmt.Sprintf("SYSTEM.conformance_%s", uniqueSuffix())
+				cleanup := func() {
+					db, err := hanaBackend().openDB(hanaURI)
+					if err == nil {
+						_, _ = db.ExecContext(ctx, "DROP TABLE "+hanaQuoteTable(table))
+						_ = db.Close()
+					}
+				}
+				return hanaURI, table, cleanup
+			},
+			sqlBackend:             hanaBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
 			scd2Capable:            true,
@@ -1038,6 +1065,83 @@ func postgresBackend() *sqlBackend {
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE _scd_is_current = false AND _scd_valid_to IS NULL", table)
 		},
 	}
+}
+
+func hanaBackend() *sqlBackend {
+	return &sqlBackend{
+		openDB: func(uri string) (*sql.DB, error) {
+			dsn, _, err := hanautil.ParseURI(uri)
+			if err != nil {
+				return nil, err
+			}
+			connector, err := hdbdriver.NewDSNConnector(dsn)
+			if err != nil {
+				return nil, err
+			}
+			return sql.OpenDB(connector), nil
+		},
+		schemaTypes: func(db *sql.DB, table string) (map[string]string, error) {
+			schemaName, tableName := splitSchemaTable(table, "SYSTEM")
+			rows, err := db.Query(`
+				SELECT COLUMN_NAME, DATA_TYPE_NAME
+				FROM SYS.TABLE_COLUMNS
+				WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?
+				ORDER BY POSITION
+			`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = rows.Close() }()
+			out := map[string]string{}
+			for rows.Next() {
+				var name, dataType string
+				if err := rows.Scan(&name, &dataType); err != nil {
+					return nil, err
+				}
+				out[strings.ToLower(name)] = normalizeTypeName(dataType)
+			}
+			return out, rows.Err()
+		},
+		expectedTypes: map[string]string{
+			"id":     "bigint",
+			"name":   "nclob",
+			"active": "boolean",
+			"score":  "double",
+		},
+		countQuery: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s", hanaQuoteTable(table))
+		},
+		nameByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT TO_NVARCHAR(%s) FROM %s WHERE %s = %d", hanaQuoteIdentifier("name"), hanaQuoteTable(table), hanaQuoteIdentifier("id"), id)
+		},
+		ageByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT TO_NVARCHAR(%s) FROM %s WHERE %s = %d", hanaQuoteIdentifier("age"), hanaQuoteTable(table), hanaQuoteIdentifier("id"), id)
+		},
+		scd2CountCurrent: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = TRUE", hanaQuoteTable(table), hanaQuoteIdentifier("_scd_is_current"))
+		},
+		scd2CountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = %d", hanaQuoteTable(table), hanaQuoteIdentifier("id"), id)
+		},
+		scd2HistNoValidTo: func(table string) string {
+			return fmt.Sprintf(
+				"SELECT COUNT(*) FROM %s WHERE %s = FALSE AND %s IS NULL",
+				hanaQuoteTable(table), hanaQuoteIdentifier("_scd_is_current"), hanaQuoteIdentifier("_scd_valid_to"),
+			)
+		},
+	}
+}
+
+func hanaQuoteTable(table string) string {
+	parts := strings.Split(table, ".")
+	for i := range parts {
+		parts[i] = hanaQuoteIdentifier(parts[i])
+	}
+	return strings.Join(parts, ".")
+}
+
+func hanaQuoteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(strings.ToUpper(identifier), `"`, `""`) + `"`
 }
 
 func splitSchemaTable(table string, defaultSchema string) (string, string) {
@@ -2309,6 +2413,14 @@ func getSchemaEvolutionExpectedTypes(backend *sqlBackend) map[string]string {
 			"age":   "text",
 			"score": "bigint",
 		}
+	case backend.expectedTypes["id"] == "bigint" && backend.expectedTypes["name"] == "nclob":
+		// SAP HANA
+		return map[string]string{
+			"id":    "bigint",
+			"name":  "nclob",
+			"age":   "nclob",
+			"score": "bigint",
+		}
 	case backend.expectedTypes["id"] == "integer" && backend.expectedTypes["name"] == "text":
 		// SQLite - types are more flexible
 		return map[string]string{
@@ -2389,7 +2501,7 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 			continue
 		}
 		// Include backends that use SwapTable in replace strategy.
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "hana" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}
@@ -2476,6 +2588,14 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 			SELECT COUNT(*) FROM information_schema.tables
 			WHERE table_schema = '%s' AND table_name LIKE '%s_old_%%'
 		`, schemaName, tableName)
+	case strings.Contains(uri, "hana"):
+		if schemaName == "" {
+			schemaName = "SYSTEM"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM SYS.TABLES
+			WHERE SCHEMA_NAME = '%s' AND TABLE_NAME LIKE '%s_OLD_%%'
+		`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
 	case strings.Contains(uri, "mssql") || strings.Contains(uri, "sqlserver"):
 		// MSSQL: query sys.tables and sys.schemas
 		if schemaName == "" {
@@ -2567,6 +2687,17 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 			  AND tc.constraint_type = 'PRIMARY KEY'
 			  AND kcu.column_name = '%s'
 		`, schemaName, tableName, column)
+	case strings.Contains(uri, "hana"):
+		if schemaName == "" {
+			schemaName = "SYSTEM"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM SYS.CONSTRAINTS
+			WHERE SCHEMA_NAME = '%s'
+			  AND TABLE_NAME = '%s'
+			  AND IS_PRIMARY_KEY = 'TRUE'
+			  AND COLUMN_NAME = '%s'
+		`, strings.ToUpper(schemaName), strings.ToUpper(tableName), strings.ToUpper(column))
 	case strings.Contains(uri, "mssql") || strings.Contains(uri, "sqlserver"):
 		if schemaName == "" {
 			schemaName = "dbo"
@@ -2641,7 +2772,7 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 		if tc.sqlBackend == nil {
 			continue
 		}
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "hana" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}

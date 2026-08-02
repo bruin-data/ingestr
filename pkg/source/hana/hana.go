@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/hanautil"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -35,7 +35,7 @@ func (s *HanaSource) Schemes() []string {
 const defaultFetchSize = 100000
 
 func (s *HanaSource) Connect(ctx context.Context, uri string) error {
-	dsn, dbName, err := uriToDSN(uri)
+	dsn, dbName, err := hanautil.ParseURI(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse HANA URI: %w", err)
 	}
@@ -58,70 +58,10 @@ func (s *HanaSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping HANA: %w", err)
 	}
 
-	if dbName != "" {
-		safeName := strings.ReplaceAll(dbName, "\"", "\"\"")
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET SCHEMA \"%s\"", safeName)); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("failed to set schema %s: %w", dbName, err)
-		}
-	}
-
 	s.db = db
 	s.uri = uri
 	s.defaultSchema = dbName
 	return nil
-}
-
-func uriToDSN(uri string) (string, string, error) {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return "", "", err
-	}
-
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "hana" && scheme != "saphana" {
-		return "", "", fmt.Errorf("unsupported scheme: %s", scheme)
-	}
-
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		port = "30015"
-	}
-
-	var user, password string
-	if u.User != nil {
-		user = u.User.Username()
-		password, _ = u.User.Password()
-	}
-
-	// go-hdb driver DSN format: hdb://user:password@host:port
-	dsn := &url.URL{
-		Scheme: "hdb",
-		Host:   fmt.Sprintf("%s:%s", host, port),
-	}
-
-	if user != "" {
-		if password != "" {
-			dsn.User = url.UserPassword(user, password)
-		} else {
-			dsn.User = url.User(user)
-		}
-	}
-
-	query := u.Query()
-
-	// HANA Cloud uses port 443 with TLS
-	if port == "443" && query.Get("TLSInsecureSkipVerify") == "" && query.Get("TLSServerName") == "" {
-		query.Set("TLSServerName", host)
-	}
-
-	if len(query) > 0 {
-		dsn.RawQuery = query.Encode()
-	}
-
-	database := strings.TrimPrefix(u.Path, "/")
-	return dsn.String(), database, nil
 }
 
 func (s *HanaSource) Close(ctx context.Context) error {

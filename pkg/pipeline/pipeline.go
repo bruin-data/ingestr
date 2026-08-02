@@ -36,8 +36,23 @@ import (
 
 const (
 	oracleComparableStringLen = 4000
+	hanaComparableStringLen   = 5000
 	resourceCloseTimeout      = 30 * time.Second
 )
+
+type comparableColumnLimits struct {
+	stringLength int
+	binaryLength int
+}
+
+// Destinations that store unbounded values as LOB types, which cannot be used in range
+// comparisons or ORDER BY. Their incremental key is pinned to the widest comparable type.
+var comparableColumnLimitsByScheme = map[string]comparableColumnLimits{
+	"oracle":           {stringLength: oracleComparableStringLen},
+	"oracle+cx_oracle": {stringLength: oracleComparableStringLen},
+	"hana":             {stringLength: hanaComparableStringLen, binaryLength: hanaComparableStringLen},
+	"saphana":          {stringLength: hanaComparableStringLen, binaryLength: hanaComparableStringLen},
+}
 
 type Pipeline struct {
 	config                   *config.IngestConfig
@@ -647,6 +662,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if evolutionPlan != nil && evolutionPlan.FinalSchema != nil {
 			destSchema = evolutionPlan.FinalSchema
 		}
+	}
+	// Evolution plans retain an existing unbounded destination type because narrowing is
+	// intentionally forbidden. Reapply the physical staging constraint to the final schema.
+	p.applyDestinationSchemaConstraints(destSchema)
+	if err := p.validateExistingDestinationSchemaConstraints(p.destinationSchema, destSchema.IncrementalKey, resolvedStrategy); err != nil {
+		return err
 	}
 	if p.config.NoLoadTimestamp {
 		destSchema = removeLoadTimestampColumn(destSchema)
@@ -1739,7 +1760,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		config.Debug("[SCHEMA EVOLUTION] No schema changes detected")
 		return &schemaevolution.EvolutionPlan{
 			Table:       destTable,
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
+			FinalSchema: buildFinalSchema(comparisonDestSchema, sourceSchema, nil),
 		}, nil
 	}
 
@@ -1768,7 +1789,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		p.filteredSchemaComparison = comparison
 		return &schemaevolution.EvolutionPlan{
 			Table:       destTable,
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
+			FinalSchema: buildFinalSchema(comparisonDestSchema, sourceSchema, p.filteredSchemaComparison),
 		}, nil
 
 	case schemaevolution.ContractDiscardRow:
@@ -1813,7 +1834,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 			}
 			return &schemaevolution.EvolutionPlan{
 				Table:       destTable,
-				FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, p.filteredSchemaComparison),
+				FinalSchema: buildFinalSchema(comparisonDestSchema, sourceSchema, p.filteredSchemaComparison),
 			}, nil
 		}
 		// For migration, only apply allowed changes (new columns) for discard_value mode
@@ -1836,7 +1857,7 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 		config.Debug("[SCHEMA EVOLUTION] Destination %s does not support schema evolution, skipping", p.dest.GetScheme())
 		return &schemaevolution.EvolutionPlan{
 			Table:       destTable,
-			FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, nil),
+			FinalSchema: buildFinalSchema(comparisonDestSchema, sourceSchema, nil),
 		}, nil
 	}
 
@@ -1848,10 +1869,18 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	plan := &schemaevolution.EvolutionPlan{
 		Table:       destTable,
 		Comparison:  p.filteredSchemaComparison,
-		FinalSchema: schemaevolution.BuildFinalSchema(comparisonDestSchema, applicable),
+		FinalSchema: buildFinalSchema(comparisonDestSchema, sourceSchema, applicable),
 	}
 	config.Debug("[SCHEMA EVOLUTION] Built plan with %d changes (deferred apply)", len(p.filteredSchemaComparison.Changes))
 	return plan, nil
+}
+
+func buildFinalSchema(destinationSchema, sourceSchema *schema.TableSchema, comparison *schemaevolution.SchemaComparison) *schema.TableSchema {
+	finalSchema := schemaevolution.BuildFinalSchema(destinationSchema, comparison)
+	if finalSchema != nil && sourceSchema != nil {
+		finalSchema.IncrementalKey = sourceSchema.IncrementalKey
+	}
+	return finalSchema
 }
 
 func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema.TableSchema) (*schema.TableSchema, error) {
@@ -1983,19 +2012,58 @@ func (p *Pipeline) applyDestinationSchemaConstraints(tableSchema *schema.TableSc
 	if tableSchema == nil || tableSchema.IncrementalKey == "" || p.dest == nil {
 		return
 	}
-	if p.dest.GetScheme() != "oracle" && p.dest.GetScheme() != "oracle+cx_oracle" {
+	limits, ok := comparableColumnLimitsByScheme[p.dest.GetScheme()]
+	if !ok {
 		return
 	}
 
 	for i := range tableSchema.Columns {
 		col := &tableSchema.Columns[i]
-		if col.DataType != schema.TypeString || !strings.EqualFold(col.Name, tableSchema.IncrementalKey) {
+		if !strings.EqualFold(col.Name, tableSchema.IncrementalKey) {
 			continue
 		}
-		if col.MaxLength <= 0 || col.MaxLength > oracleComparableStringLen {
-			col.MaxLength = oracleComparableStringLen
+		var comparableLength int
+		switch col.DataType {
+		case schema.TypeString:
+			comparableLength = limits.stringLength
+		case schema.TypeBinary:
+			comparableLength = limits.binaryLength
+		}
+		if comparableLength > 0 && (col.MaxLength <= 0 || col.MaxLength > comparableLength) {
+			col.MaxLength = comparableLength
 		}
 	}
+}
+
+func (p *Pipeline) validateExistingDestinationSchemaConstraints(tableSchema *schema.TableSchema, incrementalKey string, strategy config.IncrementalStrategy) error {
+	if tableSchema == nil || incrementalKey == "" || p.dest == nil || strategy != config.StrategyDeleteInsert {
+		return nil
+	}
+	limits, ok := comparableColumnLimitsByScheme[p.dest.GetScheme()]
+	if !ok || limits.binaryLength == 0 {
+		return nil
+	}
+
+	for _, col := range tableSchema.Columns {
+		if !strings.EqualFold(col.Name, incrementalKey) {
+			continue
+		}
+		limit := 0
+		typeName := ""
+		switch col.DataType {
+		case schema.TypeString:
+			limit = limits.stringLength
+			typeName = fmt.Sprintf("NVARCHAR(%d)", limit)
+		case schema.TypeBinary:
+			limit = limits.binaryLength
+			typeName = fmt.Sprintf("VARBINARY(%d)", limit)
+		}
+		if limit > 0 && (col.MaxLength <= 0 || col.MaxLength > limit) {
+			return fmt.Errorf("existing HANA incremental key %q is stored as a LOB and cannot be used by delete+insert; convert it to %s or recreate the destination table", col.Name, typeName)
+		}
+		return nil
+	}
+	return nil
 }
 
 func strategyUsesLogicalPrimaryKeys(strategy config.IncrementalStrategy) bool {
