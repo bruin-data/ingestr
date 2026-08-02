@@ -211,10 +211,29 @@ func (c *DataLakeClient) DeleteDir(ctx context.Context, fileSystem, dirPath stri
 	return nil
 }
 
+// DeltaLogEntry identifies a Delta JSON commit and its storage version.
+type DeltaLogEntry struct {
+	Version int64
+	ETag    string
+}
+
 // ListLogVersions returns the Delta commit versions found under logDir (the
 // numeric prefixes of the "<version>.json" files), sorted ascending. Returns an
 // empty slice if the directory does not exist.
 func (c *DataLakeClient) ListLogVersions(ctx context.Context, fileSystem, logDir string) ([]int64, error) {
+	entries, err := c.ListLogEntries(ctx, fileSystem, logDir)
+	if err != nil {
+		return nil, err
+	}
+	versions := make([]int64, len(entries))
+	for i, entry := range entries {
+		versions[i] = entry.Version
+	}
+	return versions, nil
+}
+
+// ListLogEntries returns each Delta JSON commit's version and storage ETag.
+func (c *DataLakeClient) ListLogEntries(ctx context.Context, fileSystem, logDir string) ([]DeltaLogEntry, error) {
 	fsURL := FilesystemURLWithSuffix(c.accountName, c.dnsSuffix, fileSystem)
 	fsClient, err := c.newFilesystemClient(fsURL)
 	if err != nil {
@@ -226,7 +245,7 @@ func (c *DataLakeClient) ListLogVersions(ctx context.Context, fileSystem, logDir
 		Prefix: &prefix,
 	})
 
-	var versions []int64
+	var entries []DeltaLogEntry
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -250,12 +269,25 @@ func (c *DataLakeClient) ListLogVersions(ctx context.Context, fileSystem, logDir
 			if err != nil {
 				continue
 			}
-			versions = append(versions, v)
+			entry := DeltaLogEntry{Version: v}
+			if p.ETag != nil {
+				entry.ETag = *p.ETag
+			}
+			entries = append(entries, entry)
 		}
 	}
 
-	slices.Sort(versions)
-	return versions, nil
+	slices.SortFunc(entries, func(a, b DeltaLogEntry) int {
+		switch {
+		case a.Version < b.Version:
+			return -1
+		case a.Version > b.Version:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return entries, nil
 }
 
 func recreateFile(ctx context.Context, fileClient *datalakefile.Client, path string) error {

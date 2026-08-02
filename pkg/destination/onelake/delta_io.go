@@ -29,6 +29,7 @@ type deltaSnapshot struct {
 	metadataVersion     int64 // version of the commit metadata was read from
 	protocol            *deltaProtocol
 	protocolVersion     int64 // version of the commit protocol was read from
+	logETags            map[int64]string
 }
 
 // readDeltaSnapshot replays the Delta transaction log under tableDir and returns
@@ -81,6 +82,7 @@ type deltaMetadataCache struct {
 	metadataVersion int64
 	protocolVersion int64
 	metadata        deltaMetadata
+	logETags        map[int64]string
 }
 
 // readDeltaMetadata returns the table's latest version plus its metaData and
@@ -92,24 +94,30 @@ type deltaMetadataCache struct {
 // repeated schema lookups off the whole log.
 //
 // Skipping commits is only sound while the log is the same one the cache was
-// taken from, so the commits the cached actions came from are always re-read: a
-// table another writer dropped and recreated restarts its log, and its commit
-// at the cached metaData version carries different metadata, or none at all.
+// taken from. The listing ETags verify every previously-scanned commit, and the
+// commits carrying the cached actions are also re-read before their values are
+// used.
 func readDeltaMetadata(ctx context.Context, client dataLakeClient, fileSystem, tableDir string, cached *deltaMetadataCache) (*deltaSnapshot, error) {
 	logDir := tableDir + "/_delta_log"
-	versions, err := client.ListLogVersions(ctx, fileSystem, logDir)
+	entries, err := client.ListLogEntries(ctx, fileSystem, logDir)
 	if err != nil {
 		return nil, err
+	}
+	versions := make([]int64, len(entries))
+	logETags := make(map[int64]string, len(entries))
+	for i, entry := range entries {
+		versions[i] = entry.Version
+		logETags[entry.Version] = entry.ETag
 	}
 	if len(versions) == 0 {
 		return &deltaSnapshot{exists: false}, nil
 	}
 	latest := versions[len(versions)-1]
-	if cached != nil && (len(cached.metadata) == 0 || cached.version > latest) {
+	if cached != nil && (len(cached.metadata) == 0 || cached.version > latest || !sameCachedDeltaLog(cached, logETags)) {
 		cached = nil
 	}
 
-	snapshot := &deltaSnapshot{exists: true, version: latest, firstVersion: versions[0]}
+	snapshot := &deltaSnapshot{exists: true, version: latest, firstVersion: versions[0], logETags: logETags}
 	for i := len(versions) - 1; i >= 0; i-- {
 		version := versions[i]
 		if cached != nil && version <= cached.version && version != cached.metadataVersion && version != cached.protocolVersion {
@@ -144,6 +152,29 @@ func readDeltaMetadata(ctx context.Context, client dataLakeClient, fileSystem, t
 		}
 	}
 	return snapshot, nil
+}
+
+func sameCachedDeltaLog(cached *deltaMetadataCache, current map[int64]string) bool {
+	if len(cached.logETags) == 0 {
+		return false
+	}
+	for version, etag := range cached.logETags {
+		if version > cached.version {
+			continue
+		}
+		if etag == "" || current[version] != etag {
+			return false
+		}
+	}
+	for version, etag := range current {
+		if version > cached.version {
+			continue
+		}
+		if etag == "" || cached.logETags[version] != etag {
+			return false
+		}
+	}
+	return true
 }
 
 func sameDeltaMetadata(left, right deltaMetadata) bool {

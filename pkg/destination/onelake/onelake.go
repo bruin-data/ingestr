@@ -46,6 +46,7 @@ type dataLakeClient interface {
 	EnsureDirectoriesSkippingPrefix(context.Context, string, string, int) error
 	DeleteDir(context.Context, string, string) error
 	ListLogVersions(context.Context, string, string) ([]int64, error)
+	ListLogEntries(context.Context, string, string) ([]adlsutil.DeltaLogEntry, error)
 	Download(context.Context, string, string) ([]byte, error)
 }
 
@@ -553,6 +554,7 @@ func (d *OneLakeDestination) readTableMetadata(ctx context.Context, tableDir str
 		metadataVersion: snapshot.metadataVersion,
 		protocolVersion: snapshot.protocolVersion,
 		metadata:        snapshot.metadata,
+		logETags:        snapshot.logETags,
 	}
 	if snapshot.protocol == nil {
 		// A log with no protocol action stays that way — commits are immutable —

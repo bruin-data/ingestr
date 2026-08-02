@@ -2,6 +2,7 @@ package onelake
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -64,6 +66,18 @@ func (c *localDataLakeClient) DeleteDir(ctx context.Context, _ string, path stri
 }
 
 func (c *localDataLakeClient) ListLogVersions(ctx context.Context, _ string, path string) ([]int64, error) {
+	entries, err := c.ListLogEntries(ctx, "", path)
+	if err != nil {
+		return nil, err
+	}
+	versions := make([]int64, len(entries))
+	for i, entry := range entries {
+		versions[i] = entry.Version
+	}
+	return versions, nil
+}
+
+func (c *localDataLakeClient) ListLogEntries(ctx context.Context, _ string, path string) ([]adlsutil.DeltaLogEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -78,19 +92,27 @@ func (c *localDataLakeClient) ListLogVersions(ctx context.Context, _ string, pat
 	if err != nil {
 		return nil, err
 	}
-	versions := make([]int64, 0, len(entries))
+	logEntries := make([]adlsutil.DeltaLogEntry, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || len(name) != 25 || !strings.HasSuffix(name, ".json") {
 			continue
 		}
 		version, err := strconv.ParseInt(strings.TrimSuffix(name, ".json"), 10, 64)
-		if err == nil {
-			versions = append(versions, version)
+		if err != nil {
+			continue
 		}
+		data, err := os.ReadFile(filepath.Join(fullPath, name))
+		if err != nil {
+			return nil, err
+		}
+		logEntries = append(logEntries, adlsutil.DeltaLogEntry{
+			Version: version,
+			ETag:    fmt.Sprintf("%x", sha256.Sum256(data)),
+		})
 	}
-	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
-	return versions, nil
+	sort.Slice(logEntries, func(i, j int) bool { return logEntries[i].Version < logEntries[j].Version })
+	return logEntries, nil
 }
 
 func (c *localDataLakeClient) Download(ctx context.Context, _ string, path string) ([]byte, error) {
@@ -719,6 +741,56 @@ func TestLocalStoreGetTableSchemaDetectsRecreatedTable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"ID", "BRAND_NEW"}, got.ColumnNames(),
 		"a recreated table must not be reported with the previous table's schema")
+}
+
+func TestLocalStoreSchemaEvolutionDetectsRecreatedTableWithChangedProtocol(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dest, client := newLocalOneLakeDestination(root)
+	table := "analytics.protocol_recreated"
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "ID", DataType: schema.TypeInt64}}}
+
+	for i := range 2 {
+		require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+			Table: table, Schema: tableSchema, DropFirst: i == 0,
+		}))
+		writeOneLakeTestBatch(t, dest, table, tableSchema, makeBatch(t, []arrow.Field{
+			{Name: "ID", Type: arrow.PrimitiveTypes.Int64},
+		}, [][]any{{int64(i)}}))
+	}
+
+	current, err := dest.GetTableSchema(t.Context(), table)
+	require.NoError(t, err)
+	tableDir, err := dest.tableDirForTables(table, "test")
+	require.NoError(t, err)
+	logDir := tableDir + "/_delta_log"
+	versionZero, err := client.Download(t.Context(), dest.workspace, logDir+"/"+commitFileName(0))
+	require.NoError(t, err)
+	fullLogDir, err := client.path(logDir)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(fullLogDir))
+	require.NoError(t, client.UploadBufferSkippingPrefix(
+		t.Context(), dest.workspace, logDir+"/"+commitFileName(0), versionZero, 0,
+	))
+	unsupportedProtocol := []byte(`{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors","rowTracking"]}}` + "\n")
+	require.NoError(t, client.UploadBufferSkippingPrefix(
+		t.Context(), dest.workspace, logDir+"/"+commitFileName(1), unsupportedProtocol, 0,
+	))
+
+	desired := &schema.TableSchema{Columns: append(
+		append([]schema.Column(nil), current.Columns...),
+		schema.Column{Name: "EXTERNAL_REF_ID", DataType: schema.TypeString},
+	)}
+	comparison, err := schemaevolution.Compare(desired, current, &schemaevolution.CompareOptions{
+		NormalizeColumn: dest.NormalizeSchemaEvolutionColumn,
+	})
+	require.NoError(t, err)
+	_, err = dest.ApplySchemaEvolution(t.Context(), table, comparison)
+	require.ErrorContains(t, err, `writer feature "rowTracking"`)
+
+	versions, err := client.ListLogVersions(t.Context(), dest.workspace, logDir)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{0, 1}, versions, "schema evolution must not commit against the recreated table")
 }
 
 // TestLocalStoreGetTableSchemaDetectsRecreatedTableAfterAlter covers the same
