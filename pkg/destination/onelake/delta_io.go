@@ -314,10 +314,10 @@ func alignDeltaBatches(batches []arrow.RecordBatch, tableSchema *deltaStruct) ([
 // evolution: on the target side an evolved column is a NULL fill typed from the
 // lossy Delta metadata and forced nullable, while on the staging side it still
 // carries the source's own Arrow type and nullability. declared is the target
-// table's Delta column list, or nil when the table does not exist yet. The
+// table's Delta schema, or nil when the table does not exist yet. The
 // returned release function frees whatever this call allocated; the inputs stay
 // owned by the caller.
-func unifyRewriteBatches(target, staging []arrow.RecordBatch, declared []string) ([]arrow.RecordBatch, []arrow.RecordBatch, func(), error) {
+func unifyRewriteBatches(target, staging []arrow.RecordBatch, declared *deltaStruct) ([]arrow.RecordBatch, []arrow.RecordBatch, func(), error) {
 	noop := func() {}
 	if len(staging) == 0 {
 		return target, staging, noop, nil
@@ -327,15 +327,26 @@ func unifyRewriteBatches(target, staging []arrow.RecordBatch, declared []string)
 	// every Delta reader. Fail instead of losing it silently — this is what a
 	// schema change that evolution could not apply looks like here.
 	if declared != nil {
-		if missing, ok := columnsNotIn(staging[0].Schema(), declared); !ok {
+		if missing, ok := columnsNotIn(staging[0].Schema(), deltaFieldNames(declared)); !ok {
 			return nil, nil, noop, fmt.Errorf(
-				"cannot rewrite the table: column %q is not declared in its Delta schema (declared columns are %v)", missing, declared)
+				"cannot rewrite the table: column %q is not declared in its Delta schema (declared columns are %v)", missing, deltaFieldNames(declared))
 		}
 	}
 	if len(target) == 0 {
-		return target, staging, noop, nil
+		unified, err := rewriteSchemaFromDelta(declared, staging[0].Schema())
+		if err != nil {
+			return nil, nil, noop, err
+		}
+		if unified == nil {
+			return target, staging, noop, nil
+		}
+		castStaging, err := castBatchesToSchema(staging, unified)
+		if err != nil {
+			return nil, nil, noop, err
+		}
+		return target, castStaging, func() { releaseBatches(castStaging) }, nil
 	}
-	unified, err := unifiedRewriteSchema(target, staging)
+	unified, err := unifiedRewriteSchema(target, staging, declared)
 	if err != nil {
 		return nil, nil, noop, err
 	}
@@ -364,7 +375,7 @@ func unifyRewriteBatches(target, staging []arrow.RecordBatch, declared []string)
 // name, not position: schema evolution appends a new column to the end of the
 // Delta schema while the ingest schema keeps its own ordering (SCD2, for
 // instance, always keeps the _scd_* columns last).
-func unifiedRewriteSchema(target, staging []arrow.RecordBatch) (*arrow.Schema, error) {
+func unifiedRewriteSchema(target, staging []arrow.RecordBatch, declared *deltaStruct) (*arrow.Schema, error) {
 	targetSchema := target[0].Schema()
 	stagingSchema := staging[0].Schema()
 	if missing, ok := columnsNotIn(stagingSchema, arrowFieldNames(targetSchema)); !ok {
@@ -390,8 +401,19 @@ func unifiedRewriteSchema(target, staging []arrow.RecordBatch) (*arrow.Schema, e
 		}
 		other := stagingSchema.Field(index)
 		if !arrow.TypeEqual(field.Type, other.Type) {
-			return nil, fmt.Errorf("cannot rewrite the table: column %q is %s in the table and %s in the incoming rows",
-				field.Name, field.Type, other.Type)
+			deltaIndex := -1
+			if declared != nil {
+				deltaIndex = deltaFieldIndex(declared.Fields, field.Name)
+			}
+			if deltaIndex < 0 || !sameDeltaEncoding(field, declared.Fields[deltaIndex].Type) || !sameDeltaEncoding(other, declared.Fields[deltaIndex].Type) {
+				return nil, fmt.Errorf("cannot rewrite the table: column %q is %s in the table and %s in the incoming rows",
+					field.Name, field.Type, other.Type)
+			}
+			column, err := columnFromDeltaField(declared.Fields[deltaIndex])
+			if err != nil {
+				return nil, fmt.Errorf("cannot reconcile column %q with its Delta type: %w", field.Name, err)
+			}
+			field.Type = schema.DataTypeToArrowType(column)
 		}
 		if other.Nullable {
 			field.Nullable = true
@@ -404,6 +426,56 @@ func unifiedRewriteSchema(target, staging []arrow.RecordBatch) (*arrow.Schema, e
 		return nil, nil
 	}
 	return unified, nil
+}
+
+func rewriteSchemaFromDelta(declared *deltaStruct, staging *arrow.Schema) (*arrow.Schema, error) {
+	if declared == nil {
+		return nil, nil
+	}
+	fields := make([]arrow.Field, 0, len(declared.Fields))
+	for _, deltaField := range declared.Fields {
+		index, found := fieldIndex(staging, deltaField.Name)
+		column, err := columnFromDeltaField(deltaField)
+		if err != nil {
+			if found {
+				return nil, fmt.Errorf("cannot rewrite the table: column %q has an unsupported declared Delta type: %w", deltaField.Name, err)
+			}
+			if !deltaField.Nullable {
+				return nil, fmt.Errorf("cannot rewrite the table: column %q is required but the incoming rows do not have it", deltaField.Name)
+			}
+			continue
+		}
+		field := arrow.Field{Name: deltaField.Name, Type: schema.DataTypeToArrowType(column), Nullable: deltaField.Nullable}
+		if !found {
+			if !deltaField.Nullable {
+				return nil, fmt.Errorf("cannot rewrite the table: column %q is required but the incoming rows do not have it", deltaField.Name)
+			}
+		} else {
+			incoming := staging.Field(index)
+			if !sameDeltaEncoding(incoming, deltaField.Type) {
+				return nil, fmt.Errorf("cannot rewrite the table: column %q is Delta %s in the table and %s in the incoming rows",
+					deltaField.Name, describeDeltaType(deltaField.Type), incoming.Type)
+			}
+			field.Nullable = field.Nullable || incoming.Nullable
+		}
+		fields = append(fields, field)
+	}
+	unified := arrow.NewSchema(fields, nil)
+	if schemaEqualIgnoringMetadata(unified, staging) {
+		return nil, nil
+	}
+	return unified, nil
+}
+
+func deltaFieldNames(deltaSchema *deltaStruct) []string {
+	if deltaSchema == nil {
+		return nil
+	}
+	names := make([]string, len(deltaSchema.Fields))
+	for i, field := range deltaSchema.Fields {
+		names[i] = field.Name
+	}
+	return names
 }
 
 // columnsNotIn returns the first column of s that names is missing, if any.

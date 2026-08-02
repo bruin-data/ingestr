@@ -666,22 +666,14 @@ func (d *OneLakeDestination) readTable(ctx context.Context, table, op string) (s
 	return dir, snap, batches, nil
 }
 
-// declaredDeltaColumns returns the column names the table's metaData action
-// declares, or nil when the table does not exist yet — in which case the
-// rewrite writes the first commit and declares whatever it produces.
-func declaredDeltaColumns(snap *deltaSnapshot) ([]string, error) {
+// declaredDeltaSchema returns the schema from the table's metaData action, or
+// nil when the table does not exist yet — in which case the rewrite writes the
+// first commit and declares whatever it produces.
+func declaredDeltaSchema(snap *deltaSnapshot) (*deltaStruct, error) {
 	if snap == nil || !snap.exists || len(snap.metadata) == 0 {
 		return nil, nil
 	}
-	deltaSchema, err := deltaSchemaFromMetadata(snap.metadata)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(deltaSchema.Fields))
-	for _, field := range deltaSchema.Fields {
-		names = append(names, field.Name)
-	}
-	return names, nil
+	return deltaSchemaFromMetadata(snap.metadata)
 }
 
 func (d *OneLakeDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -716,7 +708,7 @@ func (d *OneLakeDestination) rewriteTableWithRetry(ctx context.Context, targetTa
 			return err
 		}
 
-		declared, err := declaredDeltaColumns(tSnap)
+		declared, err := declaredDeltaSchema(tSnap)
 		if err != nil {
 			releaseBatches(tBatches)
 			return err

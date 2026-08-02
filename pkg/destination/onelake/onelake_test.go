@@ -682,6 +682,34 @@ func TestEvolveDeltaMetadataKeepsFieldMetadataObject(t *testing.T) {
 		`{"name":"email","type":"string","nullable":true,"metadata":{}}]}`, encoded)
 }
 
+func TestEvolveDeltaMetadataPreservesIdentityLongs(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := newDeltaMetadata(nil, "table-id", 1)
+	require.NoError(t, err)
+	metadata["schemaString"], err = json.Marshal(`{"type":"struct","fields":[{` +
+		`"name":"id","type":"long","nullable":false,"metadata":{` +
+		`"delta.identity.start":9007199254740993,` +
+		`"delta.identity.step":1,` +
+		`"delta.identity.highWaterMark":9007199254740995,` +
+		`"delta.identity.allowExplicitInsert":false}}]}`)
+	require.NoError(t, err)
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeAddColumn,
+		ColumnName: "email",
+		NewColumn:  schema.Column{Name: "email", DataType: schema.TypeString},
+	}}}
+
+	updated, changed, err := evolveDeltaMetadata(metadata, comparison)
+	require.NoError(t, err)
+	require.True(t, changed)
+	evolved, err := deltaSchemaFromMetadata(updated)
+	require.NoError(t, err)
+	require.Len(t, evolved.Fields, 2)
+	assert.Equal(t, json.Number("9007199254740993"), evolved.Fields[0].Metadata["delta.identity.start"])
+	assert.Equal(t, json.Number("9007199254740995"), evolved.Fields[0].Metadata["delta.identity.highWaterMark"])
+}
+
 func TestNormalizeSchemaEvolutionColumn(t *testing.T) {
 	t.Parallel()
 

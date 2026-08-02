@@ -221,7 +221,7 @@ func TestUnifyRewriteBatchesReconcilesNullabilityAndOrder(t *testing.T) {
 	defer staging.Release()
 
 	unifiedTarget, unifiedStaging, release, err := unifyRewriteBatches(
-		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, []string{"id", "tail", "extra"},
+		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, deltaSchemaForArrow(target.Schema()),
 	)
 	require.NoError(t, err)
 	defer release()
@@ -253,7 +253,7 @@ func TestUnifyRewriteBatchesFillsSoftRemovedColumn(t *testing.T) {
 	defer staging.Release()
 
 	unifiedTarget, unifiedStaging, release, err := unifyRewriteBatches(
-		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, []string{"id", "gone"},
+		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, deltaSchemaForArrow(target.Schema()),
 	)
 	require.NoError(t, err)
 	defer release()
@@ -285,7 +285,7 @@ func TestUnifyRewriteBatchesKeepsRequiredColumnMissingFromStaging(t *testing.T) 
 	defer staging.Release()
 
 	_, _, release, err := unifyRewriteBatches(
-		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, []string{"id", "gone"},
+		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, deltaSchemaForArrow(target.Schema()),
 	)
 	defer release()
 	require.ErrorContains(t, err, `column "gone" is required but the incoming rows do not have it`)
@@ -309,7 +309,7 @@ func TestUnifyRewriteBatchesKeepsUndeclaredStagingColumn(t *testing.T) {
 	defer staging.Release()
 
 	_, _, release, err := unifyRewriteBatches(
-		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, []string{"id", "kept"},
+		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, deltaSchemaForArrow(target.Schema()),
 	)
 	defer release()
 	require.ErrorContains(t, err, `column "undeclared" is not declared in its Delta schema`)
@@ -330,10 +330,77 @@ func TestUnifyRewriteBatchesKeepsRealTypeConflicts(t *testing.T) {
 	defer staging.Release()
 
 	_, _, release, err := unifyRewriteBatches(
-		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, []string{"id", "note"},
+		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, deltaSchemaForArrow(target.Schema()),
 	)
 	defer release()
 	require.ErrorContains(t, err, `column "note" is utf8 in the table and int64 in the incoming rows`)
+}
+
+func TestUnifyRewriteBatchesValidatesEmptyTargetAgainstDeltaSchema(t *testing.T) {
+	t.Parallel()
+
+	staging := makeBatch(t, []arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, [][]any{{int64(1)}})
+	defer staging.Release()
+	declared := &deltaStruct{Type: "struct", Fields: []deltaField{
+		{Name: "id", Type: "long", Metadata: map[string]any{}},
+		{Name: "note", Type: "string", Nullable: true, Metadata: map[string]any{}},
+	}}
+
+	_, unifiedStaging, release, err := unifyRewriteBatches(nil, []arrow.RecordBatch{staging}, declared)
+	require.NoError(t, err)
+	defer release()
+	require.Len(t, unifiedStaging, 1)
+	assert.Equal(t, []string{"id", "note"}, arrowFieldNames(unifiedStaging[0].Schema()))
+	assert.True(t, unifiedStaging[0].Column(1).IsNull(0))
+
+	declared.Fields[1].Nullable = false
+	_, _, releaseRequired, err := unifyRewriteBatches(nil, []arrow.RecordBatch{staging}, declared)
+	defer releaseRequired()
+	require.ErrorContains(t, err, `column "note" is required but the incoming rows do not have it`)
+
+	wrongType := &deltaStruct{Type: "struct", Fields: []deltaField{{Name: "id", Type: "string", Metadata: map[string]any{}}}}
+	_, _, releaseType, err := unifyRewriteBatches(nil, []arrow.RecordBatch{staging}, wrongType)
+	defer releaseType()
+	require.ErrorContains(t, err, `column "id" is Delta string in the table and int64 in the incoming rows`)
+}
+
+func TestUnifyRewriteBatchesAcceptsEquivalentLossyDeltaTypes(t *testing.T) {
+	t.Parallel()
+
+	target := makeBatch(t, []arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "duration", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, [][]any{{int64(1), nil}})
+	defer target.Release()
+	staging := makeBatch(t, []arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "duration", Type: arrow.FixedWidthTypes.Time64us},
+	}, [][]any{{int64(2), int64(3_600_000_000)}})
+	defer staging.Release()
+	declared := &deltaStruct{Type: "struct", Fields: []deltaField{
+		{Name: "id", Type: "long", Metadata: map[string]any{}},
+		{Name: "duration", Type: "long", Nullable: true, Metadata: map[string]any{}},
+	}}
+
+	unifiedTarget, unifiedStaging, release, err := unifyRewriteBatches(
+		[]arrow.RecordBatch{target}, []arrow.RecordBatch{staging}, declared,
+	)
+	require.NoError(t, err)
+	defer release()
+	assert.True(t, unifiedTarget[0].Schema().Equal(unifiedStaging[0].Schema()))
+	assert.Equal(t, arrow.PrimitiveTypes.Int64, unifiedStaging[0].Schema().Field(1).Type)
+	assert.Equal(t, int64(3_600_000_000), unifiedStaging[0].Column(1).(*array.Int64).Value(0))
+}
+
+func deltaSchemaForArrow(arrowSchema *arrow.Schema) *deltaStruct {
+	fields := make([]deltaField, arrowSchema.NumFields())
+	for i := 0; i < arrowSchema.NumFields(); i++ {
+		field := arrowSchema.Field(i)
+		fields[i] = deltaField{
+			Name: field.Name, Type: deltaTypeFor(arrowFieldToColumn(field)), Nullable: field.Nullable, Metadata: map[string]any{},
+		}
+	}
+	return &deltaStruct{Type: "struct", Fields: fields}
 }
 
 func TestDeleteInsertBatches(t *testing.T) {

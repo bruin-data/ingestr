@@ -515,6 +515,59 @@ func TestLocalStoreSchemaEvolutionRetriesCommitConflict(t *testing.T) {
 	assert.Equal(t, []int64{0, 1, 2}, versions)
 }
 
+func TestLocalStoreSchemaEvolutionRejectsConcurrentMetadataChange(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dest, client := newLocalOneLakeDestination(root)
+	table := "analytics.schema_conflict"
+	initialSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "ID", DataType: schema.TypeInt64}}}
+	desiredSchema := &schema.TableSchema{Columns: append(
+		append([]schema.Column(nil), initialSchema.Columns...),
+		schema.Column{Name: "LABEL", DataType: schema.TypeString},
+	)}
+
+	require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table: table, Schema: initialSchema, DropFirst: true,
+	}))
+	writeOneLakeTestBatch(t, dest, table, initialSchema, makeBatch(t, []arrow.Field{
+		{Name: "ID", Type: arrow.PrimitiveTypes.Int64},
+	}, [][]any{{int64(1)}}))
+	current, err := dest.GetTableSchema(t.Context(), table)
+	require.NoError(t, err)
+	comparison, err := schemaevolution.Compare(desiredSchema, current, &schemaevolution.CompareOptions{
+		NormalizeColumn: dest.NormalizeSchemaEvolutionColumn,
+	})
+	require.NoError(t, err)
+
+	tableDir, err := dest.tableDirForTables(table, "test")
+	require.NoError(t, err)
+	snapshot, err := dest.readTableMetadata(t.Context(), tableDir)
+	require.NoError(t, err)
+	concurrentSchema, err := deltaSchemaFromMetadata(snapshot.metadata)
+	require.NoError(t, err)
+	concurrentSchema.Fields[0].Type = "string"
+	concurrentMetadata, err := deltaMetadataWithSchema(snapshot.metadata, concurrentSchema)
+	require.NoError(t, err)
+	concurrentCommit, err := buildSchemaEvolutionCommit(concurrentMetadata, 2)
+	require.NoError(t, err)
+
+	stolen := false
+	dest.publishCommit = func(ctx context.Context, logDir string, version int64, commit []byte) error {
+		if !stolen {
+			stolen = true
+			require.NoError(t, client.publishCommit(ctx, logDir, version, concurrentCommit))
+			return errDeltaCommitConflict
+		}
+		return client.publishCommit(ctx, logDir, version, commit)
+	}
+
+	_, err = dest.ApplySchemaEvolution(t.Context(), table, comparison)
+	require.ErrorContains(t, err, "metadata changed after its schema evolution plan was built")
+	versions, err := client.ListLogVersions(t.Context(), dest.workspace, tableDir+"/_delta_log")
+	require.NoError(t, err)
+	assert.Equal(t, []int64{0, 1}, versions, "stale evolution must not publish another metadata commit")
+}
+
 func appendOnlyCommit(t *testing.T) []byte {
 	t.Helper()
 	commit, err := buildAppendCommit([]deltaAddFile{{Path: "part-other.parquet", Size: 1}}, 1)

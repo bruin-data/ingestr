@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,7 +29,16 @@ func deltaSchemaFromMetadata(metadata deltaMetadata) (*deltaStruct, error) {
 	}
 
 	var result deltaStruct
-	if err := json.Unmarshal([]byte(schemaString), &result); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(schemaString))
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode delta table schema: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("failed to decode delta table schema: multiple JSON values")
+		}
 		return nil, fmt.Errorf("failed to decode delta table schema: %w", err)
 	}
 	if !strings.EqualFold(result.Type, "struct") {
@@ -504,6 +514,9 @@ func (d *OneLakeDestination) ApplySchemaEvolution(ctx context.Context, table str
 	if err != nil {
 		return nil, err
 	}
+	d.metaMu.Lock()
+	expectedMetadata := d.metaCache[tableDir].metadata
+	d.metaMu.Unlock()
 
 	var lastConflict error
 	for range maxDeltaCommitAttempts {
@@ -513,6 +526,11 @@ func (d *OneLakeDestination) ApplySchemaEvolution(ctx context.Context, table str
 		}
 		if !snapshot.exists || len(snapshot.metadata) == 0 {
 			return nil, nil
+		}
+		if len(expectedMetadata) == 0 {
+			expectedMetadata = snapshot.metadata
+		} else if !sameDeltaMetadata(snapshot.metadata, expectedMetadata) {
+			return nil, fmt.Errorf("OneLake table metadata changed after its schema evolution plan was built; retry the load against the current table schema")
 		}
 		if err := checkSupportedDeltaProtocol(snapshot.protocol, "schema evolution"); err != nil {
 			return nil, err
