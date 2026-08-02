@@ -19,6 +19,8 @@ var maxIdentifierLengths = map[string]int{
 	"mariadb":             64,
 	"oracle":              128,
 	"oracle+cx_oracle":    128,
+	"hana":                127,
+	"saphana":             127,
 	"mssql":               128,
 	"sqlserver":           128,
 	"mssql+pyodbc":        128,

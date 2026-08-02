@@ -17,7 +17,7 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.13.0
-	github.com/SAP/go-hdb v1.16.2
+	github.com/SAP/go-hdb v1.17.2
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/aliyun/aliyun-odps-go-sdk v0.4.22
 	github.com/apache/arrow-adbc/go/adbc v0.0.0-20260729182025-74d5395a880c

@@ -297,7 +297,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     <tr>
         <td>SAP Hana</td>
         <td>✅</td>
-        <td>-</td>
+        <td>✅</td>
         <td>-</td>
     </tr>
     <tr>

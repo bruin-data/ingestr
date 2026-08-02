@@ -326,7 +326,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/SAP/go-hdb
-      version: v1.16.2
+      version: v1.17.2
       licenses:
         - Apache-2.0
       status: allowed

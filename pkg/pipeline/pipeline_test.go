@@ -2026,6 +2026,55 @@ func TestApplyDestinationSchemaConstraints_OracleStringIncrementalKey(t *testing
 	}
 }
 
+func TestApplyDestinationSchemaConstraints_HanaStringIncrementalKey(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "cursor", DataType: schema.TypeString},
+			{Name: "payload", DataType: schema.TypeString},
+		},
+		IncrementalKey: "cursor",
+	}
+	p := &Pipeline{dest: &mockDestination{scheme: "hana"}}
+
+	p.applyDestinationSchemaConstraints(tableSchema)
+
+	if tableSchema.Columns[1].MaxLength != hanaComparableStringLen {
+		t.Fatalf("incremental key MaxLength = %d, want %d", tableSchema.Columns[1].MaxLength, hanaComparableStringLen)
+	}
+	if tableSchema.Columns[2].MaxLength != 0 {
+		t.Fatalf("non-incremental string MaxLength = %d, want 0", tableSchema.Columns[2].MaxLength)
+	}
+}
+
+func TestApplyDestinationSchemaConstraints_HanaBinaryIncrementalKey(t *testing.T) {
+	tableSchema := &schema.TableSchema{
+		Columns:        []schema.Column{{Name: "cursor", DataType: schema.TypeBinary}},
+		IncrementalKey: "cursor",
+	}
+	p := &Pipeline{dest: &mockDestination{scheme: "hana"}}
+
+	p.applyDestinationSchemaConstraints(tableSchema)
+
+	if tableSchema.Columns[0].MaxLength != hanaComparableStringLen {
+		t.Fatalf("incremental key MaxLength = %d, want %d", tableSchema.Columns[0].MaxLength, hanaComparableStringLen)
+	}
+}
+
+func TestValidateExistingDestinationSchemaConstraints_HanaDeleteInsertLOBKey(t *testing.T) {
+	p := &Pipeline{dest: &mockDestination{scheme: "hana"}}
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "cursor", DataType: schema.TypeString}}}
+
+	err := p.validateExistingDestinationSchemaConstraints(tableSchema, "cursor", config.StrategyDeleteInsert)
+
+	if err == nil || !strings.Contains(err.Error(), "stored as a LOB") {
+		t.Fatalf("expected incompatible LOB error, got %v", err)
+	}
+	if err := p.validateExistingDestinationSchemaConstraints(tableSchema, "cursor", config.StrategyMerge); err != nil {
+		t.Fatalf("merge should use the constrained staging schema: %v", err)
+	}
+}
+
 func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 	destSchema := tschema(
 		"events",
@@ -2036,6 +2085,7 @@ func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 		tcol("id", schema.TypeInt64),
 		tcol("age", schema.TypeInt64),
 	)
+	sourceSchema.IncrementalKey = "age"
 	p := &Pipeline{
 		config: &config.IngestConfig{
 			DestTable: "events",
@@ -2057,6 +2107,9 @@ func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 	}
 	if plan.Table != "events" {
 		t.Fatalf("plan table = %q, want events", plan.Table)
+	}
+	if plan.FinalSchema.IncrementalKey != "age" {
+		t.Fatalf("final schema incremental key = %q, want age", plan.FinalSchema.IncrementalKey)
 	}
 	if !plan.HasChanges() {
 		t.Fatal("expected abstract comparison changes")

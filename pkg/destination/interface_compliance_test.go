@@ -10,6 +10,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/databricks"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/destination/fabric"
+	"github.com/bruin-data/ingestr/pkg/destination/hana"
 	"github.com/bruin-data/ingestr/pkg/destination/iceberg"
 	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/destination/mysql"
@@ -176,6 +177,7 @@ var (
 	_ destination.Destination = (*databricks.DatabricksDestination)(nil)
 	_ destination.Destination = (*duckdb.DuckDBDestination)(nil)
 	_ destination.Destination = (*fabric.FabricDestination)(nil)
+	_ destination.Destination = (*hana.HanaDestination)(nil)
 	_ destination.Destination = (*iceberg.Destination)(nil)
 	_ destination.Destination = (*mssql.MSSQLDestination)(nil)
 	_ destination.Destination = (*mysql.MySQLDestination)(nil)
