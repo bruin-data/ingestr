@@ -44,6 +44,9 @@ func (s *HanaSource) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create HANA connector: %w", err)
 	}
+	if dbName != "" {
+		connector.SetDefaultSchema(dbName)
+	}
 	connector.SetFetchSize(defaultFetchSize)
 	connector.SetBufferSize(1 << 20) // 1MB network read buffer
 

@@ -22,6 +22,9 @@ import (
 const (
 	defaultHanaStagingSchema = "_bruin_staging"
 	hanaSCD2HashMaxLength    = 2000
+	hanaDDLAutocommitOff     = "SET TRANSACTION AUTOCOMMIT DDL OFF"
+	hanaDDLAutocommitOn      = "SET TRANSACTION AUTOCOMMIT DDL ON"
+	hanaRecoveryTimeout      = 30 * time.Second
 	// Matches go-hdb's default bulk package size, so each Exec maps to one wire package.
 	hanaInsertRowsPerStatement = 10000
 )
@@ -270,21 +273,20 @@ func (d *HanaDestination) SwapTable(ctx context.Context, opts destination.SwapOp
 	backupTable := ""
 	if targetExists {
 		backupTable = backupTableName(targetSchema, targetName)
-		if err := d.DropTable(ctx, backupTable); err != nil {
-			return err
-		}
-		if err := d.renameTable(ctx, opts.TargetTable, backupTable); err != nil {
-			return fmt.Errorf("failed to rename HANA target to backup: %w", err)
-		}
 	}
 
-	if err := d.renameTable(ctx, opts.StagingTable, opts.TargetTable); err != nil {
+	if err := d.withAtomicDDL(ctx, func(tx *sql.Tx) error {
 		if backupTable != "" {
-			if restoreErr := d.renameTable(ctx, backupTable, opts.TargetTable); restoreErr != nil {
-				return fmt.Errorf("failed to rename HANA staging table to target: %w; backup restore failed: %v", err, restoreErr)
+			if err := renameHanaTable(ctx, tx, opts.TargetTable, backupTable); err != nil {
+				return fmt.Errorf("failed to rename HANA target to backup: %w", err)
 			}
 		}
-		return fmt.Errorf("failed to rename HANA staging table to target: %w", err)
+		if err := renameHanaTable(ctx, tx, opts.StagingTable, opts.TargetTable); err != nil {
+			return fmt.Errorf("failed to rename HANA staging table to target: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if backupTable != "" {
@@ -308,12 +310,6 @@ func (d *HanaDestination) copySwapTable(ctx context.Context, opts destination.Sw
 	backupTable := ""
 	if targetExists {
 		backupTable = backupTableName(targetSchema, targetName)
-		if err := d.DropTable(ctx, backupTable); err != nil {
-			return err
-		}
-		if err := d.renameTable(ctx, opts.TargetTable, backupTable); err != nil {
-			return err
-		}
 	}
 
 	// The rename path carries the staging table's PRIMARY KEY over to the target, so the copy
@@ -322,27 +318,36 @@ func (d *HanaDestination) copySwapTable(ctx context.Context, opts destination.Sw
 	if len(primaryKeys) == 0 {
 		primaryKeys = opts.Schema.PrimaryKeys
 	}
-	if err := d.PrepareTable(ctx, destination.PrepareOptions{
-		Table: opts.TargetTable, Schema: opts.Schema, PrimaryKeys: primaryKeys,
-	}); err != nil {
-		if backupTable != "" {
-			_ = d.renameTable(ctx, backupTable, opts.TargetTable)
-		}
+	targetSchemaName, _ := d.effectiveSchemaTable(opts.TargetTable)
+	if err := d.ensureSchemaExists(ctx, targetSchemaName); err != nil {
 		return err
 	}
 
 	columns := strings.Join(quoteColumns(opts.Schema.ColumnNames()), ", ")
+	createSQL := buildCreateTableSQL(opts.TargetTable, destination.PrepareOptions{
+		Table: opts.TargetTable, Schema: opts.Schema, PrimaryKeys: primaryKeys,
+	})
 	copySQL := fmt.Sprintf(
 		"INSERT INTO %s (%s) SELECT %s FROM %s",
 		quoteTable(opts.TargetTable), columns, columns, quoteTable(opts.StagingTable),
 	)
-	if _, err := d.db.ExecContext(ctx, copySQL); err != nil {
-		config.LogFailedQuery(copySQL, err)
-		_ = d.DropTable(ctx, opts.TargetTable)
+	if err := d.withAtomicDDL(ctx, func(tx *sql.Tx) error {
 		if backupTable != "" {
-			_ = d.renameTable(ctx, backupTable, opts.TargetTable)
+			if err := renameHanaTable(ctx, tx, opts.TargetTable, backupTable); err != nil {
+				return fmt.Errorf("failed to rename HANA target to backup: %w", err)
+			}
 		}
-		return fmt.Errorf("failed to copy HANA staging table into target: %w", err)
+		if _, err := tx.ExecContext(ctx, createSQL); err != nil {
+			config.LogFailedQuery(createSQL, err)
+			return fmt.Errorf("failed to create HANA replacement table: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, copySQL); err != nil {
+			config.LogFailedQuery(copySQL, err)
+			return fmt.Errorf("failed to copy HANA staging table into target: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if err := d.DropTable(ctx, opts.StagingTable); err != nil {
@@ -356,11 +361,55 @@ func (d *HanaDestination) copySwapTable(ctx context.Context, opts destination.Sw
 	return nil
 }
 
-func (d *HanaDestination) renameTable(ctx context.Context, from, to string) error {
+type hanaExecer interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func renameHanaTable(ctx context.Context, execer hanaExecer, from, to string) error {
 	renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s", quoteTable(from), quoteTable(to))
-	if _, err := d.db.ExecContext(ctx, renameSQL); err != nil {
+	if _, err := execer.ExecContext(ctx, renameSQL); err != nil {
 		config.LogFailedQuery(renameSQL, err)
 		return err
+	}
+	return nil
+}
+
+func (d *HanaDestination) withAtomicDDL(ctx context.Context, fn func(*sql.Tx) error) (err error) {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire HANA swap connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin HANA atomic DDL transaction: %w", err)
+	}
+	ddlAutocommitDisabled := false
+	defer func() {
+		if err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				err = errors.Join(err, fmt.Errorf("failed to roll back HANA atomic DDL transaction: %w", rollbackErr))
+			}
+		}
+		if ddlAutocommitDisabled {
+			recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hanaRecoveryTimeout)
+			defer cancel()
+			if _, resetErr := conn.ExecContext(recoveryCtx, hanaDDLAutocommitOn); resetErr != nil {
+				err = errors.Join(err, fmt.Errorf("failed to restore HANA DDL autocommit: %w", resetErr))
+			}
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx, hanaDDLAutocommitOff); err != nil {
+		return fmt.Errorf("failed to disable HANA DDL autocommit: %w", err)
+	}
+	ddlAutocommitDisabled = true
+	if err = fn(tx); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit HANA atomic DDL transaction: %w", err)
 	}
 	return nil
 }
@@ -1026,7 +1075,10 @@ func resolvedIdentifierReference(name string) string {
 }
 
 func isOrdinaryIdentifier(name string) bool {
-	if name == "" || !((name[0] >= 'A' && name[0] <= 'Z') || name[0] == '_') {
+	if name == "" {
+		return false
+	}
+	if name[0] != '_' && (name[0] < 'A' || name[0] > 'Z') {
 		return false
 	}
 	for i := 1; i < len(name); i++ {

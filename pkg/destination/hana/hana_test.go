@@ -1,6 +1,7 @@
 package hana
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"testing"
@@ -24,6 +25,64 @@ func TestQuoteTableUsesHanaIdentifierSemantics(t *testing.T) {
 	assert.Equal(t, `"SALES"."ORDERS"`, quoteTable("sales.orders"))
 	assert.Equal(t, `"sales.schema"."Orders"`, quoteTable(`"sales.schema"."Orders"`))
 	assert.Equal(t, `"SALES"."USER""EVENTS"`, quoteTable(`sales.user"events`))
+}
+
+func TestSwapTableUsesAtomicDDL(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	dest := &HanaDestination{db: db, defaultSchema: "APP"}
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM SYS\.TABLES`).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(hanaDDLAutocommitOff)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`RENAME TABLE "APP"\."EVENTS" TO "APP"\."EVENTS_OLD_[0-9]+"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(`RENAME TABLE "APP"."STAGING" TO "APP"."EVENTS"`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+	mock.ExpectExec(regexp.QuoteMeta(hanaDDLAutocommitOn)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM SYS\.TABLES`).
+		WithArgs("APP", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`DROP TABLE "APP"\."EVENTS_OLD_[0-9]+"`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	require.NoError(t, dest.SwapTable(t.Context(), destination.SwapOptions{
+		StagingTable: "app.staging",
+		TargetTable:  "app.events",
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSwapTableRestoresDDLAutocommitAfterCancellation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	dest := &HanaDestination{db: db, defaultSchema: "APP"}
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM SYS\.TABLES`).
+		WithArgs("APP", "EVENTS").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(hanaDDLAutocommitOff)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`RENAME TABLE "APP"\."EVENTS" TO "APP"\."EVENTS_OLD_[0-9]+"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(`RENAME TABLE "APP"."STAGING" TO "APP"."EVENTS"`)).
+		WillDelayFor(50 * time.Millisecond).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+	mock.ExpectExec(regexp.QuoteMeta(hanaDDLAutocommitOn)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	err = dest.SwapTable(ctx, destination.SwapOptions{
+		StagingTable: "app.staging",
+		TargetTable:  "app.events",
+	})
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestMapDataTypeToHana(t *testing.T) {
