@@ -544,6 +544,13 @@ func (d *Destination) ensureNamespace(ctx context.Context, namespace icebergtabl
 			continue
 		}
 		if err := d.catalog.CreateNamespace(ctx, current, iceberggo.Properties{}); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceAlreadyExists) {
+			// Another writer may have created it since the check above. Only the
+			// catalogs that return ErrNamespaceAlreadyExists are covered by the
+			// guard -- the sql catalog surfaces its driver's duplicate-key error.
+			if exists, checkErr := d.catalog.CheckNamespaceExists(ctx, current); checkErr == nil && exists {
+				continue
+			}
+
 			return fmt.Errorf("iceberg: failed to create namespace %s: %w", strings.Join(current, "."), err)
 		}
 	}
