@@ -173,6 +173,49 @@ func TestParseIcebergConfigSQLCatalogRequiresDriverDialect(t *testing.T) {
 	require.Equal(t, "sqlite", cfg.Properties["sql.dialect"])
 }
 
+func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
+	// The SDK will not sign without a region, even where the store ignores it.
+	cfg, err := parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
+	require.NoError(t, err)
+	require.Equal(t, "auto", cfg.Properties["s3.region"])
+
+	// An explicit region is left alone.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=localhost:9000&region=us-east-1")
+	require.NoError(t, err)
+	require.Equal(t, "us-east-1", cfg.Properties["s3.region"])
+
+	// Real AWS routes by region, so a missing one must surface, not be guessed.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Properties["s3.region"])
+
+	// Glue is a real AWS service and keeps needing a real region.
+	cfg, err = parseIcebergConfig("iceberg+glue://?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Properties["glue.region"])
+
+	// An AWS endpoint still routes by region, which the SDK resolves from the
+	// environment when the property is absent.
+	for _, endpoint := range []string{
+		"https://s3.eu-north-1.amazonaws.com",
+		"bucket.vpce-123-abc.s3.eu-west-1.vpce.amazonaws.com",
+		"s3-fips.us-gov-west-1.amazonaws.com",
+		"s3.dualstack.us-east-1.amazonaws.com",
+	} {
+		cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=" + url.QueryEscape(endpoint))
+		require.NoError(t, err, endpoint)
+		require.Empty(t, cfg.Properties["s3.region"], endpoint)
+		// Nor compat-mode, which switches off upload checksums.
+		require.Empty(t, cfg.Properties["s3.compat-mode"], endpoint)
+	}
+
+	// Explicit values win everywhere.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=s3.eu-north-1.amazonaws.com&s3.compat-mode=true&region=eu-north-1")
+	require.NoError(t, err)
+	require.Equal(t, "true", cfg.Properties["s3.compat-mode"])
+	require.Equal(t, "eu-north-1", cfg.Properties["s3.region"])
+}
+
 func TestParseIcebergConfigPreservesPlusInCredentials(t *testing.T) {
 	// STS tokens/secrets commonly contain '+','/','='. Percent-encode them in the
 	// URI (a raw '+' would decode to a space); '%2B' decodes back to '+'.

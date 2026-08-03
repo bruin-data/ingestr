@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -80,14 +81,35 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 		return icebergConfig{}, fmt.Errorf("iceberg uri: sql catalog requires both sql.driver and sql.dialect (e.g. sql.driver=pgx&sql.dialect=postgres), or use the iceberg+postgres / iceberg+sqlite scheme which set them automatically")
 	}
 
-	// Non-AWS S3 endpoints (MinIO, GCS interop, R2) need iceberg-go's compat-mode;
-	// enable it by default unless set explicitly.
-	if cfg.Properties["s3.endpoint"] != "" {
+	// MinIO, GCS interop and R2 need compat-mode, and ignore the region the AWS SDK
+	// still refuses to sign without. An AWS endpoint needs neither.
+	if cfg.Properties["s3.endpoint"] != "" && !isAWSEndpoint(cfg.Properties["s3.endpoint"]) {
 		if _, ok := cfg.Properties["s3.compat-mode"]; !ok {
 			cfg.Properties["s3.compat-mode"] = "true"
 		}
+		if cfg.Properties["s3.region"] == "" {
+			cfg.Properties["s3.region"] = "auto"
+		}
 	}
 	return cfg, nil
+}
+
+// isAWSEndpoint reports whether an S3 endpoint is AWS itself rather than an
+// S3-compatible service; regional, VPC, FIPS and dualstack all count as AWS.
+func isAWSEndpoint(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+	host := endpoint
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
+		host = parsed.Host
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+
+	return host == "amazonaws.com" || strings.HasSuffix(host, ".amazonaws.com")
 }
 
 func catalogTypeFromScheme(scheme string) string {
