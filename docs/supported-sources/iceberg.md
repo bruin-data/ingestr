@@ -33,7 +33,8 @@ Common URI parameters:
 - `endpoint` (optional): S3-compatible endpoint such as `localhost:9000`.
 - `use_ssl=false` (optional): use plain HTTP for S3-compatible local storage.
 - `access_key_id`, `secret_access_key`, `session_token`, `region`: S3 or Glue credentials and region aliases. `region` is required for AWS S3, where it routes the request. With `endpoint` set (MinIO, GCS interop, R2) it is unused but still has to be present for the AWS SDK to sign, so it defaults to `auto`.
-- `gcs.keypath` (optional, GCS): path to a Google Cloud service-account JSON key for a `gs://` warehouse. Without it, GCS uses Application Default Credentials.
+- `gcs.jsonkey` (optional, GCS): a Google Cloud service-account key as inline JSON, for a `gs://` warehouse.
+- `gcs.keypath` (optional, GCS): path to a service-account key **file**. Only usable where the file exists on the machine running the ingestion, so prefer `gcs.jsonkey` for hosted runs. Set neither and GCS uses Application Default Credentials; `gcs.jsonkey` wins if both are set.
 - `warehouse`: advanced override for the Iceberg warehouse location, such as `s3://bucket/warehouse`.
 - `warehouse_path`: local warehouse path alias for non-S3 catalog setups.
 - `create_namespace` (optional): create the destination namespace automatically. Defaults to `true`.
@@ -126,6 +127,47 @@ ingestr ingest \
   --incremental-strategy replace \
   --primary-key id
 ```
+
+### Google Cloud Storage (native)
+
+A `gs://` warehouse with a service-account key. Any catalog works — Glue below, but the storage half is the same for postgres, rest or hadoop:
+
+```bash
+ingestr ingest \
+  --source-uri 'postgresql://user:pass@localhost:5432/app' \
+  --source-table public.orders \
+  --dest-uri "iceberg+glue://?region=us-east-1&storage=gcs&warehouse=gs://company-lake/warehouse&gcs.keypath=/path/to/sa.json" \
+  --dest-table analytics.orders \
+  --incremental-strategy replace \
+  --primary-key id
+```
+
+Use `gcs.jsonkey` instead to pass the key inline, which is what hosted runs need since the file would not be on the machine doing the ingestion. It goes in a query parameter, so URL-encode it:
+
+```bash
+KEY=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(open(sys.argv[1]).read()))' sa.json)
+# ...&storage=gcs&warehouse=gs://company-lake/warehouse&gcs.jsonkey=$KEY
+```
+
+Set neither and GCS falls back to Application Default Credentials.
+
+### Google Cloud Storage over the S3 interop API (HMAC keys)
+
+The other way to reach GCS: keep `storage=s3` and an `s3://` warehouse, and point `endpoint` at Google. The credentials are an HMAC key pair from Cloud Storage → Settings → Interoperability, not a service account:
+
+```bash
+ingestr ingest \
+  --source-uri 'postgresql://user:pass@localhost:5432/app' \
+  --source-table public.orders \
+  --dest-uri 'iceberg+glue://?region=us-east-1&storage=s3&warehouse=s3://company-lake/warehouse&endpoint=storage.googleapis.com&access_key_id=GOOG1E...&secret_access_key=...' \
+  --dest-table analytics.orders \
+  --incremental-strategy replace \
+  --primary-key id
+```
+
+::: info
+`region` here is a placeholder — Google ignores it, but the AWS SDK refuses to run without one, so pass `region=auto` when the catalog does not already need a real region. S3 compat-mode is enabled for you because `endpoint` is set; without it Google rejects the AWS SDK's signed headers with `SignatureDoesNotMatch`.
+:::
 
 ### Hive metastore with MinIO
 
