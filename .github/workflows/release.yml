@@ -22,7 +22,7 @@ jobs:
     strategy:
       matrix:
         platform:
-          - depot-ubuntu-latest
+          - depot-ubuntu-24.04-4
           - macos-15
         suite: ["test-full", "test-integration"]
     runs-on: ${{ matrix.platform }}
