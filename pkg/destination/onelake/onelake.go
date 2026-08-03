@@ -41,16 +41,30 @@ const (
 
 var errDeltaCommitConflict = errors.New("delta commit version already exists")
 
+type dataLakeClient interface {
+	UploadBufferSkippingPrefix(context.Context, string, string, []byte, int) error
+	EnsureDirectoriesSkippingPrefix(context.Context, string, string, int) error
+	DeleteDir(context.Context, string, string) error
+	ListLogVersions(context.Context, string, string) ([]int64, error)
+	ListLogEntries(context.Context, string, string) ([]adlsutil.DeltaLogEntry, error)
+	Download(context.Context, string, string) ([]byte, error)
+}
+
 // OneLakeDestination writes data to a Microsoft Fabric OneLake lakehouse. It can
 // target the lakehouse "Tables" area (written as a Delta table so it is queryable
 // in Fabric) or the "Files" area (raw Parquet files).
 type OneLakeDestination struct {
 	workspace string
 	lakehouse string
-	client    *adlsutil.DataLakeClient
+	client    dataLakeClient
 	cred      azcore.TokenCredential
 	sasToken  string
 	layout    string
+
+	publishCommit func(context.Context, string, int64, []byte) error
+
+	metaMu    sync.Mutex
+	metaCache map[string]deltaMetadataCache
 
 	mu          sync.Mutex
 	schema      *schema.TableSchema
@@ -122,6 +136,8 @@ func (d *OneLakeDestination) Connect(ctx context.Context, uri string) error {
 	d.cred = nil
 	d.sasToken = parsed.sasToken
 	d.layout = parsed.layout
+	d.publishCommit = nil
+	d.metaCache = nil
 	if d.layout == "" {
 		d.layout = defaultLayout
 	}
@@ -224,6 +240,7 @@ func (d *OneLakeDestination) PrepareTable(ctx context.Context, opts destination.
 		if err := d.client.DeleteDir(ctx, d.workspace, dir); err != nil {
 			return fmt.Errorf("failed to clear target %s: %w", dir, err)
 		}
+		d.forgetTableMetadata(dir)
 		config.Debug("[ONELAKE] Cleared target directory %s", dir)
 	}
 
@@ -383,6 +400,9 @@ func (d *OneLakeDestination) writeTablesMode(ctx context.Context, data []byte) e
 }
 
 func (d *OneLakeDestination) uploadDeltaCommit(ctx context.Context, logDir string, version int64, commit []byte) error {
+	if d.publishCommit != nil {
+		return d.publishCommit(ctx, logDir, version, commit)
+	}
 	commitPath := logDir + "/" + commitFileName(version)
 	if err := d.ensureDirectories(ctx, logDir); err != nil {
 		return fmt.Errorf("failed to prepare delta log directory: %w", err)
@@ -505,8 +525,88 @@ func (d *OneLakeDestination) renderLayout(loadID string, fileID int) string {
 	return result
 }
 
+// readTableMetadata reads a table's metaData action, reusing the result of the
+// previous read when the log has only been appended to since. The pipeline asks
+// for the schema several times per run and ingestr writes a metaData action
+// only in the version-0 commit, so an uncached lookup downloads the table's
+// entire commit history every time.
+func (d *OneLakeDestination) readTableMetadata(ctx context.Context, tableDir string) (*deltaSnapshot, error) {
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
+
+	var cached *deltaMetadataCache
+	if entry, ok := d.metaCache[tableDir]; ok {
+		cached = &entry
+	}
+	snapshot, err := readDeltaMetadata(ctx, d.client, d.workspace, tableDir, cached)
+	if err != nil {
+		return nil, err
+	}
+	if !snapshot.exists || len(snapshot.metadata) == 0 {
+		delete(d.metaCache, tableDir)
+		return snapshot, nil
+	}
+	if d.metaCache == nil {
+		d.metaCache = make(map[string]deltaMetadataCache, 1)
+	}
+	entry := deltaMetadataCache{
+		version:         snapshot.version,
+		metadataVersion: snapshot.metadataVersion,
+		protocolVersion: snapshot.protocolVersion,
+		metadata:        snapshot.metadata,
+		logETags:        snapshot.logETags,
+	}
+	if snapshot.protocol == nil {
+		// A log with no protocol action stays that way — commits are immutable —
+		// so no version needs re-reading for it, and 0 would wrongly pin the
+		// version-0 commit.
+		entry.protocolVersion = -1
+	}
+	d.metaCache[tableDir] = entry
+	return snapshot, nil
+}
+
+// forgetTableMetadata drops a cached metaData action. Delta versions are
+// immutable, so the cache is only ever stale when the table directory itself is
+// removed and a new table restarts the log at version 0.
+func (d *OneLakeDestination) forgetTableMetadata(tableDir string) {
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
+	delete(d.metaCache, tableDir)
+}
+
 func (d *OneLakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	return nil, nil
+	if d.client == nil {
+		return nil, fmt.Errorf("OneLake destination is not connected")
+	}
+	mode, relPath, err := parseTarget(table)
+	if err != nil {
+		return nil, err
+	}
+	if mode == modeFiles {
+		return nil, nil
+	}
+
+	tableDir := d.itemPath() + "/Tables/" + strings.Trim(relPath, "/")
+	snapshot, err := d.readTableMetadata(ctx, tableDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read OneLake table schema: %w", err)
+	}
+	if !snapshot.exists {
+		return nil, nil
+	}
+	if len(snapshot.metadata) == 0 {
+		// A log whose early commits have been truncated no longer carries the
+		// metaData action. Report the table as unknown so evolution is skipped
+		// rather than aborting the load.
+		config.Debug("[ONELAKE] Delta log at %s has no metadata action; skipping schema evolution", tableDir)
+		return nil, nil
+	}
+	deltaSchema, err := deltaSchemaFromMetadata(snapshot.metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse OneLake table schema: %w", err)
+	}
+	return tableSchemaFromDelta(table, deltaSchema)
 }
 
 // Strategy support: OneLake is a direct-write, file-based destination.
@@ -549,11 +649,31 @@ func (d *OneLakeDestination) readTable(ctx context.Context, table, op string) (s
 	if !snap.exists {
 		return dir, snap, nil, nil
 	}
-	batches, err := readDeltaData(ctx, d.client, d.workspace, dir, snap.activeFiles)
+	if len(snap.metadata) == 0 {
+		return "", nil, nil, fmt.Errorf("%s rewrites the table, but the delta log under %s carries no metaData action to rewrite it against", op, dir)
+	}
+	tableSchema, err := deltaSchemaFromMetadata(snap.metadata)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to parse %s table schema: %w", op, err)
+	}
+	if err := checkRewritableDeltaTable(snap, tableSchema, op); err != nil {
+		return "", nil, nil, err
+	}
+	batches, err := readDeltaData(ctx, d.client, d.workspace, dir, snap.activeFiles, tableSchema)
 	if err != nil {
 		return "", nil, nil, err
 	}
 	return dir, snap, batches, nil
+}
+
+// declaredDeltaSchema returns the schema from the table's metaData action, or
+// nil when the table does not exist yet — in which case the rewrite writes the
+// first commit and declares whatever it produces.
+func declaredDeltaSchema(snap *deltaSnapshot) (*deltaStruct, error) {
+	if snap == nil || !snap.exists || len(snap.metadata) == 0 {
+		return nil, nil
+	}
+	return deltaSchemaFromMetadata(snap.metadata)
 }
 
 func (d *OneLakeDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
@@ -588,7 +708,18 @@ func (d *OneLakeDestination) rewriteTableWithRetry(ctx context.Context, targetTa
 			return err
 		}
 
-		result, err := transform(tBatches, sBatches)
+		declared, err := declaredDeltaSchema(tSnap)
+		if err != nil {
+			releaseBatches(tBatches)
+			return err
+		}
+		unifiedTarget, unifiedStaging, releaseUnified, err := unifyRewriteBatches(tBatches, sBatches, declared)
+		if err != nil {
+			releaseBatches(tBatches)
+			return err
+		}
+		result, err := transform(unifiedTarget, unifiedStaging)
+		releaseUnified()
 		releaseBatches(tBatches)
 		if err != nil {
 			return err
@@ -716,7 +847,7 @@ func writeBatchesToParquet(batches []arrow.RecordBatch) ([]byte, *arrow.Schema, 
 		if !b.Schema().Equal(target) {
 			if !schemaEqualIgnoringMetadata(b.Schema(), target) {
 				_ = writer.Close()
-				return nil, nil, fmt.Errorf("incompatible batch schema during rewrite")
+				return nil, nil, fmt.Errorf("incompatible batch schema during rewrite: %s", describeSchemaSkew(target, b.Schema()))
 			}
 			normalized, err := normalizeRecordToSchema(b, target)
 			if err != nil {
@@ -754,7 +885,11 @@ func (d *OneLakeDestination) DropTable(ctx context.Context, table string) error 
 		area = "Files"
 	}
 	dir := d.itemPath() + "/" + area + "/" + strings.Trim(relPath, "/")
-	return d.client.DeleteDir(ctx, d.workspace, dir)
+	if err := d.client.DeleteDir(ctx, d.workspace, dir); err != nil {
+		return err
+	}
+	d.forgetTableMetadata(dir)
+	return nil
 }
 
 func (d *OneLakeDestination) Exec(ctx context.Context, sql string, args ...interface{}) error {
@@ -784,6 +919,37 @@ func stripSchemaMetadata(s *arrow.Schema) *arrow.Schema {
 		fields[i] = f
 	}
 	return arrow.NewSchema(fields, nil)
+}
+
+// describeSchemaSkew explains why two batch schemas cannot be written to the
+// same Parquet file. unifyRewriteBatches reconciles the target and staging
+// schemas (and rejects the pairs it cannot), so this is a last-resort invariant
+// check rather than the message users normally see for schema drift.
+func describeSchemaSkew(want, got *arrow.Schema) string {
+	if want.NumFields() != got.NumFields() {
+		return fmt.Sprintf("expected %d columns (%v), got %d (%v)",
+			want.NumFields(), arrowFieldNames(want), got.NumFields(), arrowFieldNames(got))
+	}
+	for i := 0; i < want.NumFields(); i++ {
+		wantField := want.Field(i)
+		index, ok := fieldIndex(got, wantField.Name)
+		if !ok {
+			return fmt.Sprintf("column %q is missing (columns are %v)", wantField.Name, arrowFieldNames(got))
+		}
+		if gotField := got.Field(index); !arrow.TypeEqual(wantField.Type, gotField.Type) {
+			return fmt.Sprintf("column %q is %s in one data file and %s in another",
+				wantField.Name, wantField.Type, gotField.Type)
+		}
+	}
+	return fmt.Sprintf("expected %s, got %s", want, got)
+}
+
+func arrowFieldNames(s *arrow.Schema) []string {
+	names := make([]string, s.NumFields())
+	for i := 0; i < s.NumFields(); i++ {
+		names[i] = s.Field(i).Name
+	}
+	return names
 }
 
 func schemaEqualIgnoringMetadata(a, b *arrow.Schema) bool {
@@ -838,6 +1004,8 @@ func arrowFieldToColumn(f arrow.Field) schema.Column {
 	switch dt := f.Type.(type) {
 	case *arrow.BooleanType:
 		col.DataType = schema.TypeBoolean
+	case *arrow.Int8Type:
+		col.DataType = schema.TypeInt8
 	case *arrow.Int16Type:
 		col.DataType = schema.TypeInt16
 	case *arrow.Int32Type:
@@ -865,8 +1033,13 @@ func arrowFieldToColumn(f arrow.Field) schema.Column {
 			col.DataType = schema.TypeTimestamp
 		}
 	case *arrow.ListType:
+		// Array elements keep their precision/scale on the parent column, the
+		// same way schema.DataTypeToArrowType reads them back.
+		element := arrowFieldToColumn(arrow.Field{Type: dt.Elem()})
 		col.DataType = schema.TypeArray
-		col.ArrayType = arrowFieldToColumn(arrow.Field{Type: dt.Elem()}).DataType
+		col.ArrayType = element.DataType
+		col.Precision = element.Precision
+		col.Scale = element.Scale
 	default:
 		col.DataType = schema.TypeString
 	}
