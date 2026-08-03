@@ -208,7 +208,15 @@ func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
 		cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=" + url.QueryEscape(endpoint))
 		require.NoError(t, err, endpoint)
 		require.Empty(t, cfg.Properties["s3.region"], endpoint)
+		// Nor compat-mode, which would switch off upload checksums on real AWS.
+		require.Empty(t, cfg.Properties["s3.compat-mode"], endpoint)
 	}
+
+	// Explicitly asked for, even on AWS: honoured.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=s3.eu-north-1.amazonaws.com&s3.compat-mode=true&region=eu-north-1")
+	require.NoError(t, err)
+	require.Equal(t, "true", cfg.Properties["s3.compat-mode"])
+	require.Equal(t, "eu-north-1", cfg.Properties["s3.region"])
 }
 
 func TestParseIcebergConfigPreservesPlusInCredentials(t *testing.T) {
