@@ -195,6 +195,20 @@ func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
 	cfg, err = parseIcebergConfig("iceberg+glue://?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
 	require.NoError(t, err)
 	require.Empty(t, cfg.Properties["glue.region"])
+
+	// An AWS endpoint (regional, VPC, FIPS, dualstack) routes by region, and
+	// without the property the SDK resolves it from AWS_REGION or the shared
+	// config -- which "auto" would override with something unusable.
+	for _, endpoint := range []string{
+		"https://s3.eu-north-1.amazonaws.com",
+		"bucket.vpce-123-abc.s3.eu-west-1.vpce.amazonaws.com",
+		"s3-fips.us-gov-west-1.amazonaws.com",
+		"s3.dualstack.us-east-1.amazonaws.com",
+	} {
+		cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=" + url.QueryEscape(endpoint))
+		require.NoError(t, err, endpoint)
+		require.Empty(t, cfg.Properties["s3.region"], endpoint)
+	}
 }
 
 func TestParseIcebergConfigPreservesPlusInCredentials(t *testing.T) {

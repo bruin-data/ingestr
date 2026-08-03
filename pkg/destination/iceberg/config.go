@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -87,13 +88,33 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 			cfg.Properties["s3.compat-mode"] = "true"
 		}
 		// Those endpoints ignore the region, but the AWS SDK refuses to sign without
-		// one and fails on a name it cannot turn into a host. Only when an endpoint
-		// is set: on real AWS the region routes, and a default would hide a typo.
-		if cfg.Properties["s3.region"] == "" {
+		// one and fails on a name it cannot turn into a host. Never for an AWS
+		// endpoint (regional, VPC, FIPS, dualstack): there the region routes, and
+		// without this property the SDK still resolves it from the environment.
+		if cfg.Properties["s3.region"] == "" && !isAWSEndpoint(cfg.Properties["s3.endpoint"]) {
 			cfg.Properties["s3.region"] = "auto"
 		}
 	}
 	return cfg, nil
+}
+
+// isAWSEndpoint reports whether an S3 endpoint is AWS itself rather than an
+// S3-compatible service. Regional, VPC, FIPS, dualstack and accelerate
+// endpoints all live under amazonaws.com.
+func isAWSEndpoint(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+	host := endpoint
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
+		host = parsed.Host
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+
+	return host == "amazonaws.com" || strings.HasSuffix(host, ".amazonaws.com")
 }
 
 func catalogTypeFromScheme(scheme string) string {
