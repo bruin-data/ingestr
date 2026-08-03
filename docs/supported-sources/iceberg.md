@@ -166,7 +166,7 @@ ingestr ingest \
 ```
 
 ::: info
-`region` here is a placeholder — Google ignores it, but the AWS SDK refuses to run without one, so pass `region=auto` when the catalog does not already need a real region. S3 compat-mode is enabled for you because `endpoint` is set; without it Google rejects the AWS SDK's signed headers with `SignatureDoesNotMatch`.
+`region=us-east-1` above is Glue's. The storage region defaults to `auto` for a non-AWS `endpoint`, as does `s3.compat-mode`, without which Google rejects the AWS SDK's signed headers with `SignatureDoesNotMatch`.
 :::
 
 ### Hive metastore with MinIO
