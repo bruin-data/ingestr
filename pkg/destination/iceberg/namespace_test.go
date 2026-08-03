@@ -11,9 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// racingCatalog reports a namespace as missing, then fails to create it the way
-// the sql catalog does when another writer won: a driver error, not
-// ErrNamespaceAlreadyExists.
+// racingCatalog reports a namespace as missing, then fails creation the way the
+// sql catalog does when another writer won: a driver error, not the sentinel.
 type racingCatalog struct {
 	icebergcatalog.Catalog
 	created     bool
@@ -27,7 +26,7 @@ func (c *racingCatalog) CheckNamespaceExists(ctx context.Context, ns icebergtabl
 
 func (c *racingCatalog) CreateNamespace(ctx context.Context, ns icebergtable.Identifier, props iceberggo.Properties) error {
 	c.createCalls++
-	c.created = true // the winner's row is in place by the time we fail
+	c.created = true // the winner's row is already in place
 
 	return c.createErr
 }
@@ -46,7 +45,7 @@ func TestEnsureNamespaceToleratesConcurrentCreation(t *testing.T) {
 func TestEnsureNamespaceStillReportsRealFailures(t *testing.T) {
 	t.Parallel()
 
-	// Same driver error, but the namespace genuinely is not there afterwards.
+	// Creation fails and the namespace genuinely is not there.
 	cat := &neverCreatedCatalog{createErr: errors.New("permission denied")}
 	d := &Destination{catalog: cat, cfg: icebergConfig{CreateNamespace: true}}
 
