@@ -661,6 +661,8 @@ func (d *CrateDBDestination) refreshCDCStateTable(ctx context.Context, table str
 
 func (d *CrateDBDestination) refreshTableRequired(ctx context.Context, table string) error {
 	sql := fmt.Sprintf("REFRESH TABLE %s", destination.QuoteTableName(table))
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	if _, err := d.pool.Exec(ctx, sql); err != nil {
 		return err
 	}
