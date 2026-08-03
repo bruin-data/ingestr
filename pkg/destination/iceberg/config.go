@@ -183,9 +183,24 @@ func sqliteCatalogURI(parsed *url.URL) string {
 		return ":memory:"
 	}
 	if strings.HasPrefix(path, "file:") {
-		return path
+		return withBusyTimeout(path)
 	}
-	return "file:" + path
+
+	return withBusyTimeout("file:" + path)
+}
+
+// withBusyTimeout makes a second writer wait for the lock instead of failing
+// immediately with SQLITE_BUSY. Left alone if the caller set their own.
+func withBusyTimeout(uri string) string {
+	if strings.Contains(uri, "busy_timeout") {
+		return uri
+	}
+	sep := "?"
+	if strings.Contains(uri, "?") {
+		sep = "&"
+	}
+
+	return uri + sep + "_pragma=" + url.QueryEscape("busy_timeout(10000)")
 }
 
 func catalogURL(parsed *url.URL, scheme string) string {
