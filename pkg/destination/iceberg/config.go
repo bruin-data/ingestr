@@ -81,17 +81,12 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 		return icebergConfig{}, fmt.Errorf("iceberg uri: sql catalog requires both sql.driver and sql.dialect (e.g. sql.driver=pgx&sql.dialect=postgres), or use the iceberg+postgres / iceberg+sqlite scheme which set them automatically")
 	}
 
-	// Non-AWS S3 endpoints (MinIO, GCS interop, R2) need settings the AWS SDK will
-	// not infer. An AWS endpoint (regional, VPC, FIPS, dualstack) is not one of
-	// them: compat-mode there would disable upload checksums for no reason, and
-	// the region routes the request rather than being ignored.
+	// MinIO, GCS interop and R2 need compat-mode, and ignore the region the AWS SDK
+	// still refuses to sign without. An AWS endpoint needs neither.
 	if cfg.Properties["s3.endpoint"] != "" && !isAWSEndpoint(cfg.Properties["s3.endpoint"]) {
 		if _, ok := cfg.Properties["s3.compat-mode"]; !ok {
 			cfg.Properties["s3.compat-mode"] = "true"
 		}
-		// Those endpoints ignore the region, but the AWS SDK refuses to sign without
-		// one and fails on a name it cannot turn into a host. On AWS it is resolved
-		// from AWS_REGION or the shared config when the property is absent.
 		if cfg.Properties["s3.region"] == "" {
 			cfg.Properties["s3.region"] = "auto"
 		}
@@ -100,8 +95,7 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 }
 
 // isAWSEndpoint reports whether an S3 endpoint is AWS itself rather than an
-// S3-compatible service. Regional, VPC, FIPS, dualstack and accelerate
-// endpoints all live under amazonaws.com.
+// S3-compatible service; regional, VPC, FIPS and dualstack all count as AWS.
 func isAWSEndpoint(endpoint string) bool {
 	if endpoint == "" {
 		return false

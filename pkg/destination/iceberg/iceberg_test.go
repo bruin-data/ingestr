@@ -174,8 +174,7 @@ func TestParseIcebergConfigSQLCatalogRequiresDriverDialect(t *testing.T) {
 }
 
 func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
-	// MinIO, GCS interop and R2 ignore the region, but the AWS SDK will not sign a
-	// request without one -- it fails resolving an endpoint from the empty string.
+	// The SDK will not sign without a region, even where the store ignores it.
 	cfg, err := parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
 	require.NoError(t, err)
 	require.Equal(t, "auto", cfg.Properties["s3.region"])
@@ -185,20 +184,18 @@ func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "us-east-1", cfg.Properties["s3.region"])
 
-	// No endpoint means real AWS, where the region routes: no default, so a missing
-	// one still surfaces instead of being silently wrong.
+	// Real AWS routes by region, so a missing one must surface, not be guessed.
 	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w")
 	require.NoError(t, err)
 	require.Empty(t, cfg.Properties["s3.region"])
 
-	// The catalog's own region is untouched -- glue is a real AWS service.
+	// Glue is a real AWS service and keeps needing a real region.
 	cfg, err = parseIcebergConfig("iceberg+glue://?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
 	require.NoError(t, err)
 	require.Empty(t, cfg.Properties["glue.region"])
 
-	// An AWS endpoint (regional, VPC, FIPS, dualstack) routes by region, and
-	// without the property the SDK resolves it from AWS_REGION or the shared
-	// config -- which "auto" would override with something unusable.
+	// An AWS endpoint still routes by region, which the SDK resolves from the
+	// environment when the property is absent.
 	for _, endpoint := range []string{
 		"https://s3.eu-north-1.amazonaws.com",
 		"bucket.vpce-123-abc.s3.eu-west-1.vpce.amazonaws.com",
@@ -208,11 +205,11 @@ func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
 		cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=" + url.QueryEscape(endpoint))
 		require.NoError(t, err, endpoint)
 		require.Empty(t, cfg.Properties["s3.region"], endpoint)
-		// Nor compat-mode, which would switch off upload checksums on real AWS.
+		// Nor compat-mode, which switches off upload checksums.
 		require.Empty(t, cfg.Properties["s3.compat-mode"], endpoint)
 	}
 
-	// Explicitly asked for, even on AWS: honoured.
+	// Explicit values win everywhere.
 	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=s3.eu-north-1.amazonaws.com&s3.compat-mode=true&region=eu-north-1")
 	require.NoError(t, err)
 	require.Equal(t, "true", cfg.Properties["s3.compat-mode"])
