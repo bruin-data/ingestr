@@ -86,6 +86,12 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 		if _, ok := cfg.Properties["s3.compat-mode"]; !ok {
 			cfg.Properties["s3.compat-mode"] = "true"
 		}
+		// Those endpoints ignore the region, but the AWS SDK refuses to sign without
+		// one and fails on a name it cannot turn into a host. Only when an endpoint
+		// is set: on real AWS the region routes, and a default would hide a typo.
+		if cfg.Properties["s3.region"] == "" {
+			cfg.Properties["s3.region"] = "auto"
+		}
 	}
 	return cfg, nil
 }

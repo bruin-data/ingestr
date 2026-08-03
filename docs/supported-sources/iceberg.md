@@ -32,7 +32,7 @@ Common URI parameters:
 - `prefix` (optional): path prefix inside the bucket.
 - `endpoint` (optional): S3-compatible endpoint such as `localhost:9000`.
 - `use_ssl=false` (optional): use plain HTTP for S3-compatible local storage.
-- `access_key_id`, `secret_access_key`, `session_token`, `region`: S3 or Glue credentials and region aliases.
+- `access_key_id`, `secret_access_key`, `session_token`, `region`: S3 or Glue credentials and region aliases. `region` is required for AWS S3, where it routes the request. With `endpoint` set (MinIO, GCS interop, R2) it is unused but still has to be present for the AWS SDK to sign, so it defaults to `auto`.
 - `gcs.keypath` (optional, GCS): path to a Google Cloud service-account JSON key for a `gs://` warehouse. Without it, GCS uses Application Default Credentials.
 - `warehouse`: advanced override for the Iceberg warehouse location, such as `s3://bucket/warehouse`.
 - `warehouse_path`: local warehouse path alias for non-S3 catalog setups.

@@ -173,6 +173,30 @@ func TestParseIcebergConfigSQLCatalogRequiresDriverDialect(t *testing.T) {
 	require.Equal(t, "sqlite", cfg.Properties["sql.dialect"])
 }
 
+func TestParseIcebergConfigEndpointRegionDefault(t *testing.T) {
+	// MinIO, GCS interop and R2 ignore the region, but the AWS SDK will not sign a
+	// request without one -- it fails resolving an endpoint from the empty string.
+	cfg, err := parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
+	require.NoError(t, err)
+	require.Equal(t, "auto", cfg.Properties["s3.region"])
+
+	// An explicit region is left alone.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w&endpoint=localhost:9000&region=us-east-1")
+	require.NoError(t, err)
+	require.Equal(t, "us-east-1", cfg.Properties["s3.region"])
+
+	// No endpoint means real AWS, where the region routes: no default, so a missing
+	// one still surfaces instead of being silently wrong.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db?storage=s3&warehouse=s3://b/w")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Properties["s3.region"])
+
+	// The catalog's own region is untouched -- glue is a real AWS service.
+	cfg, err = parseIcebergConfig("iceberg+glue://?storage=s3&warehouse=s3://b/w&endpoint=storage.googleapis.com")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Properties["glue.region"])
+}
+
 func TestParseIcebergConfigPreservesPlusInCredentials(t *testing.T) {
 	// STS tokens/secrets commonly contain '+','/','='. Percent-encode them in the
 	// URI (a raw '+' would decode to a space); '%2B' decodes back to '+'.
