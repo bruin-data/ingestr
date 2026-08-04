@@ -66,7 +66,18 @@ ingestr ingest \
   --dest-table "orders"
 ```
 
-psdbconnect performs a per-shard snapshot first (resumable by primary key) and then streams inserts, updates, and deletes. Position is tracked per shard and serialized into `_cdc_lsn`, and subsequent runs resume from the destination table's maximum `_cdc_lsn` for both unsharded and sharded keyspaces. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild the destination from a fresh snapshot. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key. (PlanetScale delivers only the primary keys of deleted rows; the destination marks them deleted without disturbing the other columns.)
+psdbconnect performs a per-shard snapshot first (resumable by primary key) and then streams inserts, updates, and deletes. By default each invocation catches up to the current position and exits. Add `--stream` to keep all selected table/shard streams open continuously and flush buffered changes by interval or record count:
+
+```shell
+ingestr ingest \
+  --source-uri "ps_mysql+cdc://user:password@aws.connect.psdb.cloud:3306/database" \
+  --dest-uri "duckdb:///tmp/planetscale_cdc.duckdb" \
+  --source-table "orders" \
+  --dest-table "orders" \
+  --stream
+```
+
+Position is tracked per shard and serialized into `_cdc_lsn`, and subsequent runs resume from the destination table's maximum `_cdc_lsn` for both unsharded and sharded keyspaces. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild the destination from a fresh snapshot. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key. (PlanetScale delivers only the primary keys of deleted rows; the destination marks them deleted without disturbing the other columns.)
 
 CDC URI parameters:
 - `tls`: auto-enabled for the `ps_mysql://` scheme; set it explicitly only to choose a different mode (see [TLS](#tls)).
