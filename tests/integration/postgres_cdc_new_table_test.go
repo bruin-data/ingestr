@@ -48,6 +48,7 @@ func setupNewTableDest(t *testing.T, ctx context.Context) (string, *pgxpool.Pool
 // backfill of its pre-existing rows, while the original table keeps resuming
 // incrementally.
 func TestPostgresCDC_NewTableBetweenBatchRuns(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -125,6 +126,7 @@ func TestPostgresCDC_NewTableBetweenBatchRuns(t *testing.T) {
 }
 
 func TestPostgresCDC_StreamingRestartRecoversOfflineDDLAndTableRecreation(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -281,6 +283,7 @@ func TestPostgresCDC_StreamingRestartRecoversOfflineDDLAndTableRecreation(t *tes
 // discovery is a side-effect-free restart boundary. The restarted stream sees
 // the table in its startup set, backfills it, and then replicates live changes.
 func TestPostgresCDC_StreamingNewTableDetection(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -403,6 +406,7 @@ func TestPostgresCDC_StreamingNewTableDetection(t *testing.T) {
 }
 
 func TestPostgresCDC_StreamingColumnRenameAcrossHistoricalRelations(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -491,6 +495,7 @@ func TestPostgresCDC_StreamingColumnRenameAcrossHistoricalRelations(t *testing.T
 }
 
 func TestPostgresCDC_StreamingNumericTypeChangesRefreshCopyEncoding(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -563,6 +568,7 @@ func TestPostgresCDC_StreamingNumericTypeChangesRefreshCopyEncoding(t *testing.T
 }
 
 func TestPostgresCDC_SingleTableStreamingReplacesRecreatedTable(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -646,6 +652,7 @@ func TestPostgresCDC_SingleTableStreamingReplacesRecreatedTable(t *testing.T) {
 }
 
 func TestPostgresCDC_MultiTableStreamingRejectsReplacementRelationBeforeResnapshot(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

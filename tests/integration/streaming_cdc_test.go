@@ -25,6 +25,7 @@ import (
 // cancellation, and that the replication slot's confirmed_flush_lsn advances
 // only as data becomes durable (commit-after-flush).
 func TestPostgresCDC_Streaming(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -153,6 +154,7 @@ func TestPostgresCDC_Streaming(t *testing.T) {
 // destination's max LSN without re-snapshotting and without losing changes
 // made while it was down.
 func TestPostgresCDC_StreamingResume(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

@@ -129,7 +129,7 @@ test-python:
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p 64 -parallel 64 -timeout 20m ./tests/integration/...
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p 64 -parallel 8 -timeout 20m ./tests/integration/...
 
 # The CDC stress tests share one harness: a queue-based load generator that
 # tracks the target ops/sec (STRESS_OPS_PER_SEC, default 1000) as closely as
