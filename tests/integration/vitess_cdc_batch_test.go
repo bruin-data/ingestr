@@ -95,6 +95,7 @@ func duckQueryInt(t *testing.T, ctx context.Context, duckPath, query string) int
 // interval, which suppresses vtgate's idle heartbeats entirely. Before the stop
 // boundary existed, this run would never terminate.
 func TestVitessCDC_BusyKeyspaceBatchStops(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -172,6 +173,7 @@ func TestVitessCDC_BusyKeyspaceBatchStops(t *testing.T) {
 // first per-shard event used to truncate the snapshot to whichever shard
 // finished first.
 func TestVitessCDC_ShardedKeyspaceCopy(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -264,6 +266,7 @@ func TestVitessCDC_ShardedKeyspaceCopy(t *testing.T) {
 // tombstones rows deleted since the cursor, so the delete below would have been
 // lost. The fix resumes cursor-holding tables and copies only the new table.
 func TestVitessCDC_MixedResumeKeepsDeletes(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -319,6 +322,7 @@ func TestVitessCDC_MixedResumeKeepsDeletes(t *testing.T) {
 // against the stop boundary, so termination rides on the idle-heartbeat
 // fallback. A follow-up run picks up rows inserted later.
 func TestVitessCDC_EmptyTableBatchCompletes(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
