@@ -31,7 +31,7 @@ Vitess is also supported as a destination over the `vitess://` URI. Two things d
 ## Change data capture
 Vitess CDC uses the `vitess+cdc://` scheme. ingestr streams changes through vtgate's [VStream](https://vitess.io/docs/reference/vreplication/vstream/) API over gRPC — Vitess is a sharded layer with no standard binary log to tail. It produces the same `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns as the other CDC sources and resumes from the destination table's maximum `_cdc_lsn` on subsequent runs.
 
-VStream performs a consistent copy-phase snapshot first, then streams changes. Position is tracked with a Vitess GTID (VGTID) serialized into `_cdc_lsn`. This works for both unsharded and sharded keyspaces, since the VGTID covers every shard. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key.
+VStream performs a consistent copy-phase snapshot first, then streams changes. By default the run catches up to the current VGTID and exits. Add `--stream` to keep the VStream open continuously and flush buffered changes by interval or record count. Position is tracked with a Vitess GTID (VGTID) serialized into `_cdc_lsn`. This works for both unsharded and sharded keyspaces, since the VGTID covers every shard. If the stored `_cdc_lsn` is invalid, the run fails instead of taking a partial snapshot — run with `--full-refresh` to rebuild. Incremental runs use the `merge` strategy so updates and deletes are applied by primary key.
 
 VStream uses vtgate's **gRPC** port, which is different from the MySQL protocol port and cannot be derived from it, so you must supply it with `grpc_port`. The database in the URI is the Vitess keyspace.
 
@@ -45,17 +45,29 @@ ingestr ingest \
   --dest-table "orders"
 ```
 
+```shell
+ingestr ingest \
+  --source-uri "vitess+cdc://user:password@host:3306/keyspace?grpc_port=15991" \
+  --dest-uri "duckdb:///tmp/vitess_cdc.duckdb" \
+  --source-table "keyspace.orders" \
+  --dest-table "orders" \
+  --stream \
+  --flush-interval 15s \
+  --flush-records 100000
+```
+
 Vitess CDC URI parameters:
 - `grpc_port`: **required** — the vtgate gRPC port (for example `15991`). The run fails with a clear error if it is missing.
 - `grpc_host`: optional vtgate gRPC host; defaults to the host in the URI.
 - `grpc_tls`: optional override for the gRPC connection's TLS, independent of `tls`. `true` verifies the server certificate, `skip-verify` skips verification, `false` forces plaintext. When omitted, the gRPC connection inherits `tls` (`true`/`skip-verify` enable it; `preferred` and custom CA names do not).
-- `mode`: `batch`; defaults to `batch`.
+- `mode`: deprecated and ignored; continuous ingestion is controlled by `--stream`.
 - `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
 
 Requirements:
 - The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).
 - Source tables must have primary keys, or `--primary-key` must be provided.
 - Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
+- Multi-table streaming cannot start with a mix of already-synced tables and new tables without stored cursors. Run once without `--stream` to establish cursors for the new tables, or use `--full-refresh` to rebuild all selected tables before starting the stream.
 
 ## Related docs
 - [MySQL](/supported-sources/mysql.md) for the generic MySQL/MariaDB connector and binary-log CDC.
