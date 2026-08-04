@@ -488,7 +488,7 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 	recvCh := receiveVitessVStream(streamCtx, reader)
 
 	for {
-		var resp *binlogdatapb.VStreamResponse
+		var resp *vtgatepb.VStreamResponse
 		select {
 		case <-ctx.Done():
 			if err := drainCommittedBuffers(); err != nil {
@@ -610,11 +610,11 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 }
 
 type vitessVStreamReceiver interface {
-	Recv() (*binlogdatapb.VStreamResponse, error)
+	Recv() (*vtgatepb.VStreamResponse, error)
 }
 
 type vitessVStreamReceiveResult struct {
-	resp *binlogdatapb.VStreamResponse
+	resp *vtgatepb.VStreamResponse
 	err  error
 }
 
