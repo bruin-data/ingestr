@@ -364,7 +364,7 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 	defer func() { _ = cc.Close() }()
 
 	if opts.Streaming && len(plan.fresh) > 0 && len(plan.resume) > 0 {
-		return fmt.Errorf("Vitess CDC streaming cannot start with a mix of new tables and resumed tables; " +
+		return fmt.Errorf("vitess CDC streaming cannot start with a mix of new tables and resumed tables; " +
 			"run once without --stream to establish cursors for the new tables, or use --full-refresh to rebuild all selected tables")
 	}
 
@@ -533,7 +533,7 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 						return ferr
 					}
 					if opts.Streaming {
-						return fmt.Errorf("Vitess VStream ended unexpectedly")
+						return fmt.Errorf("vitess VStream ended unexpectedly")
 					}
 					return nil
 				}
