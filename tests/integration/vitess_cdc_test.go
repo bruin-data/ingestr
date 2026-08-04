@@ -14,8 +14,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // register adbc_generic for duckdb read-back
 	_ "github.com/go-sql-driver/mysql"                // register mysql driver for seeding/raw reads
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -154,7 +156,7 @@ func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	require.Greater(t, queryDuck(`SELECT COUNT(DISTINCT "_cdc_lsn") FROM main.items_dest`), snapshotLSNs, "VGTID/ordinal should advance")
 }
 
-func TestVitessCDC_Streaming_DuckDB(t *testing.T) {
+func TestVitessCDC_Streaming_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -185,31 +187,45 @@ func TestVitessCDC_Streaming_DuckDB(t *testing.T) {
 	_, err = db.ExecContext(ctx, `INSERT INTO stream_items (id, name, value) VALUES (1,'item1',100)`)
 	require.NoError(t, err)
 
-	duckPath := filepath.Join(t.TempDir(), "vitess_stream.duckdb")
+	destContainer, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("destdb"),
+		postgres.WithUsername("destuser"),
+		postgres.WithPassword("destpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).WithStartupTimeout(30*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = destContainer.Terminate(ctx) })
+
+	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	destPool, err := pgxpool.New(ctx, destConnString)
+	require.NoError(t, err)
+	defer destPool.Close()
+
 	cdcURI := fmt.Sprintf("vitess+cdc://root@%s:%s/%s?grpc_port=%s", host, mysqlPort, vitessCDCKeyspace, grpcPort)
 	cfg := &config.IngestConfig{
 		SourceURI:     cdcURI,
 		SourceTable:   vitessCDCKeyspace + ".stream_items",
-		DestURI:       fmt.Sprintf("duckdb:///%s", duckPath),
-		DestTable:     "main.stream_items_dest",
+		DestURI:       destConnString,
+		DestTable:     "public.stream_items_dest",
 		Stream:        true,
 		FlushInterval: 500 * time.Millisecond,
 		FlushRecords:  2,
 		Progress:      config.ProgressLog,
 	}
 
-	queryDuck := func(query string) int64 {
+	countDest := func(where string) int {
 		t.Helper()
-		duck, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckPath))
-		if err != nil {
+		var n int
+		if err := destPool.QueryRow(ctx, `SELECT COUNT(*) FROM public.stream_items_dest WHERE `+where).Scan(&n); err != nil {
 			return -1
 		}
-		defer func() { _ = duck.Close() }()
-		var v int64
-		if err := duck.QueryRowContext(ctx, query).Scan(&v); err != nil {
-			return -1
-		}
-		return v
+		return n
 	}
 
 	streamCtx, cancelStream := context.WithCancel(ctx)
@@ -218,7 +234,7 @@ func TestVitessCDC_Streaming_DuckDB(t *testing.T) {
 	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
 
 	require.Eventually(t, func() bool {
-		return queryDuck(`SELECT COUNT(*) FROM main.stream_items_dest WHERE id = 1 AND NOT "_cdc_deleted"`) == 1
+		return countDest(`id = 1 AND _cdc_deleted = false`) == 1
 	}, 60*time.Second, 500*time.Millisecond, "snapshot row should appear")
 
 	select {
@@ -235,8 +251,8 @@ func TestVitessCDC_Streaming_DuckDB(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		updated := queryDuck(`SELECT COUNT(*) FROM main.stream_items_dest WHERE id = 1 AND value = 150 AND NOT "_cdc_deleted"`)
-		deleted := queryDuck(`SELECT COUNT(*) FROM main.stream_items_dest WHERE id = 2 AND "_cdc_deleted"`)
+		updated := countDest(`id = 1 AND value = 150 AND _cdc_deleted = false`)
+		deleted := countDest(`id = 2 AND _cdc_deleted = true`)
 		return updated == 1 && deleted == 1
 	}, 60*time.Second, 500*time.Millisecond, "streamed Vitess changes should converge")
 
