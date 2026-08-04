@@ -65,7 +65,7 @@ func waitForStarRocksBackend(t *testing.T, dsn string) {
 		if starRocksBackendAlive(db) {
 			return
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	t.Fatal("StarRocks backend did not become alive within the deadline")
 }
@@ -118,7 +118,7 @@ func execEventually(t *testing.T, db *sql.DB, stmt string) {
 		} else {
 			lastErr = err
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	t.Fatalf("statement did not succeed within deadline: %v\nstatement: %s", lastErr, stmt)
 }
