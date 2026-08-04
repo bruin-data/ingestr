@@ -470,14 +470,27 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 	flushBuffers := func(sendCtx context.Context) error {
 		return flushMySQLCDCChangeBuffersWithTokenContext(sendCtx, buffers, results, nil)
 	}
+	committedSendContext := func() (context.Context, context.CancelFunc) {
+		if opts.Streaming && ctx.Err() != nil {
+			return detachedMySQLCDCStreamDrainContext(ctx)
+		}
+		return ctx, func() {}
+	}
+	flushCommittedTxn := func() error {
+		sendCtx, cancel := committedSendContext()
+		defer cancel()
+		return flushTxn(sendCtx)
+	}
+	flushCommittedBuffers := func() error {
+		sendCtx, cancel := committedSendContext()
+		defer cancel()
+		return flushBuffers(sendCtx)
+	}
 	drainCommittedBuffers := func() error {
 		if !opts.Streaming {
 			return nil
 		}
-		drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-		err := flushBuffers(drainCtx)
-		cancel()
-		return err
+		return flushCommittedBuffers()
 	}
 	var flushTicks <-chan time.Time
 	if opts.Streaming {
@@ -496,8 +509,11 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 			}
 			return ctx.Err()
 		case <-flushTicks:
-			if err := flushBuffers(ctx); err != nil {
+			if err := flushCommittedBuffers(); err != nil {
 				return err
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			continue
 		case received := <-recvCh:
@@ -565,12 +581,12 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 				// events and sends no COMMIT, so flush here to bound memory and
 				// capture copy rows. During streaming txnRows is already empty
 				// at this point (the prior COMMIT flushed it), so this is a no-op.
-				if err := flushTxn(ctx); err != nil {
+				if err := flushCommittedTxn(); err != nil {
 					return err
 				}
 
 			case binlogdatapb.VEventType_COMMIT:
-				if err := flushTxn(ctx); err != nil {
+				if err := flushCommittedTxn(); err != nil {
 					return err
 				}
 
