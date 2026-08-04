@@ -4,8 +4,10 @@ import (
 	"context"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -334,6 +336,109 @@ func TestPsdbStreamingTableStateCopyCompletionCheckpoint(t *testing.T) {
 	}
 	if len(finalShard.LastKnownPk) != 0 {
 		t.Fatal("completion checkpoint should clear LastKnownPk")
+	}
+}
+
+func TestPsdbStreamingTableStateConcurrentShardFlush(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeString, Nullable: false}},
+		PrimaryKeys: []string{"id"},
+	})
+	state := newPsdbStreamingTableState(
+		psdbCDCTarget{bareName: "items", schema: tableSchema},
+		psdbCursorState{Shards: map[string]psdbShardCursor{}},
+		11,
+	)
+	results := make(chan source.RecordBatchResult, 1)
+
+	type shardEvent struct {
+		shard    string
+		position string
+		value    string
+	}
+	events := []shardEvent{
+		{shard: "-80", position: "MySQL56/left:1-10", value: "left"},
+		{shard: "80-", position: "MySQL56/right:1-20", value: "right"},
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, len(events))
+	for _, ev := range events {
+		ev := ev
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := state.processResponse(
+				context.Background(),
+				ev.shard,
+				&psdbconnect.TableCursor{Keyspace: "ks", Shard: ev.shard, Position: ev.position},
+				false,
+				nil,
+				[]mysqlCDCChange{{values: []interface{}{ev.value}}},
+				false,
+				100,
+				results,
+			)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("process concurrent shard response: %v", err)
+		}
+	}
+
+	if err := flushPsdbStreamingTables(context.Background(), []*psdbStreamingTableState{state}, results); err != nil {
+		t.Fatalf("flushPsdbStreamingTables: %v", err)
+	}
+
+	select {
+	case res := <-results:
+		if res.Err != nil {
+			t.Fatalf("flush result error: %v", res.Err)
+		}
+		if res.Batch == nil {
+			t.Fatal("expected flushed batch")
+		}
+		defer res.Batch.Release()
+		if got := res.Batch.NumRows(); got != int64(len(events)) {
+			t.Fatalf("flushed rows = %d, want %d", got, len(events))
+		}
+		lsns, ok := res.Batch.Column(1).(*array.String)
+		if !ok {
+			t.Fatalf("_cdc_lsn column has type %T, want *array.String", res.Batch.Column(1))
+		}
+		latest := lsns.Value(0)
+		for i := 1; i < lsns.Len(); i++ {
+			if lsn := lsns.Value(i); latest < lsn {
+				latest = lsn
+			}
+		}
+		_, payload, ok := parseVitessLSN(latest)
+		if !ok {
+			t.Fatalf("latest LSN did not parse: %q", latest)
+		}
+		flushedState, err := decodePsdbCursor(payload)
+		if err != nil {
+			t.Fatalf("decode latest cursor: %v", err)
+		}
+		for _, ev := range events {
+			if got := flushedState.Shards[ev.shard].Position; got != ev.position {
+				t.Fatalf("latest cursor for shard %s = %q, want %q", ev.shard, got, ev.position)
+			}
+		}
+	default:
+		t.Fatal("expected one flushed result")
+	}
+
+	if buffer := state.buffers["items"]; buffer == nil || len(buffer.changes) != 0 {
+		t.Fatalf("buffer after flush = %+v, want empty", buffer)
 	}
 }
 
