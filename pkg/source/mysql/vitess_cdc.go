@@ -422,7 +422,10 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 		return nil
 	}
 
-	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(ctx, &vtgatepb.VStreamRequest{
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(streamCtx, &vtgatepb.VStreamRequest{
 		TabletType: topodatapb.TabletType_PRIMARY,
 		Vgtid:      startVGtid,
 		Filter:     &binlogdatapb.Filter{Rules: rules},
@@ -473,17 +476,16 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 		}
 		return flushBuffers(sendCtx)
 	}
-	streamingFlushInterval := mysqlCDCStreamingFlushInterval(opts)
-	lastStreamingFlush := time.Now()
-	maybeFlushStreaming := func(sendCtx context.Context) error {
-		if !opts.Streaming || time.Since(lastStreamingFlush) < streamingFlushInterval {
-			return nil
-		}
-		lastStreamingFlush = time.Now()
-		return flushBuffers(sendCtx)
+	var flushTicks <-chan time.Time
+	if opts.Streaming {
+		flushTicker := time.NewTicker(mysqlCDCStreamingFlushInterval(opts))
+		defer flushTicker.Stop()
+		flushTicks = flushTicker.C
 	}
+	recvCh := receiveVitessVStream(streamCtx, reader)
 
 	for {
+		var resp *binlogdatapb.VStreamResponse
 		select {
 		case <-ctx.Done():
 			if opts.Streaming {
@@ -495,35 +497,39 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 				}
 			}
 			return ctx.Err()
-		default:
-		}
-
-		resp, err := reader.Recv()
-		if err != nil {
-			if ctx.Err() != nil {
-				if opts.Streaming {
-					drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-					flushErr := flushPending(drainCtx)
-					cancel()
-					if flushErr != nil {
-						return flushErr
+		case <-flushTicks:
+			if err := flushBuffers(ctx); err != nil {
+				return err
+			}
+			continue
+		case received := <-recvCh:
+			resp = received.resp
+			if received.err != nil {
+				if ctx.Err() != nil {
+					if opts.Streaming {
+						drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
+						flushErr := flushPending(drainCtx)
+						cancel()
+						if flushErr != nil {
+							return flushErr
+						}
 					}
+					return ctx.Err()
 				}
-				return ctx.Err()
+				if errors.Is(received.err, io.EOF) {
+					if ferr := flushTxn(ctx); ferr != nil {
+						return ferr
+					}
+					if ferr := flushBuffers(ctx); ferr != nil {
+						return ferr
+					}
+					if opts.Streaming {
+						return fmt.Errorf("Vitess VStream ended unexpectedly")
+					}
+					return nil
+				}
+				return fmt.Errorf("vstream receive failed: %w", received.err)
 			}
-			if errors.Is(err, io.EOF) {
-				if ferr := flushTxn(ctx); ferr != nil {
-					return ferr
-				}
-				if ferr := flushBuffers(ctx); ferr != nil {
-					return ferr
-				}
-				if opts.Streaming {
-					return fmt.Errorf("Vitess VStream ended unexpectedly")
-				}
-				return nil
-			}
-			return fmt.Errorf("vstream receive failed: %w", err)
 		}
 
 		for _, ev := range resp.Events {
@@ -607,10 +613,34 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 			return flushBuffers(ctx)
 		}
 		idleHeartbeat = false
-		if err := maybeFlushStreaming(ctx); err != nil {
-			return err
-		}
 	}
+}
+
+type vitessVStreamReceiver interface {
+	Recv() (*binlogdatapb.VStreamResponse, error)
+}
+
+type vitessVStreamReceiveResult struct {
+	resp *binlogdatapb.VStreamResponse
+	err  error
+}
+
+func receiveVitessVStream(ctx context.Context, reader vitessVStreamReceiver) <-chan vitessVStreamReceiveResult {
+	results := make(chan vitessVStreamReceiveResult, 1)
+	go func() {
+		for {
+			resp, err := reader.Recv()
+			select {
+			case results <- vitessVStreamReceiveResult{resp: resp, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return results
 }
 
 // vitessStartPlan partitions targets by resume-cursor availability and carries
