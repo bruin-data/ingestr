@@ -34,8 +34,9 @@ func TestProgressJSON_CSVToDuckDB(t *testing.T) {
 	require.NoError(t, os.WriteFile(csvPath, []byte(csvWithRows), 0o644))
 
 	var out, errb bytes.Buffer
+	prevOut, prevErr, prevMode := output.Current()
 	output.Init(&out, &errb, output.ModeJSON)
-	t.Cleanup(func() { output.Init(os.Stdout, os.Stderr, output.ModeText) })
+	t.Cleanup(func() { output.Init(prevOut, prevErr, prevMode) })
 
 	duckDBPath := filepath.Join(tmpDir, "out.duckdb")
 	cfg := &config.IngestConfig{

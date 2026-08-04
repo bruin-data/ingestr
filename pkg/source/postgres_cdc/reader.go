@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
@@ -206,9 +207,9 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 		// none of its data is lost. Batch runs skip this and surface the
 		// error instead — a restart heals them the same way.
 		if schemaErr != nil {
-			fmt.Printf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+			output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
 		} else {
-			fmt.Printf("Source table %s was dropped and recreated; replacing its destination snapshot\n", reincarnationErr.Table)
+			output.Statusf("Source table %s was dropped and recreated; replacing its destination snapshot\n", reincarnationErr.Table)
 		}
 		startLSN, err = r.rebuildForTableChange(ctx, slotName, results, schemaErr, opts)
 		if err != nil {

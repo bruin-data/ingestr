@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
@@ -281,7 +282,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 		table := tables[i]
 		tableInfo := &tables[i]
 		g.Go(func() error {
-			fmt.Printf("Backfilling new table %s before streaming its changes\n", table.Name)
+			output.Statusf("Backfilling new table %s before streaming its changes\n", table.Name)
 			if opts.Streaming {
 				if _, replacement := replacements[table.Name]; replacement {
 					if err := sendResult(gctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
@@ -367,10 +368,10 @@ type streamSignal struct {
 func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string, signal *streamSignal, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (pglogrepl.LSN, error) {
 	if len(signal.newTables) > 0 || len(signal.reincarnatedTables) > 0 {
 		if len(signal.newTables) > 0 {
-			fmt.Printf("New table(s) detected on source: %s; adding to CDC stream\n", strings.Join(signal.newTables, ", "))
+			output.Statusf("New table(s) detected on source: %s; adding to CDC stream\n", strings.Join(signal.newTables, ", "))
 		}
 		if len(signal.reincarnatedTables) > 0 {
-			fmt.Printf("Recreated table(s) detected on source: %s; replacing destination snapshots\n", strings.Join(signal.reincarnatedTables, ", "))
+			output.Statusf("Recreated table(s) detected on source: %s; replacing destination snapshots\n", strings.Join(signal.reincarnatedTables, ", "))
 		}
 		if err := r.source.reconcilePublication(ctx); err != nil {
 			return 0, fmt.Errorf("failed to reconcile publication: %w", err)
@@ -888,7 +889,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// The transaction that tripped this was never emitted, so the
 				// rebuilt stream re-decodes it in full. Batch runs skip this and
 				// surface the error instead — a restart heals them the same way.
-				fmt.Printf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+				output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
 				if err := accum.flushAllContext(ctx, results, token); err != nil {
 					return nil, err
 				}

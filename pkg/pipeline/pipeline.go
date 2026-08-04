@@ -1041,6 +1041,10 @@ func (p *Pipeline) createTracker(ctx context.Context) (progress.Tracker, error) 
 		config.Debug("[PIPELINE] No TTY detected, falling back to log progress mode")
 	}
 
+	if progressMode == config.ProgressLog && p.logWriter == nil && os.Getenv("INGESTR_QUIET_PROGRESS") != "" {
+		p.logWriter = io.Discard
+	}
+
 	var display progress.Display
 	if p.logWriter != nil {
 		display = progress.NewWriterLogDisplay(p.logWriter)
