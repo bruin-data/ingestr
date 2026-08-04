@@ -50,7 +50,7 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 			},
 			wantProp: map[string]string{
 				"type":                 "sql",
-				"uri":                  "file:/tmp/iceberg/catalog.db",
+				"uri":                  "file:/tmp/iceberg/catalog.db?_pragma=busy_timeout%2810000%29",
 				"sql.driver":           "sqlite",
 				"sql.dialect":          "sqlite",
 				"warehouse":            "s3://ingestr-iceberg/",
@@ -149,6 +149,32 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSqliteCatalogURIBusyTimeout(t *testing.T) {
+	t.Parallel()
+
+	// Two ingestr processes share one catalog file; without a timeout the second
+	// fails instantly with SQLITE_BUSY instead of waiting for the lock.
+	cfg, err := parseIcebergConfig("iceberg+sqlite:///tmp/cat.db")
+	require.NoError(t, err)
+	require.Equal(t, "file:/tmp/cat.db?_pragma=busy_timeout%2810000%29", cfg.Properties["uri"])
+
+	// An explicit one is respected.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/cat.db%3F_pragma=busy_timeout(1)")
+	require.NoError(t, err)
+	require.Contains(t, cfg.Properties["uri"], "busy_timeout(1)")
+	require.NotContains(t, cfg.Properties["uri"], "10000")
+
+	// "busy_timeout" in the path is not a pragma; the default still applies.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/busy_timeout.db")
+	require.NoError(t, err)
+	require.Equal(t, "file:/tmp/busy_timeout.db?_pragma=busy_timeout%2810000%29", cfg.Properties["uri"])
+
+	// :memory: is per-connection, so there is nothing to contend with.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///:memory:")
+	require.NoError(t, err)
+	require.Equal(t, ":memory:", cfg.Properties["uri"])
 }
 
 func TestParseIcebergConfigSQLCatalogRequiresDriverDialect(t *testing.T) {
