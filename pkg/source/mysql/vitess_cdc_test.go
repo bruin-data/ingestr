@@ -4,12 +4,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"google.golang.org/protobuf/proto"
 	"vitess.io/vitess/go/sqltypes"
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 	querypb "vitess.io/vitess/go/vt/proto/query"
 )
+
+func TestVitessCDCSupportsStreaming(t *testing.T) {
+	src := NewVitessCDCSource()
+	if !src.SupportsStreaming() {
+		t.Fatal("Vitess CDC should support streaming")
+	}
+	if got := src.DefaultStreamingStrategy(); got != config.StrategyMerge {
+		t.Fatalf("DefaultStreamingStrategy() = %q, want %q", got, config.StrategyMerge)
+	}
+}
 
 func TestVitessLSNRoundTripAndOrdering(t *testing.T) {
 	payload, err := encodeVitessVGtid(&binlogdatapb.VGtid{ShardGtids: []*binlogdatapb.ShardGtid{
