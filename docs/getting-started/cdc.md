@@ -50,7 +50,7 @@ On every run after the first, a CDC connector resumes from the last durable posi
 
 ### One-shot vs. streaming
 
-By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs, and the way to run MySQL CDC. Continuous streaming is available for `postgres+cdc`, `mssql+cdc`, and `mongodb+cdc`: pass the `--stream` CLI flag and ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery — for keyed tables the `merge` strategy makes replays harmless, though keyless append-only change logs can end up with duplicate events after a recovery. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
+By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs. Continuous streaming is available for `postgres+cdc`, `mysql+cdc`, `mariadb+cdc`, `mssql+cdc`, and `mongodb+cdc`: pass the `--stream` CLI flag and ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery — for keyed tables the `merge` strategy makes replays harmless, though keyless append-only change logs can end up with duplicate events after a recovery. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
 
 ### PostgreSQL schema changes while streaming
 
@@ -97,7 +97,7 @@ Each platform has requirements and knobs specific to its change mechanism — fo
 ### Platform notes at a glance
 
 - **PostgreSQL** reads logical replication from a publication and slot. It can manage its own `ingestr_publication` or use one you supply, and tracks progress in shared destination state tables rather than the maximum `_cdc_lsn` in a user table. A running stream absorbs column-level schema changes without restarting; picking up a newly added table takes a restart, since the stream exits and lets its supervisor bring it back up. `TRUNCATE` — or dropping and recreating a source table — is captured as a table replacement.
-- **MySQL / MariaDB** stream the binary log after a consistent snapshot, resuming from the destination's maximum `_cdc_lsn`. Pin a unique `server_id` for scheduled or overlapping runs.
+- **MySQL / MariaDB** stream the binary log after a consistent snapshot, resuming from durable CDC state recorded in the destination. Pin a unique `server_id` for scheduled or overlapping runs.
 - **SQL Server** offers two paths: lightweight **Change Tracking** (net changes since the last version, primary key required) and **log-based CDC** (full row-level change history). Both resume from `_cdc_lsn`.
 - **MongoDB** tails change streams from a replica set / Atlas cluster. Being schema-less, it uses schema inference, so the destination schema is derived from sampled documents.
 - **Vitess** streams through vtgate's VStream API because a sharded cluster has no single binlog to tail; the position is a VGTID covering every shard, so it works for sharded and unsharded keyspaces alike.

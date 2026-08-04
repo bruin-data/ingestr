@@ -54,7 +54,9 @@ const (
 	// receiving any event. Heartbeats arrive every defaultMySQLCDCHeartbeat on a
 	// healthy connection, so a stall this long means the connection is broken
 	// (the syncer reconnects silently and indefinitely by default).
-	mysqlCDCStreamStallTimeout = 60 * time.Second
+	mysqlCDCStreamStallTimeout     = 60 * time.Second
+	mysqlCDCStreamDrainTimeout     = 15 * time.Second
+	mysqlCDCStateTokenQueryTimeout = 5 * time.Second
 )
 
 var mysqlCDCColumns = []schema.Column{
@@ -127,9 +129,10 @@ type MySQLCDCTable struct {
 var _ source.CDCStateProvider = (*MySQLCDCSource)(nil)
 
 type mysqlCDCChange struct {
-	values  []interface{}
-	lsn     string
-	deleted bool
+	values     []interface{}
+	lsn        string
+	checkpoint gomysql.Position
+	deleted    bool
 }
 
 type mysqlCDCChangeBuffer struct {
@@ -137,6 +140,8 @@ type mysqlCDCChangeBuffer struct {
 	tableName   string
 	changes     []mysqlCDCChange
 }
+
+type mysqlCDCCommitTokenFunc func(lastLSN string) (any, error)
 
 type mysqlCDCXAChanges struct {
 	byTable map[string]*mysqlCDCXATableChanges
@@ -364,8 +369,77 @@ func (s *MySQLCDCSource) CDCState() source.CDCStateCommitToken {
 	}
 }
 
+func (s *MySQLCDCSource) snapshotCommitToken(table string, checkpoint mysqlCDCCheckpoint) source.CDCStateCommitToken {
+	position := formatStoredMySQLCheckpoint(checkpoint)
+	return source.CDCStateCommitToken{
+		SnapshotPositions: map[string]string{table: position},
+	}
+}
+
+func (s *MySQLCDCSource) checkpointCommitToken(ctx context.Context, position string, checkpointPosition gomysql.Position) (source.CDCStateCommitToken, error) {
+	if checkpointPosition.Name == "" {
+		return source.CDCStateCommitToken{}, nil
+	}
+	checkpointCtx, cancel := source.WithoutCancelWithConnectorLease(ctx)
+	defer cancel()
+	checkpointCtx, cancel = context.WithTimeout(checkpointCtx, mysqlCDCStateTokenQueryTimeout)
+	defer cancel()
+	checkpoint, err := s.checkpointForPosition(checkpointCtx, s.db, checkpointPosition)
+	if err != nil {
+		return source.CDCStateCommitToken{}, err
+	}
+	if position == "" {
+		position = formatStoredMySQLPosition(checkpoint.Position, 0)
+	}
+	return source.CDCStateCommitToken{
+		Position: formatStoredMySQLCheckpointAt(position, checkpoint),
+	}, nil
+}
+
+func emitMySQLCDCCommitToken(ctx context.Context, results chan<- source.RecordBatchResult, token source.CDCStateCommitToken) error {
+	if token.Position == "" && len(token.SnapshotPositions) == 0 {
+		return nil
+	}
+	return emitMySQLCDCResult(ctx, results, source.RecordBatchResult{CommitToken: token})
+}
+
+func emitMySQLCDCResult(ctx context.Context, results chan<- source.RecordBatchResult, result source.RecordBatchResult) error {
+	if err := ctx.Err(); err != nil {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		return err
+	}
+	select {
+	case results <- result:
+		return nil
+	case <-ctx.Done():
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		return ctx.Err()
+	}
+}
+
+func detachedMySQLCDCStreamDrainContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	drainCtx, stopGuard := source.WithoutCancelWithConnectorLease(ctx)
+	drainCtx, cancel := context.WithTimeout(drainCtx, mysqlCDCStreamDrainTimeout)
+	return drainCtx, func() {
+		cancel()
+		stopGuard()
+	}
+}
+
 func (s *MySQLCDCSource) HandlesIncrementality() bool {
 	return true
+}
+
+func (s *MySQLCDCSource) SupportsStreaming() bool {
+	return true
+}
+
+func (s *MySQLCDCSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
 }
 
 func (s *MySQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -609,10 +683,20 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			}
 			startByTable[table.Name] = snapshotCheckpoint.Position
 			s.recordMySQLCDCSnapshot(table.Name, snapshotCheckpoint)
+			if opts.Streaming {
+				if err := emitMySQLCDCCommitToken(ctx, results, s.snapshotCommitToken(table.Name, snapshotCheckpoint)); err != nil {
+					_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+					return
+				}
+			}
 		}
 
 		if err := s.streamTables(ctx, selected, metaByTable, startByTable, opts.ReadOptions, results, true); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			if opts.Streaming {
+				_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+			} else {
+				results <- source.RecordBatchResult{Err: err}
+			}
 		}
 	}()
 
@@ -994,7 +1078,11 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 					PrimaryKeys: outputSchema.PrimaryKeys,
 				}
 				if err := t.source.streamTables(ctx, []source.SourceTableInfo{tableInfo}, metaByTable, startByTable, opts, results, false); err != nil {
-					results <- source.RecordBatchResult{Err: err}
+					if opts.Streaming {
+						_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+					} else {
+						results <- source.RecordBatchResult{Err: err}
+					}
 				}
 				return
 			}
@@ -1011,6 +1099,12 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 			return
 		}
 		t.source.recordMySQLCDCSnapshot(t.tableName, snapshotCheckpoint)
+		if opts.Streaming {
+			if err := emitMySQLCDCCommitToken(ctx, results, t.source.snapshotCommitToken(t.tableName, snapshotCheckpoint)); err != nil {
+				_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
+			}
+		}
 
 		internalName := t.metadata.Name
 		startByTable := map[string]gomysql.Position{internalName: snapshotCheckpoint.Position}
@@ -1021,7 +1115,11 @@ func (t *MySQLCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-ch
 			PrimaryKeys: outputSchema.PrimaryKeys,
 		}
 		if err := t.source.streamTables(ctx, []source.SourceTableInfo{tableInfo}, metaByTable, startByTable, opts, results, false); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			if opts.Streaming {
+				_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+			} else {
+				results <- source.RecordBatchResult{Err: err}
+			}
 		}
 	}()
 
@@ -1246,19 +1344,24 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		return nil
 	}
 
-	target, err := currentMySQLBinlogPosition(ctx, s.db)
-	if err != nil {
-		return err
-	}
-	targetCheckpoint, err := s.checkpointForPosition(ctx, s.db, target)
-	if err != nil {
-		return err
+	var target gomysql.Position
+	var targetCheckpoint mysqlCDCCheckpoint
+	if !opts.Streaming {
+		var err error
+		target, err = currentMySQLBinlogPosition(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		targetCheckpoint, err = s.checkpointForPosition(ctx, s.db, target)
+		if err != nil {
+			return err
+		}
 	}
 	start := minMySQLPosition(startByTable)
 	if start.Name == "" {
 		return nil
 	}
-	if start.Compare(target) >= 0 {
+	if !opts.Streaming && start.Compare(target) >= 0 {
 		s.recordMySQLCDCCheckpoint(targetCheckpoint)
 		return nil
 	}
@@ -1307,18 +1410,77 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		pendingXALimit = defaultMySQLCDCPendingXALimit
 	}
 	safeCheckpoint := func(position gomysql.Position) gomysql.Position {
-		for _, pending := range pendingXA {
-			if pending.start.Name == "" {
-				continue
-			}
-			if position.Name == "" || pending.start.Compare(position) < 0 {
-				position = pending.start
+		return safeMySQLCDCCheckpoint(position, pendingXA, buffers)
+	}
+	lastTokenPosition := ""
+	streamingToken := func(position gomysql.Position, preferredLSN string) (source.CDCStateCommitToken, error) {
+		safe := safeCheckpoint(position)
+		if safe.Name == "" {
+			return source.CDCStateCommitToken{}, nil
+		}
+		commitPosition := ""
+		if preferredLSN != "" {
+			if parsed, ok := parseStoredMySQLPosition(preferredLSN); ok && parsed.Compare(safe) == 0 {
+				commitPosition = preferredLSN
 			}
 		}
-		return position
+		token, err := s.checkpointCommitToken(ctx, commitPosition, safe)
+		if err != nil {
+			return source.CDCStateCommitToken{}, err
+		}
+		if token.Position == "" || token.Position == lastTokenPosition {
+			return source.CDCStateCommitToken{}, nil
+		}
+		lastTokenPosition = token.Position
+		return token, nil
+	}
+	var tokenFn mysqlCDCCommitTokenFunc
+	if opts.Streaming {
+		tokenFn = func(lastLSN string) (any, error) {
+			position, ok := parseStoredMySQLPosition(lastLSN)
+			if !ok {
+				return nil, fmt.Errorf("invalid MySQL CDC change LSN %q", lastLSN)
+			}
+			token, err := streamingToken(position, lastLSN)
+			if err != nil {
+				return nil, err
+			}
+			if token.Position == "" {
+				return nil, nil
+			}
+			return token, nil
+		}
+	}
+	emitStreamingProgress := func(sendCtx context.Context, position gomysql.Position) error {
+		if !opts.Streaming {
+			return nil
+		}
+		token, err := streamingToken(position, "")
+		if err != nil {
+			return err
+		}
+		return emitMySQLCDCCommitToken(sendCtx, results, token)
+	}
+	flushBuffers := func(sendCtx context.Context) error {
+		return flushMySQLCDCChangeBuffersWithTokenContext(sendCtx, buffers, results, tokenFn)
+	}
+	flushBuffersAndProgress := func(sendCtx context.Context, position gomysql.Position) error {
+		if err := flushBuffers(sendCtx); err != nil {
+			return err
+		}
+		return emitStreamingProgress(sendCtx, position)
+	}
+	streamingFlushInterval := mysqlCDCStreamingFlushInterval(opts)
+	lastStreamingFlush := time.Now()
+	maybeFlushStreaming := func(position gomysql.Position) error {
+		if !opts.Streaming || time.Since(lastStreamingFlush) < streamingFlushInterval {
+			return nil
+		}
+		lastStreamingFlush = time.Now()
+		return flushBuffersAndProgress(ctx, position)
 	}
 	finish := func(position gomysql.Position) error {
-		if err := flushMySQLCDCChangeBuffers(buffers, results); err != nil {
+		if err := flushMySQLCDCChangeBuffersWithTokenContext(ctx, buffers, results, nil); err != nil {
 			return err
 		}
 		checkpoint := targetCheckpoint
@@ -1336,7 +1498,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			return fmt.Errorf("missing output schema for MySQL CDC table %s", table)
 		}
 		resultTable := mysqlCDCResultTableName(meta.Name, len(tables), tagResults)
-		return appendMySQLCDCBufferedChanges(buffers, meta.Name, outputSchema, resultTable, changes, batchSize, results)
+		return appendMySQLCDCBufferedChangesWithTokenContext(ctx, buffers, meta.Name, outputSchema, resultTable, changes, batchSize, results, tokenFn)
 	}
 	releaseXA := func(xaID string, commit bool) error {
 		pending := pendingXA[xaID]
@@ -1349,6 +1511,9 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			// checkpointed — by the run that recorded it. Replaying its
 			// terminal event alone is benign.
 			return nil
+		}
+		if activeXA == xaID {
+			activeXA = ""
 		}
 		if commit {
 			tableNames := make([]string, 0, len(pending.byTable))
@@ -1367,31 +1532,50 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		pendingXAChanges -= pending.count
 		pendingXABytes -= pending.bytes
 		delete(pendingXA, xaID)
-		if activeXA == xaID {
-			activeXA = ""
-		}
 		return nil
 	}
 	lastDelivery := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
+			if opts.Streaming {
+				drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
+				err := flushBuffersAndProgress(drainCtx, current)
+				cancel()
+				if err != nil {
+					return err
+				}
+			}
 			return ctx.Err()
 		default:
 		}
 
-		if current.Compare(target) >= 0 {
+		if !opts.Streaming && current.Compare(target) >= 0 {
 			return finish(current)
 		}
 
 		event, err, eventCtxErr := readMySQLCDCEvent(ctx, streamer)
 		if err != nil {
 			if ctx.Err() != nil {
+				if opts.Streaming {
+					drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
+					flushErr := flushBuffersAndProgress(drainCtx, current)
+					cancel()
+					if flushErr != nil {
+						return flushErr
+					}
+				}
 				return ctx.Err()
 			}
 			if isMySQLCDCReadPollTimeout(ctx, err, eventCtxErr) {
 				if time.Since(lastDelivery) >= mysqlCDCStreamStallTimeout {
+					if opts.Streaming {
+						return fmt.Errorf("MySQL binlog stream stalled at %s: no events or heartbeats received for %s; check connectivity to the server", current, mysqlCDCStreamStallTimeout)
+					}
 					return fmt.Errorf("MySQL binlog stream stalled at %s while catching up to %s: no events or heartbeats received for %s; check connectivity to the server", current, target, mysqlCDCStreamStallTimeout)
+				}
+				if err := maybeFlushStreaming(current); err != nil {
+					return err
 				}
 				continue
 			}
@@ -1407,6 +1591,13 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				return fmt.Errorf("MySQL CDC does not support PARTIAL_UPDATE_ROWS_EVENT; disable binlog_row_value_options=PARTIAL_JSON")
 			}
 			if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
+				if opts.Streaming {
+					lastStreamingFlush = time.Now()
+					if err := flushBuffersAndProgress(ctx, current); err != nil {
+						return err
+					}
+					continue
+				}
 				// current < target here is normal, not an anomaly: non-data
 				// events (FORMAT_DESCRIPTION, PREVIOUS_GTIDS, artificial
 				// MariaDB events) carry LogPos=0 and don't advance current.
@@ -1420,7 +1611,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		previousPosition := current
 		eventPos := mysqlEventPosition(event, current)
 		current = eventPos
-		if eventPos.Compare(target) > 0 {
+		if !opts.Streaming && eventPos.Compare(target) > 0 {
 			return finish(previousPosition)
 		}
 		logicalEvents, err := mysqlBinlogEvents(event)
@@ -1484,15 +1675,20 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 					return err
 				}
 				if len(truncated) > 0 {
-					if err := flushMySQLCDCChangeBuffers(buffers, results); err != nil {
+					if err := flushBuffers(ctx); err != nil {
 						return err
 					}
 					for _, meta := range truncated {
-						results <- source.RecordBatchResult{
+						if err := emitMySQLCDCResult(ctx, results, source.RecordBatchResult{
 							TableName:      mysqlCDCResultTableName(meta.Name, len(tables), tagResults),
 							Truncate:       true,
 							CDCWALTruncate: true,
+						}); err != nil {
+							return err
 						}
+					}
+					if err := emitStreamingProgress(ctx, eventPos); err != nil {
+						return err
 					}
 				}
 				continue
@@ -1539,7 +1735,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if err := validateMySQLCDCFullRowImage(rowsEvent, len(sourceColumnsWithoutMySQLCDC(meta.FullSchema))); err != nil {
 				return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 			}
-			changes, nextRowSeq, err := mysqlRowsEventToChangesFromSequence(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos, rowSeq)
+			changes, nextRowSeq, err := mysqlRowsEventToChangesFromSequence(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos, rowSeq, previousPosition)
 			if err != nil {
 				return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 			}
@@ -1585,7 +1781,43 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				return err
 			}
 		}
+		if err := maybeFlushStreaming(current); err != nil {
+			return err
+		}
 	}
+}
+
+func safeMySQLCDCCheckpoint(position gomysql.Position, pendingXA map[string]*mysqlCDCXAChanges, buffers map[string]*mysqlCDCChangeBuffer) gomysql.Position {
+	for _, pending := range pendingXA {
+		if pending.start.Name == "" {
+			continue
+		}
+		if position.Name == "" || pending.start.Compare(position) < 0 {
+			position = pending.start
+		}
+	}
+	for _, buffer := range buffers {
+		checkpoint := firstMySQLCDCBufferedCheckpoint(buffer)
+		if checkpoint.Name == "" {
+			continue
+		}
+		if position.Name == "" || checkpoint.Compare(position) < 0 {
+			position = checkpoint
+		}
+	}
+	return position
+}
+
+func firstMySQLCDCBufferedCheckpoint(buffer *mysqlCDCChangeBuffer) gomysql.Position {
+	if buffer == nil || len(buffer.changes) == 0 {
+		return gomysql.Position{}
+	}
+	checkpoint := buffer.changes[0].checkpoint
+	if checkpoint.Name != "" {
+		return checkpoint
+	}
+	position, _ := parseStoredMySQLPosition(buffer.changes[0].lsn)
+	return position
 }
 
 func mysqlBinlogEvents(event *replication.BinlogEvent) ([]*replication.BinlogEvent, error) {
@@ -2142,11 +2374,11 @@ func (s *MySQLCDCSource) binlogSyncerConfig() replication.BinlogSyncerConfig {
 }
 
 func mysqlRowsEventToChanges(eventType replication.EnumRowsEventType, rows [][]interface{}, fullSchema *schema.TableSchema, outputSchema *schema.TableSchema, pos gomysql.Position) ([]mysqlCDCChange, error) {
-	changes, _, err := mysqlRowsEventToChangesFromSequence(eventType, rows, fullSchema, outputSchema, pos, 0)
+	changes, _, err := mysqlRowsEventToChangesFromSequence(eventType, rows, fullSchema, outputSchema, pos, 0, pos)
 	return changes, err
 }
 
-func mysqlRowsEventToChangesFromSequence(eventType replication.EnumRowsEventType, rows [][]interface{}, fullSchema *schema.TableSchema, outputSchema *schema.TableSchema, pos gomysql.Position, rowSeq int) ([]mysqlCDCChange, int, error) {
+func mysqlRowsEventToChangesFromSequence(eventType replication.EnumRowsEventType, rows [][]interface{}, fullSchema *schema.TableSchema, outputSchema *schema.TableSchema, pos gomysql.Position, rowSeq int, checkpoint gomysql.Position) ([]mysqlCDCChange, int, error) {
 	fullSourceColumns := sourceColumnsWithoutMySQLCDC(fullSchema)
 	outputSourceColumns := sourceColumnsWithoutMySQLCDC(outputSchema)
 	indexes, err := sourceIndexes(fullSourceColumns, outputSourceColumns)
@@ -2164,7 +2396,7 @@ func mysqlRowsEventToChangesFromSequence(eventType replication.EnumRowsEventType
 			if err != nil {
 				return nil, rowSeq, err
 			}
-			changes = append(changes, mysqlCDCChange{values: values, lsn: formatStoredMySQLPosition(pos, rowSeq), deleted: false})
+			changes = append(changes, mysqlCDCChange{values: values, lsn: formatStoredMySQLPosition(pos, rowSeq), checkpoint: checkpoint, deleted: false})
 			rowSeq++
 		}
 	case replication.EnumRowsEventTypeDelete:
@@ -2173,7 +2405,7 @@ func mysqlRowsEventToChangesFromSequence(eventType replication.EnumRowsEventType
 			if err != nil {
 				return nil, rowSeq, err
 			}
-			changes = append(changes, mysqlCDCChange{values: values, lsn: formatStoredMySQLPosition(pos, rowSeq), deleted: true})
+			changes = append(changes, mysqlCDCChange{values: values, lsn: formatStoredMySQLPosition(pos, rowSeq), checkpoint: checkpoint, deleted: true})
 			rowSeq++
 		}
 	case replication.EnumRowsEventTypeUpdate:
@@ -2188,14 +2420,14 @@ func mysqlRowsEventToChangesFromSequence(eventType replication.EnumRowsEventType
 				if err != nil {
 					return nil, rowSeq, err
 				}
-				changes = append(changes, mysqlCDCChange{values: beforeValues, lsn: formatStoredMySQLPosition(pos, rowSeq), deleted: true})
+				changes = append(changes, mysqlCDCChange{values: beforeValues, lsn: formatStoredMySQLPosition(pos, rowSeq), checkpoint: checkpoint, deleted: true})
 				rowSeq++
 			}
 			afterValues, err := projectMySQLCDCRow(after, fullSourceColumns, outputSourceColumns, indexes)
 			if err != nil {
 				return nil, rowSeq, err
 			}
-			changes = append(changes, mysqlCDCChange{values: afterValues, lsn: formatStoredMySQLPosition(pos, rowSeq), deleted: false})
+			changes = append(changes, mysqlCDCChange{values: afterValues, lsn: formatStoredMySQLPosition(pos, rowSeq), checkpoint: checkpoint, deleted: false})
 			rowSeq++
 		}
 	default:
@@ -2478,13 +2710,31 @@ func mysqlCDCChangesToBatch(changes []mysqlCDCChange, tableSchema *schema.TableS
 }
 
 func mysqlCDCStreamBatchSize(opts source.ReadOptions) int {
+	if opts.Streaming && opts.FlushRecords > 0 {
+		return opts.FlushRecords
+	}
 	if opts.PageSize > 0 {
 		return opts.PageSize
 	}
 	return defaultMySQLCDCStreamBatchSize
 }
 
+func mysqlCDCStreamingFlushInterval(opts source.ReadOptions) time.Duration {
+	if opts.Streaming && opts.FlushInterval > 0 {
+		return opts.FlushInterval
+	}
+	return defaultMySQLCDCHeartbeat
+}
+
 func appendMySQLCDCBufferedChanges(buffers map[string]*mysqlCDCChangeBuffer, key string, tableSchema *schema.TableSchema, tableName string, changes []mysqlCDCChange, batchSize int, results chan<- source.RecordBatchResult) error {
+	return appendMySQLCDCBufferedChangesWithToken(buffers, key, tableSchema, tableName, changes, batchSize, results, nil)
+}
+
+func appendMySQLCDCBufferedChangesWithToken(buffers map[string]*mysqlCDCChangeBuffer, key string, tableSchema *schema.TableSchema, tableName string, changes []mysqlCDCChange, batchSize int, results chan<- source.RecordBatchResult, tokenFn mysqlCDCCommitTokenFunc) error {
+	return appendMySQLCDCBufferedChangesWithTokenContext(context.Background(), buffers, key, tableSchema, tableName, changes, batchSize, results, tokenFn)
+}
+
+func appendMySQLCDCBufferedChangesWithTokenContext(ctx context.Context, buffers map[string]*mysqlCDCChangeBuffer, key string, tableSchema *schema.TableSchema, tableName string, changes []mysqlCDCChange, batchSize int, results chan<- source.RecordBatchResult, tokenFn mysqlCDCCommitTokenFunc) error {
 	if len(changes) == 0 {
 		return nil
 	}
@@ -2500,27 +2750,48 @@ func appendMySQLCDCBufferedChanges(buffers map[string]*mysqlCDCChangeBuffer, key
 	if len(buffer.changes) < batchSize {
 		return nil
 	}
-	return buffer.flush(results)
+	return buffer.flush(ctx, results, tokenFn)
 }
 
 func flushMySQLCDCChangeBuffers(buffers map[string]*mysqlCDCChangeBuffer, results chan<- source.RecordBatchResult) error {
+	return flushMySQLCDCChangeBuffersWithToken(buffers, results, nil)
+}
+
+func flushMySQLCDCChangeBuffersWithToken(buffers map[string]*mysqlCDCChangeBuffer, results chan<- source.RecordBatchResult, tokenFn mysqlCDCCommitTokenFunc) error {
+	return flushMySQLCDCChangeBuffersWithTokenContext(context.Background(), buffers, results, tokenFn)
+}
+
+func flushMySQLCDCChangeBuffersWithTokenContext(ctx context.Context, buffers map[string]*mysqlCDCChangeBuffer, results chan<- source.RecordBatchResult, tokenFn mysqlCDCCommitTokenFunc) error {
 	for _, buffer := range buffers {
-		if err := buffer.flush(results); err != nil {
+		if err := buffer.flush(ctx, results, tokenFn); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (b *mysqlCDCChangeBuffer) flush(results chan<- source.RecordBatchResult) error {
+func (b *mysqlCDCChangeBuffer) flush(ctx context.Context, results chan<- source.RecordBatchResult, tokenFn mysqlCDCCommitTokenFunc) error {
 	if b == nil || len(b.changes) == 0 {
 		return nil
 	}
-	record, err := mysqlCDCChangesToBatch(b.changes, b.tableSchema)
+	changes := b.changes
+	b.changes = b.changes[:0]
+	lastLSN := changes[len(changes)-1].lsn
+	record, err := mysqlCDCChangesToBatch(changes, b.tableSchema)
 	if err != nil {
 		return err
 	}
-	results <- source.RecordBatchResult{Batch: record, TableName: b.tableName}
+	var token any
+	if tokenFn != nil {
+		token, err = tokenFn(lastLSN)
+		if err != nil {
+			record.Release()
+			return err
+		}
+	}
+	if err := emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Batch: record, TableName: b.tableName, CommitToken: token}); err != nil {
+		return err
+	}
 	b.changes = b.changes[:0]
 	return nil
 }
@@ -2858,6 +3129,10 @@ func formatStoredMySQLPosition(pos gomysql.Position, rowSeq int) string {
 
 func formatStoredMySQLCheckpoint(checkpoint mysqlCDCCheckpoint) string {
 	position := formatStoredMySQLPosition(checkpoint.Position, 0)
+	return formatStoredMySQLCheckpointAt(position, checkpoint)
+}
+
+func formatStoredMySQLCheckpointAt(position string, checkpoint mysqlCDCCheckpoint) string {
 	if checkpoint.Identity == "" {
 		return position
 	}
@@ -2920,5 +3195,6 @@ func mysqlBinlogSequence(name string) uint64 {
 var (
 	_ source.Source           = (*MySQLCDCSource)(nil)
 	_ source.MultiTableSource = (*MySQLCDCSource)(nil)
+	_ source.StreamingSource  = (*MySQLCDCSource)(nil)
 	_ source.SourceTable      = (*MySQLCDCTable)(nil)
 )

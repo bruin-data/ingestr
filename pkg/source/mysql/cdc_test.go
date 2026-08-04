@@ -508,9 +508,11 @@ func TestMySQLCDCRejectsNonMergeStrategies(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestMySQLCDCDoesNotAdvertiseStreaming(t *testing.T) {
-	_, ok := any(NewMySQLCDCSource()).(source.StreamingSource)
-	require.False(t, ok)
+func TestMySQLCDCAdvertisesStreaming(t *testing.T) {
+	streaming, ok := any(NewMySQLCDCSource()).(source.StreamingSource)
+	require.True(t, ok)
+	require.True(t, streaming.SupportsStreaming())
+	assert.Equal(t, config.StrategyMerge, streaming.DefaultStreamingStrategy())
 }
 
 func TestStoredMySQLPositionHelpers(t *testing.T) {
@@ -552,6 +554,13 @@ func TestStoredMySQLCheckpointCarriesLineage(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, checkpoint, parsed)
 	assert.True(t, strings.HasPrefix(stored, formatStoredMySQLPosition(checkpoint.Position, 0)+":l1:"))
+
+	rowPosition := formatStoredMySQLPosition(checkpoint.Position, 42)
+	stored = formatStoredMySQLCheckpointAt(rowPosition, checkpoint)
+	parsed, ok = parseStoredMySQLCheckpoint(stored)
+	require.True(t, ok)
+	assert.Equal(t, checkpoint, parsed)
+	assert.True(t, strings.HasPrefix(stored, rowPosition+":l1:"))
 }
 
 func TestMySQLCDCResumeRejectsMissingAndMismatchedLineage(t *testing.T) {
@@ -699,6 +708,169 @@ func TestAppendMySQLCDCBufferedChangesFlushesAtBatchSize(t *testing.T) {
 	require.NotNil(t, result.Batch)
 	assert.EqualValues(t, 1, result.Batch.NumRows())
 	result.Batch.Release()
+}
+
+func TestAppendMySQLCDCBufferedChangesAttachesCommitToken(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 1)
+	buffers := map[string]*mysqlCDCChangeBuffer{}
+	lsn := formatStoredMySQLPosition(gomysql.Position{Name: "mysql-bin.000001", Pos: 100}, 0)
+
+	err := appendMySQLCDCBufferedChangesWithToken(
+		buffers,
+		"items",
+		tableSchema,
+		"items",
+		[]mysqlCDCChange{{values: []interface{}{int64(1), "item1"}, lsn: lsn}},
+		1,
+		results,
+		func(lastLSN string) (any, error) {
+			assert.Equal(t, lsn, lastLSN)
+			return source.CDCStateCommitToken{Position: lastLSN}, nil
+		},
+	)
+	require.NoError(t, err)
+
+	result := <-results
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+	assert.Equal(t, "items", result.TableName)
+	token, ok := result.CommitToken.(source.CDCStateCommitToken)
+	require.True(t, ok)
+	assert.Equal(t, lsn, token.Position)
+}
+
+func TestAppendMySQLCDCBufferedChangesTokenExcludesFlushedBuffer(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 1)
+	buffers := map[string]*mysqlCDCChangeBuffer{}
+	current := gomysql.Position{Name: "mysql-bin.000001", Pos: 200}
+	beforeEvent := gomysql.Position{Name: "mysql-bin.000001", Pos: 100}
+	lsn := formatStoredMySQLPosition(current, 0)
+
+	err := appendMySQLCDCBufferedChangesWithTokenContext(
+		context.Background(),
+		buffers,
+		"items",
+		tableSchema,
+		"items",
+		[]mysqlCDCChange{{values: []interface{}{int64(1), "item1"}, lsn: lsn, checkpoint: beforeEvent}},
+		1,
+		results,
+		func(lastLSN string) (any, error) {
+			position, ok := parseStoredMySQLPosition(lastLSN)
+			require.True(t, ok)
+			safe := safeMySQLCDCCheckpoint(position, nil, buffers)
+			return source.CDCStateCommitToken{Position: formatStoredMySQLPosition(safe, 0)}, nil
+		},
+	)
+	require.NoError(t, err)
+
+	result := <-results
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+	token, ok := result.CommitToken.(source.CDCStateCommitToken)
+	require.True(t, ok)
+	assert.Equal(t, formatStoredMySQLPosition(current, 0), token.Position)
+}
+
+func TestAppendMySQLCDCBufferedChangesTokenIncludesPendingXA(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 1)
+	buffers := map[string]*mysqlCDCChangeBuffer{}
+	pendingStart := gomysql.Position{Name: "mysql-bin.000001", Pos: 80}
+	current := gomysql.Position{Name: "mysql-bin.000001", Pos: 200}
+	beforeEvent := gomysql.Position{Name: "mysql-bin.000001", Pos: 100}
+	lsn := formatStoredMySQLPosition(current, 0)
+	pendingXA := map[string]*mysqlCDCXAChanges{
+		"xa": {start: pendingStart},
+	}
+
+	err := appendMySQLCDCBufferedChangesWithTokenContext(
+		context.Background(),
+		buffers,
+		"items",
+		tableSchema,
+		"items",
+		[]mysqlCDCChange{{values: []interface{}{int64(1), "item1"}, lsn: lsn, checkpoint: beforeEvent}},
+		1,
+		results,
+		func(lastLSN string) (any, error) {
+			position, ok := parseStoredMySQLPosition(lastLSN)
+			require.True(t, ok)
+			safe := safeMySQLCDCCheckpoint(position, pendingXA, buffers)
+			return source.CDCStateCommitToken{Position: formatStoredMySQLPosition(safe, 0)}, nil
+		},
+	)
+	require.NoError(t, err)
+
+	result := <-results
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+	token, ok := result.CommitToken.(source.CDCStateCommitToken)
+	require.True(t, ok)
+	assert.Equal(t, formatStoredMySQLPosition(pendingStart, 0), token.Position)
+}
+
+func TestSafeMySQLCDCCheckpointIncludesUnflushedBuffers(t *testing.T) {
+	current := gomysql.Position{Name: "mysql-bin.000001", Pos: 300}
+	bufferCheckpoint := gomysql.Position{Name: "mysql-bin.000001", Pos: 200}
+	pendingCheckpoint := gomysql.Position{Name: "mysql-bin.000001", Pos: 120}
+
+	got := safeMySQLCDCCheckpoint(current, nil, map[string]*mysqlCDCChangeBuffer{
+		"orders": {
+			changes: []mysqlCDCChange{{
+				lsn:        formatStoredMySQLPosition(gomysql.Position{Name: "mysql-bin.000001", Pos: 220}, 0),
+				checkpoint: bufferCheckpoint,
+			}},
+		},
+	})
+	assert.Equal(t, bufferCheckpoint, got)
+
+	got = safeMySQLCDCCheckpoint(current, map[string]*mysqlCDCXAChanges{
+		"xa": {start: pendingCheckpoint},
+	}, map[string]*mysqlCDCChangeBuffer{
+		"orders": {
+			changes: []mysqlCDCChange{{
+				lsn:        formatStoredMySQLPosition(gomysql.Position{Name: "mysql-bin.000001", Pos: 220}, 0),
+				checkpoint: bufferCheckpoint,
+			}},
+		},
+	})
+	assert.Equal(t, pendingCheckpoint, got)
+}
+
+func TestMySQLCDCStreamingBatchSizeUsesFlushRecords(t *testing.T) {
+	assert.Equal(t, 7, mysqlCDCStreamBatchSize(source.ReadOptions{
+		Streaming:    true,
+		FlushRecords: 7,
+		PageSize:     100,
+	}))
+	assert.Equal(t, 100, mysqlCDCStreamBatchSize(source.ReadOptions{PageSize: 100}))
 }
 
 func assertNoCDCResult(t *testing.T, results <-chan source.RecordBatchResult) {
