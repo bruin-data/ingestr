@@ -24,6 +24,7 @@ const shardedVitessKeyspace = "shardedks"
 // target keyspace, since _bruin_staging can't be auto-created on Vitess) + the RENAME
 // swap; the follow-up merge load exercises the UPDATE...JOIN + INSERT...NOT EXISTS path.
 func TestVitessDestination_ReplaceAndMerge(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -77,6 +78,7 @@ func TestVitessDestination_ReplaceAndMerge(t *testing.T) {
 // connect and rejected with a clear error, rather than surfacing a cryptic vtgate error
 // partway through a run.
 func TestVitessDestination_ShardedRejected(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

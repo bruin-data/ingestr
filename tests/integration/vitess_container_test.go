@@ -72,6 +72,7 @@ func startVitessContainer(ctx context.Context) (testcontainers.Container, string
 // read is rejected by that cap, then verifies ingestr reads every row (only
 // possible because the Vitess source enables the OLAP workload).
 func TestVitessSourceReadsBeyondRowCap(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -117,6 +118,7 @@ func TestVitessSourceReadsBeyondRowCap(t *testing.T) {
 // pointing the user at the dedicated vitess:// scheme rather than silently
 // misbehaving (e.g. hitting the OLTP row cap).
 func TestMySQLSchemeRejectsVitess(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
