@@ -1,12 +1,15 @@
 package mysql
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	psdbconnect "github.com/bruin-data/ingestr/pkg/source/mysql/internal/psdbconnect"
 	"google.golang.org/protobuf/proto"
 	"vitess.io/vitess/go/sqltypes"
@@ -63,6 +66,19 @@ func TestCDCSchemeRouting(t *testing.T) {
 				t.Errorf("scheme %q routed to %T, want %T", tc.scheme, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPlanetScaleCDCAdvertisesStreaming(t *testing.T) {
+	streaming, ok := any(NewPlanetScaleCDCSource()).(source.StreamingSource)
+	if !ok {
+		t.Fatal("PlanetScale CDC should implement StreamingSource")
+	}
+	if !streaming.SupportsStreaming() {
+		t.Fatal("PlanetScale CDC should support streaming")
+	}
+	if got := streaming.DefaultStreamingStrategy(); got != config.StrategyMerge {
+		t.Fatalf("DefaultStreamingStrategy() = %q, want %q", got, config.StrategyMerge)
 	}
 }
 
@@ -235,6 +251,89 @@ func TestPsdbRewriteBufferedLSNs(t *testing.T) {
 	}
 	if psdbRewriteBufferedLSNs(buffers, "users", len(buffers["users"].changes), 10, payload) {
 		t.Error("out-of-range start should not rewrite")
+	}
+}
+
+func TestPsdbStreamingTableStateCopyCompletionCheckpoint(t *testing.T) {
+	pk := &querypb.QueryResult{
+		Fields: []*querypb.Field{{Name: "id", Type: querypb.Type_VARCHAR}},
+		Rows:   []*querypb.Row{sqltypes.RowToProto3([]sqltypes.Value{sqltypes.NewVarChar("42")})},
+	}
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeString, Nullable: false}},
+		PrimaryKeys: []string{"id"},
+	})
+	state := newPsdbStreamingTableState(
+		psdbCDCTarget{bareName: "items", schema: tableSchema},
+		psdbCursorState{Shards: map[string]psdbShardCursor{}},
+		7,
+	)
+	results := make(chan source.RecordBatchResult, 1)
+
+	copyCursor := &psdbconnect.TableCursor{
+		Keyspace:    "ks",
+		Shard:       "-",
+		Position:    "MySQL56/abc:1-10",
+		LastKnownPk: pk,
+	}
+	checkpoint, err := state.processResponse(
+		context.Background(),
+		"-",
+		copyCursor,
+		false,
+		nil,
+		[]mysqlCDCChange{{values: []interface{}{"42"}}},
+		true,
+		100,
+		results,
+	)
+	if err != nil {
+		t.Fatalf("process copy response: %v", err)
+	}
+	if checkpoint == nil {
+		t.Fatal("expected copy checkpoint")
+	}
+
+	finalCursor := &psdbconnect.TableCursor{
+		Keyspace: "ks",
+		Shard:    "-",
+		Position: "MySQL56/abc:1-11",
+	}
+	if _, err := state.processResponse(context.Background(), "-", finalCursor, true, checkpoint, nil, false, 100, results); err != nil {
+		t.Fatalf("process copy completion: %v", err)
+	}
+
+	buffer := state.buffers["items"]
+	if buffer == nil || len(buffer.changes) != 2 {
+		t.Fatalf("buffered changes = %+v, want original copy row plus completion checkpoint", buffer)
+	}
+	_, copyPayload, ok := parseVitessLSN(buffer.changes[0].lsn)
+	if !ok {
+		t.Fatalf("copy row LSN did not parse: %q", buffer.changes[0].lsn)
+	}
+	copyState, err := decodePsdbCursor(copyPayload)
+	if err != nil {
+		t.Fatalf("decode copy cursor: %v", err)
+	}
+	if len(copyState.Shards["-"].LastKnownPk) == 0 {
+		t.Fatal("copy row should retain LastKnownPk for interrupted snapshot resume")
+	}
+
+	_, finalPayload, ok := parseVitessLSN(buffer.changes[1].lsn)
+	if !ok {
+		t.Fatalf("completion checkpoint LSN did not parse: %q", buffer.changes[1].lsn)
+	}
+	finalState, err := decodePsdbCursor(finalPayload)
+	if err != nil {
+		t.Fatalf("decode final cursor: %v", err)
+	}
+	finalShard := finalState.Shards["-"]
+	if finalShard.Position != finalCursor.Position {
+		t.Fatalf("completion checkpoint position = %q, want %q", finalShard.Position, finalCursor.Position)
+	}
+	if len(finalShard.LastKnownPk) != 0 {
+		t.Fatal("completion checkpoint should clear LastKnownPk")
 	}
 }
 
