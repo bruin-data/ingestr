@@ -95,6 +95,7 @@ func TestRedis_Streaming(t *testing.T) {
 }
 
 func TestNATS_BatchCutoff(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -122,6 +123,7 @@ func TestNATS_BatchCutoff(t *testing.T) {
 }
 
 func TestNATS_Streaming(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
