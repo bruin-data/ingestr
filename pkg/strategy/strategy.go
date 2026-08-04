@@ -7,7 +7,6 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/progress"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -252,7 +251,7 @@ func applyEvolutionPlanIfIncarnation(ctx context.Context, dest destination.Desti
 		return "", err
 	}
 	for _, w := range warnings {
-		output.Statusf("Warning: %s\n", w)
+		fmt.Printf("Warning: %s\n", w)
 	}
 	// Mark the plan applied so a repeat call is a no-op. This mirrors the prior
 	// EvolutionPlan.Apply contract (which cleared its rendered statements) and

@@ -23,7 +23,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/mysqluri"
@@ -473,7 +472,7 @@ func (s *MySQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 		return nil, fmt.Errorf("MySQL CDC only supports the merge strategy (replace is accepted as a request for the initial snapshot)")
 	}
 	if req.Strategy == config.StrategyReplace {
-		output.Statusf("Warning: MySQL CDC runs --incremental-strategy replace as merge; the initial snapshot rebuilds the table and later runs apply changes incrementally\n")
+		fmt.Printf("Warning: MySQL CDC runs --incremental-strategy replace as merge; the initial snapshot rebuilds the table and later runs apply changes incrementally\n")
 	}
 
 	return &MySQLCDCTable{
@@ -596,7 +595,7 @@ func (s *MySQLCDCSource) warnKeylessTable(name string) {
 		return
 	}
 	s.keylessWarned[name] = true
-	output.Statusf("Warning: table %s has no primary key; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
+	fmt.Printf("Warning: table %s has no primary key; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
 func (s *MySQLCDCSource) getSelectedTables(ctx context.Context, opts source.MultiTableReadOptions) ([]source.SourceTableInfo, error) {
@@ -1206,7 +1205,7 @@ func (s *MySQLCDCSource) warnMissingReloadPrivilege(ctx context.Context) {
 		if rows.Err() != nil {
 			return
 		}
-		output.Statusf("Warning: the MySQL user does not appear to have the RELOAD (or FLUSH_TABLES) privilege; the CDC snapshot's FLUSH TABLES WITH READ LOCK will fail without it (GRANT RELOAD ON *.* TO <user>)\n")
+		fmt.Printf("Warning: the MySQL user does not appear to have the RELOAD (or FLUSH_TABLES) privilege; the CDC snapshot's FLUSH TABLES WITH READ LOCK will fail without it (GRANT RELOAD ON *.* TO <user>)\n")
 	})
 }
 
