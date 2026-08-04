@@ -160,6 +160,7 @@ func runBinaryParityScenario(t *testing.T, ctx context.Context, uriExtra string)
 // text decode path and the pgoutput binary decode path (binary=true) and
 // requires byte-identical destination content across every supported type.
 func TestPostgresCDC_BinaryModeParity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	textRows := runBinaryParityScenario(t, ctx, "&discover_interval=off")
@@ -182,6 +183,7 @@ func TestPostgresCDC_BinaryModeParity(t *testing.T) {
 // a large committed transaction lands exactly and a rolled-back one leaves no
 // trace, while the server reports that streaming actually happened.
 func TestPostgresCDC_LargeTransactionStreaming(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{

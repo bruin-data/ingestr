@@ -32,6 +32,7 @@ import (
 // stays frozen at the last evt change and the require.Eventually below times out
 // with lag still pinned at the noise-burst size.
 func TestPostgresCDC_StreamingIdleSlotAdvances(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

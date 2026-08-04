@@ -145,6 +145,7 @@ func setupPostgresCDCContainerWithTimeout(t *testing.T, ctx context.Context, wal
 // is chosen well above keepaliveInterval (5s) so the keepalive's
 // send-then-tick cadence comfortably refreshes the walsender.
 func TestPostgresCDC_BatchRunAdvancesSlotWithSlowWrites(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

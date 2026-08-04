@@ -68,6 +68,7 @@ func setupPostgresCDCContainer(t *testing.T, ctx context.Context) (testcontainer
 }
 
 func TestPostgresCDCConnectorLeaseExclusiveAndReusable(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -244,6 +245,7 @@ func assertRelationAbsent(t *testing.T, ctx context.Context, db *sql.DB, schema,
 // skips unlogged tables and tables without a replica identity (no primary key),
 // warns about each, and reconciles the table set on every connection.
 func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -342,6 +344,7 @@ func TestPostgresCDC_ManagedPublicationSelectsReplicatableTables(t *testing.T) {
 // which Postgres rejects (failing Connect). Only the leaf partition, which
 // physically holds rows, is published.
 func TestPostgresCDC_ManagedPublicationHandlesPartitionedTables(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -389,6 +392,7 @@ func TestPostgresCDC_ManagedPublicationHandlesPartitionedTables(t *testing.T) {
 // end-to-end (snapshot then CDC insert/update), while an unlogged table and a
 // table without a primary key are excluded entirely.
 func TestPostgresCDC_ManagedPublicationEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -472,6 +476,7 @@ func TestPostgresCDC_ManagedPublicationEndToEnd(t *testing.T) {
 }
 
 func TestPostgresCDCMultiTableNamingPreservesPartialTOASTAndExplicitNull(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -536,6 +541,7 @@ func TestPostgresCDCMultiTableNamingPreservesPartialTOASTAndExplicitNull(t *test
 }
 
 func TestPostgresCDC_Snapshot(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -637,6 +643,7 @@ func TestPostgresCDC_Snapshot(t *testing.T) {
 }
 
 func TestPostgresCDC_URISchemes(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -660,6 +667,7 @@ func TestPostgresCDC_URISchemes(t *testing.T) {
 }
 
 func TestPostgresCDC_IncrementalResume(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -799,6 +807,7 @@ func TestPostgresCDC_IncrementalResume(t *testing.T) {
 }
 
 func TestPostgresCDC_DestinationStateTruncateAndSnapshotRecovery(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -923,6 +932,7 @@ func TestPostgresCDC_DestinationStateTruncateAndSnapshotRecovery(t *testing.T) {
 }
 
 func TestPostgresCDC_LegacyAutoSlotCutoverRequiresSuccessfulDurability(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -998,6 +1008,7 @@ func TestPostgresCDC_LegacyAutoSlotCutoverRequiresSuccessfulDurability(t *testin
 }
 
 func TestPostgresCDC_SharedStateMySQL(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1072,6 +1083,7 @@ func postgresCDCStateTables(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 }
 
 func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1160,6 +1172,7 @@ func TestPostgresCDC_DuplicatePKWithinBatch(t *testing.T) {
 }
 
 func TestPostgresCDC_MergePreservesUnchangedJSONB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1270,6 +1283,7 @@ func TestPostgresCDC_MergePreservesUnchangedJSONB(t *testing.T) {
 }
 
 func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1392,6 +1406,7 @@ func TestPostgresCDC_IntraBatchInsertUpdatePreservesUnchangedJSONB(t *testing.T)
 // the filled value must overwrite the stale target value rather than be dropped
 // via the _cdc_unchanged_cols target fallback.
 func TestPostgresCDC_IntraBatchChangedThenUnchangedOverwritesExistingRow(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1526,6 +1541,7 @@ func TestPostgresCDC_IntraBatchChangedThenUnchangedOverwritesExistingRow(t *test
 // to prevent regression of a bug where batch mode would wait forever if the source
 // database was continuously receiving writes.
 func TestPostgresCDC_BatchModeCompletesWithActiveWrites(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1664,6 +1680,7 @@ func TestPostgresCDC_BatchModeCompletesWithActiveWrites(t *testing.T) {
 }
 
 func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1774,6 +1791,7 @@ func TestPostgresCDC_IncrementalResume_DuckDB(t *testing.T) {
 // added at the source between multi-table CDC runs must be added to the
 // destination table via schema evolution before the merge.
 func TestPostgresCDC_MultiTable_SchemaEvolution(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1857,6 +1875,7 @@ func TestPostgresCDC_MultiTable_SchemaEvolution(t *testing.T) {
 }
 
 func TestPostgresCDC_StreamingSchemaEvolution_DuckDB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1951,6 +1970,7 @@ func TestPostgresCDC_StreamingSchemaEvolution_DuckDB(t *testing.T) {
 }
 
 func TestPostgresCDC_StreamingSchemaEvolution_MySQL(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2099,6 +2119,7 @@ func waitForPostgresCDCSlotConfirmation(
 }
 
 func TestPostgresCDC_MultiTableTrimWhitespace(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2197,6 +2218,7 @@ func TestPostgresCDC_MultiTableTrimWhitespace(t *testing.T) {
 // decoder to emit unchanged markers; without column filtering the SQLite
 // merge would reference a column the target table doesn't have.
 func TestPostgresCDC_UnawareDestination_SQLite(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2344,6 +2366,7 @@ func assertBatchRunsAdvanceSlot(t *testing.T, ctx context.Context, sourceConnStr
 // (multi-table) path: repeated batch runs must keep advancing the replication
 // slot so lag returns toward zero across runs.
 func TestPostgresCDC_BatchRunAdvancesReplicationSlot(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2374,6 +2397,7 @@ func TestPostgresCDC_BatchRunAdvancesReplicationSlot(t *testing.T) {
 // single-table path (--source-table) which streams via a different reader but
 // must confirm the slot the same way.
 func TestPostgresCDC_SingleTableBatchRunAdvancesReplicationSlot(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

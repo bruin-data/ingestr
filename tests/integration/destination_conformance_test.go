@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1152,9 +1153,13 @@ func splitSchemaTable(table string, defaultSchema string) (string, string) {
 	return defaultSchema, table
 }
 
+var uniqueCounter atomic.Uint64
+
 func uniqueSuffix() string {
-	// short, safe suffix for table names
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	// Collision-safe even when parallel tests race on the same nanosecond. Digits
+	// only (no separator): this feeds SQL identifiers and S3 bucket names, which
+	// forbid hyphens and underscores respectively.
+	return fmt.Sprintf("%d%d", time.Now().UnixNano(), uniqueCounter.Add(1))
 }
 
 func sqliteBackend() *sqlBackend {
