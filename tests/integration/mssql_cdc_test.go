@@ -59,6 +59,11 @@ func setupMSSQLCDCDatabase(t *testing.T, ctx context.Context) (string, *sql.DB) 
 	_, err = db.ExecContext(ctx, "EXEC sys.sp_cdc_enable_db")
 	require.NoError(t, err)
 
+	// Create the capture job with a 1s log-scan interval (default 5s) so tests
+	// don't idle a poll cycle per change; set at creation to avoid a restart.
+	_, err = db.ExecContext(ctx, "EXEC sys.sp_cdc_add_job @job_type = N'capture', @pollinginterval = 1")
+	require.NoError(t, err)
+
 	return dbName, db
 }
 
