@@ -5,22 +5,14 @@ package integration
 import (
 	"context"
 	"flag"
-	"io"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/testutil"
 	"github.com/testcontainers/testcontainers-go"
-	tclog "github.com/testcontainers/testcontainers-go/log"
 )
-
-// quietTCLogger silences testcontainers' Docker lifecycle logs (enabled by -v).
-type quietTCLogger struct{}
-
-func (quietTCLogger) Printf(string, ...any) {}
 
 var containerBackends = []string{
 	"postgres", "clickhouse", "mysql", "mssql", "oracle",
@@ -109,13 +101,6 @@ var (
 
 func TestMain(m *testing.M) {
 	flag.Parse()
-
-	// Keep `go test -v` output readable: silence ingestr's own status output and
-	// testcontainers' Docker lifecycle logs so per-test results stay visible.
-	if os.Getenv("INGESTR_QUIET_PROGRESS") != "" {
-		output.Init(io.Discard, io.Discard, output.ModeText)
-		tclog.SetDefault(quietTCLogger{})
-	}
 
 	// If tests are invoked with -short, integration tests will be skipped anyway.
 	// Avoid starting containers in that mode.
