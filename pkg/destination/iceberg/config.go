@@ -192,11 +192,14 @@ func sqliteCatalogURI(parsed *url.URL) string {
 // withBusyTimeout makes a second writer wait for the lock instead of failing
 // immediately with SQLITE_BUSY. Left alone if the caller set their own.
 func withBusyTimeout(uri string) string {
-	if strings.Contains(uri, "busy_timeout") {
+	// Only the query carries pragmas; a catalog path that happens to contain
+	// "busy_timeout" must not be mistaken for one already being set.
+	_, query, hasQuery := strings.Cut(uri, "?")
+	if strings.Contains(query, "busy_timeout") {
 		return uri
 	}
 	sep := "?"
-	if strings.Contains(uri, "?") {
+	if hasQuery {
 		sep = "&"
 	}
 

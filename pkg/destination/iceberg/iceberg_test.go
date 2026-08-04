@@ -166,6 +166,11 @@ func TestSqliteCatalogURIBusyTimeout(t *testing.T) {
 	require.Contains(t, cfg.Properties["uri"], "busy_timeout(1)")
 	require.NotContains(t, cfg.Properties["uri"], "10000")
 
+	// "busy_timeout" in the path is not a pragma; the default still applies.
+	cfg, err = parseIcebergConfig("iceberg+sqlite:///tmp/busy_timeout.db")
+	require.NoError(t, err)
+	require.Equal(t, "file:/tmp/busy_timeout.db?_pragma=busy_timeout%2810000%29", cfg.Properties["uri"])
+
 	// :memory: is per-connection, so there is nothing to contend with.
 	cfg, err = parseIcebergConfig("iceberg+sqlite:///:memory:")
 	require.NoError(t, err)
