@@ -470,11 +470,14 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 	flushBuffers := func(sendCtx context.Context) error {
 		return flushMySQLCDCChangeBuffersWithTokenContext(sendCtx, buffers, results, nil)
 	}
-	flushPending := func(sendCtx context.Context) error {
-		if err := flushTxn(sendCtx); err != nil {
-			return err
+	drainCommittedBuffers := func() error {
+		if !opts.Streaming {
+			return nil
 		}
-		return flushBuffers(sendCtx)
+		drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
+		err := flushBuffers(drainCtx)
+		cancel()
+		return err
 	}
 	var flushTicks <-chan time.Time
 	if opts.Streaming {
@@ -488,13 +491,8 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 		var resp *binlogdatapb.VStreamResponse
 		select {
 		case <-ctx.Done():
-			if opts.Streaming {
-				drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-				err := flushPending(drainCtx)
-				cancel()
-				if err != nil {
-					return err
-				}
+			if err := drainCommittedBuffers(); err != nil {
+				return err
 			}
 			return ctx.Err()
 		case <-flushTicks:
@@ -506,13 +504,8 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 			resp = received.resp
 			if received.err != nil {
 				if ctx.Err() != nil {
-					if opts.Streaming {
-						drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-						flushErr := flushPending(drainCtx)
-						cancel()
-						if flushErr != nil {
-							return flushErr
-						}
+					if err := drainCommittedBuffers(); err != nil {
+						return err
 					}
 					return ctx.Err()
 				}
