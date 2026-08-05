@@ -25,7 +25,7 @@ jobs:
         include:
           - { platform: depot-ubuntu-24.04-4, suite: test-full }
           - { platform: depot-ubuntu-24.04-4, suite: test-integration }
-          - { platform: macos-15, suite: test-full }
+          - { platform: depot-macos-15, suite: test-full }
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
