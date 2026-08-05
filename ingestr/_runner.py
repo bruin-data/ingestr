@@ -300,7 +300,7 @@ def _download_binary(target: Path) -> Path:
         archive_path = temp_dir / archive_name
         extracted_path = temp_dir / release.binary_name
         _download_file(url, archive_path)
-        _verify_archive_checksum(archive_path, archive_name)
+        _verify_archive_checksum(archive_path, tag, archive_name)
         _extract_binary(archive_path, release.binary_name, extracted_path)
         _ensure_executable(extracted_path)
         os.replace(str(extracted_path), str(target))
@@ -325,12 +325,12 @@ def _download_file(url: str, destination: Path) -> None:
             shutil.copyfileobj(response, output)
 
 
-def _verify_archive_checksum(archive_path: Path, archive_name: str) -> None:
-    expected = ARCHIVE_SHA256.get(archive_name)
+def _verify_archive_checksum(archive_path: Path, tag: str, archive_name: str) -> None:
+    expected = _archive_checksum(tag, archive_name)
     if not expected:
         raise IngestrNotFoundError(
-            "no embedded SHA256 checksum for %s; set %s to use a trusted local binary"
-            % (archive_name, _BINARY_PATH_ENV)
+            "no embedded SHA256 checksum for %s/%s; set %s to use a trusted local binary"
+            % (tag, archive_name, _BINARY_PATH_ENV)
         )
 
     actual = _sha256_file(archive_path)
@@ -339,6 +339,17 @@ def _verify_archive_checksum(archive_path: Path, archive_name: str) -> None:
             "downloaded archive checksum mismatch for %s: expected %s, got %s"
             % (archive_name, expected, actual)
         )
+
+
+def _archive_checksum(tag: str, archive_name: str) -> Optional[str]:
+    checksums = ARCHIVE_SHA256.get(tag)
+    if not isinstance(checksums, Mapping):
+        return None
+
+    expected = checksums.get(archive_name)
+    if not isinstance(expected, str):
+        return None
+    return expected
 
 
 def _sha256_file(path: Path) -> str:

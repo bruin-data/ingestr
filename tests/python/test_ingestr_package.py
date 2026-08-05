@@ -211,7 +211,7 @@ class IngestrPackageTest(unittest.TestCase):
                     with patch("ingestr._runner._package_version", return_value="1.2.3"):
                         with patch("ingestr._runner._release_platform", return_value=release):
                             checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-                            checksums = {"ingestr_Linux_x86_64.tar.gz": checksum}
+                            checksums = {"v1.2.3": {"ingestr_Linux_x86_64.tar.gz": checksum}}
                             with patch.dict(ingestr_runner.ARCHIVE_SHA256, checksums, clear=True):
                                 with patch("ingestr._runner._download_file", side_effect=fake_download):
                                     path = Path(ingestr.binary_path())
@@ -225,6 +225,74 @@ class IngestrPackageTest(unittest.TestCase):
                 downloads,
                 ["https://github.com/bruin-data/ingestr/releases/download/v1.2.3/ingestr_Linux_x86_64.tar.gz"],
             )
+
+    def test_binary_path_uses_tag_specific_checksum_for_tag_override(self):
+        binary = b"#!/bin/sh\necho ingestr\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "ingestr_Linux_x86_64.tar.gz"
+            _write_tar_binary(archive_path, "ingestr", binary)
+
+            downloads = []
+
+            def fake_download(url, destination):
+                downloads.append(url)
+                destination.write_bytes(archive_path.read_bytes())
+
+            release = ingestr_runner._ReleasePlatform("Linux", "x86_64", "tar.gz", "ingestr")
+            checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+            checksums = {
+                "v1.2.3": {"ingestr_Linux_x86_64.tar.gz": "0" * 64},
+                "v9.9.9": {"ingestr_Linux_x86_64.tar.gz": checksum},
+            }
+            env = {
+                "INGESTR_BINARY_CACHE_DIR": str(root / "cache"),
+                "INGESTR_BINARY_TAG": "v9.9.9",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch("ingestr._runner._local_binary_path", return_value=None):
+                    with patch("ingestr._runner._package_version", return_value="1.2.3"):
+                        with patch("ingestr._runner._release_platform", return_value=release):
+                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, checksums, clear=True):
+                                with patch("ingestr._runner._download_file", side_effect=fake_download):
+                                    path = Path(ingestr.binary_path())
+
+            self.assertEqual(path.read_bytes(), binary)
+            self.assertEqual(
+                downloads,
+                ["https://github.com/bruin-data/ingestr/releases/download/v9.9.9/ingestr_Linux_x86_64.tar.gz"],
+            )
+
+    def test_binary_path_rejects_missing_tag_checksum(self):
+        binary = b"#!/bin/sh\necho ingestr\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "ingestr_Linux_x86_64.tar.gz"
+            _write_tar_binary(archive_path, "ingestr", binary)
+
+            def fake_download(url, destination):
+                destination.write_bytes(archive_path.read_bytes())
+
+            release = ingestr_runner._ReleasePlatform("Linux", "x86_64", "tar.gz", "ingestr")
+            checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+            env = {
+                "INGESTR_BINARY_CACHE_DIR": str(root / "cache"),
+                "INGESTR_BINARY_TAG": "v9.9.9",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch("ingestr._runner._local_binary_path", return_value=None):
+                    with patch("ingestr._runner._package_version", return_value="1.2.3"):
+                        with patch("ingestr._runner._release_platform", return_value=release):
+                            checksums = {"v1.2.3": {"ingestr_Linux_x86_64.tar.gz": checksum}}
+                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, checksums, clear=True):
+                                with patch("ingestr._runner._download_file", side_effect=fake_download):
+                                    with self.assertRaisesRegex(
+                                        ingestr.IngestrNotFoundError,
+                                        "no embedded SHA256 checksum for v9.9.9/ingestr_Linux_x86_64.tar.gz",
+                                    ):
+                                        ingestr.binary_path()
 
     def test_binary_path_rejects_checksum_mismatch(self):
         binary = b"#!/bin/sh\necho ingestr\n"
@@ -242,7 +310,8 @@ class IngestrPackageTest(unittest.TestCase):
                 with patch("ingestr._runner._local_binary_path", return_value=None):
                     with patch("ingestr._runner._package_version", return_value="1.2.3"):
                         with patch("ingestr._runner._release_platform", return_value=release):
-                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, {"ingestr_Linux_x86_64.tar.gz": "0" * 64}, clear=True):
+                            checksums = {"v1.2.3": {"ingestr_Linux_x86_64.tar.gz": "0" * 64}}
+                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, checksums, clear=True):
                                 with patch("ingestr._runner._download_file", side_effect=fake_download):
                                     with self.assertRaisesRegex(
                                         ingestr.IngestrNotFoundError,

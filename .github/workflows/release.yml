@@ -224,7 +224,7 @@ jobs:
 
           Path("ingestr/_checksums.py").write_text(
               "ARCHIVE_SHA256 = "
-              + json.dumps(checksums, indent=4, sort_keys=True)
+              + json.dumps({tag: checksums}, indent=4, sort_keys=True)
               + "\n",
               encoding="utf-8",
           )
