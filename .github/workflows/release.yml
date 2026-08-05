@@ -25,6 +25,12 @@ jobs:
           - depot-ubuntu-24.04-4
           - macos-15
         suite: ["test-full", "test-integration"]
+        # macOS runners have no Docker, so test-integration skips every test yet
+        # still spends ~20-40min compiling the integration binary. Drop it; the
+        # integration suite is covered on Linux and test-full still runs on macOS.
+        exclude:
+          - platform: macos-15
+            suite: test-integration
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
