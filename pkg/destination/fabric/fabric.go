@@ -897,25 +897,53 @@ func escapeTableName(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+	primaryKeySet := make(map[string]struct{}, len(primaryKeys))
+	for _, key := range primaryKeys {
+		primaryKeySet[key] = struct{}{}
+	}
+
 	var colDefs []string
 	for _, col := range columns {
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), MapDataTypeToFabric(col)))
+		colType := MapDataTypeToFabric(col)
+		if _, ok := primaryKeySet[col.Name]; ok {
+			colType += " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
-
-	if len(primaryKeys) > 0 {
-		quotedKeys := make([]string, len(primaryKeys))
-		for i, k := range primaryKeys {
-			quotedKeys[i] = quoteColumn(k)
-		}
-		// Fabric only allows NONCLUSTERED, NOT ENFORCED primary keys.
-		createPart += fmt.Sprintf(",\n  PRIMARY KEY NONCLUSTERED (%s) NOT ENFORCED", strings.Join(quotedKeys, ", "))
-	}
-
 	createPart += "\n)"
 
+	if len(primaryKeys) > 0 {
+		return fmt.Sprintf(
+			"IF OBJECT_ID('%s', 'U') IS NULL BEGIN\n  %s;\n  %s\nEND",
+			escapeTableName(table),
+			createPart,
+			buildAddPrimaryKeySQL(table, primaryKeys),
+		)
+	}
+
 	return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s", escapeTableName(table), createPart)
+}
+
+func buildAddPrimaryKeySQL(table string, primaryKeys []string) string {
+	constraintName := buildPrimaryKeyConstraintName(table)
+	quotedKeys := make([]string, len(primaryKeys))
+	for i, key := range primaryKeys {
+		quotedKeys[i] = quoteColumn(key)
+	}
+	return fmt.Sprintf(
+		"ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY NONCLUSTERED (%s) NOT ENFORCED",
+		quoteTable(table),
+		quoteColumn(constraintName),
+		strings.Join(quotedKeys, ", "),
+	)
+}
+
+func buildPrimaryKeyConstraintName(table string) string {
+	_, tableName := parseTableName(table)
+	name := "PK_" + tableName
+	return destination.ShortenIdentifier(name, name, destination.MaxIdentifierLength("fabric"))
 }
 
 func extractValue(arr arrow.Array, idx int) interface{} {
