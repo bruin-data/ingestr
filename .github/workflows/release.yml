@@ -21,11 +21,12 @@ jobs:
       TEST_CONCURRENCY: "1"
     strategy:
       matrix:
-        # macOS has no Docker, so it runs test-full only; integration is on Linux.
+        # Depot macOS has no Docker, so integration skips there; keeping it on for now.
         include:
           - { platform: depot-ubuntu-24.04-4, suite: test-full }
           - { platform: depot-ubuntu-24.04-4, suite: test-integration }
           - { platform: depot-macos-15, suite: test-full }
+          - { platform: depot-macos-15, suite: test-integration }
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
