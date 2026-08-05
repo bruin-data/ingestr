@@ -55,13 +55,15 @@ func metricValue(m *dto.Metric) float64 {
 }
 
 // resetState clears the per-table series and the reporter so each test starts
-// clean. The plain counters (rowsSynced, flushCycles) cannot be reset, so tests
-// that assert their totals measure a before/after delta instead.
+// clean. The plain counters cannot be reset, so tests that assert their totals
+// measure a before/after delta instead.
 func resetState(t *testing.T) {
 	t.Helper()
 	SetLagReporter(nil)
 	tableRowsSynced.Reset()
+	tableBytesSynced.Reset()
 	tableLastFlushRows.Reset()
+	tableLastFlushBytes.Reset()
 	tableLastSyncedTS.Reset()
 	lastSyncedTS.Set(0)
 	t.Cleanup(func() { SetLagReporter(nil) })
@@ -137,13 +139,23 @@ func TestRecordSyncAccumulates(t *testing.T) {
 	resetState(t)
 
 	beforeRows := testutil.ToFloat64(rowsSynced)
+	beforeBytes := testutil.ToFloat64(bytesSynced)
 	beforeCycles := testutil.ToFloat64(flushCycles)
 
-	RecordSync(map[string]int64{"public.users": 100, "public.orders": 50}, time.Unix(1000, 0))
-	RecordSync(map[string]int64{"public.users": 25, "public.items": 7}, time.Unix(2000, 0))
+	RecordSync(map[string]SyncStats{
+		"public.users":  {Rows: 100, Bytes: 1000},
+		"public.orders": {Rows: 50, Bytes: 500},
+	}, time.Unix(1000, 0))
+	RecordSync(map[string]SyncStats{
+		"public.users": {Rows: 25, Bytes: 250},
+		"public.items": {Rows: 7, Bytes: 70},
+	}, time.Unix(2000, 0))
 
 	if got := testutil.ToFloat64(rowsSynced) - beforeRows; got != 182 {
 		t.Fatalf("expected 182 rows synced in total, got %v", got)
+	}
+	if got := testutil.ToFloat64(bytesSynced) - beforeBytes; got != 1820 {
+		t.Fatalf("expected 1820 bytes synced in total, got %v", got)
 	}
 	if got := testutil.ToFloat64(flushCycles) - beforeCycles; got != 2 {
 		t.Fatalf("expected 2 flush cycles, got %v", got)
@@ -156,13 +168,22 @@ func TestRecordSyncAccumulates(t *testing.T) {
 	if got := testutil.ToFloat64(tableRowsSynced.WithLabelValues("public.users")); got != 125 {
 		t.Fatalf("expected users rows_synced=125, got %v", got)
 	}
+	if got := testutil.ToFloat64(tableBytesSynced.WithLabelValues("public.users")); got != 1250 {
+		t.Fatalf("expected users bytes_synced=1250, got %v", got)
+	}
 	if got := testutil.ToFloat64(tableLastFlushRows.WithLabelValues("public.users")); got != 25 {
 		t.Fatalf("expected users last_flush_rows=25, got %v", got)
+	}
+	if got := testutil.ToFloat64(tableLastFlushBytes.WithLabelValues("public.users")); got != 250 {
+		t.Fatalf("expected users last_flush_bytes=250, got %v", got)
 	}
 
 	// A table absent from cycle 2 keeps its totals and its older timestamp.
 	if got := testutil.ToFloat64(tableRowsSynced.WithLabelValues("public.orders")); got != 50 {
 		t.Fatalf("expected orders rows_synced=50, got %v", got)
+	}
+	if got := testutil.ToFloat64(tableBytesSynced.WithLabelValues("public.orders")); got != 500 {
+		t.Fatalf("expected orders bytes_synced=500, got %v", got)
 	}
 	if got := testutil.ToFloat64(tableLastSyncedTS.WithLabelValues("public.orders")); got != 1000 {
 		t.Fatalf("expected orders to keep last_synced=1000, got %v", got)
@@ -172,6 +193,9 @@ func TestRecordSyncAccumulates(t *testing.T) {
 	if got := testutil.ToFloat64(tableRowsSynced.WithLabelValues("public.items")); got != 7 {
 		t.Fatalf("expected items rows_synced=7, got %v", got)
 	}
+	if got := testutil.ToFloat64(tableBytesSynced.WithLabelValues("public.items")); got != 70 {
+		t.Fatalf("expected items bytes_synced=70, got %v", got)
+	}
 }
 
 // An idle commit cycle confirms the source position without writing rows; it
@@ -180,10 +204,14 @@ func TestRecordSyncIdleCycleAdvancesTimestamp(t *testing.T) {
 	resetState(t)
 
 	beforeRows := testutil.ToFloat64(rowsSynced)
-	RecordSync(map[string]int64{}, time.Unix(500, 0))
+	beforeBytes := testutil.ToFloat64(bytesSynced)
+	RecordSync(map[string]SyncStats{}, time.Unix(500, 0))
 
 	if got := testutil.ToFloat64(rowsSynced) - beforeRows; got != 0 {
 		t.Fatalf("expected no rows synced, got %v", got)
+	}
+	if got := testutil.ToFloat64(bytesSynced) - beforeBytes; got != 0 {
+		t.Fatalf("expected no bytes synced, got %v", got)
 	}
 	if got := testutil.ToFloat64(lastSyncedTS); got != 500 {
 		t.Fatalf("expected last synced 500, got %v", got)
@@ -198,7 +226,7 @@ func TestRecordSyncConcurrentWithScrape(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {
-			RecordSync(map[string]int64{fmt.Sprintf("t%d", i%3): 1}, time.Unix(int64(i), 0))
+			RecordSync(map[string]SyncStats{fmt.Sprintf("t%d", i%3): {Rows: 1, Bytes: 2}}, time.Unix(int64(i), 0))
 		})
 		wg.Go(func() {
 			_, _ = registry.Gather()
@@ -213,7 +241,7 @@ func TestRecordSyncConcurrentWithScrape(t *testing.T) {
 
 func TestServeExposesMetrics(t *testing.T) {
 	resetState(t)
-	RecordSync(map[string]int64{"public.users": 3}, time.Unix(1234, 0))
+	RecordSync(map[string]SyncStats{"public.users": {Rows: 3, Bytes: 24}}, time.Unix(1234, 0))
 
 	addr, stop, err := Serve("127.0.0.1:0")
 	if err != nil {
@@ -236,8 +264,14 @@ func TestServeExposesMetrics(t *testing.T) {
 	if !strings.Contains(text, "ingestr_stream_rows_synced_total") {
 		t.Fatalf("expected ingestr_stream_rows_synced_total in /metrics, got:\n%s", text)
 	}
+	if !strings.Contains(text, "ingestr_stream_bytes_synced_total") {
+		t.Fatalf("expected ingestr_stream_bytes_synced_total in /metrics, got:\n%s", text)
+	}
 	if !strings.Contains(text, `ingestr_stream_table_rows_synced_total{table="public.users"}`) {
 		t.Fatalf("expected per-table series in /metrics, got:\n%s", text)
+	}
+	if !strings.Contains(text, `ingestr_stream_table_bytes_synced_total{table="public.users"}`) {
+		t.Fatalf("expected per-table byte series in /metrics, got:\n%s", text)
 	}
 
 	// The dedicated registry must not carry the default registry's Go runtime or

@@ -33,6 +33,10 @@ var (
 		Name: "ingestr_stream_rows_synced_total",
 		Help: "Total rows durably synced to the destination and acknowledged to the source.",
 	})
+	bytesSynced = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ingestr_stream_bytes_synced_total",
+		Help: "Total logical Arrow payload bytes durably synced to the destination and acknowledged to the source.",
+	})
 	flushCycles = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "ingestr_stream_flush_cycles_total",
 		Help: "Total committed flush cycles.",
@@ -45,9 +49,17 @@ var (
 		Name: "ingestr_stream_table_rows_synced_total",
 		Help: "Total rows durably synced, per table.",
 	}, []string{"table"})
+	tableBytesSynced = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ingestr_stream_table_bytes_synced_total",
+		Help: "Total logical Arrow payload bytes durably synced, per table.",
+	}, []string{"table"})
 	tableLastFlushRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ingestr_stream_table_last_flush_rows",
 		Help: "Rows written for a table in its most recent flush cycle.",
+	}, []string{"table"})
+	tableLastFlushBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ingestr_stream_table_last_flush_bytes",
+		Help: "Logical Arrow payload bytes written for a table in its most recent flush cycle.",
 	}, []string{"table"})
 	tableLastSyncedTS = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ingestr_stream_table_last_synced_timestamp_seconds",
@@ -58,10 +70,13 @@ var (
 func init() {
 	registry.MustRegister(
 		rowsSynced,
+		bytesSynced,
 		flushCycles,
 		lastSyncedTS,
 		tableRowsSynced,
+		tableBytesSynced,
 		tableLastFlushRows,
+		tableLastFlushBytes,
 		tableLastSyncedTS,
 		replicationCollector{},
 	)
@@ -152,21 +167,32 @@ func SetLagReporter(r source.LagReporter) {
 	reporter.Store(&r)
 }
 
+// SyncStats describes the logical payload committed for one table in a flush.
+type SyncStats struct {
+	Rows  int64
+	Bytes uint64
+}
+
 // RecordSync accounts one successfully committed flush cycle. Callers must
 // invoke it only after the source position is committed, so the counters mean
 // "durable in the destination" rather than merely "written".
-func RecordSync(perTable map[string]int64, at time.Time) {
+func RecordSync(perTable map[string]SyncStats, at time.Time) {
 	unix := float64(at.Unix())
 	var total int64
+	var totalBytes uint64
 
-	for name, rows := range perTable {
-		tableRowsSynced.WithLabelValues(name).Add(float64(rows))
-		tableLastFlushRows.WithLabelValues(name).Set(float64(rows))
+	for name, stats := range perTable {
+		tableRowsSynced.WithLabelValues(name).Add(float64(stats.Rows))
+		tableBytesSynced.WithLabelValues(name).Add(float64(stats.Bytes))
+		tableLastFlushRows.WithLabelValues(name).Set(float64(stats.Rows))
+		tableLastFlushBytes.WithLabelValues(name).Set(float64(stats.Bytes))
 		tableLastSyncedTS.WithLabelValues(name).Set(unix)
-		total += rows
+		total += stats.Rows
+		totalBytes += stats.Bytes
 	}
 
 	rowsSynced.Add(float64(total))
+	bytesSynced.Add(float64(totalBytes))
 	flushCycles.Inc()
 	lastSyncedTS.Set(unix)
 }

@@ -103,11 +103,18 @@ ingestr publishes:
 |---|---|
 | `ingestr_replication_*{source}` | Replication lag for the current source (see below). Absent when the source cannot report lag. |
 | `ingestr_stream_rows_synced_total` | Cumulative rows written **and** confirmed durable since the process started. |
+| `ingestr_stream_bytes_synced_total` | Cumulative logical Arrow payload bytes written **and** confirmed durable since the process started. |
 | `ingestr_stream_flush_cycles_total` | Number of completed flush cycles. |
 | `ingestr_stream_last_synced_timestamp_seconds` | Unix time of the last successful commit. |
-| `ingestr_stream_table_*{table}` | The same row counts and timestamp, broken out per destination table. |
+| `ingestr_stream_table_rows_synced_total{table}` | Cumulative rows written and confirmed durable, broken out per destination table. |
+| `ingestr_stream_table_bytes_synced_total{table}` | Cumulative logical Arrow payload bytes written and confirmed durable, broken out per destination table. |
+| `ingestr_stream_table_last_flush_rows{table}` | Rows written for a table in its most recent successful flush cycle. |
+| `ingestr_stream_table_last_flush_bytes{table}` | Logical Arrow payload bytes written for a table in its most recent successful flush cycle. |
+| `ingestr_stream_table_last_synced_timestamp_seconds{table}` | Unix time of the most recent successful flush cycle that included a table. |
 
 The row counters advance only after a flush's destination write **and** its source-position commit have both succeeded, so they count durable rows rather than merely written ones. `ingestr_stream_last_synced_timestamp_seconds` also advances on cycles that commit a position without writing rows, which is what makes it usable as a staleness alarm: if it stops moving, the stream is stuck.
+
+The byte counters use the Arrow record-batch buffers ingestr hands to the destination after stream transformations such as `_ingestr_loaded_at`. They are useful for stream throughput and workload monitoring, but they are not source log bytes, network bytes, compressed staging-file bytes, warehouse billing bytes, or destination table growth after merge/deduplication.
 
 The `ingestr_replication_*` series carry a `source` label and depend on the engine, because "lag" is not the same quantity everywhere:
 
