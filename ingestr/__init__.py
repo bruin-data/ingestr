@@ -6,12 +6,12 @@ cli = run_cli
 try:
     from importlib.metadata import PackageNotFoundError, version
 except ModuleNotFoundError:
+    from importlib_metadata import PackageNotFoundError, version  # type: ignore
+
+try:
+    __version__ = version("ingestr")
+except PackageNotFoundError:
     __version__ = "0+unknown"
-else:
-    try:
-        __version__ = version("ingestr")
-    except PackageNotFoundError:
-        __version__ = "0+unknown"
 
 __all__ = [
     "IngestrNotFoundError",

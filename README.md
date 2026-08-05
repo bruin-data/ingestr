@@ -42,7 +42,7 @@ The pip package can also be used from Python. Install the SDK extra for Python d
 pip install 'ingestr[sdk]'
 ```
 
-Python rows, generators, and DataFrames are sent to the bundled `ingestr` binary as Arrow IPC streams by default:
+Python rows, generators, and DataFrames are sent to the `ingestr` CLI binary as Arrow IPC streams by default. The pip package downloads and caches the matching GitHub release binary on first use:
 
 ```python
 import ingestr
