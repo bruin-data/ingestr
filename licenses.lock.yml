@@ -779,11 +779,6 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: github.com/elastic/go-elasticsearch/v9
-      version: v9.3.1
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/emirpasic/gods
       version: v1.18.1
       licenses:

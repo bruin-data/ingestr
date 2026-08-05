@@ -1,13 +1,19 @@
 package elasticsearch
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -127,14 +133,14 @@ func TestParseURI(t *testing.T) {
 func TestBuildQuery(t *testing.T) {
 	t.Run("no incremental key returns match_all", func(t *testing.T) {
 		q := buildQuery(source.ReadOptions{})
-		assert.NotNil(t, q.MatchAll)
-		assert.Nil(t, q.Range)
+		assert.Contains(t, q, "match_all")
+		assert.NotContains(t, q, "range")
 	})
 
 	t.Run("incremental key without interval returns match_all", func(t *testing.T) {
 		q := buildQuery(source.ReadOptions{IncrementalKey: "updated_at"})
-		assert.NotNil(t, q.MatchAll)
-		assert.Nil(t, q.Range)
+		assert.Contains(t, q, "match_all")
+		assert.NotContains(t, q, "range")
 	})
 
 	t.Run("incremental key with interval start builds range query", func(t *testing.T) {
@@ -143,12 +149,13 @@ func TestBuildQuery(t *testing.T) {
 			IncrementalKey: "updated_at",
 			IntervalStart:  &start,
 		})
-		assert.Nil(t, q.MatchAll)
-		require.Contains(t, q.Range, "updated_at")
-		rq := q.Range["updated_at"].(types.DateRangeQuery)
-		require.NotNil(t, rq.Gte)
-		assert.Equal(t, "2024-01-01T00:00:00Z", *rq.Gte)
-		assert.Nil(t, rq.Lt)
+		assert.NotContains(t, q, "match_all")
+		ranges, ok := q["range"].(map[string]any)
+		require.True(t, ok)
+		rq, ok := ranges["updated_at"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "2024-01-01T00:00:00Z", rq["gte"])
+		assert.NotContains(t, rq, "lt")
 	})
 
 	t.Run("incremental key with both intervals builds range query", func(t *testing.T) {
@@ -159,13 +166,13 @@ func TestBuildQuery(t *testing.T) {
 			IntervalStart:  &start,
 			IntervalEnd:    &end,
 		})
-		assert.Nil(t, q.MatchAll)
-		require.Contains(t, q.Range, "updated_at")
-		rq := q.Range["updated_at"].(types.DateRangeQuery)
-		require.NotNil(t, rq.Gte)
-		assert.Equal(t, "2024-01-01T00:00:00Z", *rq.Gte)
-		require.NotNil(t, rq.Lt)
-		assert.Equal(t, "2024-06-01T00:00:00Z", *rq.Lt)
+		assert.NotContains(t, q, "match_all")
+		ranges, ok := q["range"].(map[string]any)
+		require.True(t, ok)
+		rq, ok := ranges["updated_at"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "2024-01-01T00:00:00Z", rq["gte"])
+		assert.Equal(t, "2024-06-01T00:00:00Z", rq["lt"])
 	})
 }
 
@@ -200,4 +207,96 @@ func TestSearchHitDecoding(t *testing.T) {
 	count, ok := result.Hits.Hits[0].Source["count"].(json.Number)
 	require.True(t, ok)
 	assert.Equal(t, "9007199254740993", count.String())
+}
+
+func TestReadScrollsDocuments(t *testing.T) {
+	var callsMu sync.Mutex
+	var calls []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		callsMu.Unlock()
+
+		w.Header().Set("X-Elastic-Product", "Elasticsearch")
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/events/_search":
+			assert.Equal(t, scrollTimeout, r.URL.Query().Get("scroll"))
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			assert.JSONEq(t, `{
+				"query": {"range": {"updated_at": {"gte": "2024-01-01T00:00:00Z"}}},
+				"size": 1000
+			}`, string(body))
+			_, _ = io.WriteString(w, `{
+				"_scroll_id": "scroll-1",
+				"hits": {"hits": [{"_id": "doc-1", "_source": {"name": "first"}}]}
+			}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/_search/scroll":
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			assert.JSONEq(t, `{"scroll":"5m","scroll_id":"scroll-1"}`, string(body))
+			_, _ = io.WriteString(w, `{"_scroll_id":"scroll-2","hits":{"hits":[]}}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/_search/scroll":
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			assert.JSONEq(t, `{"scroll_id":["scroll-2"]}`, string(body))
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	clientURI := strings.Replace(server.URL, "http://", "elasticsearch://", 1) + "?secure=false"
+	s := NewElasticsearchSource()
+	require.NoError(t, s.Connect(context.Background(), clientURI))
+	defer func() { require.NoError(t, s.Close(context.Background())) }()
+
+	intervalStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	results, err := s.read(context.Background(), "events", source.ReadOptions{
+		IncrementalKey: "updated_at",
+		IntervalStart:  &intervalStart,
+	})
+	require.NoError(t, err)
+
+	var documents []map[string]string
+	for result := range results {
+		require.NoError(t, result.Err)
+		idColumns := result.Batch.Schema().FieldIndices("id")
+		nameColumns := result.Batch.Schema().FieldIndices("name")
+		require.Len(t, idColumns, 1)
+		require.Len(t, nameColumns, 1)
+		for row := range int(result.Batch.NumRows()) {
+			documents = append(documents, map[string]string{
+				"id":   decodeUnknownString(t, result.Batch.Column(idColumns[0]), row),
+				"name": decodeUnknownString(t, result.Batch.Column(nameColumns[0]), row),
+			})
+		}
+		result.Batch.Release()
+	}
+	assert.Equal(t, []map[string]string{{"id": "doc-1", "name": "first"}}, documents)
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	assert.Equal(t, []string{
+		"GET /",
+		"POST /events/_search?scroll=5m",
+		"POST /_search/scroll",
+		"DELETE /_search/scroll",
+	}, calls)
+}
+
+func decodeUnknownString(t *testing.T, column arrow.Array, row int) string {
+	t.Helper()
+
+	raw, ok := arrowutil.Value(column, row).(string)
+	require.True(t, ok)
+	var value string
+	require.NoError(t, json.Unmarshal([]byte(raw), &value))
+	return value
 }

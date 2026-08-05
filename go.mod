@@ -42,7 +42,7 @@ require (
 	github.com/databricks/databricks-sdk-go v0.95.0
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/eclipse/paho.mqtt.golang v1.5.1
-	github.com/elastic/go-elasticsearch/v9 v9.3.1
+	github.com/elastic/elastic-transport-go/v8 v8.8.0
 	github.com/fatih/color v1.18.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-mysql-org/go-mysql v1.13.0
@@ -229,7 +229,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/dvsekhvalnov/jose2go v1.7.0 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
-	github.com/elastic/elastic-transport-go/v8 v8.8.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect

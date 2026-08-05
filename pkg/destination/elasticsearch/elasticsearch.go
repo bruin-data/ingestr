@@ -3,7 +3,6 @@ package elasticsearch
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,10 +18,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/esclient"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	elasticsearch "github.com/elastic/go-elasticsearch/v9"
 )
 
 const bulkFlushSize = 1000
@@ -36,7 +35,7 @@ type esConfig struct {
 }
 
 type ElasticsearchDestination struct {
-	client *elasticsearch.Client
+	client *esclient.Client
 	config *esConfig
 }
 
@@ -55,38 +54,27 @@ func (d *ElasticsearchDestination) Connect(ctx context.Context, uri string) erro
 	}
 	d.config = cfg
 
-	esCfg := elasticsearch.Config{
-		Addresses: []string{cfg.baseURL},
-	}
-
-	if cfg.apiKey != "" {
-		esCfg.APIKey = cfg.apiKey
-	} else if cfg.username != "" && cfg.password != "" {
-		esCfg.Username = cfg.username
-		esCfg.Password = cfg.password
-	}
-
-	if !cfg.verifyCerts {
-		esCfg.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // user-configured option
-			},
-		}
-	}
-
-	client, err := elasticsearch.NewClient(esCfg)
+	client, err := esclient.New(esclient.Config{
+		BaseURL:     cfg.baseURL,
+		Username:    cfg.username,
+		Password:    cfg.password,
+		APIKey:      cfg.apiKey,
+		VerifyCerts: cfg.verifyCerts,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create elasticsearch client: %w", err)
 	}
 
-	res, err := client.Info(client.Info.WithContext(ctx))
+	res, err := client.Perform(ctx, http.MethodGet, "/", nil, nil, "")
 	if err != nil {
+		_ = client.Close(ctx)
 		return fmt.Errorf("failed to connect to elasticsearch: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	if res.IsError() {
-		return fmt.Errorf("elasticsearch connection error: %s", res.Status())
+	if res.StatusCode >= http.StatusMultipleChoices {
+		_ = client.Close(ctx)
+		return fmt.Errorf("elasticsearch connection error: %s", esclient.StatusMessage(res))
 	}
 
 	d.client = client
@@ -94,29 +82,32 @@ func (d *ElasticsearchDestination) Connect(ctx context.Context, uri string) erro
 	return nil
 }
 
-func (d *ElasticsearchDestination) Close(_ context.Context) error {
-	return nil
+func (d *ElasticsearchDestination) Close(ctx context.Context) error {
+	if d.client == nil {
+		return nil
+	}
+	return d.client.Close(ctx)
 }
 
 func (d *ElasticsearchDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	indexName := resolveIndexName(opts.Table)
 
 	if opts.DropFirst {
-		res, err := d.client.Indices.Exists([]string{indexName}, d.client.Indices.Exists.WithContext(ctx))
+		res, err := d.client.Perform(ctx, http.MethodHead, "/"+url.PathEscape(indexName), nil, nil, "")
 		if err != nil {
 			return fmt.Errorf("failed to check index existence: %w", err)
 		}
-		defer func() { _ = res.Body.Close() }()
+		_ = res.Body.Close()
 
-		if !res.IsError() {
-			delRes, err := d.client.Indices.Delete([]string{indexName}, d.client.Indices.Delete.WithContext(ctx))
+		if res.StatusCode < http.StatusMultipleChoices {
+			delRes, err := d.client.Perform(ctx, http.MethodDelete, "/"+url.PathEscape(indexName), nil, nil, "")
 			if err != nil {
 				return fmt.Errorf("failed to delete index: %w", err)
 			}
 			defer func() { _ = delRes.Body.Close() }()
 
-			if delRes.IsError() {
-				return fmt.Errorf("failed to delete index %s: %s", indexName, delRes.Status())
+			if delRes.StatusCode >= http.StatusMultipleChoices {
+				return fmt.Errorf("failed to delete index %s: %s", indexName, esclient.StatusMessage(delRes))
 			}
 			config.Debug("[ELASTICSEARCH DEST] Deleted index: %s", indexName)
 		}
@@ -325,14 +316,21 @@ func (d *ElasticsearchDestination) flushBulk(ctx context.Context, buf *bytes.Buf
 		return 0, nil
 	}
 
-	res, err := d.client.Bulk(bytes.NewReader(buf.Bytes()), d.client.Bulk.WithContext(ctx))
+	res, err := d.client.Perform(
+		ctx,
+		http.MethodPost,
+		"/_bulk",
+		nil,
+		bytes.NewReader(buf.Bytes()),
+		esclient.NDJSONContentType,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("elasticsearch bulk request failed: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	if res.IsError() {
-		return 0, fmt.Errorf("elasticsearch bulk error: %s", res.Status())
+	if res.StatusCode >= http.StatusMultipleChoices {
+		return 0, fmt.Errorf("elasticsearch bulk error: %s", esclient.StatusMessage(res))
 	}
 
 	var bulkRes struct {
@@ -381,13 +379,13 @@ func (d *ElasticsearchDestination) SCD2Table(_ context.Context, _ destination.SC
 
 func (d *ElasticsearchDestination) DropTable(ctx context.Context, table string) error {
 	indexName := resolveIndexName(table)
-	res, err := d.client.Indices.Delete([]string{indexName}, d.client.Indices.Delete.WithContext(ctx))
+	res, err := d.client.Perform(ctx, http.MethodDelete, "/"+url.PathEscape(indexName), nil, nil, "")
 	if err != nil {
 		return fmt.Errorf("failed to delete index: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	if res.IsError() {
-		return fmt.Errorf("failed to delete index %s: %s", indexName, res.Status())
+	if res.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("failed to delete index %s: %s", indexName, esclient.StatusMessage(res))
 	}
 	return nil
 }
