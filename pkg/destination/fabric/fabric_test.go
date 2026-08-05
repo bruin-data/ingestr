@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -188,6 +189,87 @@ func TestURIToConnString(t *testing.T) {
 				t.Errorf("write_strategy should not appear in DSN query, got %q", q.Get("write_strategy"))
 			}
 		})
+	}
+}
+
+func TestBuildCreateTableSQLAddsPrimaryKeyWithAlterTable(t *testing.T) {
+	sql := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "payload", DataType: schema.TypeString},
+	}, []string{"id"})
+
+	createIdx := strings.Index(sql, "CREATE TABLE")
+	alterIdx := strings.Index(sql, "ALTER TABLE")
+	if createIdx == -1 || alterIdx == -1 || alterIdx < createIdx {
+		t.Fatalf("SQL should create the table before altering the primary key:\n%s", sql)
+	}
+
+	createSQL := sql[createIdx:alterIdx]
+	if strings.Contains(createSQL, "PRIMARY KEY") {
+		t.Fatalf("CREATE TABLE should not contain an inline primary key:\n%s", sql)
+	}
+	if !strings.Contains(createSQL, "[id] BIGINT NOT NULL") {
+		t.Fatalf("primary key column should be created NOT NULL:\n%s", sql)
+	}
+	if !strings.Contains(sql, "NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID('dbo.events') AND [type] = 'PK')") {
+		t.Fatalf("SQL should retry missing primary key creation independently:\n%s", sql)
+	}
+	wantAlter := "ALTER TABLE [dbo].[events] ADD CONSTRAINT [PK_events] PRIMARY KEY NONCLUSTERED ([id]) NOT ENFORCED"
+	if !strings.Contains(sql, wantAlter) {
+		t.Fatalf("SQL missing Fabric primary key ALTER TABLE statement %q:\n%s", wantAlter, sql)
+	}
+}
+
+func TestBuildCreateTableSQLMatchesPrimaryKeysCaseInsensitively(t *testing.T) {
+	sql := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+	}, []string{"ID"})
+
+	if !strings.Contains(sql, "[id] BIGINT NOT NULL") {
+		t.Fatalf("primary key column should be created NOT NULL:\n%s", sql)
+	}
+	if !strings.Contains(sql, "PRIMARY KEY NONCLUSTERED ([ID]) NOT ENFORCED") {
+		t.Fatalf("SQL missing requested primary key spelling:\n%s", sql)
+	}
+}
+
+func TestBuildCreateTableSQLShortensPrimaryKeyConstraintName(t *testing.T) {
+	longTable := strings.Repeat("orders_", 30)
+	constraintName := buildPrimaryKeyConstraintName("dbo." + longTable)
+
+	if len(constraintName) > destination.MaxIdentifierLength("fabric") {
+		t.Fatalf("constraint name length = %d, want <= %d", len(constraintName), destination.MaxIdentifierLength("fabric"))
+	}
+	if !strings.HasPrefix(constraintName, "PK_") {
+		t.Fatalf("constraint name = %q, want PK_ prefix", constraintName)
+	}
+}
+
+func TestPrepareTableUsesFabricPrimaryKeyAlterTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "payload", DataType: schema.TypeString},
+	}}
+	createSQL := buildCreateTableSQL("dbo.events", tableSchema.Columns, []string{"id"})
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	dest := &FabricDestination{db: db}
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:       "dbo.events",
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
