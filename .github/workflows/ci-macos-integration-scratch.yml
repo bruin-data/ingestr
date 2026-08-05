@@ -24,5 +24,7 @@ jobs:
           brew install colima docker qemu
           colima start --vm-type qemu --cpu 4 --memory 8
           docker info
+          echo "DOCKER_HOST=$(docker context inspect colima -f '{{.Endpoints.docker.Host}}')" >> "$GITHUB_ENV"
+          echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" >> "$GITHUB_ENV"
       - name: Run integration suite
         run: make test-integration
