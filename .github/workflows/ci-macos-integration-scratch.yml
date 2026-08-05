@@ -19,10 +19,10 @@ jobs:
           cache: true
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - name: Start Docker (colima)
+      - name: Start Docker (colima, QEMU backend)
         run: |
-          brew install colima docker
-          colima start
+          brew install colima docker qemu
+          colima start --vm-type qemu --cpu 4 --memory 8
           docker info
       - name: Run integration suite
         run: make test-integration
