@@ -36,6 +36,11 @@ jobs:
           cache: true
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - name: Start Docker (colima)
+        if: runner.os == 'macOS'
+        run: |
+          brew install colima docker
+          colima start
       - name: Run test suite
         run: make ${{ matrix.suite }}
 
