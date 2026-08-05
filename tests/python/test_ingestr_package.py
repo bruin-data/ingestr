@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import subprocess
@@ -209,9 +210,12 @@ class IngestrPackageTest(unittest.TestCase):
                 with patch("ingestr._runner._local_binary_path", return_value=None):
                     with patch("ingestr._runner._package_version", return_value="1.2.3"):
                         with patch("ingestr._runner._release_platform", return_value=release):
-                            with patch("ingestr._runner._download_file", side_effect=fake_download):
-                                path = Path(ingestr.binary_path())
-                                second_path = Path(ingestr.binary_path())
+                            checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+                            checksums = {"ingestr_Linux_x86_64.tar.gz": checksum}
+                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, checksums, clear=True):
+                                with patch("ingestr._runner._download_file", side_effect=fake_download):
+                                    path = Path(ingestr.binary_path())
+                                    second_path = Path(ingestr.binary_path())
 
             self.assertEqual(path, second_path)
             self.assertEqual(path.name, "ingestr")
@@ -221,6 +225,30 @@ class IngestrPackageTest(unittest.TestCase):
                 downloads,
                 ["https://github.com/bruin-data/ingestr/releases/download/v1.2.3/ingestr_Linux_x86_64.tar.gz"],
             )
+
+    def test_binary_path_rejects_checksum_mismatch(self):
+        binary = b"#!/bin/sh\necho ingestr\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "ingestr_Linux_x86_64.tar.gz"
+            _write_tar_binary(archive_path, "ingestr", binary)
+
+            def fake_download(url, destination):
+                destination.write_bytes(archive_path.read_bytes())
+
+            release = ingestr_runner._ReleasePlatform("Linux", "x86_64", "tar.gz", "ingestr")
+            with patch.dict(os.environ, {"INGESTR_BINARY_CACHE_DIR": str(root / "cache")}, clear=True):
+                with patch("ingestr._runner._local_binary_path", return_value=None):
+                    with patch("ingestr._runner._package_version", return_value="1.2.3"):
+                        with patch("ingestr._runner._release_platform", return_value=release):
+                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, {"ingestr_Linux_x86_64.tar.gz": "0" * 64}, clear=True):
+                                with patch("ingestr._runner._download_file", side_effect=fake_download):
+                                    with self.assertRaisesRegex(
+                                        ingestr.IngestrNotFoundError,
+                                        "checksum mismatch",
+                                    ):
+                                        ingestr.binary_path()
 
     def test_release_platform_uses_goreleaser_asset_names(self):
         with patch("platform.system", return_value="Linux"):
@@ -240,6 +268,13 @@ class IngestrPackageTest(unittest.TestCase):
             with patch("platform.machine", return_value="riscv64"):
                 with self.assertRaises(ingestr.IngestrNotFoundError):
                     ingestr_runner._release_platform()
+
+    def test_release_platform_rejects_musl_linux(self):
+        with patch("platform.system", return_value="Linux"):
+            with patch("platform.machine", return_value="x86_64"):
+                with patch("ingestr._runner._linux_uses_musl", return_value=True):
+                    with self.assertRaisesRegex(ingestr.IngestrNotFoundError, "glibc"):
+                        ingestr_runner._release_platform()
 
     @unittest.skipIf(pa is None, "pyarrow is required for SDK data ingestion tests")
     def test_ingest_streams_records_to_stdin(self):

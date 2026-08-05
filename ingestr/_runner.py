@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -16,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, List, NamedTuple, Optional, Union
+
+from ._checksums import ARCHIVE_SHA256
 
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -297,6 +300,7 @@ def _download_binary(target: Path) -> Path:
         archive_path = temp_dir / archive_name
         extracted_path = temp_dir / release.binary_name
         _download_file(url, archive_path)
+        _verify_archive_checksum(archive_path, archive_name)
         _extract_binary(archive_path, release.binary_name, extracted_path)
         _ensure_executable(extracted_path)
         os.replace(str(extracted_path), str(target))
@@ -319,6 +323,30 @@ def _download_file(url: str, destination: Path) -> None:
     with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
         with destination.open("wb") as output:
             shutil.copyfileobj(response, output)
+
+
+def _verify_archive_checksum(archive_path: Path, archive_name: str) -> None:
+    expected = ARCHIVE_SHA256.get(archive_name)
+    if not expected:
+        raise IngestrNotFoundError(
+            "no embedded SHA256 checksum for %s; set %s to use a trusted local binary"
+            % (archive_name, _BINARY_PATH_ENV)
+        )
+
+    actual = _sha256_file(archive_path)
+    if actual.lower() != expected.lower():
+        raise IngestrNotFoundError(
+            "downloaded archive checksum mismatch for %s: expected %s, got %s"
+            % (archive_name, expected, actual)
+        )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _extract_binary(archive_path: Path, binary_name: str, destination: Path) -> None:
@@ -398,6 +426,11 @@ def _release_platform() -> _ReleasePlatform:
     arch = arch_names.get(machine)
     if os_name is None or arch is None:
         raise IngestrNotFoundError("ingestr release binaries are not available for %s/%s" % (system, machine))
+    if os_name == "Linux" and _linux_uses_musl():
+        raise IngestrNotFoundError(
+            "ingestr release binaries require glibc on Linux; build a musl-compatible binary and set %s"
+            % _BINARY_PATH_ENV
+        )
     if os_name == "Windows" and arch != "x86_64":
         raise IngestrNotFoundError("ingestr release binaries are not available for %s/%s" % (system, machine))
 
@@ -407,6 +440,20 @@ def _release_platform() -> _ReleasePlatform:
         archive_suffix="zip" if os_name == "Windows" else "tar.gz",
         binary_name="ingestr.exe" if os_name == "Windows" else "ingestr",
     )
+
+
+def _linux_uses_musl() -> bool:
+    libc_name = platform.libc_ver()[0].lower()
+    if "musl" in libc_name:
+        return True
+
+    for directory in (Path("/lib"), Path("/usr/lib")):
+        try:
+            if any(directory.glob("ld-musl-*.so.1")):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _release_tag() -> str:

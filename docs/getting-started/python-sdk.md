@@ -8,6 +8,8 @@ The `ingestr` pip package can be used as a Python library when your source data 
 
 The SDK still runs the `ingestr` CLI binary for the actual ingestion work. The pip package downloads and caches the matching GitHub release binary on first use. Python data is passed to the process as Arrow IPC by default, so the Go pipeline can load it into any supported destination.
 
+Downloaded archives are verified against checksums embedded in the pip package. On Linux, the downloaded release binaries require glibc; musl-based distributions such as Alpine should build or provide a compatible binary with `INGESTR_BINARY_PATH`.
+
 ## Installation
 
 Install `ingestr` with the SDK extra:

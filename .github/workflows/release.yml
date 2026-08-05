@@ -181,6 +181,55 @@ jobs:
       - name: Install build tooling
         run: pip install --quiet build twine
 
+      - name: Embed release checksums
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          token = os.environ["GITHUB_TOKEN"]
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+
+          with urllib.request.urlopen(request) as response:
+              release = json.load(response)
+
+          checksums = {}
+          for asset in release["assets"]:
+              name = asset["name"]
+              if not name.startswith("ingestr_") or not name.endswith((".tar.gz", ".zip")):
+                  continue
+
+              digest = asset.get("digest", "")
+              if not digest.startswith("sha256:"):
+                  raise RuntimeError(f"release asset {name} is missing a SHA256 digest")
+              checksums[name] = digest.removeprefix("sha256:")
+
+          if not checksums:
+              raise RuntimeError(f"no ingestr release archives found for {tag}")
+
+          Path("ingestr/_checksums.py").write_text(
+              "ARCHIVE_SHA256 = "
+              + json.dumps(checksums, indent=4, sort_keys=True)
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Build pip wheel
         run: |
           set -euo pipefail
