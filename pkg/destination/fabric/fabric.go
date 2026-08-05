@@ -899,13 +899,13 @@ func escapeTableName(table string) string {
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
 	primaryKeySet := make(map[string]struct{}, len(primaryKeys))
 	for _, key := range primaryKeys {
-		primaryKeySet[key] = struct{}{}
+		primaryKeySet[strings.ToLower(key)] = struct{}{}
 	}
 
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToFabric(col)
-		if _, ok := primaryKeySet[col.Name]; ok {
+		if _, ok := primaryKeySet[strings.ToLower(col.Name)]; ok {
 			colType += " NOT NULL"
 		}
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
@@ -916,9 +916,11 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 
 	if len(primaryKeys) > 0 {
 		return fmt.Sprintf(
-			"IF OBJECT_ID('%s', 'U') IS NULL BEGIN\n  %s;\n  %s\nEND",
+			"IF OBJECT_ID('%s', 'U') IS NULL %s;\nIF OBJECT_ID('%s', 'U') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID('%s') AND [type] = 'PK') %s",
 			escapeTableName(table),
 			createPart,
+			escapeTableName(table),
+			escapeTableName(table),
 			buildAddPrimaryKeySQL(table, primaryKeys),
 		)
 	}

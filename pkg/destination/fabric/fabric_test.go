@@ -211,9 +211,25 @@ func TestBuildCreateTableSQLAddsPrimaryKeyWithAlterTable(t *testing.T) {
 	if !strings.Contains(createSQL, "[id] BIGINT NOT NULL") {
 		t.Fatalf("primary key column should be created NOT NULL:\n%s", sql)
 	}
+	if !strings.Contains(sql, "NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID('dbo.events') AND [type] = 'PK')") {
+		t.Fatalf("SQL should retry missing primary key creation independently:\n%s", sql)
+	}
 	wantAlter := "ALTER TABLE [dbo].[events] ADD CONSTRAINT [PK_events] PRIMARY KEY NONCLUSTERED ([id]) NOT ENFORCED"
 	if !strings.Contains(sql, wantAlter) {
 		t.Fatalf("SQL missing Fabric primary key ALTER TABLE statement %q:\n%s", wantAlter, sql)
+	}
+}
+
+func TestBuildCreateTableSQLMatchesPrimaryKeysCaseInsensitively(t *testing.T) {
+	sql := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+	}, []string{"ID"})
+
+	if !strings.Contains(sql, "[id] BIGINT NOT NULL") {
+		t.Fatalf("primary key column should be created NOT NULL:\n%s", sql)
+	}
+	if !strings.Contains(sql, "PRIMARY KEY NONCLUSTERED ([ID]) NOT ENFORCED") {
+		t.Fatalf("SQL missing requested primary key spelling:\n%s", sql)
 	}
 }
 
