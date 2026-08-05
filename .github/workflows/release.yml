@@ -21,16 +21,11 @@ jobs:
       TEST_CONCURRENCY: "1"
     strategy:
       matrix:
-        platform:
-          - depot-ubuntu-24.04-4
-          - macos-15
-        suite: ["test-full", "test-integration"]
-        # macOS runners have no Docker, so test-integration skips every test yet
-        # still spends ~20-40min compiling the integration binary. Drop it; the
-        # integration suite is covered on Linux and test-full still runs on macOS.
-        exclude:
-          - platform: macos-15
-            suite: test-integration
+        # macOS has no Docker, so it runs test-full only; integration is on Linux.
+        include:
+          - { platform: depot-ubuntu-24.04-4, suite: test-full }
+          - { platform: depot-ubuntu-24.04-4, suite: test-integration }
+          - { platform: macos-15, suite: test-full }
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
