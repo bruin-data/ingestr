@@ -28,7 +28,9 @@ jobs:
           echo "DOCKER_HOST=$(docker context inspect colima -f '{{.Endpoints.docker.Host}}')" >> "$GITHUB_ENV"
           echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" >> "$GITHUB_ENV"
       - name: Run integration suite
-        run: make test-integration
+        run: |
+          make generate
+          go test -tags integration -v -p 64 -parallel 8 -timeout 60m ./tests/integration/...
 
   arm-qemu:
     runs-on: macos-15
@@ -52,4 +54,6 @@ jobs:
           echo "DOCKER_HOST=$(docker context inspect colima -f '{{.Endpoints.docker.Host}}')" >> "$GITHUB_ENV"
           echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" >> "$GITHUB_ENV"
       - name: Run integration suite
-        run: make test-integration
+        run: |
+          make generate
+          go test -tags integration -v -p 64 -parallel 8 -timeout 60m ./tests/integration/...
