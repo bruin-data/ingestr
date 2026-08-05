@@ -69,7 +69,7 @@ jobs:
         run: |
           # Pull in parallel with go-test compilation; testcontainers will
           # find the image already cached and skip its own pull.
-          for img in mongo:7 postgres:16-alpine mysql:8.0 mcr.microsoft.com/mssql/server:2022-latest clickhouse/clickhouse-server:24.3 amazon/dynamodb-local:latest crate:latest minio/minio:latest rabbitmq:3-management-alpine starrocks/allin1-ubuntu:3.3-latest gvenzl/oracle-free:23-slim vitess/vttestserver:mysql80 redpandadata/redpanda:v24.2.7 localstack/localstack:3.8.1 cassandra:4.1 maxcompute/maxcompute-emulator:v0.0.7; do
+          for img in mongo:7 postgres:16-alpine mysql:8.0 mcr.microsoft.com/mssql/server:2022-latest clickhouse/clickhouse-server:24.3 amazon/dynamodb-local:latest crate:latest minio/minio:latest rabbitmq:3-management-alpine starrocks/allin1-ubuntu:3.3-latest gvenzl/oracle-free:23-slim vitess/vttestserver:mysql80 redpandadata/redpanda:v24.2.7 localstack/localstack:3.8.1 cassandra:4.1 maxcompute/maxcompute-emulator:v0.0.7 docker.elastic.co/elasticsearch/elasticsearch:9.4.4; do
             docker pull "$img" >/dev/null 2>&1 &
           done
 

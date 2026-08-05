@@ -16,7 +16,7 @@ import (
 
 var containerBackends = []string{
 	"postgres", "clickhouse", "mysql", "mssql", "oracle",
-	"cratedb", "maxcompute", "minio", "dynamodb", "cassandra", "rabbitmq", "mqtt",
+	"cratedb", "maxcompute", "minio", "dynamodb", "cassandra", "elasticsearch", "rabbitmq", "mqtt",
 }
 
 // containerWanted reports whether the shared container for the given backend
@@ -83,6 +83,12 @@ type maxcomputeEnv struct {
 	dbPath    string
 }
 
+type elasticsearchEnv struct {
+	container testcontainers.Container
+	uri       string
+	baseURL   string
+}
+
 var (
 	pgSource        postgresEnv
 	pgDest          postgresEnv
@@ -95,6 +101,7 @@ var (
 	minioShared     minioEnv
 	dynamoDBDest    dynamoDBEnv
 	cassandraShared cassandraEnv
+	elasticShared   elasticsearchEnv
 	rabbitmqShared  rabbitmqEnv
 	mqttShared      mqttEnv
 )
@@ -118,7 +125,7 @@ func TestMain(m *testing.M) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(11)
+	wg.Add(12)
 	go func() {
 		defer wg.Done()
 		if !containerWanted("postgres") {
@@ -222,6 +229,15 @@ func TestMain(m *testing.M) {
 			cassandraShared = cassandraEnv{container: c, uri: uri, host: host, port: port}
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if !containerWanted("elasticsearch") {
+			return
+		}
+		if c, uri, baseURL, err := startElasticsearchContainerForMain(ctx); err == nil {
+			elasticShared = elasticsearchEnv{container: c, uri: uri, baseURL: baseURL}
+		}
+	}()
 	wg.Wait()
 
 	// Start RabbitMQ container
@@ -245,7 +261,7 @@ func TestMain(m *testing.M) {
 		pgSource.container, pgDest.container, chDest.container,
 		mysqlDest.container, mssqlDest.container, oracleDest.container, cratedbDest.container,
 		maxcomputeDest.container, minioShared.container, dynamoDBDest.container,
-		cassandraShared.container,
+		cassandraShared.container, elasticShared.container,
 	}
 	var twg sync.WaitGroup
 	for _, c := range containers {

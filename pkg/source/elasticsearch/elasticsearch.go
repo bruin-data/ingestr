@@ -1,8 +1,8 @@
 package elasticsearch
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -12,25 +12,16 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/esclient"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	elasticsearch "github.com/elastic/go-elasticsearch/v9"
-	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )
 
 const (
 	scrollTimeout = "5m"
 	scrollSize    = 1000
 )
-
-type durationString string
-
-//nolint:unused // used by elasticsearch library
-func (d durationString) DurationCaster() *types.Duration {
-	dur := types.Duration(string(d))
-	return &dur
-}
 
 type elasticsearchConfig struct {
 	baseURL     string
@@ -42,7 +33,7 @@ type elasticsearchConfig struct {
 
 type ElasticsearchSource struct {
 	config *elasticsearchConfig
-	client *elasticsearch.TypedClient
+	client *esclient.Client
 }
 
 func NewElasticsearchSource() *ElasticsearchSource {
@@ -64,33 +55,26 @@ func (s *ElasticsearchSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.config = cfg
 
-	esCfg := elasticsearch.Config{
-		Addresses: []string{cfg.baseURL},
-	}
-
-	if cfg.apiKey != "" {
-		esCfg.APIKey = cfg.apiKey
-	} else if cfg.username != "" && cfg.password != "" {
-		esCfg.Username = cfg.username
-		esCfg.Password = cfg.password
-	}
-
-	if !cfg.verifyCerts {
-		esCfg.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // user-configured option to disable TLS verification
-			},
-		}
-	}
-
-	client, err := elasticsearch.NewTypedClient(esCfg)
+	client, err := esclient.New(esclient.Config{
+		BaseURL:     cfg.baseURL,
+		Username:    cfg.username,
+		Password:    cfg.password,
+		APIKey:      cfg.apiKey,
+		VerifyCerts: cfg.verifyCerts,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create elasticsearch client: %w", err)
 	}
 
-	_, err = client.Info().Do(ctx)
+	res, err := client.Perform(ctx, http.MethodGet, "/", nil, nil, "")
 	if err != nil {
+		_ = client.Close(ctx)
 		return fmt.Errorf("failed to connect to elasticsearch: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode >= http.StatusMultipleChoices {
+		_ = client.Close(ctx)
+		return fmt.Errorf("failed to connect to elasticsearch: %s", esclient.StatusMessage(res))
 	}
 
 	s.client = client
@@ -98,8 +82,11 @@ func (s *ElasticsearchSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-func (s *ElasticsearchSource) Close(_ context.Context) error {
-	return nil
+func (s *ElasticsearchSource) Close(ctx context.Context) error {
+	if s.client == nil {
+		return nil
+	}
+	return s.client.Close(ctx)
 }
 
 func parseURI(uri string) (*elasticsearchConfig, error) {
@@ -194,29 +181,40 @@ func (s *ElasticsearchSource) read(ctx context.Context, index string, opts sourc
 func (s *ElasticsearchSource) readIndex(ctx context.Context, index string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[ELASTICSEARCH] reading index %s", index)
 
-	query := buildQuery(opts)
+	requestBody, err := json.Marshal(map[string]any{
+		"query": buildQuery(opts),
+		"size":  scrollSize,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to build search request for %s: %w", index, err)
+	}
 
-	res, err := s.client.Search().
-		Index(index).
-		Query(query).
-		Scroll(scrollTimeout).
-		Size(scrollSize).
-		Perform(ctx)
+	res, err := s.client.Perform(
+		ctx,
+		http.MethodPost,
+		"/"+url.PathEscape(index)+"/_search",
+		url.Values{"scroll": {scrollTimeout}},
+		bytes.NewReader(requestBody),
+		esclient.JSONContentType,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to search index %s: %w", index, err)
 	}
-	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode >= 400 {
-		return fmt.Errorf("elasticsearch search on %s returned status %d", index, res.StatusCode)
+		msg := esclient.StatusMessage(res)
+		_ = res.Body.Close()
+		return fmt.Errorf("elasticsearch search on %s failed: %s", index, msg)
 	}
 
 	var searchResult searchResponse
 	decoder := json.NewDecoder(res.Body)
 	decoder.UseNumber()
 	if err := decoder.Decode(&searchResult); err != nil {
+		_ = res.Body.Close()
 		return fmt.Errorf("failed to parse search response for %s: %w", index, err)
 	}
+	_ = res.Body.Close()
 
 	scrollID := searchResult.ScrollID
 	defer func() {
@@ -256,17 +254,30 @@ func (s *ElasticsearchSource) readIndex(ctx context.Context, index string, opts 
 		default:
 		}
 
-		res, err := s.client.Scroll().
-			ScrollId(scrollID).
-			Scroll(durationString(scrollTimeout)).
-			Perform(ctx)
+		scrollBody, err := json.Marshal(map[string]any{
+			"scroll":    scrollTimeout,
+			"scroll_id": scrollID,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to build scroll request for %s: %w", index, err)
+		}
+
+		res, err := s.client.Perform(
+			ctx,
+			http.MethodPost,
+			"/_search/scroll",
+			nil,
+			bytes.NewReader(scrollBody),
+			esclient.JSONContentType,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to scroll index %s: %w", index, err)
 		}
 
 		if res.StatusCode >= 400 {
+			msg := esclient.StatusMessage(res)
 			_ = res.Body.Close()
-			return fmt.Errorf("elasticsearch scroll on %s returned status %d", index, res.StatusCode)
+			return fmt.Errorf("elasticsearch scroll on %s failed: %s", index, msg)
 		}
 
 		searchResult = searchResponse{}
@@ -285,34 +296,50 @@ func (s *ElasticsearchSource) readIndex(ctx context.Context, index string, opts 
 	return nil
 }
 
-func buildQuery(opts source.ReadOptions) *types.Query {
+func buildQuery(opts source.ReadOptions) map[string]any {
 	if opts.IncrementalKey == "" || opts.IntervalStart == nil {
-		return &types.Query{
-			MatchAll: &types.MatchAllQuery{},
+		return map[string]any{
+			"match_all": map[string]any{},
 		}
 	}
 
-	rangeQuery := types.DateRangeQuery{}
+	rangeQuery := make(map[string]any, 2)
 	if opts.IntervalStart != nil {
-		gte := opts.IntervalStart.Format(time.RFC3339)
-		rangeQuery.Gte = &gte
+		rangeQuery["gte"] = opts.IntervalStart.Format(time.RFC3339)
 	}
 	if opts.IntervalEnd != nil {
-		lt := opts.IntervalEnd.Format(time.RFC3339)
-		rangeQuery.Lt = &lt
+		rangeQuery["lt"] = opts.IntervalEnd.Format(time.RFC3339)
 	}
 
-	return &types.Query{
-		Range: map[string]types.RangeQuery{
+	return map[string]any{
+		"range": map[string]any{
 			opts.IncrementalKey: rangeQuery,
 		},
 	}
 }
 
 func (s *ElasticsearchSource) clearScroll(ctx context.Context, scrollID string) {
-	_, err := s.client.ClearScroll().ScrollId(scrollID).Do(ctx)
+	body, err := json.Marshal(map[string]any{"scroll_id": []string{scrollID}})
+	if err != nil {
+		config.Debug("[ELASTICSEARCH] Failed to build clear scroll request: %v", err)
+		return
+	}
+
+	res, err := s.client.Perform(
+		ctx,
+		http.MethodDelete,
+		"/_search/scroll",
+		nil,
+		bytes.NewReader(body),
+		esclient.JSONContentType,
+	)
 	if err != nil {
 		config.Debug("[ELASTICSEARCH] Failed to clear scroll: %v", err)
+		return
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode >= http.StatusMultipleChoices && res.StatusCode != http.StatusNotFound {
+		config.Debug("[ELASTICSEARCH] Failed to clear scroll: %s", res.Status)
 	}
 }
 
