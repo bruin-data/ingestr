@@ -8,6 +8,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,11 @@ func rowsSyncedValue(t *testing.T) float64 {
 	return gatherValue(t, "ingestr_stream_rows_synced_total", nil)
 }
 
+func bytesSyncedValue(t *testing.T) float64 {
+	t.Helper()
+	return gatherValue(t, "ingestr_stream_bytes_synced_total", nil)
+}
+
 func lastSyncedValue(t *testing.T) float64 {
 	t.Helper()
 	return gatherValue(t, "ingestr_stream_last_synced_timestamp_seconds", nil)
@@ -75,28 +81,52 @@ func tableRowsSynced(t *testing.T, table string) float64 {
 	return gatherValue(t, "ingestr_stream_table_rows_synced_total", map[string]string{"table": table})
 }
 
+func tableBytesSynced(t *testing.T, table string) float64 {
+	t.Helper()
+	return gatherValue(t, "ingestr_stream_table_bytes_synced_total", map[string]string{"table": table})
+}
+
+func tableLastFlushBytes(t *testing.T, table string) float64 {
+	t.Helper()
+	return gatherValue(t, "ingestr_stream_table_last_flush_bytes", map[string]string{"table": table})
+}
+
 func TestStreaming_FlushRecordsRowsSynced(t *testing.T) {
 	dest := &fakeDestination{}
 	committer := &fakeCommitter{}
+	tableSchema := streamTestSchemaWithLoadTimestamp()
 	loop := newTestLoop(dest, StreamingOptions{
 		FlushInterval: time.Hour,
 		FlushRecords:  100,
 		Strategy:      config.StrategyAppend,
 		Committer:     committer,
-	}, map[string]*streamTableState{"": {destTable: "ds.tbl", schema: streamTestSchema()}})
+	}, map[string]*streamTableState{"": {destTable: "ds.tbl", schema: tableSchema}})
 
 	before := rowsSyncedValue(t)
+	beforeBytes := bytesSyncedValue(t)
+	beforeTableBytes := tableBytesSynced(t, "ds.tbl")
+
+	batch := int64RecordBatch(t, "id", []int64{1, 2, 3, 4}, nil)
+	loadColumn, ok := loadTimestampColumn(tableSchema)
+	require.True(t, ok)
+	transformed, err := transformer.NewLoadTimestamp(loadColumn, time.Unix(1000, 0)).Transform(batch)
+	require.NoError(t, err)
+	expectedBytes := recordBatchPayloadBytes(transformed)
+	transformed.Release()
 
 	loop.buffer(source.RecordBatchResult{
-		Batch:       int64RecordBatch(t, "id", []int64{1, 2, 3, 4}, nil),
+		Batch:       batch,
 		CommitToken: 7,
 	})
 	require.NoError(t, loop.flush(context.Background()))
 
 	assert.Equal(t, float64(4), rowsSyncedValue(t)-before)
+	assert.Equal(t, float64(expectedBytes), bytesSyncedValue(t)-beforeBytes)
 	// Single-table loops key l.tables on "", so the metric must fall back to
 	// the destination table name rather than publishing an empty key.
 	assert.Positive(t, tableRowsSynced(t, "ds.tbl"))
+	assert.Equal(t, float64(expectedBytes), tableBytesSynced(t, "ds.tbl")-beforeTableBytes)
+	assert.Equal(t, float64(expectedBytes), tableLastFlushBytes(t, "ds.tbl"))
 	assert.NotZero(t, lastSyncedValue(t))
 }
 
@@ -113,6 +143,7 @@ func TestStreaming_FailedCommitDoesNotRecordRowsSynced(t *testing.T) {
 	}, map[string]*streamTableState{"": {destTable: "ds.tbl", schema: streamTestSchema()}})
 
 	before := rowsSyncedValue(t)
+	beforeBytes := bytesSyncedValue(t)
 	beforeTS := lastSyncedValue(t)
 
 	loop.buffer(source.RecordBatchResult{
@@ -122,5 +153,17 @@ func TestStreaming_FailedCommitDoesNotRecordRowsSynced(t *testing.T) {
 	require.Error(t, loop.flush(context.Background()))
 
 	assert.Equal(t, before, rowsSyncedValue(t), "rows must not be counted when the commit fails")
+	assert.Equal(t, beforeBytes, bytesSyncedValue(t), "bytes must not be counted when the commit fails")
 	assert.Equal(t, beforeTS, lastSyncedValue(t), "last synced must not advance when the commit fails")
+}
+
+func TestRecordBatchPayloadBytesIncludesNestedBuffers(t *testing.T) {
+	batch := intStringRecordBatch(t, "id", []int64{1, 2}, "name", []string{"alpha", "beta"})
+	defer batch.Release()
+
+	assert.Greater(t, recordBatchPayloadBytes(batch), uint64(2*8), "string offsets and values should contribute to payload bytes")
+}
+
+func TestRecordBatchPayloadBytesNilBatch(t *testing.T) {
+	assert.Zero(t, recordBatchPayloadBytes(nil))
 }

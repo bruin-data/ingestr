@@ -923,6 +923,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 
 		batches []arrow.RecordBatch
 		rows    int64
+		bytes   uint64
 	}
 
 	var work []flushWork
@@ -952,7 +953,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		}
 	}
 
-	flushOne := func(ctx context.Context, w flushWork) error {
+	flushOne := func(ctx context.Context, w *flushWork) error {
 		st := w.st
 		displayName := w.name
 		if displayName == "" {
@@ -982,10 +983,13 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
 		}
+		var bytes uint64
+		records = countRecordBatchBytes(records, &bytes)
 		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
 			drainAndRelease(records)
 			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
 		}
+		w.bytes = bytes
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return err
 		}
@@ -1022,13 +1026,14 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	if limit := l.flushConcurrency(); limit > 1 && len(work) > 1 {
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(limit)
-		for _, w := range work {
+		for i := range work {
+			w := &work[i]
 			g.Go(func() error { return flushOne(gctx, w) })
 		}
 		flushErr = g.Wait()
 	} else {
-		for i, w := range work {
-			if err := flushOne(ctx, w); err != nil {
+		for i := range work {
+			if err := flushOne(ctx, &work[i]); err != nil {
 				for _, unstarted := range work[i+1:] {
 					for _, batch := range unstarted.batches {
 						batch.Release()
@@ -1104,13 +1109,13 @@ func (l *flushLoop) flush(ctx context.Context) error {
 
 	// Only after the commit: the counters mean "durable in the destination and
 	// acknowledged to the source", not merely "written".
-	perTable := make(map[string]int64, len(work))
+	perTable := make(map[string]metrics.SyncStats, len(work))
 	for _, w := range work {
 		name := w.name
 		if name == "" {
 			name = w.st.destTable // single-table streams key l.tables on ""
 		}
-		perTable[name] = w.rows
+		perTable[name] = metrics.SyncStats{Rows: w.rows, Bytes: w.bytes}
 	}
 	metrics.RecordSync(perTable, time.Now())
 
@@ -1119,6 +1124,35 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		output.Statusf("[STREAM] %s | cycle %d: flushed %d rows in %s\n", time.Now().Format("15:04:05"), l.cycles, flushedRows, time.Since(start).Round(time.Millisecond))
 	}
 	return nil
+}
+
+func countRecordBatchBytes(records <-chan source.RecordBatchResult, total *uint64) <-chan source.RecordBatchResult {
+	out := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(out)
+		for result := range records {
+			if result.Err == nil && result.Batch != nil {
+				*total += recordBatchPayloadBytes(result.Batch)
+			}
+			out <- result
+		}
+	}()
+	return out
+}
+
+func recordBatchPayloadBytes(batch arrow.RecordBatch) uint64 {
+	if batch == nil {
+		return 0
+	}
+	var total uint64
+	for i := 0; i < int(batch.NumCols()); i++ {
+		col := batch.Column(i)
+		if col == nil || col.Data() == nil {
+			continue
+		}
+		total += col.Data().SizeInBytes()
+	}
+	return total
 }
 
 // flushConcurrency returns how many tables may flush at once: destinations
