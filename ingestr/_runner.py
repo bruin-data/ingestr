@@ -1,42 +1,68 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
 import shutil
+import stat
 import subprocess
 import sys
-import sysconfig
+import tarfile
+import tempfile
+import urllib.parse
+import urllib.request
+import zipfile
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, List, NamedTuple, Optional, Union
+
+from ._checksums import ARCHIVE_SHA256
+
+try:
+    from importlib.metadata import PackageNotFoundError, version
+except ModuleNotFoundError:
+    from importlib_metadata import PackageNotFoundError, version  # type: ignore
 
 PathLike = Union[str, os.PathLike]
+_GITHUB_RELEASE_BASE_URL = "https://github.com/bruin-data/ingestr/releases/download"
+_BINARY_PATH_ENV = "INGESTR_BINARY_PATH"
+_BINARY_CACHE_DIR_ENV = "INGESTR_BINARY_CACHE_DIR"
+_BINARY_TAG_ENV = "INGESTR_BINARY_TAG"
+_DOWNLOAD_TIMEOUT_SECONDS = 60
 
 
 class IngestrNotFoundError(FileNotFoundError):
-    """Raised when the bundled ingestr executable cannot be found."""
+    """Raised when the ingestr executable cannot be found or installed."""
 
     pass
 
 
+class _ReleasePlatform(NamedTuple):
+    os_name: str
+    arch: str
+    archive_suffix: str
+    binary_name: str
+
+
 def binary_path() -> str:
-    """Return the path to the installed ingestr executable."""
+    """Return the path to the ingestr executable, downloading it if needed."""
 
-    for candidate in _binary_candidates():
-        if candidate.is_file():
-            return str(candidate)
+    override = _binary_path_override()
+    if override is not None:
+        return str(override)
 
-    for name in _binary_names():
-        resolved = shutil.which(name)
-        if resolved:
-            return resolved
+    local = _local_binary_path()
+    if local is not None:
+        return str(local)
 
-    checked = ", ".join(str(path) for path in _binary_candidates())
-    raise IngestrNotFoundError(
-        "could not find the ingestr executable; reinstall with `pip install ingestr` "
-        "or build it locally with `make build`. Checked: " + checked
-    )
+    cached = _cached_binary_path()
+    if cached.is_file():
+        _ensure_executable(cached)
+        return str(cached)
+
+    return str(_download_binary(cached))
 
 
 def run(
@@ -229,31 +255,269 @@ def _binary_names() -> Sequence[str]:
     return ("ingestr", "ingestr.exe")
 
 
-def _binary_candidates() -> List[Path]:
-    dirs = _binary_dirs()
-    seen = set()
-    candidates: List[Path] = []
-    for directory in dirs:
+def _binary_path_override() -> Optional[Path]:
+    configured = os.environ.get(_BINARY_PATH_ENV)
+    if not configured:
+        return None
+
+    candidate = Path(os.path.expandvars(configured)).expanduser()
+    if candidate.is_file():
+        _ensure_executable(candidate)
+        return candidate
+
+    raise IngestrNotFoundError("%s points to a missing ingestr executable: %s" % (_BINARY_PATH_ENV, candidate))
+
+
+def _local_binary_path() -> Optional[Path]:
+    for directory in _local_binary_dirs():
         for name in _binary_names():
             candidate = directory / name
-            marker = str(candidate)
-            if marker not in seen:
-                seen.add(marker)
-                candidates.append(candidate)
-    return candidates
+            if candidate.is_file():
+                _ensure_executable(candidate)
+                return candidate
+    return None
 
 
-def _binary_dirs() -> List[Path]:
-    dirs: List[Path] = []
-    dirs.append(Path(__file__).resolve().parents[1] / "bin")
+def _local_binary_dirs() -> List[Path]:
+    return [Path(__file__).resolve().parents[1] / "bin"]
 
-    scripts_dir = sysconfig.get_path("scripts")
-    if scripts_dir:
-        dirs.append(Path(scripts_dir))
 
-    if sys.executable:
-        dirs.append(Path(sys.executable).resolve().parent)
-    return dirs
+def _cached_binary_path() -> Path:
+    release = _release_platform()
+    platform_dir = "%s_%s" % (release.os_name, release.arch)
+    return _cache_root() / "bin" / _release_tag() / platform_dir / release.binary_name
+
+
+def _download_binary(target: Path) -> Path:
+    release = _release_platform()
+    tag = _release_tag()
+    archive_name = _release_archive_name(release)
+    url = _release_asset_url(tag, archive_name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="ingestr-download-", dir=str(target.parent)))
+    try:
+        archive_path = temp_dir / archive_name
+        extracted_path = temp_dir / release.binary_name
+        _download_file(url, archive_path)
+        _verify_archive_checksum(archive_path, tag, archive_name)
+        _extract_binary(archive_path, release.binary_name, extracted_path)
+        _ensure_executable(extracted_path)
+        os.replace(str(extracted_path), str(target))
+        _ensure_executable(target)
+        return target
+    except Exception as exc:
+        raise IngestrNotFoundError(
+            "failed to download ingestr %s for %s/%s from %s: %s"
+            % (tag, release.os_name, release.arch, url, exc)
+        ) from exc
+    finally:
+        shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+
+def _download_file(url: str, destination: Path) -> None:
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "ingestr-python/%s" % _package_version()},
+    )
+    with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
+        with destination.open("wb") as output:
+            shutil.copyfileobj(response, output)
+
+
+def _verify_archive_checksum(archive_path: Path, tag: str, archive_name: str) -> None:
+    expected = _archive_checksum(tag, archive_name)
+    if not expected:
+        raise IngestrNotFoundError(
+            "no embedded SHA256 checksum for %s/%s; set %s to use a trusted local binary"
+            % (tag, archive_name, _BINARY_PATH_ENV)
+        )
+
+    actual = _sha256_file(archive_path)
+    if actual.lower() != expected.lower():
+        raise IngestrNotFoundError(
+            "downloaded archive checksum mismatch for %s: expected %s, got %s"
+            % (archive_name, expected, actual)
+        )
+
+
+def _archive_checksum(tag: str, archive_name: str) -> Optional[str]:
+    checksums = ARCHIVE_SHA256.get(tag)
+    if not isinstance(checksums, Mapping):
+        return None
+
+    expected = checksums.get(archive_name)
+    if not isinstance(expected, str):
+        return None
+    return expected
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _extract_binary(archive_path: Path, binary_name: str, destination: Path) -> None:
+    if archive_path.suffix == ".zip":
+        _extract_binary_from_zip(archive_path, binary_name, destination)
+        return
+    _extract_binary_from_tar(archive_path, binary_name, destination)
+
+
+def _extract_binary_from_tar(archive_path: Path, binary_name: str, destination: Path) -> None:
+    with tarfile.open(str(archive_path), "r:*") as archive:
+        member = _find_tar_binary_member(archive, binary_name)
+        if member is None:
+            raise IngestrNotFoundError("%s was not found in %s" % (binary_name, archive_path.name))
+        source = archive.extractfile(member)
+        if source is None:
+            raise IngestrNotFoundError("%s could not be read from %s" % (binary_name, archive_path.name))
+        with source:
+            with destination.open("wb") as output:
+                shutil.copyfileobj(source, output)
+
+
+def _extract_binary_from_zip(archive_path: Path, binary_name: str, destination: Path) -> None:
+    with zipfile.ZipFile(str(archive_path)) as archive:
+        member = _find_zip_binary_member(archive, binary_name)
+        if member is None:
+            raise IngestrNotFoundError("%s was not found in %s" % (binary_name, archive_path.name))
+        with archive.open(member) as source:
+            with destination.open("wb") as output:
+                shutil.copyfileobj(source, output)
+
+
+def _find_tar_binary_member(archive: tarfile.TarFile, binary_name: str) -> Optional[tarfile.TarInfo]:
+    for member in archive.getmembers():
+        if member.isfile() and Path(member.name).name == binary_name:
+            return member
+    return None
+
+
+def _find_zip_binary_member(archive: zipfile.ZipFile, binary_name: str) -> Optional[str]:
+    for name in archive.namelist():
+        if not name.endswith("/") and Path(name).name == binary_name:
+            return name
+    return None
+
+
+def _release_asset_url(tag: str, archive_name: str) -> str:
+    return "%s/%s/%s" % (
+        _GITHUB_RELEASE_BASE_URL,
+        urllib.parse.quote(tag, safe=""),
+        urllib.parse.quote(archive_name, safe=""),
+    )
+
+
+def _release_archive_name(release: _ReleasePlatform) -> str:
+    return "ingestr_%s_%s.%s" % (release.os_name, release.arch, release.archive_suffix)
+
+
+def _release_platform() -> _ReleasePlatform:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    os_names = {
+        "darwin": "Darwin",
+        "linux": "Linux",
+        "windows": "Windows",
+    }
+    arch_names = {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "x64": "x86_64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }
+
+    os_name = os_names.get(system)
+    arch = arch_names.get(machine)
+    if os_name is None or arch is None:
+        raise IngestrNotFoundError("ingestr release binaries are not available for %s/%s" % (system, machine))
+    if os_name == "Linux" and _linux_uses_musl():
+        raise IngestrNotFoundError(
+            "ingestr release binaries require glibc on Linux; build a musl-compatible binary and set %s"
+            % _BINARY_PATH_ENV
+        )
+    if os_name == "Windows" and arch != "x86_64":
+        raise IngestrNotFoundError("ingestr release binaries are not available for %s/%s" % (system, machine))
+
+    return _ReleasePlatform(
+        os_name=os_name,
+        arch=arch,
+        archive_suffix="zip" if os_name == "Windows" else "tar.gz",
+        binary_name="ingestr.exe" if os_name == "Windows" else "ingestr",
+    )
+
+
+def _linux_uses_musl() -> bool:
+    libc_name = platform.libc_ver()[0].lower()
+    if "musl" in libc_name:
+        return True
+
+    for directory in (Path("/lib"), Path("/usr/lib")):
+        try:
+            if any(directory.glob("ld-musl-*.so.1")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _release_tag() -> str:
+    configured = os.environ.get(_BINARY_TAG_ENV)
+    if configured:
+        return configured
+
+    package_version = _package_version()
+    public_version = package_version.split("+", 1)[0]
+    if not public_version or "dev" in public_version or public_version == "0":
+        raise IngestrNotFoundError(
+            "cannot infer an ingestr GitHub release tag from package version %r; set %s or %s"
+            % (package_version, _BINARY_TAG_ENV, _BINARY_PATH_ENV)
+        )
+    if public_version.startswith("v"):
+        return public_version
+    return "v" + public_version
+
+
+def _package_version() -> str:
+    try:
+        return version("ingestr")
+    except PackageNotFoundError:
+        return "0+unknown"
+
+
+def _cache_root() -> Path:
+    configured = os.environ.get(_BINARY_CACHE_DIR_ENV)
+    if configured:
+        return Path(os.path.expandvars(configured)).expanduser()
+
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA")
+        if root:
+            return Path(root) / "ingestr"
+        return Path.home() / "AppData" / "Local" / "ingestr"
+
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "ingestr"
+
+    root = os.environ.get("XDG_CACHE_HOME")
+    if root:
+        return Path(root) / "ingestr"
+    return Path.home() / ".cache" / "ingestr"
+
+
+def _ensure_executable(path: Path) -> None:
+    if os.name == "nt":
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    executable_mode = mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if executable_mode != mode:
+        path.chmod(executable_mode)
 
 
 def _normalize_args(args: Optional[Sequence[object]]) -> List[str]:
