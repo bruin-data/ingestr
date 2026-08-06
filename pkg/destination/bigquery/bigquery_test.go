@@ -1362,7 +1362,12 @@ func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Close() }()
-	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	dest := &BigQueryDestination{
+		client:        client,
+		projectID:     "test-project",
+		location:      "US",
+		activeCDCJobs: map[string]struct{}{jobID: {}},
+	}
 	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
 	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
 
@@ -1377,6 +1382,10 @@ func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
 	}
 	if postCalls.Load() != loadJobStartMaxAttempts {
 		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+	_, _, active := dest.cdcJobFence()
+	if _, ok := active[jobID]; ok {
+		t.Fatalf("job %q remained active after start retry exhaustion", jobID)
 	}
 }
 
@@ -1427,7 +1436,12 @@ func TestLoadJobAmbiguousStartContinuesWithDiscoveredJobAfterMaxAttempts(t *test
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Close() }()
-	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	dest := &BigQueryDestination{
+		client:        client,
+		projectID:     "test-project",
+		location:      "US",
+		activeCDCJobs: map[string]struct{}{jobID: {}},
+	}
 	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
 	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
 
@@ -1445,6 +1459,10 @@ func TestLoadJobAmbiguousStartContinuesWithDiscoveredJobAfterMaxAttempts(t *test
 	}
 	if postCalls.Load() != loadJobStartMaxAttempts {
 		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+	_, _, active := dest.cdcJobFence()
+	if _, ok := active[jobID]; !ok {
+		t.Fatalf("discovered job %q was released before the caller could wait for it", jobID)
 	}
 }
 
@@ -1661,57 +1679,6 @@ func TestAmbiguousJobPermanentAuthorizationErrorReturns(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Fatalf("permanent authorization failure took %v", time.Since(started))
-	}
-}
-
-func TestAmbiguousJobReconciliationReleasesActiveJobOnTerminalCheckFailure(t *testing.T) {
-	const jobID = "unconfirmed-active-job"
-	var gets atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
-			if gets.Add(1) == 1 {
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
-					"configuration": map[string]interface{}{"query": map[string]interface{}{
-						"query": "SELECT 1", "useLegacySql": false,
-					}},
-					"status": map[string]string{"state": "RUNNING"},
-				})
-				return
-			}
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"permission denied"}}`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs/"+jobID+"/cancel"):
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = client.Close() }()
-	dest := &BigQueryDestination{
-		client:              client,
-		projectID:           "test-project",
-		location:            "US",
-		cdcStateTable:       "test-dataset.cdc_state",
-		cdcStateConnectorID: "connector",
-		activeCDCJobs:       map[string]struct{}{jobID: {}},
-	}
-
-	_, err = dest.reconcileAmbiguousBigQueryJob(t.Context(), jobID)
-	if err == nil || !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("error=%v, want terminal-check failure", err)
-	}
-	_, _, active := dest.cdcJobFence()
-	if _, ok := active[jobID]; ok {
-		t.Fatalf("job %q remained active after reconciliation returned", jobID)
 	}
 }
 

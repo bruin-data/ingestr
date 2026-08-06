@@ -878,6 +878,7 @@ func (d *BigQueryDestination) startLoadJobWithRetry(ctx context.Context, jobID s
 				config.Debug("[DEST] Continuing with discovered load job %s after start retry exhaustion: %v", jobID, reconcileErr)
 				return job, nil
 			}
+			d.releaseCDCJob(jobID)
 			if job == nil && reconcileErr == nil {
 				return nil, fmt.Errorf("failed to start load job %s after %d attempts: %w", jobID, attempt, err)
 			}

@@ -501,8 +501,6 @@ func reconcileCanceledBigQueryJob(ctx context.Context, job *bigquery.Job) (*bigq
 }
 
 func (d *BigQueryDestination) reconcileAmbiguousBigQueryJob(ctx context.Context, jobID string) (*bigquery.Job, error) {
-	defer d.releaseCDCJob(jobID)
-
 	deadline := time.Now().Add(bigQueryAmbiguousJobWindow)
 	for {
 		callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
