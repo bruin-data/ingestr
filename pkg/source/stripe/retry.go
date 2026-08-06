@@ -106,7 +106,9 @@ func (b *retryBackend) callWithGovernor(ctx context.Context, path, key string, f
 		}
 		defer release()
 
+		started := time.Now()
 		err = fn()
+		governor.observeRequest(path, time.Since(started), err)
 		if isRateLimitErr(err) {
 			governor.observeRateLimit(path, err)
 		}

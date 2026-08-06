@@ -168,6 +168,23 @@ func TestRequestGovernorDoesNotAdaptWithoutReasonHeader(t *testing.T) {
 	}
 }
 
+func TestRequestGovernorRecordsEndpointMetrics(t *testing.T) {
+	governor := newRequestGovernor(testGovernorConfig())
+	governor.observeRequest("/v1/customers?limit=100", 20*time.Millisecond, nil)
+	governor.observeRequest("/v1/customers", 40*time.Millisecond, rateLimitError())
+
+	stats := governor.endpointStats()
+	if len(stats) != 1 {
+		t.Fatalf("endpoint stats = %d, want 1", len(stats))
+	}
+	if stats[0].path != "/v1/customers" || stats[0].requests != 2 || stats[0].errors != 1 || stats[0].rateLimited != 1 {
+		t.Fatalf("unexpected endpoint stats: %+v", stats[0])
+	}
+	if got := stats[0].averageAPITime(); got != 30*time.Millisecond {
+		t.Fatalf("average API time = %s, want 30ms", got)
+	}
+}
+
 func TestAdaptiveLimitersRecover(t *testing.T) {
 	rateLimiter := newAdaptiveRateLimiter(20, 1, time.Millisecond)
 	rateLimiter.reduce()

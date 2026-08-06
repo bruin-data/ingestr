@@ -82,3 +82,48 @@ All 29 child requests returned the expected `resource_missing` response because 
 ### Conclusion
 
 Keep the embedded subscription-item reader and the 100/s adaptive governor. The governor preserves normal-path performance, improves saturated extraction, and prevents retry storms. Subscription-item speed is governed by Stripe response latency after reducing the operation to two requests.
+
+## Experiment 1: Central request correctness and endpoint telemetry
+
+Date: 2026-08-06
+
+Status: successful
+
+### Changes
+
+- Clamp every Stripe list request to Stripe's maximum page size of 100, including the CLI default of 25,000.
+- Trim a final page before Arrow conversion when a reader-level limit ends inside that page.
+- Reject a malformed `has_more` response without a cursor instead of looping forever.
+- Make result delivery cancellation-aware so downstream cancellation releases Arrow records and stops pagination.
+- Propagate the read context into list, object-refetch, account, parent-child, and oldest-record probe requests.
+- Record request count, errors, 429s, governed waits, and average API latency for each normalized Stripe endpoint.
+
+### Benchmarks
+
+#### Direct-list concurrency stress
+
+Command shape: `balance_transaction:sync:incremental`, 2026-07-07 through 2026-08-06, extraction parallelism 120, discard destination.
+
+| Variant | Runs | Median | Requests | 429s | Average API latency |
+|---|---:|---:|---:|---:|---:|
+| Experiment 0, governor 100/s | 1.3s, 1.2s, 1.5s | 1.3s | 120 | 0 | not recorded per endpoint |
+| Centralized request path | 1.2s, 1.8s, 1.2s | 1.2s | 120 | 0 | 290ms, 408ms, 289ms |
+
+The median improved by 0.1s, but the difference is normal API-latency noise. The successful result is no throughput regression, the same 64 rows and 120 requests, no 429s, and endpoint-level evidence showing that Stripe response time—not local page processing—dominates this workload.
+
+#### Page-size safety
+
+Command shape: one-day `balance_transaction:sync:incremental` read with `--page-size=25000`.
+
+The live debug trace reported `batch size: 100` for every time window. Unit coverage also verifies negative, zero, sub-maximum, maximum, and over-maximum values. This prevents Stripe from rejecting ingestr's generic 25,000-row page-size default while preserving smaller explicit page sizes.
+
+### Validation
+
+- `go test -race ./pkg/source/stripe`
+- `make format`
+- `make lint`
+- `make test`
+
+### Conclusion
+
+Keep the centralized page cap, context propagation, pagination guards, and endpoint telemetry. They make cancellation and pagination reliable without changing the emitted objects, and they make subsequent optimization decisions attributable to a concrete Stripe endpoint.

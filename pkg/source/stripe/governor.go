@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,13 @@ type requestGovernor struct {
 type endpointGovernor struct {
 	rate        *adaptiveRateLimiter
 	concurrency *adaptiveConcurrencyLimiter
+
+	requests             atomic.Uint64
+	errors               atomic.Uint64
+	rateLimited          atomic.Uint64
+	waitedRequests       atomic.Uint64
+	totalWaitNanoseconds atomic.Int64
+	totalAPINanoseconds  atomic.Int64
 }
 
 type governorStats struct {
@@ -132,6 +140,16 @@ type governorStats struct {
 	rateLimited    uint64
 	waitedRequests uint64
 	totalWait      time.Duration
+}
+
+type endpointStats struct {
+	path           string
+	requests       uint64
+	errors         uint64
+	rateLimited    uint64
+	waitedRequests uint64
+	totalWait      time.Duration
+	totalAPITime   time.Duration
 }
 
 func newRequestGovernor(cfg governorConfig) *requestGovernor {
@@ -171,6 +189,8 @@ func (g *requestGovernor) acquire(ctx context.Context, path string) (func(), err
 	if waited >= time.Millisecond {
 		g.waitedRequests.Add(1)
 		g.totalWaitNanoseconds.Add(waited.Nanoseconds())
+		endpoint.waitedRequests.Add(1)
+		endpoint.totalWaitNanoseconds.Add(waited.Nanoseconds())
 	}
 	g.requests.Add(1)
 
@@ -178,6 +198,18 @@ func (g *requestGovernor) acquire(ctx context.Context, path string) (func(), err
 		g.globalConcurrency.release()
 		endpoint.concurrency.release()
 	}, nil
+}
+
+func (g *requestGovernor) observeRequest(path string, duration time.Duration, err error) {
+	endpoint := g.endpoint(normalizeStripeEndpoint(path))
+	endpoint.requests.Add(1)
+	endpoint.totalAPINanoseconds.Add(duration.Nanoseconds())
+	if err != nil {
+		endpoint.errors.Add(1)
+	}
+	if isRateLimitErr(err) {
+		endpoint.rateLimited.Add(1)
+	}
 }
 
 func (g *requestGovernor) endpoint(path string) *endpointGovernor {
@@ -235,6 +267,33 @@ func (g *requestGovernor) stats() governorStats {
 		waitedRequests: g.waitedRequests.Load(),
 		totalWait:      time.Duration(g.totalWaitNanoseconds.Load()),
 	}
+}
+
+func (g *requestGovernor) endpointStats() []endpointStats {
+	g.mu.Lock()
+	stats := make([]endpointStats, 0, len(g.endpoints))
+	for path, endpoint := range g.endpoints {
+		stats = append(stats, endpointStats{
+			path:           path,
+			requests:       endpoint.requests.Load(),
+			errors:         endpoint.errors.Load(),
+			rateLimited:    endpoint.rateLimited.Load(),
+			waitedRequests: endpoint.waitedRequests.Load(),
+			totalWait:      time.Duration(endpoint.totalWaitNanoseconds.Load()),
+			totalAPITime:   time.Duration(endpoint.totalAPINanoseconds.Load()),
+		})
+	}
+	g.mu.Unlock()
+
+	sort.Slice(stats, func(i, j int) bool { return stats[i].path < stats[j].path })
+	return stats
+}
+
+func (s endpointStats) averageAPITime() time.Duration {
+	if s.requests == 0 {
+		return 0
+	}
+	return s.totalAPITime / time.Duration(s.requests)
 }
 
 type adaptiveRateLimiter struct {
