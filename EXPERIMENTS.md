@@ -199,3 +199,40 @@ The normal default is 4.8× faster and parallelism 20 is 15.4× faster. At paral
 ### Conclusion
 
 Keep the bounded setup-attempt worker pool. This table had the largest serial request fan-out observed so far, and concurrency converts nearly all of that independent network wait into useful throughput without changing the response payloads or filters.
+
+## Experiment 4: Embedded customer tax IDs with overflow fallback
+
+Date: 2026-08-06
+
+Status: successful
+
+### Changes
+
+- Expand `data.tax_ids` while paging customers and emit the embedded raw tax-ID objects.
+- Skip the per-customer tax-ID endpoint when the embedded list is complete.
+- Resume from the last embedded tax-ID cursor when an embedded list reports `has_more`.
+- Fall back to a full child fetch when Stripe omits or changes the embedded list shape.
+- Preserve customer pagination, global result streaming, number precision, and raw tax-ID object contents.
+
+### Benchmarks
+
+Command shape: full `tax_id:sync` load, discard destination. The live account contained 455 customers and 31 tax IDs.
+
+| Variant | Runs | Median | Rows | Requests | Errors / 429s |
+|---|---:|---:|---:|---:|---:|
+| Serial child endpoint baseline | 121.0s | 121.0s | 31 | 460 (5 parent + 455 child) | 0 / 0 |
+| Embedded expansion with fallback | 4.4s, 2.0s, 2.0s | 2.0s | 31 | 5 parent + 0 fallback | 0 / 0 |
+
+The median is 60.5× faster and removes 455 unnecessary requests. Stripe's expanded customer pages were slower individually than unexpanded pages in two runs, but five expanded pages were overwhelmingly cheaper than 455 serial child requests. The identical 31-row result verifies unchanged table contents for this account.
+
+### Validation
+
+- Unit coverage for complete, truncated, and missing embedded lists, including JSON number precision.
+- `go test -race ./pkg/source/stripe`
+- `make format`
+- `make lint`
+- `make test`
+
+### Conclusion
+
+Keep the embedded tax-ID reader and overflow fallback. It achieves the largest improvement in this series while retaining the child endpoint as a correctness path for truncated or absent expansions.

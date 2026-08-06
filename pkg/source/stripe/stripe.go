@@ -2328,43 +2328,53 @@ func (s *StripeSource) readTaxIDs(ctx context.Context, opts source.ReadOptions, 
 	customerParams := &stripe.CustomerListParams{}
 	customerParams.Context = ctx
 	customerParams.Limit = stripe.Int64(int64(batchSize))
+	customerParams.AddExpand("data.tax_ids")
 
-	customerIter := customer.List(customerParams)
-	for customerIter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	return s.paginateAndSend(ctx, opts, results, "tax_id", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+		if startingAfter != "" {
+			customerParams.StartingAfter = stripe.String(startingAfter)
 		}
 
-		c := customerIter.Customer()
-
-		tidParams := &stripe.TaxIDListParams{
-			Customer: stripe.String(c.ID),
+		customerIter := customer.List(customerParams)
+		if !customerIter.Next() {
+			return nil, false, "", customerIter.Err()
 		}
-		tidParams.Context = ctx
-		tidParams.Limit = stripe.Int64(int64(batchSize))
-
-		err := s.paginateAndSend(ctx, opts, results, "tax_id", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				tidParams.StartingAfter = stripe.String(startingAfter)
-			}
-			iter := taxid.List(tidParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.TaxIDList().LastResponse.RawJSON)
-		})
+		page, err := extractRawCustomerTaxIDs(customerIter.CustomerList().LastResponse.RawJSON)
 		if err != nil {
-			config.Debug("[STRIPE] Error fetching tax IDs for customer %s: %v", c.ID, err)
+			return nil, false, "", err
 		}
-	}
 
-	if err := customerIter.Err(); err != nil {
-		return fmt.Errorf("failed to list customers for tax IDs: %w", err)
-	}
+		for _, overflow := range page.overflows {
+			cursor := overflow.startingAfter
+			for {
+				tidParams := &stripe.TaxIDListParams{Customer: stripe.String(overflow.customerID)}
+				tidParams.Context = ctx
+				tidParams.Limit = stripe.Int64(int64(batchSize))
+				if cursor != "" {
+					tidParams.StartingAfter = stripe.String(cursor)
+				}
 
-	return nil
+				iter := taxid.List(tidParams)
+				if !iter.Next() {
+					return nil, false, "", fmt.Errorf("failed to fetch tax IDs for customer %s: %w", overflow.customerID, iter.Err())
+				}
+				items, hasMore, lastID, err := extractRawListItems(iter.TaxIDList().LastResponse.RawJSON)
+				if err != nil {
+					return nil, false, "", err
+				}
+				page.items = append(page.items, items...)
+				if !hasMore {
+					break
+				}
+				if lastID == "" {
+					return nil, false, "", fmt.Errorf("failed to paginate tax IDs for customer %s: missing cursor", overflow.customerID)
+				}
+				cursor = lastID
+			}
+		}
+
+		return page.items, page.hasMore, page.lastID, nil
+	})
 }
 
 func (s *StripeSource) readTaxRates(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
@@ -2628,6 +2638,69 @@ func extractRawSubscriptionItems(rawJSON []byte) (subscriptionItemsPage, error) 
 			page.overflows = append(page.overflows, subscriptionItemOverflow{
 				subscriptionID: subscriptionID,
 				startingAfter:  itemCursor,
+			})
+		}
+	}
+
+	return page, nil
+}
+
+type taxIDOverflow struct {
+	customerID    string
+	startingAfter string
+}
+
+type customerTaxIDsPage struct {
+	items     []map[string]interface{}
+	overflows []taxIDOverflow
+	hasMore   bool
+	lastID    string
+}
+
+func extractRawCustomerTaxIDs(rawJSON []byte) (customerTaxIDsPage, error) {
+	customers, hasMore, lastID, err := extractRawListItems(rawJSON)
+	if err != nil {
+		return customerTaxIDsPage{}, err
+	}
+
+	page := customerTaxIDsPage{hasMore: hasMore, lastID: lastID}
+	for _, customer := range customers {
+		customerID, _ := customer["id"].(string)
+		if customerID == "" {
+			return customerTaxIDsPage{}, fmt.Errorf("customer response is missing an id")
+		}
+
+		taxIDList, ok := customer["tax_ids"].(map[string]interface{})
+		if !ok {
+			page.overflows = append(page.overflows, taxIDOverflow{customerID: customerID})
+			continue
+		}
+
+		data, dataOK := taxIDList["data"].([]interface{})
+		if !dataOK {
+			page.overflows = append(page.overflows, taxIDOverflow{customerID: customerID})
+			continue
+		}
+
+		var taxIDCursor string
+		for _, rawTaxID := range data {
+			taxID, ok := rawTaxID.(map[string]interface{})
+			if !ok {
+				return customerTaxIDsPage{}, fmt.Errorf("customer %s contains an invalid tax ID", customerID)
+			}
+			taxIDValue, _ := taxID["id"].(string)
+			if taxIDValue == "" {
+				return customerTaxIDsPage{}, fmt.Errorf("customer %s contains a tax ID without an id", customerID)
+			}
+			page.items = append(page.items, taxID)
+			taxIDCursor = taxIDValue
+		}
+
+		taxIDsHaveMore, hasMoreOK := taxIDList["has_more"].(bool)
+		if taxIDsHaveMore || !hasMoreOK {
+			page.overflows = append(page.overflows, taxIDOverflow{
+				customerID:    customerID,
+				startingAfter: taxIDCursor,
 			})
 		}
 	}
