@@ -324,3 +324,34 @@ The two-window run required three cursor-pagination requests beyond its initial 
 ### Conclusion
 
 Keep worker-aware windows. They make request volume proportional to useful parallelism instead of wall-clock interval length, dramatically improving sparse tables while preserving dense-range pagination and row counts.
+
+## Experiment 7: Embedded child payload equivalence
+
+Date: 2026-08-07
+
+Status: successful
+
+### Method
+
+- Fetch the complete subscription and customer parent collections with `data.items` and `data.tax_ids` expanded, using Stripe API version `2025-02-24.acacia`.
+- Reconstruct the optimized results from each embedded list plus the same overflow fallback used by the source.
+- Independently fetch the original result for every parent from the subscription-item and customer tax-ID child list endpoints.
+- Key both result sets by object `id` and recursively compare field presence, JSON type, scalar value, object contents, array length, array order, and nested array values.
+- Pace the live run at 100 requests/second with 20 child-fetch workers. Keep all account values in memory and report only aggregate results.
+
+### Results
+
+| Table | Original rows | Optimized rows | Exact row matches | Missing / extra IDs | Duplicate IDs | JSON nodes compared | Field differences | Overflow fallbacks |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `subscription_item` | 733 | 733 | 733 | 0 / 0 | 0 | 42,551 | 0 | 0 |
+| `tax_id` | 31 | 31 | 31 | 0 / 0 | 0 | 558 | 0 | 0 |
+
+The subscription-item rows contained the same 13 top-level fields through both paths: `billing_thresholds`, `created`, `current_period_end`, `current_period_start`, `discounts`, `id`, `metadata`, `object`, `plan`, `price`, `quantity`, `subscription`, and `tax_rates`.
+
+The tax-ID rows contained the same 11 top-level fields through both paths: `country`, `created`, `customer`, `customer_account`, `id`, `livemode`, `object`, `owner`, `type`, `value`, and `verification`.
+
+The combined validation made 918 Stripe requests in 32.0 seconds, with zero retries and zero 429 responses.
+
+### Conclusion
+
+For this live account, the embedded subscription-item and tax-ID paths are field-for-field identical to the original child endpoint paths, including nested data and JSON types. The earlier equal-row-count benchmarks understated the validation: no payload differences were found anywhere in either complete result set.
