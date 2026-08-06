@@ -231,6 +231,7 @@ func TestNormalizeStripeEndpoint(t *testing.T) {
 		"/v1/customers/cus_123/tax_ids?limit=100": "/v1/customers/*/tax_ids",
 		"/v1/payment_records/pi_123":              "/v1/payment_records/*",
 		"/v1/subscriptions/sub_123":               "/v1/subscriptions/*",
+		"/v1/charges/py_123":                      "/v1/charges/*",
 	}
 
 	for path, want := range cases {

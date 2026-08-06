@@ -465,7 +465,7 @@ func looksLikeStripeID(segment string) bool {
 	}
 
 	switch prefix {
-	case "acct", "apd", "bt", "ch", "cs", "cus", "dp", "evt", "fee", "in", "ii", "initem", "invst", "mandate", "or", "pi", "plink", "pm", "po", "price", "prod", "promo", "qt", "re", "req", "seti", "setatt", "shr", "si", "src", "sub", "sub_sched", "txi", "txr", "tr", "tu", "we":
+	case "acct", "apd", "bt", "ch", "cs", "cus", "dp", "evt", "fee", "in", "ii", "initem", "invst", "mandate", "or", "pi", "plink", "pm", "po", "price", "prod", "promo", "py", "qt", "re", "req", "seti", "setatt", "shr", "si", "src", "sub", "sub_sched", "txi", "txr", "tr", "tu", "we":
 		return true
 	default:
 		return false

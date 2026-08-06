@@ -572,8 +572,11 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 	tc := tables[tableName]
 	config.Debug("[STRIPE] Reading %s from events (type filter: %s)", tableName, eventTypeFilter)
 
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+
 	params := &stripe.EventListParams{}
-	params.Context = ctx
+	params.Context = fetchCtx
 	params.Limit = stripe.Int64(int64(defaultBatchSize))
 	params.Type = stripe.String(eventTypeFilter)
 	params.CreatedRange = &stripe.RangeQueryParams{
@@ -583,135 +586,143 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 		params.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
 	}
 
-	// Collect unique parent object IDs from all events
-	changedIDs := make(map[string]bool)
+	workers := stripeFanoutWorkers(opts.Parallelism)
+	objectIDs := make(chan string, workers)
+	objects := make(chan map[string]interface{}, workers)
+	eventErrCh := make(chan error, 1)
+	changedCountCh := make(chan int, 1)
+	var workersWG sync.WaitGroup
 
-	iter := event.List(params)
-	for iter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		e := iter.Event()
-
-		if e.Data == nil || e.Data.Object == nil {
-			continue
-		}
-
-		obj := e.Data.Object
-		var parentID string
-
-		objType, _ := obj["object"].(string)
-		if objType == tc.objectType {
-			parentID, _ = obj["id"].(string)
-		} else if tc.parentIDField != "" {
-			parentID, _ = obj[tc.parentIDField].(string)
-		}
-
-		if parentID != "" {
-			changedIDs[parentID] = true
-		}
-	}
-
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to fetch events for %s: %w", tableName, err)
-	}
-
-	if len(changedIDs) == 0 {
-		config.Debug("[STRIPE] No events found for %s in the given interval", tableName)
-		return nil
-	}
-
-	config.Debug("[STRIPE] Found %d unique %s IDs from events, re-fetching full objects", len(changedIDs), tableName)
-
-	// Re-fetch objects by ID in parallel using a worker pool
-	const fetchWorkers = 5
-	fetchCtx, cancelFetch := context.WithCancel(ctx)
-	defer cancelFetch()
-
-	objChan := make(chan map[string]interface{}, fetchWorkers)
-	sem := make(chan struct{}, fetchWorkers)
-	var wg sync.WaitGroup
-
-	go func() {
-		defer func() {
-			wg.Wait()
-			close(objChan)
-		}()
-		for id := range changedIDs {
-			select {
-			case <-fetchCtx.Done():
-				return
-			case sem <- struct{}{}:
-			}
-
-			wg.Add(1)
-			go func(id string) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				select {
-				case <-fetchCtx.Done():
-					return
-				default:
-				}
-
-				config.Debug("[STRIPE] Fetching object ID: %s", id)
+	for i := 0; i < workers; i++ {
+		workersWG.Add(1)
+		go func() {
+			defer workersWG.Done()
+			for id := range objectIDs {
 				obj, err := s.fetchObjectByID(fetchCtx, tableName, id)
 				if err != nil {
 					config.Debug("[STRIPE] Failed to fetch %s %s: %v (skipping)", tableName, id, err)
+					continue
+				}
+				select {
+				case objects <- obj:
+				case <-fetchCtx.Done():
 					return
 				}
+			}
+		}()
+	}
 
-				select {
-				case objChan <- obj:
-				case <-fetchCtx.Done():
-				}
-			}(id)
+	go func() {
+		seen := make(map[string]struct{})
+		iter := event.List(params)
+		for iter.Next() {
+			e := iter.Event()
+			if e.Data == nil || e.Data.Object == nil {
+				continue
+			}
+
+			obj := e.Data.Object
+			var parentID string
+			objType, _ := obj["object"].(string)
+			if objType == tc.objectType {
+				parentID, _ = obj["id"].(string)
+			} else if tc.parentIDField != "" {
+				parentID, _ = obj[tc.parentIDField].(string)
+			}
+			if parentID == "" {
+				continue
+			}
+			if _, exists := seen[parentID]; exists {
+				continue
+			}
+			seen[parentID] = struct{}{}
+
+			select {
+			case objectIDs <- parentID:
+			case <-fetchCtx.Done():
+				close(objectIDs)
+				workersWG.Wait()
+				changedCountCh <- len(seen)
+				close(objects)
+				return
+			}
 		}
+
+		if err := iter.Err(); err != nil && fetchCtx.Err() == nil {
+			eventErrCh <- fmt.Errorf("failed to fetch events for %s: %w", tableName, err)
+		}
+		close(objectIDs)
+		workersWG.Wait()
+		changedCountCh <- len(seen)
+		close(objects)
 	}()
 
 	var items []map[string]interface{}
 	batchNum := 0
 	totalSent := 0
+	batchSize := stripePageSize(opts.PageSize)
 
-	for obj := range objChan {
-		items = append(items, obj)
-
-		if len(items) >= defaultBatchSize {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
-			}
-
-			batchNum++
-			totalSent += len(items)
-			config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent)
-			results <- source.RecordBatchResult{Batch: record}
-			items = nil
-
-			if opts.Limit > 0 && totalSent >= opts.Limit {
-				config.Debug("[STRIPE] Reached limit of %d %s", opts.Limit, tableName)
-				return nil
-			}
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
 		}
-	}
-
-	if len(items) > 0 {
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
 		}
 
 		batchNum++
-		totalSent += len(items)
 		config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent)
-		results <- source.RecordBatchResult{Batch: record}
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+			items = nil
+			return nil
+		case <-fetchCtx.Done():
+			record.Release()
+			return fetchCtx.Err()
+		}
 	}
 
-	config.Debug("[STRIPE] Total %d %s records re-fetched from %d changed IDs", totalSent, tableName, len(changedIDs))
+	for obj := range objects {
+		items = append(items, obj)
+		totalSent++
+
+		reachedLimit := opts.Limit > 0 && totalSent >= opts.Limit
+		if len(items) >= batchSize || reachedLimit {
+			if err := flush(); err != nil {
+				cancelFetch()
+				return err
+			}
+		}
+		if reachedLimit {
+			cancelFetch()
+			for range objects {
+			}
+			changedCount := <-changedCountCh
+			config.Debug("[STRIPE] Reached limit of %d %s after %d changed IDs", opts.Limit, tableName, changedCount)
+			return nil
+		}
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
+	select {
+	case err := <-eventErrCh:
+		return err
+	default:
+	}
+
+	changedCount := <-changedCountCh
+	if changedCount == 0 {
+		config.Debug("[STRIPE] No events found for %s in the given interval", tableName)
+		return nil
+	}
+	config.Debug("[STRIPE] Total %d %s records re-fetched from %d changed IDs", totalSent, tableName, changedCount)
 	return nil
 }
 

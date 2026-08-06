@@ -236,3 +236,41 @@ The median is 60.5× faster and removes 455 unnecessary requests. Stripe's expan
 ### Conclusion
 
 Keep the embedded tax-ID reader and overflow fallback. It achieves the largest improvement in this series while retaining the child endpoint as a correctness path for truncated or absent expansions.
+
+## Experiment 5: Streaming event refetch with configured parallelism
+
+Date: 2026-08-06
+
+Status: successful
+
+### Changes
+
+- Start refetching each unique changed object while Stripe event pagination is still in progress.
+- Replace the hard-coded five-fetch semaphore with the bounded, configured fan-out worker count.
+- Preserve event-level deduplication and stream completed objects in bounded Arrow batches.
+- Stop event pagination and in-flight object work when cancellation or the row limit is reached.
+- Normalize `py_` charge identifiers into the `/v1/charges/*` metric bucket to avoid per-object endpoint cardinality.
+
+### Benchmarks
+
+Command shape: async `charge` load from 2026-07-08 21:00 UTC through 2026-08-06 00:00 UTC, discard destination. The interval contained 33 unique changed charges and required one event request plus 33 object refetches.
+
+| Variant | Runs | Median | Rows | Requests | Errors / 429s |
+|---|---:|---:|---:|---:|---:|
+| Collect-then-refetch baseline, fixed 5 workers | 2.8s | 2.8s | 33 | 34 | 0 / 0 |
+| Streaming, default parallelism 5 | 2.2s, 2.3s, 2.9s | 2.3s | 33 | 34 | 0 / 0 |
+| Streaming, parallelism 20 | 1.2s, 1.5s, 1.5s | 1.5s | 33 | 34 | 0 / 0 |
+
+Streaming improves the normal default by 18%. Parallelism 20 is 47% faster than the committed baseline. The event request itself took 695ms–1.1s, so overlapping it with object refetches and increasing independent fetch concurrency accounted for the gain. Row and request counts were identical in every run.
+
+### Validation
+
+- Unit coverage for charge-ID endpoint normalization.
+- `go test -race ./pkg/source/stripe`
+- `make format`
+- `make lint`
+- `make test`
+
+### Conclusion
+
+Keep streaming event refetch and configured fan-out. It lowers latency without adding requests or changing deduplication, and it becomes increasingly valuable when an event interval spans multiple event pages.
