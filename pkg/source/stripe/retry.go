@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"time"
@@ -19,13 +20,13 @@ const (
 	maxRateLimitDelay   = 32 * time.Second
 )
 
-// retryBackend wraps a stripe.Backend and retries requests that fail with a
+// retryBackend governs Stripe traffic and retries requests that fail with a
 // 429 rate-limit error. The stripe-go library retries most transient failures
 // out of the box, but deliberately does NOT retry rate-limit 429s (it only
-// retries 429s caused by lock timeouts). Stripe recommends handling rate
-// limits with exponential backoff on the client side, which is what this does.
+// retries 429s caused by lock timeouts).
 type retryBackend struct {
 	inner      stripe.Backend
+	governors  *requestGovernorRegistry
 	baseDelay  time.Duration
 	maxDelay   time.Duration
 	maxRetries int
@@ -34,13 +35,14 @@ type retryBackend struct {
 func newRetryBackend(inner stripe.Backend) *retryBackend {
 	return &retryBackend{
 		inner:      inner,
+		governors:  sharedGovernorRegistry,
 		baseDelay:  baseRateLimitDelay,
 		maxDelay:   maxRateLimitDelay,
 		maxRetries: maxRateLimitRetries,
 	}
 }
 
-// wrapWithRetry installs a retryBackend over the given backend type. It is
+// wrapWithRetry installs the governed retry backend over the given backend type. It is
 // idempotent: if the current backend is already a retryBackend (e.g. Connect
 // was called more than once in the same process), it is left untouched so
 // retries don't compound across calls.
@@ -53,31 +55,63 @@ func wrapWithRetry(backendType stripe.SupportedBackend) {
 }
 
 func (b *retryBackend) Call(method, path, key string, params stripe.ParamsContainer, v stripe.LastResponseSetter) error {
-	return b.withRetry(paramsContext(params), func() error {
+	return b.callWithGovernor(paramsContext(params), path, key, func() error {
 		return b.inner.Call(method, path, key, params, v)
 	})
 }
 
 func (b *retryBackend) CallStreaming(method, path, key string, params stripe.ParamsContainer, v stripe.StreamingLastResponseSetter) error {
-	return b.withRetry(paramsContext(params), func() error {
+	return b.callWithGovernor(paramsContext(params), path, key, func() error {
 		return b.inner.CallStreaming(method, path, key, params, v)
 	})
 }
 
 func (b *retryBackend) CallRaw(method, path, key string, body *form.Values, params *stripe.Params, v stripe.LastResponseSetter) error {
-	return b.withRetry(paramsCtx(params), func() error {
+	return b.callWithGovernor(paramsCtx(params), path, key, func() error {
 		return b.inner.CallRaw(method, path, key, body, params, v)
 	})
 }
 
 func (b *retryBackend) CallMultipart(method, path, key, boundary string, body *bytes.Buffer, params *stripe.Params, v stripe.LastResponseSetter) error {
-	return b.withRetry(paramsCtx(params), func() error {
+	return b.callWithGovernor(paramsCtx(params), path, key, func() error {
 		return b.inner.CallMultipart(method, path, key, boundary, body, params, v)
 	})
 }
 
+func (b *retryBackend) RawRequest(method, path, key, content string, params *stripe.RawParams) (*stripe.APIResponse, error) {
+	inner, ok := b.inner.(stripe.RawRequestBackend)
+	if !ok {
+		return nil, fmt.Errorf("stripe backend does not support raw requests")
+	}
+
+	var response *stripe.APIResponse
+	err := b.callWithGovernor(rawParamsContext(params), path, key, func() error {
+		var err error
+		response, err = inner.RawRequest(method, path, key, content, params)
+		return err
+	})
+	return response, err
+}
+
 func (b *retryBackend) SetMaxNetworkRetries(maxNetworkRetries int64) {
 	b.inner.SetMaxNetworkRetries(maxNetworkRetries)
+}
+
+func (b *retryBackend) callWithGovernor(ctx context.Context, path, key string, fn func() error) error {
+	governor := b.governors.governorForKey(key)
+	return b.withRetry(ctx, func() error {
+		release, err := governor.acquire(ctx, path)
+		if err != nil {
+			return err
+		}
+		defer release()
+
+		err = fn()
+		if isRateLimitErr(err) {
+			governor.observeRateLimit(path, err)
+		}
+		return err
+	})
 }
 
 func (b *retryBackend) withRetry(ctx context.Context, fn func() error) error {
@@ -136,6 +170,13 @@ func paramsContext(params stripe.ParamsContainer) context.Context {
 }
 
 func paramsCtx(params *stripe.Params) context.Context {
+	if params == nil {
+		return nil
+	}
+	return params.Context
+}
+
+func rawParamsContext(params *stripe.RawParams) context.Context {
 	if params == nil {
 		return nil
 	}

@@ -69,7 +69,8 @@ const (
 )
 
 type StripeSource struct {
-	apiKey string
+	apiKey   string
+	governor *requestGovernor
 }
 
 func NewStripeSource() *StripeSource {
@@ -86,10 +87,10 @@ func (s *StripeSource) Connect(ctx context.Context, uri string) error {
 		return err
 	}
 	s.apiKey = apiKey
+	s.governor = sharedGovernorRegistry.governorForKey(apiKey)
 	stripe.Key = apiKey
 
-	// Wrap the default backends so rate-limit (429) responses are retried with
-	// exponential backoff. stripe-go does not retry rate-limit 429s on its own.
+	// Govern all Stripe requests and retry rate-limit responses.
 	wrapWithRetry(stripe.APIBackend)
 	wrapWithRetry(stripe.UploadsBackend)
 
@@ -123,6 +124,9 @@ func parseAPIKeyFromURI(uri string) (string, error) {
 }
 
 func (s *StripeSource) Close(ctx context.Context) error {
+	if s.governor != nil {
+		config.Debug("[STRIPE] Request governor: %s", s.governor.stats())
+	}
 	return nil
 }
 
@@ -1925,45 +1929,185 @@ func (s *StripeSource) readSubscriptions(ctx context.Context, opts source.ReadOp
 
 func (s *StripeSource) readSubscriptionItems(ctx context.Context, opts source.ReadOptions, batchSize int, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching subscription items")
+	if batchSize <= 0 || batchSize > defaultBatchSize {
+		batchSize = defaultBatchSize
+	}
 
 	subParams := &stripe.SubscriptionListParams{}
+	subParams.Context = ctx
 	subParams.Limit = stripe.Int64(int64(batchSize))
 	subParams.Status = stripe.String("all")
 
-	subIter := subscription.List(subParams)
-	for subIter.Next() {
+	parentFetch := func(startingAfter string) (subscriptionItemsPage, error) {
+		if startingAfter != "" {
+			subParams.StartingAfter = stripe.String(startingAfter)
+		}
+
+		iter := subscription.List(subParams)
+		if !iter.Next() {
+			return subscriptionItemsPage{}, iter.Err()
+		}
+		return extractRawSubscriptionItems(iter.SubscriptionList().LastResponse.RawJSON)
+	}
+
+	overflowFetch := func(subscriptionID, startingAfter string) ([]map[string]interface{}, bool, string, error) {
+		siParams := &stripe.SubscriptionItemListParams{
+			Subscription: stripe.String(subscriptionID),
+		}
+		siParams.Context = ctx
+		siParams.Limit = stripe.Int64(int64(batchSize))
+		if startingAfter != "" {
+			siParams.StartingAfter = stripe.String(startingAfter)
+		}
+
+		iter := subscriptionitem.List(siParams)
+		if !iter.Next() {
+			return nil, false, "", iter.Err()
+		}
+		return extractRawListItems(iter.SubscriptionItemList().LastResponse.RawJSON)
+	}
+
+	return readSubscriptionItemsFromPages(ctx, opts, batchSize, results, parentFetch, overflowFetch)
+}
+
+type subscriptionItemOverflow struct {
+	subscriptionID string
+	startingAfter  string
+}
+
+type subscriptionItemsPage struct {
+	items     []map[string]interface{}
+	overflows []subscriptionItemOverflow
+	hasMore   bool
+	lastID    string
+}
+
+type subscriptionItemsPageFetch func(startingAfter string) (subscriptionItemsPage, error)
+
+type subscriptionItemOverflowFetch func(subscriptionID, startingAfter string) ([]map[string]interface{}, bool, string, error)
+
+func readSubscriptionItemsFromPages(
+	ctx context.Context,
+	opts source.ReadOptions,
+	batchSize int,
+	results chan<- source.RecordBatchResult,
+	parentFetch subscriptionItemsPageFetch,
+	overflowFetch subscriptionItemOverflowFetch,
+) error {
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+
+	var pending []map[string]interface{}
+	totalSent := 0
+	batchNum := 0
+
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(pending, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert subscription_item to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[STRIPE] Sending batch %d with %d subscription_item (total sent: %d)", batchNum, len(pending), totalSent)
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+			pending = nil
+			return nil
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
+	}
+
+	appendItems := func(items []map[string]interface{}) (bool, error) {
+		for _, item := range items {
+			if opts.Limit > 0 && totalSent >= opts.Limit {
+				return true, flush()
+			}
+
+			pending = append(pending, item)
+			totalSent++
+			if len(pending) >= batchSize {
+				if err := flush(); err != nil {
+					return false, err
+				}
+			}
+		}
+
+		if opts.Limit > 0 && totalSent >= opts.Limit {
+			return true, flush()
+		}
+		return false, nil
+	}
+
+	var parentCursor string
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		sub := subIter.Subscription()
-
-		siParams := &stripe.SubscriptionItemListParams{
-			Subscription: stripe.String(sub.ID),
-		}
-		siParams.Limit = stripe.Int64(int64(batchSize))
-
-		err := s.paginateAndSend(ctx, opts, results, "subscription_item", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				siParams.StartingAfter = stripe.String(startingAfter)
-			}
-			iter := subscriptionitem.List(siParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.SubscriptionItemList().LastResponse.RawJSON)
-		})
+		page, err := parentFetch(parentCursor)
 		if err != nil {
-			config.Debug("[STRIPE] Error fetching subscription items for subscription %s: %v", sub.ID, err)
+			return fmt.Errorf("failed to fetch subscriptions for subscription items: %w", err)
 		}
+
+		reachedLimit, err := appendItems(page.items)
+		if err != nil {
+			return err
+		}
+		if reachedLimit {
+			config.Debug("[STRIPE] Reached limit of %d subscription_item", opts.Limit)
+			return nil
+		}
+
+		for _, overflow := range page.overflows {
+			itemCursor := overflow.startingAfter
+			for {
+				items, hasMore, lastID, err := overflowFetch(overflow.subscriptionID, itemCursor)
+				if err != nil {
+					return fmt.Errorf("failed to fetch subscription items for subscription %s: %w", overflow.subscriptionID, err)
+				}
+
+				reachedLimit, err = appendItems(items)
+				if err != nil {
+					return err
+				}
+				if reachedLimit {
+					config.Debug("[STRIPE] Reached limit of %d subscription_item", opts.Limit)
+					return nil
+				}
+				if !hasMore {
+					break
+				}
+				if lastID == "" {
+					return fmt.Errorf("failed to paginate subscription items for subscription %s: missing item cursor", overflow.subscriptionID)
+				}
+				itemCursor = lastID
+			}
+		}
+
+		if !page.hasMore {
+			break
+		}
+		if page.lastID == "" {
+			return fmt.Errorf("failed to paginate subscriptions for subscription items: missing subscription cursor")
+		}
+		parentCursor = page.lastID
 	}
 
-	if err := subIter.Err(); err != nil {
-		return fmt.Errorf("failed to list subscriptions for subscription items: %w", err)
+	if err := flush(); err != nil {
+		return err
 	}
-
+	if totalSent == 0 {
+		config.Debug("[STRIPE] No subscription_item found")
+	}
 	return nil
 }
 
@@ -2248,6 +2392,60 @@ func extractRawListItems(rawJSON []byte) (items []map[string]interface{}, hasMor
 		}
 	}
 	return items, hasMore, lastID, nil
+}
+
+func extractRawSubscriptionItems(rawJSON []byte) (subscriptionItemsPage, error) {
+	subscriptions, hasMore, lastID, err := extractRawListItems(rawJSON)
+	if err != nil {
+		return subscriptionItemsPage{}, err
+	}
+
+	page := subscriptionItemsPage{
+		hasMore: hasMore,
+		lastID:  lastID,
+	}
+	for _, subscription := range subscriptions {
+		subscriptionID, _ := subscription["id"].(string)
+		if subscriptionID == "" {
+			return subscriptionItemsPage{}, fmt.Errorf("subscription response is missing an id")
+		}
+
+		itemList, ok := subscription["items"].(map[string]interface{})
+		if !ok {
+			page.overflows = append(page.overflows, subscriptionItemOverflow{subscriptionID: subscriptionID})
+			continue
+		}
+
+		data, dataOK := itemList["data"].([]interface{})
+		if !dataOK {
+			page.overflows = append(page.overflows, subscriptionItemOverflow{subscriptionID: subscriptionID})
+			continue
+		}
+
+		var itemCursor string
+		for _, rawItem := range data {
+			item, ok := rawItem.(map[string]interface{})
+			if !ok {
+				return subscriptionItemsPage{}, fmt.Errorf("subscription %s contains an invalid item", subscriptionID)
+			}
+			itemID, _ := item["id"].(string)
+			if itemID == "" {
+				return subscriptionItemsPage{}, fmt.Errorf("subscription %s contains an item without an id", subscriptionID)
+			}
+			page.items = append(page.items, item)
+			itemCursor = itemID
+		}
+
+		itemsHaveMore, hasMoreOK := itemList["has_more"].(bool)
+		if itemsHaveMore || !hasMoreOK {
+			page.overflows = append(page.overflows, subscriptionItemOverflow{
+				subscriptionID: subscriptionID,
+				startingAfter:  itemCursor,
+			})
+		}
+	}
+
+	return page, nil
 }
 
 var _ source.Source = (*StripeSource)(nil)
