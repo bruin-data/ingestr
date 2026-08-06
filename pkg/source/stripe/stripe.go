@@ -1920,56 +1920,80 @@ func (s *StripeSource) readReviews(ctx context.Context, opts source.ReadOptions,
 func (s *StripeSource) readSetupAttempts(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching setup attempts")
 
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+
 	siParams := &stripe.SetupIntentListParams{}
-	siParams.Context = ctx
+	siParams.Context = workerCtx
 	siParams.Limit = stripe.Int64(int64(batchSize))
 
-	siIter := setupintent.List(siParams)
-	for siIter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	workers := stripeFanoutWorkers(opts.Parallelism)
+	setupIntentIDs := make(chan string, workers)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
 
-		si := siIter.SetupIntent()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for setupIntentID := range setupIntentIDs {
+				saParams := &stripe.SetupAttemptListParams{SetupIntent: stripe.String(setupIntentID)}
+				saParams.Context = workerCtx
+				saParams.Limit = stripe.Int64(int64(batchSize))
+				if intervalStart != nil || intervalEnd != nil {
+					saParams.CreatedRange = &stripe.RangeQueryParams{}
+					if intervalStart != nil {
+						saParams.CreatedRange.GreaterThanOrEqual = intervalStart.Unix()
+					}
+					if intervalEnd != nil {
+						saParams.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
+					}
+				}
 
-		saParams := &stripe.SetupAttemptListParams{
-			SetupIntent: stripe.String(si.ID),
-		}
-		saParams.Context = ctx
-		saParams.Limit = stripe.Int64(int64(batchSize))
-
-		if intervalStart != nil || intervalEnd != nil {
-			saParams.CreatedRange = &stripe.RangeQueryParams{}
-			if intervalStart != nil {
-				saParams.CreatedRange.GreaterThanOrEqual = intervalStart.Unix()
+				err := s.paginateAndSend(workerCtx, opts, results, "setup_attempt", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+					if startingAfter != "" {
+						saParams.StartingAfter = stripe.String(startingAfter)
+					}
+					iter := setupattempt.List(saParams)
+					if !iter.Next() {
+						return nil, false, "", iter.Err()
+					}
+					return extractRawListItems(iter.SetupAttemptList().LastResponse.RawJSON)
+				})
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("failed to fetch setup attempts for setup intent %s: %w", setupIntentID, err):
+						cancelWorkers()
+					default:
+					}
+					return
+				}
 			}
-			if intervalEnd != nil {
-				saParams.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
-			}
-		}
-
-		err := s.paginateAndSend(ctx, opts, results, "setup_attempt", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				saParams.StartingAfter = stripe.String(startingAfter)
-			}
-			iter := setupattempt.List(saParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.SetupAttemptList().LastResponse.RawJSON)
-		})
-		if err != nil {
-			config.Debug("[STRIPE] Error fetching setup attempts for setup intent %s: %v", si.ID, err)
-		}
+		}()
 	}
 
-	if err := siIter.Err(); err != nil {
+	siIter := setupintent.List(siParams)
+setupIntentLoop:
+	for siIter.Next() {
+		select {
+		case <-workerCtx.Done():
+			break setupIntentLoop
+		case setupIntentIDs <- siIter.SetupIntent().ID:
+		}
+	}
+	close(setupIntentIDs)
+	wg.Wait()
+
+	if err := siIter.Err(); err != nil && workerCtx.Err() == nil {
 		return fmt.Errorf("failed to list setup intents for setup attempts: %w", err)
 	}
 
-	return nil
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return ctx.Err()
+	}
 }
 
 func (s *StripeSource) readSetupIntents(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {

@@ -163,3 +163,39 @@ The default load is 5.9× faster. At parallelism 20 it is 20.4× faster, while t
 ### Conclusion
 
 Keep the bounded worker pool. The normal default removes most serial latency, while `--extract-parallelism=20` makes substantially better use of the live account's available request capacity without approaching the governor's endpoint-concurrency ceiling.
+
+## Experiment 3: Bounded setup-attempt fan-out
+
+Date: 2026-08-06
+
+Status: successful
+
+### Changes
+
+- Fetch setup attempts for independent SetupIntents through the same bounded, configurable worker model.
+- Keep time filtering on each child request exactly as before.
+- Stream child pages immediately and cancel sibling work on the first error.
+- Return child failures instead of logging them and silently completing with missing rows.
+
+### Benchmarks
+
+Command shape: full `setup_attempt:sync` load, discard destination. The live account produced 74 setup attempts from 597 SetupIntents; every run made six parent-page requests and 597 child requests.
+
+| Variant | Runs | Median | Rows | Requests | Errors / 429s |
+|---|---:|---:|---:|---:|---:|
+| Serial committed baseline | 146.0s | 146.0s | 74 | 603 | 0 / 0 |
+| Worker pool, default parallelism 5 | 30.2s, 29.7s, 30.4s | 30.2s | 74 | 603 | 0 / 0 |
+| Worker pool, parallelism 20 | 9.4s, 9.5s, 9.5s | 9.5s | 74 | 603 | 0 / 0 |
+
+The normal default is 4.8× faster and parallelism 20 is 15.4× faster. At parallelism 20 the governor delayed at most three requests for 28ms total; the API returned no 429s. Identical row and request counts confirm unchanged table contents.
+
+### Validation
+
+- `go test -race ./pkg/source/stripe`
+- `make format`
+- `make lint`
+- `make test`
+
+### Conclusion
+
+Keep the bounded setup-attempt worker pool. This table had the largest serial request fan-out observed so far, and concurrency converts nearly all of that independent network wait into useful throughput without changing the response payloads or filters.
