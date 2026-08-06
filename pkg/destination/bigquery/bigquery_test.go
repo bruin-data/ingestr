@@ -1380,6 +1380,74 @@ func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestLoadJobAmbiguousStartContinuesWithDiscoveredJobAfterMaxAttempts(t *testing.T) {
+	oldStartDelay := loadJobStartRetryDelay
+	loadJobStartRetryDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { loadJobStartRetryDelay = oldStartDelay })
+
+	var postCalls atomic.Int32
+	var getCalls atomic.Int32
+	const jobID = "ingestr_load_discovered_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists: Job test-project:US.ingestr_load_discovered_1","errors":[{"reason":"duplicate","message":"Already Exists: Job test-project:US.ingestr_load_discovered_1"}]}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			if getCalls.Add(1) == loadJobStartMaxAttempts+1 {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+					"configuration": map[string]interface{}{"load": map[string]interface{}{
+						"destinationTable": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+						"sourceUris":       []string{"gs://bucket/chunk.jsonl"},
+					}},
+					"status": map[string]string{"state": "RUNNING"},
+				})
+				return
+			}
+			if getCalls.Load() <= loadJobStartMaxAttempts {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":404,"message":"job not found"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"permission denied"}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs/"+jobID+"/cancel"):
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
+
+	job, err := dest.startLoadJobWithRetry(t.Context(), jobID, tableRef, func() (*bigquery.Loader, func(), error) {
+		loader := tableRef.LoaderFrom(source)
+		loader.CreateDisposition = bigquery.CreateNever
+		loader.WriteDisposition = bigquery.WriteAppend
+		return loader, func() {}, nil
+	})
+	if err != nil {
+		t.Fatalf("startLoadJobWithRetry() error=%v, want discovered job", err)
+	}
+	if job == nil || job.ID() != jobID {
+		t.Fatalf("job=%v, want discovered job %q", job, jobID)
+	}
+	if postCalls.Load() != loadJobStartMaxAttempts {
+		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+}
+
 func TestLoadJobWaitErrorReconcilesOriginalWithoutResubmission(t *testing.T) {
 	oldDelay := bigQueryJobReconcileDelay
 	bigQueryJobReconcileDelay = time.Millisecond
