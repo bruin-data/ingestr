@@ -501,6 +501,8 @@ func reconcileCanceledBigQueryJob(ctx context.Context, job *bigquery.Job) (*bigq
 }
 
 func (d *BigQueryDestination) reconcileAmbiguousBigQueryJob(ctx context.Context, jobID string) (*bigquery.Job, error) {
+	defer d.releaseCDCJob(jobID)
+
 	deadline := time.Now().Add(bigQueryAmbiguousJobWindow)
 	for {
 		callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -3246,10 +3248,14 @@ func (d *BigQueryDestination) resolveCDCJob(ctx context.Context, jobID string) e
 	if err := d.writeCDCJobMarker(ctx, table, connectorID, jobID, "resolved"); err != nil {
 		return err
 	}
+	d.releaseCDCJob(jobID)
+	return nil
+}
+
+func (d *BigQueryDestination) releaseCDCJob(jobID string) {
 	d.cdcStateMu.Lock()
 	delete(d.activeCDCJobs, jobID)
 	d.cdcStateMu.Unlock()
-	return nil
 }
 
 func (d *BigQueryDestination) writeCDCJobMarker(ctx context.Context, table, connectorID, jobID, status string) error {
