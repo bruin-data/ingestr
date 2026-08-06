@@ -226,6 +226,37 @@ class IngestrPackageTest(unittest.TestCase):
                 ["https://github.com/bruin-data/ingestr/releases/download/v1.2.3/ingestr_Linux_x86_64.tar.gz"],
             )
 
+    def test_binary_path_reports_first_download_to_stderr(self):
+        binary = b"#!/bin/sh\necho ingestr\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "ingestr_Linux_x86_64.tar.gz"
+            _write_tar_binary(archive_path, "ingestr", binary)
+
+            def fake_download(url, destination):
+                destination.write_bytes(archive_path.read_bytes())
+
+            release = ingestr_runner._ReleasePlatform("Linux", "x86_64", "tar.gz", "ingestr")
+            checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+            checksums = {"v1.2.3": {"ingestr_Linux_x86_64.tar.gz": checksum}}
+            stderr = io.StringIO()
+            with patch.dict(os.environ, {"INGESTR_BINARY_CACHE_DIR": str(root / "cache")}, clear=True):
+                with patch("ingestr._runner._local_binary_path", return_value=None):
+                    with patch("ingestr._runner._package_version", return_value="1.2.3"):
+                        with patch("ingestr._runner._release_platform", return_value=release):
+                            with patch.dict(ingestr_runner.ARCHIVE_SHA256, checksums, clear=True):
+                                with patch("ingestr._runner._download_file", side_effect=fake_download):
+                                    with patch("sys.stderr", stderr):
+                                        ingestr.binary_path()
+                                        ingestr.binary_path()
+
+            self.assertEqual(
+                stderr.getvalue(),
+                "ingestr: downloading CLI binary v1.2.3 for Linux/x86_64 from GitHub; "
+                "this happens once per version and may take a moment\n",
+            )
+
     def test_binary_path_uses_tag_specific_checksum_for_tag_override(self):
         binary = b"#!/bin/sh\necho ingestr\n"
 
