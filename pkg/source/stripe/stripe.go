@@ -59,6 +59,7 @@ const (
 	defaultBatchSize       = 100
 	defaultSyncParallelism = 10
 	maxFanoutParallelism   = 32
+	maxAdaptiveChunks      = 128
 )
 
 type loadingMode int
@@ -288,21 +289,19 @@ type timeWindow struct {
 	end   time.Time
 }
 
-// chunkSizeForInterval picks a chunk size that yields ~50-500 chunks for typical intervals.
-// Worker count is decoupled from chunk count — workers pull chunks from a queue.
-func chunkSizeForInterval(interval time.Duration) time.Duration {
-	switch {
-	case interval < time.Hour:
-		return interval / 10
-	case interval < 24*time.Hour:
-		return 5 * time.Minute
-	case interval < 7*24*time.Hour:
-		return time.Hour
-	case interval < 90*24*time.Hour:
-		return 6 * time.Hour
-	default:
-		return 24 * time.Hour
+func chunkSizeForParallelism(interval time.Duration, workers int) time.Duration {
+	if interval <= 0 {
+		return interval
 	}
+	if workers <= 0 {
+		workers = defaultSyncParallelism
+	}
+	targetChunks := min(workers*2, maxAdaptiveChunks)
+	chunkSize := interval / time.Duration(targetChunks)
+	if interval%time.Duration(targetChunks) != 0 {
+		chunkSize++
+	}
+	return max(chunkSize, time.Second)
 }
 
 func chunkTimeRange(start, end time.Time, chunkSize time.Duration) []timeWindow {
@@ -517,7 +516,7 @@ func (s *StripeSource) readParallelAdaptive(ctx context.Context, tableName strin
 		workers = defaultSyncParallelism
 	}
 
-	chunkSize := chunkSizeForInterval(end.Sub(start))
+	chunkSize := chunkSizeForParallelism(end.Sub(start), workers)
 	chunks := chunkTimeRange(start, end, chunkSize)
 	if len(chunks) == 0 {
 		return nil

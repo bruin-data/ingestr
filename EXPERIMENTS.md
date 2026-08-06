@@ -274,3 +274,53 @@ Streaming improves the normal default by 18%. Parallelism 20 is 47% faster than 
 ### Conclusion
 
 Keep streaming event refetch and configured fan-out. It lowers latency without adding requests or changing deduplication, and it becomes increasingly valuable when an event interval spans multiple event pages.
+
+## Experiment 6: Worker-aware time windows
+
+Date: 2026-08-06
+
+Status: successful
+
+### Changes
+
+- Replace fixed calendar chunk sizes with approximately two time windows per extraction worker.
+- Cap the queue at 128 windows for very high configured parallelism.
+- Continue using Stripe cursor pagination inside every window, so dense windows remain complete.
+- Keep a small amount of over-partitioning for load balancing without issuing hundreds of empty-window requests.
+
+### Benchmarks
+
+#### Sparse 30-day balance transactions
+
+Command shape: `balance_transaction:sync:incremental`, 2026-07-07 through 2026-08-06, default extraction parallelism 5, discard destination.
+
+| Variant | Runs | Median | Rows | Requests | Errors / 429s |
+|---|---:|---:|---:|---:|---:|
+| Fixed six-hour windows | 6.2s | 6.2s | 64 | 120 | 0 / 0 |
+| Worker-aware 72-hour windows | 0.8s, 0.7s, 0.7s | 0.7s | 64 | 10 | 0 / 0 |
+
+The worker-aware strategy is 8.9× faster and makes 91.7% fewer requests while returning the same rows. This is especially important for sparse tables, where the old implementation spent almost all of its time proving that narrow windows were empty.
+
+#### Wide-range pagination check
+
+Command shape: `charge:sync:incremental`, 2025-08-06 through 2026-08-06, discard destination.
+
+| Parallelism | Windows | Stripe requests | Rows | Duration |
+|---:|---:|---:|---:|---:|
+| 1 | 2 | 5 | 333 | 10.9s |
+| 5 | 10 | 10 | 333 | 3.1s |
+
+The two-window run required three cursor-pagination requests beyond its initial windows; the ten-window run fit each slice into one page. Both returned exactly 333 rows, validating that larger windows retain complete data through cursor pagination.
+
+### Validation
+
+- Unit coverage for default, high, fallback, capped, and sub-second chunk sizing.
+- Live one-year row-count comparison across different window counts.
+- `go test -race ./pkg/source/stripe`
+- `make format`
+- `make lint`
+- `make test`
+
+### Conclusion
+
+Keep worker-aware windows. They make request volume proportional to useful parallelism instead of wall-clock interval length, dramatically improving sparse tables while preserving dense-range pagination and row counts.
