@@ -1329,6 +1329,57 @@ func TestLoadJobAmbiguousStartRetriesWithStableJobID(t *testing.T) {
 	}
 }
 
+func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
+	oldDelay := loadJobStartRetryDelay
+	oldWindow := bigQueryAmbiguousJobWindow
+	loadJobStartRetryDelay = func(int) time.Duration { return 0 }
+	bigQueryAmbiguousJobWindow = time.Nanosecond
+	t.Cleanup(func() {
+		loadJobStartRetryDelay = oldDelay
+		bigQueryAmbiguousJobWindow = oldWindow
+	})
+
+	var postCalls atomic.Int32
+	const jobID = "ingestr_load_bounded_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists: Job test-project:US.ingestr_load_bounded_1","errors":[{"reason":"duplicate","message":"Already Exists: Job test-project:US.ingestr_load_bounded_1"}]}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"job not found"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US"}
+	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
+
+	_, err = dest.startLoadJobWithRetry(t.Context(), jobID, tableRef, func() (*bigquery.Loader, func(), error) {
+		loader := tableRef.LoaderFrom(source)
+		loader.CreateDisposition = bigquery.CreateNever
+		loader.WriteDisposition = bigquery.WriteAppend
+		return loader, func() {}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "after 10 attempts") {
+		t.Fatalf("error=%v, want bounded retry exhaustion", err)
+	}
+	if postCalls.Load() != loadJobStartMaxAttempts {
+		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+}
+
 func TestLoadJobWaitErrorReconcilesOriginalWithoutResubmission(t *testing.T) {
 	oldDelay := bigQueryJobReconcileDelay
 	bigQueryJobReconcileDelay = time.Millisecond
