@@ -27,6 +27,25 @@ func TestStripePageSize(t *testing.T) {
 	}
 }
 
+func TestStripeFanoutWorkers(t *testing.T) {
+	tests := []struct {
+		requested int
+		want      int
+	}{
+		{requested: 0, want: 10},
+		{requested: -1, want: 10},
+		{requested: 1, want: 1},
+		{requested: 20, want: 20},
+		{requested: 100, want: 32},
+	}
+
+	for _, tt := range tests {
+		if got := stripeFanoutWorkers(tt.requested); got != tt.want {
+			t.Errorf("stripeFanoutWorkers(%d) = %d, want %d", tt.requested, got, tt.want)
+		}
+	}
+}
+
 func TestPaginateAndSendTrimsFinalPageToLimit(t *testing.T) {
 	results := make(chan source.RecordBatchResult, 2)
 	fetches := 0

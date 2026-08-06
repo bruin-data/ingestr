@@ -58,6 +58,7 @@ import (
 const (
 	defaultBatchSize       = 100
 	defaultSyncParallelism = 10
+	maxFanoutParallelism   = 32
 )
 
 type loadingMode int
@@ -1039,6 +1040,16 @@ func stripePageSize(requested int) int {
 	return requested
 }
 
+func stripeFanoutWorkers(requested int) int {
+	if requested <= 0 {
+		return defaultSyncParallelism
+	}
+	if requested > maxFanoutParallelism {
+		return maxFanoutParallelism
+	}
+	return requested
+}
+
 func (s *StripeSource) getAccount(ctx context.Context) (*stripe.Account, error) {
 	params := &stripe.Params{Context: ctx}
 	acc := &stripe.Account{}
@@ -1609,46 +1620,71 @@ func (s *StripeSource) readPaymentLinks(ctx context.Context, opts source.ReadOpt
 func (s *StripeSource) readPaymentMethods(ctx context.Context, opts source.ReadOptions, batchSize int, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching payment methods")
 
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+
 	customerParams := &stripe.CustomerListParams{}
-	customerParams.Context = ctx
+	customerParams.Context = workerCtx
 	customerParams.Limit = stripe.Int64(int64(batchSize))
 
-	customerIter := customer.List(customerParams)
-	for customerIter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	workers := stripeFanoutWorkers(opts.Parallelism)
+	customerIDs := make(chan string, workers)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
 
-		c := customerIter.Customer()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for customerID := range customerIDs {
+				pmParams := &stripe.PaymentMethodListParams{Customer: stripe.String(customerID)}
+				pmParams.Context = workerCtx
+				pmParams.Limit = stripe.Int64(int64(batchSize))
 
-		pmParams := &stripe.PaymentMethodListParams{
-			Customer: stripe.String(c.ID),
-		}
-		pmParams.Context = ctx
-		pmParams.Limit = stripe.Int64(int64(batchSize))
-
-		err := s.paginateAndSend(ctx, opts, results, "payment_method", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				pmParams.StartingAfter = stripe.String(startingAfter)
+				err := s.paginateAndSend(workerCtx, opts, results, "payment_method", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+					if startingAfter != "" {
+						pmParams.StartingAfter = stripe.String(startingAfter)
+					}
+					iter := paymentmethod.List(pmParams)
+					if !iter.Next() {
+						return nil, false, "", iter.Err()
+					}
+					return extractRawListItems(iter.PaymentMethodList().LastResponse.RawJSON)
+				})
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("failed to fetch payment methods for customer %s: %w", customerID, err):
+						cancelWorkers()
+					default:
+					}
+					return
+				}
 			}
-			iter := paymentmethod.List(pmParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.PaymentMethodList().LastResponse.RawJSON)
-		})
-		if err != nil {
-			config.Debug("[STRIPE] Error fetching payment methods for customer %s: %v", c.ID, err)
-		}
+		}()
 	}
 
-	if err := customerIter.Err(); err != nil {
+	customerIter := customer.List(customerParams)
+customerLoop:
+	for customerIter.Next() {
+		select {
+		case <-workerCtx.Done():
+			break customerLoop
+		case customerIDs <- customerIter.Customer().ID:
+		}
+	}
+	close(customerIDs)
+	wg.Wait()
+
+	if err := customerIter.Err(); err != nil && workerCtx.Err() == nil {
 		return fmt.Errorf("failed to list customers for payment methods: %w", err)
 	}
 
-	return nil
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return ctx.Err()
+	}
 }
 
 func (s *StripeSource) readPayouts(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {

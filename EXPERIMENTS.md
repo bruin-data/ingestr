@@ -127,3 +127,39 @@ The live debug trace reported `batch size: 100` for every time window. Unit cove
 ### Conclusion
 
 Keep the centralized page cap, context propagation, pagination guards, and endpoint telemetry. They make cancellation and pagination reliable without changing the emitted objects, and they make subsequent optimization decisions attributable to a concrete Stripe endpoint.
+
+## Experiment 2: Bounded payment-method fan-out
+
+Date: 2026-08-06
+
+Status: successful
+
+### Changes
+
+- Replace the serial customer-to-payment-method loop with a bounded worker pool.
+- Use the configured extraction parallelism, defaulting to 10 only when no value is supplied and capping the fan-out at the governor's 32-request endpoint concurrency ceiling.
+- Stream each customer's pages as soon as they arrive; no account data is buffered.
+- Cancel sibling work and return the first child error instead of logging it and silently producing an incomplete table.
+
+### Benchmarks
+
+Command shape: full `payment_method:sync` load, discard destination. The live account had 455 customers and 63 payment methods; every run made five customer-page requests and 455 payment-method requests.
+
+| Variant | Runs | Median | Rows | Requests | Errors / 429s |
+|---|---:|---:|---:|---:|---:|
+| Serial committed baseline | 114.0s | 114.0s | 63 | 460 | 0 / 0 |
+| Worker pool, default parallelism 5 | 19.2s, 20.3s, 19.2s | 19.2s | 63 | 460 | 0 / 0 |
+| Worker pool, parallelism 20 | 5.6s, 6.0s, 5.1s | 5.6s | 63 | 460 | 0 / 0 |
+
+The default load is 5.9× faster. At parallelism 20 it is 20.4× faster, while the governor introduced at most 119ms of aggregate wait and Stripe returned no rate-limit responses. Row count and request count remained identical, demonstrating that concurrency changed scheduling but not table contents.
+
+### Validation
+
+- `go test -race ./pkg/source/stripe`
+- `make format`
+- `make lint`
+- `make test`
+
+### Conclusion
+
+Keep the bounded worker pool. The normal default removes most serial latency, while `--extract-parallelism=20` makes substantially better use of the live account's available request capacity without approaching the governor's endpoint-concurrency ceiling.
