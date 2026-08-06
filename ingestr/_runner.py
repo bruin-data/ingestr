@@ -294,6 +294,7 @@ def _download_binary(target: Path) -> Path:
     archive_name = _release_archive_name(release)
     url = _release_asset_url(tag, archive_name)
     target.parent.mkdir(parents=True, exist_ok=True)
+    _report_download_start(tag, release)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="ingestr-download-", dir=str(target.parent)))
     try:
@@ -323,6 +324,24 @@ def _download_file(url: str, destination: Path) -> None:
     with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
         with destination.open("wb") as output:
             shutil.copyfileobj(response, output)
+
+
+def _report_download_start(tag: str, release: _ReleasePlatform) -> None:
+    stream = sys.stderr
+    if stream is None:
+        return
+
+    try:
+        message = (
+            "ingestr: downloading CLI binary %s for %s/%s from GitHub; "
+            "this happens once per version and may take a moment\n"
+        )
+        stream.write(
+            message % (tag, release.os_name, release.arch)
+        )
+        stream.flush()
+    except (OSError, ValueError):
+        pass
 
 
 def _verify_archive_checksum(archive_path: Path, tag: str, archive_name: str) -> None:
