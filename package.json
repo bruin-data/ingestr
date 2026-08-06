@@ -9,7 +9,7 @@
     "vitepress": "^1.6.3"
   },
   "overrides": {
-    "postcss": "^8.5.10",
+    "postcss": "^8.5.18",
     "vite": "^6.4.2",
     "preact": "^10.28.2"
   }
