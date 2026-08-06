@@ -10,9 +10,8 @@ authors = [
 dynamic = ["version"]
 description = "ingestr is a command-line application that ingests data from various sources and stores them in any database."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 dependencies = [
-  "importlib-metadata>=4; python_version < '3.8'",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
