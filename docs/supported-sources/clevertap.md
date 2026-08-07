@@ -1,0 +1,127 @@
+# CleverTap
+[CleverTap](https://clevertap.com/) is a customer engagement and retention platform that combines analytics, segmentation, and cross-channel campaigns for mobile and web apps.
+
+ingestr supports CleverTap as a source.
+
+## URI format
+
+```
+clevertap://?account_id=<account_id>&passcode=<passcode>&region=<region>&timezone=<timezone>
+```
+
+URI parameters:
+- `account_id`: the CleverTap Account ID for your project.
+- `passcode`: the Account Passcode, or your user passcode if your admin has enabled user-level passcodes.
+- `region`: optional, the data centre your account lives in. One of `eu1`, `in1`, `us1`, `sg1`, `aps3`, `mec1`. Defaults to `eu1`. European projects appear as `global` in the dashboard, and that value works too.
+- `timezone`: optional, the timezone your CleverTap project is set to, as an IANA name such as `Asia/Kolkata`. Defaults to `UTC`. **Set this to match your project**, otherwise every event time is shifted by the difference.
+
+Find all four in the CleverTap dashboard under **Settings → Project**. Your region is also the subdomain of your dashboard URL, so `in1.dashboard.clevertap.com` means `region=in1`.
+
+Here's a sample command that copies your user profiles into a DuckDB database:
+
+```sh
+ingestr ingest \
+  --source-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123&region=eu1" \
+  --source-table "profiles" \
+  --dest-uri duckdb:///clevertap.duckdb \
+  --dest-table "public.profiles"
+```
+
+## Tables
+
+CleverTap source allows ingesting the following resources into separate tables:
+
+| Table | PK | Inc Key | Inc Strategy | Details |
+| ----- | -- | ------- | ------------ | ------- |
+| [events](https://developer.clevertap.com/docs/get-events-api) | – | ts | delete+insert | Individual occurrences of an event, with who raised it and the event's properties |
+| [profiles](https://developer.clevertap.com/docs/get-user-profiles-api) | object_id | – | replace | Your users, with their custom properties, activity summaries, and devices |
+| [campaigns](https://developer.clevertap.com/docs/get-campaigns-api) | id | – | replace | Campaigns created **through the API**, with their name, schedule, and status |
+| [campaign_reports](https://developer.clevertap.com/docs/get-campaign-report-api) | id | – | replace | Delivery and engagement metrics for each completed campaign created **through the API** |
+| [content_blocks](https://developer.clevertap.com/docs/get-content-block-list-api) | id | updatedAt | merge | Reusable content blocks, with their type, content, and authorship |
+| [message_reports](https://developer.clevertap.com/docs/get-message-reports-api) | message_id | – | replace | Per-message delivery and engagement counts |
+| [event_schema](https://developer.clevertap.com/docs/get-schema) | name | – | replace | Every event defined in your project, with its properties |
+| [user_properties](https://developer.clevertap.com/docs/get-schema) | name | – | replace | Every custom profile property defined in your project |
+| [category_groups](https://developer.clevertap.com/docs/settings-api-endpoints) | key | – | replace | Messaging subscription groups, with the channels each one covers |
+
+Use these as the `--source-table` parameter in the `ingestr ingest` command.
+
+> [!WARNING]
+> `campaigns` and `campaign_reports` only ever contain campaigns **created through the CleverTap API**. Campaigns you build in the dashboard are not included.
+
+### Choosing which events to load
+
+`events` and `profiles` accept an `event_name` parameter, which narrows them to a single event:
+
+```sh
+ingestr ingest \
+  --source-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123" \
+  --source-table "events?event_name=App Launched" \
+  --dest-uri duckdb:///clevertap.duckdb \
+  --dest-table "public.app_launched"
+```
+
+The name must match your CleverTap dashboard exactly, including spaces and capitalisation. It is also included as a column, so several events can share one destination table.
+
+Separate names with a comma to load more than one:
+
+```sh
+--source-table "events?event_name=Charged,App Launched"
+```
+
+Leave the parameter out and you get everything:
+
+```sh
+--source-table "events"     # every event, in one table
+--source-table "profiles"   # your whole user base
+```
+
+## Joining events to profiles
+
+`events` carries two keys:
+
+| Column | Identifies | Use it for |
+| ------ | ---------- | ---------- |
+| `identity` | the person | joining to `profiles` |
+| `object_id` | one device | per-device analysis |
+
+```sql
+SELECT e.ts, e.event_name, p.name, p.profile_data
+FROM events e
+JOIN profiles p ON e.identity = p.identity
+```
+
+**Join on `identity`.** Someone using your app on both a phone and a laptop has a different `object_id` for each, so joining on `object_id` silently drops the events they raised on their other devices. Every device is still listed in `profiles.platform_info`.
+
+`identity` is only set for users who have logged in, so events from anonymous visitors have no profile to join to.
+
+## Date ranges
+
+`events` and `content_blocks` respect `--interval-start` and `--interval-end`:
+
+```sh
+ingestr ingest \
+  --source-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123" \
+  --source-table "events?event_name=Charged" \
+  --dest-uri duckdb:///clevertap.duckdb \
+  --dest-table "public.charged" \
+  --interval-start 2024-01-01 \
+  --interval-end 2024-04-01
+```
+
+The end bound is exclusive of that day's activity, so use the following day to capture a full day. With no interval at all, everything is loaded.
+
+The other tables always load in full and ignore the interval.
+
+## Limitations
+
+> [!WARNING]
+> As noted above, `campaigns` and `campaign_reports` cover only API-created campaigns. Dashboard campaigns never appear whatever their channel or schedule, because CleverTap offers no way to list them.
+
+> [!NOTE]
+> The `profile` column on `events` shows the user's details as they stand today, not as they were when the event happened. CleverTap keeps no history of past values, so point-in-time user attributes are not available from this source.
+
+> [!NOTE]
+> A campaign only has a report once it has completed and delivered. Campaigns that are still scheduled, running, paused, or were stopped before delivering are skipped, so `campaign_reports` usually holds fewer rows than `campaigns`.
+
+> [!NOTE]
+> Notification events such as push impressions and clicks cannot be exported from CleverTap and are skipped automatically.
