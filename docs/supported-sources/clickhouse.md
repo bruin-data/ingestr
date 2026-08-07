@@ -74,9 +74,6 @@ ingestr ingest \
 ```
 
 
-<!-- 
-    see https://github.com/dlt-hub/dlt/issues/2248
--->
 > [!WARNING]
 > ingestr does not use ClickHouse transactions. ClickHouse `delete+insert` is supported as a best-effort two-step operation: ingestr runs `ALTER TABLE ... DELETE`, waits for the mutation to finish, and then inserts rows from the staging table. This is not a single atomic transaction.
 
