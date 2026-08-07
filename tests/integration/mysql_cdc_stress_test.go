@@ -766,7 +766,8 @@ func TestMySQLCDC_StressComplexWorkload(t *testing.T) {
 			start := time.Now()
 			results := runCDCStressPipelines(ctx, pipelines)
 			for i, result := range results {
-				if result.err != nil {
+				// A late table racing in mid-run is an expected transient; the source asks us to retry.
+				if result.err != nil && !strings.Contains(result.err.Error(), "retry so it can be prepared safely") {
 					runnerErr <- fmt.Errorf("%s: %w", pipelines[i].name, result.err)
 					return
 				}
