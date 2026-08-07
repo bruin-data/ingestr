@@ -554,11 +554,22 @@ func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts
 
 	// The API filters by whole days but delete+insert removes an exact instant
 	// range, so trim the day padding or the edges duplicate on every run.
+	var undated int64
 	keep := func(item map[string]interface{}) bool {
+		// A record whose ts did not parse cannot be placed in the delete window, so
+		// keeping it would insert a duplicate on every run.
+		if _, ok := item["ts"].(time.Time); !ok {
+			undated++
+			return false
+		}
 		return withinInterval(item["ts"], opts.IntervalStart, opts.IntervalEnd)
 	}
 
-	return s.cursorExport(ctx, "/1/events.json", body, query, transform, keep, opts, results)
+	err := s.cursorExport(ctx, "/1/events.json", body, query, transform, keep, opts, results)
+	if undated > 0 {
+		output.Warnf("Warning: clevertap dropped %d %q record(s) with an unreadable timestamp\n", undated, eventName)
+	}
+	return err
 }
 
 // withinInterval reports whether a converted timestamp is inside the bounds. Both

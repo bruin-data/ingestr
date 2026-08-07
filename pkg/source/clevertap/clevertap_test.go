@@ -391,6 +391,22 @@ func TestLiftProfileObjectIDIsDeviceScoped(t *testing.T) {
 	require.Equal(t, "bruin-user-1", item["identity"])
 }
 
+func TestWithinIntervalRequiresConvertedTimestamp(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	inside := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+
+	require.True(t, withinInterval(inside, &start, &end))
+	require.False(t, withinInterval(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), &start, &end))
+	require.True(t, withinInterval(inside, nil, nil))
+
+	// readEvents drops records whose ts never converted, because delete+insert
+	// cannot place them in a window; withinInterval itself keeps non-time values.
+	require.True(t, withinInterval(json.Number("20260815000000"), &start, &end))
+}
+
 func TestIsRequestInProgress(t *testing.T) {
 	t.Parallel()
 
