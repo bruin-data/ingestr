@@ -355,3 +355,29 @@ The combined validation made 918 Stripe requests in 32.0 seconds, with zero retr
 ### Conclusion
 
 For this live account, the embedded subscription-item and tax-ID paths are field-for-field identical to the original child endpoint paths, including nested data and JSON types. The earlier equal-row-count benchmarks understated the validation: no payload differences were found anywhere in either complete result set.
+
+## Experiment 8: Hyperfine main-versus-branch tax-ID benchmark
+
+Date: 2026-08-07
+
+Status: successful
+
+### Method
+
+- Build clean detached worktrees for `origin/main` at `c41988b6` and this branch at `edd2fcd7`.
+- Run a complete `tax_id:sync` extraction into the `discard://` destination with Hyperfine 1.19.0.
+- Measure three fresh-process runs for each binary without a warmup. This includes CLI startup and captures the live request path users experience.
+- Use the same restricted live account and destination for both variants. The field-equivalence validation in Experiment 7 established that both paths return the same 31 tax-ID objects with identical payloads.
+
+### Results
+
+| Variant | Individual runs | Mean ± standard deviation | Median | Range | Speedup by mean | Speedup by median |
+|---|---:|---:|---:|---:|---:|---:|
+| `origin/main` (`c41988b6`) | 129.387s, 124.033s, 124.243s | 125.887s ± 3.032s | 124.243s | 124.033–129.387s | 1.0× | 1.0× |
+| Branch (`edd2fcd7`) | 7.891s, 2.540s, 3.065s | 4.499s ± 2.949s | 3.065s | 2.540–7.891s | 27.98× | 40.53× |
+
+Hyperfine reported the branch as `27.98 ± 18.36` times faster based on the arithmetic means. The large uncertainty comes from the branch's first, cold live request taking 7.891 seconds; its next two complete runs took 2.540 and 3.065 seconds. The main path was much more consistently slow because its approximately 460 serial requests dominate process and connection startup effects.
+
+### Conclusion
+
+The expanded customer tax-ID path reduces a complete live extraction from roughly two minutes to roughly three seconds after the first run. Even when the slow cold branch run is included, the measured mean improvement is 28.0×; the median improvement is 40.5×.
