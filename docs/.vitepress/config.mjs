@@ -202,6 +202,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Bruin", link: "/supported-sources/bruin.md" },
               { text: "Chargebee", link: "/supported-sources/chargebee.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
+              { text: "CleverTap", link: "/supported-sources/clevertap.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
               { text: "Cursor", link: "/supported-sources/cursor.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
