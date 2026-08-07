@@ -773,6 +773,11 @@ func (s *CleverTapSource) fanOutByEvent(ctx context.Context, names []string, fn 
 		select {
 		case nameCh <- name:
 		case <-ctx.Done():
+			// A worker failed; stop queueing instead of spinning through the rest.
+			close(nameCh)
+			wg.Wait()
+			close(errs)
+			return <-errs
 		}
 	}
 	close(nameCh)
@@ -1073,6 +1078,11 @@ func (s *CleverTapSource) readCampaignReports(ctx context.Context, opts source.R
 		select {
 		case idCh <- id:
 		case <-ctx.Done():
+			// A worker failed; stop queueing instead of spinning through the rest.
+			close(idCh)
+			wg.Wait()
+			close(errs)
+			return <-errs
 		}
 	}
 	close(idCh)
