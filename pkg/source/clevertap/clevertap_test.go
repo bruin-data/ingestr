@@ -258,14 +258,41 @@ func TestDateRange(t *testing.T) {
 	start := time.Date(2024, 3, 5, 13, 0, 0, 0, time.UTC)
 	end := time.Date(2024, 4, 1, 6, 0, 0, 0, time.UTC)
 
-	from, to := dateRange(source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	from, to := dateRange(source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, time.UTC)
 	require.Equal(t, 20240305, from)
 	require.Equal(t, 20240401, to)
 
 	// With no interval the export still needs bounds: a fixed floor and today.
-	from, to = dateRange(source.ReadOptions{})
+	from, to = dateRange(source.ReadOptions{}, time.UTC)
 	require.Equal(t, 20130101, from)
 	require.Equal(t, yyyymmdd(time.Now().UTC()), to)
+}
+
+func TestDateRangeUsesProjectTimezone(t *testing.T) {
+	t.Parallel()
+
+	// 20:00Z on the 6th is already 01:30 on the 7th in Kolkata. CleverTap's days
+	// are project-local, so the 7th has to be requested or those events are never
+	// fetched while delete+insert still removes them from the destination.
+	start := time.Date(2026, 8, 5, 20, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 6, 20, 0, 0, 0, time.UTC)
+	opts := source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}
+
+	from, to := dateRange(opts, kolkata(t))
+	require.Equal(t, 20260806, from)
+	require.Equal(t, 20260807, to)
+
+	// The same instants in UTC land on the previous day at both ends.
+	from, to = dateRange(opts, time.UTC)
+	require.Equal(t, 20260805, from)
+	require.Equal(t, 20260806, to)
+
+	// A negative offset shifts the other way.
+	ny, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	midnightUTC := time.Date(2026, 8, 6, 0, 30, 0, 0, time.UTC)
+	from, _ = dateRange(source.ReadOptions{IntervalStart: &midnightUTC}, ny)
+	require.Equal(t, 20260805, from)
 }
 
 func TestDecodeCursor(t *testing.T) {

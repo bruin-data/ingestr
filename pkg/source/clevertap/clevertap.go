@@ -63,9 +63,8 @@ var supportedTables = []string{
 // events, which are only available through its S3/GCP exports).
 var errExportNotAllowed = errors.New("export not allowed for this event")
 
-// validRegions maps a region code to its API host prefix. Europe is served from
-// the unprefixed host, and the dashboard labels that project "global", so both
-// spellings are accepted for it.
+// validRegions maps a region code to its API host prefix. Europe uses the
+// unprefixed host and the dashboard labels it "global", so both are accepted.
 var validRegions = map[string]string{
 	"eu1":    "",
 	"global": "",
@@ -76,9 +75,8 @@ var validRegions = map[string]string{
 	"mec1":   "mec1",
 }
 
-// defaultStartDate bounds the export when no interval is supplied; the CleverTap
-// export endpoints require an explicit from/to range. CleverTap was founded in
-// 2013, so no project can hold data from before then and nothing is cut off.
+// defaultStartDate bounds the export when no interval is supplied. CleverTap was
+// founded in 2013, so nothing can predate it.
 var defaultStartDate = time.Date(2013, 1, 1, 0, 0, 0, 0, time.UTC)
 
 type CleverTapSource struct {
@@ -229,22 +227,17 @@ func (s *CleverTapSource) GetTable(ctx context.Context, req source.TableRequest)
 	switch table {
 	case "events":
 		// Event records carry no unique id, so merge is impossible; delete+insert
-		// rewrites the loaded window instead, which also refreshes the profile
-		// snapshot each record embeds.
+		// rewrites the loaded window instead.
 		incrementalKey = "ts"
 		strategy = config.StrategyDeleteInsert
 	case "profiles":
-		// CleverTap exposes no way to detect profile edits or deletions, so the
-		// table is rebuilt from a full sweep rather than accumulated; merging
-		// would leave deleted users and dormant edits behind forever.
+		// No way to detect profile edits or deletions, so each run rebuilds rather
+		// than accumulating stale rows.
 		primaryKeys = []string{"object_id"}
 		strategy = config.StrategyReplace
 	case "campaigns", "campaign_reports":
-		// The endpoint filters on a campaign's scheduled date, which says nothing
-		// about when it last changed: a campaign's status moves through running to
-		// completed long after that date, and its report only exists once it has
-		// finished. A narrow window would freeze both, so each run rebuilds from a
-		// full sweep.
+		// scheduled_on says nothing about when a campaign last changed, so a
+		// windowed load would freeze its status; each run rebuilds in full.
 		primaryKeys = []string{"id"}
 		strategy = config.StrategyReplace
 	case "content_blocks":
@@ -329,18 +322,21 @@ func jsonUseNumber(data []byte, v any) error {
 	return dec.Decode(v)
 }
 
-// dateRange converts the ingestion interval into the inclusive YYYYMMDD bounds the
-// CleverTap export endpoints require.
-func dateRange(opts source.ReadOptions) (int, int) {
+// dateRange converts the interval into inclusive YYYYMMDD bounds. Resolved in loc
+// because CleverTap's days are project-local; UTC dates would skip a boundary day.
+func dateRange(opts source.ReadOptions, loc *time.Location) (int, int) {
+	if loc == nil {
+		loc = time.UTC
+	}
 	from := defaultStartDate
-	to := time.Now().UTC()
+	to := time.Now()
 	if opts.IntervalStart != nil {
-		from = opts.IntervalStart.UTC()
+		from = *opts.IntervalStart
 	}
 	if opts.IntervalEnd != nil {
-		to = opts.IntervalEnd.UTC()
+		to = *opts.IntervalEnd
 	}
-	return yyyymmdd(from), yyyymmdd(to)
+	return yyyymmdd(from.In(loc)), yyyymmdd(to.In(loc))
 }
 
 func yyyymmdd(t time.Time) int {
@@ -525,11 +521,10 @@ func decodeCursor(cursor string) string {
 func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[CLEVERTAP] reading events for %q", eventName)
 
-	from, to := dateRange(opts)
+	from, to := dateRange(opts, s.timezone)
 	body := map[string]interface{}{"event_name": eventName, "from": from, "to": to}
-	// The profile enrichments are all off: they would copy profile_data, the
-	// device list and the lifetime activity summary onto every event row, and the
-	// profiles table already holds those. objectId is returned either way.
+	// Enrichments off: they would copy onto every row what profiles already holds.
+	// objectId and identity are returned either way.
 	query := map[string]string{
 		"batch_size": strconv.Itoa(maxPageSize),
 		"app":        "false",
@@ -542,9 +537,8 @@ func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts
 		// events would be indistinguishable in one table.
 		item["event_name"] = eventName
 		if profile, ok := item["profile"].(map[string]interface{}); ok {
-			// object_id identifies the device, so it only joins to the one device
-			// profiles happens to key on. identity is the person and joins reliably;
-			// it is empty for users who never logged in.
+			// object_id is per-device so it under-joins; identity is per-person and
+			// is the reliable key, though empty for users who never logged in.
 			if id, ok := profile["objectId"].(string); ok {
 				item["object_id"] = id
 			}
@@ -558,9 +552,8 @@ func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts
 		return item
 	}
 
-	// CleverTap filters by whole days, but delete+insert removes exactly the
-	// requested instant range, so anything outside it would be re-inserted every
-	// run without ever being deleted. Trim the day padding to keep runs idempotent.
+	// The API filters by whole days but delete+insert removes an exact instant
+	// range, so trim the day padding or the edges duplicate on every run.
 	keep := func(item map[string]interface{}) bool {
 		return withinInterval(item["ts"], opts.IntervalStart, opts.IntervalEnd)
 	}
@@ -568,9 +561,8 @@ func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts
 	return s.cursorExport(ctx, "/1/events.json", body, query, transform, keep, opts, results)
 }
 
-// withinInterval reports whether an already-converted event timestamp falls inside the
-// requested bounds. Both ends are inclusive to match the delete+insert delete predicate.
-// A value that is absent or was never converted is kept rather than silently dropped.
+// withinInterval reports whether a converted timestamp is inside the bounds. Both
+// ends are inclusive to match the delete predicate; unconverted values are kept.
 func withinInterval(v interface{}, start, end *time.Time) bool {
 	ts, ok := v.(time.Time)
 	if !ok {
@@ -585,9 +577,8 @@ func withinInterval(v interface{}, start, end *time.Time) bool {
 	return true
 }
 
-// parseEventTimestamp turns CleverTap's 14-digit yyyyMMddHHmmss event timestamp into
-// a real instant. It is reported in the project's timezone, so loc supplies the offset;
-// an unparseable value is left untouched rather than dropped.
+// parseEventTimestamp turns the 14-digit yyyyMMddHHmmss timestamp into an instant.
+// It is project-local, so loc supplies the offset.
 func parseEventTimestamp(v interface{}, loc *time.Location) (time.Time, bool) {
 	if loc == nil {
 		loc = time.UTC
@@ -701,9 +692,7 @@ func (s *CleverTapSource) readCategoryGroups(ctx context.Context, opts source.Re
 }
 
 // fetchEventNames lists every event name in the project. Nothing is filtered out:
-// eventCount only covers the current and previous month and reads zero for events
-// that hold data, and a Discarded event has merely stopped collecting new data
-// while keeping its history. The export call decides what is actually available.
+// eventCount is unreliable and Discarded events keep their history.
 func (s *CleverTapSource) fetchEventNames(ctx context.Context) ([]string, error) {
 	resp, err := s.client.R(ctx).SetQueryParam("type", "events").Get("/getSchema")
 	if err != nil {
@@ -736,9 +725,8 @@ func (s *CleverTapSource) fetchEventNames(ctx context.Context) ([]string, error)
 	return names, nil
 }
 
-// fanOutByEvent runs fn once per event name, a few at a time. An empty names list
-// means every event defined in the project. Events CleverTap refuses to export are
-// skipped rather than failing the whole table.
+// fanOutByEvent runs fn per event name, a few at a time; an empty list means every
+// event in the project. Events CleverTap refuses to export are skipped.
 func (s *CleverTapSource) fanOutByEvent(ctx context.Context, names []string, fn func(context.Context, string) error) error {
 	if len(names) == 0 {
 		discovered, err := s.fetchEventNames(ctx)
@@ -795,16 +783,13 @@ func (s *CleverTapSource) fanOutByEvent(ctx context.Context, names []string, fn 
 	return <-errs
 }
 
-// readProfiles fetches the users who raised one event. Sweeping several events
-// returns the same person once per event they fired; replace de-duplicates them
-// on object_id.
+// readProfiles fetches the users who raised one event. Sweeping several returns a
+// person once per event they fired; replace de-duplicates on object_id.
 func (s *CleverTapSource) readProfiles(ctx context.Context, eventName string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[CLEVERTAP] reading profiles for %q", eventName)
 
-	// The interval is deliberately ignored. CleverTap selects profiles by event
-	// activity, not by when the profile changed, so a narrow window would drop
-	// users who were merely dormant while still returning current attributes for
-	// everyone else. Only a full sweep gives a complete, consistent snapshot.
+	// Interval ignored: profiles are selected by event activity, not by when the
+	// profile changed, so only a full sweep is complete.
 	from, to := yyyymmdd(defaultStartDate), yyyymmdd(time.Now().UTC())
 	body := map[string]interface{}{"event_name": eventName, "from": from, "to": to}
 	query := map[string]string{
@@ -914,14 +899,8 @@ func (s *CleverTapSource) readContentBlocks(ctx context.Context, opts source.Rea
 func (s *CleverTapSource) readMessageReports(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[CLEVERTAP] reading message_reports")
 
-	// The interval is ignored for the same reason as campaigns: from/to select on
-	// when a message was sent, while its delivery and engagement counts keep rising
-	// for days afterwards, so a narrow window would freeze stale counts.
-	//
-	// Only from/to are sent. Omitting channel, delivery, status, message_type and
-	// label applies no filter on any of them, so every channel and status is
-	// covered. daily is left at its false default, which keeps one aggregated
-	// entry per message and so one row per message_id.
+	// Interval ignored: from/to select on send date while counts keep rising after
+	// it. The optional filters are omitted so every channel and status is covered.
 	from, to := yyyymmdd(defaultStartDate), yyyymmdd(time.Now().UTC())
 	resp, err := s.client.R(ctx).
 		SetBody(map[string]interface{}{"from": from, "to": to}).
@@ -976,10 +955,8 @@ func liftMessageID(item map[string]interface{}) map[string]interface{} {
 	return item
 }
 
-// fetchCampaigns walks the full history in 31-day windows and invokes fn once per
-// window. The interval is deliberately ignored: the endpoint selects on a campaign's
-// scheduled date, so a narrow window would miss status changes and late-arriving
-// reports for campaigns scheduled earlier.
+// fetchCampaigns walks the full history in 31-day windows, invoking fn per window.
+// The interval is ignored; see the strategy note in GetTable.
 func (s *CleverTapSource) fetchCampaigns(ctx context.Context, opts source.ReadOptions, fn func([]map[string]interface{}) error) error {
 	start := defaultStartDate
 	// Campaigns are selected by their scheduled date, which for a pending campaign
@@ -1120,9 +1097,8 @@ func (s *CleverTapSource) sendCampaignReport(ctx context.Context, id json.Number
 	if err != nil {
 		return fmt.Errorf("failed to fetch campaign report for %s: %w", id, err)
 	}
-	// A campaign with no report yet is expected, not an error. The docs promise a
-	// 409, but a completed campaign that produced no results answers 500 with
-	// "This target has no result as of yet", so match on the message too.
+	// No report yet is expected, not an error. The docs promise 409 but a 500 with
+	// "no result as of yet" also occurs, so match on the message too.
 	if resp.StatusCode() == 409 || hasNoResultYet(resp.Body()) {
 		config.Debug("[CLEVERTAP] campaign %s has no report yet, skipping", id)
 		skipped.Add(1)
