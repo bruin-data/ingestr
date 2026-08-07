@@ -2555,10 +2555,7 @@ func (s *StripeSource) paginateAndSendWithRowLimit(
 	batchNum := 0
 	var startingAfter string
 
-	for {
-		if rowLimit.exhausted() {
-			break
-		}
+	for !rowLimit.exhausted() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
