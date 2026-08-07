@@ -2366,7 +2366,10 @@ func (s *StripeSource) readTaxIDs(ctx context.Context, opts source.ReadOptions, 
 
 				iter := taxid.List(tidParams)
 				if !iter.Next() {
-					return nil, false, "", fmt.Errorf("failed to fetch tax IDs for customer %s: %w", overflow.customerID, iter.Err())
+					if err := iter.Err(); err != nil {
+						return nil, false, "", fmt.Errorf("failed to fetch tax IDs for customer %s: %w", overflow.customerID, err)
+					}
+					break
 				}
 				items, hasMore, lastID, err := extractRawListItems(iter.TaxIDList().LastResponse.RawJSON)
 				if err != nil {

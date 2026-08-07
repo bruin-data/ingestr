@@ -229,7 +229,11 @@ func TestNormalizeStripeEndpoint(t *testing.T) {
 	cases := map[string]string{
 		"/v1/customers?limit=100":                 "/v1/customers",
 		"/v1/customers/cus_123/tax_ids?limit=100": "/v1/customers/*/tax_ids",
+		"/v1/coupons/summer-sale":                 "/v1/coupons/*",
+		"/v1/credit_notes/cn_123":                 "/v1/credit_notes/*",
 		"/v1/payment_records/pi_123":              "/v1/payment_records/*",
+		"/v1/plans/enterprise-monthly":            "/v1/plans/*",
+		"/v1/reviews/prv_123":                     "/v1/reviews/*",
 		"/v1/subscriptions/sub_123":               "/v1/subscriptions/*",
 		"/v1/charges/py_123":                      "/v1/charges/*",
 	}

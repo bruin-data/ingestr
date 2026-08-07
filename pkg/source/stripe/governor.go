@@ -448,11 +448,48 @@ func normalizeStripeEndpoint(path string) string {
 
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	for i := 2; i < len(parts); i++ {
-		if looksLikeStripeID(parts[i]) {
+		if looksLikeStripeID(parts[i]) || i == 2 && stripeResourcePathHasID(parts[1]) {
 			parts[i] = "*"
 		}
 	}
 	return "/" + strings.Join(parts, "/")
+}
+
+func stripeResourcePathHasID(resource string) bool {
+	switch resource {
+	case "accounts",
+		"application_fees",
+		"charges",
+		"coupons",
+		"credit_notes",
+		"customers",
+		"disputes",
+		"invoiceitems",
+		"invoices",
+		"payment_intents",
+		"payment_links",
+		"payment_methods",
+		"payment_records",
+		"payouts",
+		"plans",
+		"prices",
+		"products",
+		"promotion_codes",
+		"quotes",
+		"refunds",
+		"reviews",
+		"setup_intents",
+		"subscription_items",
+		"subscription_schedules",
+		"subscriptions",
+		"tax_ids",
+		"tax_rates",
+		"topups",
+		"transfers":
+		return true
+	default:
+		return false
+	}
 }
 
 func looksLikeStripeID(segment string) bool {

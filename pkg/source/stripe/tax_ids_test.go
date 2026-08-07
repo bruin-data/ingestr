@@ -1,9 +1,17 @@
 package stripe
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"reflect"
 	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/source"
+	stripego "github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v81/form"
 )
 
 func TestExtractRawCustomerTaxIDs(t *testing.T) {
@@ -59,3 +67,57 @@ func TestExtractRawCustomerTaxIDsFallsBackWhenExpansionIsMissing(t *testing.T) {
 		t.Fatalf("overflows = %#v, want %#v", page.overflows, want)
 	}
 }
+
+func TestReadTaxIDsAcceptsEmptyFallbackPage(t *testing.T) {
+	original := stripego.GetBackend(stripego.APIBackend)
+	stripego.SetBackend(stripego.APIBackend, &emptyTaxIDFallbackBackend{})
+	t.Cleanup(func() { stripego.SetBackend(stripego.APIBackend, original) })
+
+	results := make(chan source.RecordBatchResult, 1)
+	err := (&StripeSource{}).readTaxIDs(context.Background(), source.ReadOptions{}, defaultBatchSize, nil, nil, results)
+	if err != nil {
+		t.Fatalf("readTaxIDs() error = %v", err)
+	}
+	select {
+	case result := <-results:
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		t.Fatalf("unexpected result: %+v", result)
+	default:
+	}
+}
+
+type emptyTaxIDFallbackBackend struct{}
+
+func (b *emptyTaxIDFallbackBackend) Call(method, path, key string, params stripego.ParamsContainer, v stripego.LastResponseSetter) error {
+	return nil
+}
+
+func (b *emptyTaxIDFallbackBackend) CallStreaming(method, path, key string, params stripego.ParamsContainer, v stripego.StreamingLastResponseSetter) error {
+	return nil
+}
+
+func (b *emptyTaxIDFallbackBackend) CallRaw(method, path, key string, body *form.Values, params *stripego.Params, v stripego.LastResponseSetter) error {
+	var rawJSON []byte
+	switch path {
+	case "/v1/customers":
+		rawJSON = []byte(`{"object":"list","has_more":false,"data":[{"id":"cus_1","object":"customer"}]}`)
+	case "/v1/customers/cus_1/tax_ids":
+		rawJSON = []byte(`{"object":"list","has_more":false,"data":[]}`)
+	default:
+		return fmt.Errorf("unexpected Stripe path %q", path)
+	}
+
+	if err := json.Unmarshal(rawJSON, v); err != nil {
+		return err
+	}
+	v.SetLastResponse(&stripego.APIResponse{RawJSON: rawJSON, StatusCode: http.StatusOK})
+	return nil
+}
+
+func (b *emptyTaxIDFallbackBackend) CallMultipart(method, path, key, boundary string, body *bytes.Buffer, params *stripego.Params, v stripego.LastResponseSetter) error {
+	return nil
+}
+
+func (b *emptyTaxIDFallbackBackend) SetMaxNetworkRetries(maxNetworkRetries int64) {}
