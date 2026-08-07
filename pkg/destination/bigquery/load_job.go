@@ -40,6 +40,7 @@ const (
 	stagedGCSBufferSize        = 1 * 1024 * 1024
 	maxLocalLoadJobParallelism = 4
 	loadJobMaxAttempts         = 4
+	loadJobStartMaxAttempts    = 10
 )
 
 type loadJobFileFormat string
@@ -871,6 +872,14 @@ func (d *BigQueryDestination) startLoadJobWithRetry(ctx context.Context, jobID s
 			_ = d.resolveCDCJob(context.Background(), jobID)
 			return nil, err
 		}
+		if attempt >= loadJobStartMaxAttempts {
+			if job, recoverErr := d.recoverDuplicateLoadJob(ctx, jobID, tableRef); recoverErr == nil {
+				config.Debug("[DEST] Continuing with discovered load job %s after start retry exhaustion", jobID)
+				return job, nil
+			}
+			d.deferCDCJobReconciliation(jobID)
+			return nil, fmt.Errorf("failed to start load job %s after %d attempts: %w", jobID, attempt, err)
+		}
 		config.Debug("[DEST] Retrying ambiguous load job start with stable job ID %s: %v", jobID, err)
 		if err := sleepWithContextForLoadJob(ctx, loadJobStartRetryDelay(min(attempt, loadJobMaxAttempts))); err != nil {
 			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
@@ -934,6 +943,10 @@ func loadJobErrorDetails(status *gcbq.JobStatus) string {
 
 func isRetryableLoadJobError(err error) bool {
 	if err == nil {
+		return false
+	}
+	var locationErr *datasetLocationMismatchError
+	if errors.As(err, &locationErr) {
 		return false
 	}
 

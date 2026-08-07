@@ -1329,6 +1329,147 @@ func TestLoadJobAmbiguousStartRetriesWithStableJobID(t *testing.T) {
 	}
 }
 
+func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
+	oldDelay := loadJobStartRetryDelay
+	oldWindow := bigQueryAmbiguousJobWindow
+	loadJobStartRetryDelay = func(int) time.Duration { return 0 }
+	bigQueryAmbiguousJobWindow = time.Nanosecond
+	t.Cleanup(func() {
+		loadJobStartRetryDelay = oldDelay
+		bigQueryAmbiguousJobWindow = oldWindow
+	})
+
+	var postCalls atomic.Int32
+	const jobID = "ingestr_load_bounded_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists: Job test-project:US.ingestr_load_bounded_1","errors":[{"reason":"duplicate","message":"Already Exists: Job test-project:US.ingestr_load_bounded_1"}]}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"job not found"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{
+		client:            client,
+		projectID:         "test-project",
+		location:          "US",
+		activeCDCJobs:     map[string]struct{}{jobID: {}},
+		cdcJobsReconciled: true,
+	}
+	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
+
+	_, err = dest.startLoadJobWithRetry(t.Context(), jobID, tableRef, func() (*bigquery.Loader, func(), error) {
+		loader := tableRef.LoaderFrom(source)
+		loader.CreateDisposition = bigquery.CreateNever
+		loader.WriteDisposition = bigquery.WriteAppend
+		return loader, func() {}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "after 10 attempts") {
+		t.Fatalf("error=%v, want bounded retry exhaustion", err)
+	}
+	if postCalls.Load() != loadJobStartMaxAttempts {
+		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+	_, _, active := dest.cdcJobFence()
+	if _, ok := active[jobID]; ok {
+		t.Fatalf("job %q remained active after start retry exhaustion", jobID)
+	}
+	if dest.cdcJobsReconciled {
+		t.Fatal("CDC job reconciliation remained cached after ambiguous start retry exhaustion")
+	}
+}
+
+func TestLoadJobAmbiguousStartContinuesWithDiscoveredJobAfterMaxAttempts(t *testing.T) {
+	oldStartDelay := loadJobStartRetryDelay
+	loadJobStartRetryDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { loadJobStartRetryDelay = oldStartDelay })
+
+	var postCalls atomic.Int32
+	var getCalls atomic.Int32
+	const jobID = "ingestr_load_discovered_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists: Job test-project:US.ingestr_load_discovered_1","errors":[{"reason":"duplicate","message":"Already Exists: Job test-project:US.ingestr_load_discovered_1"}]}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			if getCalls.Add(1) == loadJobStartMaxAttempts+1 {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+					"configuration": map[string]interface{}{"load": map[string]interface{}{
+						"destinationTable": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+						"sourceUris":       []string{"gs://bucket/chunk.jsonl"},
+					}},
+					"status": map[string]string{"state": "RUNNING"},
+				})
+				return
+			}
+			if getCalls.Load() <= loadJobStartMaxAttempts {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":404,"message":"job not found"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"permission denied"}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs/"+jobID+"/cancel"):
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{
+		client:        client,
+		projectID:     "test-project",
+		location:      "US",
+		activeCDCJobs: map[string]struct{}{jobID: {}},
+	}
+	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
+
+	job, err := dest.startLoadJobWithRetry(t.Context(), jobID, tableRef, func() (*bigquery.Loader, func(), error) {
+		loader := tableRef.LoaderFrom(source)
+		loader.CreateDisposition = bigquery.CreateNever
+		loader.WriteDisposition = bigquery.WriteAppend
+		return loader, func() {}, nil
+	})
+	if err != nil {
+		t.Fatalf("startLoadJobWithRetry() error=%v, want discovered job", err)
+	}
+	if job == nil || job.ID() != jobID {
+		t.Fatalf("job=%v, want discovered job %q", job, jobID)
+	}
+	if postCalls.Load() != loadJobStartMaxAttempts {
+		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+	_, _, active := dest.cdcJobFence()
+	if _, ok := active[jobID]; !ok {
+		t.Fatalf("discovered job %q was released before the caller could wait for it", jobID)
+	}
+}
+
 func TestLoadJobWaitErrorReconcilesOriginalWithoutResubmission(t *testing.T) {
 	oldDelay := bigQueryJobReconcileDelay
 	bigQueryJobReconcileDelay = time.Millisecond
@@ -1801,6 +1942,108 @@ func TestSupportsStrategies(t *testing.T) {
 	if !dest.SupportsDeleteInsertStrategy() {
 		t.Error("SupportsDeleteInsertStrategy() = false, want true")
 	}
+}
+
+func TestPrepareTableRejectsDatasetLocationMismatchBeforeTableWork(t *testing.T) {
+	tests := []struct {
+		name      string
+		dropFirst bool
+	}{
+		{name: "destination table", dropFirst: false},
+		{name: "staging table", dropFirst: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var tableCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset") {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"datasetReference": map[string]string{
+							"projectId": "test-project",
+							"datasetId": "test-dataset",
+						},
+						"location": "US",
+					})
+					return
+				}
+				tableCalls.Add(1)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+
+			client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			dest := &BigQueryDestination{
+				client:    client,
+				projectID: "test-project",
+				location:  "EU",
+			}
+			err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:     "test-dataset.events",
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+				DropFirst: tt.dropFirst,
+			})
+
+			var locationErr *datasetLocationMismatchError
+			require.ErrorAs(t, err, &locationErr)
+			require.Equal(t, "US", locationErr.datasetLocation)
+			require.Equal(t, "EU", locationErr.jobLocation)
+			require.ErrorContains(t, err, "BigQuery dataset test-project:test-dataset is in location US")
+			require.ErrorContains(t, err, "--staging-dataset")
+			require.False(t, isRetryableLoadJobError(err))
+			require.Zero(t, tableCalls.Load(), "table work must not start after a dataset location mismatch")
+		})
+	}
+}
+
+func TestEnsureDatasetExistsValidatesConcurrentCreateWinnerLocation(t *testing.T) {
+	var metadataCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset"):
+			if metadataCalls.Add(1) == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found"},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{
+					"projectId": "test-project",
+					"datasetId": "test-dataset",
+				},
+				"location": "US",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets"):
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code": http.StatusConflict, "message": "Already Exists",
+					"errors": []map[string]string{{"reason": "duplicate", "message": "Already Exists"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "EU"}
+	err = dest.ensureDatasetExists(t.Context(), "test-project", "test-dataset")
+
+	var locationErr *datasetLocationMismatchError
+	require.ErrorAs(t, err, &locationErr)
+	require.EqualValues(t, 2, metadataCalls.Load())
 }
 
 // TestEnsureDatasetExists_ConcurrentCallers exercises the knownDatasets
