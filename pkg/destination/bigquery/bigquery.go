@@ -280,6 +280,9 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	// Check if dataset exists
 	metadata, err := ds.Metadata(ctx)
 	if err == nil {
+		if err := d.validateDatasetLocation(project, datasetID, metadata.Location); err != nil {
+			return err
+		}
 		d.markDatasetKnown(datasetKey)
 		d.cacheDatasetCase(datasetKey, metadata.IsCaseInsensitive, false)
 		return nil
@@ -302,8 +305,15 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	if err := ds.Create(ctx, metadata); err != nil {
 		// Check if it was created by another process in the meantime
 		if isAlreadyExistsError(err) {
+			metadata, metadataErr := ds.Metadata(ctx)
+			if metadataErr != nil {
+				return fmt.Errorf("failed to check concurrently created dataset: %w", metadataErr)
+			}
+			if locationErr := d.validateDatasetLocation(project, datasetID, metadata.Location); locationErr != nil {
+				return locationErr
+			}
 			d.markDatasetKnown(datasetKey)
-			d.invalidateDatasetCase(datasetKey)
+			d.cacheDatasetCase(datasetKey, metadata.IsCaseInsensitive, false)
 			return nil
 		}
 		return fmt.Errorf("failed to create dataset: %w", err)
@@ -315,6 +325,37 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	return nil
 }
 
+type datasetLocationMismatchError struct {
+	project         string
+	dataset         string
+	datasetLocation string
+	jobLocation     string
+}
+
+func (e *datasetLocationMismatchError) Error() string {
+	return fmt.Sprintf(
+		"BigQuery dataset %s:%s is in location %s, but destination jobs are configured for %s; configure the destination for %s or use a dataset in %s (for staging, select it with --staging-dataset)",
+		e.project,
+		e.dataset,
+		e.datasetLocation,
+		e.jobLocation,
+		e.datasetLocation,
+		e.jobLocation,
+	)
+}
+
+func (d *BigQueryDestination) validateDatasetLocation(project, dataset, location string) error {
+	if d.location == "" || location == "" || strings.EqualFold(d.location, location) {
+		return nil
+	}
+	return &datasetLocationMismatchError{
+		project:         project,
+		dataset:         dataset,
+		datasetLocation: location,
+		jobLocation:     d.location,
+	}
+}
+
 func (d *BigQueryDestination) cacheDatasetCase(key string, caseInsensitive, provisional bool) {
 	d.datasetCaseMu.Lock()
 	defer d.datasetCaseMu.Unlock()
@@ -322,12 +363,6 @@ func (d *BigQueryDestination) cacheDatasetCase(key string, caseInsensitive, prov
 		d.datasetCase = make(map[string]bigQueryDatasetCase)
 	}
 	d.datasetCase[key] = bigQueryDatasetCase{caseInsensitive: caseInsensitive, provisional: provisional}
-}
-
-func (d *BigQueryDestination) invalidateDatasetCase(key string) {
-	d.datasetCaseMu.Lock()
-	defer d.datasetCaseMu.Unlock()
-	delete(d.datasetCase, key)
 }
 
 func (d *BigQueryDestination) markDatasetKnown(datasetKey string) {
@@ -791,6 +826,10 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		return err
 	}
 
+	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
+		return fmt.Errorf("failed to ensure dataset exists: %w", err)
+	}
+
 	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
 	cdcKeyColumns := opts.CDCKeys
 	if len(cdcKeyColumns) == 0 {
@@ -872,11 +911,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		return fmt.Errorf("failed to check table existence: %w", err)
 	}
 
-	// Table doesn't exist — ensure dataset exists and create
-	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
-		return fmt.Errorf("failed to ensure dataset exists: %w", err)
-	}
-
+	// Table doesn't exist — create it
 	tableSchema := opts.Schema
 	if opts.CDCMode {
 		tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)

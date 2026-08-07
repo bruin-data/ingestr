@@ -945,6 +945,10 @@ func isRetryableLoadJobError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var locationErr *datasetLocationMismatchError
+	if errors.As(err, &locationErr) {
+		return false
+	}
 
 	var bqErrPtr *gcbq.Error
 	if errors.As(err, &bqErrPtr) && bqErrPtr != nil {

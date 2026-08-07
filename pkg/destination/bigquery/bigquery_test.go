@@ -1940,6 +1940,108 @@ func TestSupportsStrategies(t *testing.T) {
 	}
 }
 
+func TestPrepareTableRejectsDatasetLocationMismatchBeforeTableWork(t *testing.T) {
+	tests := []struct {
+		name      string
+		dropFirst bool
+	}{
+		{name: "destination table", dropFirst: false},
+		{name: "staging table", dropFirst: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var tableCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset") {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"datasetReference": map[string]string{
+							"projectId": "test-project",
+							"datasetId": "test-dataset",
+						},
+						"location": "US",
+					})
+					return
+				}
+				tableCalls.Add(1)
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+
+			client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			dest := &BigQueryDestination{
+				client:    client,
+				projectID: "test-project",
+				location:  "EU",
+			}
+			err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:     "test-dataset.events",
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+				DropFirst: tt.dropFirst,
+			})
+
+			var locationErr *datasetLocationMismatchError
+			require.ErrorAs(t, err, &locationErr)
+			require.Equal(t, "US", locationErr.datasetLocation)
+			require.Equal(t, "EU", locationErr.jobLocation)
+			require.ErrorContains(t, err, "BigQuery dataset test-project:test-dataset is in location US")
+			require.ErrorContains(t, err, "--staging-dataset")
+			require.False(t, isRetryableLoadJobError(err))
+			require.Zero(t, tableCalls.Load(), "table work must not start after a dataset location mismatch")
+		})
+	}
+}
+
+func TestEnsureDatasetExistsValidatesConcurrentCreateWinnerLocation(t *testing.T) {
+	var metadataCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset"):
+			if metadataCalls.Add(1) == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found"},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{
+					"projectId": "test-project",
+					"datasetId": "test-dataset",
+				},
+				"location": "US",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets"):
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code": http.StatusConflict, "message": "Already Exists",
+					"errors": []map[string]string{{"reason": "duplicate", "message": "Already Exists"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{client: client, projectID: "test-project", location: "EU"}
+	err = dest.ensureDatasetExists(t.Context(), "test-project", "test-dataset")
+
+	var locationErr *datasetLocationMismatchError
+	require.ErrorAs(t, err, &locationErr)
+	require.EqualValues(t, 2, metadataCalls.Load())
+}
+
 // TestEnsureDatasetExists_ConcurrentCallers exercises the knownDatasets
 // mutex. Without the mutex (the bug fix), running ensureDatasetExists from
 // many goroutines for the same (project, dataset) racing all the way through
