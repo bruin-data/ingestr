@@ -715,8 +715,8 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	startVal := formatSnowflakeValue(opts.IntervalStart)
-	endVal := formatSnowflakeValue(opts.IntervalEnd)
+	startVal := formatSnowflakeValue(opts.IntervalStart, opts.IncrementalKeyType)
+	endVal := formatSnowflakeValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
 	deleteSQL := fmt.Sprintf(
 		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
@@ -1461,13 +1461,18 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	return sql
 }
 
-func formatSnowflakeValue(v interface{}) string {
+func formatSnowflakeValue(v interface{}, keyType schema.DataType) string {
+	if p, ok := v.(*time.Time); ok {
+		if p == nil {
+			return "NULL"
+		}
+		v = *p
+	}
 	switch val := v.(type) {
 	case time.Time:
-		return fmt.Sprintf("TO_TIMESTAMP('%s')", val.Format("2006-01-02 15:04:05.000000"))
-	case *time.Time:
-		if val == nil {
-			return "NULL"
+		// Anchor TZ-aware bounds to UTC so the session TIMEZONE can't shift the window (BRU-5586).
+		if keyType == schema.TypeTimestampTZ {
+			return fmt.Sprintf("TO_TIMESTAMP_TZ('%s +0000')", val.UTC().Format("2006-01-02 15:04:05.000000"))
 		}
 		return fmt.Sprintf("TO_TIMESTAMP('%s')", val.Format("2006-01-02 15:04:05.000000"))
 	case string:

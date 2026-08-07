@@ -76,6 +76,14 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 
 	sourceIncrementalKey := sourceIncrementalKeyForRead(job)
 	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
+	// When the reconciled type came back degraded (e.g. SQLite stores DATE as TEXT, so the
+	// key type flips to string on re-runs), recover the real temporal type from the source
+	// schema so date-only bound conversion still fires.
+	if job.SourceSchema != nil && (incrementalKeyType == schema.TypeString || incrementalKeyType == schema.TypeUnknown) {
+		if _, srcType := resolveSchemaColumn(job.SourceSchema, job.Config.IncrementalKey); srcType == schema.TypeDate || srcType == schema.TypeTimestamp || srcType == schema.TypeTimestampTZ {
+			incrementalKeyType = srcType
+		}
+	}
 
 	readOpts := source.ReadOptions{
 		IncrementalKey:                  sourceIncrementalKey,
