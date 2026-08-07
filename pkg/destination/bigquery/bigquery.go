@@ -3291,6 +3291,13 @@ func (d *BigQueryDestination) releaseCDCJob(jobID string) {
 	d.cdcStateMu.Unlock()
 }
 
+func (d *BigQueryDestination) deferCDCJobReconciliation(jobID string) {
+	d.cdcJobReconcileMu.Lock()
+	defer d.cdcJobReconcileMu.Unlock()
+	d.releaseCDCJob(jobID)
+	d.cdcJobsReconciled = false
+}
+
 func (d *BigQueryDestination) writeCDCJobMarker(ctx context.Context, table, connectorID, jobID, status string) error {
 	project, dataset, tableName, err := d.parseTable(table)
 	if err != nil {

@@ -1363,10 +1363,11 @@ func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 	dest := &BigQueryDestination{
-		client:        client,
-		projectID:     "test-project",
-		location:      "US",
-		activeCDCJobs: map[string]struct{}{jobID: {}},
+		client:            client,
+		projectID:         "test-project",
+		location:          "US",
+		activeCDCJobs:     map[string]struct{}{jobID: {}},
+		cdcJobsReconciled: true,
 	}
 	tableRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
 	source := bigquery.NewGCSReference("gs://bucket/chunk.jsonl")
@@ -1386,6 +1387,9 @@ func TestLoadJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
 	_, _, active := dest.cdcJobFence()
 	if _, ok := active[jobID]; ok {
 		t.Fatalf("job %q remained active after start retry exhaustion", jobID)
+	}
+	if dest.cdcJobsReconciled {
+		t.Fatal("CDC job reconciliation remained cached after ambiguous start retry exhaustion")
 	}
 }
 
