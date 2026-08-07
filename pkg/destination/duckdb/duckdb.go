@@ -193,6 +193,10 @@ func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
 		_ = opt.SetOption(adbc.OptionKeyAutoCommit, adbc.OptionValueEnabled)
 	}
 
+	// Pin the session to UTC so bound timestamps aren't reinterpreted in the
+	// process-local timezone against TIMESTAMPTZ columns (BRU-5581).
+	_ = d.exec(ctx, "SET TimeZone='UTC'")
+
 	if limit := os.Getenv("INGESTR_DUCKDB_MEMORY_LIMIT"); limit != "" {
 		if strings.ContainsAny(limit, "';\n") {
 			config.Debug("[DUCKDB] Ignoring invalid INGESTR_DUCKDB_MEMORY_LIMIT=%q", limit)

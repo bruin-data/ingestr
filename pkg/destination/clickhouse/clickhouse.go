@@ -932,6 +932,12 @@ func (d *ClickHouseDestination) buildDeleteInsertStatements(opts destination.Del
 }
 
 func formatClickHouseLiteral(value interface{}, dataType schema.DataType) string {
+	if p, ok := value.(*time.Time); ok {
+		if p == nil {
+			return "NULL"
+		}
+		value = *p
+	}
 	switch v := value.(type) {
 	case time.Time:
 		switch dataType {

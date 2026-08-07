@@ -76,6 +76,13 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 
 	sourceIncrementalKey := sourceIncrementalKeyForRead(job)
 	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
+	// Prefer the stable source type: the reconciled job.Schema can inherit the destination's
+	// storage type (e.g. SQLite stores DATE as TEXT), flipping the key type on re-runs.
+	if job.SourceSchema != nil {
+		if _, srcType := resolveSchemaColumn(job.SourceSchema, job.Config.IncrementalKey); srcType != schema.TypeUnknown {
+			incrementalKeyType = srcType
+		}
+	}
 
 	readOpts := source.ReadOptions{
 		IncrementalKey:                  sourceIncrementalKey,
