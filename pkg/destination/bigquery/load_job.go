@@ -873,16 +873,12 @@ func (d *BigQueryDestination) startLoadJobWithRetry(ctx context.Context, jobID s
 			return nil, err
 		}
 		if attempt >= loadJobStartMaxAttempts {
-			job, reconcileErr := d.reconcileAmbiguousBigQueryJob(ctx, jobID)
-			if job != nil && ctx.Err() == nil {
-				config.Debug("[DEST] Continuing with discovered load job %s after start retry exhaustion: %v", jobID, reconcileErr)
+			if job, recoverErr := d.recoverDuplicateLoadJob(ctx, jobID, tableRef); recoverErr == nil {
+				config.Debug("[DEST] Continuing with discovered load job %s after start retry exhaustion", jobID)
 				return job, nil
 			}
 			d.releaseCDCJob(jobID)
-			if job == nil && reconcileErr == nil {
-				return nil, fmt.Errorf("failed to start load job %s after %d attempts: %w", jobID, attempt, err)
-			}
-			return job, reconcileErr
+			return nil, fmt.Errorf("failed to start load job %s after %d attempts: %w", jobID, attempt, err)
 		}
 		config.Debug("[DEST] Retrying ambiguous load job start with stable job ID %s: %v", jobID, err)
 		if err := sleepWithContextForLoadJob(ctx, loadJobStartRetryDelay(min(attempt, loadJobMaxAttempts))); err != nil {
