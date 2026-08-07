@@ -322,9 +322,9 @@ func jsonUseNumber(data []byte, v any) error {
 	return dec.Decode(v)
 }
 
-// dateRange converts the interval into inclusive YYYYMMDD bounds. Resolved in loc
-// because CleverTap's days are project-local; UTC dates would skip a boundary day.
-func dateRange(opts source.ReadOptions, loc *time.Location) (int, int) {
+// intervalBounds resolves the ingestion interval in loc, since CleverTap's days
+// are project-local and UTC dates would skip the day a boundary falls on.
+func intervalBounds(opts source.ReadOptions, loc *time.Location) (time.Time, time.Time) {
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -336,16 +336,37 @@ func dateRange(opts source.ReadOptions, loc *time.Location) (int, int) {
 	if opts.IntervalEnd != nil {
 		to = *opts.IntervalEnd
 	}
-	return yyyymmdd(from.In(loc)), yyyymmdd(to.In(loc))
+	return from.In(loc), to.In(loc)
 }
 
-// nowIn is today in the project's timezone, which is the day CleverTap's
-// date filters are measured against.
+// nowIn is today in the project's timezone, which is the day CleverTap's date
+// filters are measured against.
 func nowIn(loc *time.Location) time.Time {
 	if loc == nil {
 		loc = time.UTC
 	}
 	return time.Now().In(loc)
+}
+
+// forEachDateWindow calls fn with the inclusive YYYYMMDD bounds of each window, so
+// one export never has to walk the whole history in a single cursor.
+func forEachDateWindow(ctx context.Context, start, end time.Time, days int, fn func(from, to int) error) error {
+	for windowStart := start; !windowStart.After(end); windowStart = windowStart.AddDate(0, 0, days) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		windowEnd := windowStart.AddDate(0, 0, days-1)
+		if windowEnd.After(end) {
+			windowEnd = end
+		}
+		if err := fn(yyyymmdd(windowStart), yyyymmdd(windowEnd)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func yyyymmdd(t time.Time) int {
@@ -428,20 +449,23 @@ func (s *CleverTapSource) cursorExport(
 	}
 
 	cursor := start.Cursor
+	previousCursor := ""
 	totalSent := 0
 
-	for pages := 0; cursor != ""; pages++ {
+	// No page cap: capping a cursor walk truncates the export, and delete+insert
+	// would commit the short result over the full window. A cursor that repeats
+	// is the only way the walk fails to terminate, so guard on that instead.
+	for cursor != "" {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Stopping here would truncate silently, and delete+insert would commit the
-		// short result over the full window.
-		if pages >= maxPages {
-			return fmt.Errorf("%s exceeded the %d page cap; narrow the interval", endpoint, maxPages)
+		if cursor == previousCursor {
+			return fmt.Errorf("%s cursor stopped advancing after %d records", endpoint, totalSent)
 		}
+		previousCursor = cursor
 
 		var page struct {
 			Status     string                   `json:"status"`
@@ -531,8 +555,6 @@ func decodeCursor(cursor string) string {
 func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[CLEVERTAP] reading events for %q", eventName)
 
-	from, to := dateRange(opts, s.timezone)
-	body := map[string]interface{}{"event_name": eventName, "from": from, "to": to}
 	// Enrichments off: they would copy onto every row what profiles already holds.
 	// objectId and identity are returned either way.
 	query := map[string]string{
@@ -572,6 +594,12 @@ func (s *CleverTapSource) readEvents(ctx context.Context, eventName string, opts
 		return withinInterval(item["ts"], opts.IntervalStart, opts.IntervalEnd)
 	}
 
+	start, end := intervalBounds(opts, s.timezone)
+	body := map[string]interface{}{
+		"event_name": eventName,
+		"from":       yyyymmdd(start),
+		"to":         yyyymmdd(end),
+	}
 	return s.cursorExport(ctx, "/1/events.json", body, query, transform, keep, opts, results)
 }
 
@@ -809,8 +837,6 @@ func (s *CleverTapSource) readProfiles(ctx context.Context, eventName string, op
 
 	// Interval ignored: profiles are selected by event activity, not by when the
 	// profile changed, so only a full sweep is complete.
-	from, to := yyyymmdd(defaultStartDate), yyyymmdd(nowIn(s.timezone))
-	body := map[string]interface{}{"event_name": eventName, "from": from, "to": to}
 	query := map[string]string{
 		"batch_size": strconv.Itoa(maxPageSize),
 		"app":        "true",
@@ -818,6 +844,11 @@ func (s *CleverTapSource) readProfiles(ctx context.Context, eventName string, op
 		"profile":    "true",
 	}
 
+	body := map[string]interface{}{
+		"event_name": eventName,
+		"from":       yyyymmdd(defaultStartDate),
+		"to":         yyyymmdd(nowIn(s.timezone)),
+	}
 	return s.cursorExport(ctx, "/1/profiles.json", body, query, liftProfileObjectID, nil, opts, results)
 }
 
@@ -908,7 +939,7 @@ func (s *CleverTapSource) readContentBlocks(ctx context.Context, opts source.Rea
 			break
 		}
 		if page == maxPages {
-			return fmt.Errorf("content blocks exceeded the %d page cap; narrow the interval", maxPages)
+			return fmt.Errorf("content blocks did not terminate within %d pages", maxPages)
 		}
 	}
 
@@ -982,19 +1013,8 @@ func (s *CleverTapSource) fetchCampaigns(ctx context.Context, opts source.ReadOp
 	// is in the future, so the sweep has to run past today to see them at all.
 	end := nowIn(s.timezone).AddDate(0, campaignFutureMonths, 0)
 
-	for windowStart := start; !windowStart.After(end); windowStart = windowStart.AddDate(0, 0, campaignWindowDays) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		windowEnd := windowStart.AddDate(0, 0, campaignWindowDays-1)
-		if windowEnd.After(end) {
-			windowEnd = end
-		}
-
-		body := map[string]interface{}{"from": yyyymmdd(windowStart), "to": yyyymmdd(windowEnd)}
+	return forEachDateWindow(ctx, start, end, campaignWindowDays, func(from, to int) error {
+		body := map[string]interface{}{"from": from, "to": to}
 		resp, err := s.client.R(ctx).SetBody(body).Post("/1/targets/list.json")
 		if err != nil {
 			return fmt.Errorf("failed to fetch campaigns: %w", err)
@@ -1015,15 +1035,11 @@ func (s *CleverTapSource) fetchCampaigns(ctx context.Context, opts source.ReadOp
 			return fmt.Errorf("campaigns request failed: %s", page.Error)
 		}
 		if len(page.Targets) == 0 {
-			continue
+			return nil
 		}
 
-		if err := fn(page.Targets); err != nil {
-			return err
-		}
-	}
-
-	return nil
+		return fn(page.Targets)
+	})
 }
 
 func (s *CleverTapSource) readCampaigns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {

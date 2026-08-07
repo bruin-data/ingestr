@@ -1,6 +1,7 @@
 package clevertap
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -252,23 +253,23 @@ func TestTableStrategies(t *testing.T) {
 	}
 }
 
-func TestDateRange(t *testing.T) {
+func TestIntervalBounds(t *testing.T) {
 	t.Parallel()
 
 	start := time.Date(2024, 3, 5, 13, 0, 0, 0, time.UTC)
 	end := time.Date(2024, 4, 1, 6, 0, 0, 0, time.UTC)
 
-	from, to := dateRange(source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, time.UTC)
-	require.Equal(t, 20240305, from)
-	require.Equal(t, 20240401, to)
+	from, to := intervalBounds(source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, time.UTC)
+	require.Equal(t, 20240305, yyyymmdd(from))
+	require.Equal(t, 20240401, yyyymmdd(to))
 
 	// With no interval the export still needs bounds: a fixed floor and today.
-	from, to = dateRange(source.ReadOptions{}, time.UTC)
-	require.Equal(t, 20130101, from)
-	require.Equal(t, yyyymmdd(time.Now().UTC()), to)
+	from, to = intervalBounds(source.ReadOptions{}, time.UTC)
+	require.Equal(t, 20130101, yyyymmdd(from))
+	require.Equal(t, yyyymmdd(time.Now().UTC()), yyyymmdd(to))
 }
 
-func TestDateRangeUsesProjectTimezone(t *testing.T) {
+func TestIntervalBoundsUsesProjectTimezone(t *testing.T) {
 	t.Parallel()
 
 	// 20:00Z on the 6th is already 01:30 on the 7th in Kolkata. CleverTap's days
@@ -278,21 +279,61 @@ func TestDateRangeUsesProjectTimezone(t *testing.T) {
 	end := time.Date(2026, 8, 6, 20, 0, 0, 0, time.UTC)
 	opts := source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}
 
-	from, to := dateRange(opts, kolkata(t))
-	require.Equal(t, 20260806, from)
-	require.Equal(t, 20260807, to)
+	from, to := intervalBounds(opts, kolkata(t))
+	require.Equal(t, 20260806, yyyymmdd(from))
+	require.Equal(t, 20260807, yyyymmdd(to))
 
 	// The same instants in UTC land on the previous day at both ends.
-	from, to = dateRange(opts, time.UTC)
-	require.Equal(t, 20260805, from)
-	require.Equal(t, 20260806, to)
+	from, to = intervalBounds(opts, time.UTC)
+	require.Equal(t, 20260805, yyyymmdd(from))
+	require.Equal(t, 20260806, yyyymmdd(to))
 
 	// A negative offset shifts the other way.
 	ny, err := time.LoadLocation("America/New_York")
 	require.NoError(t, err)
 	midnightUTC := time.Date(2026, 8, 6, 0, 30, 0, 0, time.UTC)
-	from, _ = dateRange(source.ReadOptions{IntervalStart: &midnightUTC}, ny)
-	require.Equal(t, 20260805, from)
+	from, _ = intervalBounds(source.ReadOptions{IntervalStart: &midnightUTC}, ny)
+	require.Equal(t, 20260805, yyyymmdd(from))
+}
+
+func TestForEachDateWindow(t *testing.T) {
+	t.Parallel()
+
+	collect := func(start, end time.Time, days int) [][2]int {
+		var got [][2]int
+		require.NoError(t, forEachDateWindow(context.Background(), start, end, days, func(from, to int) error {
+			got = append(got, [2]int{from, to})
+			return nil
+		}))
+		return got
+	}
+
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// The last window is clamped to the end rather than running past it.
+	require.Equal(t, [][2]int{{20240101, 20240110}, {20240111, 20240115}},
+		collect(start, start.AddDate(0, 0, 14), 10))
+
+	// Windows are contiguous and never overlap, so nothing is fetched twice.
+	windows := collect(start, start.AddDate(0, 0, 29), 10)
+	require.Len(t, windows, 3)
+	for i := 1; i < len(windows); i++ {
+		require.Greater(t, windows[i][0], windows[i-1][1])
+	}
+
+	// A range shorter than one window still yields exactly one.
+	require.Equal(t, [][2]int{{20240101, 20240101}}, collect(start, start, 365))
+
+	// An end before the start yields nothing at all.
+	require.Empty(t, collect(start, start.AddDate(0, 0, -1), 10))
+
+	// Cancellation stops the walk instead of running every window.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, forEachDateWindow(ctx, start, start.AddDate(10, 0, 0), 1, func(int, int) error {
+		t.Fatal("window ran after cancellation")
+		return nil
+	}), context.Canceled)
 }
 
 func TestDecodeCursor(t *testing.T) {
