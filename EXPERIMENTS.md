@@ -373,8 +373,8 @@ Status: successful
 
 | Variant | Individual runs | Mean ± standard deviation | Median | Range | Speedup by mean | Speedup by median |
 |---|---:|---:|---:|---:|---:|---:|
-| `origin/main` (`c41988b6`) | 129.387s, 124.033s, 124.243s | 125.887s ± 3.032s | 124.243s | 124.033–129.387s | 1.0× | 1.0× |
-| Branch (`edd2fcd7`) | 7.891s, 2.540s, 3.065s | 4.499s ± 2.949s | 3.065s | 2.540–7.891s | 27.98× | 40.53× |
+| Old | 129.387s, 124.033s, 124.243s | 125.887s ± 3.032s | 124.243s | 124.033–129.387s | 1.0× | 1.0× |
+| New | 7.891s, 2.540s, 3.065s | 4.499s ± 2.949s | 3.065s | 2.540–7.891s | 27.98× | 40.53× |
 
 Hyperfine reported the branch as `27.98 ± 18.36` times faster based on the arithmetic means. The large uncertainty comes from the branch's first, cold live request taking 7.891 seconds; its next two complete runs took 2.540 and 3.065 seconds. The main path was much more consistently slow because its approximately 460 serial requests dominate process and connection startup effects.
 
