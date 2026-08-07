@@ -195,7 +195,9 @@ func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
 
 	// Pin the session to UTC so bound timestamps aren't reinterpreted in the
 	// process-local timezone against TIMESTAMPTZ columns (BRU-5581).
-	_ = d.exec(ctx, "SET TimeZone='UTC'")
+	if err := d.exec(ctx, "SET TimeZone='UTC'"); err != nil {
+		return fmt.Errorf("failed to set DuckDB session timezone to UTC: %w", err)
+	}
 
 	if limit := os.Getenv("INGESTR_DUCKDB_MEMORY_LIMIT"); limit != "" {
 		if strings.ContainsAny(limit, "';\n") {
