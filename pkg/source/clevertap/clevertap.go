@@ -339,6 +339,15 @@ func dateRange(opts source.ReadOptions, loc *time.Location) (int, int) {
 	return yyyymmdd(from.In(loc)), yyyymmdd(to.In(loc))
 }
 
+// nowIn is today in the project's timezone, which is the day CleverTap's
+// date filters are measured against.
+func nowIn(loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return time.Now().In(loc)
+}
+
 func yyyymmdd(t time.Time) int {
 	n, _ := strconv.Atoi(t.Format("20060102"))
 	return n
@@ -428,9 +437,10 @@ func (s *CleverTapSource) cursorExport(
 		default:
 		}
 
+		// Stopping here would truncate silently, and delete+insert would commit the
+		// short result over the full window.
 		if pages >= maxPages {
-			config.Debug("[CLEVERTAP] %s hit the %d page cap, stopping", endpoint, maxPages)
-			break
+			return fmt.Errorf("%s exceeded the %d page cap; narrow the interval", endpoint, maxPages)
 		}
 
 		var page struct {
@@ -799,7 +809,7 @@ func (s *CleverTapSource) readProfiles(ctx context.Context, eventName string, op
 
 	// Interval ignored: profiles are selected by event activity, not by when the
 	// profile changed, so only a full sweep is complete.
-	from, to := yyyymmdd(defaultStartDate), yyyymmdd(time.Now().UTC())
+	from, to := yyyymmdd(defaultStartDate), yyyymmdd(nowIn(s.timezone))
 	body := map[string]interface{}{"event_name": eventName, "from": from, "to": to}
 	query := map[string]string{
 		"batch_size": strconv.Itoa(maxPageSize),
@@ -898,7 +908,7 @@ func (s *CleverTapSource) readContentBlocks(ctx context.Context, opts source.Rea
 			break
 		}
 		if page == maxPages {
-			config.Debug("[CLEVERTAP] content_blocks hit the %d page cap, stopping", maxPages)
+			return fmt.Errorf("content blocks exceeded the %d page cap; narrow the interval", maxPages)
 		}
 	}
 
@@ -910,7 +920,7 @@ func (s *CleverTapSource) readMessageReports(ctx context.Context, opts source.Re
 
 	// Interval ignored: from/to select on send date while counts keep rising after
 	// it. The optional filters are omitted so every channel and status is covered.
-	from, to := yyyymmdd(defaultStartDate), yyyymmdd(time.Now().UTC())
+	from, to := yyyymmdd(defaultStartDate), yyyymmdd(nowIn(s.timezone))
 	resp, err := s.client.R(ctx).
 		SetBody(map[string]interface{}{"from": from, "to": to}).
 		Post("/1/message/report.json")
@@ -970,7 +980,7 @@ func (s *CleverTapSource) fetchCampaigns(ctx context.Context, opts source.ReadOp
 	start := defaultStartDate
 	// Campaigns are selected by their scheduled date, which for a pending campaign
 	// is in the future, so the sweep has to run past today to see them at all.
-	end := time.Now().UTC().AddDate(0, campaignFutureMonths, 0)
+	end := nowIn(s.timezone).AddDate(0, campaignFutureMonths, 0)
 
 	for windowStart := start; !windowStart.After(end); windowStart = windowStart.AddDate(0, 0, campaignWindowDays) {
 		select {

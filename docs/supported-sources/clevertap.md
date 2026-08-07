@@ -72,8 +72,10 @@ Leave the parameter out and you get everything:
 
 ```sh
 --source-table "events"     # every event, in one table
---source-table "profiles"   # your whole user base
+--source-table "profiles"   # everyone who has done anything
 ```
+
+CleverTap reaches profiles through their activity, so `profiles` covers users who have raised at least one exportable event. Anyone whose only recorded activity is a notification event, which CleverTap will not export, is not included.
 
 ## Joining events to profiles
 
