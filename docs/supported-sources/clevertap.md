@@ -50,7 +50,7 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 ### Choosing which events to load
 
-`events` and `profiles` accept an `event_name` parameter, which narrows them to a single event:
+`events` and `profiles` accept an `event_name` parameter, which narrows them to the events you name:
 
 ```sh
 ingestr ingest \
@@ -60,7 +60,7 @@ ingestr ingest \
   --dest-table "public.app_launched"
 ```
 
-The name must match your CleverTap dashboard exactly, including spaces and capitalisation. It is also included as a column, so several events can share one destination table.
+Each name must match your CleverTap dashboard exactly, including spaces and capitalisation. The name is also included as a column, so several events can share one destination table.
 
 Separate names with a comma to load more than one:
 
