@@ -3,6 +3,7 @@ package stripe
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -112,5 +113,50 @@ func TestPaginateAndSendHonorsCancellationWhileSending(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected cancellation error")
+	}
+}
+
+func TestPaginateAndSendSharedLimitAcrossWorkers(t *testing.T) {
+	results := make(chan source.RecordBatchResult, 2)
+	rowLimit := newStripeRowLimit(3)
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	for worker := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- (&StripeSource{}).paginateAndSendWithRowLimit(
+				context.Background(),
+				source.ReadOptions{Limit: 3},
+				results,
+				"test",
+				rowLimit,
+				func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+					return []map[string]interface{}{
+						{"id": worker*2 + 1},
+						{"id": worker*2 + 2},
+					}, false, "", nil
+				},
+			)
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	close(results)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("paginateAndSendWithRowLimit() error = %v", err)
+		}
+	}
+
+	var rows int64
+	for result := range results {
+		rows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	if rows != 3 {
+		t.Fatalf("rows = %d, want global limit 3", rows)
 	}
 }

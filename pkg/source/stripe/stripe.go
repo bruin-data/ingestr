@@ -1640,6 +1640,7 @@ func (s *StripeSource) readPaymentMethods(ctx context.Context, opts source.ReadO
 	workers := stripeFanoutWorkers(opts.Parallelism)
 	customerIDs := make(chan string, workers)
 	errCh := make(chan error, 1)
+	rowLimit := newStripeRowLimit(opts.Limit)
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
@@ -1651,7 +1652,7 @@ func (s *StripeSource) readPaymentMethods(ctx context.Context, opts source.ReadO
 				pmParams.Context = workerCtx
 				pmParams.Limit = stripe.Int64(int64(batchSize))
 
-				err := s.paginateAndSend(workerCtx, opts, results, "payment_method", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+				err := s.paginateAndSendWithRowLimit(workerCtx, opts, results, "payment_method", rowLimit, func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
 					if startingAfter != "" {
 						pmParams.StartingAfter = stripe.String(startingAfter)
 					}
@@ -1675,7 +1676,7 @@ func (s *StripeSource) readPaymentMethods(ctx context.Context, opts source.ReadO
 
 	customerIter := customer.List(customerParams)
 customerLoop:
-	for customerIter.Next() {
+	for !rowLimit.exhausted() && customerIter.Next() {
 		select {
 		case <-workerCtx.Done():
 			break customerLoop
@@ -1940,6 +1941,7 @@ func (s *StripeSource) readSetupAttempts(ctx context.Context, opts source.ReadOp
 	workers := stripeFanoutWorkers(opts.Parallelism)
 	setupIntentIDs := make(chan string, workers)
 	errCh := make(chan error, 1)
+	rowLimit := newStripeRowLimit(opts.Limit)
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
@@ -1960,7 +1962,7 @@ func (s *StripeSource) readSetupAttempts(ctx context.Context, opts source.ReadOp
 					}
 				}
 
-				err := s.paginateAndSend(workerCtx, opts, results, "setup_attempt", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+				err := s.paginateAndSendWithRowLimit(workerCtx, opts, results, "setup_attempt", rowLimit, func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
 					if startingAfter != "" {
 						saParams.StartingAfter = stripe.String(startingAfter)
 					}
@@ -1984,7 +1986,7 @@ func (s *StripeSource) readSetupAttempts(ctx context.Context, opts source.ReadOp
 
 	siIter := setupintent.List(siParams)
 setupIntentLoop:
-	for siIter.Next() {
+	for !rowLimit.exhausted() && siIter.Next() {
 		select {
 		case <-workerCtx.Done():
 			break setupIntentLoop
@@ -2504,11 +2506,59 @@ func (s *StripeSource) readWebhookEndpoints(ctx context.Context, opts source.Rea
 type paginationFunc func(startingAfter string) (items []map[string]interface{}, hasMore bool, lastID string, err error)
 
 func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, tableName string, fetch paginationFunc) error {
-	totalSent := 0
+	return s.paginateAndSendWithRowLimit(ctx, opts, results, tableName, newStripeRowLimit(opts.Limit), fetch)
+}
+
+type stripeRowLimit struct {
+	mu       sync.Mutex
+	limit    int
+	reserved int
+}
+
+func newStripeRowLimit(limit int) *stripeRowLimit {
+	return &stripeRowLimit{limit: limit}
+}
+
+func (l *stripeRowLimit) reserve(items []map[string]interface{}) ([]map[string]interface{}, int, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.limit > 0 {
+		remaining := l.limit - l.reserved
+		if remaining <= 0 {
+			return nil, l.reserved, true
+		}
+		if len(items) > remaining {
+			items = items[:remaining]
+		}
+	}
+
+	l.reserved += len(items)
+	return items, l.reserved, l.limit > 0 && l.reserved >= l.limit
+}
+
+func (l *stripeRowLimit) exhausted() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.limit > 0 && l.reserved >= l.limit
+}
+
+func (s *StripeSource) paginateAndSendWithRowLimit(
+	ctx context.Context,
+	opts source.ReadOptions,
+	results chan<- source.RecordBatchResult,
+	tableName string,
+	rowLimit *stripeRowLimit,
+	fetch paginationFunc,
+) error {
+	localSent := 0
 	batchNum := 0
 	var startingAfter string
 
 	for {
+		if rowLimit.exhausted() {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -2520,15 +2570,7 @@ func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOpti
 			return fmt.Errorf("failed to fetch %s: %w", tableName, err)
 		}
 
-		if opts.Limit > 0 {
-			remaining := opts.Limit - totalSent
-			if remaining <= 0 {
-				break
-			}
-			if len(items) > remaining {
-				items = items[:remaining]
-			}
-		}
+		items, totalSent, reachedLimit := rowLimit.reserve(items)
 
 		if len(items) > 0 {
 			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
@@ -2537,19 +2579,21 @@ func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOpti
 			}
 
 			batchNum++
-			config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent+len(items))
+			config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent)
 			select {
 			case results <- source.RecordBatchResult{Batch: record}:
 			case <-ctx.Done():
 				record.Release()
 				return ctx.Err()
 			}
-			totalSent += len(items)
+			localSent += len(items)
 
-			if opts.Limit > 0 && totalSent >= opts.Limit {
+			if reachedLimit {
 				config.Debug("[STRIPE] Reached limit of %d %s", opts.Limit, tableName)
 				break
 			}
+		} else if reachedLimit {
+			break
 		}
 
 		if !hasMore {
@@ -2562,7 +2606,7 @@ func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOpti
 		startingAfter = lastID
 	}
 
-	if totalSent == 0 {
+	if localSent == 0 {
 		config.Debug("[STRIPE] No %s found", tableName)
 	}
 
