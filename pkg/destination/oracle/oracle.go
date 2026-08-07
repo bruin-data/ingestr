@@ -41,7 +41,7 @@ func NewOracleDestination() *OracleDestination {
 }
 
 func (d *OracleDestination) Schemes() []string {
-	return []string{"oracle", "oracle+cx_oracle"}
+	return []string{"oracle", "oracle+cx_oracle", "exadata", "oracle+exadata", "oracle_exadata"}
 }
 
 func (d *OracleDestination) Connect(ctx context.Context, uri string) error {
@@ -84,8 +84,11 @@ func (d *OracleDestination) Connect(ctx context.Context, uri string) error {
 
 func buildConnStrings(uri string) ([]string, error) {
 	normalized := uri
-	if strings.HasPrefix(strings.ToLower(uri), "oracle+cx_oracle://") {
-		normalized = "oracle://" + uri[len("oracle+cx_oracle://"):]
+	if scheme, rest, ok := strings.Cut(uri, "://"); ok {
+		switch strings.ToLower(scheme) {
+		case "oracle+cx_oracle", "exadata", "oracle+exadata", "oracle_exadata":
+			normalized = "oracle://" + rest
+		}
 	}
 
 	u, err := url.Parse(normalized)

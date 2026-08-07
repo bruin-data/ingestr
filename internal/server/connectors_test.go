@@ -22,6 +22,23 @@ func TestAzureSQLConnectorMetadata(t *testing.T) {
 	}
 }
 
+func TestOracleExadataConnectorMetadata(t *testing.T) {
+	connector := GetConnectorByID("exadata")
+	if connector == nil {
+		t.Fatal("expected Oracle Exadata connector to be registered")
+	}
+	if connector.IsSource {
+		t.Fatal("Oracle Exadata connector should not be source-capable")
+	}
+	if !connector.IsDestination {
+		t.Fatal("Oracle Exadata connector should be destination-capable")
+	}
+	wantSchemes := []string{"exadata", "oracle+exadata", "oracle_exadata"}
+	if strings.Join(connector.Schemes, ",") != strings.Join(wantSchemes, ",") {
+		t.Fatalf("schemes = %v, want %v", connector.Schemes, wantSchemes)
+	}
+}
+
 func TestBuildAzureSQLURI(t *testing.T) {
 	uri := BuildURI("azuresql", map[string]string{
 		"host":      "myserver.database.windows.net",

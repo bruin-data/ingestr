@@ -506,6 +506,42 @@ func TestDestinations_Replace(t *testing.T) {
 	}
 }
 
+func TestDestinations_OracleExadataAlias(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	t.Run("oracle", func(t *testing.T) {
+		if oracleDest.uri == "" {
+			t.Skip("shared oracle destination container not available")
+		}
+
+		_, uriRest, ok := strings.Cut(oracleDest.uri, "://")
+		require.True(t, ok, "Oracle test URI must contain a scheme")
+		exadataURI := "exadata://" + uriRest
+		table := fmt.Sprintf("EXADATA_ALIAS_%s", uniqueSuffix())
+		ctx := t.Context()
+		t.Cleanup(func() {
+			db, err := sql.Open("oracle", oracleSQLConnString(exadataURI))
+			if err == nil {
+				_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE %s PURGE", quoteTableOracle(table)))
+				_ = db.Close()
+			}
+		})
+
+		cfg := &config.IngestConfig{
+			SourceURI:           jsonlURI(t, "testdata/conformance.jsonl"),
+			SourceTable:         "replace_source",
+			DestURI:             exadataURI,
+			DestTable:           table,
+			IncrementalStrategy: config.StrategyReplace,
+		}
+
+		require.NoError(t, pipeline.New(cfg).Run(ctx))
+		validateReplaceSQL(t, oracleBackend(), exadataURI, table)
+	})
+}
+
 func validateAthenaReplace(t *testing.T, destURI, destTable string) {
 	ctx := context.Background()
 	rows := countRowsViaAthenaRead(t, ctx, destURI, destTable)
@@ -1835,8 +1871,11 @@ func normalizeMySQLType(mysqlType string) string {
 
 func oracleSQLConnString(rawURI string) string {
 	normalized := rawURI
-	if strings.HasPrefix(strings.ToLower(normalized), "oracle+cx_oracle://") {
-		normalized = "oracle://" + normalized[len("oracle+cx_oracle://"):]
+	if scheme, rest, ok := strings.Cut(rawURI, "://"); ok {
+		switch strings.ToLower(scheme) {
+		case "oracle+cx_oracle", "exadata", "oracle+exadata", "oracle_exadata":
+			normalized = "oracle://" + rest
+		}
 	}
 
 	u, err := url.Parse(normalized)
