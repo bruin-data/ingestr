@@ -131,6 +131,14 @@ test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
 	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p 64 -parallel 8 -timeout 20m ./tests/integration/...
 
+# Integration tests that need no Docker: container-backed tests skip themselves
+# when no Docker provider is available (see requireDocker), leaving the
+# file-based tests (sqlite/duckdb/csv/parquet/local-fs iceberg). Runs anywhere,
+# including macOS CI where Docker/testcontainers is unavailable.
+test-integration-nodocker: generate
+	@echo "$(OK_COLOR)==> Running Docker-free integration tests$(NO_COLOR)"
+	@INTEGRATION_BACKENDS=none go test -tags integration -v -p 64 -parallel 8 -timeout 15m ./tests/integration/...
+
 # The CDC stress tests share one harness: a queue-based load generator that
 # tracks the target ops/sec (STRESS_OPS_PER_SEC, default 1000) as closely as
 # the source engine allows, parallel ingestion into PostgreSQL and DuckDB

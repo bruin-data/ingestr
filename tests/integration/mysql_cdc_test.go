@@ -20,6 +20,7 @@ import (
 )
 
 func setupMySQLCDCContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
+	requireDocker(t)
 	t.Helper()
 
 	container, err := tcmysql.Run(

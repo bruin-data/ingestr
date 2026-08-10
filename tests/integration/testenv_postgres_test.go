@@ -34,6 +34,16 @@ func containerWanted(name string) bool {
 	return false
 }
 
+// requireDocker skips the test when no Docker provider is available. This lets
+// the container-backed integration tests be excluded simply by running without
+// Docker (e.g. on macOS CI), while file-based tests still run.
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if !testutil.DockerProviderHealthy(context.Background()) {
+		t.Skip("requires Docker; Docker provider not available")
+	}
+}
+
 // anyContainerWanted reports whether any container-backed backend is requested.
 func anyContainerWanted() bool {
 	for _, name := range containerBackends {

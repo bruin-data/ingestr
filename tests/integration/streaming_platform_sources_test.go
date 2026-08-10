@@ -246,6 +246,7 @@ func TestPulsar_Streaming(t *testing.T) {
 }
 
 func startRedisContainer(t *testing.T, ctx context.Context) string {
+	requireDocker(t)
 	t.Helper()
 	req := testcontainers.ContainerRequest{
 		Image:        "redis:7-alpine",
@@ -304,6 +305,7 @@ func seedRedisPending(t *testing.T, ctx context.Context, client *goredis.Client,
 }
 
 func startNATSContainer(t *testing.T, ctx context.Context) string {
+	requireDocker(t)
 	t.Helper()
 	req := testcontainers.ContainerRequest{
 		Image:        "nats:2.10-alpine",
@@ -363,6 +365,7 @@ func publishNATSMessages(t *testing.T, js natsgo.JetStreamContext, subject strin
 }
 
 func startPulsarContainer(t *testing.T, ctx context.Context) (string, testcontainers.Container) {
+	requireDocker(t)
 	t.Helper()
 	req := testcontainers.ContainerRequest{
 		Image:        "apachepulsar/pulsar:3.3.0",

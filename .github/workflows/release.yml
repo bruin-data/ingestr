@@ -21,10 +21,18 @@ jobs:
       TEST_CONCURRENCY: "1"
     strategy:
       matrix:
-        platform:
-          - depot-ubuntu-24.04-4
-          - depot-macos-15
-        suite: ["test-full", "test-integration"]
+        # Each platform/suite combination is listed explicitly. macOS runners
+        # have no Docker/testcontainers, so they run test-integration-nodocker
+        # (the full test-integration suite would only self-skip there).
+        include:
+          - platform: depot-ubuntu-24.04-4
+            suite: test-full
+          - platform: depot-ubuntu-24.04-4
+            suite: test-integration
+          - platform: depot-macos-15
+            suite: test-full
+          - platform: depot-macos-15
+            suite: test-integration-nodocker
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -31,6 +31,7 @@ import (
 
 // setupPostgresCDCContainer creates a PostgreSQL container configured for logical replication
 func setupPostgresCDCContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
+	requireDocker(t)
 	req := testcontainers.ContainerRequest{
 		Image: "postgres:16-alpine",
 		Env: map[string]string{
