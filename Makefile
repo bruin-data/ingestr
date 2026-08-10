@@ -137,7 +137,7 @@ test-integration: generate
 # including macOS CI where Docker/testcontainers is unavailable.
 test-integration-nodocker: generate
 	@echo "$(OK_COLOR)==> Running Docker-free integration tests$(NO_COLOR)"
-	@INTEGRATION_BACKENDS=none go test -tags integration -v -p 64 -parallel 8 -timeout 15m ./tests/integration/...
+	@INTEGRATION_BACKENDS=none go test -tags integration -p 64 -parallel 8 -timeout 15m ./tests/integration/...
 
 # The CDC stress tests share one harness: a queue-based load generator that
 # tracks the target ops/sec (STRESS_OPS_PER_SEC, default 1000) as closely as
