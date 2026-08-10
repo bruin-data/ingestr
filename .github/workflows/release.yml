@@ -25,6 +25,14 @@ jobs:
           - depot-ubuntu-24.04-4
           - depot-macos-15
         suite: ["test-full", "test-integration"]
+        exclude:
+          # macOS runners have no Docker/testcontainers, so test-integration only
+          # self-skips there. Run the Docker-free subset instead (see include).
+          - platform: depot-macos-15
+            suite: test-integration
+        include:
+          - platform: depot-macos-15
+            suite: test-integration-nodocker
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
