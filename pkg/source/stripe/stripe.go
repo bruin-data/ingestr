@@ -58,6 +58,8 @@ import (
 const (
 	defaultBatchSize       = 100
 	defaultSyncParallelism = 10
+	maxFanoutParallelism   = 32
+	maxAdaptiveChunks      = 128
 )
 
 type loadingMode int
@@ -69,7 +71,8 @@ const (
 )
 
 type StripeSource struct {
-	apiKey string
+	apiKey   string
+	governor *requestGovernor
 }
 
 func NewStripeSource() *StripeSource {
@@ -86,10 +89,10 @@ func (s *StripeSource) Connect(ctx context.Context, uri string) error {
 		return err
 	}
 	s.apiKey = apiKey
+	s.governor = sharedGovernorRegistry.governorForKey(apiKey)
 	stripe.Key = apiKey
 
-	// Wrap the default backends so rate-limit (429) responses are retried with
-	// exponential backoff. stripe-go does not retry rate-limit 429s on its own.
+	// Govern all Stripe requests and retry rate-limit responses.
 	wrapWithRetry(stripe.APIBackend)
 	wrapWithRetry(stripe.UploadsBackend)
 
@@ -123,6 +126,20 @@ func parseAPIKeyFromURI(uri string) (string, error) {
 }
 
 func (s *StripeSource) Close(ctx context.Context) error {
+	if s.governor != nil {
+		config.Debug("[STRIPE] Request governor: %s", s.governor.stats())
+		for _, endpoint := range s.governor.endpointStats() {
+			config.Debug("[STRIPE] Endpoint %s: %d requests, %d errors, %d rate-limited, %d waits totaling %s, average API time %s",
+				endpoint.path,
+				endpoint.requests,
+				endpoint.errors,
+				endpoint.rateLimited,
+				endpoint.waitedRequests,
+				endpoint.totalWait.Round(time.Millisecond),
+				endpoint.averageAPITime().Round(time.Millisecond),
+			)
+		}
+	}
 	return nil
 }
 
@@ -272,21 +289,19 @@ type timeWindow struct {
 	end   time.Time
 }
 
-// chunkSizeForInterval picks a chunk size that yields ~50-500 chunks for typical intervals.
-// Worker count is decoupled from chunk count — workers pull chunks from a queue.
-func chunkSizeForInterval(interval time.Duration) time.Duration {
-	switch {
-	case interval < time.Hour:
-		return interval / 10
-	case interval < 24*time.Hour:
-		return 5 * time.Minute
-	case interval < 7*24*time.Hour:
-		return time.Hour
-	case interval < 90*24*time.Hour:
-		return 6 * time.Hour
-	default:
-		return 24 * time.Hour
+func chunkSizeForParallelism(interval time.Duration, workers int) time.Duration {
+	if interval <= 0 {
+		return interval
 	}
+	if workers <= 0 {
+		workers = defaultSyncParallelism
+	}
+	targetChunks := min(workers*2, maxAdaptiveChunks)
+	chunkSize := interval / time.Duration(targetChunks)
+	if interval%time.Duration(targetChunks) != 0 {
+		chunkSize++
+	}
+	return max(chunkSize, time.Second)
 }
 
 func chunkTimeRange(start, end time.Time, chunkSize time.Duration) []timeWindow {
@@ -306,12 +321,13 @@ func chunkTimeRange(start, end time.Time, chunkSize time.Duration) []timeWindow 
 	return chunks
 }
 
-func (s *StripeSource) hasRecordsInRange(tableName string, start, end time.Time) (bool, error) {
+func (s *StripeSource) hasRecordsInRange(ctx context.Context, tableName string, start, end time.Time) (bool, error) {
 	cr := &stripe.RangeQueryParams{
 		GreaterThanOrEqual: start.Unix(),
 		LesserThanOrEqual:  end.Unix(),
 	}
 	lp := stripe.ListParams{Limit: stripe.Int64(1)}
+	lp.Context = ctx
 
 	type iter interface {
 		Next() bool
@@ -379,13 +395,13 @@ func (s *StripeSource) hasRecordsInRange(tableName string, start, end time.Time)
 	return it.Next(), it.Err()
 }
 
-func (s *StripeSource) getOldestRecordTime(tableName string, accountCreated time.Time) time.Time {
+func (s *StripeSource) getOldestRecordTime(ctx context.Context, tableName string, accountCreated time.Time) time.Time {
 	start := accountCreated
 	end := time.Now()
 
 	for end.Sub(start) > 24*time.Hour {
 		mid := start.Add(end.Sub(start) / 2)
-		hasRecords, err := s.hasRecordsInRange(tableName, start, mid)
+		hasRecords, err := s.hasRecordsInRange(ctx, tableName, start, mid)
 		if err != nil {
 			config.Debug("[STRIPE] Error during oldest record search for %s, using account creation time: %v", tableName, err)
 			return accountCreated
@@ -447,12 +463,12 @@ func (s *StripeSource) read(ctx context.Context, table string, opts source.ReadO
 				if opts.IntervalStart != nil {
 					start = *opts.IntervalStart
 				} else {
-					acc, err := account.Get()
+					acc, err := s.getAccount(ctx)
 					if err != nil {
 						results <- source.RecordBatchResult{Err: fmt.Errorf("failed to fetch account for time range: %w", err)}
 						return
 					}
-					start = s.getOldestRecordTime(tableName, time.Unix(acc.Created, 0))
+					start = s.getOldestRecordTime(ctx, tableName, time.Unix(acc.Created, 0))
 				}
 				if opts.IntervalEnd != nil {
 					end = *opts.IntervalEnd
@@ -461,12 +477,12 @@ func (s *StripeSource) read(ctx context.Context, table string, opts source.ReadO
 				}
 				useParallel = true
 			case modeAsync:
-				acc, err := account.Get()
+				acc, err := s.getAccount(ctx)
 				if err != nil {
 					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to fetch account for time range: %w", err)}
 					return
 				}
-				start = s.getOldestRecordTime(tableName, time.Unix(acc.Created, 0))
+				start = s.getOldestRecordTime(ctx, tableName, time.Unix(acc.Created, 0))
 				end = time.Now()
 				useParallel = true
 			}
@@ -500,7 +516,7 @@ func (s *StripeSource) readParallelAdaptive(ctx context.Context, tableName strin
 		workers = defaultSyncParallelism
 	}
 
-	chunkSize := chunkSizeForInterval(end.Sub(start))
+	chunkSize := chunkSizeForParallelism(end.Sub(start), workers)
 	chunks := chunkTimeRange(start, end, chunkSize)
 	if len(chunks) == 0 {
 		return nil
@@ -555,7 +571,11 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 	tc := tables[tableName]
 	config.Debug("[STRIPE] Reading %s from events (type filter: %s)", tableName, eventTypeFilter)
 
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+
 	params := &stripe.EventListParams{}
+	params.Context = fetchCtx
 	params.Limit = stripe.Int64(int64(defaultBatchSize))
 	params.Type = stripe.String(eventTypeFilter)
 	params.CreatedRange = &stripe.RangeQueryParams{
@@ -565,142 +585,151 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 		params.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
 	}
 
-	// Collect unique parent object IDs from all events
-	changedIDs := make(map[string]bool)
+	workers := stripeFanoutWorkers(opts.Parallelism)
+	objectIDs := make(chan string, workers)
+	objects := make(chan map[string]interface{}, workers)
+	eventErrCh := make(chan error, 1)
+	changedCountCh := make(chan int, 1)
+	var workersWG sync.WaitGroup
 
-	iter := event.List(params)
-	for iter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		e := iter.Event()
-
-		if e.Data == nil || e.Data.Object == nil {
-			continue
-		}
-
-		obj := e.Data.Object
-		var parentID string
-
-		objType, _ := obj["object"].(string)
-		if objType == tc.objectType {
-			parentID, _ = obj["id"].(string)
-		} else if tc.parentIDField != "" {
-			parentID, _ = obj[tc.parentIDField].(string)
-		}
-
-		if parentID != "" {
-			changedIDs[parentID] = true
-		}
-	}
-
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to fetch events for %s: %w", tableName, err)
-	}
-
-	if len(changedIDs) == 0 {
-		config.Debug("[STRIPE] No events found for %s in the given interval", tableName)
-		return nil
-	}
-
-	config.Debug("[STRIPE] Found %d unique %s IDs from events, re-fetching full objects", len(changedIDs), tableName)
-
-	// Re-fetch objects by ID in parallel using a worker pool
-	const fetchWorkers = 5
-	fetchCtx, cancelFetch := context.WithCancel(ctx)
-	defer cancelFetch()
-
-	objChan := make(chan map[string]interface{}, fetchWorkers)
-	sem := make(chan struct{}, fetchWorkers)
-	var wg sync.WaitGroup
-
-	go func() {
-		defer func() {
-			wg.Wait()
-			close(objChan)
-		}()
-		for id := range changedIDs {
-			select {
-			case <-fetchCtx.Done():
-				return
-			case sem <- struct{}{}:
-			}
-
-			wg.Add(1)
-			go func(id string) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				select {
-				case <-fetchCtx.Done():
-					return
-				default:
-				}
-
-				config.Debug("[STRIPE] Fetching object ID: %s", id)
-				obj, err := s.fetchObjectByID(tableName, id)
+	for i := 0; i < workers; i++ {
+		workersWG.Add(1)
+		go func() {
+			defer workersWG.Done()
+			for id := range objectIDs {
+				obj, err := s.fetchObjectByID(fetchCtx, tableName, id)
 				if err != nil {
 					config.Debug("[STRIPE] Failed to fetch %s %s: %v (skipping)", tableName, id, err)
+					continue
+				}
+				select {
+				case objects <- obj:
+				case <-fetchCtx.Done():
 					return
 				}
+			}
+		}()
+	}
 
-				select {
-				case objChan <- obj:
-				case <-fetchCtx.Done():
-				}
-			}(id)
+	go func() {
+		seen := make(map[string]struct{})
+		iter := event.List(params)
+		for iter.Next() {
+			e := iter.Event()
+			if e.Data == nil || e.Data.Object == nil {
+				continue
+			}
+
+			obj := e.Data.Object
+			var parentID string
+			objType, _ := obj["object"].(string)
+			if objType == tc.objectType {
+				parentID, _ = obj["id"].(string)
+			} else if tc.parentIDField != "" {
+				parentID, _ = obj[tc.parentIDField].(string)
+			}
+			if parentID == "" {
+				continue
+			}
+			if _, exists := seen[parentID]; exists {
+				continue
+			}
+			seen[parentID] = struct{}{}
+
+			select {
+			case objectIDs <- parentID:
+			case <-fetchCtx.Done():
+				close(objectIDs)
+				workersWG.Wait()
+				changedCountCh <- len(seen)
+				close(objects)
+				return
+			}
 		}
+
+		if err := iter.Err(); err != nil && fetchCtx.Err() == nil {
+			eventErrCh <- fmt.Errorf("failed to fetch events for %s: %w", tableName, err)
+		}
+		close(objectIDs)
+		workersWG.Wait()
+		changedCountCh <- len(seen)
+		close(objects)
 	}()
 
 	var items []map[string]interface{}
 	batchNum := 0
 	totalSent := 0
+	batchSize := stripePageSize(opts.PageSize)
 
-	for obj := range objChan {
-		items = append(items, obj)
-
-		if len(items) >= defaultBatchSize {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
-			}
-
-			batchNum++
-			totalSent += len(items)
-			config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent)
-			results <- source.RecordBatchResult{Batch: record}
-			items = nil
-
-			if opts.Limit > 0 && totalSent >= opts.Limit {
-				config.Debug("[STRIPE] Reached limit of %d %s", opts.Limit, tableName)
-				return nil
-			}
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
 		}
-	}
-
-	if len(items) > 0 {
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
 		}
 
 		batchNum++
-		totalSent += len(items)
 		config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent)
-		results <- source.RecordBatchResult{Batch: record}
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+			items = nil
+			return nil
+		case <-fetchCtx.Done():
+			record.Release()
+			return fetchCtx.Err()
+		}
 	}
 
-	config.Debug("[STRIPE] Total %d %s records re-fetched from %d changed IDs", totalSent, tableName, len(changedIDs))
+	for obj := range objects {
+		items = append(items, obj)
+		totalSent++
+
+		reachedLimit := opts.Limit > 0 && totalSent >= opts.Limit
+		if len(items) >= batchSize || reachedLimit {
+			if err := flush(); err != nil {
+				cancelFetch()
+				return err
+			}
+		}
+		if reachedLimit {
+			cancelFetch()
+			for range objects {
+			}
+			changedCount := <-changedCountCh
+			config.Debug("[STRIPE] Reached limit of %d %s after %d changed IDs", opts.Limit, tableName, changedCount)
+			return nil
+		}
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
+	select {
+	case err := <-eventErrCh:
+		return err
+	default:
+	}
+
+	changedCount := <-changedCountCh
+	if changedCount == 0 {
+		config.Debug("[STRIPE] No events found for %s in the given interval", tableName)
+		return nil
+	}
+	config.Debug("[STRIPE] Total %d %s records re-fetched from %d changed IDs", totalSent, tableName, changedCount)
 	return nil
 }
 
-func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interface{}, error) {
+func (s *StripeSource) fetchObjectByID(ctx context.Context, tableName, id string) (map[string]interface{}, error) {
 	switch tableName {
 	case "account":
 		params := &stripe.AccountParams{}
+		params.Context = ctx
 		params.AddExpand("external_accounts")
 		obj, err := account.GetByID(id, params)
 		if err != nil {
@@ -709,6 +738,7 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "application_fee":
 		params := &stripe.ApplicationFeeParams{}
+		params.Context = ctx
 		params.AddExpand("refunds")
 		obj, err := applicationfee.Get(id, params)
 		if err != nil {
@@ -717,6 +747,7 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "charge":
 		params := &stripe.ChargeParams{}
+		params.Context = ctx
 		params.AddExpand("refunds")
 		obj, err := charge.Get(id, params)
 		if err != nil {
@@ -725,6 +756,7 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "checkout_session":
 		params := &stripe.CheckoutSessionParams{}
+		params.Context = ctx
 		params.AddExpand("line_items")
 		obj, err := session.Get(id, params)
 		if err != nil {
@@ -732,19 +764,24 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "coupon":
-		obj, err := coupon.Get(id, nil)
+		params := &stripe.CouponParams{}
+		params.Context = ctx
+		obj, err := coupon.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "credit_note":
-		obj, err := creditnote.Get(id, nil)
+		params := &stripe.CreditNoteParams{}
+		params.Context = ctx
+		obj, err := creditnote.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "customer":
 		params := &stripe.CustomerParams{}
+		params.Context = ctx
 		params.AddExpand("tax_ids")
 		params.AddExpand("subscriptions")
 		params.AddExpand("sources")
@@ -754,13 +791,16 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "dispute":
-		obj, err := dispute.Get(id, nil)
+		params := &stripe.DisputeParams{}
+		params.Context = ctx
+		obj, err := dispute.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "invoice":
 		params := &stripe.InvoiceParams{}
+		params.Context = ctx
 		params.AddExpand("lines")
 		obj, err := invoice.Get(id, params)
 		if err != nil {
@@ -768,85 +808,112 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "invoice_item":
-		obj, err := invoiceitem.Get(id, nil)
+		params := &stripe.InvoiceItemParams{}
+		params.Context = ctx
+		obj, err := invoiceitem.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "payment_intent":
-		obj, err := paymentintent.Get(id, nil)
+		params := &stripe.PaymentIntentParams{}
+		params.Context = ctx
+		obj, err := paymentintent.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "payment_link":
-		obj, err := paymentlink.Get(id, nil)
+		params := &stripe.PaymentLinkParams{}
+		params.Context = ctx
+		obj, err := paymentlink.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "payment_method":
-		obj, err := paymentmethod.Get(id, nil)
+		params := &stripe.PaymentMethodParams{}
+		params.Context = ctx
+		obj, err := paymentmethod.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "payout":
-		obj, err := payout.Get(id, nil)
+		params := &stripe.PayoutParams{}
+		params.Context = ctx
+		obj, err := payout.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "plan":
-		obj, err := plan.Get(id, nil)
+		params := &stripe.PlanParams{}
+		params.Context = ctx
+		obj, err := plan.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "price":
-		obj, err := price.Get(id, nil)
+		params := &stripe.PriceParams{}
+		params.Context = ctx
+		obj, err := price.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "product":
-		obj, err := product.Get(id, nil)
+		params := &stripe.ProductParams{}
+		params.Context = ctx
+		obj, err := product.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "promotion_code":
-		obj, err := promotioncode.Get(id, nil)
+		params := &stripe.PromotionCodeParams{}
+		params.Context = ctx
+		obj, err := promotioncode.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "quote":
-		obj, err := quote.Get(id, nil)
+		params := &stripe.QuoteParams{}
+		params.Context = ctx
+		obj, err := quote.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "refund":
-		obj, err := refund.Get(id, nil)
+		params := &stripe.RefundParams{}
+		params.Context = ctx
+		obj, err := refund.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "review":
-		obj, err := review.Get(id, nil)
+		params := &stripe.ReviewParams{}
+		params.Context = ctx
+		obj, err := review.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "setup_intent":
-		obj, err := setupintent.Get(id, nil)
+		params := &stripe.SetupIntentParams{}
+		params.Context = ctx
+		obj, err := setupintent.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "subscription":
 		params := &stripe.SubscriptionParams{}
+		params.Context = ctx
 		params.AddExpand("items")
 		obj, err := subscription.Get(id, params)
 		if err != nil {
@@ -854,25 +921,32 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "subscription_schedule":
-		obj, err := subscriptionschedule.Get(id, nil)
+		params := &stripe.SubscriptionScheduleParams{}
+		params.Context = ctx
+		obj, err := subscriptionschedule.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "tax_rate":
-		obj, err := taxrate.Get(id, nil)
+		params := &stripe.TaxRateParams{}
+		params.Context = ctx
+		obj, err := taxrate.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "top_up":
-		obj, err := topup.Get(id, nil)
+		params := &stripe.TopupParams{}
+		params.Context = ctx
+		obj, err := topup.Get(id, params)
 		if err != nil {
 			return nil, err
 		}
 		return parseRawResponse(obj.LastResponse.RawJSON)
 	case "transfer":
 		params := &stripe.TransferParams{}
+		params.Context = ctx
 		params.AddExpand("reversals")
 		obj, err := transfer.Get(id, params)
 		if err != nil {
@@ -885,10 +959,7 @@ func (s *StripeSource) fetchObjectByID(tableName, id string) (map[string]interfa
 }
 
 func (s *StripeSource) readTable(ctx context.Context, tableName string, opts source.ReadOptions, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
-	batchSize := opts.PageSize
-	if batchSize <= 0 {
-		batchSize = defaultBatchSize
-	}
+	batchSize := stripePageSize(opts.PageSize)
 
 	config.Debug("[STRIPE] Reading table: %s (batch size: %d)", tableName, batchSize)
 
@@ -972,9 +1043,35 @@ func (s *StripeSource) readTable(ctx context.Context, tableName string, opts sou
 	}
 }
 
+func stripePageSize(requested int) int {
+	if requested <= 0 || requested > defaultBatchSize {
+		return defaultBatchSize
+	}
+	return requested
+}
+
+func stripeFanoutWorkers(requested int) int {
+	if requested <= 0 {
+		return defaultSyncParallelism
+	}
+	if requested > maxFanoutParallelism {
+		return maxFanoutParallelism
+	}
+	return requested
+}
+
+func (s *StripeSource) getAccount(ctx context.Context) (*stripe.Account, error) {
+	params := &stripe.Params{Context: ctx}
+	acc := &stripe.Account{}
+	if err := stripe.GetBackend(stripe.APIBackend).Call(http.MethodGet, "/v1/account", s.apiKey, params, acc); err != nil {
+		return nil, err
+	}
+	return acc, nil
+}
+
 func (s *StripeSource) readAccount(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching account")
-	acc, err := account.Get()
+	acc, err := s.getAccount(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch account: %w", err)
 	}
@@ -998,6 +1095,7 @@ func (s *StripeSource) readApplePayDomains(ctx context.Context, opts source.Read
 	config.Debug("[STRIPE] Fetching apple pay domains")
 
 	params := &stripe.ApplePayDomainListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	return s.paginateAndSend(ctx, opts, results, "apple_pay_domain", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
@@ -1017,6 +1115,7 @@ func (s *StripeSource) readApplicationFees(ctx context.Context, opts source.Read
 	config.Debug("[STRIPE] Fetching application fees")
 
 	params := &stripe.ApplicationFeeListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.AddExpand("data.refunds")
 
@@ -1047,6 +1146,7 @@ func (s *StripeSource) readBalanceTransactions(ctx context.Context, opts source.
 	config.Debug("[STRIPE] Fetching balance transactions")
 
 	params := &stripe.BalanceTransactionListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1076,6 +1176,7 @@ func (s *StripeSource) readCharges(ctx context.Context, opts source.ReadOptions,
 	config.Debug("[STRIPE] Fetching charges")
 
 	params := &stripe.ChargeListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.AddExpand("data.refunds")
 
@@ -1106,6 +1207,7 @@ func (s *StripeSource) readCheckoutSessions(ctx context.Context, opts source.Rea
 	config.Debug("[STRIPE] Fetching checkout sessions")
 
 	params := &stripe.CheckoutSessionListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.AddExpand("data.line_items")
 
@@ -1136,6 +1238,7 @@ func (s *StripeSource) readCoupons(ctx context.Context, opts source.ReadOptions,
 	config.Debug("[STRIPE] Fetching coupons")
 
 	params := &stripe.CouponListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1165,6 +1268,7 @@ func (s *StripeSource) readCreditNotes(ctx context.Context, opts source.ReadOpti
 	config.Debug("[STRIPE] Fetching credit notes")
 
 	params := &stripe.CreditNoteListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	return s.paginateAndSend(ctx, opts, results, "credit_note", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
@@ -1184,6 +1288,7 @@ func (s *StripeSource) readCustomers(ctx context.Context, opts source.ReadOption
 	config.Debug("[STRIPE] Fetching customers")
 
 	params := &stripe.CustomerListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.AddExpand("data.tax_ids")
 	params.AddExpand("data.subscriptions")
@@ -1216,6 +1321,7 @@ func (s *StripeSource) readDisputes(ctx context.Context, opts source.ReadOptions
 	config.Debug("[STRIPE] Fetching disputes")
 
 	params := &stripe.DisputeListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1245,6 +1351,7 @@ func (s *StripeSource) readEvents(ctx context.Context, opts source.ReadOptions, 
 	config.Debug("[STRIPE] Fetching events")
 
 	params := &stripe.EventListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1274,6 +1381,7 @@ func (s *StripeSource) readInvoices(ctx context.Context, opts source.ReadOptions
 	config.Debug("[STRIPE] Fetching invoices")
 
 	params := &stripe.InvoiceListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.AddExpand("data.lines")
 
@@ -1304,6 +1412,7 @@ func (s *StripeSource) readInvoiceItems(ctx context.Context, opts source.ReadOpt
 	config.Debug("[STRIPE] Fetching invoice items")
 
 	params := &stripe.InvoiceItemListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1333,6 +1442,7 @@ func (s *StripeSource) readPaymentIntents(ctx context.Context, opts source.ReadO
 	config.Debug("[STRIPE] Fetching payment intents")
 
 	params := &stripe.PaymentIntentListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1501,6 +1611,7 @@ func (s *StripeSource) readPaymentLinks(ctx context.Context, opts source.ReadOpt
 	config.Debug("[STRIPE] Fetching payment links")
 
 	params := &stripe.PaymentLinkListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	return s.paginateAndSend(ctx, opts, results, "payment_link", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
@@ -1519,50 +1630,79 @@ func (s *StripeSource) readPaymentLinks(ctx context.Context, opts source.ReadOpt
 func (s *StripeSource) readPaymentMethods(ctx context.Context, opts source.ReadOptions, batchSize int, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching payment methods")
 
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+
 	customerParams := &stripe.CustomerListParams{}
+	customerParams.Context = workerCtx
 	customerParams.Limit = stripe.Int64(int64(batchSize))
 
-	customerIter := customer.List(customerParams)
-	for customerIter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	workers := stripeFanoutWorkers(opts.Parallelism)
+	customerIDs := make(chan string, workers)
+	errCh := make(chan error, 1)
+	rowLimit := newStripeRowLimit(opts.Limit)
+	var wg sync.WaitGroup
 
-		c := customerIter.Customer()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for customerID := range customerIDs {
+				pmParams := &stripe.PaymentMethodListParams{Customer: stripe.String(customerID)}
+				pmParams.Context = workerCtx
+				pmParams.Limit = stripe.Int64(int64(batchSize))
 
-		pmParams := &stripe.PaymentMethodListParams{
-			Customer: stripe.String(c.ID),
-		}
-		pmParams.Limit = stripe.Int64(int64(batchSize))
-
-		err := s.paginateAndSend(ctx, opts, results, "payment_method", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				pmParams.StartingAfter = stripe.String(startingAfter)
+				err := s.paginateAndSendWithRowLimit(workerCtx, opts, results, "payment_method", rowLimit, func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+					if startingAfter != "" {
+						pmParams.StartingAfter = stripe.String(startingAfter)
+					}
+					iter := paymentmethod.List(pmParams)
+					if !iter.Next() {
+						return nil, false, "", iter.Err()
+					}
+					return extractRawListItems(iter.PaymentMethodList().LastResponse.RawJSON)
+				})
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("failed to fetch payment methods for customer %s: %w", customerID, err):
+						cancelWorkers()
+					default:
+					}
+					return
+				}
 			}
-			iter := paymentmethod.List(pmParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.PaymentMethodList().LastResponse.RawJSON)
-		})
-		if err != nil {
-			config.Debug("[STRIPE] Error fetching payment methods for customer %s: %v", c.ID, err)
-		}
+		}()
 	}
 
-	if err := customerIter.Err(); err != nil {
+	customerIter := customer.List(customerParams)
+customerLoop:
+	for !rowLimit.exhausted() && customerIter.Next() {
+		select {
+		case <-workerCtx.Done():
+			break customerLoop
+		case customerIDs <- customerIter.Customer().ID:
+		}
+	}
+	close(customerIDs)
+	wg.Wait()
+
+	if err := customerIter.Err(); err != nil && workerCtx.Err() == nil {
 		return fmt.Errorf("failed to list customers for payment methods: %w", err)
 	}
 
-	return nil
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return ctx.Err()
+	}
 }
 
 func (s *StripeSource) readPayouts(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching payouts")
 
 	params := &stripe.PayoutListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1592,6 +1732,7 @@ func (s *StripeSource) readPlans(ctx context.Context, opts source.ReadOptions, b
 	config.Debug("[STRIPE] Fetching plans")
 
 	params := &stripe.PlanListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1621,6 +1762,7 @@ func (s *StripeSource) readPrices(ctx context.Context, opts source.ReadOptions, 
 	config.Debug("[STRIPE] Fetching prices")
 
 	params := &stripe.PriceListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1650,6 +1792,7 @@ func (s *StripeSource) readProducts(ctx context.Context, opts source.ReadOptions
 	config.Debug("[STRIPE] Fetching products")
 
 	params := &stripe.ProductListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1679,6 +1822,7 @@ func (s *StripeSource) readPromotionCodes(ctx context.Context, opts source.ReadO
 	config.Debug("[STRIPE] Fetching promotion codes")
 
 	params := &stripe.PromotionCodeListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1708,6 +1852,7 @@ func (s *StripeSource) readQuotes(ctx context.Context, opts source.ReadOptions, 
 	config.Debug("[STRIPE] Fetching quotes")
 
 	params := &stripe.QuoteListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	return s.paginateAndSend(ctx, opts, results, "quote", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
@@ -1727,6 +1872,7 @@ func (s *StripeSource) readRefunds(ctx context.Context, opts source.ReadOptions,
 	config.Debug("[STRIPE] Fetching refunds")
 
 	params := &stripe.RefundListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1756,6 +1902,7 @@ func (s *StripeSource) readReviews(ctx context.Context, opts source.ReadOptions,
 	config.Debug("[STRIPE] Fetching reviews")
 
 	params := &stripe.ReviewListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1784,60 +1931,88 @@ func (s *StripeSource) readReviews(ctx context.Context, opts source.ReadOptions,
 func (s *StripeSource) readSetupAttempts(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching setup attempts")
 
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+
 	siParams := &stripe.SetupIntentListParams{}
+	siParams.Context = workerCtx
 	siParams.Limit = stripe.Int64(int64(batchSize))
 
-	siIter := setupintent.List(siParams)
-	for siIter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	workers := stripeFanoutWorkers(opts.Parallelism)
+	setupIntentIDs := make(chan string, workers)
+	errCh := make(chan error, 1)
+	rowLimit := newStripeRowLimit(opts.Limit)
+	var wg sync.WaitGroup
 
-		si := siIter.SetupIntent()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for setupIntentID := range setupIntentIDs {
+				saParams := &stripe.SetupAttemptListParams{SetupIntent: stripe.String(setupIntentID)}
+				saParams.Context = workerCtx
+				saParams.Limit = stripe.Int64(int64(batchSize))
+				if intervalStart != nil || intervalEnd != nil {
+					saParams.CreatedRange = &stripe.RangeQueryParams{}
+					if intervalStart != nil {
+						saParams.CreatedRange.GreaterThanOrEqual = intervalStart.Unix()
+					}
+					if intervalEnd != nil {
+						saParams.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
+					}
+				}
 
-		saParams := &stripe.SetupAttemptListParams{
-			SetupIntent: stripe.String(si.ID),
-		}
-		saParams.Limit = stripe.Int64(int64(batchSize))
-
-		if intervalStart != nil || intervalEnd != nil {
-			saParams.CreatedRange = &stripe.RangeQueryParams{}
-			if intervalStart != nil {
-				saParams.CreatedRange.GreaterThanOrEqual = intervalStart.Unix()
+				err := s.paginateAndSendWithRowLimit(workerCtx, opts, results, "setup_attempt", rowLimit, func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+					if startingAfter != "" {
+						saParams.StartingAfter = stripe.String(startingAfter)
+					}
+					iter := setupattempt.List(saParams)
+					if !iter.Next() {
+						return nil, false, "", iter.Err()
+					}
+					return extractRawListItems(iter.SetupAttemptList().LastResponse.RawJSON)
+				})
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("failed to fetch setup attempts for setup intent %s: %w", setupIntentID, err):
+						cancelWorkers()
+					default:
+					}
+					return
+				}
 			}
-			if intervalEnd != nil {
-				saParams.CreatedRange.LesserThanOrEqual = intervalEnd.Unix()
-			}
-		}
-
-		err := s.paginateAndSend(ctx, opts, results, "setup_attempt", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				saParams.StartingAfter = stripe.String(startingAfter)
-			}
-			iter := setupattempt.List(saParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.SetupAttemptList().LastResponse.RawJSON)
-		})
-		if err != nil {
-			config.Debug("[STRIPE] Error fetching setup attempts for setup intent %s: %v", si.ID, err)
-		}
+		}()
 	}
 
-	if err := siIter.Err(); err != nil {
+	siIter := setupintent.List(siParams)
+setupIntentLoop:
+	for !rowLimit.exhausted() && siIter.Next() {
+		select {
+		case <-workerCtx.Done():
+			break setupIntentLoop
+		case setupIntentIDs <- siIter.SetupIntent().ID:
+		}
+	}
+	close(setupIntentIDs)
+	wg.Wait()
+
+	if err := siIter.Err(); err != nil && workerCtx.Err() == nil {
 		return fmt.Errorf("failed to list setup intents for setup attempts: %w", err)
 	}
 
-	return nil
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return ctx.Err()
+	}
 }
 
 func (s *StripeSource) readSetupIntents(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching setup intents")
 
 	params := &stripe.SetupIntentListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1867,6 +2042,7 @@ func (s *StripeSource) readShippingRates(ctx context.Context, opts source.ReadOp
 	config.Debug("[STRIPE] Fetching shipping rates")
 
 	params := &stripe.ShippingRateListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -1896,6 +2072,7 @@ func (s *StripeSource) readSubscriptions(ctx context.Context, opts source.ReadOp
 	config.Debug("[STRIPE] Fetching subscriptions")
 
 	params := &stripe.SubscriptionListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.Status = stripe.String("all") // Include canceled, incomplete_expired, etc.
 	params.AddExpand("data.items")
@@ -1925,45 +2102,185 @@ func (s *StripeSource) readSubscriptions(ctx context.Context, opts source.ReadOp
 
 func (s *StripeSource) readSubscriptionItems(ctx context.Context, opts source.ReadOptions, batchSize int, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching subscription items")
+	if batchSize <= 0 || batchSize > defaultBatchSize {
+		batchSize = defaultBatchSize
+	}
 
 	subParams := &stripe.SubscriptionListParams{}
+	subParams.Context = ctx
 	subParams.Limit = stripe.Int64(int64(batchSize))
 	subParams.Status = stripe.String("all")
 
-	subIter := subscription.List(subParams)
-	for subIter.Next() {
+	parentFetch := func(startingAfter string) (subscriptionItemsPage, error) {
+		if startingAfter != "" {
+			subParams.StartingAfter = stripe.String(startingAfter)
+		}
+
+		iter := subscription.List(subParams)
+		if !iter.Next() {
+			return subscriptionItemsPage{}, iter.Err()
+		}
+		return extractRawSubscriptionItems(iter.SubscriptionList().LastResponse.RawJSON)
+	}
+
+	overflowFetch := func(subscriptionID, startingAfter string) ([]map[string]interface{}, bool, string, error) {
+		siParams := &stripe.SubscriptionItemListParams{
+			Subscription: stripe.String(subscriptionID),
+		}
+		siParams.Context = ctx
+		siParams.Limit = stripe.Int64(int64(batchSize))
+		if startingAfter != "" {
+			siParams.StartingAfter = stripe.String(startingAfter)
+		}
+
+		iter := subscriptionitem.List(siParams)
+		if !iter.Next() {
+			return nil, false, "", iter.Err()
+		}
+		return extractRawListItems(iter.SubscriptionItemList().LastResponse.RawJSON)
+	}
+
+	return readSubscriptionItemsFromPages(ctx, opts, batchSize, results, parentFetch, overflowFetch)
+}
+
+type subscriptionItemOverflow struct {
+	subscriptionID string
+	startingAfter  string
+}
+
+type subscriptionItemsPage struct {
+	items     []map[string]interface{}
+	overflows []subscriptionItemOverflow
+	hasMore   bool
+	lastID    string
+}
+
+type subscriptionItemsPageFetch func(startingAfter string) (subscriptionItemsPage, error)
+
+type subscriptionItemOverflowFetch func(subscriptionID, startingAfter string) ([]map[string]interface{}, bool, string, error)
+
+func readSubscriptionItemsFromPages(
+	ctx context.Context,
+	opts source.ReadOptions,
+	batchSize int,
+	results chan<- source.RecordBatchResult,
+	parentFetch subscriptionItemsPageFetch,
+	overflowFetch subscriptionItemOverflowFetch,
+) error {
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+
+	var pending []map[string]interface{}
+	totalSent := 0
+	batchNum := 0
+
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(pending, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert subscription_item to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[STRIPE] Sending batch %d with %d subscription_item (total sent: %d)", batchNum, len(pending), totalSent)
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+			pending = nil
+			return nil
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
+	}
+
+	appendItems := func(items []map[string]interface{}) (bool, error) {
+		for _, item := range items {
+			if opts.Limit > 0 && totalSent >= opts.Limit {
+				return true, flush()
+			}
+
+			pending = append(pending, item)
+			totalSent++
+			if len(pending) >= batchSize {
+				if err := flush(); err != nil {
+					return false, err
+				}
+			}
+		}
+
+		if opts.Limit > 0 && totalSent >= opts.Limit {
+			return true, flush()
+		}
+		return false, nil
+	}
+
+	var parentCursor string
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		sub := subIter.Subscription()
-
-		siParams := &stripe.SubscriptionItemListParams{
-			Subscription: stripe.String(sub.ID),
-		}
-		siParams.Limit = stripe.Int64(int64(batchSize))
-
-		err := s.paginateAndSend(ctx, opts, results, "subscription_item", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				siParams.StartingAfter = stripe.String(startingAfter)
-			}
-			iter := subscriptionitem.List(siParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.SubscriptionItemList().LastResponse.RawJSON)
-		})
+		page, err := parentFetch(parentCursor)
 		if err != nil {
-			config.Debug("[STRIPE] Error fetching subscription items for subscription %s: %v", sub.ID, err)
+			return fmt.Errorf("failed to fetch subscriptions for subscription items: %w", err)
 		}
+
+		reachedLimit, err := appendItems(page.items)
+		if err != nil {
+			return err
+		}
+		if reachedLimit {
+			config.Debug("[STRIPE] Reached limit of %d subscription_item", opts.Limit)
+			return nil
+		}
+
+		for _, overflow := range page.overflows {
+			itemCursor := overflow.startingAfter
+			for {
+				items, hasMore, lastID, err := overflowFetch(overflow.subscriptionID, itemCursor)
+				if err != nil {
+					return fmt.Errorf("failed to fetch subscription items for subscription %s: %w", overflow.subscriptionID, err)
+				}
+
+				reachedLimit, err = appendItems(items)
+				if err != nil {
+					return err
+				}
+				if reachedLimit {
+					config.Debug("[STRIPE] Reached limit of %d subscription_item", opts.Limit)
+					return nil
+				}
+				if !hasMore {
+					break
+				}
+				if lastID == "" {
+					return fmt.Errorf("failed to paginate subscription items for subscription %s: missing item cursor", overflow.subscriptionID)
+				}
+				itemCursor = lastID
+			}
+		}
+
+		if !page.hasMore {
+			break
+		}
+		if page.lastID == "" {
+			return fmt.Errorf("failed to paginate subscriptions for subscription items: missing subscription cursor")
+		}
+		parentCursor = page.lastID
 	}
 
-	if err := subIter.Err(); err != nil {
-		return fmt.Errorf("failed to list subscriptions for subscription items: %w", err)
+	if err := flush(); err != nil {
+		return err
 	}
-
+	if totalSent == 0 {
+		config.Debug("[STRIPE] No subscription_item found")
+	}
 	return nil
 }
 
@@ -1971,6 +2288,7 @@ func (s *StripeSource) readSubscriptionSchedules(ctx context.Context, opts sourc
 	config.Debug("[STRIPE] Fetching subscription schedules")
 
 	params := &stripe.SubscriptionScheduleListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -2000,6 +2318,7 @@ func (s *StripeSource) readTaxCodes(ctx context.Context, opts source.ReadOptions
 	config.Debug("[STRIPE] Fetching tax codes")
 
 	params := &stripe.TaxCodeListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	return s.paginateAndSend(ctx, opts, results, "tax_code", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
@@ -2019,49 +2338,65 @@ func (s *StripeSource) readTaxIDs(ctx context.Context, opts source.ReadOptions, 
 	config.Debug("[STRIPE] Fetching tax IDs")
 
 	customerParams := &stripe.CustomerListParams{}
+	customerParams.Context = ctx
 	customerParams.Limit = stripe.Int64(int64(batchSize))
+	customerParams.AddExpand("data.tax_ids")
 
-	customerIter := customer.List(customerParams)
-	for customerIter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	return s.paginateAndSend(ctx, opts, results, "tax_id", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
+		if startingAfter != "" {
+			customerParams.StartingAfter = stripe.String(startingAfter)
 		}
 
-		c := customerIter.Customer()
-
-		tidParams := &stripe.TaxIDListParams{
-			Customer: stripe.String(c.ID),
+		customerIter := customer.List(customerParams)
+		if !customerIter.Next() {
+			return nil, false, "", customerIter.Err()
 		}
-		tidParams.Limit = stripe.Int64(int64(batchSize))
-
-		err := s.paginateAndSend(ctx, opts, results, "tax_id", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
-			if startingAfter != "" {
-				tidParams.StartingAfter = stripe.String(startingAfter)
-			}
-			iter := taxid.List(tidParams)
-			if !iter.Next() {
-				return nil, false, "", iter.Err()
-			}
-			return extractRawListItems(iter.TaxIDList().LastResponse.RawJSON)
-		})
+		page, err := extractRawCustomerTaxIDs(customerIter.CustomerList().LastResponse.RawJSON)
 		if err != nil {
-			config.Debug("[STRIPE] Error fetching tax IDs for customer %s: %v", c.ID, err)
+			return nil, false, "", err
 		}
-	}
 
-	if err := customerIter.Err(); err != nil {
-		return fmt.Errorf("failed to list customers for tax IDs: %w", err)
-	}
+		for _, overflow := range page.overflows {
+			cursor := overflow.startingAfter
+			for {
+				tidParams := &stripe.TaxIDListParams{Customer: stripe.String(overflow.customerID)}
+				tidParams.Context = ctx
+				tidParams.Limit = stripe.Int64(int64(batchSize))
+				if cursor != "" {
+					tidParams.StartingAfter = stripe.String(cursor)
+				}
 
-	return nil
+				iter := taxid.List(tidParams)
+				if !iter.Next() {
+					if err := iter.Err(); err != nil {
+						return nil, false, "", fmt.Errorf("failed to fetch tax IDs for customer %s: %w", overflow.customerID, err)
+					}
+					break
+				}
+				items, hasMore, lastID, err := extractRawListItems(iter.TaxIDList().LastResponse.RawJSON)
+				if err != nil {
+					return nil, false, "", err
+				}
+				page.items = append(page.items, items...)
+				if !hasMore {
+					break
+				}
+				if lastID == "" {
+					return nil, false, "", fmt.Errorf("failed to paginate tax IDs for customer %s: missing cursor", overflow.customerID)
+				}
+				cursor = lastID
+			}
+		}
+
+		return page.items, page.hasMore, page.lastID, nil
+	})
 }
 
 func (s *StripeSource) readTaxRates(ctx context.Context, opts source.ReadOptions, batchSize int, intervalStart, intervalEnd *time.Time, results chan<- source.RecordBatchResult) error {
 	config.Debug("[STRIPE] Fetching tax rates")
 
 	params := &stripe.TaxRateListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -2091,6 +2426,7 @@ func (s *StripeSource) readTopUps(ctx context.Context, opts source.ReadOptions, 
 	config.Debug("[STRIPE] Fetching top ups")
 
 	params := &stripe.TopupListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	if intervalStart != nil || intervalEnd != nil {
@@ -2120,6 +2456,7 @@ func (s *StripeSource) readTransfers(ctx context.Context, opts source.ReadOption
 	config.Debug("[STRIPE] Fetching transfers")
 
 	params := &stripe.TransferListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 	params.AddExpand("data.reversals")
 
@@ -2150,6 +2487,7 @@ func (s *StripeSource) readWebhookEndpoints(ctx context.Context, opts source.Rea
 	config.Debug("[STRIPE] Fetching webhook endpoints")
 
 	params := &stripe.WebhookEndpointListParams{}
+	params.Context = ctx
 	params.Limit = stripe.Int64(int64(batchSize))
 
 	return s.paginateAndSend(ctx, opts, results, "webhook_endpoint", func(startingAfter string) ([]map[string]interface{}, bool, string, error) {
@@ -2168,11 +2506,56 @@ func (s *StripeSource) readWebhookEndpoints(ctx context.Context, opts source.Rea
 type paginationFunc func(startingAfter string) (items []map[string]interface{}, hasMore bool, lastID string, err error)
 
 func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, tableName string, fetch paginationFunc) error {
-	totalSent := 0
+	return s.paginateAndSendWithRowLimit(ctx, opts, results, tableName, newStripeRowLimit(opts.Limit), fetch)
+}
+
+type stripeRowLimit struct {
+	mu       sync.Mutex
+	limit    int
+	reserved int
+}
+
+func newStripeRowLimit(limit int) *stripeRowLimit {
+	return &stripeRowLimit{limit: limit}
+}
+
+func (l *stripeRowLimit) reserve(items []map[string]interface{}) ([]map[string]interface{}, int, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.limit > 0 {
+		remaining := l.limit - l.reserved
+		if remaining <= 0 {
+			return nil, l.reserved, true
+		}
+		if len(items) > remaining {
+			items = items[:remaining]
+		}
+	}
+
+	l.reserved += len(items)
+	return items, l.reserved, l.limit > 0 && l.reserved >= l.limit
+}
+
+func (l *stripeRowLimit) exhausted() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.limit > 0 && l.reserved >= l.limit
+}
+
+func (s *StripeSource) paginateAndSendWithRowLimit(
+	ctx context.Context,
+	opts source.ReadOptions,
+	results chan<- source.RecordBatchResult,
+	tableName string,
+	rowLimit *stripeRowLimit,
+	fetch paginationFunc,
+) error {
+	localSent := 0
 	batchNum := 0
 	var startingAfter string
 
-	for {
+	for !rowLimit.exhausted() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -2184,6 +2567,8 @@ func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOpti
 			return fmt.Errorf("failed to fetch %s: %w", tableName, err)
 		}
 
+		items, totalSent, reachedLimit := rowLimit.reserve(items)
+
 		if len(items) > 0 {
 			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 			if err != nil {
@@ -2191,24 +2576,34 @@ func (s *StripeSource) paginateAndSend(ctx context.Context, opts source.ReadOpti
 			}
 
 			batchNum++
-			config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent+len(items))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+			config.Debug("[STRIPE] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), tableName, totalSent)
+			select {
+			case results <- source.RecordBatchResult{Batch: record}:
+			case <-ctx.Done():
+				record.Release()
+				return ctx.Err()
+			}
+			localSent += len(items)
 
-			if opts.Limit > 0 && totalSent >= opts.Limit {
+			if reachedLimit {
 				config.Debug("[STRIPE] Reached limit of %d %s", opts.Limit, tableName)
 				break
 			}
+		} else if reachedLimit {
+			break
 		}
 
 		if !hasMore {
 			break
 		}
+		if lastID == "" {
+			return fmt.Errorf("failed to paginate %s: Stripe returned has_more without a cursor", tableName)
+		}
 
 		startingAfter = lastID
 	}
 
-	if totalSent == 0 {
+	if localSent == 0 {
 		config.Debug("[STRIPE] No %s found", tableName)
 	}
 
@@ -2248,6 +2643,123 @@ func extractRawListItems(rawJSON []byte) (items []map[string]interface{}, hasMor
 		}
 	}
 	return items, hasMore, lastID, nil
+}
+
+func extractRawSubscriptionItems(rawJSON []byte) (subscriptionItemsPage, error) {
+	subscriptions, hasMore, lastID, err := extractRawListItems(rawJSON)
+	if err != nil {
+		return subscriptionItemsPage{}, err
+	}
+
+	page := subscriptionItemsPage{
+		hasMore: hasMore,
+		lastID:  lastID,
+	}
+	for _, subscription := range subscriptions {
+		subscriptionID, _ := subscription["id"].(string)
+		if subscriptionID == "" {
+			return subscriptionItemsPage{}, fmt.Errorf("subscription response is missing an id")
+		}
+
+		itemList, ok := subscription["items"].(map[string]interface{})
+		if !ok {
+			page.overflows = append(page.overflows, subscriptionItemOverflow{subscriptionID: subscriptionID})
+			continue
+		}
+
+		data, dataOK := itemList["data"].([]interface{})
+		if !dataOK {
+			page.overflows = append(page.overflows, subscriptionItemOverflow{subscriptionID: subscriptionID})
+			continue
+		}
+
+		var itemCursor string
+		for _, rawItem := range data {
+			item, ok := rawItem.(map[string]interface{})
+			if !ok {
+				return subscriptionItemsPage{}, fmt.Errorf("subscription %s contains an invalid item", subscriptionID)
+			}
+			itemID, _ := item["id"].(string)
+			if itemID == "" {
+				return subscriptionItemsPage{}, fmt.Errorf("subscription %s contains an item without an id", subscriptionID)
+			}
+			page.items = append(page.items, item)
+			itemCursor = itemID
+		}
+
+		itemsHaveMore, hasMoreOK := itemList["has_more"].(bool)
+		if itemsHaveMore || !hasMoreOK {
+			page.overflows = append(page.overflows, subscriptionItemOverflow{
+				subscriptionID: subscriptionID,
+				startingAfter:  itemCursor,
+			})
+		}
+	}
+
+	return page, nil
+}
+
+type taxIDOverflow struct {
+	customerID    string
+	startingAfter string
+}
+
+type customerTaxIDsPage struct {
+	items     []map[string]interface{}
+	overflows []taxIDOverflow
+	hasMore   bool
+	lastID    string
+}
+
+func extractRawCustomerTaxIDs(rawJSON []byte) (customerTaxIDsPage, error) {
+	customers, hasMore, lastID, err := extractRawListItems(rawJSON)
+	if err != nil {
+		return customerTaxIDsPage{}, err
+	}
+
+	page := customerTaxIDsPage{hasMore: hasMore, lastID: lastID}
+	for _, customer := range customers {
+		customerID, _ := customer["id"].(string)
+		if customerID == "" {
+			return customerTaxIDsPage{}, fmt.Errorf("customer response is missing an id")
+		}
+
+		taxIDList, ok := customer["tax_ids"].(map[string]interface{})
+		if !ok {
+			page.overflows = append(page.overflows, taxIDOverflow{customerID: customerID})
+			continue
+		}
+
+		data, dataOK := taxIDList["data"].([]interface{})
+		if !dataOK {
+			page.overflows = append(page.overflows, taxIDOverflow{customerID: customerID})
+			continue
+		}
+
+		var taxIDCursor string
+		for _, rawTaxID := range data {
+			taxID, ok := rawTaxID.(map[string]interface{})
+			if !ok {
+				return customerTaxIDsPage{}, fmt.Errorf("customer %s contains an invalid tax ID", customerID)
+			}
+			taxIDValue, _ := taxID["id"].(string)
+			if taxIDValue == "" {
+				return customerTaxIDsPage{}, fmt.Errorf("customer %s contains a tax ID without an id", customerID)
+			}
+			page.items = append(page.items, taxID)
+			taxIDCursor = taxIDValue
+		}
+
+		taxIDsHaveMore, hasMoreOK := taxIDList["has_more"].(bool)
+		if taxIDsHaveMore || !hasMoreOK {
+			page.overflows = append(page.overflows, taxIDOverflow{
+				customerID:    customerID,
+				startingAfter: taxIDCursor,
+			})
+		}
+	}
+
+	return page, nil
 }
 
 var _ source.Source = (*StripeSource)(nil)

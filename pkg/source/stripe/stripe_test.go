@@ -128,23 +128,23 @@ func TestParallelFetch_AllItems_NoCancel(t *testing.T) {
 	}
 }
 
-func TestChunkSizeForInterval(t *testing.T) {
+func TestChunkSizeForParallelism(t *testing.T) {
 	cases := []struct {
 		name     string
 		interval time.Duration
+		workers  int
 		want     time.Duration
 	}{
-		{"sub-hour", 30 * time.Minute, 3 * time.Minute},
-		{"hour", time.Hour, 5 * time.Minute},
-		{"day", 24 * time.Hour, time.Hour},
-		{"week", 7 * 24 * time.Hour, 6 * time.Hour},
-		{"quarter", 90 * 24 * time.Hour, 24 * time.Hour},
-		{"year", 365 * 24 * time.Hour, 24 * time.Hour},
+		{"default workers", 30 * 24 * time.Hour, 5, 3 * 24 * time.Hour},
+		{"more workers", 30 * 24 * time.Hour, 20, 18 * time.Hour},
+		{"chunk cap", 30 * 24 * time.Hour, 120, 5*time.Hour + 37*time.Minute + 30*time.Second},
+		{"fallback workers", 20 * time.Hour, 0, time.Hour},
+		{"second floor", time.Second, 10, time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := chunkSizeForInterval(c.interval); got != c.want {
-				t.Errorf("chunkSizeForInterval(%v) = %v, want %v", c.interval, got, c.want)
+			if got := chunkSizeForParallelism(c.interval, c.workers); got != c.want {
+				t.Errorf("chunkSizeForParallelism(%v, %d) = %v, want %v", c.interval, c.workers, got, c.want)
 			}
 		})
 	}
