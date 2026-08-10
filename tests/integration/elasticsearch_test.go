@@ -79,7 +79,8 @@ func TestElasticsearchDestinationReplace(t *testing.T) {
 	index := "destination_users_" + uniqueSuffix()
 	t.Cleanup(func() { deleteElasticsearchIndex(t, context.Background(), index) })
 
-	initialPath := writeElasticsearchJSONL(t, "initial.jsonl",
+	initialPath := writeElasticsearchJSONL(
+		t, "initial.jsonl",
 		`{"id":"user-1","name":"Alice","score":10,"active":true}`,
 		`{"id":"user-2","name":"Bob","score":20,"active":false}`,
 	)
@@ -95,7 +96,8 @@ func TestElasticsearchDestinationReplace(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, initialActive)
 
-	replacementPath := writeElasticsearchJSONL(t, "replacement.jsonl",
+	replacementPath := writeElasticsearchJSONL(
+		t, "replacement.jsonl",
 		`{"id":"user-2","name":"Bob Updated","score":30,"active":true}`,
 		`{"id":"user-3","name":"Carol","score":40,"active":true}`,
 	)

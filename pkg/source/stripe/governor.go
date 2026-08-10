@@ -250,7 +250,8 @@ func (g *requestGovernor) observeRateLimit(path string, err error) {
 		return
 	}
 
-	config.Debug("[STRIPE] Governor adjusted after %s on %s (global %.1f req/s, endpoint %.1f req/s, global concurrency %d, endpoint concurrency %d)",
+	config.Debug(
+		"[STRIPE] Governor adjusted after %s on %s (global %.1f req/s, endpoint %.1f req/s, global concurrency %d, endpoint concurrency %d)",
 		reason,
 		endpointPath,
 		g.globalRate.limit(),

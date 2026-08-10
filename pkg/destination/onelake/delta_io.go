@@ -329,7 +329,8 @@ func unifyRewriteBatches(target, staging []arrow.RecordBatch, declared *deltaStr
 	if declared != nil {
 		if missing, ok := columnsNotIn(staging[0].Schema(), deltaFieldNames(declared)); !ok {
 			return nil, nil, noop, fmt.Errorf(
-				"cannot rewrite the table: column %q is not declared in its Delta schema (declared columns are %v)", missing, deltaFieldNames(declared))
+				"cannot rewrite the table: column %q is not declared in its Delta schema (declared columns are %v)", missing, deltaFieldNames(declared),
+			)
 		}
 	}
 	if len(target) == 0 {
@@ -394,7 +395,8 @@ func unifiedRewriteSchema(target, staging []arrow.RecordBatch, declared *deltaSt
 			// not "evolve" — filling it would break that declaration.
 			if !field.Nullable {
 				return nil, fmt.Errorf(
-					"cannot rewrite the table: column %q is required but the incoming rows do not have it", field.Name)
+					"cannot rewrite the table: column %q is required but the incoming rows do not have it", field.Name,
+				)
 			}
 			fields[i] = field
 			continue

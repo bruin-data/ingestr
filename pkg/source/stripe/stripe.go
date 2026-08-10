@@ -129,7 +129,8 @@ func (s *StripeSource) Close(ctx context.Context) error {
 	if s.governor != nil {
 		config.Debug("[STRIPE] Request governor: %s", s.governor.stats())
 		for _, endpoint := range s.governor.endpointStats() {
-			config.Debug("[STRIPE] Endpoint %s: %d requests, %d errors, %d rate-limited, %d waits totaling %s, average API time %s",
+			config.Debug(
+				"[STRIPE] Endpoint %s: %d requests, %d errors, %d rate-limited, %d waits totaling %s, average API time %s",
 				endpoint.path,
 				endpoint.requests,
 				endpoint.errors,
