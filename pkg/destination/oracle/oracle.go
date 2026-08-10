@@ -686,10 +686,6 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 				}
 				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", s), true
 			}
-			if t, ok := v.(time.Time); ok {
-				// Date bounds carry a wall date, not an instant; match toDateOnly semantics.
-				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", t.Format("2006-01-02")), true
-			}
 		case schema.TypeTimestamp:
 			if t, ok := v.(time.Time); ok {
 				return fmt.Sprintf("TO_TIMESTAMP('%s', 'YYYY-MM-DD HH24:MI:SS.FF6')", t.UTC().Format("2006-01-02 15:04:05.000000")), true
