@@ -681,10 +681,14 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 		switch opts.IncrementalKeyType {
 		case schema.TypeDate:
 			if s, ok := v.(string); ok {
+				if _, err := time.Parse("2006-01-02", s); err != nil {
+					return "", false
+				}
 				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", s), true
 			}
 			if t, ok := v.(time.Time); ok {
-				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", t.UTC().Format("2006-01-02")), true
+				// Date bounds carry a wall date, not an instant; match toDateOnly semantics.
+				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", t.Format("2006-01-02")), true
 			}
 		case schema.TypeTimestamp:
 			if t, ok := v.(time.Time); ok {
