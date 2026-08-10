@@ -40,6 +40,7 @@ type icebergCatalogTestEnv struct {
 }
 
 func TestIcebergCatalogBackends(t *testing.T) {
+	requireDocker(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -409,6 +410,7 @@ func dockerSharedTempDir(t *testing.T, prefix string) string {
 }
 
 func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse string) string {
+	requireDocker(t)
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
@@ -446,6 +448,7 @@ func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse stri
 }
 
 func startIcebergRESTContainerWithS3(t *testing.T, ctx context.Context, networkName, bucket string) string {
+	requireDocker(t)
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
@@ -490,6 +493,7 @@ func startIcebergRESTContainerWithS3(t *testing.T, ctx context.Context, networkN
 }
 
 func startIcebergMinioContainer(t *testing.T, ctx context.Context, networkName string) (testcontainers.Container, string) {
+	requireDocker(t)
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{

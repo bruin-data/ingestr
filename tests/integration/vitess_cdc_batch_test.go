@@ -33,6 +33,7 @@ type vitessCDCEnv struct {
 // startVitessCDCEnv boots a vttestserver with the given shard count and waits
 // until vtgate serves queries.
 func startVitessCDCEnv(t *testing.T, ctx context.Context, numShards string) *vitessCDCEnv {
+	requireDocker(t)
 	t.Helper()
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

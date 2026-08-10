@@ -23,6 +23,7 @@ import (
 )
 
 func setupMongoDBCDCContainer(t *testing.T, ctx context.Context) (*tcmongo.MongoDBContainer, string) {
+	requireDocker(t)
 	t.Helper()
 
 	container, err := tcmongo.Run(

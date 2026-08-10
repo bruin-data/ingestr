@@ -183,6 +183,7 @@ func TestPostgresCDC_BinaryModeParity(t *testing.T) {
 // a large committed transaction lands exactly and a rolled-back one leaves no
 // trace, while the server reports that streaming actually happened.
 func TestPostgresCDC_LargeTransactionStreaming(t *testing.T) {
+	requireDocker(t)
 	t.Parallel()
 	ctx := context.Background()
 

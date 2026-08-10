@@ -24,6 +24,7 @@ import (
 // Runs as part of `make test-integration`. The all-in-one image is slow to boot,
 // so this test manages its own container instead of the shared TestMain.
 func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string) {
+	requireDocker(t)
 	t.Helper()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{

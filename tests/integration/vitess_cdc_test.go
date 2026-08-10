@@ -78,6 +78,7 @@ func startVitessCDCContainer(ctx context.Context) (testcontainers.Container, str
 // (VStream) performs a consistent copy-phase snapshot and then captures
 // INSERT/UPDATE/DELETE changes on a re-run, resuming from the stored VGTID.
 func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
+	requireDocker(t)
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -158,6 +159,7 @@ func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 }
 
 func TestVitessCDC_Streaming_Postgres(t *testing.T) {
+	requireDocker(t)
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
