@@ -671,14 +671,42 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= :1 AND %s <= :2",
-		quoteTable(opts.TargetTable),
-		quoteColumn(opts.IncrementalKey),
-		quoteColumn(opts.IncrementalKey),
-	)
+	key := quoteColumn(opts.IncrementalKey)
+	// Emit UTC-anchored literals for temporal keys so the DELETE window ignores the
+	// go-ora process timezone and session NLS_DATE_FORMAT (BRU-5586).
+	bound := func(v interface{}) (string, bool) {
+		if p, ok := v.(*time.Time); ok && p != nil {
+			v = *p
+		}
+		switch opts.IncrementalKeyType {
+		case schema.TypeDate:
+			if s, ok := v.(string); ok {
+				if _, err := time.Parse("2006-01-02", s); err != nil {
+					return "", false
+				}
+				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", s), true
+			}
+		case schema.TypeTimestamp:
+			if t, ok := v.(time.Time); ok {
+				return fmt.Sprintf("TO_TIMESTAMP('%s', 'YYYY-MM-DD HH24:MI:SS.FF6')", t.UTC().Format("2006-01-02 15:04:05.000000")), true
+			}
+		case schema.TypeTimestampTZ:
+			if t, ok := v.(time.Time); ok {
+				return fmt.Sprintf("TO_TIMESTAMP_TZ('%s', 'YYYY-MM-DD HH24:MI:SS.FF6 TZHTZM')", t.UTC().Format("2006-01-02 15:04:05.000000 -0700")), true
+			}
+		}
+		return "", false
+	}
+	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s >= :1 AND %s <= :2", quoteTable(opts.TargetTable), key, key)
+	deleteArgs := []interface{}{opts.IntervalStart, opts.IntervalEnd}
+	if start, ok := bound(opts.IntervalStart); ok {
+		if end, ok := bound(opts.IntervalEnd); ok {
+			deleteSQL = fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quoteTable(opts.TargetTable), key, start, key, end)
+			deleteArgs = nil
+		}
+	}
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
+	if _, err := tx.ExecContext(ctx, deleteSQL, deleteArgs...); err != nil {
 		config.LogFailedQuery(deleteSQL, err)
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
