@@ -86,8 +86,8 @@ var tableRegistry = map[string]tableMeta{
 	"groups":             {[]string{"id"}, "lastUpdated", config.StrategyMerge},
 	"group_members":      {[]string{"group_id", "id"}, "", config.StrategyReplace},
 	"applications":       {[]string{"id"}, "lastUpdated", config.StrategyMerge},
-	"application_users":  {[]string{"app_id", "id"}, "lastUpdated", config.StrategyMerge},
-	"application_groups": {[]string{"app_id", "id"}, "lastUpdated", config.StrategyMerge},
+	"application_users":  {[]string{"app_id", "id"}, "", config.StrategyReplace},
+	"application_groups": {[]string{"app_id", "id"}, "", config.StrategyReplace},
 	"system_log_events":  {[]string{"uuid"}, "published", config.StrategyMerge},
 	"devices":            {[]string{"id"}, "lastUpdated", config.StrategyMerge},
 	"policies":           {[]string{"id"}, "lastUpdated", config.StrategyMerge},
@@ -348,8 +348,10 @@ func (s *OktaSource) readApplicationChildren(ctx context.Context, child string, 
 	if child == "users" {
 		limit = appUsersPageSize
 	}
+	// Full replace: an assignment listing has no removal signal, so gate on
+	// nothing and snapshot every current assignment (same as group_members).
 	return s.fanOut(
-		ctx, appIDs, opts, results, label, "lastUpdated",
+		ctx, appIDs, opts, results, label, "",
 		func(id string) string {
 			return fmt.Sprintf("/apps/%s/%s?limit=%d", id, child, limit)
 		},
@@ -544,8 +546,7 @@ func (s *OktaSource) walk(ctx context.Context, client *httpclient.Client, initia
 
 		pages++
 		if pages > maxPages {
-			config.Debug("[OKTA] reached max pages (%d) for %s", maxPages, initialURL)
-			break
+			return fmt.Errorf("okta API %s exceeded max pages (%d); results would be incomplete", initialURL, maxPages)
 		}
 
 		resp, err := client.R(ctx).Get(nextURL)

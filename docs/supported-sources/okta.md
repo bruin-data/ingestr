@@ -35,8 +35,8 @@ Okta source allows ingesting the following resources into separate tables:
 | groups               | id                 | `lastUpdated` | merge        | All groups in the org                                                      |
 | group_members        | group_id, id       | –             | replace      | Members of each group (one row per user per group); full snapshot each run |
 | applications         | id                 | `lastUpdated` | merge        | All applications configured in the org                                     |
-| application_users    | app_id, id         | `lastUpdated` | merge        | Users assigned to each application                                         |
-| application_groups   | app_id, id         | `lastUpdated` | merge        | Groups assigned to each application                                        |
+| application_users    | app_id, id         | –             | replace      | Users assigned to each application; full snapshot each run                 |
+| application_groups   | app_id, id         | –             | replace      | Groups assigned to each application; full snapshot each run                |
 | system_log_events    | uuid               | `published`   | merge        | System log events (Okta retains roughly the last 90 days)                  |
 | devices              | id                 | `lastUpdated` | merge        | Devices enrolled in the org                                                |
 | policies             | id                 | `lastUpdated` | merge        | Policies across all policy types                                           |
