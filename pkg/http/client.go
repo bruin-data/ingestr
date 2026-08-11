@@ -121,6 +121,13 @@ func (r *Request) SetBody(body interface{}) *Request {
 	return r
 }
 
+// SetOutputFileName streams the response body to the given file instead of
+// buffering it in memory.
+func (r *Request) SetOutputFileName(name string) *Request {
+	r.resty.SetOutputFileName(name)
+	return r
+}
+
 func (r *Request) SetResult(result interface{}) *Request {
 	r.resty.SetResult(result)
 	return r

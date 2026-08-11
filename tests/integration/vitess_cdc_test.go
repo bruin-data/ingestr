@@ -14,8 +14,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // register adbc_generic for duckdb read-back
 	_ "github.com/go-sql-driver/mysql"                // register mysql driver for seeding/raw reads
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -76,6 +78,8 @@ func startVitessCDCContainer(ctx context.Context) (testcontainers.Container, str
 // (VStream) performs a consistent copy-phase snapshot and then captures
 // INSERT/UPDATE/DELETE changes on a re-run, resuming from the stored VGTID.
 func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
+	requireDocker(t)
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -152,4 +156,117 @@ func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.items_dest WHERE id = 2 AND "_cdc_deleted"`), "delete should be soft-applied")
 	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.items_dest WHERE id = 4 AND name = 'item4' AND value = 400 AND NOT "_cdc_deleted"`), "insert should be applied")
 	require.Greater(t, queryDuck(`SELECT COUNT(DISTINCT "_cdc_lsn") FROM main.items_dest`), snapshotLSNs, "VGTID/ordinal should advance")
+}
+
+func TestVitessCDC_Streaming_Postgres(t *testing.T) {
+	requireDocker(t)
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, host, mysqlPort, grpcPort, err := startVitessCDCContainer(ctx)
+	require.NoError(t, err, "failed to start vttestserver")
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	mysqlURI := fmt.Sprintf("mysql://root@%s:%s/%s", host, mysqlPort, vitessCDCKeyspace)
+	db, err := sql.Open("mysql", mysqlDSN(mysqlURI))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.Eventually(t, func() bool {
+		return db.PingContext(ctx) == nil
+	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+
+	_, err = db.ExecContext(ctx, "DROP TABLE IF EXISTS stream_items")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE stream_items (
+		id INT NOT NULL PRIMARY KEY,
+		name VARCHAR(100) NOT NULL,
+		value INT NULL
+	)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO stream_items (id, name, value) VALUES (1,'item1',100)`)
+	require.NoError(t, err)
+
+	destContainer, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("destdb"),
+		postgres.WithUsername("destuser"),
+		postgres.WithPassword("destpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).WithStartupTimeout(30*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = destContainer.Terminate(ctx) })
+
+	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	destPool, err := pgxpool.New(ctx, destConnString)
+	require.NoError(t, err)
+	defer destPool.Close()
+
+	cdcURI := fmt.Sprintf("vitess+cdc://root@%s:%s/%s?grpc_port=%s", host, mysqlPort, vitessCDCKeyspace, grpcPort)
+	cfg := &config.IngestConfig{
+		SourceURI:     cdcURI,
+		SourceTable:   vitessCDCKeyspace + ".stream_items",
+		DestURI:       destConnString,
+		DestTable:     "public.stream_items_dest",
+		Stream:        true,
+		FlushInterval: 500 * time.Millisecond,
+		FlushRecords:  2,
+		Progress:      config.ProgressLog,
+	}
+
+	countDest := func(where string) int {
+		t.Helper()
+		var n int
+		if err := destPool.QueryRow(ctx, `SELECT COUNT(*) FROM public.stream_items_dest WHERE `+where).Scan(&n); err != nil {
+			return -1
+		}
+		return n
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	t.Cleanup(cancelStream)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pipeline.New(cfg).Run(streamCtx) }()
+
+	require.Eventually(t, func() bool {
+		return countDest(`id = 1 AND _cdc_deleted = false`) == 1
+	}, 60*time.Second, 500*time.Millisecond, "snapshot row should appear")
+
+	select {
+	case err := <-runErr:
+		t.Fatalf("streaming run exited after catch-up instead of waiting for cancellation: %v", err)
+	case <-time.After(2 * time.Second):
+	}
+
+	_, err = db.ExecContext(ctx, `INSERT INTO stream_items (id, name, value) VALUES (2,'item2',200)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE stream_items SET value = 150 WHERE id = 1`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM stream_items WHERE id = 2`)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		updated := countDest(`id = 1 AND value = 150 AND _cdc_deleted = false`)
+		deleted := countDest(`id = 2 AND _cdc_deleted = true`)
+		return updated == 1 && deleted == 1
+	}, 60*time.Second, 500*time.Millisecond, "streamed Vitess changes should converge")
+
+	cancelStream()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("streaming pipeline did not exit within 30s of cancellation")
+	}
 }

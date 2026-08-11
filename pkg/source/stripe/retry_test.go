@@ -43,6 +43,17 @@ func (f *fakeBackend) CallMultipart(method, path, key, boundary string, body *by
 
 func (f *fakeBackend) SetMaxNetworkRetries(maxNetworkRetries int64) {}
 
+type fakeRawBackend struct {
+	fakeBackend
+	response *stripe.APIResponse
+}
+
+func (f *fakeRawBackend) RawRequest(method, path, key, content string, params *stripe.RawParams) (*stripe.APIResponse, error) {
+	err := f.errs[f.calls]
+	f.calls++
+	return f.response, err
+}
+
 func rateLimitError() error {
 	return &stripe.Error{HTTPStatusCode: http.StatusTooManyRequests, Code: stripe.ErrorCodeRateLimit}
 }
@@ -129,6 +140,34 @@ func TestRetryBackendStopsOnContextCancel(t *testing.T) {
 	// First call returns 429, then ctx is already cancelled so we bail before retrying.
 	if fake.calls != 1 {
 		t.Fatalf("expected 1 call before context cancel, got %d", fake.calls)
+	}
+}
+
+func TestRetryBackendSupportsGovernedRawRequests(t *testing.T) {
+	want := &stripe.APIResponse{StatusCode: http.StatusOK}
+	fake := &fakeRawBackend{
+		fakeBackend: fakeBackend{errs: []error{rateLimitError(), nil}},
+		response:    want,
+	}
+	backend := newTestRetryBackend(fake)
+	backend.governors = newRequestGovernorRegistry(func(string) governorConfig { return testGovernorConfig() })
+
+	ctx := context.Background()
+	response, err := backend.RawRequest(
+		http.MethodGet,
+		"/v1/payment_records/pi_123",
+		"rk_live_test",
+		"",
+		&stripe.RawParams{Params: stripe.Params{Context: ctx}},
+	)
+	if err != nil {
+		t.Fatalf("raw request failed: %v", err)
+	}
+	if response != want {
+		t.Fatalf("response = %#v, want %#v", response, want)
+	}
+	if fake.calls != 2 {
+		t.Fatalf("raw request calls = %d, want 2", fake.calls)
 	}
 }
 

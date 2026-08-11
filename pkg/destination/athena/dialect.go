@@ -52,6 +52,8 @@ func (d *Dialect) TypeName(col schema.Column) string {
 		}
 		return "DECIMAL(38,9)"
 	case schema.TypeString:
+		// Athena tables are Iceberg-backed; Iceberg has no sized string type,
+		// so a column length cannot be preserved and VARCHAR stays unbounded.
 		return "VARCHAR"
 	case schema.TypeBinary:
 		return "VARBINARY"

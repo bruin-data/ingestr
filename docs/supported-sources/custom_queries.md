@@ -48,3 +48,35 @@ ingestr ingest \
 
 In this example, the query is filtering the data to only include rows where the `updated_at` column is greater than the `interval_start` variable.
 
+### Parallel extract partitioning
+
+Custom queries on PostgreSQL, MySQL, Microsoft SQL Server, SQLite, DuckDB, Snowflake, and BigQuery can split the query result into parallel extract windows. The partition column must be returned by the query and must have a unique output name.
+
+```bash
+ingestr ingest \
+    --source-uri "$POSTGRES_URI" \
+    --source-table "query:select oi.*, o.created_at as partition_ts, o.updated_at from order_items oi join orders o on oi.order_id = o.id where o.updated_at >= :interval_start and o.updated_at <= :interval_end" \
+    --dest-uri "$DEST_URI" \
+    --dest-table public.order_items \
+    --incremental-key updated_at \
+    --incremental-strategy merge \
+    --primary-key id \
+    --interval-start 2026-01-01 \
+    --interval-end 2026-02-01 \
+    --extract-partition-by partition_ts \
+    --extract-partition-interval 1d \
+    --extract-parallelism 4
+```
+
+ingestr applies each partition predicate to the result of the custom query, equivalent to:
+
+```sql
+SELECT *
+FROM (<custom query>) AS __ingestr_query
+WHERE __ingestr_query.partition_ts >= <window start>
+  AND __ingestr_query.partition_ts < <window end>
+```
+
+The final window includes its end boundary. Numeric partition columns and `--extract-partition-interval auto` use a bounds query over the same custom-query result.
+
+Because the query is used as a derived table, it must be a single query that is valid inside a `FROM (...)` clause. Some dialect-specific constructs, such as an unbounded `ORDER BY` in Microsoft SQL Server, cannot be used in a derived table.

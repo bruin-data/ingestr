@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -21,16 +23,15 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type MongoDBCDCMode string
-
 const (
-	MongoDBCDCModeBatch  MongoDBCDCMode = "batch"
-	MongoDBCDCModeStream MongoDBCDCMode = "stream"
-
 	defaultMongoDBCDCAwaitTime        = time.Second
 	defaultMongoDBCDCSchemaSampleSize = 1000
 	defaultMongoDBCDCStreamBatchSize  = 10000
 	defaultMongoDBCDCFlushInterval    = 30 * time.Second
+
+	// mongoLagRefreshInterval throttles the operationTime round-trip taken on
+	// the idle path to keep the reported lag from drifting upward.
+	mongoLagRefreshInterval = 5 * time.Second
 )
 
 var mongodbCDCColumns = []schema.Column{
@@ -40,7 +41,6 @@ var mongodbCDCColumns = []schema.Column{
 }
 
 type MongoDBCDCConfig struct {
-	Mode             MongoDBCDCMode
 	DestSchema       string
 	MaxAwaitTime     time.Duration
 	SchemaSampleSize int
@@ -51,6 +51,38 @@ type MongoDBCDCSource struct {
 	database  string
 	uri       string
 	cdcConfig MongoDBCDCConfig
+	lag       *mongoLagState
+}
+
+// mongoLagState tracks the cluster time of the last processed change event
+// against the server's own operationTime. Both clocks are server-side, so the
+// difference is immune to client clock skew. Written by the change-stream
+// goroutine, read by the metrics scraper.
+type mongoLagState struct {
+	lastEventUnix atomic.Int64
+	serverOpUnix  atomic.Int64
+	streaming     atomic.Bool
+}
+
+func newMongoLagState() *mongoLagState {
+	return &mongoLagState{}
+}
+
+func (l *mongoLagState) noteEvent(ts primitive.Timestamp) {
+	storeMaxInt64(&l.lastEventUnix, int64(ts.T))
+}
+
+func (l *mongoLagState) noteServerTime(ts primitive.Timestamp) {
+	storeMaxInt64(&l.serverOpUnix, int64(ts.T))
+}
+
+func storeMaxInt64(dst *atomic.Int64, v int64) {
+	for {
+		cur := dst.Load()
+		if v <= cur || dst.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 type mongoNamespace struct {
@@ -93,7 +125,37 @@ type mongoCDCEventBuffer struct {
 }
 
 func NewMongoDBCDCSource() *MongoDBCDCSource {
-	return &MongoDBCDCSource{}
+	return &MongoDBCDCSource{lag: newMongoLagState()}
+}
+
+var _ source.LagReporter = (*MongoDBCDCSource)(nil)
+
+// ReplicationLag reports how many seconds of change events the destination
+// still trails the source by. Both timestamps come from the server, so an idle
+// collection converges to zero rather than growing as "time since last change".
+func (s *MongoDBCDCSource) ReplicationLag() (source.LagSnapshot, bool) {
+	if s.lag == nil || !s.lag.streaming.Load() {
+		return source.LagSnapshot{}, false
+	}
+	server := s.lag.serverOpUnix.Load()
+	lastEvent := s.lag.lastEventUnix.Load()
+	if server == 0 || lastEvent == 0 {
+		return source.LagSnapshot{}, false
+	}
+
+	behind := float64(0)
+	if server > lastEvent {
+		behind = float64(server - lastEvent)
+	}
+
+	return source.LagSnapshot{
+		Source:          "mongodb",
+		SecondsBehind:   &behind,
+		ServerPosition:  strconv.FormatInt(server, 10),
+		DurablePosition: strconv.FormatInt(lastEvent, 10),
+		CaughtUp:        behind == 0,
+		UpdatedAt:       time.Now(),
+	}, true
 }
 
 func (s *MongoDBCDCSource) Schemes() []string {
@@ -261,7 +323,6 @@ func (t *MongoDBCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-
 
 func parseMongoDBCDCURI(rawURI string) (MongoDBCDCConfig, string, error) {
 	cfg := MongoDBCDCConfig{
-		Mode:             MongoDBCDCModeBatch,
 		MaxAwaitTime:     defaultMongoDBCDCAwaitTime,
 		SchemaSampleSize: defaultMongoDBCDCSchemaSampleSize,
 	}
@@ -284,16 +345,6 @@ func parseMongoDBCDCURI(rawURI string) (MongoDBCDCConfig, string, error) {
 
 	query := parsed.Query()
 	cfg.DestSchema = query.Get("dest_schema")
-	if mode := strings.ToLower(strings.TrimSpace(query.Get("mode"))); mode != "" {
-		switch mode {
-		case string(MongoDBCDCModeBatch):
-			cfg.Mode = MongoDBCDCModeBatch
-		case string(MongoDBCDCModeStream):
-			cfg.Mode = MongoDBCDCModeStream
-		default:
-			return cfg, "", fmt.Errorf("invalid mode: %s (must be 'batch' or 'stream')", mode)
-		}
-	}
 	if maxAwait := strings.TrimSpace(query.Get("max_await_time")); maxAwait != "" {
 		d, err := time.ParseDuration(maxAwait)
 		if err != nil {
@@ -496,14 +547,9 @@ func (s *MongoDBCDCSource) readNamespace(ctx context.Context, ns mongoNamespace,
 	go func() {
 		defer close(results)
 
-		mode := s.cdcConfig.Mode
-		if opts.Streaming {
-			mode = MongoDBCDCModeStream
-		}
-
 		hasResume := strings.TrimSpace(opts.CDCResumeLSN) != "" && !opts.FullRefresh
 		var commandStart primitive.Timestamp
-		if mode == MongoDBCDCModeBatch || !hasResume {
+		if !opts.Streaming || !hasResume {
 			opTime, err := s.currentOperationTime(ctx)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err, TableName: resultTable}
@@ -513,7 +559,7 @@ func (s *MongoDBCDCSource) readNamespace(ctx context.Context, ns mongoNamespace,
 		}
 
 		var batchTarget *primitive.Timestamp
-		if mode == MongoDBCDCModeBatch {
+		if !opts.Streaming {
 			target := commandStart
 			batchTarget = &target
 		}
@@ -535,7 +581,7 @@ func (s *MongoDBCDCSource) readNamespace(ctx context.Context, ns mongoNamespace,
 			}
 		}
 
-		if err := s.streamCollection(ctx, ns, outputSchema, opts, mode, start, batchTarget, results, resultTable); err != nil {
+		if err := s.streamCollection(ctx, ns, outputSchema, opts, start, batchTarget, results, resultTable); err != nil {
 			results <- source.RecordBatchResult{Err: err, TableName: resultTable}
 		}
 	}()
@@ -592,7 +638,7 @@ func (s *MongoDBCDCSource) snapshotCollection(ctx context.Context, ns mongoNames
 	return buffer.flush(ctx, results)
 }
 
-func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespace, tableSchema *schema.TableSchema, opts source.ReadOptions, mode MongoDBCDCMode, start mongoCDCStart, batchTarget *primitive.Timestamp, results chan<- source.RecordBatchResult, resultTable string) error {
+func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespace, tableSchema *schema.TableSchema, opts source.ReadOptions, start mongoCDCStart, batchTarget *primitive.Timestamp, results chan<- source.RecordBatchResult, resultTable string) error {
 	collection := s.client.Database(ns.Database).Collection(ns.Collection)
 	maxAwaitTime := s.cdcConfig.MaxAwaitTime
 	if opts.Streaming {
@@ -620,6 +666,24 @@ func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespa
 	buffer := newMongoCDCEventBuffer(tableSchema, opts.ExcludeColumns, resultTable, mongoCDCSourceBatchSize(opts))
 	defer buffer.release()
 
+	s.lag.streaming.Store(opts.Streaming)
+	if start.OperationTime.T > 0 {
+		s.lag.noteEvent(start.OperationTime)
+		s.lag.noteServerTime(start.OperationTime)
+	}
+	// Refreshing the server clock costs a command round-trip, so only do it on
+	// the idle path and no more than once per interval.
+	var lastServerTimeRefresh time.Time
+	refreshServerTime := func() {
+		if !opts.Streaming || time.Since(lastServerTimeRefresh) < mongoLagRefreshInterval {
+			return
+		}
+		lastServerTimeRefresh = time.Now()
+		if ts, err := s.currentOperationTime(ctx); err == nil {
+			s.lag.noteServerTime(ts)
+		}
+	}
+
 	var firstBufferedAt time.Time
 	flushByInterval := func() error {
 		if !opts.Streaming || buffer.rows == 0 || firstBufferedAt.IsZero() || time.Since(firstBufferedAt) < mongoCDCFlushInterval(opts) {
@@ -646,6 +710,10 @@ func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespa
 			if mongoCDCAfterBatchTarget(clusterTime, batchTarget) {
 				return buffer.flush(ctx, results)
 			}
+			// Only noteEvent here: advancing the server clock to the event's
+			// own cluster time would make lag read zero while a backlog drains.
+			s.lag.noteEvent(clusterTime)
+			refreshServerTime()
 
 			doc, deleted, ok := mongoCDCEventDocument(event)
 			if !ok {
@@ -686,9 +754,11 @@ func (s *MongoDBCDCSource) streamCollection(ctx context.Context, ns mongoNamespa
 			return fmt.Errorf("MongoDB change stream error for %s.%s: %w", ns.Database, ns.Collection, err)
 		}
 
-		if mode == MongoDBCDCModeBatch {
+		if !opts.Streaming {
 			return buffer.flush(ctx, results)
 		}
+
+		refreshServerTime()
 
 		if err := flushByInterval(); err != nil {
 			return err

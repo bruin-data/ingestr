@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
@@ -52,8 +55,13 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INCREMENTAL_KEY", "INGESTR_INCREMENTAL_KEY"),
 			},
 			&cli.StringFlag{
+				Name:    "incremental-predicate",
+				Usage:   "Additional destination-specific SQL predicate appended to the merge join condition",
+				Sources: cli.EnvVars("INCREMENTAL_PREDICATE", "INGESTR_INCREMENTAL_PREDICATE"),
+			},
+			&cli.StringFlag{
 				Name:    "incremental-strategy",
-				Usage:   "The incremental strategy to use (replace, truncate+insert, append, delete+insert, merge, scd2, none)",
+				Usage:   "The incremental strategy to use (replace, append, delete+insert, merge, scd2, none)",
 				Value:   "replace",
 				Sources: cli.EnvVars("INCREMENTAL_STRATEGY", "INGESTR_INCREMENTAL_STRATEGY"),
 			},
@@ -131,7 +139,7 @@ func IngestCommand() *cli.Command {
 			&cli.IntFlag{
 				Name:    "extract-parallelism",
 				Usage:   "The number of parallel jobs to run for extracting data from the source",
-				Value:   5,
+				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
 			&cli.StringFlag{
@@ -143,6 +151,12 @@ func IngestCommand() *cli.Command {
 				Name:    "extract-partition-interval",
 				Usage:   "The width for each extract partition window: duration (1h, 7d), integer step (10000), or auto. Defaults to auto when extract-partition-by is set",
 				Sources: cli.EnvVars("EXTRACT_PARTITION_INTERVAL", "INGESTR_EXTRACT_PARTITION_INTERVAL"),
+			},
+			&cli.BoolFlag{
+				Name:    "disable-prestaging",
+				Usage:   "Disable extract-time load-file staging for schema-inferred sources",
+				Hidden:  true,
+				Sources: cli.EnvVars("INGESTR_DISABLE_PRESTAGING"),
 			},
 			&cli.IntFlag{
 				Name:    "sql-limit",
@@ -162,7 +176,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "columns",
-				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:string:fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p,s), string, text, boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
+				Usage:   "Override column types and/or rename columns. Per-column format: 'name:type' (type override), 'name:type:source' (rename + type), or 'name::source' (rename only). Multiple entries comma-separated, e.g. 'id:bigint,first_name:varchar(50):fname,email::eml'. Types: bigint, int, smallint, tinyint, float, double, decimal(p,s), string, text, varchar(n), boolean, date, timestamp (with tz), timestamp_ntz (no tz), json, uuid, binary",
 				Sources: cli.EnvVars("INGESTR_COLUMNS"),
 			},
 			&cli.BoolFlag{
@@ -223,6 +237,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INGESTR_FLUSH_RECORDS"),
 			},
 			&cli.StringFlag{
+				Name:    "metrics-addr",
+				Usage:   "Serve streaming metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
+			},
+			&cli.StringFlag{
 				Name:    "query-annotations",
 				Usage:   "JSON object of caller annotation keys (e.g. {\"pipeline\":\"p\",\"asset\":\"a\"}) merged into the '-- @bruin.config' comment on destination queries (QUERY_TAG on Snowflake) for cost attribution. ingestr always annotates with its own keys (type, ingestr_step); this flag adds the caller's keys on top.",
 				Sources: cli.EnvVars("INGESTR_QUERY_ANNOTATIONS"),
@@ -233,11 +252,11 @@ func IngestCommand() *cli.Command {
 }
 
 func runIngest(ctx context.Context, c *cli.Command) (err error) {
-	trackCommandTriggered(ctx, "ingest")
-	var finishedProperties map[string]any
+	startedAt := time.Now()
+	var cfg *config.IngestConfig
 	defer func() {
 		output.EnsureTerminal(err)
-		trackCommandFinished(ctx, "ingest", err, finishedProperties)
+		trackCommandFinished(ctx, "ingest", startedAt, err, ingestTelemetryProperties(cfg))
 	}()
 
 	config.DebugMode = c.Bool("debug")
@@ -246,13 +265,14 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		outputMode = output.ModeJSON
 	}
 	output.Init(os.Stdout, os.Stderr, outputMode)
-	cfg := config.DefaultConfig()
+	cfg = config.DefaultConfig()
 
 	cfg.SourceURI = c.String("source-uri")
 	cfg.DestURI = c.String("dest-uri")
 	cfg.SourceTable = c.String("source-table")
 	cfg.DestTable = c.String("dest-table")
 	cfg.IncrementalKey = c.String("incremental-key")
+	cfg.IncrementalPredicate = c.String("incremental-predicate")
 	cfg.IncrementalStrategy = config.IncrementalStrategy(c.String("incremental-strategy"))
 	cfg.IncrementalStrategyExplicit = c.IsSet("incremental-strategy")
 	cfg.PrimaryKeys = c.StringSlice("primary-key")
@@ -266,7 +286,11 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
+	if c.IsSet("extract-parallelism") {
+		cfg.DestinationParallelism = cfg.ExtractParallelism
+	}
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")
+	cfg.DisablePreStaging = c.Bool("disable-prestaging")
 	cfg.SQLLimit = int(c.Int("sql-limit"))
 	cfg.SQLExcludeColumns = c.StringSlice("sql-exclude-columns")
 	cfg.Columns = c.String("columns")
@@ -281,10 +305,13 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Stream = c.Bool("stream")
 	cfg.FlushInterval = c.Duration("flush-interval")
 	cfg.FlushRecords = int(c.Int("flush-records"))
-	finishedProperties = ingestTelemetryProperties(cfg)
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
+	}
+	metricsAddr := c.String("metrics-addr")
+	if !cfg.Stream && metricsAddr != "" {
+		return fmt.Errorf("--metrics-addr is only valid together with --stream")
 	}
 	// In streaming mode the source decides the default strategy (merge for CDC,
 	// append for brokers); only treat the strategy as a user override when the
@@ -335,6 +362,17 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		}
 	}
 
+	if metricsAddr != "" {
+		boundAddr, stop, err := metrics.Serve(metricsAddr)
+		if err != nil {
+			return fmt.Errorf("failed to start metrics server: %w", err)
+		}
+		defer stop()
+		if !output.IsJSON() {
+			color.Green("Serving metrics on http://%s/metrics", boundAddr)
+		}
+	}
+
 	p := pipeline.New(cfg)
 	if err := p.Run(ctx); err != nil {
 		return err
@@ -360,21 +398,91 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 
 func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
 	properties := map[string]any{}
-	if sourceType := telemetryScheme(cfg.SourceURI); sourceType != "" {
+	if cfg == nil {
+		return properties
+	}
+	if sourceType := telemetrySourceScheme(cfg.SourceURI); sourceType != "" {
 		properties["source_platform"] = sourceType
 	}
-	if destinationType := telemetryScheme(cfg.DestURI); destinationType != "" {
+	if destinationType := telemetryDestinationScheme(cfg.DestURI); destinationType != "" {
 		properties["destination_platform"] = destinationType
+	}
+	properties["execution_mode"] = telemetryExecutionMode(cfg)
+	properties["full_refresh"] = cfg.FullRefresh
+	properties["multi_table"] = cfg.IsCDCSource() && cfg.SourceTable == ""
+	properties["schema_inference_disabled"] = cfg.NoInference
+	properties["masking_enabled"] = len(cfg.Mask) > 0
+	properties["partitioned_extract"] = cfg.ExtractPartitionBy != ""
+	properties["trim_whitespace"] = cfg.TrimWhitespace
+	properties["load_timestamp_enabled"] = !cfg.NoLoadTimestamp
+	properties["strategy_selection"] = "default"
+	if cfg.IncrementalStrategyExplicit {
+		properties["strategy_selection"] = "explicit"
+		properties["requested_strategy"] = telemetryStrategy(cfg.IncrementalStrategy)
+	}
+	if schemaContract := telemetrySchemaContract(cfg.SchemaContract); schemaContract != "" {
+		properties["schema_contract"] = schemaContract
 	}
 	return properties
 }
 
-func telemetryScheme(rawURI string) string {
+func telemetrySourceScheme(rawURI string) string {
 	parsed, err := uri.Parse(rawURI)
 	if err != nil {
 		return ""
 	}
-	return parsed.Scheme
+	scheme := uri.NormalizeScheme(parsed.Scheme)
+	if _, err := registry.Default.GetSourceConstructor(scheme); err != nil {
+		return ""
+	}
+	return scheme
+}
+
+func telemetryDestinationScheme(rawURI string) string {
+	parsed, err := uri.Parse(rawURI)
+	if err != nil {
+		return ""
+	}
+	scheme := uri.NormalizeScheme(parsed.Scheme)
+	if _, err := registry.Default.GetDestinationConstructor(scheme); err != nil {
+		return ""
+	}
+	return scheme
+}
+
+func telemetryExecutionMode(cfg *config.IngestConfig) string {
+	switch {
+	case cfg.Stream && cfg.IsCDCSource():
+		return "cdc_stream"
+	case cfg.Stream:
+		return "stream"
+	case cfg.IsCDCSource():
+		return "cdc_batch"
+	default:
+		return "batch"
+	}
+}
+
+func telemetryStrategy(strategy config.IncrementalStrategy) string {
+	switch strategy {
+	case config.StrategyReplace,
+		config.StrategyAppend,
+		config.StrategyDeleteInsert,
+		config.StrategyMerge,
+		config.StrategySCD2,
+		config.StrategyNone:
+		return string(strategy)
+	default:
+		return "invalid"
+	}
+}
+
+func telemetrySchemaContract(contract string) string {
+	mode, err := schemaevolution.ParseContractMode(contract)
+	if err != nil {
+		return ""
+	}
+	return string(mode)
 }
 
 func parseDateTime(s string) (time.Time, error) {

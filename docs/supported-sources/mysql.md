@@ -40,9 +40,9 @@ Vitess and PlanetScale speak the MySQL wire protocol but are selected with their
 Pointing a `mysql://` URI at a Vitess or PlanetScale server fails fast with a message telling you to switch to the dedicated scheme.
 
 ## Change data capture
-CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes for standard MySQL and MariaDB, which stream the binary log. It produces the `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resumes from the destination table's maximum `_cdc_lsn` on subsequent runs. (Vitess and PlanetScale have their own CDC schemes — see [Vitess](/supported-sources/vitess.md) and [PlanetScale](/supported-sources/planetscale.md).)
+CDC uses the `mysql+cdc://`, `mysql+pymysql+cdc://`, and `mariadb+cdc://` URI schemes for standard MySQL and MariaDB, which stream the binary log. It produces the `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at` metadata columns and records durable CDC state in the destination for subsequent resumes. (Vitess and PlanetScale have their own CDC schemes — see [Vitess](/supported-sources/vitess.md) and [PlanetScale](/supported-sources/planetscale.md).)
 
-This path reads a consistent snapshot first, then streams the binary log, resuming from the destination table's maximum `_cdc_lsn` on subsequent runs.
+This path reads a consistent snapshot first, then streams the binary log, resuming from the last durable destination CDC state on subsequent runs. By default each invocation catches up and exits, so re-run it (for example on a schedule) to keep the destination up to date. Add `--stream` to keep the binary log reader running continuously and flush buffered changes by interval or record count.
 
 If the saved `_cdc_lsn` is invalid or no longer available in MySQL binary logs, the run fails instead of taking a partial snapshot. Run with `--full-refresh` to rebuild the destination from a fresh snapshot.
 
@@ -52,7 +52,7 @@ Example:
 
 ```shell
 ingestr ingest \
-  --source-uri "mysql+cdc://user:password@host:3306/dbname?mode=batch&server_id=18888" \
+  --source-uri "mysql+cdc://user:password@host:3306/dbname?server_id=18888" \
   --dest-uri "sqlite:///tmp/mysql_cdc.db" \
   --source-table "orders" \
   --dest-table "orders"
@@ -68,9 +68,13 @@ Requirements:
 - The source user needs normal read access, permission to run `FLUSH TABLES WITH READ LOCK` for the initial snapshot, and replication privileges required to stream binary logs.
 
 CDC URI parameters:
-- `mode`: `batch`; defaults to `batch`.
+- `mode`: **deprecated and ignored.** Continuous ingestion is controlled by `--stream`. `mode=batch` is accepted as a no-op; `mode=stream` is rejected unless `--stream` is also passed.
 - `server_id`: optional positive uint32 replication server id; generated automatically when omitted. Pin a unique value for scheduled or overlapping CDC runs.
-- `dest_schema`: optional destination schema for multi-table CDC runs.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
 - `flavor`: `mysql` or `mariadb`; inferred from the URI scheme unless overridden.
 
 Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
+
+### Tutorial
+
+For a step-by-step walkthrough — from enabling the binary log to capturing live inserts, updates, and deletes into DuckDB — see [Replicate MySQL to DuckDB with CDC](/tutorials/cdc-mysql-duckdb.md).

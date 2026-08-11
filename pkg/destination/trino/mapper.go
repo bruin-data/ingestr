@@ -33,6 +33,9 @@ func mapBaseType(col schema.Column) string {
 		}
 		return "DECIMAL(38,9)"
 	case schema.TypeString:
+		if col.MaxLength > 0 {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
 		return "VARCHAR"
 	case schema.TypeBinary:
 		return "VARBINARY"

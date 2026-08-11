@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/cratedb"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/destination/fabric"
+	"github.com/bruin-data/ingestr/pkg/destination/hana"
 	"github.com/bruin-data/ingestr/pkg/destination/maxcompute"
 	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/destination/mysql"
@@ -43,6 +44,7 @@ func dialectsByScheme() map[string]destination.Dialect {
 		"clickhouse": &clickhouse.Dialect{},
 		"cratedb":    &cratedb.Dialect{},
 		"fabric":     &fabric.Dialect{},
+		"hana":       &hana.Dialect{},
 		"maxcompute": &maxcompute.Dialect{},
 		"mysql":      &mysql.Dialect{},
 		"mssql":      &mssql.Dialect{},
@@ -101,6 +103,7 @@ func TestAllDialects_QuoteIdentifier(t *testing.T) {
 		{"mysql", "column_name", "`column_name`"},
 		{"mssql", "column_name", "[column_name]"},
 		{"oracle", "column_name", `"COLUMN_NAME"`},
+		{"hana", "column_name", `"COLUMN_NAME"`},
 		{"redshift", "column_name", `"column_name"`},
 		{"synapse", "column_name", "[column_name]"},
 		{"trino", "column_name", `"column_name"`},
@@ -131,6 +134,7 @@ func TestAllDialects_TypeName_Boolean(t *testing.T) {
 		"mysql":      "TINYINT(1)",
 		"mssql":      "BIT",
 		"oracle":     "NUMBER(1,0)",
+		"hana":       "BOOLEAN",
 		"redshift":   "BOOLEAN",
 		"synapse":    "BIT",
 		"trino":      "BOOLEAN",
@@ -164,6 +168,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 				"mysql":      "SMALLINT",
 				"mssql":      "SMALLINT",
 				"oracle":     "NUMBER(5,0)",
+				"hana":       "SMALLINT",
 				"redshift":   "SMALLINT",
 				"synapse":    "SMALLINT",
 				"trino":      "SMALLINT",
@@ -185,6 +190,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 				"mysql":      "INT",
 				"mssql":      "INT",
 				"oracle":     "NUMBER(10,0)",
+				"hana":       "INTEGER",
 				"redshift":   "INTEGER",
 				"synapse":    "INT",
 				"trino":      "INTEGER",
@@ -206,6 +212,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 				"mysql":      "BIGINT",
 				"mssql":      "BIGINT",
 				"oracle":     "NUMBER(19,0)",
+				"hana":       "BIGINT",
 				"redshift":   "BIGINT",
 				"synapse":    "BIGINT",
 				"trino":      "BIGINT",
@@ -246,6 +253,7 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 				"mysql":      "FLOAT",
 				"mssql":      "REAL",
 				"oracle":     "BINARY_FLOAT",
+				"hana":       "REAL",
 				"redshift":   "REAL",
 				"synapse":    "REAL",
 				"trino":      "REAL",
@@ -267,6 +275,7 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 				"mysql":      "DOUBLE",
 				"mssql":      "FLOAT",
 				"oracle":     "BINARY_DOUBLE",
+				"hana":       "DOUBLE",
 				"redshift":   "DOUBLE PRECISION",
 				"synapse":    "FLOAT",
 				"trino":      "DOUBLE",
@@ -345,6 +354,54 @@ func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
 	}
 }
 
+// Dialects backed by a database with a sized character type must honor
+// Column.MaxLength instead of falling back to an unbounded string type.
+func TestAllDialects_TypeName_SizedString(t *testing.T) {
+	col := schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50}
+
+	expected := map[string]string{
+		"postgres":   "VARCHAR(50)",
+		"mysql":      "VARCHAR(50)",
+		"mssql":      "NVARCHAR(50)",
+		"synapse":    "NVARCHAR(50)",
+		"snowflake":  "VARCHAR(50)",
+		"redshift":   "VARCHAR(50)",
+		"bigquery":   "STRING(50)",
+		"oracle":     "VARCHAR2(50 CHAR)",
+		"hana":       "NVARCHAR(50)",
+		"duckdb":     "VARCHAR(50)",
+		"trino":      "VARCHAR(50)",
+		"cratedb":    "VARCHAR(50)",
+		"sqlite":     "VARCHAR(50)",
+		"maxcompute": "VARCHAR(50)",
+	}
+
+	for scheme, exp := range expected {
+		t.Run(scheme, func(t *testing.T) {
+			assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
+		})
+	}
+}
+
+// ClickHouse and Cassandra have no sized character type, so a MaxLength must
+// be ignored rather than producing invalid DDL.
+func TestAllDialects_TypeName_SizedString_Unsupported(t *testing.T) {
+	col := schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50}
+
+	expected := map[string]string{
+		"clickhouse": "String",
+		"cassandra":  "text",
+		// Athena tables are Iceberg-backed; Iceberg has no sized string type.
+		"athena": "VARCHAR",
+	}
+
+	for scheme, exp := range expected {
+		t.Run(scheme, func(t *testing.T) {
+			assert.Equal(t, exp, dialectForScheme(t, scheme).TypeName(col))
+		})
+	}
+}
+
 func TestAllDialects_AddColumnSQL(t *testing.T) {
 	col := schema.Column{Name: "new_column", DataType: schema.TypeString, Nullable: true}
 
@@ -363,6 +420,7 @@ func TestAllDialects_AddColumnSQL(t *testing.T) {
 func TestAllDialects_AddColumnSQL_Nullable(t *testing.T) {
 	// Dialects that include NULL/NOT NULL in AddColumnSQL.
 	dialectsWithNullability := map[string]bool{
+		"hana":  true,
 		"mysql": true,
 		"mssql": true,
 	}
@@ -386,24 +444,33 @@ func TestAllDialects_AddColumnSQL_Nullable(t *testing.T) {
 }
 
 func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
+	// Dialects that fold unquoted identifiers to upper case.
+	dialectsUpperCasingIdentifiers := map[string]bool{
+		"hana": true,
+	}
+
 	for _, dt := range allDialects() {
 		t.Run(dt.Scheme, func(t *testing.T) {
 			if !dt.Dialect.SupportsAlterType() {
 				t.Skip("dialect does not support ALTER TYPE")
 			}
 
+			expectedTable := "test_table"
+			if dialectsUpperCasingIdentifiers[dt.Scheme] {
+				expectedTable = "TEST_TABLE"
+			}
 			newType := schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}
 			sql := dt.Dialect.AlterColumnTypeSQL("test_table", "val", newType)
 			assert.Contains(t, sql, "ALTER TABLE")
-			assert.Contains(t, sql, "test_table")
+			assert.Contains(t, sql, expectedTable, "SQL should contain table name")
 			assert.True(t, strings.Contains(strings.ToLower(sql), "val"), "SQL should contain column name")
 		})
 	}
 }
 
 func TestDialect_SupportsAlterType(t *testing.T) {
-	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse"}
-	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "fabric", "maxcompute", "oracle"}
+	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse", "fabric", "hana"}
+	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "maxcompute", "oracle"}
 
 	for _, scheme := range dialectsWithAlter {
 		t.Run(scheme+"_supports", func(t *testing.T) {

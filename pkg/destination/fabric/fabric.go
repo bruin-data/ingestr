@@ -3,6 +3,7 @@ package fabric
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -246,6 +247,23 @@ func (d *FabricDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *FabricDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *FabricDestination) DropTable(ctx context.Context, table string) error {
 	dropSQL := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s",
 		escapeTableName(table), quoteTable(table))
@@ -472,7 +490,7 @@ func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.Mer
 	quotedColumns := quoteColumns(opts.Columns)
 	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns)
+	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalPredicate)
 	config.Debug("[Fabric MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -484,7 +502,7 @@ func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.Mer
 	return nil
 }
 
-func buildMergeSQL(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string) string {
+func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, quotedColumns, nonPKColumns []string, incrementalPredicate string) string {
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
@@ -523,7 +541,7 @@ ON %s
 WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 		quoteTable(targetTable),
 		dedupSource,
-		strings.Join(onConditions, " AND "),
+		destination.MergeJoinCondition(strings.Join(onConditions, " AND "), incrementalPredicate),
 		updateSet,
 		insertCols,
 		strings.Join(sourceCols, ", "),
@@ -707,6 +725,7 @@ func (t *fabricTransaction) Rollback(ctx context.Context) error {
 func (d *FabricDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *FabricDestination) SupportsAppendStrategy() bool       { return true }
 func (d *FabricDestination) SupportsMergeStrategy() bool        { return true }
+func (d *FabricDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *FabricDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *FabricDestination) SupportsSCD2Strategy() bool         { return true }
 
@@ -878,25 +897,55 @@ func escapeTableName(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+	primaryKeySet := make(map[string]struct{}, len(primaryKeys))
+	for _, key := range primaryKeys {
+		primaryKeySet[strings.ToLower(key)] = struct{}{}
+	}
+
 	var colDefs []string
 	for _, col := range columns {
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), MapDataTypeToFabric(col)))
+		colType := MapDataTypeToFabric(col)
+		if _, ok := primaryKeySet[strings.ToLower(col.Name)]; ok {
+			colType += " NOT NULL"
+		}
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
 	}
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
-
-	if len(primaryKeys) > 0 {
-		quotedKeys := make([]string, len(primaryKeys))
-		for i, k := range primaryKeys {
-			quotedKeys[i] = quoteColumn(k)
-		}
-		// Fabric only allows NONCLUSTERED, NOT ENFORCED primary keys.
-		createPart += fmt.Sprintf(",\n  PRIMARY KEY NONCLUSTERED (%s) NOT ENFORCED", strings.Join(quotedKeys, ", "))
-	}
-
 	createPart += "\n)"
 
+	if len(primaryKeys) > 0 {
+		return fmt.Sprintf(
+			"IF OBJECT_ID('%s', 'U') IS NULL %s;\nIF OBJECT_ID('%s', 'U') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID('%s') AND [type] = 'PK') %s",
+			escapeTableName(table),
+			createPart,
+			escapeTableName(table),
+			escapeTableName(table),
+			buildAddPrimaryKeySQL(table, primaryKeys),
+		)
+	}
+
 	return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s", escapeTableName(table), createPart)
+}
+
+func buildAddPrimaryKeySQL(table string, primaryKeys []string) string {
+	constraintName := buildPrimaryKeyConstraintName(table)
+	quotedKeys := make([]string, len(primaryKeys))
+	for i, key := range primaryKeys {
+		quotedKeys[i] = quoteColumn(key)
+	}
+	return fmt.Sprintf(
+		"ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY NONCLUSTERED (%s) NOT ENFORCED",
+		quoteTable(table),
+		quoteColumn(constraintName),
+		strings.Join(quotedKeys, ", "),
+	)
+}
+
+func buildPrimaryKeyConstraintName(table string) string {
+	_, tableName := parseTableName(table)
+	name := "PK_" + tableName
+	return destination.ShortenIdentifier(name, name, destination.MaxIdentifierLength("fabric"))
 }
 
 func extractValue(arr arrow.Array, idx int) interface{} {

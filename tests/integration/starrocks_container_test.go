@@ -24,6 +24,7 @@ import (
 // Runs as part of `make test-integration`. The all-in-one image is slow to boot,
 // so this test manages its own container instead of the shared TestMain.
 func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string) {
+	requireDocker(t)
 	t.Helper()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
@@ -65,7 +66,7 @@ func waitForStarRocksBackend(t *testing.T, dsn string) {
 		if starRocksBackendAlive(db) {
 			return
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	t.Fatal("StarRocks backend did not become alive within the deadline")
 }
@@ -118,7 +119,7 @@ func execEventually(t *testing.T, db *sql.DB, stmt string) {
 		} else {
 			lastErr = err
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	t.Fatalf("statement did not succeed within deadline: %v\nstatement: %s", lastErr, stmt)
 }

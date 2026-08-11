@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -442,7 +444,11 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 		return errors.New("merge requires at least one primary key")
 	}
 
-	mergeSQL := buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
+	castMap, err := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	if err != nil {
+		return fmt.Errorf("failed to build merge cast map: %w", err)
+	}
+	mergeSQL := buildMergeSQLWithPredicate(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap, opts.IncrementalPredicate)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -455,7 +461,59 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	return nil
 }
 
-func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string) string {
+// castSourceCol casts the source column to the target type when they disagree (see buildCastMap).
+func castSourceCol(col string, castMap map[string]string) string {
+	ref := "source." + quoteIdentifier(col)
+	if castMap != nil {
+		if targetType, ok := castMap[strings.ToUpper(col)]; ok {
+			return fmt.Sprintf("CAST(%s AS %s)", ref, targetType)
+		}
+	}
+	return ref
+}
+
+// buildCastMap returns, by upper-cased column name, the target type for every
+// column whose staging and target types differ. Snowflake's MERGE does not
+// implicitly cast (e.g. TIMESTAMP_TZ vs TIMESTAMP_NTZ), so those need a CAST.
+func (d *SnowflakeDestination) buildCastMap(ctx context.Context, stagingTable, targetTable string) (map[string]string, error) {
+	targetSchema, err := d.GetTableSchema(ctx, targetTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read target schema for %s: %w", targetTable, err)
+	}
+	stagingSchema, err := d.GetTableSchema(ctx, stagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read staging schema for %s: %w", stagingTable, err)
+	}
+	// Without both schemas there is nothing to compare; let the merge surface any error.
+	if targetSchema == nil || stagingSchema == nil {
+		return nil, nil
+	}
+
+	dialect := &Dialect{}
+	stagingTypes := make(map[string]string, len(stagingSchema.Columns))
+	for _, col := range stagingSchema.Columns {
+		stagingTypes[strings.ToUpper(col.Name)] = dialect.TypeName(col)
+	}
+
+	castMap := make(map[string]string)
+	for _, col := range targetSchema.Columns {
+		key := strings.ToUpper(col.Name)
+		targetType := dialect.TypeName(col)
+		if stagingType, ok := stagingTypes[key]; ok && stagingType != targetType {
+			castMap[key] = targetType
+		}
+	}
+	if len(castMap) == 0 {
+		return nil, nil
+	}
+	return castMap, nil
+}
+
+func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string) string {
+	return buildMergeSQLWithPredicate(stagingTable, targetTable, primaryKeys, allColumns, incrementalKey, castMap, "")
+}
+
+func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := quoteFQN(sfTable(stagingTable))
 	targetFull := quoteFQN(sfTable(targetTable))
@@ -464,7 +522,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	for i, pk := range primaryKeys {
 		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteIdentifier(pk), quoteIdentifier(pk))
 	}
-	onClause := strings.Join(onConditions, " AND ")
+	primaryKeyOnClause := strings.Join(onConditions, " AND ")
+	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
 
 	pkMap := make(map[string]bool)
 	for _, pk := range primaryKeys {
@@ -486,10 +545,10 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			q := quoteIdentifier(col)
 			if hasCDCDeleted && hasUnchangedCols && !destination.IsCDCMetaColumn(col) {
 				updateSets = append(updateSets, cdcMergeAssign(
-					col, q, "target."+q, "source."+q, unchangedRef,
+					col, q, "target."+q, castSourceCol(col, castMap), unchangedRef,
 				))
 			} else {
-				updateSets = append(updateSets, fmt.Sprintf("target.%s = source.%s", q, q))
+				updateSets = append(updateSets, fmt.Sprintf("target.%s = %s", q, castSourceCol(col, castMap)))
 			}
 		}
 	}
@@ -502,13 +561,15 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	destSourceCols := make([]string, len(destColumns))
 	for i, col := range destColumns {
 		destQuoted[i] = quoteIdentifier(col)
-		destSourceCols[i] = "source." + quoteIdentifier(col)
+		destSourceCols[i] = castSourceCol(col, castMap)
 	}
 
 	quotedPKList := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		quotedPKList[i] = quoteIdentifier(pk)
 	}
+	uniqueInternalName := newSnowflakeInternalNameAllocator(allColumns)
+	dedupRowNumber := quoteIdentifier(uniqueInternalName("__bruin_dedup_rn"))
 
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
@@ -519,6 +580,8 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	fmt.Fprintf(&mergeSQL, "MERGE INTO %s AS target\n", targetFull)
 
 	if hasCDCDeleted {
+		hasActiveColumn := quoteIdentifier(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn := quoteIdentifier(uniqueInternalName("__ingestr_active_lsn"))
 		// CDC mode: compose the merge source from two per-PK dedups of staging:
 		// data columns come from the latest non-deleted change (so a trailing
 		// delete doesn't discard the last update's values), while the CDC
@@ -535,7 +598,7 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
 
-		selectCols := make([]string, 0, len(allColumns)+1)
+		selectCols := make([]string, 0, len(allColumns)+2)
 		for _, col := range allColumns {
 			alias := "act"
 			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
@@ -543,17 +606,20 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 			}
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
-		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS \"__ingestr_has_active\"", cdcLSN))
+		selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS %s", cdcLSN, hasActiveColumn))
+		selectCols = append(selectCols, fmt.Sprintf("act.%s AS %s", cdcLSN, activeLSNColumn))
 
 		dedup := func(where, orderBy string) string {
 			return fmt.Sprintf(
-				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s%s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+				`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s%s) AS _numbered WHERE %s = 1)`,
 				strings.Join(stagingQuoted, ", "),
 				strings.Join(stagingQuoted, ", "),
 				strings.Join(quotedPKList, ", "),
 				orderBy,
+				dedupRowNumber,
 				stagingFull,
 				where,
+				dedupRowNumber,
 			)
 		}
 		quoteActual := func(col string) string {
@@ -568,19 +634,30 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 		)
 
 		fmt.Fprintf(&mergeSQL, "USING %s AS source\n", composedSource)
-		fmt.Fprintf(&mergeSQL, "ON %s\n", onClause)
+		fmt.Fprintf(&mergeSQL, "ON %s\n", primaryKeyOnClause)
 
-		hasRowData := fmt.Sprintf("(source.%s = false OR source.\"__ingestr_has_active\")", cdcDeleted)
+		hasRowData := fmt.Sprintf(
+			"(source.%s = false OR (source.%s AND (target.%s IS NULL OR source.%s >= target.%s)))",
+			cdcDeleted, hasActiveColumn, cdcLSN, activeLSNColumn, cdcLSN,
+		)
+		newerChange := fmt.Sprintf(
+			"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND source.%s = true AND COALESCE(target.%s, false) = false))",
+			cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcLSN, cdcDeleted, cdcDeleted,
+		)
+		matchedCondition := newerChange
+		if strings.TrimSpace(incrementalPredicate) != "" {
+			matchedCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, matchedCondition)
+		}
 		if len(updateSets) > 0 {
-			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", hasRowData)
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND %s THEN\n", matchedCondition, hasRowData)
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
-		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND source.%s = true THEN\n", cdcDeleted)
+		fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND source.%s = true THEN\n", matchedCondition, cdcDeleted)
 		fmt.Fprintf(&mergeSQL, "  UPDATE SET target.%s = true, target.%s = source.%s, target.%s = source.%s\n",
 			cdcDeleted, cdcLSN, cdcLSN, cdcSyncedAt, cdcSyncedAt)
 
-		fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND %s THEN\n", hasRowData)
+		mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
 		fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
 		fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
 
@@ -588,12 +665,14 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 	}
 
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1)`,
 		strings.Join(stagingQuoted, ", "),
 		strings.Join(stagingQuoted, ", "),
 		strings.Join(quotedPKList, ", "),
 		dedupOrderBy,
+		dedupRowNumber,
 		stagingFull,
+		dedupRowNumber,
 	)
 
 	fmt.Fprintf(&mergeSQL, "USING %s AS source\n", dedupSource)
@@ -636,8 +715,8 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	startVal := formatSnowflakeValue(opts.IntervalStart)
-	endVal := formatSnowflakeValue(opts.IntervalEnd)
+	startVal := formatSnowflakeValue(opts.IntervalStart, opts.IncrementalKeyType)
+	endVal := formatSnowflakeValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
 	deleteSQL := fmt.Sprintf(
 		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
@@ -796,6 +875,35 @@ func (d *SnowflakeDestination) TruncateTable(ctx context.Context, table string) 
 	return nil
 }
 
+func (d *SnowflakeDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	quotedColumns := make([]string, len(columns))
+	selectColumns := make([]string, len(columns))
+	castMap, err := d.buildCastMap(ctx, opts.StagingTable, opts.TargetTable)
+	if err != nil {
+		return fmt.Errorf("failed to build insert-from-staging cast map: %w", err)
+	}
+	for i, column := range columns {
+		quotedColumns[i] = quoteIdentifier(column)
+		selectColumns[i] = castSourceCol(column, castMap)
+	}
+	columnList := strings.Join(quotedColumns, ", ")
+	targetTable := sfTable(opts.TargetTable)
+	stagingTable := sfTable(opts.StagingTable)
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s AS source",
+		quoteFQN(targetTable), columnList, strings.Join(selectColumns, ", "), quoteFQN(stagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 // annotate tags the context with the current operation's step and, when query
 // annotations are enabled, attaches the annotation payload to the session via
 // Snowflake's native QUERY_TAG. Snowflake strips leading SQL comments, so the
@@ -814,10 +922,211 @@ func (d *SnowflakeDestination) Exec(ctx context.Context, sql string, args ...int
 		ctx = sf.WithQueryTag(ctx, tag)
 	}
 	_, err := d.db.ExecContext(ctx, sql, args...)
-	if err != nil {
-		config.LogFailedQuery(sql, err)
+	if err == nil {
+		return nil
 	}
+	if isSnowflakeAlterTypeRewriteCandidate(sql, err) {
+		if rewriteErr := d.execAlterColumnTypeWithRewrite(ctx, sql); rewriteErr == nil {
+			config.Debug("[DEST] recovered from unsupported ALTER COLUMN TYPE via CREATE OR REPLACE rewrite (original error: %v)", err)
+			return nil
+		} else {
+			config.LogFailedQuery(sql, err)
+			return fmt.Errorf("%w (rewrite fallback failed: %v)", err, rewriteErr)
+		}
+	}
+	config.LogFailedQuery(sql, err)
 	return err
+}
+
+var (
+	snowflakeAlterColumnTypesRe = regexp.MustCompile(`(?is)^ALTER TABLE\s+(.+?)\s+ALTER COLUMN\s+(.+)$`)
+	snowflakeAlterClauseSepRe   = regexp.MustCompile(`(?i),\s+COLUMN\s+`)
+	snowflakeAlterClauseRe      = regexp.MustCompile(`(?is)^"?([^"\s]+)"?\s+SET DATA TYPE\s+(.+)$`)
+)
+
+type snowflakeAlterTypeChange struct {
+	column  string
+	newType string
+}
+
+// parseSnowflakeAlterColumnTypesSQL extracts the table and each column/type from
+// a single- or multi-clause ALTER COLUMN SET DATA TYPE statement.
+func parseSnowflakeAlterColumnTypesSQL(sql string) (table string, changes []snowflakeAlterTypeChange, ok bool) {
+	m := snowflakeAlterColumnTypesRe.FindStringSubmatch(strings.TrimSpace(sql))
+	if m == nil {
+		return "", nil, false
+	}
+	for _, clause := range snowflakeAlterClauseSepRe.Split(m[2], -1) {
+		c := snowflakeAlterClauseRe.FindStringSubmatch(strings.TrimSpace(clause))
+		if c == nil {
+			return "", nil, false
+		}
+		changes = append(changes, snowflakeAlterTypeChange{column: c[1], newType: strings.TrimSpace(c[2])})
+	}
+	return strings.TrimSpace(m[1]), changes, true
+}
+
+func isSnowflakeAlterTypeRewriteCandidate(sql string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, _, ok := parseSnowflakeAlterColumnTypesSQL(sql); !ok {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "cannot change column")
+}
+
+func (d *SnowflakeDestination) execAlterColumnTypeWithRewrite(ctx context.Context, originalSQL string) error {
+	tableFQN, changes, ok := parseSnowflakeAlterColumnTypesSQL(originalSQL)
+	if !ok {
+		return fmt.Errorf("not an ALTER COLUMN TYPE statement: %s", originalSQL)
+	}
+
+	columns, err := d.describeColumnNames(ctx, tableFQN)
+	if err != nil {
+		return err
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("no columns found for table %s", tableFQN)
+	}
+
+	typeChanges := make(map[string]string, len(changes))
+	for _, c := range changes {
+		typeChanges[strings.ToUpper(c.column)] = c.newType
+	}
+
+	clusterBy := d.readClusterByClause(ctx, tableFQN)
+
+	rewrittenSQL, err := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, clusterBy)
+	if err != nil {
+		return err
+	}
+
+	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s", tableFQN)
+	config.Debug("[DEST] Column type change SQL: %s", rewrittenSQL)
+
+	clusteringDropped := false
+	if _, err := d.db.ExecContext(ctx, rewrittenSQL); err != nil {
+		if clusterBy == "" {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		// Clustering-preserving rewrite failed; retry without it so the type change still lands.
+		config.Debug("[DEST] rewrite with preserved clustering failed (%v); retrying without CLUSTER BY", err)
+		fallbackSQL, berr := buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN, columns, typeChanges, "")
+		if berr != nil {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		if _, ferr := d.db.ExecContext(ctx, fallbackSQL); ferr != nil {
+			config.LogFailedQuery(rewrittenSQL, err)
+			return err
+		}
+		clusteringDropped = true
+	}
+
+	warnRewriteDropsTableProperties(tableFQN, clusteringDropped)
+	return nil
+}
+
+// warnRewriteDropsTableProperties reports the properties lost when a type change
+// recreates the table via CREATE OR REPLACE. Called only after the rewrite succeeds.
+func warnRewriteDropsTableProperties(tableFQN string, clusteringDropped bool) {
+	props := []string{"column DEFAULT/NOT NULL constraints", "comments", "masking/row-access policies"}
+	if clusteringDropped {
+		props = append(props, "clustering keys")
+	}
+	output.Warnf("Snowflake: changing an incompatible column type on %s recreated the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
+		tableFQN, strings.Join(props, ", "))
+}
+
+func (d *SnowflakeDestination) describeColumnNames(ctx context.Context, tableFQN string) ([]string, error) {
+	query := fmt.Sprintf(`DESCRIBE TABLE %s ->> SELECT "name" FROM $1`, tableFQN)
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		config.LogFailedQuery(query, err)
+		return nil, fmt.Errorf("failed to describe table for rewrite: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan column name: %w", err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating columns: %w", err)
+	}
+	return columns, nil
+}
+
+// buildSnowflakeAlterColumnTypeRewriteSQL reprojects all columns, casting each
+// changed column (keyed by upper-cased name) to its new type.
+func buildSnowflakeAlterColumnTypeRewriteSQL(tableFQN string, columns []string, typeChanges map[string]string, clusterByClause string) (string, error) {
+	if len(typeChanges) == 0 {
+		return "", errors.New("no column type changes provided")
+	}
+	selectExprs := make([]string, 0, len(columns))
+	found := make(map[string]bool, len(typeChanges))
+	for _, col := range columns {
+		if newType, ok := typeChanges[strings.ToUpper(col)]; ok {
+			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(col), newType, quoteIdentifier(col)))
+			found[strings.ToUpper(col)] = true
+			continue
+		}
+		selectExprs = append(selectExprs, quoteIdentifier(col))
+	}
+	for col := range typeChanges {
+		if !found[col] {
+			return "", fmt.Errorf("column %q not found in table %s", col, tableFQN)
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE OR REPLACE TABLE %s ", tableFQN)
+	if clusterByClause != "" {
+		b.WriteString(clusterByClause)
+		b.WriteByte(' ')
+	}
+	fmt.Fprintf(&b, "AS SELECT %s FROM %s", strings.Join(selectExprs, ", "), tableFQN)
+	return b.String(), nil
+}
+
+func clusterByClauseFor(clusteringKey string) string {
+	k := strings.TrimSpace(clusteringKey)
+	if k == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToUpper(k), "LINEAR(") && strings.HasSuffix(k, ")") {
+		inner := strings.TrimSpace(k[len("LINEAR(") : len(k)-1])
+		return "CLUSTER BY (" + inner + ")"
+	}
+	return "CLUSTER BY (" + k + ")"
+}
+
+func (d *SnowflakeDestination) readClusterByClause(ctx context.Context, tableFQN string) string {
+	tn := sfTable(strings.ReplaceAll(tableFQN, `"`, ""))
+	catalog := tn.Catalog
+	if catalog == "" {
+		catalog = strings.ToUpper(d.database)
+	}
+	infoTables := "INFORMATION_SCHEMA.TABLES"
+	if catalog != "" {
+		infoTables = quoteIdentifier(catalog) + ".INFORMATION_SCHEMA.TABLES"
+	}
+	query := fmt.Sprintf("SELECT CLUSTERING_KEY FROM %s WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", infoTables)
+
+	var key sql.NullString
+	if err := d.db.QueryRowContext(ctx, query, tn.Schema, tn.Table).Scan(&key); err != nil {
+		config.Debug("[DEST] could not read clustering key for %s: %v", tableFQN, err)
+		return ""
+	}
+	if !key.Valid {
+		return ""
+	}
+	return clusterByClauseFor(key.String)
 }
 
 func (d *SnowflakeDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
@@ -854,6 +1163,7 @@ func (t *snowflakeTransaction) Rollback(ctx context.Context) error {
 func (d *SnowflakeDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *SnowflakeDestination) SupportsAppendStrategy() bool       { return true }
 func (d *SnowflakeDestination) SupportsMergeStrategy() bool        { return true }
+func (d *SnowflakeDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *SnowflakeDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *SnowflakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true }
@@ -885,6 +1195,8 @@ func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
 
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 
+func (d *SnowflakeDestination) RequiresSerializedCDCRuns() bool { return true }
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	tn := sfTable(table)
 
@@ -911,11 +1223,9 @@ func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string)
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
-		col := schema.Column{
-			Name:     colName,
-			DataType: mapSnowflakeTypeToSchema(dataType),
-			Nullable: isNullable == "Y",
-		}
+		col := mapSnowflakeTypeToColumn(dataType)
+		col.Name = colName
+		col.Nullable = isNullable == "Y"
 
 		columns = append(columns, col)
 	}
@@ -935,48 +1245,85 @@ func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string)
 	}, nil
 }
 
-func mapSnowflakeTypeToSchema(dataType string) schema.DataType {
-	dataType = strings.ToUpper(dataType)
+func mapSnowflakeTypeToColumn(dataType string) schema.Column {
+	dataType = strings.ToUpper(strings.TrimSpace(dataType))
 
 	if strings.HasPrefix(dataType, "NUMBER") || strings.HasPrefix(dataType, "DECIMAL") || strings.HasPrefix(dataType, "NUMERIC") {
-		return schema.TypeDecimal
+		col := schema.Column{DataType: schema.TypeDecimal, Precision: 38}
+		params := parseSnowflakeTypeParams(dataType)
+		if len(params) > 0 {
+			col.Precision = params[0]
+		}
+		if len(params) > 1 {
+			col.Scale = params[1]
+		}
+		return col
 	}
-	if strings.HasPrefix(dataType, "VARCHAR") || strings.HasPrefix(dataType, "TEXT") {
-		return schema.TypeString
+	if strings.HasPrefix(dataType, "VARCHAR") || strings.HasPrefix(dataType, "TEXT") || strings.HasPrefix(dataType, "STRING") || strings.HasPrefix(dataType, "CHAR") {
+		col := schema.Column{DataType: schema.TypeString}
+		params := parseSnowflakeTypeParams(dataType)
+		if len(params) > 0 {
+			col.MaxLength = params[0]
+		}
+		return col
 	}
 	if strings.HasPrefix(dataType, "TIMESTAMP_NTZ") {
-		return schema.TypeTimestamp
+		return schema.Column{DataType: schema.TypeTimestamp}
 	}
 	if strings.HasPrefix(dataType, "TIMESTAMP_TZ") || strings.HasPrefix(dataType, "TIMESTAMP_LTZ") {
-		return schema.TypeTimestampTZ
+		return schema.Column{DataType: schema.TypeTimestampTZ}
+	}
+	if strings.HasPrefix(dataType, "TIME") {
+		return schema.Column{DataType: schema.TypeTime}
+	}
+	if strings.HasPrefix(dataType, "BINARY") || strings.HasPrefix(dataType, "VARBINARY") {
+		return schema.Column{DataType: schema.TypeBinary}
 	}
 
 	switch dataType {
 	case "BOOLEAN":
-		return schema.TypeBoolean
+		return schema.Column{DataType: schema.TypeBoolean}
 	case "SMALLINT":
-		return schema.TypeInt16
+		return schema.Column{DataType: schema.TypeInt16}
 	case "INTEGER", "INT":
-		return schema.TypeInt32
+		return schema.Column{DataType: schema.TypeInt32}
 	case "BIGINT":
-		return schema.TypeInt64
+		return schema.Column{DataType: schema.TypeInt64}
 	case "FLOAT", "FLOAT4", "FLOAT8":
-		return schema.TypeFloat64
+		return schema.Column{DataType: schema.TypeFloat64}
 	case "DOUBLE", "DOUBLE PRECISION", "REAL":
-		return schema.TypeFloat64
-	case "BINARY", "VARBINARY":
-		return schema.TypeBinary
+		return schema.Column{DataType: schema.TypeFloat64}
 	case "DATE":
-		return schema.TypeDate
-	case "TIME":
-		return schema.TypeTime
+		return schema.Column{DataType: schema.TypeDate}
 	case "VARIANT", "OBJECT":
-		return schema.TypeJSON
+		return schema.Column{DataType: schema.TypeJSON}
 	case "ARRAY":
-		return schema.TypeArray
+		return schema.Column{DataType: schema.TypeArray}
 	default:
-		return schema.TypeString
+		return schema.Column{DataType: schema.TypeString}
 	}
+}
+
+func parseSnowflakeTypeParams(dataType string) []int {
+	start := strings.IndexByte(dataType, '(')
+	if start == -1 {
+		return nil
+	}
+	end := strings.IndexByte(dataType[start+1:], ')')
+	if end == -1 {
+		return nil
+	}
+
+	rawParams := strings.Split(dataType[start+1:start+1+end], ",")
+	params := make([]int, 0, len(rawParams))
+	for _, raw := range rawParams {
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return params
+		}
+		params = append(params, value)
+	}
+	return params
 }
 
 // sfTable parses a possibly database-qualified Snowflake table name
@@ -1023,6 +1370,31 @@ func quoteIdentifier(name string) string {
 		return name
 	}
 	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
+}
+
+func newSnowflakeInternalNameAllocator(columns []string) func(string) string {
+	used := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		used[snowflakeIdentifierKey(col)] = struct{}{}
+	}
+	return func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if _, exists := used[snowflakeIdentifierKey(candidate)]; !exists {
+				used[snowflakeIdentifierKey(candidate)] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+}
+
+func snowflakeIdentifierKey(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+	}
+	return strings.ToLower(name)
 }
 
 func quoteColumns(cols []string) []string {
@@ -1089,13 +1461,18 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	return sql
 }
 
-func formatSnowflakeValue(v interface{}) string {
+func formatSnowflakeValue(v interface{}, keyType schema.DataType) string {
+	if p, ok := v.(*time.Time); ok {
+		if p == nil {
+			return "NULL"
+		}
+		v = *p
+	}
 	switch val := v.(type) {
 	case time.Time:
-		return fmt.Sprintf("TO_TIMESTAMP('%s')", val.Format("2006-01-02 15:04:05.000000"))
-	case *time.Time:
-		if val == nil {
-			return "NULL"
+		// Anchor TZ-aware bounds to UTC so the session TIMEZONE can't shift the window (BRU-5586).
+		if keyType == schema.TypeTimestampTZ {
+			return fmt.Sprintf("TO_TIMESTAMP_TZ('%s +0000')", val.UTC().Format("2006-01-02 15:04:05.000000"))
 		}
 		return fmt.Sprintf("TO_TIMESTAMP('%s')", val.Format("2006-01-02 15:04:05.000000"))
 	case string:

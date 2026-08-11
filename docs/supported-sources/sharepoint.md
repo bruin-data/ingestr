@@ -22,6 +22,7 @@ URI parameters:
 - `library` (optional): document library (drive) name; defaults to the site's default **Documents** library. Set it to read from a secondary library on the same site.
 - `max_file_size` (optional): maximum bytes for any single downloaded file; the read fails if a file exceeds it. Defaults to `0` (unlimited).
 - `max_files` (optional): maximum number of files a glob may match before erroring, to guard against an over-broad recursive pattern. Defaults to `10000`; set `0` for unlimited.
+- `download_timeout` (optional): per-request HTTP timeout as a Go duration (e.g. `30m`, `600s`). Bounds each Graph call, most importantly the file download, which streams the whole workbook. Defaults to `10m`; raise it for very large files on slow links.
 
 Authentication uses the OAuth2 **client-credentials** flow. The app registration needs application permission to read the site's files (e.g. `Sites.Read.All` or `Files.Read.All`), granted with admin consent.
 

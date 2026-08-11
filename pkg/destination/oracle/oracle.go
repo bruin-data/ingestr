@@ -3,8 +3,10 @@ package oracle
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,12 +20,20 @@ import (
 	_ "github.com/sijms/go-ora/v2"
 )
 
-const defaultOracleStagingSchema = "_bruin_staging"
+const (
+	defaultOracleStagingSchema = "_bruin_staging"
+	cdcEqualLSNDeleteMarker    = "__ingestr_has_equal_lsn_delete"
+)
 
 type OracleDestination struct {
 	db          *sql.DB
 	uri         string
 	currentUser string
+}
+
+type oracleCDCInternalAliases struct {
+	activeRowNumber      string
+	equalLSNDeleteMarker string
 }
 
 func NewOracleDestination() *OracleDestination {
@@ -65,7 +75,6 @@ func (d *OracleDestination) Connect(ctx context.Context, uri string) error {
 			_ = db.Close()
 			return fmt.Errorf("failed to get current Oracle user: %w", err)
 		}
-		d.currentUser = strings.ToUpper(d.currentUser)
 		config.Debug("[ORACLE] Connected as: %s", d.currentUser)
 		return nil
 	}
@@ -170,21 +179,47 @@ func (d *OracleDestination) PrepareTable(ctx context.Context, opts destination.P
 	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
-
-	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
-	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-		if isOracleError(err, "00955") {
-			return nil
+	if !exists {
+		startCreate := time.Now()
+		createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
+		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			if !isOracleError(err, "00955") {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else {
+			config.Debug("[ORACLE] CREATE TABLE took %v", time.Since(startCreate))
 		}
-		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create table: %w", err)
 	}
-	config.Debug("[ORACLE] CREATE TABLE took %v", time.Since(startCreate))
+	if opts.RequirePrimaryKeyMatch {
+		schemaName, tableName := d.effectiveSchemaTable(opts.Table)
+		actualKeys, err := d.getEnforcedPrimaryKeys(ctx, schemaName, tableName)
+		if err != nil {
+			return fmt.Errorf("failed to inspect CDC target primary key: %w", err)
+		}
+		if !oraclePrimaryKeySetsEqual(opts.PrimaryKeys, actualKeys) {
+			return fmt.Errorf("CDC merge target %s must have an enabled and validated primary key %v; found %v", opts.Table, opts.PrimaryKeys, actualKeys)
+		}
+	}
 	return nil
+}
+
+func oraclePrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	remaining := make(map[string]int, len(expected))
+	for _, key := range expected {
+		remaining[canonicalIdentifier(key)]++
+	}
+	for _, key := range actual {
+		canonical := canonicalIdentifier(key)
+		if remaining[canonical] == 0 {
+			return false
+		}
+		remaining[canonical]--
+	}
+	return true
 }
 
 func (d *OracleDestination) DropTable(ctx context.Context, table string) error {
@@ -218,6 +253,27 @@ func (d *OracleDestination) TruncateTable(ctx context.Context, table string) err
 	return nil
 }
 
+func (d *OracleDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	columns := destination.DestinationColumns(opts.Columns)
+	if len(columns) == 0 {
+		return errors.New("insert from staging requires at least one column")
+	}
+	quotedColumns := make([]string, len(columns))
+	for i, column := range columns {
+		quotedColumns[i] = quoteColumn(column)
+	}
+	columnList := strings.Join(quotedColumns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s",
+		quoteTable(opts.TargetTable), columnList, columnList, quoteTable(opts.StagingTable),
+	)
+	if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert into table %s from staging: %w", opts.TargetTable, err)
+	}
+	return nil
+}
+
 func (d *OracleDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	return d.WriteParallel(ctx, records, opts)
 }
@@ -231,6 +287,9 @@ func (d *OracleDestination) WriteParallel(ctx context.Context, records <-chan so
 
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
 		}
 		if result.Batch == nil {
@@ -309,6 +368,12 @@ func (d *OracleDestination) writeRecordBatch(ctx context.Context, record arrow.R
 
 func (d *OracleDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+	if err := tablename.TwoLevel("oracle").CheckName(opts.StagingTable); err != nil {
+		return err
+	}
+	if err := tablename.TwoLevel("oracle").CheckName(opts.TargetTable); err != nil {
+		return err
+	}
 	stagingSchema, _ := parseTableName(opts.StagingTable)
 	targetSchema, targetName := parseTableName(opts.TargetTable)
 
@@ -428,7 +493,8 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	columns := opts.Columns
-	nonPKColumns := filterColumns(columns, opts.PrimaryKeys)
+	targetColumns := destination.DestinationColumns(columns)
+	nonPKColumns := filterColumns(targetColumns, opts.PrimaryKeys)
 	isCDC := destination.HasCDCDeletedColumn(columns)
 
 	dedupOrderBy := "1"
@@ -442,11 +508,14 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	upsertSource := dedupSource("")
+	equalLSNDeleteMarker := cdcEqualLSNDeleteMarker
 	if isCDC {
-		upsertSource = dedupSource(" WHERE " + quoteColumn(destination.CDCDeletedColumn) + " = 0")
+		aliases := newOracleCDCInternalAliases(columns)
+		equalLSNDeleteMarker = aliases.equalLSNDeleteMarker
+		upsertSource = oracleCDCActiveSourceWithAliases(columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), "source", aliases)
 	}
 
-	mergeSQL := buildMergeSQL(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns)
+	mergeSQL := buildMergeSQLWithCDCMarker(opts.TargetTable, upsertSource, columns, opts.PrimaryKeys, nonPKColumns, opts.IncrementalPredicate, equalLSNDeleteMarker)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -461,22 +530,7 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	}
 
 	if isCDC {
-		markDeletedSQL := fmt.Sprintf(
-			`MERGE INTO %s target
-USING %s
-ON (%s)
-WHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s
-WHERE source.%s = 1`,
-			quoteTable(opts.TargetTable),
-			dedupSource(""),
-			buildJoinCondition(opts.PrimaryKeys, "target", "source"),
-			quoteColumn(destination.CDCDeletedColumn),
-			quoteColumn(destination.CDCLSNColumn),
-			quoteColumn(destination.CDCLSNColumn),
-			quoteColumn(destination.CDCSyncedAtColumn),
-			quoteColumn(destination.CDCSyncedAtColumn),
-			quoteColumn(destination.CDCDeletedColumn),
-		)
+		markDeletedSQL := buildCDCDeleteMarkSQL(opts.TargetTable, dedupSource(""), opts.PrimaryKeys, opts.IncrementalPredicate)
 		config.Debug("[MERGE] Executing CDC delete marking: %s", markDeletedSQL)
 		if _, err := tx.ExecContext(ctx, markDeletedSQL); err != nil {
 			config.LogFailedQuery(markDeletedSQL, err)
@@ -500,34 +554,110 @@ WHERE source.%s = 1`,
 }
 
 func buildMergeSQL(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string) string {
+	return buildMergeSQLWithPredicate(targetTable, sourceExpr, columns, primaryKeys, updateColumns, "")
+}
+
+// mergeTargetExpr filters the merge target through an inline view when a
+// predicate is set. Oracle raises ORA-38104 if the predicate were placed in
+// the ON clause and referenced a column updated by WHEN MATCHED.
+func mergeTargetExpr(targetTable, incrementalPredicate string) string {
+	predicate := strings.TrimSpace(incrementalPredicate)
+	if predicate == "" {
+		return quoteTable(targetTable) + " target"
+	}
+	return fmt.Sprintf("(SELECT * FROM %s target WHERE %s) target", quoteTable(targetTable), predicate)
+}
+
+func buildMergeSQLWithPredicate(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate string) string {
+	return buildMergeSQLWithCDCMarker(targetTable, sourceExpr, columns, primaryKeys, updateColumns, incrementalPredicate, cdcEqualLSNDeleteMarker)
+}
+
+func buildMergeSQLWithCDCMarker(targetTable, sourceExpr string, columns, primaryKeys, updateColumns []string, incrementalPredicate, equalLSNDeleteMarker string) string {
+	targetColumns := destination.DestinationColumns(columns)
+	isCDC := destination.HasCDCDeletedColumn(columns)
+	targetExpr := mergeTargetExpr(targetTable, incrementalPredicate)
+	if isCDC {
+		targetExpr = mergeTargetExpr(targetTable, "")
+	}
 	var b strings.Builder
 	fmt.Fprintf(
-		&b, "MERGE INTO %s target\nUSING %s\nON (%s)\n",
-		quoteTable(targetTable),
+		&b, "MERGE INTO %s\nUSING %s\nON (%s)\n",
+		targetExpr,
 		sourceExpr,
 		buildJoinCondition(primaryKeys, "target", "source"),
 	)
 	if len(updateColumns) > 0 {
-		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s\n", buildUpdateSet(updateColumns, "target", "source"))
+		updateSet := buildUpdateSet(updateColumns, "target", "source")
+		if isCDC && destination.HasCDCUnchangedColsColumn(columns) {
+			updateSet = buildCDCUpdateSet(updateColumns, "target", "source", "source."+quoteColumn(destination.CDCUnchangedColsColumn))
+		}
+		fmt.Fprintf(&b, "WHEN MATCHED THEN UPDATE SET %s", updateSet)
+		if isCDC {
+			conditions := make([]string, 0, 2)
+			if predicate := strings.TrimSpace(incrementalPredicate); predicate != "" {
+				conditions = append(conditions, "("+predicate+")")
+			}
+			conditions = append(conditions, fmt.Sprintf(
+				"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND NVL(target.%s, 0) = 0 AND source.%s = 1))",
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCLSNColumn),
+				quoteColumn(destination.CDCDeletedColumn),
+				quoteColumn(equalLSNDeleteMarker),
+			))
+			fmt.Fprintf(&b, " WHERE %s", strings.Join(conditions, " AND "))
+		}
+		b.WriteByte('\n')
 	}
 	fmt.Fprintf(
 		&b, "WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
-		strings.Join(quoteColumns(columns), ", "),
-		strings.Join(sourceColumnRefs(columns, "source"), ", "),
+		strings.Join(quoteColumns(targetColumns), ", "),
+		strings.Join(sourceColumnRefs(targetColumns, "source"), ", "),
 	)
 	return b.String()
 }
 
 func buildCDCDeleteTombstoneInsertSQL(targetTable, sourceExpr string, columns, primaryKeys []string) string {
+	targetColumns := destination.DestinationColumns(columns)
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s) SELECT %s FROM %s WHERE source.%s = 1 AND NOT EXISTS (SELECT 1 FROM %s target WHERE %s)",
 		quoteTable(targetTable),
-		strings.Join(quoteColumns(columns), ", "),
-		strings.Join(sourceColumnRefs(columns, "source"), ", "),
+		strings.Join(quoteColumns(targetColumns), ", "),
+		strings.Join(sourceColumnRefs(targetColumns, "source"), ", "),
 		sourceExpr,
 		quoteColumn(destination.CDCDeletedColumn),
 		quoteTable(targetTable),
 		buildJoinCondition(primaryKeys, "target", "source"),
+	)
+}
+
+func buildCDCDeleteMarkSQL(targetTable, sourceExpr string, primaryKeys []string, incrementalPredicate string) string {
+	conditions := []string{"source." + quoteColumn(destination.CDCDeletedColumn) + " = 1"}
+	if predicate := strings.TrimSpace(incrementalPredicate); predicate != "" {
+		conditions = append(conditions, "("+predicate+")")
+	}
+	conditions = append(conditions, fmt.Sprintf(
+		"(target.%s IS NULL OR source.%s > target.%s OR (source.%s = target.%s AND NVL(target.%s, 0) = 0))",
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCDeletedColumn),
+	))
+	return fmt.Sprintf(
+		"MERGE INTO %s\nUSING %s\nON (%s)\nWHEN MATCHED THEN UPDATE SET target.%s = 1, target.%s = source.%s, target.%s = source.%s\nWHERE %s",
+		mergeTargetExpr(targetTable, ""),
+		sourceExpr,
+		buildJoinCondition(primaryKeys, "target", "source"),
+		quoteColumn(destination.CDCDeletedColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCLSNColumn),
+		quoteColumn(destination.CDCSyncedAtColumn),
+		quoteColumn(destination.CDCSyncedAtColumn),
+		strings.Join(conditions, " AND "),
 	)
 }
 
@@ -541,14 +671,42 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= :1 AND %s <= :2",
-		quoteTable(opts.TargetTable),
-		quoteColumn(opts.IncrementalKey),
-		quoteColumn(opts.IncrementalKey),
-	)
+	key := quoteColumn(opts.IncrementalKey)
+	// Emit UTC-anchored literals for temporal keys so the DELETE window ignores the
+	// go-ora process timezone and session NLS_DATE_FORMAT (BRU-5586).
+	bound := func(v interface{}) (string, bool) {
+		if p, ok := v.(*time.Time); ok && p != nil {
+			v = *p
+		}
+		switch opts.IncrementalKeyType {
+		case schema.TypeDate:
+			if s, ok := v.(string); ok {
+				if _, err := time.Parse("2006-01-02", s); err != nil {
+					return "", false
+				}
+				return fmt.Sprintf("TO_DATE('%s', 'YYYY-MM-DD')", s), true
+			}
+		case schema.TypeTimestamp:
+			if t, ok := v.(time.Time); ok {
+				return fmt.Sprintf("TO_TIMESTAMP('%s', 'YYYY-MM-DD HH24:MI:SS.FF6')", t.UTC().Format("2006-01-02 15:04:05.000000")), true
+			}
+		case schema.TypeTimestampTZ:
+			if t, ok := v.(time.Time); ok {
+				return fmt.Sprintf("TO_TIMESTAMP_TZ('%s', 'YYYY-MM-DD HH24:MI:SS.FF6 TZHTZM')", t.UTC().Format("2006-01-02 15:04:05.000000 -0700")), true
+			}
+		}
+		return "", false
+	}
+	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s >= :1 AND %s <= :2", quoteTable(opts.TargetTable), key, key)
+	deleteArgs := []interface{}{opts.IntervalStart, opts.IntervalEnd}
+	if start, ok := bound(opts.IntervalStart); ok {
+		if end, ok := bound(opts.IntervalEnd); ok {
+			deleteSQL = fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quoteTable(opts.TargetTable), key, start, key, end)
+			deleteArgs = nil
+		}
+	}
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
-	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
+	if _, err := tx.ExecContext(ctx, deleteSQL, deleteArgs...); err != nil {
 		config.LogFailedQuery(deleteSQL, err)
 		return fmt.Errorf("failed to delete records: %w", err)
 	}
@@ -711,15 +869,17 @@ func (t *oracleTransaction) Rollback(ctx context.Context) error {
 func (d *OracleDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *OracleDestination) SupportsAppendStrategy() bool       { return true }
 func (d *OracleDestination) SupportsMergeStrategy() bool        { return true }
+func (d *OracleDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *OracleDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *OracleDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *OracleDestination) SupportsAtomicSwap() bool           { return true }
 func (d *OracleDestination) SupportsCDCMerge() bool             { return true }
+func (d *OracleDestination) SupportsCDCUnchangedCols() bool     { return true }
 
 func (d *OracleDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
 	return destination.ReplaceStagingPolicy{
 		DefaultPlacement:     destination.ReplaceStagingTargetSchema,
-		DefaultTargetSchema:  d.currentUser,
+		DefaultTargetSchema:  oracleResolvedIdentifierReference(d.currentUser),
 		DefaultManagedSchema: defaultOracleStagingSchema,
 	}
 }
@@ -745,6 +905,149 @@ func (d *OracleDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 		return "", err
 	}
 	return maxLSN, nil
+}
+
+func (d *OracleDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s, %s, %s FROM %s WHERE %s = :1",
+		quoteColumn("event_id"), quoteColumn("source_table"), quoteColumn("destination_table"), quoteColumn("state_kind"), quoteColumn("state_generation"),
+		quoteColumn("state_status"), quoteColumn(destination.CDCLSNColumn), quoteTable(table), quoteColumn("connector_id"))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if isOracleError(err, "00942", "00904") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (d *OracleDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	schemaName, tableName := d.effectiveSchemaTable(table)
+	var dataType string
+	var charLength sql.NullInt64
+	err := d.db.QueryRowContext(ctx,
+		"SELECT DATA_TYPE, CHAR_LENGTH FROM ALL_TAB_COLUMNS WHERE OWNER = :1 AND TABLE_NAME = :2 AND COLUMN_NAME = :3",
+		schemaName, tableName, destination.CDCLSNColumn).Scan(&dataType, &charLength)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect Oracle CDC state position column: %w", err)
+	}
+	if !strings.EqualFold(dataType, "VARCHAR2") || (charLength.Valid && charLength.Int64 >= 4000) {
+		return nil
+	}
+	// NOT NULL is deliberately not re-specified: Oracle raises ORA-01442 when a
+	// MODIFY names NOT NULL on a column that already carries the constraint, and
+	// the column is created NOT NULL. Omitting it leaves nullability unchanged.
+	query := fmt.Sprintf("ALTER TABLE %s MODIFY (%s VARCHAR2(4000 CHAR))", quoteTable(table), quoteColumn(destination.CDCLSNColumn))
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen Oracle CDC state position column: %w", err)
+	}
+	return nil
+}
+
+func (d *OracleDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	canonicalTarget := d.canonicalCDCTarget(claim.DestinationTable)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	insert := fmt.Sprintf("INSERT INTO %s (%s, %s, %s) VALUES (:1, :2, SYSTIMESTAMP)", quoteTable(claimTable), quoteColumn("destination_table"), quoteColumn("connector_id"), quoteColumn("claimed_at"))
+	if _, err := tx.ExecContext(ctx, insert, canonicalTarget, ownerID); err != nil && !isOracleError(err, "00001") {
+		return err
+	}
+	var owner string
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = :1", quoteColumn("connector_id"), quoteTable(claimTable), quoteColumn("destination_table"))
+	if err := tx.QueryRowContext(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return tx.Commit()
+}
+
+func (d *OracleDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	owner, tableName := d.effectiveSchemaTable(table)
+	var objectID int64
+	err := d.db.QueryRowContext(ctx, `SELECT OBJECT_ID FROM ALL_OBJECTS
+		WHERE OWNER = :1 AND OBJECT_NAME = :2 AND OBJECT_TYPE = 'TABLE'`, owner, tableName).Scan(&objectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read Oracle CDC target incarnation for %s: %w", table, err)
+	}
+	return destination.CDCTargetKey(owner, strconv.FormatInt(objectID, 10)), true, nil
+}
+
+func (d *OracleDestination) canonicalCDCTarget(table string) string {
+	schemaName, tableName := d.effectiveSchemaTable(table)
+	return destination.CDCTargetKey(schemaName, tableName)
+}
+
+func (d *OracleDestination) CanonicalCDCTarget(_ context.Context, table string) (string, error) {
+	return d.canonicalCDCTarget(table), nil
+}
+
+func (d *OracleDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	quotedTable := quoteTable(table)
+	query := fmt.Sprintf("SELECT DISTINCT %s, %s FROM %s WHERE %s = :1 AND %s = 'run' AND %s = (SELECT MAX(%s) FROM %s WHERE %s = :1 AND %s = 'run') ORDER BY %s",
+		quoteColumn("event_id"), quoteColumn("state_generation"), quotedTable,
+		quoteColumn("connector_id"), quoteColumn("state_kind"), quoteColumn("state_generation"),
+		quoteColumn("state_generation"), quotedTable, quoteColumn("connector_id"), quoteColumn("state_kind"), quoteColumn("event_id"))
+	rows, err := d.db.QueryContext(ctx, query, connectorID)
+	if err != nil {
+		if isOracleError(err, "00942", "00904") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *OracleDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = fmt.Sprintf(":%d", i+2)
+		args = append(args, eventID)
+	}
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = :1 AND %s IN (%s)", quoteTable(table), quoteColumn("connector_id"), quoteColumn("event_id"), strings.Join(placeholders, ", "))
+	_, err := d.db.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (d *OracleDestination) queryMaxCDCLSN(ctx context.Context, query string) (string, error) {
@@ -798,7 +1101,7 @@ func (d *OracleDestination) GetTableSchema(ctx context.Context, table string) (*
 		colScale := nullIntPtr(scale)
 		colCharLength := nullIntPtr(charLength)
 		col := mapOracleTypeToSchema(dataType, colPrecision, colScale, colCharLength)
-		col.Name = colName
+		col.Name = oracleResolvedColumnReference(colName)
 		col.Nullable = nullable == "Y"
 		columns = append(columns, col)
 	}
@@ -814,13 +1117,13 @@ func (d *OracleDestination) GetTableSchema(ctx context.Context, table string) (*
 	if err != nil {
 		return nil, err
 	}
+	columnNames := make([]string, len(columns))
 	for i := range columns {
-		for _, pk := range primaryKeys {
-			if strings.EqualFold(columns[i].Name, pk) {
-				columns[i].IsPrimaryKey = true
-				break
-			}
-		}
+		columnNames[i] = columns[i].Name
+	}
+	primaryKeySet := matchedOracleIdentifiers(columnNames, primaryKeys)
+	for i := range columns {
+		columns[i].IsPrimaryKey = primaryKeySet[columns[i].Name]
 	}
 
 	return &schema.TableSchema{
@@ -832,13 +1135,25 @@ func (d *OracleDestination) GetTableSchema(ctx context.Context, table string) (*
 }
 
 func (d *OracleDestination) getPrimaryKeys(ctx context.Context, schemaName, tableName string) ([]string, error) {
+	return d.queryPrimaryKeys(ctx, schemaName, tableName, false)
+}
+
+func (d *OracleDestination) getEnforcedPrimaryKeys(ctx context.Context, schemaName, tableName string) ([]string, error) {
+	return d.queryPrimaryKeys(ctx, schemaName, tableName, true)
+}
+
+func (d *OracleDestination) queryPrimaryKeys(ctx context.Context, schemaName, tableName string, requireEnforced bool) ([]string, error) {
+	enforcedFilter := ""
+	if requireEnforced {
+		enforcedFilter = "\n\t\t\tAND c.STATUS = 'ENABLED'\n\t\t\tAND c.VALIDATED = 'VALIDATED'"
+	}
 	query := `
 		SELECT cc.COLUMN_NAME
 		FROM ALL_CONSTRAINTS c
 		JOIN ALL_CONS_COLUMNS cc
 			ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
 			AND c.OWNER = cc.OWNER
-		WHERE c.CONSTRAINT_TYPE = 'P'
+		WHERE c.CONSTRAINT_TYPE = 'P'` + enforcedFilter + `
 			AND c.OWNER = :1
 			AND c.TABLE_NAME = :2
 		ORDER BY cc.POSITION`
@@ -856,7 +1171,7 @@ func (d *OracleDestination) getPrimaryKeys(ctx context.Context, schemaName, tabl
 		if err := rows.Scan(&key); err != nil {
 			return nil, fmt.Errorf("failed to scan primary key: %w", err)
 		}
-		keys = append(keys, key)
+		keys = append(keys, oracleResolvedColumnReference(key))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -887,11 +1202,11 @@ func (d *OracleDestination) effectiveSchemaName(schemaName string) string {
 }
 
 func (d *OracleDestination) sameSchema(left, right string) bool {
-	return strings.EqualFold(d.effectiveSchemaName(left), d.effectiveSchemaName(right))
+	return d.effectiveSchemaName(left) == d.effectiveSchemaName(right)
 }
 
 func parseTableName(table string) (string, string) {
-	parts := tablename.Split(table)
+	parts := splitOracleIdentifiers(table)
 	if len(parts) >= 2 {
 		return parts[0], parts[1]
 	}
@@ -906,10 +1221,11 @@ func extractTableName(table string) string {
 func backupTableName(schemaName, tableName string) string {
 	candidate := fmt.Sprintf("%s_OLD_%d", canonicalIdentifier(tableName), time.Now().UnixNano())
 	backupName := destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("oracle"))
+	backupRef := oracleResolvedIdentifierReference(backupName)
 	if schemaName == "" {
-		return backupName
+		return backupRef
 	}
-	return schemaName + "." + backupName
+	return schemaName + "." + backupRef
 }
 
 func (d *OracleDestination) restoreBackup(ctx context.Context, targetTable, backupTable string) error {
@@ -927,17 +1243,21 @@ func (d *OracleDestination) restoreBackup(ctx context.Context, targetTable, back
 
 func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryKeys []string) string {
 	columns := tableSchema.Columns
-	primaryKeySet := make(map[string]bool, len(primaryKeys)+len(tableSchema.PrimaryKeys))
-	for _, key := range primaryKeys {
-		primaryKeySet[strings.ToLower(key)] = true
+	columnNames := make([]string, len(columns))
+	for i := range columns {
+		columnNames[i] = columns[i].Name
 	}
-	for _, key := range tableSchema.PrimaryKeys {
-		primaryKeySet[strings.ToLower(key)] = true
+	comparableKeys := make([]string, 0, len(primaryKeys)+len(tableSchema.PrimaryKeys)+1)
+	comparableKeys = append(comparableKeys, primaryKeys...)
+	comparableKeys = append(comparableKeys, tableSchema.PrimaryKeys...)
+	if tableSchema.IncrementalKey != "" {
+		comparableKeys = append(comparableKeys, tableSchema.IncrementalKey)
 	}
+	comparableColumns := matchedOracleIdentifiers(columnNames, comparableKeys)
 
 	colDefs := make([]string, 0, len(columns)+1)
 	for _, col := range columns {
-		isComparableString := col.IsPrimaryKey || primaryKeySet[strings.ToLower(col.Name)] || strings.EqualFold(col.Name, tableSchema.IncrementalKey)
+		isComparableString := col.IsPrimaryKey || comparableColumns[col.Name]
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), mapDataTypeToOracle(col, isComparableString)))
 	}
 	if len(primaryKeys) > 0 {
@@ -951,6 +1271,66 @@ func oracleDedupSource(columns, primaryKeys []string, tableExpr, orderBy, where,
 	return fmt.Sprintf("(%s) %s", oracleDedupSelect(columns, primaryKeys, tableExpr, orderBy, where), alias)
 }
 
+func oracleCDCActiveSource(columns, primaryKeys []string, tableExpr, alias string) string {
+	return oracleCDCActiveSourceWithAliases(columns, primaryKeys, tableExpr, alias, oracleCDCInternalAliases{
+		activeRowNumber:      "bruin_active_rn",
+		equalLSNDeleteMarker: cdcEqualLSNDeleteMarker,
+	})
+}
+
+func newOracleCDCInternalAliases(columns []string) oracleCDCInternalAliases {
+	allocate := newOracleInternalNameAllocator(columns)
+	return oracleCDCInternalAliases{
+		activeRowNumber:      allocate("bruin_active_rn"),
+		equalLSNDeleteMarker: allocate(cdcEqualLSNDeleteMarker),
+	}
+}
+
+func newOracleInternalNameAllocator(columns []string) func(string) string {
+	used := make(map[string]struct{}, len(columns)+2)
+	for _, col := range columns {
+		used[strings.ToLower(canonicalIdentifier(col))] = struct{}{}
+	}
+	return func(base string) string {
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			canonical := strings.ToLower(canonicalIdentifier(candidate))
+			if _, exists := used[canonical]; !exists {
+				used[canonical] = struct{}{}
+				return candidate
+			}
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+}
+
+func oracleCDCActiveSourceWithAliases(columns, primaryKeys []string, tableExpr, alias string, aliases oracleCDCInternalAliases) string {
+	quotedColumns := strings.Join(quoteColumns(columns), ", ")
+	quotedPKs := strings.Join(quoteColumns(primaryKeys), ", ")
+	deleted := quoteColumn(destination.CDCDeletedColumn)
+	lsn := quoteColumn(destination.CDCLSNColumn)
+	activeRowNumber := quoteColumn(aliases.activeRowNumber)
+	marker := quoteColumn(aliases.equalLSNDeleteMarker)
+	return fmt.Sprintf(
+		"(SELECT %s, %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s, %s ORDER BY %s DESC) %s, MAX(%s) OVER (PARTITION BY %s, %s) %s FROM %s) bruin_numbered WHERE %s = 0 AND %s = 1) %s",
+		quotedColumns,
+		marker,
+		quotedColumns,
+		quotedPKs,
+		deleted,
+		lsn,
+		activeRowNumber,
+		deleted,
+		quotedPKs,
+		lsn,
+		marker,
+		tableExpr,
+		deleted,
+		activeRowNumber,
+		alias,
+	)
+}
+
 func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string, where ...string) string {
 	quotedColumns := strings.Join(quoteColumns(columns), ", ")
 	if len(primaryKeys) == 0 {
@@ -958,19 +1338,22 @@ func oracleDedupSelect(columns, primaryKeys []string, tableExpr, orderBy string,
 	}
 
 	whereClause := strings.Join(where, "")
+	dedupRowNumber := quoteColumn(newOracleInternalNameAllocator(columns)("bruin_dedup_rn"))
 	return fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) bruin_dedup_rn FROM %s%s) bruin_numbered WHERE bruin_dedup_rn = 1",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) %s FROM %s%s) bruin_numbered WHERE %s = 1",
 		quotedColumns,
 		quotedColumns,
 		strings.Join(quoteColumns(primaryKeys), ", "),
 		orderBy,
+		dedupRowNumber,
 		tableExpr,
 		whereClause,
+		dedupRowNumber,
 	)
 }
 
 func quoteTable(table string) string {
-	parts := tablename.Split(table)
+	parts := splitOracleIdentifiers(table)
 	quoted := make([]string, 0, len(parts))
 	for _, part := range parts {
 		quoted = append(quoted, quoteColumn(part))
@@ -991,22 +1374,128 @@ func quoteColumns(columns []string) []string {
 }
 
 func canonicalIdentifier(name string) string {
-	return strings.ToUpper(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		return strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+	}
+	return strings.ToUpper(name)
+}
+
+func oracleResolvedIdentifierReference(name string) string {
+	if name == "" {
+		return ""
+	}
+	if isOrdinaryOracleIdentifier(name) && name == strings.ToUpper(name) {
+		return name
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func oracleResolvedColumnReference(name string) string {
+	if name == strings.ToUpper(name) {
+		return name
+	}
+	return oracleResolvedIdentifierReference(name)
+}
+
+func isOrdinaryOracleIdentifier(name string) bool {
+	if name == "" || name[0] < 'A' || name[0] > 'Z' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		ch := name[i]
+		if (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$' || ch == '#' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func splitOracleIdentifiers(name string) []string {
+	name = strings.TrimSpace(name)
+	parts := make([]string, 0, 2)
+	var current strings.Builder
+	inQuotes := false
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if ch == '"' {
+			current.WriteByte(ch)
+			if inQuotes && i+1 < len(name) && name[i+1] == '"' {
+				i++
+				current.WriteByte(name[i])
+				continue
+			}
+			inQuotes = !inQuotes
+			continue
+		}
+		if ch == '.' && !inQuotes {
+			parts = append(parts, strings.TrimSpace(current.String()))
+			current.Reset()
+			continue
+		}
+		current.WriteByte(ch)
+	}
+	return append(parts, strings.TrimSpace(current.String()))
 }
 
 func filterColumns(columns []string, exclude []string) []string {
-	excludeMap := make(map[string]bool, len(exclude))
-	for _, col := range exclude {
-		excludeMap[strings.ToLower(col)] = true
-	}
-
-	var result []string
+	excluded := matchedOracleIdentifiers(columns, exclude)
+	result := make([]string, 0, len(columns))
 	for _, col := range columns {
-		if !excludeMap[strings.ToLower(col)] {
+		if !excluded[col] {
 			result = append(result, col)
 		}
 	}
 	return result
+}
+
+func matchedOracleIdentifiers(columns, selected []string) map[string]bool {
+	foldedCounts := make(map[string]int, len(columns))
+	for _, col := range columns {
+		foldedCounts[strings.ToLower(canonicalIdentifier(col))]++
+	}
+	exact := make(map[string]bool, len(selected))
+	folded := make(map[string]bool, len(selected))
+	for _, col := range selected {
+		canonical := canonicalIdentifier(col)
+		exact[canonical] = true
+		folded[strings.ToLower(canonical)] = true
+	}
+
+	matched := make(map[string]bool, len(selected))
+	for _, col := range columns {
+		canonical := canonicalIdentifier(col)
+		foldedName := strings.ToLower(canonical)
+		if exact[canonical] || (foldedCounts[foldedName] == 1 && folded[foldedName]) {
+			matched[col] = true
+		}
+	}
+	return matched
+}
+
+func oracleColumnForIdentifier(columns []schema.Column, selected string) (schema.Column, bool) {
+	canonical := canonicalIdentifier(selected)
+	for _, col := range columns {
+		if canonicalIdentifier(col.Name) == canonical {
+			return col, true
+		}
+	}
+
+	folded := strings.ToLower(canonical)
+	var matched schema.Column
+	found := false
+	for _, col := range columns {
+		if strings.ToLower(canonicalIdentifier(col.Name)) != folded {
+			continue
+		}
+		if found {
+			return schema.Column{}, false
+		}
+		matched = col
+		found = true
+	}
+	return matched, found
 }
 
 func sourceColumnRefs(columns []string, alias string) []string {
@@ -1033,21 +1522,38 @@ func buildUpdateSet(columns []string, targetAlias, sourceAlias string) string {
 	return strings.Join(sets, ", ")
 }
 
+func buildCDCUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {
+	sets := make([]string, len(columns))
+	for i, col := range columns {
+		target := targetAlias + "." + quoteColumn(col)
+		source := sourceAlias + "." + quoteColumn(col)
+		if destination.IsCDCColumn(col) {
+			sets[i] = target + " = " + source
+			continue
+		}
+		unchanged := fmt.Sprintf(
+			"JSON_EXISTS(COALESCE(%s, '[]'), '$[*]?(@ == $marker)' PASSING '%s' AS \"marker\")",
+			unchangedRef,
+			strings.ReplaceAll(col, "'", "''"),
+		)
+		sets[i] = fmt.Sprintf("%s = CASE WHEN %s THEN %s ELSE %s END", target, unchanged, target, source)
+	}
+	return strings.Join(sets, ", ")
+}
+
 func buildChangeConditions(columns []string, targetAlias, sourceAlias string, tableSchema *schema.TableSchema) string {
 	if len(columns) == 0 {
 		return "0 = 1"
-	}
-	columnTypes := make(map[string]schema.Column)
-	if tableSchema != nil {
-		for _, col := range tableSchema.Columns {
-			columnTypes[strings.ToLower(col.Name)] = col
-		}
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
 		target := targetAlias + "." + quoteColumn(col)
 		source := sourceAlias + "." + quoteColumn(col)
-		if oracleColumnUsesLOB(columnTypes[strings.ToLower(col)]) {
+		columnType := schema.Column{}
+		if tableSchema != nil {
+			columnType, _ = oracleColumnForIdentifier(tableSchema.Columns, col)
+		}
+		if oracleColumnUsesLOB(columnType) {
 			conditions[i] = fmt.Sprintf("(DBMS_LOB.COMPARE(%s, %s) != 0 OR (%s IS NULL AND %s IS NOT NULL) OR (%s IS NOT NULL AND %s IS NULL))",
 				target, source, target, source, target, source)
 			continue

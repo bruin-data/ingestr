@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,13 +21,12 @@ func Debug(format string, args ...any) {
 type IncrementalStrategy string
 
 const (
-	StrategyReplace        IncrementalStrategy = "replace"
-	StrategyTruncateInsert IncrementalStrategy = "truncate+insert"
-	StrategyAppend         IncrementalStrategy = "append"
-	StrategyDeleteInsert   IncrementalStrategy = "delete+insert"
-	StrategyMerge          IncrementalStrategy = "merge"
-	StrategySCD2           IncrementalStrategy = "scd2"
-	StrategyNone           IncrementalStrategy = "none"
+	StrategyReplace      IncrementalStrategy = "replace"
+	StrategyAppend       IncrementalStrategy = "append"
+	StrategyDeleteInsert IncrementalStrategy = "delete+insert"
+	StrategyMerge        IncrementalStrategy = "merge"
+	StrategySCD2         IncrementalStrategy = "scd2"
+	StrategyNone         IncrementalStrategy = "none"
 )
 
 type ProgressMode string
@@ -46,6 +46,7 @@ type IngestConfig struct {
 	IncrementalStrategy         IncrementalStrategy
 	IncrementalStrategyExplicit bool
 	IncrementalKey              string
+	IncrementalPredicate        string
 	IntervalStart               *time.Time
 	IntervalEnd                 *time.Time
 
@@ -65,10 +66,12 @@ type IngestConfig struct {
 	LoaderFileSize                  int
 	LoaderFileFormat                string
 	ExtractParallelism              int
+	DestinationParallelism          int
 	ExtractPartitionBy              string
 	ExtractPartitionInterval        time.Duration
 	ExtractPartitionNumericInterval int64
 	ExtractPartitionAuto            bool
+	DisablePreStaging               bool // Skip extract-time load-file staging for schema-inferred sources
 
 	SQLLimit          int
 	SQLExcludeColumns []string
@@ -83,8 +86,11 @@ type IngestConfig struct {
 	StagingDataset string
 	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
-	CDCResumeLSN  string // For CDC sources: resume from this LSN (auto-detected from destination)
-	CDCSlotSuffix string // For CDC sources: suffix appended to auto-generated slot names (derived from dest URI)
+	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
+	CDCResumeIncarnation       string
+	CDCResumeSchemaFingerprint string
+	CDCSlotSuffix              string // For CDC sources: suffix appended to auto-generated slot names (derived from connector identity)
+	CDCLegacySlotSuffix        string // For CDC upgrades: legacy 6-hex suffix derived from the raw destination URI
 
 	Stream        bool          // Continuous ingestion: flush buffered records on an interval or record-count trigger
 	FlushInterval time.Duration // Streaming mode: flush at least this often
@@ -95,6 +101,33 @@ type IngestConfig struct {
 	// "-- @bruin.config: {...}" comment to destination queries (QUERY_TAG on
 	// Snowflake) for warehouse cost attribution. Empty disables annotations.
 	QueryAnnotations string
+}
+
+// DefaultExtractParallelism is the default of the --extract-parallelism CLI
+// flag. EffectiveDestinationParallelism compares against it to tell "user left
+// the default" apart from an explicit choice, which cmd records by setting
+// DestinationParallelism.
+const DefaultExtractParallelism = 5
+
+const defaultPostgresWriteParallelism = 8
+
+func (c *IngestConfig) EffectiveDestinationParallelism() int {
+	if c.DestinationParallelism > 0 {
+		return c.DestinationParallelism
+	}
+	parallelism := c.ExtractParallelism
+	if parallelism <= 0 {
+		parallelism = 4
+	}
+	if parallelism == DefaultExtractParallelism && isPostgresURI(c.DestURI) {
+		return defaultPostgresWriteParallelism
+	}
+	return parallelism
+}
+
+func isPostgresURI(uri string) bool {
+	scheme, _, _ := strings.Cut(strings.ToLower(uri), "://")
+	return scheme == "postgres" || scheme == "postgresql" || scheme == "postgresql+psycopg2"
 }
 
 func DefaultConfig() *IngestConfig {
@@ -131,11 +164,22 @@ func (c *IngestConfig) Validate() error {
 			Message: fmt.Sprintf("must be earlier than interval-end (got start=%s, end=%s)", c.IntervalStart.Format(time.RFC3339), c.IntervalEnd.Format(time.RFC3339)),
 		}
 	}
+	if c.IncrementalStrategy == IncrementalStrategy("truncate+insert") {
+		return &ValidationError{
+			Field:   "incremental-strategy",
+			Message: `"truncate+insert" has been removed; use "replace"`,
+		}
+	}
 	if err := c.validateExtractPartitioning(); err != nil {
 		return err
 	}
 	if c.NoInference && strings.TrimSpace(c.Columns) == "" {
 		return &ValidationError{Field: "columns", Message: "is required when no-inference is enabled"}
+	}
+	if strings.TrimSpace(c.IncrementalPredicate) != "" {
+		if c.FullRefresh {
+			return &ValidationError{Field: "incremental-predicate", Message: "cannot be combined with --full-refresh"}
+		}
 	}
 	if c.Stream {
 		if c.FullRefresh {
@@ -157,6 +201,11 @@ func (c *IngestConfig) Validate() error {
 		case "", StrategyMerge, StrategyAppend:
 		default:
 			return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q is not supported with --stream (only merge and append)", c.IncrementalStrategy)}
+		}
+	}
+	if c.IsCDCSource() {
+		if err := c.validateCDCMode(); err != nil {
+			return err
 		}
 	}
 	if c.IsChangeTrackingSource() && c.SQLLimit > 0 {
@@ -196,10 +245,16 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	if c.ExtractPartitionInterval < 0 || c.ExtractPartitionNumericInterval < 0 {
 		return &ValidationError{Field: "extract-partition-interval", Message: "must be positive"}
 	}
-	if c.IntervalStart == nil {
+	if c.IntervalStart == nil && c.IntervalEnd != nil {
+		return &ValidationError{Field: "interval-start", Message: "is required when interval-end is set"}
+	}
+	if c.IntervalEnd == nil && c.IntervalStart != nil {
+		return &ValidationError{Field: "interval-end", Message: "is required when interval-start is set"}
+	}
+	if c.IncrementalKey != "" && c.IntervalStart == nil {
 		return &ValidationError{Field: "interval-start", Message: "is required when extract partitioning is enabled"}
 	}
-	if c.IntervalEnd == nil {
+	if c.IncrementalKey != "" && c.IntervalEnd == nil {
 		return &ValidationError{Field: "interval-end", Message: "is required when extract partitioning is enabled"}
 	}
 	if c.SQLLimit > 0 {
@@ -217,16 +272,6 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 	if c.FullRefresh {
 		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with extract partitioning"}
 	}
-	switch c.IncrementalStrategy {
-	case StrategyReplace, StrategyTruncateInsert:
-		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%q cannot be combined with extract partitioning because it rewrites the whole destination table from a bounded source read", c.IncrementalStrategy)}
-	}
-	if rawQuery, ok := strings.CutPrefix(c.SourceTable, "query:"); ok {
-		if strings.TrimSpace(rawQuery) == "" {
-			return nil
-		}
-		return &ValidationError{Field: "source-table", Message: "custom queries do not support extract partitioning"}
-	}
 	return nil
 }
 
@@ -237,6 +282,39 @@ func (c *IngestConfig) IsCDCSource() bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+cdc")
+}
+
+// validateCDCMode enforces the deprecation of the ?mode= CDC URI parameter.
+// Continuous ingestion is selected by --stream alone; mode= no longer has any
+// effect. mode=stream on its own used to leave the source reading forever while
+// the batch write path waited for a read that never ended, so it is rejected
+// rather than silently ignored.
+func (c *IngestConfig) validateCDCMode() error {
+	parsed, err := url.Parse(c.SourceURI)
+	if err != nil {
+		// Leave malformed URIs to the source's own parser, which reports better.
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(parsed.Query().Get("mode")))
+	switch mode {
+	case "":
+		return nil
+	case "batch":
+	case "stream":
+		if !c.Stream {
+			return &ValidationError{
+				Field:   "source-uri",
+				Message: "mode=stream is no longer supported; remove it and use --stream on sources that support continuous ingestion",
+			}
+		}
+	default:
+		return &ValidationError{
+			Field:   "source-uri",
+			Message: fmt.Sprintf("invalid mode: %s (must be 'batch' or 'stream')", mode),
+		}
+	}
+	output.Warnf("Warning: the ?mode= URI parameter is deprecated and ignored; continuous ingestion is controlled by --stream\n")
+	return nil
 }
 
 func (c *IngestConfig) IsChangeTrackingSource() bool {

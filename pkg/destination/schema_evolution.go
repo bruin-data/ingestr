@@ -36,6 +36,27 @@ type BatchColumnAdder interface {
 	BatchAddColumnsSQL(table string, cols []schema.Column) string
 }
 
+// BatchColumnTypeAlterer is an optional Dialect extension for databases that can
+// change several column types in a single ALTER TABLE statement.
+type BatchColumnTypeAlterer interface {
+	BatchAlterColumnTypesSQL(table string, cols []schema.Column) string
+}
+
+// NullabilityRelaxer renders DDL that changes an existing required column to
+// optional. Dialects without this capability must fail evolution before data
+// is written whenever nullable source rows could reach a required column.
+type NullabilityRelaxer interface {
+	RelaxColumnNullabilitySQL(table, colName string) string
+}
+
+// CDCConditionalSchemaEvolver applies schema changes only when the managed
+// CDC target still has the expected physical identity. It returns the target
+// identity after the DDL because some databases replace catalog objects while
+// altering a table.
+type CDCConditionalSchemaEvolver interface {
+	ApplySchemaEvolutionIfIncarnation(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison, expectedIncarnation string) (warnings []string, resultIncarnation string, err error)
+}
+
 // BuildMigration turns an abstract schema comparison into the concrete DDL
 // statements (and human-readable warnings) for a dialect. It is dialect-
 // agnostic orchestration shared by SQL destinations; the dialect supplies the
@@ -45,19 +66,24 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 		return nil, nil
 	}
 
-	batcher, canBatch := dialect.(BatchColumnAdder)
+	batcher, canBatchAdd := dialect.(BatchColumnAdder)
+	typeAlterer, canBatchAlter := dialect.(BatchColumnTypeAlterer)
 	var addColumns []schema.Column
+	var typeChangeColumns []schema.Column
 
 	for _, change := range comparison.Changes {
 		switch change.Type {
 		case schemaevolution.ChangeAddColumn:
-			if canBatch {
+			if canBatchAdd {
 				addColumns = append(addColumns, change.NewColumn)
 			} else if sql := dialect.AddColumnSQL(table, change.NewColumn); sql != "" {
 				statements = append(statements, sql)
 			}
 
 		case schemaevolution.ChangeWidenType, schemaevolution.ChangeOverrideType:
+			if sameDestinationType(dialect, change) {
+				continue
+			}
 			if !dialect.SupportsAlterType() {
 				warnings = append(warnings, fmt.Sprintf(
 					"column %q type change skipped: %s does not support ALTER COLUMN TYPE",
@@ -65,7 +91,11 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 				))
 				continue
 			}
-			if sql := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn); sql != "" {
+			if canBatchAlter {
+				col := change.NewColumn
+				col.Name = change.ColumnName
+				typeChangeColumns = append(typeChangeColumns, col)
+			} else if sql := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn); sql != "" {
 				statements = append(statements, sql)
 			}
 			if change.Type == schemaevolution.ChangeWidenType && change.OldColumn != nil {
@@ -73,10 +103,24 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 					warnings = append(warnings, fmt.Sprintf("column %q: %s", change.ColumnName, warning))
 				}
 			}
+
+		case schemaevolution.ChangeRelaxNullability:
+			appendNullabilityRelaxation(dialect, table, change.ColumnName, &statements, &warnings)
+
+		case schemaevolution.ChangeRemoveColumn:
+			if change.OldColumn != nil && !change.OldColumn.Nullable {
+				appendNullabilityRelaxation(dialect, table, change.ColumnName, &statements, &warnings)
+			}
 		}
 	}
 
-	if canBatch && len(addColumns) > 0 {
+	if canBatchAlter && len(typeChangeColumns) > 0 {
+		if sql := typeAlterer.BatchAlterColumnTypesSQL(table, typeChangeColumns); sql != "" {
+			statements = append(statements, sql)
+		}
+	}
+
+	if canBatchAdd && len(addColumns) > 0 {
 		if sql := batcher.BatchAddColumnsSQL(table, addColumns); sql != "" {
 			statements = append(statements, sql)
 		}
@@ -85,14 +129,91 @@ func BuildMigration(dialect Dialect, table string, comparison *schemaevolution.S
 	return statements, warnings
 }
 
+func appendNullabilityRelaxation(dialect Dialect, table, column string, statements, warnings *[]string) {
+	if relaxer, ok := dialect.(NullabilityRelaxer); ok {
+		if sql := relaxer.RelaxColumnNullabilitySQL(table, column); sql != "" {
+			*statements = append(*statements, sql)
+			return
+		}
+	}
+	*warnings = append(*warnings, fmt.Sprintf(
+		"column %q nullability relaxation skipped: %s does not expose nullability evolution",
+		column, dialect.Name(),
+	))
+}
+
+// RenderEvolution validates and renders an abstract schema-change plan into
+// dialect-specific DDL without executing it.
+func RenderEvolution(dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) (statements, warnings []string, err error) {
+	if comparison != nil {
+		for _, change := range comparison.Changes {
+			if change.Type == schemaevolution.ChangeWidenType || change.Type == schemaevolution.ChangeOverrideType {
+				if sameDestinationType(dialect, change) {
+					continue
+				}
+				stmt := dialect.AlterColumnTypeSQL(table, change.ColumnName, change.NewColumn)
+				if !dialect.SupportsAlterType() || stmt == "" {
+					return nil, nil, unsupportedTypeChangeError(dialect, table, change, stmt)
+				}
+			}
+			needsRelaxation := change.Type == schemaevolution.ChangeRelaxNullability ||
+				(change.Type == schemaevolution.ChangeRemoveColumn && change.OldColumn != nil && !change.OldColumn.Nullable)
+			if needsRelaxation {
+				relaxer, ok := dialect.(NullabilityRelaxer)
+				if !ok || relaxer.RelaxColumnNullabilitySQL(table, change.ColumnName) == "" {
+					return nil, nil, fmt.Errorf(
+						"apply schema evolution: column %q requires nullability relaxation, which generic %s DDL does not support",
+						change.ColumnName, dialect.Name(),
+					)
+				}
+			}
+		}
+	}
+	statements, warnings = BuildMigration(dialect, table, comparison)
+	return statements, warnings, nil
+}
+
 // ApplyEvolution renders the abstract schema-change plan into dialect-specific
 // DDL and executes each statement against the destination.
 func ApplyEvolution(ctx context.Context, dest Destination, dialect Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
-	statements, warnings := BuildMigration(dialect, table, comparison)
+	statements, warnings, err := RenderEvolution(dialect, table, comparison)
+	if err != nil {
+		return nil, err
+	}
 	for _, stmt := range statements {
 		if err := dest.Exec(ctx, stmt); err != nil {
 			return warnings, fmt.Errorf("apply schema evolution: %s: %w", stmt, err)
 		}
 	}
 	return warnings, nil
+}
+
+func sameDestinationType(dialect Dialect, change schemaevolution.SchemaChange) bool {
+	return change.OldColumn != nil && dialect.TypeName(*change.OldColumn) == dialect.TypeName(change.NewColumn)
+}
+
+func unsupportedTypeChangeError(dialect Dialect, table string, change schemaevolution.SchemaChange, stmt string) error {
+	oldLogicalType := "unknown"
+	oldDestinationType := "unknown"
+	if change.OldColumn != nil {
+		oldLogicalType = change.OldColumn.DataType.String()
+		oldDestinationType = dialect.TypeName(*change.OldColumn)
+	}
+
+	detail := fmt.Sprintf(
+		"apply schema evolution: column %q on table %q requires a type change from %s (%s type %s) to %s (%s type %s), which generic %s DDL does not support",
+		change.ColumnName,
+		table,
+		oldLogicalType,
+		dialect.Name(),
+		oldDestinationType,
+		change.NewColumn.DataType,
+		dialect.Name(),
+		dialect.TypeName(change.NewColumn),
+		dialect.Name(),
+	)
+	if stmt == "" {
+		return fmt.Errorf("%s; no ALTER COLUMN query was generated or executed", detail)
+	}
+	return fmt.Errorf("%s; query was not executed: %s", detail, stmt)
 }

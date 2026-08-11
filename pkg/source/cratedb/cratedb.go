@@ -114,7 +114,7 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 	schemaName, tableName := parseTableName(table)
 
 	query := `
-		SELECT column_name, data_type, is_nullable
+		SELECT column_name, data_type, is_nullable, character_maximum_length
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
 		AND column_name !~ '.*\[''.*''\]'
@@ -130,8 +130,9 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 	var columns []schema.Column
 	for rows.Next() {
 		var columnName, dataType, isNullable string
+		var charMaxLen *int
 
-		if err := rows.Scan(&columnName, &dataType, &isNullable); err != nil {
+		if err := rows.Scan(&columnName, &dataType, &isNullable, &charMaxLen); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -144,6 +145,9 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 			Precision: precision,
 			Scale:     scale,
 			ArrayType: arrayType,
+		}
+		if dt == schema.TypeString && charMaxLen != nil && *charMaxLen > 0 {
+			col.MaxLength = *charMaxLen
 		}
 
 		columns = append(columns, col)

@@ -11,6 +11,15 @@ func HasCDCDeletedColumn(columns []string) bool {
 	return false
 }
 
+func HasCDCUnchangedColsColumn(columns []string) bool {
+	for _, col := range columns {
+		if strings.EqualFold(col, CDCUnchangedColsColumn) {
+			return true
+		}
+	}
+	return false
+}
+
 func IsCDCColumn(column string) bool {
 	return strings.EqualFold(column, CDCLSNColumn) ||
 		strings.EqualFold(column, CDCDeletedColumn) ||

@@ -1,6 +1,7 @@
 package schemaevolution
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -74,6 +75,112 @@ func TestParseColumnOverrides_DecimalWithPrecisionOnly(t *testing.T) {
 	assert.Equal(t, schema.TypeDecimal, amount.DataType)
 	assert.Equal(t, 18, amount.Precision)
 	assert.Equal(t, 0, amount.Scale)
+	assert.True(t, amount.ScaleSpecified)
+
+	result := amount.ApplyToColumn(schema.Column{DataType: schema.TypeDecimal, Precision: 10, Scale: 4})
+	assert.Equal(t, 18, result.Precision)
+	assert.Zero(t, result.Scale)
+}
+
+func TestParseColumnOverrides_DecimalValidationAndExplicitZeroScale(t *testing.T) {
+	overrides, err := ParseColumnOverrides("amount:decimal(18,0)")
+	require.NoError(t, err)
+	amount, ok := overrides.Get("amount")
+	require.True(t, ok)
+	require.True(t, amount.ScaleSpecified)
+	require.Zero(t, amount.Scale)
+
+	result := amount.ApplyToColumn(schema.Column{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 10, Scale: 4,
+	})
+	require.Equal(t, 18, result.Precision)
+	require.Zero(t, result.Scale)
+
+	for _, spec := range []string{
+		"amount:decimal(0,0)",
+		"amount:decimal(39,2)",
+		"amount:decimal(10,-1)",
+		"amount:decimal(10,11)",
+		"amount:decimal(10,2,1)",
+	} {
+		t.Run(spec, func(t *testing.T) {
+			_, err := ParseColumnOverrides(spec)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestParseColumnOverrides_SizedString(t *testing.T) {
+	tests := []struct {
+		input     string
+		dataType  schema.DataType
+		maxLength int
+	}{
+		{"name:varchar(50)", schema.TypeString, 50},
+		{"name:string(255)", schema.TypeString, 255},
+		{"name:text(120)", schema.TypeString, 120},
+		// Unsized string types keep MaxLength at zero.
+		{"name:varchar", schema.TypeString, 0},
+		{"name:string", schema.TypeString, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			overrides, err := ParseColumnOverrides(tt.input)
+			require.NoError(t, err)
+			require.Len(t, overrides, 1)
+
+			ov, ok := overrides.Get(strings.SplitN(tt.input, ":", 2)[0])
+			assert.True(t, ok)
+			assert.Equal(t, tt.dataType, ov.DataType)
+			assert.Equal(t, tt.maxLength, ov.MaxLength)
+		})
+	}
+}
+
+func TestParseColumnOverrides_SizedStringInvalidLength(t *testing.T) {
+	for _, spec := range []string{
+		"name:varchar(abc)",
+		"name:varchar(0)",
+		"name:varchar(-5)",
+		"name:varchar(10,20)",  // sized strings take a single length
+		"name:varchar(10,abc)", // extra parameter is not silently ignored
+	} {
+		t.Run(spec, func(t *testing.T) {
+			_, err := ParseColumnOverrides(spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid length")
+		})
+	}
+}
+
+func TestParseColumnOverrides_SizedStringWithRename(t *testing.T) {
+	overrides, err := ParseColumnOverrides("full_name:varchar(120):name")
+	require.NoError(t, err)
+	require.Len(t, overrides, 1)
+
+	ov, ok := overrides.Get("name")
+	assert.True(t, ok)
+	assert.Equal(t, schema.TypeString, ov.DataType)
+	assert.Equal(t, 120, ov.MaxLength)
+	assert.Equal(t, "full_name", ov.RenameTo)
+}
+
+func TestColumnOverride_ApplyToColumn_WithMaxLength(t *testing.T) {
+	col := schema.Column{
+		Name:     "name",
+		DataType: schema.TypeString,
+	}
+
+	override := ColumnOverride{
+		Name:      "name",
+		DataType:  schema.TypeString,
+		MaxLength: 50,
+	}
+
+	result := override.ApplyToColumn(col)
+	assert.Equal(t, schema.TypeString, result.DataType)
+	assert.Equal(t, 50, result.MaxLength)
 }
 
 func TestParseColumnOverrides_AllTypes(t *testing.T) {
@@ -372,6 +479,46 @@ func TestCompare_OverrideMatchesDestination(t *testing.T) {
 	assert.False(t, result.HasChanges)
 }
 
+func TestCompare_RequiredOverrideDoesNotClaimNullabilityRelaxation(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: false}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: false}}}
+	overrides, err := ParseColumnOverrides("value:bigint")
+	require.NoError(t, err)
+
+	comparison, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+	require.NoError(t, err)
+	require.Len(t, comparison.Changes, 1)
+	require.Equal(t, ChangeOverrideType, comparison.Changes[0].Type)
+	require.False(t, comparison.Changes[0].NewColumn.Nullable)
+	require.False(t, BuildFinalSchema(dest, comparison).Columns[0].Nullable)
+}
+
+func TestCompare_OverrideStillEmitsNullabilityRelaxation(t *testing.T) {
+	tests := []struct {
+		name     string
+		override string
+		changes  []ChangeType
+	}{
+		{name: "override matches destination", override: "value:integer", changes: []ChangeType{ChangeRelaxNullability}},
+		{name: "override changes type", override: "value:double", changes: []ChangeType{ChangeRelaxNullability, ChangeOverrideType}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt32, Nullable: true}}}
+			dest := &schema.TableSchema{Columns: []schema.Column{{Name: "value", DataType: schema.TypeInt64, Nullable: false}}}
+			overrides, err := ParseColumnOverrides(tt.override)
+			require.NoError(t, err)
+			comparison, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+			require.NoError(t, err)
+			require.Len(t, comparison.Changes, len(tt.changes))
+			for i, changeType := range tt.changes {
+				require.Equal(t, changeType, comparison.Changes[i].Type)
+			}
+			require.True(t, BuildFinalSchema(dest, comparison).Columns[0].Nullable)
+		})
+	}
+}
+
 func TestCompare_DecimalOverrideWithPrecision(t *testing.T) {
 	source := &schema.TableSchema{
 		Name: "orders",
@@ -400,6 +547,23 @@ func TestCompare_DecimalOverrideWithPrecision(t *testing.T) {
 	assert.Equal(t, schema.TypeDecimal, change.NewColumn.DataType)
 	assert.Equal(t, 18, change.NewColumn.Precision)
 	assert.Equal(t, 4, change.NewColumn.Scale)
+}
+
+func TestCompare_DecimalOverrideDoesNotNarrowExistingValues(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 18, Scale: 2,
+	}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 20, Scale: 8,
+	}}}
+	overrides, err := ParseColumnOverrides("amount:decimal(18,2)")
+	require.NoError(t, err)
+
+	comparison, err := Compare(source, dest, &CompareOptions{Overrides: overrides})
+	require.NoError(t, err)
+	require.Len(t, comparison.Changes, 1)
+	require.Equal(t, 24, comparison.Changes[0].NewColumn.Precision)
+	require.Equal(t, 8, comparison.Changes[0].NewColumn.Scale)
 }
 
 func TestColumnOverrides_GetForColumn_SnakeCase(t *testing.T) {

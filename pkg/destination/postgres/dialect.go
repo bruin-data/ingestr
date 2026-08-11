@@ -8,6 +8,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
+// maxPostgresVarcharLength is the maximum length PostgreSQL allows for
+// VARCHAR(n). Longer requested lengths fall back to unbounded TEXT.
+const maxPostgresVarcharLength = 10485760
+
 // Dialect implements the destination.Dialect interface for PostgreSQL.
 type Dialect struct{}
 
@@ -37,6 +41,11 @@ func (d *Dialect) SupportsAlterType() bool {
 	return true
 }
 
+func (d *Dialect) RelaxColumnNullabilitySQL(table, colName string) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL",
+		destination.QuoteTableName(table), d.QuoteIdentifier(colName))
+}
+
 func (d *Dialect) TypeName(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
@@ -59,7 +68,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 		}
 		return "NUMERIC"
 	case schema.TypeString:
-		if col.MaxLength > 0 {
+		if col.MaxLength > 0 && col.MaxLength <= maxPostgresVarcharLength {
 			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
 		return "TEXT"

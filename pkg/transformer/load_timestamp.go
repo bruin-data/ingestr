@@ -103,8 +103,9 @@ func (t *LoadTimestamp) timestampArray(numRows int64) arrow.Array {
 	defer builder.Release()
 
 	value := arrow.Timestamp(t.timestamp.UnixMicro())
+	builder.Reserve(int(numRows))
 	for i := int64(0); i < numRows; i++ {
-		builder.Append(value)
+		builder.UnsafeAppend(value)
 	}
 	return builder.NewArray()
 }

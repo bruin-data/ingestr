@@ -117,6 +117,14 @@ func (s *VitessCDCSource) HandlesIncrementality() bool {
 	return true
 }
 
+func (s *VitessCDCSource) SupportsStreaming() bool {
+	return true
+}
+
+func (s *VitessCDCSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
 func (s *VitessCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	if req.Name == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -241,6 +249,10 @@ func (s *VitessCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRea
 	go func() {
 		defer close(results)
 		if err := s.runVStream(ctx, targets, resumeByBare, opts.ReadOptions, results); err != nil {
+			if opts.Streaming {
+				_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
+			}
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -282,6 +294,10 @@ func (t *VitessCDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-c
 			resumeByBare[bare] = lsn
 		}
 		if err := t.source.runVStream(ctx, []vitessCDCTarget{target}, resumeByBare, opts, results); err != nil {
+			if opts.Streaming {
+				_ = emitMySQLCDCResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
+			}
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -347,6 +363,11 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 	}
 	defer func() { _ = cc.Close() }()
 
+	if opts.Streaming && len(plan.fresh) > 0 && len(plan.resume) > 0 {
+		return fmt.Errorf("vitess CDC streaming cannot start with a mix of new tables and resumed tables; " +
+			"run once without --stream to establish cursors for the new tables, or use --full-refresh to rebuild all selected tables")
+	}
+
 	if len(plan.fresh) > 0 && len(plan.resume) > 0 {
 		names := make([]string, 0, len(plan.fresh))
 		for _, t := range plan.fresh {
@@ -357,26 +378,22 @@ func (s *VitessCDCSource) runVStream(ctx context.Context, targets []vitessCDCTar
 
 	ordinal := plan.ordinal
 	if len(plan.fresh) > 0 {
-		if err := s.streamVGroup(ctx, cc, plan.fresh, freshVitessVGtid(s.keyspace, shards), false, &ordinal, shards, opts, results); err != nil {
+		if err := s.streamVGroup(ctx, cc, plan.fresh, freshVitessVGtid(s.keyspace, shards), false, &ordinal, shards, opts, results, !opts.Streaming); err != nil {
 			return err
 		}
 	}
 	if len(plan.resume) > 0 {
-		if err := s.streamVGroup(ctx, cc, plan.resume, plan.resumeVGtid, true, &ordinal, shards, opts, results); err != nil {
+		if err := s.streamVGroup(ctx, cc, plan.resume, plan.resumeVGtid, true, &ordinal, shards, opts, results, !opts.Streaming); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// streamVGroup opens one VStream for a group of tables sharing a start position
-// and drives the copy + streaming phases, emitting CDC batches via the shared
-// change buffers. Batch semantics: the current per-shard positions are captured
-// up front as the stop boundary, and the stream ends at the first transaction
-// boundary at which the copy phase (if any) has completed and every shard has
-// reached that boundary — so a run processes everything up to its start moment
-// and then stops, even under sustained write traffic (microbatches).
-func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn, targets []vitessCDCTarget, startVGtid *binlogdatapb.VGtid, fromResume bool, ordinal *uint64, shards []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+// streamVGroup opens one VStream for a group of tables sharing a start position.
+// With stopAtBoundary, the current per-shard positions are captured up front
+// and the stream ends once copy has completed and every shard has reached them.
+func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn, targets []vitessCDCTarget, startVGtid *binlogdatapb.VGtid, fromResume bool, ordinal *uint64, shards []string, opts source.ReadOptions, results chan<- source.RecordBatchResult, stopAtBoundary bool) error {
 	schemaByTable := make(map[string]*schema.TableSchema, len(targets))
 	resultByTable := make(map[string]string, len(targets))
 	rules := make([]*binlogdatapb.Rule, 0, len(targets))
@@ -386,9 +403,13 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 		rules = append(rules, &binlogdatapb.Rule{Match: t.bareName, Filter: "select * from " + t.bareName})
 	}
 
-	stopByShard, err := s.peekVitessPositions(ctx, cc, rules, shards)
-	if err != nil {
-		return err
+	stopByShard := map[string]string{}
+	if stopAtBoundary {
+		var err error
+		stopByShard, err = s.peekVitessPositions(ctx, cc, rules, shards)
+		if err != nil {
+			return err
+		}
 	}
 	copyPending := vitessPendingCopyShards(startVGtid, fromResume, shards)
 	config.Debug("[SOURCE] Vitess CDC: group tables=%d fromResume=%v stop=%v copyPending=%d", len(targets), fromResume, stopByShard, len(copyPending))
@@ -396,12 +417,15 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 	// A resumed group with no interrupted copy that already sits at or beyond the
 	// stop boundary has nothing to stream; skip it rather than wait out an idle
 	// heartbeat interval.
-	if fromResume && len(copyPending) == 0 && vitessCaughtUp(startVGtid, stopByShard, s.keyspace) {
+	if stopAtBoundary && fromResume && len(copyPending) == 0 && vitessCaughtUp(startVGtid, stopByShard, s.keyspace) {
 		config.Debug("[SOURCE] Vitess CDC: resume group already caught up; skipping")
 		return nil
 	}
 
-	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(ctx, &vtgatepb.VStreamRequest{
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	reader, err := vtgateservicepb.NewVitessClient(cc).VStream(streamCtx, &vtgatepb.VStreamRequest{
 		TabletType: topodatapb.TabletType_PRIMARY,
 		Vgtid:      startVGtid,
 		Filter:     &binlogdatapb.Filter{Rules: rules},
@@ -418,7 +442,7 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 	var txnRows []vitessTxnRow
 	idleHeartbeat := false
 
-	flushTxn := func() error {
+	flushTxn := func(sendCtx context.Context) error {
 		if len(txnRows) == 0 {
 			return nil
 		}
@@ -435,7 +459,7 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 				lsn:     formatVitessLSN(*ordinal, i, payload),
 				deleted: r.deleted,
 			}
-			if err := appendMySQLCDCBufferedChanges(buffers, r.bareName, schemaByTable[r.bareName], resultByTable[r.bareName], []mysqlCDCChange{change}, batchSize, results); err != nil {
+			if err := appendMySQLCDCBufferedChangesWithTokenContext(sendCtx, buffers, r.bareName, schemaByTable[r.bareName], resultByTable[r.bareName], []mysqlCDCChange{change}, batchSize, results, nil); err != nil {
 				return err
 			}
 		}
@@ -443,26 +467,78 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 		txnRows = txnRows[:0]
 		return nil
 	}
+	flushBuffers := func(sendCtx context.Context) error {
+		return flushMySQLCDCChangeBuffersWithTokenContext(sendCtx, buffers, results, nil)
+	}
+	committedSendContext := func() (context.Context, context.CancelFunc) {
+		if opts.Streaming && ctx.Err() != nil {
+			return detachedMySQLCDCStreamDrainContext(ctx)
+		}
+		return ctx, func() {}
+	}
+	flushCommittedTxn := func() error {
+		sendCtx, cancel := committedSendContext()
+		defer cancel()
+		return flushTxn(sendCtx)
+	}
+	flushCommittedBuffers := func() error {
+		sendCtx, cancel := committedSendContext()
+		defer cancel()
+		return flushBuffers(sendCtx)
+	}
+	drainCommittedBuffers := func() error {
+		if !opts.Streaming {
+			return nil
+		}
+		return flushCommittedBuffers()
+	}
+	var flushTicks <-chan time.Time
+	if opts.Streaming {
+		flushTicker := time.NewTicker(mysqlCDCStreamingFlushInterval(opts))
+		defer flushTicker.Stop()
+		flushTicks = flushTicker.C
+	}
+	recvCh := receiveVitessVStream(streamCtx, reader)
 
 	for {
+		var resp *vtgatepb.VStreamResponse
 		select {
 		case <-ctx.Done():
+			if err := drainCommittedBuffers(); err != nil {
+				return err
+			}
 			return ctx.Err()
-		default:
-		}
-
-		resp, err := reader.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				if ferr := flushTxn(); ferr != nil {
-					return ferr
-				}
-				return flushMySQLCDCChangeBuffers(buffers, results)
+		case <-flushTicks:
+			if err := flushCommittedBuffers(); err != nil {
+				return err
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("vstream receive failed: %w", err)
+			continue
+		case received := <-recvCh:
+			resp = received.resp
+			if received.err != nil {
+				if ctx.Err() != nil {
+					if err := drainCommittedBuffers(); err != nil {
+						return err
+					}
+					return ctx.Err()
+				}
+				if errors.Is(received.err, io.EOF) {
+					if ferr := flushTxn(ctx); ferr != nil {
+						return ferr
+					}
+					if ferr := flushBuffers(ctx); ferr != nil {
+						return ferr
+					}
+					if opts.Streaming {
+						return fmt.Errorf("vitess VStream ended unexpectedly")
+					}
+					return nil
+				}
+				return fmt.Errorf("vstream receive failed: %w", received.err)
+			}
 		}
 
 		for _, ev := range resp.Events {
@@ -505,12 +581,12 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 				// events and sends no COMMIT, so flush here to bound memory and
 				// capture copy rows. During streaming txnRows is already empty
 				// at this point (the prior COMMIT flushed it), so this is a no-op.
-				if err := flushTxn(); err != nil {
+				if err := flushCommittedTxn(); err != nil {
 					return err
 				}
 
 			case binlogdatapb.VEventType_COMMIT:
-				if err := flushTxn(); err != nil {
+				if err := flushCommittedTxn(); err != nil {
 					return err
 				}
 
@@ -541,12 +617,39 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 		// fresh copy of an empty table on an idle keyspace emits no VGTID):
 		// vtgate sends it only when nothing was delivered for a full interval,
 		// which after a completed copy means the stream is fully caught up.
-		if len(copyPending) == 0 && len(txnRows) == 0 && (idleHeartbeat || vitessCaughtUp(latestVGtid, stopByShard, s.keyspace)) {
+		if stopAtBoundary && len(copyPending) == 0 && len(txnRows) == 0 && (idleHeartbeat || vitessCaughtUp(latestVGtid, stopByShard, s.keyspace)) {
 			config.Debug("[SOURCE] Vitess CDC: caught up to stop boundary; finishing batch")
-			return flushMySQLCDCChangeBuffers(buffers, results)
+			return flushBuffers(ctx)
 		}
 		idleHeartbeat = false
 	}
+}
+
+type vitessVStreamReceiver interface {
+	Recv() (*vtgatepb.VStreamResponse, error)
+}
+
+type vitessVStreamReceiveResult struct {
+	resp *vtgatepb.VStreamResponse
+	err  error
+}
+
+func receiveVitessVStream(ctx context.Context, reader vitessVStreamReceiver) <-chan vitessVStreamReceiveResult {
+	results := make(chan vitessVStreamReceiveResult, 1)
+	go func() {
+		for {
+			resp, err := reader.Recv()
+			select {
+			case results <- vitessVStreamReceiveResult{resp: resp, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return results
 }
 
 // vitessStartPlan partitions targets by resume-cursor availability and carries
@@ -957,6 +1060,7 @@ func decodeVitessVGtid(payload string) (*binlogdatapb.VGtid, error) {
 
 var (
 	_ source.Source           = (*VitessCDCSource)(nil)
+	_ source.StreamingSource  = (*VitessCDCSource)(nil)
 	_ source.MultiTableSource = (*VitessCDCSource)(nil)
 	_ source.SourceTable      = (*VitessCDCTable)(nil)
 )

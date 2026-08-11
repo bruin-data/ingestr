@@ -22,6 +22,16 @@ func FormatLSN(lsn pglogrepl.LSN) string {
 	return fmt.Sprintf("%08X/%08X", uint32(lsn>>32), uint32(lsn))
 }
 
+// FormatChangeLSN extends the durable PostgreSQL position with a fixed-width
+// transaction-local sequence. The raw LSN remains the sortable prefix used by
+// checkpoints, while row merges gain a deterministic last-operation order.
+func FormatChangeLSN(lsn pglogrepl.LSN, sequence uint64) string {
+	if sequence == 0 {
+		return FormatLSN(lsn)
+	}
+	return fmt.Sprintf("%s/%016X", FormatLSN(lsn), sequence)
+}
+
 type CDCTable struct {
 	source      *PostgresCDCSource
 	tableName   string
@@ -32,6 +42,9 @@ type CDCTable struct {
 
 func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, error) {
 	ctx := context.Background()
+	if err := src.validateTablePublished(ctx, req.Name); err != nil {
+		return nil, err
+	}
 
 	// Fetch schema from database
 	tableSchema, err := getTableSchema(ctx, src.queryPool, req.Name)
@@ -107,7 +120,7 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 		// Start reading
 		batches, err := reader.Read(ctx, opts)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to start CDC read: %w", err)}
+			_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("failed to start CDC read: %w", err)})
 			return
 		}
 
@@ -116,21 +129,37 @@ func (t *CDCTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan so
 
 		for batch := range batches {
 			if batch.Err != nil {
-				results <- batch
+				_ = sendResult(ctx, results, batch)
+				drainRecordBatchResults(batches)
 				return
 			}
 
-			batchNum++
-			totalRows += batch.Batch.NumRows()
-			config.Debug("[CDC] Batch %d: %d rows (total: %d)", batchNum, batch.Batch.NumRows(), totalRows)
+			// Streaming results without a batch still matter: bare commit
+			// tokens and schema-change announcements (TableInfo).
+			if batch.Batch != nil {
+				batchNum++
+				totalRows += batch.Batch.NumRows()
+				config.Debug("[CDC] Batch %d: %d rows (total: %d)", batchNum, batch.Batch.NumRows(), totalRows)
+			}
 
-			results <- batch
+			if err := sendResult(ctx, results, batch); err != nil {
+				drainRecordBatchResults(batches)
+				return
+			}
 		}
 
 		config.Debug("[CDC] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
 	}()
 
 	return results, nil
+}
+
+func drainRecordBatchResults(results <-chan source.RecordBatchResult) {
+	for result := range results {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
 }
 
 func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*schema.TableSchema, error) {
@@ -241,6 +270,16 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		return nil, fmt.Errorf("error iterating primary key rows: %w", err)
 	}
 
+	// A table without a primary key can still declare row identity via
+	// REPLICA IDENTITY USING INDEX. Those columns are what pgoutput keys old
+	// tuples by, so they serve as merge keys exactly like a primary key would.
+	if len(primaryKeys) == 0 {
+		primaryKeys, err = replicaIdentityIndexColumns(ctx, pool, schemaName, tableName)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	for i := range columns {
 		for _, pk := range primaryKeys {
 			if columns[i].Name == pk {
@@ -256,6 +295,41 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
 	}, nil
+}
+
+// replicaIdentityIndexColumns returns the columns of the table's replica
+// identity index (REPLICA IDENTITY USING INDEX), in index column order, or nil
+// when the table has none.
+func replicaIdentityIndexColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]string, error) {
+	const q = `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+		WHERE n.nspname = $1 AND c.relname = $2
+		  AND i.indisreplident AND i.indisvalid
+		ORDER BY k.ord
+	`
+	rows, err := pool.Query(ctx, q, schemaName, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query replica identity index: %w", err)
+	}
+	defer func() { rows.Close() }()
+
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan replica identity column: %w", err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating replica identity columns: %w", err)
+	}
+	return columns, nil
 }
 
 func addCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {

@@ -4,7 +4,12 @@
 #     "pyspark>=3.5,<3.6",
 # ]
 # ///
-"""Single-node Spark ingestion benchmark."""
+"""Single-node Spark ingestion benchmark.
+
+JDBC range partitioning is opt-in. Set BENCH_SPARK_PARTITIONED_READ=true to
+enable it, then optionally tune BENCH_SPARK_PARTITION_COLUMN,
+BENCH_SPARK_LOWER_BOUND, and BENCH_SPARK_NUM_PARTITIONS.
+"""
 
 import argparse
 import os
@@ -50,6 +55,17 @@ def int_env(name: str, default: int) -> int:
     if not value:
         return default
     return int(value)
+
+
+def bool_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value.lower() in ("1", "true", "yes", "on"):
+        return True
+    if value.lower() in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be a boolean value")
 
 
 def default_partitions() -> int:
@@ -211,8 +227,9 @@ def read_source(spark: SparkSession, args) -> object:
         options["customSchema"] = "json_val STRING"
 
     rows = args.rows or int(os.environ.get("BENCH_ROWS") or "0")
+    partitioned_read = bool_env("BENCH_SPARK_PARTITIONED_READ")
     partition_column = os.environ.get("BENCH_SPARK_PARTITION_COLUMN", "id")
-    if rows > 1 and partition_column:
+    if partitioned_read and rows > 1 and partition_column:
         options["partitionColumn"] = partition_column
         options["lowerBound"] = os.environ.get("BENCH_SPARK_LOWER_BOUND", "1")
         options["upperBound"] = str(rows)

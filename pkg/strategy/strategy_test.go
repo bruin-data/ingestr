@@ -20,6 +20,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +41,80 @@ type fakeSourceTable struct {
 
 	readCh  <-chan source.RecordBatchResult
 	readErr error
+}
+
+func TestMultiTableColumnRenamingRewritesCDCMarkers(t *testing.T) {
+	ctx := context.Background()
+	job := &MultiTableIngestionJob{
+		ColumnRenamers: map[string]*transformer.ColumnRenamer{
+			"public.items": transformer.NewColumnRenamer(map[string]string{"configData": "config_data"}),
+		},
+	}
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: cdcRenameRecordBatch(t, "configData", nil, `["configData"]`)}
+	close(records)
+
+	result := <-job.ApplyBatchTransformation(ctx, records)
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+	require.Equal(t, "config_data", result.Batch.Schema().Field(0).Name)
+	require.Equal(t, `["config_data"]`, result.Batch.Column(1).(*array.String).Value(0))
+}
+
+func TestMultiTableDynamicAnnouncementInstallsColumnRenamer(t *testing.T) {
+	ctx := context.Background()
+	job := &MultiTableIngestionJob{
+		Destination: &fakeDestination{},
+		NormalizeTableInfo: func(_ context.Context, table source.SourceTableInfo, _ string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
+			table.Schema = &schema.TableSchema{Columns: []schema.Column{
+				{Name: "config_data", DataType: schema.TypeString},
+				{Name: destination.CDCUnchangedColsColumn, DataType: schema.TypeString},
+			}}
+			return table, transformer.NewColumnRenamer(map[string]string{"configData": "config_data"}), nil
+		},
+	}
+	rawInfo := source.SourceTableInfo{Name: "public.items", Schema: &schema.TableSchema{Columns: []schema.Column{
+		{Name: "configData", DataType: schema.TypeString},
+		{Name: destination.CDCUnchangedColsColumn, DataType: schema.TypeString},
+	}}}
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{TableName: rawInfo.Name, TableInfo: &rawInfo}
+	records <- source.RecordBatchResult{TableName: rawInfo.Name, Batch: cdcRenameRecordBatch(t, "configData", nil, `["configData"]`)}
+	close(records)
+
+	out := job.ApplyBatchTransformation(ctx, records)
+	announcement := <-out
+	require.NoError(t, announcement.Err)
+	require.Equal(t, "config_data", announcement.TableInfo.Schema.Columns[0].Name)
+	result := <-out
+	require.NoError(t, result.Err)
+	require.Equal(t, "config_data", result.Batch.Schema().Field(0).Name)
+	require.Equal(t, `["config_data"]`, result.Batch.Column(1).(*array.String).Value(0))
+	result.Batch.Release()
+}
+
+func cdcRenameRecordBatch(t *testing.T, dataColumn string, value *string, marker string) arrow.RecordBatch {
+	t.Helper()
+	dataBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	if value == nil {
+		dataBuilder.AppendNull()
+	} else {
+		dataBuilder.Append(*value)
+	}
+	markerBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	markerBuilder.Append(marker)
+	data := dataBuilder.NewArray()
+	markers := markerBuilder.NewArray()
+	dataBuilder.Release()
+	markerBuilder.Release()
+	record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{
+		{Name: dataColumn, Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: destination.CDCUnchangedColsColumn, Type: arrow.BinaryTypes.String},
+	}, nil), []arrow.Array{data, markers}, 1)
+	data.Release()
+	markers.Release()
+	return record
 }
 
 func (t *fakeSourceTable) Name() string {
@@ -91,6 +166,7 @@ type fakeDestination struct {
 	prepareCalls  []destination.PrepareOptions
 	writeCalls    []destination.WriteOptions
 	swapCalls     [][2]string
+	swapOptions   []destination.SwapOptions
 	mergeCalls    []destination.MergeOptions
 	diCalls       []destination.DeleteInsertOptions
 	dropCalls     []string
@@ -112,6 +188,8 @@ type fakeDestination struct {
 	noDeleteInsert    bool
 	evolutionWarnings []string
 	evolutionErr      error
+
+	tableSchemas map[string]*schema.TableSchema
 }
 
 func (d *fakeDestination) Schemes() []string                             { return nil }
@@ -155,6 +233,9 @@ func (d *fakeDestination) SupportsAtomicSwap() bool           { return true }
 func (d *fakeDestination) GetScheme() string                  { return "fake" }
 
 func (d *fakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
+	if d.tableSchemas != nil {
+		return d.tableSchemas[table], nil
+	}
 	return nil, nil
 }
 
@@ -196,6 +277,7 @@ func (d *fakeDestination) SwapTable(ctx context.Context, opts destination.SwapOp
 	d.mu.Lock()
 	d.calls = append(d.calls, "SwapTable")
 	d.swapCalls = append(d.swapCalls, [2]string{opts.StagingTable, opts.TargetTable})
+	d.swapOptions = append(d.swapOptions, opts)
 	swapErr := d.swapErr
 	d.mu.Unlock()
 	return swapErr
@@ -266,6 +348,18 @@ type fakeReplaceStagingPolicyProvider struct {
 	*fakeDestination
 
 	policy destination.ReplaceStagingPolicy
+}
+
+type fakeReplaceStagingPrimaryKeyDeferrer struct {
+	*fakeDestination
+}
+
+func (d *fakeReplaceStagingPrimaryKeyDeferrer) DeferReplaceStagingPrimaryKey() bool {
+	return true
+}
+
+func (d *fakeReplaceStagingPrimaryKeyDeferrer) DeferredReplaceStagingParallelism() int {
+	return 12
 }
 
 func (d *fakeReplaceStagingPolicyProvider) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {

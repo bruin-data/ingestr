@@ -18,6 +18,16 @@ import (
 // spinning forever on a 100ms read timeout that masks the dead socket.
 const deadConnectionTimeout = 2 * time.Minute
 
+// silenceProbeAfter is how long the server may stay silent before the next
+// standby status update requests an explicit reply. The server only sends
+// keepalives on its own when the standby has been quiet for
+// wal_sender_timeout/2, and we send status every 10s — so a healthy connection
+// to a quiet database receives nothing at all, indefinitely. Probing
+// distinguishes quiet from dead: a live server answers immediately (resetting
+// the silence clock), so deadConnectionTimeout only fires on connections that
+// stay silent even when asked to reply.
+const silenceProbeAfter = 30 * time.Second
+
 // receiveTimeout bounds a single ReceiveMessage call. It governs how quickly the
 // loop reacts to context cancellation and flushes idle batches. It must not be
 // too small: churning the replication connection's read deadline every few
@@ -25,6 +35,11 @@ const deadConnectionTimeout = 2 * time.Minute
 // connection so the server stops delivering WAL. One second keeps the loop
 // responsive while leaving the deadline stable enough to avoid that race.
 const receiveTimeout = 1 * time.Second
+
+// streamHeartbeatInterval bounds slot lag while published tables are idle. The
+// heartbeat is decoded through pgoutput, so its LSN is an ordered, safe commit
+// point rather than the database-wide WAL head reported by a keepalive.
+const streamHeartbeatInterval = 10 * time.Second
 
 // streamPosition holds the LSN the pipeline has confirmed durable (flushed and
 // merged into the destination). The pipeline goroutine advances it via
@@ -54,6 +69,34 @@ func (p *streamPosition) Commit(lsn pglogrepl.LSN) {
 
 func (p *streamPosition) Committed() pglogrepl.LSN {
 	return pglogrepl.LSN(p.committed.Load())
+}
+
+// lagState tracks the server's WAL head so replication lag can be reported as
+// serverHead - pos.Committed(), which is what the slot's
+// pg_current_wal_lsn() - confirmed_flush_lsn shows. It lives on the source, not
+// the replicator: replicators are rebuilt on reconnect and on new-table
+// discovery, which would otherwise reset the head. Written by the replication
+// goroutine and read by the metrics scraper, so every field is atomic.
+type lagState struct {
+	serverHead atomic.Uint64
+	streaming  atomic.Bool
+}
+
+func newLagState() *lagState {
+	return &lagState{}
+}
+
+func (l *lagState) observe(serverWALEnd pglogrepl.LSN) {
+	storeMax(&l.serverHead, uint64(serverWALEnd))
+}
+
+func storeMax(dst *atomic.Uint64, v uint64) {
+	for {
+		cur := dst.Load()
+		if v <= cur || dst.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 // lowWaterReporter exposes the in-flight position state needed to compute a
@@ -93,8 +136,8 @@ func safeCommitLSN(repl lowWaterReporter, accum *batchAccumulator) pglogrepl.LSN
 
 // emitIdleCommitToken sends a bare CommitToken (no batch) on results when the
 // stream has caught up past lastEmitted. This lets the pipeline confirm the
-// replication slot over WAL that produced no rows for this slot (changes to
-// unpublished tables, keepalives advancing the received position). Without it,
+// replication slot over WAL that produced no rows for this slot. Logical
+// heartbeats advance the decoded position across unpublished-table WAL. Without it,
 // an idle or low-traffic stream never advances the slot's confirmed_flush_lsn,
 // so retained WAL and replica lag grow without bound even though the
 // destination is fully caught up. The safe position already excludes any change
@@ -108,29 +151,59 @@ func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batc
 	if safe <= lastEmitted {
 		return lastEmitted
 	}
-	select {
-	case results <- source.RecordBatchResult{CommitToken: safe}:
+	if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: checkpointCommitToken(safe)}); err == nil {
 		return safe
-	case <-ctx.Done():
-		return lastEmitted
+	}
+	return lastEmitted
+}
+
+type streamHeartbeatEmitter interface {
+	EmitStreamHeartbeat(ctx context.Context) error
+}
+
+func maybeEmitStreamHeartbeat(ctx context.Context, repl any, last time.Time) time.Time {
+	now := time.Now()
+	if now.Sub(last) < streamHeartbeatInterval {
+		return last
+	}
+	emitter, ok := repl.(streamHeartbeatEmitter)
+	if !ok {
+		return now
+	}
+	_ = emitter.EmitStreamHeartbeat(ctx)
+	return now
+}
+
+func checkpointCommitToken(lsn pglogrepl.LSN) source.CDCStateCommitToken {
+	position := ""
+	if lsn > 0 {
+		position = FormatLSN(lsn)
+	}
+	return source.CDCStateCommitToken{SourceCommitToken: lsn, Position: position}
+}
+
+func snapshotCommitToken(lsn pglogrepl.LSN, snapshots map[string]string) source.CDCStateCommitToken {
+	return source.CDCStateCommitToken{
+		SourceCommitToken: lsn,
+		Position:          FormatLSN(lsn),
+		SnapshotPositions: snapshots,
 	}
 }
 
 // standbyUpdate computes the standby status positions to report to Postgres.
-// In streaming mode the flushed/applied positions track the confirmed durable
-// LSN (committed) rather than the received position, so the slot only advances
-// once data is durable. committed==0 (nothing confirmed yet) falls back to the
-// replication start LSN so pglogrepl does not default the flush position to the
-// received position.
+// The flushed/applied positions track the confirmed durable LSN rather than
+// the received position, so the slot only advances once data is durable.
+// committed==0 falls back to the replication start LSN. Positions must always
+// be explicit because pglogrepl replaces zero flush/apply with write.
 func standbyUpdate(streaming bool, received, committed, start pglogrepl.LSN) pglogrepl.StandbyStatusUpdate {
-	ssu := pglogrepl.StandbyStatusUpdate{WALWritePosition: received}
-	if !streaming {
-		return ssu
+	flush := pglogrepl.LSN(0)
+	if streaming {
+		flush = committed
 	}
-	flush := committed
 	if flush == 0 {
 		flush = start
 	}
+	ssu := pglogrepl.StandbyStatusUpdate{WALWritePosition: max(received, flush)}
 	ssu.WALFlushPosition = flush
 	ssu.WALApplyPosition = flush
 	return ssu

@@ -72,7 +72,7 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 
 	case ContractDiscardRow:
 		for _, change := range comparison.Changes {
-			if change.Type == ChangeRemoveColumn || isInternalAllowedChange(change) {
+			if isDiscardRowAllowedChange(change) {
 				result.Allowed = append(result.Allowed, change)
 			} else {
 				result.Violations = append(result.Violations, ContractViolation{
@@ -85,7 +85,7 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 
 	case ContractDiscardValue:
 		for _, change := range comparison.Changes {
-			if change.Type == ChangeAddColumn || change.Type == ChangeRemoveColumn {
+			if change.Type == ChangeAddColumn || change.Type == ChangeRemoveColumn || change.Type == ChangeRelaxNullability {
 				result.Allowed = append(result.Allowed, change)
 			} else {
 				result.Violations = append(result.Violations, ContractViolation{
@@ -104,6 +104,10 @@ func isInternalAllowedChange(change SchemaChange) bool {
 	return change.Type == ChangeAddColumn && strings.EqualFold(change.ColumnName, naming.IngestrLoadedAtColumn)
 }
 
+func isDiscardRowAllowedChange(change SchemaChange) bool {
+	return change.Type == ChangeRemoveColumn || change.Type == ChangeRelaxNullability || isInternalAllowedChange(change)
+}
+
 func describeChange(change SchemaChange) string {
 	switch change.Type {
 	case ChangeAddColumn:
@@ -120,6 +124,8 @@ func describeChange(change SchemaChange) string {
 		return fmt.Sprintf("type override to %s", change.NewColumn.DataType)
 	case ChangeRemoveColumn:
 		return "column removed from source (future values will be NULL)"
+	case ChangeRelaxNullability:
+		return "column changed from required to optional"
 	default:
 		return "unknown change"
 	}

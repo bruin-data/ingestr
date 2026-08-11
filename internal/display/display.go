@@ -30,8 +30,8 @@ func PrintSummary(cfg *config.IngestConfig) {
 	yellow := color.New(color.FgYellow, color.Bold).SprintFunc()
 	magenta := color.New(color.FgMagenta).SprintFunc()
 
-	fmt.Print("\n\n")
-	fmt.Println(green("Initiated the pipeline with the following:"))
+	output.Statusf("\n\n")
+	output.Statusf("%s\n", green("Initiated the pipeline with the following:"))
 
 	printConnectionLine := func(label string, display []string, suffix string) {
 		value := "unknown"
@@ -42,9 +42,9 @@ func PrintSummary(cfg *config.IngestConfig) {
 			value = fmt.Sprintf("%s / %s", value, suffix)
 		}
 
-		fmt.Printf("%s %s\n", yellow(label), value)
+		output.Statusf("%s %s\n", yellow(label), value)
 		for _, extra := range display[1:] {
-			fmt.Printf("  %s\n", extra)
+			output.Statusf("  %s\n", extra)
 		}
 	}
 
@@ -64,14 +64,14 @@ func PrintSummary(cfg *config.IngestConfig) {
 		pkValue = magenta(pkValue)
 	}
 
-	fmt.Printf("%s %s\n", yellow("Incremental Strategy:"), strategyValue)
-	fmt.Printf("%s %s\n", yellow("Incremental Key:"), keyValue)
-	fmt.Printf("%s %s\n", yellow("Primary Key:"), pkValue)
+	output.Statusf("%s %s\n", yellow("Incremental Strategy:"), strategyValue)
+	output.Statusf("%s %s\n", yellow("Incremental Key:"), keyValue)
+	output.Statusf("%s %s\n", yellow("Primary Key:"), pkValue)
 	if cfg.SchemaNaming != string(naming.Default) && cfg.SchemaNaming != "" {
-		fmt.Printf("%s %s\n", yellow("Schema naming:"), cfg.SchemaNaming)
+		output.Statusf("%s %s\n", yellow("Schema naming:"), cfg.SchemaNaming)
 	}
 
-	fmt.Print("\n\n")
+	output.Statusf("\n\n")
 }
 
 func displayFromURI(rawURI string) []string {

@@ -29,6 +29,8 @@ import (
 // msg_id+data envelope, offsets are committed only after a flush (a second run
 // in the same group reads nothing new), and the stream exits on cancellation.
 func TestKafka_Streaming(t *testing.T) {
+	requireDocker(t)
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

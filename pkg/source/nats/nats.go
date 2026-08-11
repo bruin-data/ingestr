@@ -41,7 +41,7 @@ type natsConfig struct {
 }
 
 type natsCommitToken struct {
-	MaxSeq uint64
+	MaxPendingSeq uint64
 }
 
 type NATSSource struct {
@@ -49,8 +49,9 @@ type NATSSource struct {
 	nc  *natsgo.Conn
 	js  natsgo.JetStreamContext
 
-	mu      sync.Mutex
-	pending map[uint64]*natsgo.Msg
+	mu             sync.Mutex
+	nextPendingSeq uint64
+	pending        map[uint64]*natsgo.Msg
 }
 
 func NewNATSSource() *NATSSource {
@@ -85,7 +86,7 @@ func (s *NATSSource) Connect(_ context.Context, raw string) error {
 	s.cfg = cfg
 	s.nc = nc
 	s.js = js
-	config.Debug("[NATS] Connected to %s", cfg.URL)
+	config.Debug("[NATS] Connected to %s", sanitizeNATSURL(cfg.URL))
 	return nil
 }
 
@@ -177,14 +178,20 @@ func parseNATSURI(raw string) (natsConfig, error) {
 	if err != nil {
 		return natsConfig{}, fmt.Errorf("invalid NATS URI: %w", err)
 	}
-	switch u.Scheme {
+	switch strings.ToLower(u.Scheme) {
 	case "nats":
 	default:
 		return natsConfig{}, fmt.Errorf("invalid NATS URI: unsupported scheme %q", u.Scheme)
 	}
+	if u.Hostname() == "" {
+		return natsConfig{}, fmt.Errorf("nats URI: host is required")
+	}
 	q := u.Query()
 	durable := q.Get("durable")
-	bindConsumer := parseBool(firstQuery(q, "bind", "bind_consumer"))
+	bindConsumer, err := parseNATSBool(firstQuery(q, "bind", "bind_consumer"))
+	if err != nil {
+		return natsConfig{}, err
+	}
 	if durable == "" {
 		if consumer := firstQuery(q, "consumer", "consumer_name"); consumer != "" {
 			durable = consumer
@@ -236,9 +243,15 @@ func firstQuery(values url.Values, keys ...string) string {
 	return ""
 }
 
-func parseBool(value string) bool {
-	value = strings.TrimSpace(strings.ToLower(value))
-	return value == "1" || value == "true" || value == "yes"
+func parseNATSBool(value string) (bool, error) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "", "0", "false", "no":
+		return false, nil
+	case "1", "true", "yes":
+		return true, nil
+	default:
+		return false, fmt.Errorf("nats URI: bind must be a boolean")
+	}
 }
 
 func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -303,6 +316,7 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 
 	if opts.Streaming {
 		s.mu.Lock()
+		s.nextPendingSeq = 0
 		s.pending = make(map[uint64]*natsgo.Msg)
 		s.mu.Unlock()
 	}
@@ -318,12 +332,15 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 			if ctx.Err() != nil {
 				return
 			}
-			msgs, err := sub.Fetch(batchSize, natsgo.MaxWait(s.cfg.BatchTimeout))
+			fetchCtx, cancel := context.WithTimeout(ctx, s.cfg.BatchTimeout)
+			msgs, err := sub.Fetch(batchSize, natsgo.Context(fetchCtx))
+			timedOut := errors.Is(fetchCtx.Err(), context.DeadlineExceeded)
+			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				if errors.Is(err, natsgo.ErrTimeout) {
+				if timedOut || errors.Is(err, natsgo.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 					if !opts.Streaming {
 						return
 					}
@@ -341,6 +358,7 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 
 			items := make([]map[string]any, 0, len(msgs))
 			var maxSeq uint64
+			var maxPendingSeq uint64
 			var ackNow []*natsgo.Msg
 			reachedCutoff := false
 			for _, msg := range msgs {
@@ -356,7 +374,7 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 				}
 				if opts.Streaming {
 					items = append(items, messageToEnvelope(msg, meta))
-					s.trackPending(seq, msg)
+					maxPendingSeq = s.trackPending(msg)
 				} else {
 					items = append(items, messageToItem(msg, meta))
 					ackNow = append(ackNow, msg)
@@ -382,7 +400,7 @@ func (s *NATSSource) read(ctx context.Context, stream string, opts source.ReadOp
 			}
 			res := source.RecordBatchResult{Batch: record}
 			if opts.Streaming {
-				res.CommitToken = natsCommitToken{MaxSeq: maxSeq}
+				res.CommitToken = natsCommitToken{MaxPendingSeq: maxPendingSeq}
 			}
 			results <- res
 			for _, msg := range ackNow {
@@ -426,10 +444,13 @@ func (s *NATSSource) resolveBoundConsumerSubject(stream, durable string, opts so
 	}
 }
 
-func (s *NATSSource) trackPending(seq uint64, msg *natsgo.Msg) {
+func (s *NATSSource) trackPending(msg *natsgo.Msg) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.nextPendingSeq++
+	seq := s.nextPendingSeq
 	s.pending[seq] = msg
+	return seq
 }
 
 func (s *NATSSource) CommitStream(_ context.Context, token any) error {
@@ -440,7 +461,7 @@ func (s *NATSSource) CommitStream(_ context.Context, token any) error {
 	s.mu.Lock()
 	msgs := make([]*natsgo.Msg, 0)
 	for seq, msg := range s.pending {
-		if seq <= tok.MaxSeq {
+		if seq <= tok.MaxPendingSeq {
 			msgs = append(msgs, msg)
 			delete(s.pending, seq)
 		}
@@ -529,6 +550,15 @@ func digest128(value string) string {
 func safeName(value string) string {
 	replacer := strings.NewReplacer(".", "_", "-", "_", "/", "_", ">", "_", "*", "_")
 	return replacer.Replace(value)
+}
+
+func sanitizeNATSURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = url.User("***")
+	return u.String()
 }
 
 var (

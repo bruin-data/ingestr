@@ -32,13 +32,12 @@ const (
 		FROM (
 			SELECT unnest(constraint_column_names) as col
 			FROM duckdb_constraints()
-			WHERE database_name = current_database() AND table_name = ? AND constraint_type = 'PRIMARY KEY'
+			WHERE database_name = current_database() AND schema_name = ? AND table_name = ? AND constraint_type = 'PRIMARY KEY'
 		)
 	`
 
 	// Catalog-qualified variants, used when a catalog (attached database) is
-	// present in the table name. Parameters: (catalog, schema, table) and
-	// (catalog, table) respectively.
+	// present in the table name. Both queries accept (catalog, schema, table).
 	schemaQueryForCatalogSQL = `
 		SELECT
 			column_name,
@@ -54,7 +53,7 @@ const (
 		FROM (
 			SELECT unnest(constraint_column_names) as col
 			FROM duckdb_constraints()
-			WHERE database_name = ? AND table_name = ? AND constraint_type = 'PRIMARY KEY'
+			WHERE database_name = ? AND schema_name = ? AND table_name = ? AND constraint_type = 'PRIMARY KEY'
 		)
 	`
 )
@@ -219,6 +218,10 @@ func (d *Dialect) SchemaQuery() string {
 
 func (d *Dialect) PrimaryKeyQuery() string {
 	return primaryKeyQuerySQL
+}
+
+func (d *Dialect) EnforcesPrimaryKeys() bool {
+	return true
 }
 
 func (d *Dialect) SchemaQueryForCatalog() string {

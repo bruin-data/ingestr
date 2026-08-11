@@ -30,6 +30,9 @@ func MapDataTypeToDatabricks(col schema.Column) string {
 		}
 		return fmt.Sprintf("DECIMAL(%d,%d)", precision, scale)
 	case schema.TypeString:
+		if col.MaxLength > 0 && col.MaxLength <= 65535 {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
 		return "STRING"
 	case schema.TypeBinary:
 		return "BINARY"

@@ -65,6 +65,7 @@ func TestParseSchemaTable(t *testing.T) {
 		{"my_table", "doc", "my_table"},
 		{"my_schema.my_table", "my_schema", "my_table"},
 		{"doc.users", "doc", "users"},
+		{`"doc"."users"`, "doc", "users"},
 	}
 
 	for _, tt := range tests {

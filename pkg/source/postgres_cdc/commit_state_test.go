@@ -41,24 +41,24 @@ func TestStreamPosition_ConcurrentMax(t *testing.T) {
 
 func TestStandbyUpdate(t *testing.T) {
 	tests := []struct {
-		name        string
-		streaming   bool
-		received    pglogrepl.LSN
-		committed   pglogrepl.LSN
-		start       pglogrepl.LSN
-		wantWrite   pglogrepl.LSN
-		wantFlush   pglogrepl.LSN
-		wantApply   pglogrepl.LSN
-		flushIsZero bool
+		name      string
+		streaming bool
+		received  pglogrepl.LSN
+		committed pglogrepl.LSN
+		start     pglogrepl.LSN
+		wantWrite pglogrepl.LSN
+		wantFlush pglogrepl.LSN
+		wantApply pglogrepl.LSN
 	}{
 		{
-			name:        "batch mode reports only write position",
-			streaming:   false,
-			received:    500,
-			committed:   300,
-			start:       100,
-			wantWrite:   500,
-			flushIsZero: true, // pglogrepl defaults flush:=write when 0
+			name:      "batch mode keeps flush and apply at durable start",
+			streaming: false,
+			received:  500,
+			committed: 300,
+			start:     100,
+			wantWrite: 500,
+			wantFlush: 100,
+			wantApply: 100,
 		},
 		{
 			name:      "streaming reports committed as flush/apply",
@@ -80,16 +80,32 @@ func TestStandbyUpdate(t *testing.T) {
 			wantFlush: 100,
 			wantApply: 100,
 		},
+		{
+			name:      "streaming write covers later durable commit",
+			streaming: true,
+			received:  300,
+			committed: 500,
+			start:     100,
+			wantWrite: 500,
+			wantFlush: 500,
+			wantApply: 500,
+		},
+		{
+			name:      "batch write covers durable start",
+			streaming: false,
+			received:  50,
+			committed: 500,
+			start:     100,
+			wantWrite: 100,
+			wantFlush: 100,
+			wantApply: 100,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ssu := standbyUpdate(tt.streaming, tt.received, tt.committed, tt.start)
 			assert.Equal(t, tt.wantWrite, ssu.WALWritePosition)
-			if tt.flushIsZero {
-				assert.Equal(t, pglogrepl.LSN(0), ssu.WALFlushPosition, "flush must stay 0 in batch mode so behavior is unchanged")
-				return
-			}
 			assert.Equal(t, tt.wantFlush, ssu.WALFlushPosition)
 			assert.Equal(t, tt.wantApply, ssu.WALApplyPosition)
 		})
@@ -178,11 +194,20 @@ func TestSafeCommitLSN(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repl := &fakeReplicator{lsn: tt.currentLSN, pendingLowWater: tt.replLowWater}
-			accum := newBatchAccumulator(10000)
+			accum := testAccumulator(10000, "t")
 			for _, b := range tt.accumBatches {
-				accum.add("t", makeRowBatch(1), b.lsn)
+				accum.add("t", makeInsertChanges(1, 1, b.lsn), b.lsn)
 			}
-			defer accum.flushAll(make(chan source.RecordBatchResult, 16), nil)
+			defer func() {
+				results := make(chan source.RecordBatchResult, 16)
+				_ = accum.flushAll(results, nil)
+				close(results)
+				for res := range results {
+					if res.Batch != nil {
+						res.Batch.Release()
+					}
+				}
+			}()
 
 			got := safeCommitLSN(repl, accum)
 			assert.Equal(t, tt.want, got)
@@ -196,16 +221,16 @@ func TestSafeCommitLSN(t *testing.T) {
 func TestStreamLoopCumulativeTokens(t *testing.T) {
 	// Threshold 3 rows: table "small" gets a 1-row txn at LSN 100 (stays
 	// buffered); table "big" gets a 3-row txn at LSN 200 (flushes immediately).
-	accum := newBatchAccumulator(3)
+	accum := testAccumulator(3, "small", "big")
 	results := make(chan source.RecordBatchResult, 16)
 
 	repl := &fakeReplicator{lsn: 200}
 	token := func() any { return safeCommitLSN(repl, accum) }
 
-	accum.add("small", makeRowBatch(1), 100)
-	accum.add("big", makeNRowBatch(3), 200)
+	accum.add("small", makeInsertChanges(1, 1, 100), 100)
+	accum.add("big", makeInsertChanges(3, 10, 200), 200)
 
-	accum.flushReady(results, token)
+	require.NoError(t, accum.flushReady(results, token))
 	close(results)
 
 	var bigToken pglogrepl.LSN

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -60,7 +61,24 @@ func inferUnknownColumnType(arr arrow.Array) (arrow.DataType, bool) {
 }
 
 // DecodeUnknownValue decodes a JSON-encoded string from Unknown type storage.
+// Plain strings without escapes decode without going through encoding/json,
+// which matters on hot paths like casting CSV batches.
 func DecodeUnknownValue(raw string) (any, error) {
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		inner := raw[1 : len(raw)-1]
+		if isPlainJSONString(inner) {
+			return inner, nil
+		}
+	}
+	switch raw {
+	case "null":
+		return nil, nil
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+
 	dec := json.NewDecoder(bytes.NewBufferString(raw))
 	dec.UseNumber()
 	var v any
@@ -68,6 +86,18 @@ func DecodeUnknownValue(raw string) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+func isPlainJSONString(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' || s[i] == '"' || s[i] < 0x20 {
+			return false
+		}
+	}
+	return true
 }
 
 // StringValueAt extracts a string value from an arrow array at the given index.

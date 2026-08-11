@@ -40,6 +40,7 @@ type icebergCatalogTestEnv struct {
 }
 
 func TestIcebergCatalogBackends(t *testing.T) {
+	requireDocker(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -84,6 +85,43 @@ func TestIcebergCatalogBackends(t *testing.T) {
 				assert.Greater(t, countMinioObjects(t, ctx, env.client, env.bucket, tablePrefix+"data/"), 0)
 				assert.Greater(t, countMinioObjects(t, ctx, env.client, env.bucket, tablePrefix+"metadata/"), 0)
 			}
+		})
+	}
+}
+
+func TestIcebergPipelineRejectsNullPrimaryKeys(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	tests := []struct {
+		name     string
+		strategy ingestconfig.IncrementalStrategy
+	}{
+		{name: "append", strategy: ingestconfig.StrategyAppend},
+		{name: "replace", strategy: ingestconfig.StrategyReplace},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			destURI := icebergConformanceDestURI(t)
+			tableName := "lake.null_primary_keys_" + uniqueSuffix()
+
+			initial := writeIcebergJSONL(t, "initial.jsonl", `{"id":7,"name":"seven"}`)
+			runIcebergPipeline(t, ctx, initial, destURI, tableName, ingestconfig.StrategyReplace)
+
+			invalid := writeIcebergJSONL(
+				t, "null-primary-key.jsonl",
+				`{"id":8,"name":"eight"}`,
+				`{"id":null,"name":"null-id-row"}`,
+			)
+			err := runIcebergPipelineWithError(t, ctx, invalid, destURI, tableName, tt.strategy)
+			require.ErrorContains(t, err, `required field "id" contains 1 NULL value(s)`)
+
+			rows := readIcebergRows(t, ctx, destURI, tableName)
+			require.Len(t, rows, 1)
+			assert.Equal(t, "seven", icebergNameByID(t, rows, 7))
 		})
 	}
 }
@@ -186,6 +224,10 @@ func exerciseIcebergDestination(t *testing.T, ctx context.Context, destURI, tabl
 	assert.True(t, summary.fields["name"])
 	assert.True(t, summary.fields["active"])
 	assert.True(t, summary.fields["score"])
+	assert.True(t, summary.requiredFields["id"], "primary key should remain required")
+	assert.False(t, summary.requiredFields["name"], "inferred destination columns should be nullable")
+	assert.False(t, summary.requiredFields["active"], "inferred destination columns should be nullable")
+	assert.False(t, summary.requiredFields["score"], "inferred destination columns should be nullable")
 
 	appendRows := writeIcebergJSONL(
 		t, "append.jsonl",
@@ -197,6 +239,7 @@ func exerciseIcebergDestination(t *testing.T, ctx context.Context, destURI, tabl
 	summary = loadIcebergTableSummary(t, ctx, destURI, tableName)
 	assert.EqualValues(t, 4, summary.rows)
 	assert.True(t, summary.fields["age"], "append should evolve the Iceberg table schema")
+	assert.False(t, summary.requiredFields["age"], "new inferred columns should be nullable")
 
 	replacement := writeIcebergJSONL(
 		t, "replacement.jsonl",
@@ -207,6 +250,18 @@ func exerciseIcebergDestination(t *testing.T, ctx context.Context, destURI, tabl
 	summary = loadIcebergTableSummary(t, ctx, destURI, tableName)
 	assert.EqualValues(t, 1, summary.rows)
 	assert.True(t, summary.fields["age"])
+
+	mergeRows := writeIcebergJSONL(
+		t, "merge.jsonl",
+		`{"id":9,"name":"replace-merged","active":false,"score":9.5,"age":56}`,
+		`{"id":10,"name":"merged-new","active":true,"score":10.5,"age":20}`,
+	)
+	runIcebergPipeline(t, ctx, mergeRows, destURI, tableName, ingestconfig.StrategyMerge)
+
+	rows := readIcebergRows(t, ctx, destURI, tableName)
+	assert.Len(t, rows, 2)
+	assert.Equal(t, "replace-merged", icebergNameByID(t, rows, 9), "merge should update the existing row in place")
+	assert.Equal(t, "merged-new", icebergNameByID(t, rows, 10), "merge should insert net-new rows")
 }
 
 func icebergSQLMinioDestinationURI(t *testing.T, minioEndpoint, bucket string) string {
@@ -288,6 +343,11 @@ func writeIcebergJSONL(t *testing.T, name string, rows ...string) string {
 
 func runIcebergPipeline(t *testing.T, ctx context.Context, sourceURI, destURI, table string, strategy ingestconfig.IncrementalStrategy) {
 	t.Helper()
+	require.NoError(t, runIcebergPipelineWithError(t, ctx, sourceURI, destURI, table, strategy))
+}
+
+func runIcebergPipelineWithError(t *testing.T, ctx context.Context, sourceURI, destURI, table string, strategy ingestconfig.IncrementalStrategy) error {
+	t.Helper()
 
 	prepareIcebergRESTLocalDataDir(t, destURI, table)
 
@@ -302,7 +362,7 @@ func runIcebergPipeline(t *testing.T, ctx context.Context, sourceURI, destURI, t
 	cfg.Progress = ingestconfig.ProgressLog
 	cfg.ExtractParallelism = 2
 
-	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	return pipeline.New(cfg).Run(ctx)
 }
 
 func prepareIcebergRESTLocalDataDir(t *testing.T, destURI, table string) {
@@ -350,6 +410,7 @@ func dockerSharedTempDir(t *testing.T, prefix string) string {
 }
 
 func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse string) string {
+	requireDocker(t)
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
@@ -387,6 +448,7 @@ func startIcebergRESTContainer(t *testing.T, ctx context.Context, warehouse stri
 }
 
 func startIcebergRESTContainerWithS3(t *testing.T, ctx context.Context, networkName, bucket string) string {
+	requireDocker(t)
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
@@ -431,6 +493,7 @@ func startIcebergRESTContainerWithS3(t *testing.T, ctx context.Context, networkN
 }
 
 func startIcebergMinioContainer(t *testing.T, ctx context.Context, networkName string) (testcontainers.Container, string) {
+	requireDocker(t)
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
@@ -466,9 +529,10 @@ func startIcebergMinioContainer(t *testing.T, ctx context.Context, networkName s
 }
 
 type icebergTableSummary struct {
-	rows        int64
-	fields      map[string]bool
-	primaryKeys []string
+	rows           int64
+	fields         map[string]bool
+	requiredFields map[string]bool
+	primaryKeys    []string
 }
 
 func loadIcebergTableSummary(t *testing.T, ctx context.Context, destURI, tableName string) icebergTableSummary {
@@ -492,8 +556,10 @@ func loadIcebergTableSummary(t *testing.T, ctx context.Context, destURI, tableNa
 	}
 
 	fields := make(map[string]bool)
+	requiredFields := make(map[string]bool)
 	for _, field := range tbl.Schema().Fields() {
 		fields[field.Name] = true
+		requiredFields[field.Name] = field.Required
 	}
 
 	idNames := make([]string, 0, len(tbl.Schema().IdentifierFieldIDs))
@@ -504,9 +570,10 @@ func loadIcebergTableSummary(t *testing.T, ctx context.Context, destURI, tableNa
 	}
 
 	return icebergTableSummary{
-		rows:        rows,
-		fields:      fields,
-		primaryKeys: idNames,
+		rows:           rows,
+		fields:         fields,
+		requiredFields: requiredFields,
+		primaryKeys:    idNames,
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/cratedb"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/destination/fabric"
+	"github.com/bruin-data/ingestr/pkg/destination/hana"
 	"github.com/bruin-data/ingestr/pkg/destination/iceberg"
 	"github.com/bruin-data/ingestr/pkg/destination/maxcompute"
 	"github.com/bruin-data/ingestr/pkg/destination/mssql"
@@ -35,6 +36,7 @@ var (
 	// DuckLake is duckdb-backed and intentionally inherits evolution via embedding.
 	_ schemaevolution.SchemaEvolver = (*duckdb.DuckLakeDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*fabric.FabricDestination)(nil)
+	_ schemaevolution.SchemaEvolver = (*hana.HanaDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*iceberg.Destination)(nil)
 	_ schemaevolution.SchemaEvolver = (*maxcompute.MaxComputeDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*mssql.MSSQLDestination)(nil)

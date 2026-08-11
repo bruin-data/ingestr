@@ -1,17 +1,39 @@
 package fabric
 
 import (
+	"context"
+	"errors"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
+
+func TestBuildMergeSQLWithIncrementalPredicate(t *testing.T) {
+	sql := buildMergeSQLWithPredicate(
+		"dbo.events",
+		"stage.events",
+		[]string{"id"},
+		[]string{"[id]", "[event_date]"},
+		[]string{"event_date"},
+		"target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date))",
+	)
+
+	if !strings.Contains(sql, "ON target.[id] = source.[id] AND (target.[event_date] >= DATEADD(day, -7, CAST(GETDATE() AS date)))") {
+		t.Fatalf("merge SQL missing incremental predicate: %s", sql)
+	}
+}
 
 func TestURIToConnString(t *testing.T) {
 	tests := []struct {
@@ -167,6 +189,87 @@ func TestURIToConnString(t *testing.T) {
 				t.Errorf("write_strategy should not appear in DSN query, got %q", q.Get("write_strategy"))
 			}
 		})
+	}
+}
+
+func TestBuildCreateTableSQLAddsPrimaryKeyWithAlterTable(t *testing.T) {
+	sql := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "payload", DataType: schema.TypeString},
+	}, []string{"id"})
+
+	createIdx := strings.Index(sql, "CREATE TABLE")
+	alterIdx := strings.Index(sql, "ALTER TABLE")
+	if createIdx == -1 || alterIdx == -1 || alterIdx < createIdx {
+		t.Fatalf("SQL should create the table before altering the primary key:\n%s", sql)
+	}
+
+	createSQL := sql[createIdx:alterIdx]
+	if strings.Contains(createSQL, "PRIMARY KEY") {
+		t.Fatalf("CREATE TABLE should not contain an inline primary key:\n%s", sql)
+	}
+	if !strings.Contains(createSQL, "[id] BIGINT NOT NULL") {
+		t.Fatalf("primary key column should be created NOT NULL:\n%s", sql)
+	}
+	if !strings.Contains(sql, "NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID('dbo.events') AND [type] = 'PK')") {
+		t.Fatalf("SQL should retry missing primary key creation independently:\n%s", sql)
+	}
+	wantAlter := "ALTER TABLE [dbo].[events] ADD CONSTRAINT [PK_events] PRIMARY KEY NONCLUSTERED ([id]) NOT ENFORCED"
+	if !strings.Contains(sql, wantAlter) {
+		t.Fatalf("SQL missing Fabric primary key ALTER TABLE statement %q:\n%s", wantAlter, sql)
+	}
+}
+
+func TestBuildCreateTableSQLMatchesPrimaryKeysCaseInsensitively(t *testing.T) {
+	sql := buildCreateTableSQL("dbo.events", []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+	}, []string{"ID"})
+
+	if !strings.Contains(sql, "[id] BIGINT NOT NULL") {
+		t.Fatalf("primary key column should be created NOT NULL:\n%s", sql)
+	}
+	if !strings.Contains(sql, "PRIMARY KEY NONCLUSTERED ([ID]) NOT ENFORCED") {
+		t.Fatalf("SQL missing requested primary key spelling:\n%s", sql)
+	}
+}
+
+func TestBuildCreateTableSQLShortensPrimaryKeyConstraintName(t *testing.T) {
+	longTable := strings.Repeat("orders_", 30)
+	constraintName := buildPrimaryKeyConstraintName("dbo." + longTable)
+
+	if len(constraintName) > destination.MaxIdentifierLength("fabric") {
+		t.Fatalf("constraint name length = %d, want <= %d", len(constraintName), destination.MaxIdentifierLength("fabric"))
+	}
+	if !strings.HasPrefix(constraintName, "PK_") {
+		t.Fatalf("constraint name = %q, want PK_ prefix", constraintName)
+	}
+}
+
+func TestPrepareTableUsesFabricPrimaryKeyAlterTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "payload", DataType: schema.TypeString},
+	}}
+	createSQL := buildCreateTableSQL("dbo.events", tableSchema.Columns, []string{"id"})
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	dest := &FabricDestination{db: db}
+	err = dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:       "dbo.events",
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -350,5 +453,141 @@ func TestColumnsForRecordMapsByCaseInsensitiveName(t *testing.T) {
 	}
 	if cols[1] != nil {
 		t.Fatalf("expected unmatched column to map to nil, got %+v", cols[1])
+	}
+}
+
+func TestNormalizeSchemaEvolutionColumn(t *testing.T) {
+	d := &FabricDestination{}
+
+	// TimestampTZ and Timestamp both store as DATETIME2, so they must normalize
+	// to the same logical type Fabric recovers on read-back.
+	if got := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeTimestampTZ}); got.DataType != schema.TypeTimestamp {
+		t.Fatalf("TimestampTZ should normalize to Timestamp, got %v", got.DataType)
+	}
+	// Int8 and Int16 both store as SMALLINT.
+	if got := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeInt8}); got.DataType != schema.TypeInt16 {
+		t.Fatalf("Int8 should normalize to Int16, got %v", got.DataType)
+	}
+	// Distinguishable types are left alone.
+	if got := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeInt64}); got.DataType != schema.TypeInt64 {
+		t.Fatalf("Int64 should be unchanged, got %v", got.DataType)
+	}
+	// Precision/scale/length are preserved so genuine widenings still surface.
+	dec := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeDecimal, Precision: 18, Scale: 4})
+	if dec.Precision != 18 || dec.Scale != 4 {
+		t.Fatalf("decimal precision/scale should be preserved, got %+v", dec)
+	}
+	str := d.NormalizeSchemaEvolutionColumn(schema.Column{DataType: schema.TypeString, MaxLength: 255})
+	if str.MaxLength != 255 {
+		t.Fatalf("string length should be preserved, got %+v", str)
+	}
+}
+
+func TestSchemaEvolutionNoPhantomTimestampTZChange(t *testing.T) {
+	d := &FabricDestination{}
+	desired := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: naming.IngestrLoadedAtColumn, DataType: schema.TypeTimestampTZ, Nullable: true},
+	}}
+	existing := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: naming.IngestrLoadedAtColumn, DataType: schema.TypeTimestamp, Nullable: true},
+	}}
+
+	withNormalizer, err := schemaevolution.Compare(desired, existing, &schemaevolution.CompareOptions{
+		NormalizeColumn: d.NormalizeSchemaEvolutionColumn,
+	})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if withNormalizer.HasChanges {
+		t.Fatalf("expected no changes with normalizer, got %+v", withNormalizer.Changes)
+	}
+
+	without, err := schemaevolution.Compare(desired, existing, nil)
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if !without.HasChanges {
+		t.Fatal("expected a phantom change without the normalizer")
+	}
+}
+
+func TestSchemaEvolutionSkipsUnchangedFabricType(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create mock database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &FabricDestination{db: db}
+	oldColumn := schema.Column{Name: "clause_names", DataType: schema.TypeString, MaxLength: -1, Nullable: true}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "clause_names",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "clause_names", DataType: schema.TypeArray, ArrayType: schema.TypeString, Nullable: true},
+	}}}
+
+	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
+	if err != nil {
+		t.Fatalf("apply schema evolution: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchemaEvolutionAttemptsTypeChange(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create mock database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &FabricDestination{db: db}
+	oldColumn := schema.Column{Name: "value", DataType: schema.TypeInt32, Nullable: true}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "value",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}}
+	query := "ALTER TABLE dbo.events ALTER COLUMN [value] BIGINT NULL"
+	mock.ExpectExec(regexp.QuoteMeta(query)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
+	if err != nil {
+		t.Fatalf("apply schema evolution: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchemaEvolutionTypeChangeFailureIncludesQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create mock database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &FabricDestination{db: db}
+	oldColumn := schema.Column{Name: "value", DataType: schema.TypeInt32, Nullable: true}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "value",
+		OldColumn:  &oldColumn,
+		NewColumn:  schema.Column{Name: "value", DataType: schema.TypeInt64, Nullable: true},
+	}}}
+	query := "ALTER TABLE dbo.events ALTER COLUMN [value] BIGINT NULL"
+	mock.ExpectExec(regexp.QuoteMeta(query)).WillReturnError(errors.New("Fabric rejected conversion"))
+
+	_, err = d.ApplySchemaEvolution(context.Background(), "dbo.events", comparison)
+	if err == nil || !strings.Contains(err.Error(), query) || !strings.Contains(err.Error(), "Fabric rejected conversion") {
+		t.Fatalf("expected query and Fabric error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -3,7 +3,6 @@ package source
 import (
 	"context"
 	"math/big"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -671,9 +670,7 @@ func TestReadExtractPartitionsDiscoversNumericBounds(t *testing.T) {
 	}
 }
 
-func TestReadExtractPartitionsRejectsNumericBoundsWithoutIncrementalKey(t *testing.T) {
-	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+func TestReadExtractPartitionsDiscoversFullNumericBoundsWithoutIncrementalKey(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{
 			{Name: "id", DataType: schema.TypeInt64},
@@ -681,27 +678,33 @@ func TestReadExtractPartitionsRejectsNumericBoundsWithoutIncrementalKey(t *testi
 	}
 
 	discoverCalled := false
-	_, err := ReadExtractPartitions(context.Background(), ReadOptions{
-		IntervalStart:                   &intervalStart,
-		IntervalEnd:                     &intervalEnd,
+	records, err := ReadExtractPartitions(context.Background(), ReadOptions{
 		ExtractPartitionBy:              "id",
 		ExtractPartitionNumericInterval: 10,
 		Parallelism:                     1,
 	}, tableSchema, func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
-		t.Fatal("read should not be called")
-		return nil, nil
+		ch := make(chan RecordBatchResult)
+		close(ch)
+		return ch, nil
 	}, func(ctx context.Context, opts ReadOptions) (ExtractPartitionBounds, error) {
 		discoverCalled = true
-		return ExtractPartitionBounds{}, nil
+		return ExtractPartitionBounds{
+			NumericStart: 1,
+			NumericEnd:   20,
+			Kind:         ExtractPartitionKindNumeric,
+			HasRange:     true,
+		}, nil
 	})
-	if err == nil {
-		t.Fatal("expected error")
+	if err != nil {
+		t.Fatalf("ReadExtractPartitions() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "incremental key") {
-		t.Fatalf("error = %v, want incremental key message", err)
+	for result := range records {
+		if result.Err != nil {
+			t.Fatalf("unexpected read error: %v", result.Err)
+		}
 	}
-	if discoverCalled {
-		t.Fatal("bounds discovery should not be called")
+	if !discoverCalled {
+		t.Fatal("bounds discovery should be called")
 	}
 }
 
@@ -953,5 +956,44 @@ func TestSQLIntValueAcceptsFloatAndBigIntValues(t *testing.T) {
 func TestSQLIntValueRejectsNonIntegerFloat(t *testing.T) {
 	if _, err := SQLIntValue(42.5); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestSQLCustomQueryBuilders(t *testing.T) {
+	quote := func(name string) string { return `"` + name + `"` }
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+
+	schemaQuery := SQLCustomQuerySchemaQuery(" SELECT id, created_at FROM orders; ", quote)
+	wantSchema := `SELECT * FROM (SELECT id, created_at FROM orders) AS "__ingestr_query" WHERE 1 = 0`
+	if schemaQuery != wantSchema {
+		t.Fatalf("schema query = %q, want %q", schemaQuery, wantSchema)
+	}
+
+	windowQuery := SQLCustomQuerySelectQuery("SELECT id, created_at FROM orders;", ReadOptions{
+		ExtractPartitionBy:           "created_at",
+		ExtractPartitionStart:        &start,
+		ExtractPartitionEnd:          &end,
+		ExtractPartitionEndInclusive: true,
+		ExtractPartitionDataType:     schema.TypeTimestamp,
+	}, quote, DefaultSQLTimeFormat)
+	wantWindow := `SELECT * FROM (SELECT id, created_at FROM orders) AS "__ingestr_query" WHERE "__ingestr_query"."created_at" >= '2026-01-01 00:00:00' AND "__ingestr_query"."created_at" <= '2026-01-02 00:00:00'`
+	if windowQuery != wantWindow {
+		t.Fatalf("window query = %q, want %q", windowQuery, wantWindow)
+	}
+
+	nullQuery := SQLCustomQuerySelectQuery("SELECT id FROM orders", ReadOptions{
+		ExtractPartitionBy:     "id",
+		ExtractPartitionIsNull: true,
+	}, quote, DefaultSQLTimeFormat)
+	wantNull := `SELECT * FROM (SELECT id FROM orders) AS "__ingestr_query" WHERE "__ingestr_query"."id" IS NULL`
+	if nullQuery != wantNull {
+		t.Fatalf("null query = %q, want %q", nullQuery, wantNull)
+	}
+
+	boundsQuery := SQLCustomQueryBoundsQuery("SELECT id FROM orders;", "id", quote)
+	wantBounds := `SELECT MIN("__ingestr_query"."id"), MAX("__ingestr_query"."id"), COUNT(*), COUNT("__ingestr_query"."id") FROM (SELECT id FROM orders) AS "__ingestr_query"`
+	if boundsQuery != wantBounds {
+		t.Fatalf("bounds query = %q, want %q", boundsQuery, wantBounds)
 	}
 }

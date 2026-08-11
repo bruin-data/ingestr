@@ -402,6 +402,78 @@ func TestArrowFieldToColumn_List(t *testing.T) {
 	}
 }
 
+func TestArrowFieldToColumn_NestedTypesUseJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		type_ arrow.DataType
+	}{
+		{name: "struct", type_: arrow.StructOf(arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64})},
+		{name: "map", type_: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64)},
+		{name: "list of structs", type_: arrow.ListOf(arrow.StructOf(arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64}))},
+		{name: "nested list", type_: arrow.ListOf(arrow.ListOf(arrow.PrimitiveTypes.Int64))},
+		{name: "fixed size list", type_: arrow.FixedSizeListOf(2, arrow.PrimitiveTypes.Int64)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			col := ArrowFieldToColumn("payload", tt.type_, true)
+			if col.DataType != schema.TypeJSON {
+				t.Fatalf("expected TypeJSON, got %v", col.DataType)
+			}
+		})
+	}
+}
+
+func TestArrowFieldToColumn_PrimitiveVariableListsRemainArrays(t *testing.T) {
+	for _, dt := range []arrow.DataType{
+		arrow.ListOf(arrow.PrimitiveTypes.Int64),
+		arrow.LargeListOf(arrow.PrimitiveTypes.Int64),
+		arrow.ListViewOf(arrow.PrimitiveTypes.Int64),
+		arrow.LargeListViewOf(arrow.PrimitiveTypes.Int64),
+	} {
+		col := ArrowFieldToColumn("numbers", dt, true)
+		if col.DataType != schema.TypeArray || col.ArrayType != schema.TypeInt64 {
+			t.Fatalf("expected array<int64> for %s, got %s<%s>", dt, col.DataType, col.ArrayType)
+		}
+	}
+}
+
+func TestMergeArrowTypes_NestedTypesUseJSON(t *testing.T) {
+	structA := arrow.StructOf(arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64})
+	structB := arrow.StructOf(arrow.Field{Name: "name", Type: arrow.BinaryTypes.String})
+
+	for _, pair := range [][2]arrow.DataType{
+		{structA, structA},
+		{structA, structB},
+		{arrow.ListOf(structA), arrow.ListOf(structA)},
+	} {
+		merged, err := MergeArrowTypes(pair[0], pair[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !isJSONType(merged) {
+			t.Fatalf("expected JSON when merging %s and %s, got %s", pair[0], pair[1], merged)
+		}
+	}
+}
+
+func TestMergeArrowTypes_PreservesPrimitiveVariableLists(t *testing.T) {
+	unknown := arrow.ListOf(schema.UnknownArrowType)
+	int32s := arrow.ListOf(arrow.PrimitiveTypes.Int32)
+	int64s := arrow.LargeListOf(arrow.PrimitiveTypes.Int64)
+
+	for _, pair := range [][2]arrow.DataType{{unknown, int64s}, {int32s, int64s}} {
+		merged, err := MergeArrowTypes(pair[0], pair[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		col := ArrowFieldToColumn("numbers", merged, true)
+		if col.DataType != schema.TypeArray || col.ArrayType != schema.TypeInt64 {
+			t.Fatalf("expected array<int64> when merging %s and %s, got %s<%s>", pair[0], pair[1], col.DataType, col.ArrayType)
+		}
+	}
+}
+
 func TestValidateSchema(t *testing.T) {
 	// Valid schema
 	valid := &schema.TableSchema{

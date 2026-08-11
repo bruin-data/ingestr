@@ -26,6 +26,7 @@ import (
 // acked only after a flush (queue drains, no redelivery on a second run), and
 // the stream exits cleanly on cancellation.
 func TestRabbitMQ_Streaming(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -137,6 +138,7 @@ func TestRabbitMQ_Streaming(t *testing.T) {
 // the final flush (regression test: the consumer channel must outlive its
 // goroutine so CommitStream can ack at shutdown).
 func TestRabbitMQ_StreamingShutdownFlushesPending(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

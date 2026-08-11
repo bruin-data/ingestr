@@ -10,12 +10,13 @@ type RunJobRequest struct {
 	SourceTable        string `json:"sourceTable"`
 	DestTable          string `json:"destTable"`
 
-	IncrementalStrategy string   `json:"incrementalStrategy"`
-	Strategy            string   `json:"strategy"`
-	IncrementalKey      string   `json:"incrementalKey"`
-	IntervalStart       string   `json:"intervalStart"`
-	IntervalEnd         string   `json:"intervalEnd"`
-	PrimaryKeys         []string `json:"primaryKeys"`
+	IncrementalStrategy  string   `json:"incrementalStrategy"`
+	Strategy             string   `json:"strategy"`
+	IncrementalKey       string   `json:"incrementalKey"`
+	IncrementalPredicate string   `json:"incrementalPredicate"`
+	IntervalStart        string   `json:"intervalStart"`
+	IntervalEnd          string   `json:"intervalEnd"`
+	PrimaryKeys          []string `json:"primaryKeys"`
 
 	PartitionBy string `json:"partitionBy"`
 	ClusterBy   string `json:"clusterBy"`
@@ -80,6 +81,7 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendString("source-table", r.SourceTable)
 	appendString("dest-table", r.DestTable)
 	appendString("incremental-key", r.IncrementalKey)
+	appendString("incremental-predicate", r.IncrementalPredicate)
 	appendString("incremental-strategy", r.IncrementalStrategy)
 	appendString("interval-start", r.IntervalStart)
 	appendString("interval-end", r.IntervalEnd)

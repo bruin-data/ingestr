@@ -244,7 +244,12 @@ func (s *MSSQLSource) HandlesIncrementality() bool {
 
 func (s *MSSQLSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	if _, ok := source.IsCustomQuery(req.Name); ok {
-		return source.CustomQueryTable(req, s.ExecuteCustomQuery)
+		return source.PartitionedCustomQueryTable(req, s.ExecuteCustomQuery, source.PartitionedCustomQueryOptions{
+			QuoteIdentifier: quoteColumn,
+			FormatTime:      source.NativeSQLTimeFormat,
+			GetSchema:       s.getCustomQuerySchema,
+			DiscoverBounds:  s.discoverCustomQueryExtractPartitionBounds,
+		})
 	}
 
 	tableSchema, err := s.getSchema(ctx, req.Name)
@@ -252,11 +257,7 @@ func (s *MSSQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		return nil, err
 	}
 
-	// Use user-provided PKs if available, otherwise use auto-detected
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = tableSchema.PrimaryKeys
-	}
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, tableSchema.PrimaryKeys, true)
 
 	// Use user's strategy or default to replace
 	strategy := req.Strategy
@@ -268,6 +269,7 @@ func (s *MSSQLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 	return &source.DynamicSourceTable{
 		TableName:                        tableName,
 		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
 		TableIncrementalKey:              req.IncrementalKey,
 		TableStrategy:                    strategy,
 		TableSupportsExtractPartitioning: true,
@@ -482,6 +484,29 @@ func (s *MSSQLSource) discoverExtractPartitionBounds(ctx context.Context, table 
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
 }
 
+func (s *MSSQLSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect custom query schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get custom query column types: %w", err)
+	}
+	return &schema.TableSchema{Name: source.CustomQueryTableName, Columns: mssqlCustomQueryColumns(colTypes)}, nil
+}
+
+func (s *MSSQLSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+}
+
 func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -507,24 +532,7 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 			return
 		}
 
-		columns := make([]schema.Column, len(colTypes))
-		for i, ct := range colTypes {
-			dt, precision, scale, arrayType := MapMSSQLToDataType(ct.DatabaseTypeName())
-			if dt == schema.TypeDecimal {
-				if p, s, ok := ct.DecimalSize(); ok {
-					precision, scale = int(p), int(s)
-				}
-			}
-			nullable, _ := ct.Nullable()
-			columns[i] = schema.Column{
-				Name:      ct.Name(),
-				DataType:  dt,
-				Nullable:  nullable,
-				Precision: precision,
-				Scale:     scale,
-				ArrayType: arrayType,
-			}
-		}
+		columns := mssqlCustomQueryColumns(colTypes)
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
@@ -541,6 +549,28 @@ func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 	}()
 
 	return results, nil
+}
+
+func mssqlCustomQueryColumns(colTypes []*sql.ColumnType) []schema.Column {
+	columns := make([]schema.Column, len(colTypes))
+	for i, ct := range colTypes {
+		dt, precision, scale, arrayType := MapMSSQLToDataType(ct.DatabaseTypeName())
+		if dt == schema.TypeDecimal {
+			if p, s, ok := ct.DecimalSize(); ok {
+				precision, scale = int(p), int(s)
+			}
+		}
+		nullable, _ := ct.Nullable()
+		columns[i] = schema.Column{
+			Name:      ct.Name(),
+			DataType:  dt,
+			Nullable:  nullable,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+		}
+	}
+	return columns
 }
 
 type mssqlTableRef struct {
@@ -757,6 +787,21 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	}
 
 	return record, rowCount, nil
+}
+
+// NormalizeUUIDValue converts the driver's raw uniqueidentifier
+// representation into its canonical string form, honoring the connection's
+// "guid conversion" byte-order setting. Shared with the CDC source, which
+// scans the same driver values.
+func NormalizeUUIDValue(val interface{}, guidConversion bool) (interface{}, error) {
+	return normalizeUUIDValue(val, guidConversion)
+}
+
+// GUIDConversionEnabled reports whether the connection string enables the
+// go-mssqldb "guid conversion" setting, which changes uniqueidentifier byte
+// order on the wire.
+func GUIDConversionEnabled(connStr string) bool {
+	return guidConversionEnabled(connStr)
 }
 
 func normalizeUUIDValue(val interface{}, guidConversion bool) (interface{}, error) {

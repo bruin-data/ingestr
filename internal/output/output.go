@@ -80,6 +80,10 @@ func Init(stdout, stderr io.Writer, m Mode) {
 // IsJSON reports whether output is in JSON mode.
 func IsJSON() bool { return mode == ModeJSON }
 
+// Current returns the active writers and mode, so callers that temporarily
+// redirect output (e.g. tests) can restore exactly what was there before.
+func Current() (io.Writer, io.Writer, Mode) { return stdoutW, stderrW, mode }
+
 // Warnf reports a warning. Text mode: written verbatim to stdout. JSON mode: a
 // {"event":"log","level":"WARN",...} record.
 func Warnf(format string, args ...any) { emitLog(slog.LevelWarn, fmt.Sprintf(format, args...)) }

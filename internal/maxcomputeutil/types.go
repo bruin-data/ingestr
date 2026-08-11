@@ -97,6 +97,9 @@ func MapDataTypeToMaxCompute(col schema.Column) string {
 		}
 		return "DECIMAL(38,9)"
 	case schema.TypeString, schema.TypeUUID:
+		if col.DataType == schema.TypeString && col.MaxLength > 0 && col.MaxLength <= 65535 {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
 		return "STRING"
 	case schema.TypeBinary:
 		return "BINARY"

@@ -29,6 +29,10 @@ const (
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
 	`
+
+	// snowflakeMaxVarcharLength is the length Snowflake reports for a bare VARCHAR;
+	// treated as "unbounded" so it isn't propagated as a literal VARCHAR(16777216).
+	snowflakeMaxVarcharLength = 16777216
 )
 
 var (
@@ -164,6 +168,10 @@ func (d *Dialect) QuoteIdentifier(name string) string {
 	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
 }
 
+func (d *Dialect) QuoteCustomQueryIdentifier(name string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
+}
+
 func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {
 	if rawValue == nil {
 		return nil
@@ -215,14 +223,20 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 
 		dt, precision, scale, arrayType := d.MapDataType(dataType)
 
-		columns = append(columns, schema.Column{
+		col := schema.Column{
 			Name:      adbc.CopyString(name),
 			DataType:  dt,
 			Nullable:  nullable == "Y",
 			Precision: precision,
 			Scale:     scale,
 			ArrayType: arrayType,
-		})
+		}
+		if dt == schema.TypeString {
+			// DESCRIBE reports the full type (e.g. VARCHAR(50)); keep the length.
+			// A bare VARCHAR reports as 16777216, which is treated as unbounded.
+			col.MaxLength = parseSnowflakeStringLength(dataType)
+		}
+		columns = append(columns, col)
 	}
 
 	if err := rows.Err(); err != nil {

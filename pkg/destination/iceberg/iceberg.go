@@ -5,9 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	iceberggo "github.com/apache/iceberg-go"
 	icebergcatalog "github.com/apache/iceberg-go/catalog"
 	_ "github.com/apache/iceberg-go/catalog/glue"
@@ -35,9 +44,16 @@ type Destination struct {
 	cfg     icebergConfig
 	catalog icebergcatalog.Catalog
 
-	mu       sync.Mutex
-	prepared map[string]preparedTable
+	mu                       sync.Mutex
+	prepared                 map[string]preparedTable
+	orphanCleanupLastAttempt map[string]time.Time
 }
+
+const (
+	managedExpiresAtProperty = "ingestr.managed-staging.expires-at-ms"
+	orphanCleanupRetention   = 72 * time.Hour
+	orphanCleanupInterval    = 24 * time.Hour
+)
 
 func NewDestination() *Destination {
 	return &Destination{}
@@ -61,6 +77,7 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 	d.cfg = cfg
 	d.catalog = cat
 	d.prepared = make(map[string]preparedTable)
+	d.orphanCleanupLastAttempt = make(map[string]time.Time)
 	config.Debug("[ICEBERG] Connected catalog type=%s name=%s", cat.CatalogType(), cfg.CatalogName)
 	return nil
 }
@@ -69,6 +86,7 @@ func (d *Destination) Close(ctx context.Context) error {
 	cat := d.catalog
 	d.catalog = nil
 	d.prepared = nil
+	d.orphanCleanupLastAttempt = nil
 	if closer, ok := cat.(io.Closer); ok {
 		if err := closer.Close(); err != nil {
 			return fmt.Errorf("iceberg: failed to close catalog: %w", err)
@@ -84,7 +102,7 @@ func (d *Destination) PrepareTable(ctx context.Context, opts destination.Prepare
 	if opts.Schema == nil {
 		return errors.New("iceberg destination requires schema")
 	}
-	tableSchema := tableSchemaWithPrimaryKeys(opts.Schema, opts.PrimaryKeys)
+	tableSchema := prepareTableSchema(opts.Schema, opts.PrimaryKeys)
 
 	ident, err := parseIdentifier(opts.Table)
 	if err != nil {
@@ -94,19 +112,28 @@ func (d *Destination) PrepareTable(ctx context.Context, opts destination.Prepare
 	if err := d.ensureNamespace(ctx, namespace); err != nil {
 		return err
 	}
+	if opts.ExpiresAfter > 0 {
+		d.purgeExpiredManagedTables(ctx, namespace, ident, time.Now())
+	}
 
 	exists, err := d.tableExists(ctx, ident)
 	if err != nil {
 		return err
 	}
 	if exists {
+		tbl, err := d.catalog.LoadTable(ctx, ident)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to load table %s: %w", opts.Table, err)
+		}
+		d.cleanupOldOrphans(ctx, tbl)
 		if opts.DropFirst {
-			tbl, err := d.catalog.LoadTable(ctx, ident)
-			if err != nil {
-				return fmt.Errorf("iceberg: failed to load table %s: %w", opts.Table, err)
-			}
 			if err := validateIdentifierFieldsForEvolution(tbl.Schema(), tableSchema, true); err != nil {
 				return err
+			}
+		}
+		if opts.ExpiresAfter > 0 {
+			if err := setManagedExpiration(ctx, tbl, time.Now().Add(opts.ExpiresAfter)); err != nil {
+				return fmt.Errorf("iceberg: failed to refresh managed table expiration for %s: %w", opts.Table, err)
 			}
 		}
 	} else {
@@ -141,23 +168,58 @@ func (d *Destination) WriteParallel(ctx context.Context, records <-chan source.R
 	}
 
 	prepared := d.lookupPrepared(opts.Table)
-	writeSchema := opts.Schema
+	writeSchema := prepared.schema
 	if writeSchema == nil {
-		writeSchema = prepared.schema
+		writeSchema = opts.Schema
 	}
 	if writeSchema == nil {
 		return errors.New("iceberg destination requires schema for write")
 	}
 
-	reader := newRecordBatchReader(ctx, records, icebergArrowSchema(writeSchema))
+	targetSchema := tbl.Schema()
+	if prepared.replace && prepared.schema != nil {
+		targetSchema, err = icebergSchemaFromTableSchema(prepared.schema)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to build replacement schema for table %s: %w", opts.Table, err)
+		}
+	}
+	reader, err := newTableRecordBatchReader(ctx, records, icebergArrowSchema(writeSchema), targetSchema)
+	if err != nil {
+		return fmt.Errorf("iceberg: invalid write schema for table %s: %w", opts.Table, err)
+	}
 	defer reader.Release()
+
+	var writeReader array.RecordReader = reader
+	if opts.DeduplicatePrimaryKeys {
+		if !prepared.replace {
+			return fmt.Errorf("iceberg: primary-key deduplication is only supported for replace writes")
+		}
+		if len(opts.PrimaryKeys) > 0 && !identifierFieldsEqual(targetSchema, opts.PrimaryKeys, false) {
+			return fmt.Errorf("iceberg: requested deduplication keys do not match table %s identifier fields", opts.Table)
+		}
+		primaryKeys, err := identifierFieldNames(targetSchema)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to resolve identifier fields for table %s: %w", opts.Table, err)
+		}
+		if len(primaryKeys) == 0 {
+			return fmt.Errorf("iceberg: table %s has no identifier fields for replace deduplication", opts.Table)
+		}
+
+		deduped, sorter, err := newDeduplicatedReplaceReader(reader, primaryKeys, opts.IncrementalKey, opts.Table)
+		if err != nil {
+			return fmt.Errorf("iceberg: failed to deduplicate replacement data for table %s: %w", opts.Table, err)
+		}
+		defer sorter.Close()
+		defer deduped.Release()
+		writeReader = deduped
+	}
 
 	props := iceberggo.Properties{
 		"ingestr.destination": "iceberg",
 	}
 	if prepared.replace {
 		props["ingestr.operation"] = "replace"
-		_, err = d.overwritePrepared(ctx, tbl, reader, props, prepared)
+		_, err = d.overwritePrepared(ctx, tbl, writeReader, props, prepared)
 	} else {
 		props["ingestr.operation"] = "append"
 		_, err = tbl.Append(ctx, reader, props)
@@ -171,20 +233,8 @@ func (d *Destination) WriteParallel(ctx context.Context, records <-chan source.R
 	return nil
 }
 
-func (d *Destination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
-	return nil
-}
-
-func (d *Destination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	return errors.New("delete+insert strategy is not supported for iceberg destination")
-}
-
-func (d *Destination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	return errors.New("merge strategy is not supported for iceberg destination")
-}
-
-func (d *Destination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
-	return errors.New("scd2 strategy is not supported for iceberg destination")
+func (d *Destination) SwapTable(_ context.Context, _ destination.SwapOptions) error {
+	return errors.New("iceberg destination does not support atomic table swap")
 }
 
 func (d *Destination) DropTable(ctx context.Context, table string) error {
@@ -195,9 +245,13 @@ func (d *Destination) DropTable(ctx context.Context, table string) error {
 	if err != nil {
 		return err
 	}
-	if err := d.catalog.DropTable(ctx, ident); err != nil && !isMissingTableOrNamespace(err) {
+	if err := d.purgeTable(ctx, ident); err != nil && !isMissingTableOrNamespace(err) {
 		return fmt.Errorf("iceberg: failed to drop table %s: %w", table, err)
 	}
+	d.mu.Lock()
+	delete(d.prepared, table)
+	delete(d.orphanCleanupLastAttempt, table)
+	d.mu.Unlock()
 	return nil
 }
 
@@ -239,12 +293,15 @@ func (d *Destination) GetScheme() string {
 	return "iceberg"
 }
 
-func (d *Destination) SupportsReplaceStrategy() bool      { return true }
-func (d *Destination) SupportsAppendStrategy() bool       { return true }
-func (d *Destination) SupportsMergeStrategy() bool        { return false }
-func (d *Destination) SupportsDeleteInsertStrategy() bool { return false }
-func (d *Destination) SupportsSCD2Strategy() bool         { return false }
-func (d *Destination) SupportsAtomicSwap() bool           { return false }
+func (d *Destination) SupportsReplaceStrategy() bool            { return true }
+func (d *Destination) SupportsAppendStrategy() bool             { return true }
+func (d *Destination) SupportsMergeStrategy() bool              { return true }
+func (d *Destination) SupportsDeleteInsertStrategy() bool       { return true }
+func (d *Destination) SupportsSCD2Strategy() bool               { return true }
+func (d *Destination) SupportsAtomicSwap() bool                 { return false }
+func (d *Destination) SupportsDirectReplaceDeduplication() bool { return true }
+func (d *Destination) SupportsCDCMerge() bool                   { return true }
+func (d *Destination) SupportsCDCUnchangedCols() bool           { return true }
 
 func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identifier, opts destination.PrepareOptions) error {
 	iceSchema, err := icebergSchemaFromTableSchema(opts.Schema)
@@ -252,9 +309,17 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		return err
 	}
 
+	properties := maps.Clone(d.cfg.TableProperties)
+	if properties == nil {
+		properties = iceberggo.Properties{}
+	}
+	if opts.ExpiresAfter > 0 {
+		properties[managedExpiresAtProperty] = strconv.FormatInt(time.Now().Add(opts.ExpiresAfter).UnixMilli(), 10)
+	}
+
 	createOpts := []icebergcatalog.CreateTableOpt{}
-	if len(d.cfg.TableProperties) > 0 {
-		createOpts = append(createOpts, icebergcatalog.WithProperties(d.cfg.TableProperties))
+	if len(properties) > 0 {
+		createOpts = append(createOpts, icebergcatalog.WithProperties(properties))
 	}
 	if d.cfg.TableLocation != "" {
 		createOpts = append(createOpts, icebergcatalog.WithLocation(renderTableLocation(d.cfg.TableLocation, ident)))
@@ -269,6 +334,9 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		createOpts = append(createOpts, icebergcatalog.WithPartitionSpec(&spec))
 	}
 
+	if err := d.ensureLocalTableDirs(ident); err != nil {
+		return err
+	}
 	if _, err := d.catalog.CreateTable(ctx, ident, iceSchema, createOpts...); err != nil {
 		if errors.Is(err, icebergcatalog.ErrTableAlreadyExists) {
 			return nil
@@ -276,6 +344,78 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		return fmt.Errorf("iceberg: failed to create table %s: %w", strings.Join(ident, "."), err)
 	}
 	return nil
+}
+
+func setManagedExpiration(ctx context.Context, tbl *icebergtable.Table, expiresAt time.Time) error {
+	txn := tbl.NewTransaction()
+	if err := txn.SetProperties(iceberggo.Properties{
+		managedExpiresAtProperty: strconv.FormatInt(expiresAt.UnixMilli(), 10),
+	}); err != nil {
+		return err
+	}
+	_, err := txn.Commit(ctx)
+	return err
+}
+
+func (d *Destination) purgeTable(ctx context.Context, ident icebergtable.Identifier) error {
+	if purger, ok := d.catalog.(icebergcatalog.PurgeableTable); ok {
+		return purger.PurgeTable(ctx, ident)
+	}
+	return d.catalog.DropTable(ctx, ident)
+}
+
+func (d *Destination) purgeExpiredManagedTables(ctx context.Context, namespace, exclude icebergtable.Identifier, now time.Time) {
+	var expired []icebergtable.Identifier
+	for ident, err := range d.catalog.ListTables(ctx, namespace) {
+		if err != nil {
+			config.Debug("[ICEBERG] Warning: failed to list managed tables for expiry cleanup: %v", err)
+			return
+		}
+		if slices.Equal(ident, exclude) {
+			continue
+		}
+		tbl, err := d.catalog.LoadTable(ctx, ident)
+		if err != nil {
+			if !isMissingTableOrNamespace(err) {
+				config.Debug("[ICEBERG] Warning: failed to load managed table %s for expiry cleanup: %v", strings.Join(ident, "."), err)
+			}
+			continue
+		}
+		expiresAtMillis, err := strconv.ParseInt(tbl.Properties().Get(managedExpiresAtProperty, ""), 10, 64)
+		if err != nil || now.Before(time.UnixMilli(expiresAtMillis)) {
+			continue
+		}
+		expired = append(expired, ident)
+	}
+	for _, ident := range expired {
+		if err := d.purgeTable(ctx, ident); err != nil && !isMissingTableOrNamespace(err) {
+			config.Debug("[ICEBERG] Warning: failed to purge expired managed table %s: %v", strings.Join(ident, "."), err)
+		}
+	}
+}
+
+func (d *Destination) cleanupOldOrphans(ctx context.Context, tbl *icebergtable.Table) {
+	if !tbl.Properties().GetBool("gc.enabled", true) {
+		return
+	}
+	tableName := strings.Join(tbl.Identifier(), ".")
+	now := time.Now()
+	d.mu.Lock()
+	if lastAttempt := d.orphanCleanupLastAttempt[tableName]; now.Sub(lastAttempt) < orphanCleanupInterval {
+		d.mu.Unlock()
+		return
+	}
+	d.orphanCleanupLastAttempt[tableName] = now
+	d.mu.Unlock()
+
+	result, err := tbl.DeleteOrphanFiles(ctx, icebergtable.WithFilesOlderThan(orphanCleanupRetention))
+	if err != nil {
+		config.Debug("[ICEBERG] Warning: failed to clean old orphan files for table %s: %v", tableName, err)
+		return
+	}
+	if len(result.DeletedFiles) > 0 {
+		config.Debug("[ICEBERG] Removed %d old orphan file(s) for table %s", len(result.DeletedFiles), tableName)
+	}
 }
 
 func (d *Destination) stageTableSchemaUpdate(txn *icebergtable.Transaction, tbl *icebergtable.Table, desired *schema.TableSchema, reset bool) (bool, error) {
@@ -371,7 +511,7 @@ func (d *Destination) stagePartitionSpecUpdate(txn *icebergtable.Transaction, tb
 	return true, nil
 }
 
-func (d *Destination) overwritePrepared(ctx context.Context, tbl *icebergtable.Table, reader *recordBatchReader, props iceberggo.Properties, prepared preparedTable) (*icebergtable.Table, error) {
+func (d *Destination) overwritePrepared(ctx context.Context, tbl *icebergtable.Table, reader array.RecordReader, props iceberggo.Properties, prepared preparedTable) (*icebergtable.Table, error) {
 	txn := tbl.NewTransaction()
 	if prepared.schema != nil {
 		if _, err := d.stageTableSchemaUpdate(txn, tbl, prepared.schema, true); err != nil {
@@ -404,6 +544,12 @@ func (d *Destination) ensureNamespace(ctx context.Context, namespace icebergtabl
 			continue
 		}
 		if err := d.catalog.CreateNamespace(ctx, current, iceberggo.Properties{}); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceAlreadyExists) {
+			// A concurrent writer may have created it; the sql catalog reports that
+			// as a driver error rather than ErrNamespaceAlreadyExists.
+			if exists, checkErr := d.catalog.CheckNamespaceExists(ctx, current); checkErr == nil && exists {
+				continue
+			}
+
 			return fmt.Errorf("iceberg: failed to create namespace %s: %w", strings.Join(current, "."), err)
 		}
 	}
@@ -458,12 +604,74 @@ func renderTableLocation(template string, ident icebergtable.Identifier) string 
 	return replacer.Replace(template)
 }
 
-func tableSchemaWithPrimaryKeys(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
-	if len(primaryKeys) == 0 {
-		return s
+func (d *Destination) ensureLocalTableDirs(ident icebergtable.Identifier) error {
+	location, ok := d.localTableLocation(ident)
+	if !ok {
+		return nil
 	}
+	mode := fs.FileMode(0o755)
+	forceMode := false
+	if d.cfg.Properties.Get("type", "") == "rest" {
+		// A local REST warehouse is shared by the catalog server and this process,
+		// which may run as different UIDs.
+		mode = 0o777
+		forceMode = true
+	}
+	for _, dir := range []string{location, filepath.Join(location, "data"), filepath.Join(location, "metadata")} {
+		if err := os.MkdirAll(dir, mode); err != nil {
+			return fmt.Errorf("iceberg: failed to create local table directory %s: %w", dir, err)
+		}
+		if forceMode {
+			if err := os.Chmod(dir, mode); err != nil {
+				return fmt.Errorf("iceberg: failed to set local table directory permissions %s: %w", dir, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (d *Destination) localTableLocation(ident icebergtable.Identifier) (string, bool) {
+	if d.cfg.TableLocation != "" {
+		return localFilesystemPath(renderTableLocation(d.cfg.TableLocation, ident))
+	}
+	warehouse, ok := localFilesystemPath(d.cfg.Properties.Get("warehouse", ""))
+	if !ok || warehouse == "" {
+		return "", false
+	}
+	parts := append([]string{warehouse}, ident...)
+	return filepath.Join(parts...), true
+}
+
+func localFilesystemPath(location string) (string, bool) {
+	if location == "" {
+		return "", false
+	}
+	if !strings.Contains(location, "://") {
+		return location, true
+	}
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme != "file" {
+		return "", false
+	}
+	return parsed.Path, parsed.Path != ""
+}
+
+func prepareTableSchema(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {
 	out := *s
-	out.PrimaryKeys = append([]string(nil), primaryKeys...)
+	out.Columns = append([]schema.Column(nil), s.Columns...)
+	out.PrimaryKeys = append([]string(nil), s.PrimaryKeys...)
+	if len(primaryKeys) > 0 {
+		out.PrimaryKeys = append([]string(nil), primaryKeys...)
+	}
+
+	identifierFields := make(map[string]struct{}, len(out.PrimaryKeys))
+	for _, primaryKey := range out.PrimaryKeys {
+		identifierFields[primaryKey] = struct{}{}
+	}
+	for i := range out.Columns {
+		_, identifier := identifierFields[out.Columns[i].Name]
+		out.Columns[i].Nullable = !identifier
+	}
 	return &out
 }
 

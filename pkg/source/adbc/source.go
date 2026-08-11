@@ -99,7 +99,16 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 				return nil, fmt.Errorf("failed to set dataset for custom query: %w", err)
 			}
 		}
-		return source.CustomQueryTable(req, s.ExecuteCustomQuery)
+		quoteIdentifier := s.dialect.QuoteIdentifier
+		if quoter, ok := s.dialect.(CustomQueryIdentifierQuoter); ok {
+			quoteIdentifier = quoter.QuoteCustomQueryIdentifier
+		}
+		return source.PartitionedCustomQueryTable(req, s.ExecuteCustomQuery, source.PartitionedCustomQueryOptions{
+			QuoteIdentifier: quoteIdentifier,
+			FormatTime:      source.DefaultSQLTimeFormat,
+			GetSchema:       s.getCustomQuerySchema,
+			DiscoverBounds:  s.discoverCustomQueryExtractPartitionBounds,
+		})
 	}
 
 	tableSchema, err := s.getSchema(ctx, req.Name)
@@ -107,11 +116,11 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 		return nil, err
 	}
 
-	// Use user-provided PKs if available, otherwise use auto-detected
-	pks := req.PrimaryKeys
-	if len(pks) == 0 {
-		pks = tableSchema.PrimaryKeys
+	detectedPKsUnique := false
+	if provider, ok := s.dialect.(PrimaryKeyEnforcementProvider); ok {
+		detectedPKsUnique = provider.EnforcesPrimaryKeys()
 	}
+	pks, pksUnique := source.ResolvePrimaryKeys(req.PrimaryKeys, tableSchema.PrimaryKeys, detectedPKsUnique)
 
 	// Use user's strategy or default to replace
 	strategy := req.Strategy
@@ -123,6 +132,7 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 	return &source.DynamicSourceTable{
 		TableName:                        tableName,
 		TablePrimaryKeys:                 pks,
+		TablePrimaryKeysUnique:           pksUnique,
 		TableIncrementalKey:              req.IncrementalKey,
 		TableStrategy:                    strategy,
 		TableSupportsExtractPartitioning: true,
@@ -310,10 +320,10 @@ func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, 
 		args = []any{tableName}
 	case catalog != "" && isCatalogSQL(s.dialect):
 		pkSQL = s.dialect.(CatalogSQLDialect).PrimaryKeyQueryForCatalog()
-		args = []any{catalog, tableName}
+		args = []any{catalog, schemaName, tableName}
 	default:
 		pkSQL = s.dialect.PrimaryKeyQuery()
-		args = []any{tableName}
+		args = []any{schemaName, tableName}
 	}
 	if pkSQL == "" {
 		return nil
@@ -396,19 +406,7 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 			return
 		}
 
-		columns := make([]schema.Column, len(colTypes))
-		for i, ct := range colTypes {
-			dt, precision, scale, arrayType := s.dialect.MapDataType(ct.DatabaseTypeName())
-			nullable, _ := ct.Nullable()
-			columns[i] = schema.Column{
-				Name:      ct.Name(),
-				DataType:  dt,
-				Nullable:  nullable,
-				Precision: precision,
-				Scale:     scale,
-				ArrayType: arrayType,
-			}
-		}
+		columns := s.customQueryColumns(colTypes)
 		arrowSchema := BuildArrowSchema(columns)
 
 		for {
@@ -425,6 +423,48 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 	}()
 
 	return results, nil
+}
+
+func (s *ADBCSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
+	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect custom query schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get custom query column types: %w", err)
+	}
+	return &schema.TableSchema{Name: source.CustomQueryTableName, Columns: s.customQueryColumns(colTypes)}, nil
+}
+
+func (s *ADBCSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
+	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
+	var minValue, maxValue any
+	var totalCount, nonNullCount int64
+	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+}
+
+func (s *ADBCSource) customQueryColumns(colTypes []*sql.ColumnType) []schema.Column {
+	columns := make([]schema.Column, len(colTypes))
+	for i, ct := range colTypes {
+		dt, precision, scale, arrayType := s.dialect.MapDataType(ct.DatabaseTypeName())
+		nullable, _ := ct.Nullable()
+		columns[i] = schema.Column{
+			Name:      ct.Name(),
+			DataType:  dt,
+			Nullable:  nullable,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+		}
+	}
+	return columns
 }
 
 func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {

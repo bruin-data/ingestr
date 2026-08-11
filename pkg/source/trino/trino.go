@@ -139,6 +139,9 @@ func (s *TrinoSource) getSchema(ctx context.Context, table string) (*schema.Tabl
 			Scale:     scale,
 			ArrayType: arrayType,
 		}
+		if dt == schema.TypeString {
+			col.MaxLength = source.ParseSizedStringLength(dataType)
+		}
 		columns = append(columns, col)
 	}
 

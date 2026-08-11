@@ -29,7 +29,7 @@ func MapDataTypeToPostgres(col schema.Column) string {
 		}
 		return "NUMERIC"
 	case schema.TypeString:
-		if col.MaxLength > 0 {
+		if col.MaxLength > 0 && col.MaxLength <= maxPostgresVarcharLength {
 			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
 		return "TEXT"

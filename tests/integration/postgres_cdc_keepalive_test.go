@@ -93,6 +93,7 @@ func init() {
 // that lets the test override wal_sender_timeout, which is what triggers the
 // regression scenario (destination-write phase outlasting the timeout).
 func setupPostgresCDCContainerWithTimeout(t *testing.T, ctx context.Context, walSenderTimeout string) (testcontainers.Container, string) {
+	requireDocker(t)
 	t.Helper()
 	req := testcontainers.ContainerRequest{
 		Image: "postgres:16-alpine",
@@ -145,6 +146,7 @@ func setupPostgresCDCContainerWithTimeout(t *testing.T, ctx context.Context, wal
 // is chosen well above keepaliveInterval (5s) so the keepalive's
 // send-then-tick cadence comfortably refreshes the walsender.
 func TestPostgresCDC_BatchRunAdvancesSlotWithSlowWrites(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

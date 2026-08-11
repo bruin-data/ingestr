@@ -6,7 +6,9 @@ outline: deep
 
 The `ingestr` pip package can be used as a Python library when your source data already lives in Python: API responses, yielded pages, dictionaries, pandas DataFrames, Polars DataFrames, or PyArrow tables.
 
-The SDK still runs the bundled `ingestr` binary for the actual ingestion work. Python data is passed to the process as Arrow IPC by default, so the Go pipeline can load it into any supported destination.
+The SDK still runs the `ingestr` CLI binary for the actual ingestion work. The pip package downloads and caches the matching GitHub release binary on first use. Python data is passed to the process as Arrow IPC by default, so the Go pipeline can load it into any supported destination.
+
+Downloaded archives are verified against checksums embedded in the pip package. On Linux, the downloaded release binaries require glibc; musl-based distributions such as Alpine should build or provide a compatible binary with `INGESTR_BINARY_PATH`.
 
 ## Installation
 
@@ -122,7 +124,7 @@ A bare `yield` inside the `with` block yields from your Python function; it does
 
 ## Transport options
 
-By default, Python data is streamed to the bundled binary over Arrow IPC:
+By default, Python data is streamed to the CLI binary over Arrow IPC:
 
 ```python
 ingestr.ingest(rows, dest_uri="duckdb:///tmp/warehouse.duckdb", dest_table="main.rows")

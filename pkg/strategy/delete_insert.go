@@ -36,6 +36,9 @@ func (s *DeleteInsertStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if hasCDCColumns(job.Schema) {
+		return fmt.Errorf("delete+insert strategy is not supported for CDC records; use merge or replace")
+	}
 	if !job.Destination.SupportsDeleteInsertStrategy() {
 		return fmt.Errorf("destination %s does not support delete+insert strategy", job.Destination.GetScheme())
 	}
@@ -73,6 +76,14 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 
 	sourceIncrementalKey := sourceIncrementalKeyForRead(job)
 	destinationIncrementalKey, incrementalKeyType := resolveSchemaColumn(job.Schema, job.Config.IncrementalKey)
+	// When the reconciled type came back degraded (e.g. SQLite stores DATE as TEXT, so the
+	// key type flips to string on re-runs), recover the real temporal type from the source
+	// schema so date-only bound conversion still fires.
+	if job.SourceSchema != nil && (incrementalKeyType == schema.TypeString || incrementalKeyType == schema.TypeUnknown) {
+		if _, srcType := resolveSchemaColumn(job.SourceSchema, job.Config.IncrementalKey); srcType == schema.TypeDate || srcType == schema.TypeTimestamp || srcType == schema.TypeTimestampTZ {
+			incrementalKeyType = srcType
+		}
+	}
 
 	readOpts := source.ReadOptions{
 		IncrementalKey:                  sourceIncrementalKey,
@@ -105,7 +116,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	if err := job.Destination.WriteParallel(ctx, records, destination.WriteOptions{
 		Table:            stagingTable,
 		Schema:           job.Schema,
-		Parallelism:      parallelism,
+		Parallelism:      job.Config.EffectiveDestinationParallelism(),
 		StagingTable:     true,
 		StagingBucket:    job.Config.StagingBucket,
 		LoaderFileSize:   job.Config.LoaderFileSize,

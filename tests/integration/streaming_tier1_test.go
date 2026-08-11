@@ -43,6 +43,7 @@ const (
 )
 
 func TestSQS_Streaming(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -96,6 +97,7 @@ func TestSQS_Streaming(t *testing.T) {
 }
 
 func TestKinesis_Streaming(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -146,6 +148,8 @@ func TestKinesis_Streaming(t *testing.T) {
 }
 
 func TestPubSub_Streaming(t *testing.T) {
+	requireDocker(t)
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -197,6 +201,7 @@ func TestPubSub_Streaming(t *testing.T) {
 }
 
 func startLocalStackContainer(t *testing.T, ctx context.Context) string {
+	requireDocker(t)
 	t.Helper()
 	req := testcontainers.ContainerRequest{
 		Image:        "localstack/localstack:3.8.1",

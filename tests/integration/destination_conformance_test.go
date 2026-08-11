@@ -12,15 +12,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/bigquery"
 	"github.com/ClickHouse/clickhouse-go/v2"
+	hdbdriver "github.com/SAP/go-hdb/driver"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/hanautil"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/snowflake"
@@ -65,13 +68,12 @@ type destCase struct {
 	sqlBackend             *sqlBackend
 	mergeCapable           bool
 	deleteInsertCapable    bool
-	truncateInsertCapable  bool
 	scd2Capable            bool
 	schemaEvolutionCapable bool
 	// replaceDedupCapable marks destinations that deduplicate by primary key on
 	// replace, so the dedup conformance tests run against them. Most swap+merge
 	// destinations do this via the strategy's pre-swap normalised table; Postgres
-	// via truncate+insert. Excludes ClickHouse (dedup is engine-dependent) and
+	// via its in-place replace implementation. Excludes ClickHouse (dedup is engine-dependent) and
 	// destinations without atomic swap (which write directly, no dedup).
 	replaceDedupCapable  bool
 	validateNonSQL       func(t *testing.T, destURI, destTable string)
@@ -100,7 +102,31 @@ func destinationCases() []destCase {
 			sqlBackend:             postgresBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
+			scd2Capable:            true,
+			schemaEvolutionCapable: true,
+			replaceDedupCapable:    true,
+		},
+		{
+			name: "hana",
+			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
+				hanaURI := os.Getenv("GONG_TEST_HANA_URI")
+				if hanaURI == "" {
+					t.Skip("Set GONG_TEST_HANA_URI to run SAP HANA destination conformance tests")
+				}
+
+				table := fmt.Sprintf("SYSTEM.conformance_%s", uniqueSuffix())
+				cleanup := func() {
+					db, err := hanaBackend().openDB(hanaURI)
+					if err == nil {
+						_, _ = db.ExecContext(ctx, "DROP TABLE "+hanaQuoteTable(table))
+						_ = db.Close()
+					}
+				}
+				return hanaURI, table, cleanup
+			},
+			sqlBackend:             hanaBackend(),
+			mergeCapable:           true,
+			deleteInsertCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -117,7 +143,6 @@ func destinationCases() []destCase {
 			sqlBackend:             sqliteBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // SQLite doesn't support ALTER COLUMN TYPE
 			replaceDedupCapable:    true,
@@ -133,7 +158,6 @@ func destinationCases() []destCase {
 			sqlBackend:             duckdbBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -197,7 +221,6 @@ func destinationCases() []destCase {
 			sqlBackend:             bigqueryBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -223,7 +246,6 @@ func destinationCases() []destCase {
 			sqlBackend:             clickhouseBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 		},
@@ -247,7 +269,6 @@ func destinationCases() []destCase {
 			sqlBackend:             mysqlBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			replaceDedupCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
@@ -272,7 +293,6 @@ func destinationCases() []destCase {
 			sqlBackend:             oracleBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			replaceDedupCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // Oracle needs a data-preserving rewrite path for type changes like NUMBER -> CLOB.
@@ -321,7 +341,6 @@ func destinationCases() []destCase {
 			sqlBackend:             mssqlBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -344,11 +363,10 @@ func destinationCases() []destCase {
 				}
 				return fabricURI, table, cleanup
 			},
-			sqlBackend:            fabricBackend(),
-			mergeCapable:          true,
-			deleteInsertCapable:   true,
-			truncateInsertCapable: true,
-			scd2Capable:           true,
+			sqlBackend:          fabricBackend(),
+			mergeCapable:        true,
+			deleteInsertCapable: true,
+			scd2Capable:         true,
 		},
 		{
 			name: "cratedb",
@@ -369,7 +387,6 @@ func destinationCases() []destCase {
 			},
 			sqlBackend:             cratedbBackend(),
 			mergeCapable:           true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false,
 		},
@@ -393,7 +410,6 @@ func destinationCases() []destCase {
 			sqlBackend:             snowflakeBackend(),
 			mergeCapable:           true,
 			deleteInsertCapable:    true,
-			truncateInsertCapable:  true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
@@ -423,10 +439,33 @@ func destinationCases() []destCase {
 			validateNonSQL:       validateAthenaReplace,
 			validateAppendNonSQL: validateAthenaAppend,
 		},
+		{
+			// Merge, delete+insert and SCD2 cannot be
+			// validated through sqlBackend (no database/sql driver for
+			// Iceberg); they run in iceberg_strategies_test.go against the
+			// same fixtures and expectations.
+			name: "iceberg",
+			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
+				return icebergConformanceDestURI(t), icebergConformanceTable(), func() {}
+			},
+			validateNonSQL:       validateIcebergReplace,
+			validateAppendNonSQL: validateIcebergAppend,
+		},
 		// DynamoDB is tested separately in dynamodb_test.go because it always
 		// requires primary keys in the config, which the generic conformance
 		// tests don't provide.
 	}
+}
+
+func validateIcebergReplace(t *testing.T, destURI, destTable string) {
+	rows := readIcebergRows(t, context.Background(), destURI, destTable)
+	require.Len(t, rows, replaceFixtureRows)
+}
+
+func validateIcebergAppend(t *testing.T, destURI, destTable string) {
+	rows := readIcebergRows(t, context.Background(), destURI, destTable)
+	require.Len(t, rows, appendAfterRows)
+	assert.Equal(t, "kilo", icebergNameByID(t, rows, 11))
 }
 
 // TestDestinations_Replace validates:
@@ -770,115 +809,6 @@ func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 	}
 }
 
-// TestDestinations_TruncateInsert validates truncate+insert semantics:
-//   - seed the destination with a small set of rows via replace
-//   - run truncate+insert with a larger source fixture
-//   - verify the final row count matches the new source (old rows are gone,
-//     not appended) and the replacement values are queryable
-func TestDestinations_TruncateInsert(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	if _, err := strategy.Get(config.StrategyTruncateInsert); err != nil {
-		t.Skip("truncate+insert strategy not implemented yet")
-	}
-
-	ctx := context.Background()
-	seedURI := jsonlURI(t, "testdata/conformance_append_initial.jsonl")
-	truncateURI := jsonlURI(t, "testdata/conformance.jsonl")
-
-	for _, tc := range destinationCases() {
-		tc := tc
-		if tc.sqlBackend == nil || !tc.truncateInsertCapable {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Skip("destination does not support truncate+insert")
-			})
-			continue
-		}
-
-		t.Run(tc.name, func(t *testing.T) {
-			destURI, destTable, cleanup := tc.setup(t, ctx)
-			defer cleanup()
-
-			// Seed with 5 rows via replace so the table exists.
-			seedCfg := &config.IngestConfig{
-				SourceURI:           seedURI,
-				SourceTable:         "truncate_seed",
-				DestURI:             destURI,
-				DestTable:           destTable,
-				IncrementalStrategy: config.StrategyReplace,
-			}
-			require.NoError(t, pipeline.New(seedCfg).Run(ctx))
-
-			// Truncate+insert with 10 rows. Final count should be 10 (not 15).
-			cfg := &config.IngestConfig{
-				SourceURI:           truncateURI,
-				SourceTable:         "truncate_source",
-				DestURI:             destURI,
-				DestTable:           destTable,
-				IncrementalStrategy: config.StrategyTruncateInsert,
-			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-			validateTruncateInsertSQL(t, tc.sqlBackend, destURI, destTable)
-		})
-	}
-}
-
-// TestDestinations_TruncateInsert_Dedup validates that truncate+insert
-// deduplicates source rows by primary key. The fixture contains 10 rows with
-// only 5 distinct ids (each id appearing twice). After the run, the target
-// must contain exactly 5 rows.
-func TestDestinations_TruncateInsert_Dedup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	if _, err := strategy.Get(config.StrategyTruncateInsert); err != nil {
-		t.Skip("truncate+insert strategy not implemented yet")
-	}
-
-	ctx := context.Background()
-	dupesURI := jsonlURI(t, "testdata/conformance_truncate_dupes.jsonl")
-
-	for _, tc := range destinationCases() {
-		tc := tc
-		if tc.sqlBackend == nil || !tc.truncateInsertCapable {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Skip("destination does not support truncate+insert")
-			})
-			continue
-		}
-
-		t.Run(tc.name, func(t *testing.T) {
-			destURI, destTable, cleanup := tc.setup(t, ctx)
-			defer cleanup()
-
-			cfg := &config.IngestConfig{
-				SourceURI:           dupesURI,
-				SourceTable:         "truncate_dupes",
-				DestURI:             destURI,
-				DestTable:           destTable,
-				IncrementalStrategy: config.StrategyTruncateInsert,
-				PrimaryKeys:         []string{"id"},
-			}
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
-
-			db, err := tc.sqlBackend.openDB(destURI)
-			if err != nil {
-				t.Skipf("Could not open SQL backend for truncate+insert dedup validation: %v", err)
-				return
-			}
-			defer func() { _ = db.Close() }()
-
-			var count int
-			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(destTable)).Scan(&count))
-			assert.Equal(t, 5, count, "expected 5 distinct ids after dedup")
-		})
-	}
-}
-
 // TestDestinations_SCD2 validates SCD2 (Slowly Changing Dimensions Type 2) semantics:
 // - Initial load: 5 records inserted as current rows with _scd_valid_from, _scd_valid_to=NULL, _scd_is_current=true
 // - Update load:SCD2Table
@@ -1138,6 +1068,83 @@ func postgresBackend() *sqlBackend {
 	}
 }
 
+func hanaBackend() *sqlBackend {
+	return &sqlBackend{
+		openDB: func(uri string) (*sql.DB, error) {
+			dsn, _, err := hanautil.ParseURI(uri)
+			if err != nil {
+				return nil, err
+			}
+			connector, err := hdbdriver.NewDSNConnector(dsn)
+			if err != nil {
+				return nil, err
+			}
+			return sql.OpenDB(connector), nil
+		},
+		schemaTypes: func(db *sql.DB, table string) (map[string]string, error) {
+			schemaName, tableName := splitSchemaTable(table, "SYSTEM")
+			rows, err := db.Query(`
+				SELECT COLUMN_NAME, DATA_TYPE_NAME
+				FROM SYS.TABLE_COLUMNS
+				WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?
+				ORDER BY POSITION
+			`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = rows.Close() }()
+			out := map[string]string{}
+			for rows.Next() {
+				var name, dataType string
+				if err := rows.Scan(&name, &dataType); err != nil {
+					return nil, err
+				}
+				out[strings.ToLower(name)] = normalizeTypeName(dataType)
+			}
+			return out, rows.Err()
+		},
+		expectedTypes: map[string]string{
+			"id":     "bigint",
+			"name":   "nclob",
+			"active": "boolean",
+			"score":  "double",
+		},
+		countQuery: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s", hanaQuoteTable(table))
+		},
+		nameByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT TO_NVARCHAR(%s) FROM %s WHERE %s = %d", hanaQuoteIdentifier("name"), hanaQuoteTable(table), hanaQuoteIdentifier("id"), id)
+		},
+		ageByIDQuery: func(table string, id int) string {
+			return fmt.Sprintf("SELECT TO_NVARCHAR(%s) FROM %s WHERE %s = %d", hanaQuoteIdentifier("age"), hanaQuoteTable(table), hanaQuoteIdentifier("id"), id)
+		},
+		scd2CountCurrent: func(table string) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = TRUE", hanaQuoteTable(table), hanaQuoteIdentifier("_scd_is_current"))
+		},
+		scd2CountByID: func(table string, id int) string {
+			return fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = %d", hanaQuoteTable(table), hanaQuoteIdentifier("id"), id)
+		},
+		scd2HistNoValidTo: func(table string) string {
+			return fmt.Sprintf(
+				"SELECT COUNT(*) FROM %s WHERE %s = FALSE AND %s IS NULL",
+				hanaQuoteTable(table), hanaQuoteIdentifier("_scd_is_current"), hanaQuoteIdentifier("_scd_valid_to"),
+			)
+		},
+	}
+}
+
+func hanaQuoteTable(table string) string {
+	parts := strings.Split(table, ".")
+	for i := range parts {
+		parts[i] = hanaQuoteIdentifier(parts[i])
+	}
+	return strings.Join(parts, ".")
+}
+
+func hanaQuoteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(strings.ToUpper(identifier), `"`, `""`) + `"`
+}
+
 func splitSchemaTable(table string, defaultSchema string) (string, string) {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) == 2 {
@@ -1146,9 +1153,13 @@ func splitSchemaTable(table string, defaultSchema string) (string, string) {
 	return defaultSchema, table
 }
 
+var uniqueCounter atomic.Uint64
+
 func uniqueSuffix() string {
-	// short, safe suffix for table names
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	// Collision-safe even when parallel tests race on the same nanosecond. Digits
+	// only (no separator): this feeds SQL identifiers and S3 bucket names, which
+	// forbid hyphens and underscores respectively.
+	return fmt.Sprintf("%d%d", time.Now().UnixNano(), uniqueCounter.Add(1))
 }
 
 func sqliteBackend() *sqlBackend {
@@ -1449,26 +1460,6 @@ func validateAppendSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	var newNameRaw []byte
 	require.NoError(t, db.QueryRow(backend.nameByIDQuery(table, 11)).Scan(&newNameRaw))
 	assert.Equal(t, "kilo", string(newNameRaw))
-}
-
-func validateTruncateInsertSQL(t *testing.T, backend *sqlBackend, uri, table string) {
-	t.Helper()
-	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend for truncate+insert validation: %v", err)
-		return
-	}
-	defer func() { _ = db.Close() }()
-
-	var count int
-	require.NoError(t, db.QueryRow(backend.countQuery(table)).Scan(&count))
-	assert.Equal(t, replaceFixtureRows, count)
-
-	// id=10 only exists in the truncate+insert source; seeing it proves the
-	// new batch is present and the seed's 5-row table was emptied (not appended).
-	var nameRaw []byte
-	require.NoError(t, db.QueryRow(backend.nameByIDQuery(table, 10)).Scan(&nameRaw))
-	assert.Equal(t, "juliet", string(nameRaw))
 }
 
 func validateDeleteInsertSQL(t *testing.T, backend *sqlBackend, uri, table string) {
@@ -2427,6 +2418,14 @@ func getSchemaEvolutionExpectedTypes(backend *sqlBackend) map[string]string {
 			"age":   "text",
 			"score": "bigint",
 		}
+	case backend.expectedTypes["id"] == "bigint" && backend.expectedTypes["name"] == "nclob":
+		// SAP HANA
+		return map[string]string{
+			"id":    "bigint",
+			"name":  "nclob",
+			"age":   "nclob",
+			"score": "bigint",
+		}
 	case backend.expectedTypes["id"] == "integer" && backend.expectedTypes["name"] == "text":
 		// SQLite - types are more flexible
 		return map[string]string{
@@ -2507,7 +2506,7 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 			continue
 		}
 		// Include backends that use SwapTable in replace strategy.
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "hana" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}
@@ -2594,6 +2593,14 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 			SELECT COUNT(*) FROM information_schema.tables
 			WHERE table_schema = '%s' AND table_name LIKE '%s_old_%%'
 		`, schemaName, tableName)
+	case strings.Contains(uri, "hana"):
+		if schemaName == "" {
+			schemaName = "SYSTEM"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM SYS.TABLES
+			WHERE SCHEMA_NAME = '%s' AND TABLE_NAME LIKE '%s_OLD_%%'
+		`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
 	case strings.Contains(uri, "mssql") || strings.Contains(uri, "sqlserver"):
 		// MSSQL: query sys.tables and sys.schemas
 		if schemaName == "" {
@@ -2685,6 +2692,17 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 			  AND tc.constraint_type = 'PRIMARY KEY'
 			  AND kcu.column_name = '%s'
 		`, schemaName, tableName, column)
+	case strings.Contains(uri, "hana"):
+		if schemaName == "" {
+			schemaName = "SYSTEM"
+		}
+		query = fmt.Sprintf(`
+			SELECT COUNT(*) FROM SYS.CONSTRAINTS
+			WHERE SCHEMA_NAME = '%s'
+			  AND TABLE_NAME = '%s'
+			  AND IS_PRIMARY_KEY = 'TRUE'
+			  AND COLUMN_NAME = '%s'
+		`, strings.ToUpper(schemaName), strings.ToUpper(tableName), strings.ToUpper(column))
 	case strings.Contains(uri, "mssql") || strings.Contains(uri, "sqlserver"):
 		if schemaName == "" {
 			schemaName = "dbo"
@@ -2759,7 +2777,7 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 		if tc.sqlBackend == nil {
 			continue
 		}
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
+		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "hana" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}

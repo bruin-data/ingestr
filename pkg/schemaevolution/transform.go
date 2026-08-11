@@ -3,6 +3,7 @@ package schemaevolution
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -35,12 +36,11 @@ func NewDiscardValueTransformer(comparison *SchemaComparison, _ *schema.TableSch
 
 	if comparison != nil {
 		for _, change := range comparison.Changes {
-			if change.Type == ChangeAddColumn {
-				// New columns are allowed in discard_value mode, keep their values.
+			if change.Type == ChangeAddColumn || change.Type == ChangeRemoveColumn || change.Type == ChangeRelaxNullability {
 				continue
 			}
 			// Track type incompatibilities to NULL out values.
-			transformer.violations[change.ColumnName] = true
+			transformer.violations[strings.ToLower(change.ColumnName)] = true
 		}
 	}
 
@@ -61,7 +61,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 	// For each column with violations, replace with NULL values
 	for colIdx := 0; colIdx < int(batch.NumCols()); colIdx++ {
 		colName := batchSchema.Field(colIdx).Name
-		if t.violations[colName] {
+		if t.violations[strings.ToLower(colName)] {
 			// Violation: discard value (set to NULL)
 			// If the column exists in destination schema, use destination type (to satisfy strict typing)
 			// Otherwise use source type (e.g. for rejected new columns)
@@ -69,7 +69,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 			targetType := field.Type
 			if t.destSchema != nil {
 				for _, destCol := range t.destSchema.Columns {
-					if destCol.Name == colName {
+					if strings.EqualFold(destCol.Name, colName) {
 						targetType = schema.DataTypeToArrowType(destCol)
 						break
 					}
@@ -104,7 +104,7 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 	newSchema := arrow.NewSchema(newFields, nil)
 	newBatch := array.NewRecordBatch(newSchema, columns, batch.NumRows())
 	for i, col := range columns {
-		if t.violations[batchSchema.Field(i).Name] {
+		if t.violations[strings.ToLower(batchSchema.Field(i).Name)] {
 			col.Release()
 		}
 	}
@@ -113,28 +113,22 @@ func (t *DiscardValueTransformer) Transform(ctx context.Context, batch arrow.Rec
 
 // DiscardRowTransformer filters out rows with incompatible values.
 type DiscardRowTransformer struct {
-	violations map[string]bool // column name -> has violation
-	schema     *schema.TableSchema
-	destSchema *schema.TableSchema
+	violations map[string]bool
 	allocator  memory.Allocator
 }
 
 // NewDiscardRowTransformer creates a transformer for discard_row mode.
-func NewDiscardRowTransformer(sourceSchema, destSchema *schema.TableSchema, comparison *SchemaComparison) *DiscardRowTransformer {
+func NewDiscardRowTransformer(_, _ *schema.TableSchema, comparison *SchemaComparison) *DiscardRowTransformer {
 	transformer := &DiscardRowTransformer{
 		violations: make(map[string]bool),
-		schema:     sourceSchema,
-		destSchema: destSchema,
 		allocator:  memory.DefaultAllocator,
 	}
-
 	if comparison != nil {
 		for _, change := range comparison.Changes {
-			if isInternalAllowedChange(change) {
+			if isDiscardRowAllowedChange(change) {
 				continue
 			}
-			// Track all violations (both new columns and type mismatches)
-			transformer.violations[change.ColumnName] = true
+			transformer.violations[strings.ToLower(change.ColumnName)] = true
 		}
 	}
 
@@ -147,19 +141,6 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 		return batch, nil
 	}
 
-	// Find column indices that have violations
-	violationCols := make(map[int]string)
-	schema := batch.Schema()
-	for i := 0; i < schema.NumFields(); i++ {
-		colName := schema.Field(i).Name
-		if t.violations[colName] {
-			violationCols[i] = colName
-		}
-	}
-
-	if len(violationCols) == 0 {
-		return batch, nil
-	}
 	allocator := allocatorOrDefault(t.allocator)
 
 	// Create a boolean filter array: true for rows to keep, false for rows to discard
@@ -170,11 +151,8 @@ func (t *DiscardRowTransformer) Transform(ctx context.Context, batch arrow.Recor
 	for rowIdx := 0; rowIdx < int(batch.NumRows()); rowIdx++ {
 		keepRow := true
 
-		// Check if any violation column has a non-NULL value
-		for colIdx := range violationCols {
-			col := batch.Column(colIdx)
-			if col.IsValid(rowIdx) {
-				// This row has data in a violation column, discard it
+		for colIdx, field := range batch.Schema().Fields() {
+			if t.violations[strings.ToLower(field.Name)] && batch.Column(colIdx).IsValid(rowIdx) {
 				keepRow = false
 				break
 			}

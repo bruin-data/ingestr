@@ -107,7 +107,7 @@ uvx crash -c 'SELECT * FROM doc.sample'
 
 ### Supported destination strategies
 
-When using CrateDB as a destination, ingestr supports `replace`, `append`, `merge`, `truncate+insert`, and `scd2`.
+When using CrateDB as a destination, ingestr supports `replace`, `append`, `merge`, and `scd2`.
 
 `delete+insert` is not supported for CrateDB destinations. CrateDB accepts transaction-control statements such as `BEGIN` and `START TRANSACTION` for PostgreSQL wire compatibility, but it does not provide transaction control; every statement commits immediately. Because ingestr cannot make the delete and insert steps atomic on CrateDB, it fails this strategy before loading staging data.
 
@@ -128,7 +128,7 @@ docker run --rm -it --name=cratedb \
 ```
 
 We are tracking development progress and incompatibilities at 
-[Support for ingestr/CrateDB] and ["tool: dlt/ingestr"]. Please join the discussion
+[Support for ingestr/CrateDB] and [CrateDB ingestr issues]. Please join the discussion
 or share relevant issue reports that help us improve interoperability. Thanks!
 
 
@@ -136,4 +136,4 @@ or share relevant issue reports that help us improve interoperability. Thanks!
 [CrateDB Cloud]: https://console.cratedb.cloud/
 [PostgreSQL SSL Mode Descriptions]: https://www.postgresql.org/docs/current/libpq-ssl.html#LIBPQ-SSL-SSLMODE-STATEMENTS
 [Support for ingestr/CrateDB]: https://github.com/crate/crate-clients-tools/issues/86
-["tool: dlt/ingestr"]: https://github.com/crate/crate/issues?q=state%3Aopen%20label%3A%22tool%3A%20dlt%2Fingestr%22
+[CrateDB ingestr issues]: https://github.com/crate/crate/issues?q=state%3Aopen%20label%3A%22tool%3A%20dlt%2Fingestr%22

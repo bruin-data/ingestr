@@ -17,12 +17,13 @@ import (
 
 // FieldInfo tracks information about a field observed during schema inference.
 type FieldInfo struct {
-	Name      string
-	Type      arrow.DataType
-	Nullable  bool
-	SeenNull  bool             // Whether a null value was observed
-	HasData   bool             // Whether at least one non-null value was observed
-	SeenTypes []arrow.DataType // All types observed for type conflict detection
+	Name              string
+	Type              arrow.DataType
+	Nullable          bool
+	SeenNull          bool             // Whether a null value was observed
+	HasData           bool             // Whether at least one non-null value was observed
+	SeenTypes         []arrow.DataType // All types observed for type conflict detection
+	SawUnknownStorage bool             // Whether the field ever arrived as the unknown extension type
 }
 
 // SchemaInferrer collects Arrow schemas from record batches and produces
@@ -62,7 +63,8 @@ func (i *SchemaInferrer) AddBatch(batch arrow.RecordBatch) error {
 		effectiveType := field.Type
 		hasNulls := col.NullN() > 0
 		hasNonNull := col.Len()-col.NullN() > 0
-		if isUnknownType(field.Type) {
+		fromUnknown := isUnknownType(field.Type)
+		if fromUnknown {
 			inferred, ok := inferUnknownColumnType(col)
 			if ok {
 				effectiveType = inferred
@@ -77,12 +79,13 @@ func (i *SchemaInferrer) AddBatch(batch arrow.RecordBatch) error {
 		if !exists {
 			// First time seeing this field
 			i.seenFields[field.Name] = &FieldInfo{
-				Name:      field.Name,
-				Type:      effectiveType,
-				Nullable:  field.Nullable || hasNulls,
-				SeenNull:  hasNulls,
-				HasData:   hasNonNull,
-				SeenTypes: []arrow.DataType{effectiveType},
+				Name:              field.Name,
+				Type:              effectiveType,
+				Nullable:          field.Nullable || hasNulls,
+				SeenNull:          hasNulls,
+				HasData:           hasNonNull,
+				SeenTypes:         []arrow.DataType{effectiveType},
+				SawUnknownStorage: fromUnknown,
 			}
 			i.fieldOrder = append(i.fieldOrder, field.Name)
 		} else {
@@ -90,6 +93,7 @@ func (i *SchemaInferrer) AddBatch(batch arrow.RecordBatch) error {
 			existing.Nullable = existing.Nullable || field.Nullable || hasNulls
 			existing.SeenNull = existing.SeenNull || hasNulls
 			existing.HasData = existing.HasData || hasNonNull
+			existing.SawUnknownStorage = existing.SawUnknownStorage || fromUnknown
 
 			// Check if type is different
 			if !arrow.TypeEqual(existing.Type, effectiveType) {
@@ -205,6 +209,34 @@ type InferStats struct {
 	BatchCount int64
 	RowCount   int64
 	FieldCount int
+}
+
+// TypeUnstableColumns returns the names of fields that were observed with more
+// than one effective type across batches (i.e. the final type required
+// promotion). Raw values staged before inference finished may not match the
+// promoted type for these columns.
+func (i *SchemaInferrer) TypeUnstableColumns() []string {
+	var unstable []string
+	for _, name := range i.fieldOrder {
+		if len(i.seenFields[name].SeenTypes) > 1 {
+			unstable = append(unstable, name)
+		}
+	}
+	return unstable
+}
+
+// UnknownStorageColumns returns the fields that ever arrived as the unknown
+// extension type. Their raw values are JSON-encoded text whose interpretation
+// (e.g. lenient date parsing) may be more permissive than a destination's
+// native load-time coercion.
+func (i *SchemaInferrer) UnknownStorageColumns() map[string]bool {
+	result := make(map[string]bool)
+	for name, info := range i.seenFields {
+		if info.SawUnknownStorage {
+			result[name] = true
+		}
+	}
+	return result
 }
 
 // TODO (cagin): if table already existed, compare existing column types against opts.Schema

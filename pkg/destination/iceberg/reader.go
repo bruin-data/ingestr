@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -9,13 +10,21 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	iceberggo "github.com/apache/iceberg-go"
+	icebergtable "github.com/apache/iceberg-go/table"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
+type requiredColumn struct {
+	name  string
+	index int
+}
+
 type recordBatchReader struct {
-	ctx     context.Context
-	records <-chan source.RecordBatchResult
-	schema  *arrow.Schema
+	ctx             context.Context
+	records         <-chan source.RecordBatchResult
+	schema          *arrow.Schema
+	requiredColumns []requiredColumn
 
 	current  arrow.RecordBatch
 	err      error
@@ -30,6 +39,35 @@ func newRecordBatchReader(ctx context.Context, records <-chan source.RecordBatch
 	}
 	r.refCount.Store(1)
 	return r
+}
+
+func newTableRecordBatchReader(
+	ctx context.Context,
+	records <-chan source.RecordBatchResult,
+	writeSchema *arrow.Schema,
+	tableSchema *iceberggo.Schema,
+) (*recordBatchReader, error) {
+	writeSchema = applyTableRequirements(writeSchema, tableSchema)
+	if err := validateArrowSchemaCompatibility(tableSchema, writeSchema); err != nil {
+		return nil, err
+	}
+
+	r := newRecordBatchReader(ctx, records, writeSchema)
+	identifierIDs := make(map[int]struct{}, len(tableSchema.IdentifierFieldIDs))
+	for _, id := range tableSchema.IdentifierFieldIDs {
+		identifierIDs[id] = struct{}{}
+	}
+	for i, field := range writeSchema.Fields() {
+		tableField, ok := tableSchema.FindFieldByName(field.Name)
+		if !ok {
+			continue
+		}
+		_, identifier := identifierIDs[tableField.ID]
+		if tableField.Required || identifier {
+			r.requiredColumns = append(r.requiredColumns, requiredColumn{name: field.Name, index: i})
+		}
+	}
+	return r, nil
 }
 
 func (r *recordBatchReader) Retain() {
@@ -79,10 +117,119 @@ func (r *recordBatchReader) Next() bool {
 				r.err = err
 				return false
 			}
+			if err := validateRequiredColumns(batch, r.requiredColumns); err != nil {
+				batch.Release()
+				r.err = err
+				return false
+			}
 			r.current = batch
 			return true
 		}
 	}
+}
+
+func applyTableRequirements(writeSchema *arrow.Schema, tableSchema *iceberggo.Schema) *arrow.Schema {
+	fields := writeSchema.Fields()
+	identifierIDs := make(map[int]struct{}, len(tableSchema.IdentifierFieldIDs))
+	for _, id := range tableSchema.IdentifierFieldIDs {
+		identifierIDs[id] = struct{}{}
+	}
+	for i := range fields {
+		tableField, ok := tableSchema.FindFieldByName(fields[i].Name)
+		if !ok {
+			continue
+		}
+		_, identifier := identifierIDs[tableField.ID]
+		fields[i].Nullable = !tableField.Required && !identifier
+	}
+	metadata := writeSchema.Metadata()
+	return arrow.NewSchema(fields, &metadata)
+}
+
+func validateArrowSchemaCompatibility(tableSchema *iceberggo.Schema, writeSchema *arrow.Schema) error {
+	if err := validateArrowSchemaCompatibilityWithTimestampUnit(tableSchema, writeSchema, false); err == nil {
+		return nil
+	}
+	// Match WriteRecords by retrying with nanosecond timestamps downcast to microseconds.
+	return validateArrowSchemaCompatibilityWithTimestampUnit(tableSchema, writeSchema, true)
+}
+
+func validateArrowSchemaCompatibilityWithTimestampUnit(
+	tableSchema *iceberggo.Schema,
+	writeSchema *arrow.Schema,
+	downcastNanoToMicro bool,
+) error {
+	provided, err := icebergtable.ArrowSchemaToIceberg(writeSchema, downcastNanoToMicro, tableSchema.NameMapping())
+	if err != nil {
+		return err
+	}
+	for _, field := range tableSchema.Fields() {
+		if err := validateIcebergFieldCompatibility(field, provided, field.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateIcebergFieldCompatibility(target iceberggo.NestedField, provided *iceberggo.Schema, path string) error {
+	actual, ok := provided.FindFieldByID(target.ID)
+	if !ok {
+		if target.Required && target.WriteDefault == nil && target.InitialDefault == nil {
+			return fmt.Errorf("required field %q is missing", path)
+		}
+		return nil
+	}
+	if target.Required && !actual.Required {
+		return fmt.Errorf("required field %q is nullable in the write schema", path)
+	}
+
+	switch targetType := target.Type.(type) {
+	case *iceberggo.StructType:
+		if _, ok := actual.Type.(*iceberggo.StructType); !ok {
+			return incompatibleIcebergTypeError(path, target.Type, actual.Type)
+		}
+		for _, field := range targetType.Fields() {
+			if err := validateIcebergFieldCompatibility(field, provided, path+"."+field.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *iceberggo.ListType:
+		if _, ok := actual.Type.(*iceberggo.ListType); !ok {
+			return incompatibleIcebergTypeError(path, target.Type, actual.Type)
+		}
+		return validateIcebergFieldCompatibility(targetType.ElementField(), provided, path+".element")
+	case *iceberggo.MapType:
+		if _, ok := actual.Type.(*iceberggo.MapType); !ok {
+			return incompatibleIcebergTypeError(path, target.Type, actual.Type)
+		}
+		if err := validateIcebergFieldCompatibility(targetType.KeyField(), provided, path+".key"); err != nil {
+			return err
+		}
+		return validateIcebergFieldCompatibility(targetType.ValueField(), provided, path+".value")
+	default:
+		if target.Type.Equals(actual.Type) {
+			return nil
+		}
+		if _, err := iceberggo.PromoteType(actual.Type, target.Type); err != nil {
+			return incompatibleIcebergTypeError(path, target.Type, actual.Type)
+		}
+		return nil
+	}
+}
+
+func incompatibleIcebergTypeError(path string, target, actual iceberggo.Type) error {
+	return fmt.Errorf("field %q has incompatible type %s, expected %s", path, actual, target)
+}
+
+func validateRequiredColumns(batch arrow.RecordBatch, required []requiredColumn) error {
+	var violations []error
+	for _, field := range required {
+		if nulls := batch.Column(field.index).NullN(); nulls > 0 {
+			violations = append(violations, fmt.Errorf("required field %q contains %d NULL value(s)", field.name, nulls))
+		}
+	}
+	return errors.Join(violations...)
 }
 
 func (r *recordBatchReader) RecordBatch() arrow.RecordBatch {

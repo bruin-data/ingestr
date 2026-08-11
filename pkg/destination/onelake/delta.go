@@ -27,6 +27,20 @@ type deltaStruct struct {
 	Fields []deltaField `json:"fields"`
 }
 
+// deltaMetadata keeps the metadata action as raw JSON fields so schema changes
+// can preserve table properties that ingestr does not interpret.
+type deltaMetadata map[string]json.RawMessage
+
+// deltaProtocol is the table's protocol action. It states the reader and writer
+// capabilities a client must have before touching the table, so it has to be
+// read and checked before any rewrite or metadata commit.
+type deltaProtocol struct {
+	MinReaderVersion int      `json:"minReaderVersion"`
+	MinWriterVersion int      `json:"minWriterVersion"`
+	ReaderFeatures   []string `json:"readerFeatures"`
+	WriterFeatures   []string `json:"writerFeatures"`
+}
+
 // deltaTypeFor maps an ingestr column type to a Delta Lake schema type. Scalar
 // types are returned as strings; arrays as nested type objects.
 func deltaTypeFor(col schema.Column) any {
@@ -63,9 +77,11 @@ func deltaTypeFor(col schema.Column) any {
 		// Delta has no TIME type; values are carried as microsecond longs.
 		return "long"
 	case schema.TypeArray:
+		// Array elements carry their precision/scale on the parent column, the
+		// same way schema.DataTypeToArrowType reads them.
 		return map[string]any{
 			"type":         "array",
-			"elementType":  deltaTypeFor(schema.Column{DataType: col.ArrayType}),
+			"elementType":  deltaTypeFor(schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}),
 			"containsNull": true,
 		}
 	default:
@@ -90,6 +106,31 @@ func buildSchemaString(cols []schema.Column) (string, error) {
 		return "", fmt.Errorf("failed to encode delta schema: %w", err)
 	}
 	return string(b), nil
+}
+
+func newDeltaMetadata(cols []schema.Column, tableID string, createdTime int64) (deltaMetadata, error) {
+	schemaString, err := buildSchemaString(cols)
+	if err != nil {
+		return nil, err
+	}
+
+	metadata := map[string]any{
+		"id":               tableID,
+		"format":           map[string]any{"provider": "parquet", "options": map[string]string{}},
+		"schemaString":     schemaString,
+		"partitionColumns": []string{},
+		"configuration":    map[string]string{},
+		"createdTime":      createdTime,
+	}
+	b, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode delta metadata: %w", err)
+	}
+	var result deltaMetadata
+	if err := json.Unmarshal(b, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode delta metadata: %w", err)
+	}
+	return result, nil
 }
 
 func addActions(adds []deltaAddFile, nowMillis int64) []any {
@@ -123,14 +164,16 @@ func removeActions(paths []string, nowMillis int64) []any {
 }
 
 func commitInfo(mode string, nowMillis int64) any {
+	return operationCommitInfo("WRITE", map[string]string{"mode": mode}, nowMillis)
+}
+
+func operationCommitInfo(operation string, parameters map[string]string, nowMillis int64) any {
 	return map[string]any{
 		"commitInfo": map[string]any{
-			"timestamp": nowMillis,
-			"operation": "WRITE",
-			"operationParameters": map[string]string{
-				"mode": mode,
-			},
-			"clientVersion": "ingestr",
+			"timestamp":           nowMillis,
+			"operation":           operation,
+			"operationParameters": parameters,
+			"clientVersion":       "ingestr",
 		},
 	}
 }
@@ -151,7 +194,7 @@ func marshalActions(actions []any) ([]byte, error) {
 // buildInitialCommit produces the newline-delimited JSON for Delta commit
 // version 0: protocol, metaData, one add per data file, and a commitInfo.
 func buildInitialCommit(cols []schema.Column, adds []deltaAddFile, tableID string, nowMillis int64) ([]byte, error) {
-	schemaString, err := buildSchemaString(cols)
+	metadata, err := newDeltaMetadata(cols, tableID, nowMillis)
 	if err != nil {
 		return nil, err
 	}
@@ -163,20 +206,25 @@ func buildInitialCommit(cols []schema.Column, adds []deltaAddFile, tableID strin
 				"minWriterVersion": 2,
 			},
 		},
-		map[string]any{
-			"metaData": map[string]any{
-				"id":               tableID,
-				"format":           map[string]any{"provider": "parquet", "options": map[string]string{}},
-				"schemaString":     schemaString,
-				"partitionColumns": []string{},
-				"configuration":    map[string]string{},
-				"createdTime":      nowMillis,
-			},
-		},
+		map[string]any{"metaData": metadata},
 	}
 	actions = append(actions, addActions(adds, nowMillis)...)
 	actions = append(actions, commitInfo("Overwrite", nowMillis))
 
+	return marshalActions(actions)
+}
+
+// buildSchemaEvolutionCommit replaces the table metadata without changing its
+// active data files. Delta readers fill newly-added columns with NULL for old
+// files that do not contain them.
+func buildSchemaEvolutionCommit(metadata deltaMetadata, nowMillis int64) ([]byte, error) {
+	if len(metadata) == 0 {
+		return nil, fmt.Errorf("cannot build schema evolution commit without delta metadata")
+	}
+	actions := []any{
+		map[string]any{"metaData": metadata},
+		operationCommitInfo("ALTER TABLE", map[string]string{}, nowMillis),
+	}
 	return marshalActions(actions)
 }
 

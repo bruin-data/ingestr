@@ -1,12 +1,17 @@
 package mysql
 
 import (
+	"context"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	psdbconnect "github.com/bruin-data/ingestr/pkg/source/mysql/internal/psdbconnect"
 	"google.golang.org/protobuf/proto"
 	"vitess.io/vitess/go/sqltypes"
@@ -63,6 +68,19 @@ func TestCDCSchemeRouting(t *testing.T) {
 				t.Errorf("scheme %q routed to %T, want %T", tc.scheme, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPlanetScaleCDCAdvertisesStreaming(t *testing.T) {
+	streaming, ok := any(NewPlanetScaleCDCSource()).(source.StreamingSource)
+	if !ok {
+		t.Fatal("PlanetScale CDC should implement StreamingSource")
+	}
+	if !streaming.SupportsStreaming() {
+		t.Fatal("PlanetScale CDC should support streaming")
+	}
+	if got := streaming.DefaultStreamingStrategy(); got != config.StrategyMerge {
+		t.Fatalf("DefaultStreamingStrategy() = %q, want %q", got, config.StrategyMerge)
 	}
 }
 
@@ -235,6 +253,192 @@ func TestPsdbRewriteBufferedLSNs(t *testing.T) {
 	}
 	if psdbRewriteBufferedLSNs(buffers, "users", len(buffers["users"].changes), 10, payload) {
 		t.Error("out-of-range start should not rewrite")
+	}
+}
+
+func TestPsdbStreamingTableStateCopyCompletionCheckpoint(t *testing.T) {
+	pk := &querypb.QueryResult{
+		Fields: []*querypb.Field{{Name: "id", Type: querypb.Type_VARCHAR}},
+		Rows:   []*querypb.Row{sqltypes.RowToProto3([]sqltypes.Value{sqltypes.NewVarChar("42")})},
+	}
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeString, Nullable: false}},
+		PrimaryKeys: []string{"id"},
+	})
+	state := newPsdbStreamingTableState(
+		psdbCDCTarget{bareName: "items", schema: tableSchema},
+		psdbCursorState{Shards: map[string]psdbShardCursor{}},
+		7,
+	)
+	results := make(chan source.RecordBatchResult, 1)
+
+	copyCursor := &psdbconnect.TableCursor{
+		Keyspace:    "ks",
+		Shard:       "-",
+		Position:    "MySQL56/abc:1-10",
+		LastKnownPk: pk,
+	}
+	checkpoint, err := state.processResponse(
+		context.Background(),
+		"-",
+		copyCursor,
+		false,
+		nil,
+		[]mysqlCDCChange{{values: []interface{}{"42"}}},
+		true,
+		100,
+		results,
+	)
+	if err != nil {
+		t.Fatalf("process copy response: %v", err)
+	}
+	if checkpoint == nil {
+		t.Fatal("expected copy checkpoint")
+	}
+
+	finalCursor := &psdbconnect.TableCursor{
+		Keyspace: "ks",
+		Shard:    "-",
+		Position: "MySQL56/abc:1-11",
+	}
+	if _, err := state.processResponse(context.Background(), "-", finalCursor, true, checkpoint, nil, false, 100, results); err != nil {
+		t.Fatalf("process copy completion: %v", err)
+	}
+
+	buffer := state.buffers["items"]
+	if buffer == nil || len(buffer.changes) != 2 {
+		t.Fatalf("buffered changes = %+v, want original copy row plus completion checkpoint", buffer)
+	}
+	_, copyPayload, ok := parseVitessLSN(buffer.changes[0].lsn)
+	if !ok {
+		t.Fatalf("copy row LSN did not parse: %q", buffer.changes[0].lsn)
+	}
+	copyState, err := decodePsdbCursor(copyPayload)
+	if err != nil {
+		t.Fatalf("decode copy cursor: %v", err)
+	}
+	if len(copyState.Shards["-"].LastKnownPk) == 0 {
+		t.Fatal("copy row should retain LastKnownPk for interrupted snapshot resume")
+	}
+
+	_, finalPayload, ok := parseVitessLSN(buffer.changes[1].lsn)
+	if !ok {
+		t.Fatalf("completion checkpoint LSN did not parse: %q", buffer.changes[1].lsn)
+	}
+	finalState, err := decodePsdbCursor(finalPayload)
+	if err != nil {
+		t.Fatalf("decode final cursor: %v", err)
+	}
+	finalShard := finalState.Shards["-"]
+	if finalShard.Position != finalCursor.Position {
+		t.Fatalf("completion checkpoint position = %q, want %q", finalShard.Position, finalCursor.Position)
+	}
+	if len(finalShard.LastKnownPk) != 0 {
+		t.Fatal("completion checkpoint should clear LastKnownPk")
+	}
+}
+
+func TestPsdbStreamingTableStateConcurrentShardFlush(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeString, Nullable: false}},
+		PrimaryKeys: []string{"id"},
+	})
+	state := newPsdbStreamingTableState(
+		psdbCDCTarget{bareName: "items", schema: tableSchema},
+		psdbCursorState{Shards: map[string]psdbShardCursor{}},
+		11,
+	)
+	results := make(chan source.RecordBatchResult, 1)
+
+	type shardEvent struct {
+		shard    string
+		position string
+		value    string
+	}
+	events := []shardEvent{
+		{shard: "-80", position: "MySQL56/left:1-10", value: "left"},
+		{shard: "80-", position: "MySQL56/right:1-20", value: "right"},
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, len(events))
+	for _, ev := range events {
+		ev := ev
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := state.processResponse(
+				context.Background(),
+				ev.shard,
+				&psdbconnect.TableCursor{Keyspace: "ks", Shard: ev.shard, Position: ev.position},
+				false,
+				nil,
+				[]mysqlCDCChange{{values: []interface{}{ev.value}}},
+				false,
+				100,
+				results,
+			)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("process concurrent shard response: %v", err)
+		}
+	}
+
+	if err := flushPsdbStreamingTables(context.Background(), []*psdbStreamingTableState{state}, results); err != nil {
+		t.Fatalf("flushPsdbStreamingTables: %v", err)
+	}
+
+	select {
+	case res := <-results:
+		if res.Err != nil {
+			t.Fatalf("flush result error: %v", res.Err)
+		}
+		if res.Batch == nil {
+			t.Fatal("expected flushed batch")
+		}
+		defer res.Batch.Release()
+		if got := res.Batch.NumRows(); got != int64(len(events)) {
+			t.Fatalf("flushed rows = %d, want %d", got, len(events))
+		}
+		lsns, ok := res.Batch.Column(1).(*array.String)
+		if !ok {
+			t.Fatalf("_cdc_lsn column has type %T, want *array.String", res.Batch.Column(1))
+		}
+		latest := lsns.Value(0)
+		for i := 1; i < lsns.Len(); i++ {
+			if lsn := lsns.Value(i); latest < lsn {
+				latest = lsn
+			}
+		}
+		_, payload, ok := parseVitessLSN(latest)
+		if !ok {
+			t.Fatalf("latest LSN did not parse: %q", latest)
+		}
+		flushedState, err := decodePsdbCursor(payload)
+		if err != nil {
+			t.Fatalf("decode latest cursor: %v", err)
+		}
+		for _, ev := range events {
+			if got := flushedState.Shards[ev.shard].Position; got != ev.position {
+				t.Fatalf("latest cursor for shard %s = %q, want %q", ev.shard, got, ev.position)
+			}
+		}
+	default:
+		t.Fatal("expected one flushed result")
+	}
+
+	if buffer := state.buffers["items"]; buffer == nil || len(buffer.changes) != 0 {
+		t.Fatalf("buffer after flush = %+v, want empty", buffer)
 	}
 }
 

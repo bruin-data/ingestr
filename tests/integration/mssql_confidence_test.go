@@ -191,10 +191,14 @@ func TestMSSQLSource_TableToSQLite_CustomSchemaFiltersAndExcludeColumns(t *testi
 	cols = withoutLoadTimestampColumns(cols)
 	assert.Equal(t, []string{"id", "name", "updated_at"}, cols, "excluded MSSQL columns should be removed from the destination schema")
 
-	var minTS, maxTS string
-	require.NoError(t, destDB.QueryRow("SELECT MIN(updated_at), MAX(updated_at) FROM filtered_rows").Scan(&minTS, &maxTS))
-	assert.GreaterOrEqual(t, minTS, "2024-01-01 00:20:00", "interval start filter should be applied")
-	assert.LessOrEqual(t, maxTS, "2024-01-01 00:40:00", "interval end filter should be applied")
+	var minTSStr, maxTSStr string
+	require.NoError(t, destDB.QueryRow("SELECT MIN(updated_at), MAX(updated_at) FROM filtered_rows").Scan(&minTSStr, &maxTSStr))
+	minTS, err := time.Parse(time.RFC3339Nano, minTSStr)
+	require.NoError(t, err)
+	maxTS, err := time.Parse(time.RFC3339Nano, maxTSStr)
+	require.NoError(t, err)
+	assert.False(t, minTS.Before(time.Date(2024, 1, 1, 0, 20, 0, 0, time.UTC)), "interval start filter should be applied")
+	assert.False(t, maxTS.After(time.Date(2024, 1, 1, 0, 40, 0, 0, time.UTC)), "interval end filter should be applied")
 }
 
 func TestMSSQLSource_TableToSQLite_DatabaseQualifiedTable(t *testing.T) {

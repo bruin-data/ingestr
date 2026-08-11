@@ -73,4 +73,4 @@ ingestr ingest \
   --primary-key "id"
 ```
 
-Supported destination strategies are `replace`, `append`, `merge`, and `truncate+insert`. `merge` uses Cassandra upsert semantics. `delete+insert` and `scd2` are not supported.
+Supported destination strategies are `replace`, `append`, and `merge`. `merge` uses Cassandra upsert semantics. `delete+insert` and `scd2` are not supported.

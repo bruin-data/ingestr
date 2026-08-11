@@ -2,38 +2,69 @@ package postgres_cdc
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// replStep is one NextBatch result in a scripted WAL stream.
-type replStep struct {
-	batch       arrow.RecordBatch
-	hadActivity bool
-	lsn         pglogrepl.LSN
+type readerTestLease struct {
+	done chan struct{}
+	err  error
 }
 
-// fakeReplicator replays a scripted sequence of NextBatch results, mimicking
+func (l *readerTestLease) Done() <-chan struct{} { return l.done }
+func (l *readerTestLease) Err() error            { return l.err }
+func (l *readerTestLease) Release() error        { return nil }
+
+type leaseLossReplicator struct {
+	lease *readerTestLease
+	calls int
+}
+
+func (r *leaseLossReplicator) NextChanges(context.Context) ([]Change, pglogrepl.LSN, bool, error) {
+	r.calls++
+	if r.calls == 1 {
+		return makeInsertChanges(1, 1, 10), 10, true, nil
+	}
+	close(r.lease.done)
+	return nil, 0, false, errors.New("replication stopped")
+}
+
+func (r *leaseLossReplicator) CurrentLSN() pglogrepl.LSN { return 10 }
+func (r *leaseLossReplicator) BarrierReached() bool      { return false }
+func (r *leaseLossReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
+	return 0, false
+}
+
+// replStep is one NextChanges result in a scripted WAL stream.
+type replStep struct {
+	changes     []Change
+	hadActivity bool
+	lsn         pglogrepl.LSN
+	barrier     bool
+}
+
+// fakeReplicator replays a scripted sequence of NextChanges results, mimicking
 // the WAL message stream a real Replicator produces (Begin/Insert/Relation
-// messages return no batch but are still activity; only Commit yields a batch).
+// messages return no changes but are still activity; only Commit yields the
+// transaction's changes).
 type fakeReplicator struct {
-	steps []replStep
-	idx   int
-	lsn   pglogrepl.LSN
+	steps       []replStep
+	idx         int
+	lsn         pglogrepl.LSN
+	barrierSeen bool
 
 	// pendingLowWater, when set, scripts PendingLowWater's return value.
 	pendingLowWater func() (pglogrepl.LSN, bool)
 }
 
-func (f *fakeReplicator) NextBatch(_ context.Context, _ int) (arrow.RecordBatch, pglogrepl.LSN, bool, error) {
+func (f *fakeReplicator) NextChanges(_ context.Context) ([]Change, pglogrepl.LSN, bool, error) {
 	if f.idx >= len(f.steps) {
 		// Stream exhausted: report idle with no further LSN progress.
 		return nil, 0, false, nil
@@ -43,10 +74,15 @@ func (f *fakeReplicator) NextBatch(_ context.Context, _ int) (arrow.RecordBatch,
 	if s.lsn > f.lsn {
 		f.lsn = s.lsn
 	}
-	return s.batch, s.lsn, s.hadActivity, nil
+	if s.barrier {
+		f.barrierSeen = true
+	}
+	return s.changes, s.lsn, s.hadActivity, nil
 }
 
 func (f *fakeReplicator) CurrentLSN() pglogrepl.LSN { return f.lsn }
+
+func (f *fakeReplicator) BarrierReached() bool { return f.barrierSeen }
 
 func (f *fakeReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
 	if f.pendingLowWater != nil {
@@ -55,58 +91,71 @@ func (f *fakeReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
 	return 0, false
 }
 
-func makeRowBatch(id int64) arrow.RecordBatch {
-	return makeNRowBatch(1)
+// testStreamSchema is the minimal CDC table schema used by the accumulator
+// tests: one source column (id) plus the four CDC meta columns.
+func testStreamSchema() *schema.TableSchema {
+	return &schema.TableSchema{
+		Name:        "t",
+		Schema:      "public",
+		Columns:     append([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, cdcMetaColumns()...),
+		PrimaryKeys: []string{"id"},
+	}
 }
 
-func makeNRowBatch(n int) arrow.RecordBatch {
-	mem := memory.NewGoAllocator()
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-	}, nil)
-
-	b := array.NewInt64Builder(mem)
-	defer b.Release()
-	for i := range n {
-		b.Append(int64(i))
+func testAccumulator(threshold int, tables ...string) *batchAccumulator {
+	schemas := map[string]*schema.TableSchema{"": testStreamSchema()}
+	for _, tbl := range tables {
+		schemas[tbl] = testStreamSchema()
 	}
-	col := b.NewArray()
-	defer col.Release()
+	return newBatchAccumulator(threshold, schemas)
+}
 
-	return array.NewRecordBatch(arrowSchema, []arrow.Array{col}, int64(n))
+// makeInsertChanges builds n INSERT changes with distinct ids starting at base.
+func makeInsertChanges(n int, base int64, lsn pglogrepl.LSN) []Change {
+	changes := make([]Change, n)
+	for i := range n {
+		changes[i] = Change{
+			Operation: "INSERT",
+			LSN:       lsn,
+			Values:    []interface{}{base + int64(i)},
+		}
+	}
+	return changes
 }
 
 // buildSingleRowTxnStream models n single-row transactions and returns the
 // scripted steps plus the target LSN (the LSN of the final commit). Each
 // transaction in the pgoutput protocol is Begin -> Insert -> Commit; Begin and
-// Insert produce no batch but ARE activity, and only Commit emits the 1-row
-// batch. LSNs increase monotonically across every step so batch mode only
+// Insert produce no changes but ARE activity, and only Commit emits the 1-row
+// change set. LSNs increase monotonically across every step so batch mode only
 // catches up after the very last commit is read.
-func buildSingleRowTxnStream(n int) (steps []replStep, targetLSN pglogrepl.LSN) {
+func buildSingleRowTxnStream(n int) (steps []replStep, finalLSN pglogrepl.LSN) {
 	var lsn pglogrepl.LSN
-	next := func(batch arrow.RecordBatch) replStep {
+	next := func(changes []Change) replStep {
 		lsn++
-		return replStep{batch: batch, hadActivity: true, lsn: lsn}
+		return replStep{changes: changes, hadActivity: true, lsn: lsn}
 	}
 	for i := range n {
 		steps = append(
 			steps,
-			next(nil),                    // Begin
-			next(nil),                    // Insert
-			next(makeRowBatch(int64(i))), // Commit
+			next(nil), // Begin
+			next(nil), // Insert
+			next(makeInsertChanges(1, int64(i), lsn+1)), // Commit
 		)
 	}
+	lsn++
+	steps = append(steps, replStep{hadActivity: true, lsn: lsn, barrier: true})
 	return steps, lsn
 }
 
-func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (batchCount int, totalRows int64) {
+func drainStreamLoop(t *testing.T, steps []replStep) (batchCount int, totalRows int64) {
 	t.Helper()
 
 	repl := &fakeReplicator{steps: steps}
 	results := make(chan source.RecordBatchResult, len(steps)+1)
-	accum := newBatchAccumulator(10000)
+	accum := testAccumulator(10000)
 
-	err := streamLoop(context.Background(), repl, ModeBatch, targetLSN, 10000, accum, results, false)
+	err := streamLoop(context.Background(), repl, 10000, accum, results, false)
 	require.NoError(t, err)
 	close(results)
 
@@ -114,6 +163,7 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 		require.NoError(t, res.Err)
 		batchCount++
 		totalRows += res.Batch.NumRows()
+		res.Batch.Release()
 	}
 	return batchCount, totalRows
 }
@@ -121,16 +171,56 @@ func drainStreamLoop(t *testing.T, steps []replStep, targetLSN pglogrepl.LSN) (b
 // TestStreamLoopAccumulatesSingleRowTransactions is a regression test for the
 // bug where each single-row WAL transaction was emitted as its own batch
 // (batches == rows). With activity-aware idle detection, the per-transaction
-// 1-row batches accumulate and flush as a single merged batch.
+// 1-row change sets accumulate and flush as a single merged batch.
 func TestStreamLoopAccumulatesSingleRowTransactions(t *testing.T) {
 	const numTxns = 50
-	steps, targetLSN := buildSingleRowTxnStream(numTxns)
+	steps, _ := buildSingleRowTxnStream(numTxns)
 
-	batchCount, totalRows := drainStreamLoop(t, steps, targetLSN)
+	batchCount, totalRows := drainStreamLoop(t, steps)
 
 	assert.Equal(t, int64(numTxns), totalRows, "all rows should be emitted")
 	assert.Equal(t, 1, batchCount, "single-row transactions should merge into one batch, not one batch per row")
 	assert.Less(t, batchCount, numTxns, "batch count must not equal row count")
+}
+
+func TestStreamLoopLeaseLossDiscardsAccumulatorWithoutMaterializing(t *testing.T) {
+	lease := &readerTestLease{done: make(chan struct{}), err: errors.New("lease backend terminated")}
+	ctx := source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(lease))
+	accum := testAccumulator(10000)
+	results := make(chan source.RecordBatchResult, 1)
+
+	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, 10000, accum, results, true)
+	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+	assert.Empty(t, accum.changes)
+	assert.Empty(t, accum.minLSN)
+	assert.Empty(t, results, "lease loss must not materialize buffered changes into Arrow")
+}
+
+func TestAccumulatorLeaseLossWhileSendingReleasesMaterializedBatch(t *testing.T) {
+	lease := &readerTestLease{done: make(chan struct{}), err: errors.New("lease backend terminated")}
+	ctx := source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(lease))
+	accum := testAccumulator(10000)
+	accum.add("", makeInsertChanges(1, 1, 10), 10)
+	results := make(chan source.RecordBatchResult)
+	done := make(chan error, 1)
+	go func() { done <- accum.flushAllContext(ctx, results, nil) }()
+
+	time.Sleep(20 * time.Millisecond)
+	close(lease.done)
+	require.ErrorIs(t, <-done, source.ErrConnectorLeaseLost)
+	assert.Empty(t, accum.changes)
+	assert.Empty(t, accum.minLSN)
+}
+
+func TestCommitStreamRejectsLeaseLoss(t *testing.T) {
+	lease := &readerTestLease{done: make(chan struct{}), err: errors.New("lease backend terminated")}
+	ctx := source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(lease))
+	src := &PostgresCDCSource{pos: newStreamPosition()}
+	close(lease.done)
+
+	err := src.CommitStream(ctx, pglogrepl.LSN(42))
+	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+	assert.Zero(t, src.pos.Committed())
 }
 
 // TestStreamLoopEmitsIdleCommitToken is a regression test for the streaming
@@ -139,16 +229,16 @@ func TestStreamLoopAccumulatesSingleRowTransactions(t *testing.T) {
 // advance the replication slot's confirmed_flush_lsn. Without it, an idle or
 // low-traffic stream never advances the slot and replica lag grows unbounded.
 func TestStreamLoopEmitsIdleCommitToken(t *testing.T) {
-	steps, targetLSN := buildSingleRowTxnStream(3)
+	steps, finalLSN := buildSingleRowTxnStream(3)
 	repl := &fakeReplicator{steps: steps}
 	results := make(chan source.RecordBatchResult, 64)
-	accum := newBatchAccumulator(10000)
+	accum := testAccumulator(10000)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		// ModeStream with targetLSN 0 streams forever until ctx is cancelled.
-		done <- streamLoop(ctx, repl, ModeStream, 0, 10000, accum, results, true)
+		// Streaming ignores the scripted barrier and runs until cancellation.
+		done <- streamLoop(ctx, repl, 10000, accum, results, true)
 	}()
 
 	var idleToken pglogrepl.LSN
@@ -161,8 +251,10 @@ loop:
 			require.NoError(t, res.Err)
 			// A bare commit token has no batch but carries the caught-up LSN.
 			if res.Batch == nil && res.CommitToken != nil {
-				lsn, ok := res.CommitToken.(pglogrepl.LSN)
-				require.True(t, ok, "expected an LSN commit token")
+				stateToken, ok := res.CommitToken.(source.CDCStateCommitToken)
+				require.True(t, ok, "expected a CDC state commit token")
+				lsn, ok := stateToken.SourceCommitToken.(pglogrepl.LSN)
+				require.True(t, ok, "expected an LSN source commit token")
 				idleToken = lsn
 				sawIdleToken = true
 				break loop
@@ -178,45 +270,29 @@ loop:
 	<-done
 
 	require.True(t, sawIdleToken, "streaming idle must emit a bare commit token")
-	assert.Equal(t, targetLSN, idleToken, "idle token must equal the caught-up LSN")
+	assert.Equal(t, finalLSN, idleToken, "idle token must equal the decoded LSN")
 }
 
-// TestStreamModeIdleSlotAdvances_Repro is an end-to-end reproduction of the
-// streaming replica-lag stall. It models the real-world trigger: a single
-// change to a published table, then a long idle period during which the rest of
-// the database keeps writing WAL (keepalives advance the received position) but
-// our tables produce nothing further.
-//
-// It drives the real streamLoop and threads every emitted CommitToken through
-// the real PostgresCDCSource.CommitStream / streamPosition, then checks the
-// position the client would report as WALFlushPosition (which is what advances
-// the slot's confirmed_flush_lsn and therefore what makes lag drop).
-//
-// With the idle-token fix the reported flush position catches up to the
-// received position (lag -> 0). WITHOUT it (delete the emitIdleCommitToken
-// calls in reader.go / multitable_reader.go), the flush position stays pinned
-// at the last data LSN and this test times out with lag still ~588.
-func TestStreamModeIdleSlotAdvances_Repro(t *testing.T) {
+func TestStreamModeKeepaliveHeadNeverBecomesCommitToken(t *testing.T) {
 	const (
-		dataTxLSN     = pglogrepl.LSN(12)  // the tx that actually touched our table
-		receivedFinal = pglogrepl.LSN(600) // where unrelated WAL/keepalives carry us
+		dataTxLSN = pglogrepl.LSN(12) // the tx that actually touched our table
 	)
 
 	steps := []replStep{
-		{batch: nil, hadActivity: true, lsn: 10},                    // BEGIN
-		{batch: nil, hadActivity: true, lsn: 11},                    // INSERT
-		{batch: makeRowBatch(1), hadActivity: true, lsn: dataTxLSN}, // COMMIT -> 1 row at LSN 12
-		{batch: nil, hadActivity: false, lsn: 0},                    // idle: flush the row, confirm LSN 12
-		{batch: nil, hadActivity: true, lsn: 500},                   // keepalive: other tables' WAL
-		{batch: nil, hadActivity: false, lsn: 0},                    // idle: nothing for us at LSN 500
-		{batch: nil, hadActivity: true, lsn: receivedFinal},         // keepalive: more unrelated WAL
-		{batch: nil, hadActivity: false, lsn: 0},                    // idle: nothing for us at LSN 600
+		{changes: nil, hadActivity: true, lsn: 10},                                       // BEGIN
+		{changes: nil, hadActivity: true, lsn: 11},                                       // INSERT
+		{changes: makeInsertChanges(1, 1, dataTxLSN), hadActivity: true, lsn: dataTxLSN}, // COMMIT -> 1 row at LSN 12
+		{changes: nil, hadActivity: false, lsn: 0},                                       // idle: flush the row, confirm LSN 12
+		{changes: nil, hadActivity: true},                                                // keepalive: server WAL head only
+		{changes: nil, hadActivity: false, lsn: 0},                                       // idle: nothing for us at LSN 500
+		{changes: nil, hadActivity: true},                                                // keepalive: more server WAL
+		{changes: nil, hadActivity: false, lsn: 0},                                       // idle: nothing for us at LSN 600
 	}
 
 	src := NewPostgresCDCSource()
 	repl := &fakeReplicator{steps: steps}
 	results := make(chan source.RecordBatchResult, 64)
-	accum := newBatchAccumulator(10000) // high threshold: only the idle path flushes
+	accum := testAccumulator(10000) // high threshold: only the idle path flushes
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -224,7 +300,7 @@ func TestStreamModeIdleSlotAdvances_Repro(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		_ = streamLoop(ctx, repl, ModeStream, 0, 10000, accum, results, true)
+		_ = streamLoop(ctx, repl, 10000, accum, results, true)
 		close(results)
 	}()
 
@@ -245,35 +321,31 @@ func TestStreamModeIdleSlotAdvances_Repro(t *testing.T) {
 		}
 	}()
 
-	// Poll the position we would report as WALFlushPosition until it catches up
-	// to the received position, or give up.
-	caughtUp := false
-	deadline := time.After(5 * time.Second)
-pollLoop:
-	for {
-		flush := standbyUpdate(true, receivedFinal, src.pos.Committed(), dataTxLSN).WALFlushPosition
-		if flush >= receivedFinal {
-			caughtUp = true
-			break
-		}
-		select {
-		case <-deadline:
-			t.Logf("TIMEOUT: flush position stuck at %s, received %s, lag %d",
-				flush, receivedFinal, uint64(receivedFinal-flush))
-			break pollLoop
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
+	require.Eventually(t, func() bool { return src.pos.Committed() == dataTxLSN }, 5*time.Second, 20*time.Millisecond)
+	// The scripted keepalive/idle pairs each exercise the loop's idle delay.
+	time.Sleep(500 * time.Millisecond)
 
 	cancel()
 	<-loopDone
 	<-consumerDone
 
-	committed := src.pos.Committed()
-	t.Logf("final flush(committed) LSN = %s, received = %s, lag = %d",
-		committed, receivedFinal, uint64(receivedFinal-committed))
-	require.True(t, caughtUp,
-		"streaming flush position must advance to the received position during idle; "+
-			"if this fails the idle CommitToken is not emitted and replica lag grows unbounded")
-	assert.Equal(t, receivedFinal, committed, "flush position should equal the received position (lag 0)")
+	assert.Equal(t, dataTxLSN, repl.CurrentLSN())
+	assert.Equal(t, dataTxLSN, src.pos.Committed(), "server WAL head must never become durable decoded progress")
+}
+
+func TestBatchWaitsForBarrierAfterKeepaliveAndDelayedChanges(t *testing.T) {
+	repl := &fakeReplicator{steps: []replStep{
+		{hadActivity: true}, // server-head keepalive must not terminate the batch
+		{hadActivity: false},
+		{hadActivity: true, lsn: 25, changes: makeInsertChanges(1, 7, 25)},
+		{hadActivity: true, lsn: 30, barrier: true},
+	}}
+	results := make(chan source.RecordBatchResult, 1)
+	err := streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false)
+	require.NoError(t, err)
+	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
+	res := <-results
+	require.NotNil(t, res.Batch)
+	assert.Equal(t, int64(1), res.Batch.NumRows())
+	res.Batch.Release()
 }

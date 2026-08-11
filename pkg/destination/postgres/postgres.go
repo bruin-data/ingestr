@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +31,19 @@ type PostgresDestination struct {
 	uri  string
 }
 
+type postgresStatementDescriber interface {
+	Prepare(context.Context, string, string, []uint32) (*pgconn.StatementDescription, error)
+}
+
+type postgresCopyPlan struct {
+	tableIdent pgx.Identifier
+	columns    []string
+	oids       []uint32
+	copySQL    string
+}
+
+type postgresCopyPlanCache map[*arrow.Schema]*postgresCopyPlan
+
 func NewPostgresDestination() *PostgresDestination {
 	return &PostgresDestination{}
 }
@@ -51,6 +65,7 @@ func (d *PostgresDestination) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
 	}
+	configureCopyDataWriteCoalescing(config)
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -82,14 +97,18 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		return fmt.Errorf("schema is required")
 	}
 
-	schemaName, _ := parseSchemaTable(opts.Table)
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, opts.Table)
+	if err != nil {
+		return err
+	}
+	resolvedTable := schemaName + "." + tableName
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(opts.Table))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(resolvedTable))
 		if _, err := d.pool.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -98,15 +117,21 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(destination.QuoteTableName(resolvedTable), opts.Schema.Columns, opts.PrimaryKeys)
 	if _, err := d.pool.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	config.Debug("[DEST] CREATE TABLE took %v", time.Since(startCreate))
+	if opts.DropFirst {
+		// pgx caches the SELECT description that CopyFrom uses to choose binary
+		// encoders. Recreating a staging table under the same name with a changed
+		// column type leaves that cached OID stale on pooled connections.
+		d.pool.Reset()
+	}
 
-	if !opts.DropFirst && len(opts.PrimaryKeys) > 0 {
-		if err := d.ensurePrimaryKey(ctx, opts.Table, opts.PrimaryKeys); err != nil {
+	if len(opts.PrimaryKeys) > 0 && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
+		if err := d.ensurePrimaryKey(ctx, schemaName, tableName, opts.PrimaryKeys, opts.RequirePrimaryKeyMatch); err != nil {
 			return fmt.Errorf("failed to ensure primary key: %w", err)
 		}
 	}
@@ -114,34 +139,87 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	return nil
 }
 
-func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, table string, primaryKeys []string) error {
-	quoted := destination.QuoteTableName(table)
-	schemaName, tableName := parseSchemaTable(table)
-	var hasPK bool
-	err := d.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.table_constraints
-			WHERE table_schema = $1 AND table_name = $2
-			AND constraint_type = 'PRIMARY KEY'
-		)`, schemaName, tableName).Scan(&hasPK)
+func (d *PostgresDestination) ensurePrimaryKey(ctx context.Context, schemaName, tableName string, primaryKeys []string, requireMatch bool) error {
+	actualKeys, err := postgresPrimaryKeyColumns(ctx, d.pool, schemaName, tableName)
 	if err != nil {
 		return fmt.Errorf("failed to check primary key: %w", err)
 	}
-	if hasPK {
+	if len(actualKeys) > 0 {
+		if requireMatch && !postgresPrimaryKeySetsEqual(primaryKeys, actualKeys) {
+			return postgresPrimaryKeyMismatchError(schemaName, tableName, primaryKeys, actualKeys)
+		}
 		return nil
 	}
 
+	quoted := quotePostgresTable(schemaName, tableName)
 	quotedKeys := make([]string, len(primaryKeys))
 	for i, k := range primaryKeys {
 		quotedKeys[i] = destination.QuoteIdentifier(k)
 	}
 	alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quoted, strings.Join(quotedKeys, ", "))
 	if _, err := d.pool.Exec(ctx, alterSQL); err != nil {
+		if requireMatch {
+			concurrentKeys, inspectErr := postgresPrimaryKeyColumns(ctx, d.pool, schemaName, tableName)
+			if inspectErr == nil {
+				if postgresPrimaryKeySetsEqual(primaryKeys, concurrentKeys) {
+					return nil
+				}
+				if len(concurrentKeys) > 0 {
+					return postgresPrimaryKeyMismatchError(schemaName, tableName, primaryKeys, concurrentKeys)
+				}
+			}
+		}
 		config.LogFailedQuery(alterSQL, err)
 		return fmt.Errorf("failed to add primary key: %w", err)
 	}
-	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", table)
+	config.Debug("[DEST] Added PRIMARY KEY to existing table %s", quoted)
 	return nil
+}
+
+func postgresPrimaryKeyColumns(ctx context.Context, queryer postgresTableResolver, schemaName, tableName string) ([]string, error) {
+	var primaryKeys []string
+	err := queryer.QueryRow(ctx, `
+		SELECT COALESCE(
+			array_agg(attr.attname::text ORDER BY key_column.ordinality),
+			ARRAY[]::text[]
+		)
+		FROM pg_catalog.pg_constraint AS con
+		JOIN pg_catalog.pg_class AS rel
+		  ON rel.oid = con.conrelid
+		JOIN pg_catalog.pg_namespace AS nsp
+		  ON nsp.oid = rel.relnamespace
+		CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+		JOIN pg_catalog.pg_attribute AS attr
+		  ON attr.attrelid = rel.oid
+		 AND attr.attnum = key_column.attnum
+		WHERE nsp.nspname = $1
+		  AND rel.relname = $2
+		  AND con.contype = 'p'
+	`, schemaName, tableName).Scan(&primaryKeys)
+	if err != nil {
+		return nil, err
+	}
+	return primaryKeys, nil
+}
+
+func postgresPrimaryKeySetsEqual(expected, actual []string) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	expected = slices.Clone(expected)
+	actual = slices.Clone(actual)
+	slices.Sort(expected)
+	slices.Sort(actual)
+	return slices.Equal(expected, actual)
+}
+
+func postgresPrimaryKeyMismatchError(schemaName, tableName string, expected, actual []string) error {
+	return fmt.Errorf(
+		"CDC merge target %s must have primary key %v; found %v",
+		quotePostgresTable(schemaName, tableName),
+		expected,
+		actual,
+	)
 }
 
 func (d *PostgresDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
@@ -183,10 +261,14 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 	batchNum := 0
 	totalRows := int64(0)
 	startTotal := time.Now()
+	copyPlans := make(postgresCopyPlanCache)
 
 	for result := range records {
 		batchNum++
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
 		}
 
@@ -196,7 +278,6 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		}
 
 		numRows := record.NumRows()
-		numCols := record.NumCols()
 
 		if numRows == 0 {
 			record.Release()
@@ -206,29 +287,7 @@ func (d *PostgresDestination) Write(ctx context.Context, records <-chan source.R
 		config.Debug("[DEST] Batch %d: received %d rows", batchNum, numRows)
 
 		startCopy := time.Now()
-
-		// Build column names
-		columns := make([]string, numCols)
-		for i := 0; i < int(numCols); i++ {
-			columns[i] = record.ColumnName(i)
-		}
-
-		// Use CopyFromSlice for streaming conversion without materializing all rows
-		// Pre-allocate row buffer and reuse it for each row to reduce allocations
-		tableIdent := parseTableIdentifier(opts.Table)
-		getters := postgresValueGetters(record, opts.Schema)
-		rowBuf := make([]any, numCols)
-		copyCount, err := d.pool.CopyFrom(
-			ctx,
-			tableIdent,
-			columns,
-			pgx.CopyFromSlice(int(numRows), func(i int) ([]any, error) {
-				for j := 0; j < int(numCols); j++ {
-					rowBuf[j] = getters[j](i)
-				}
-				return rowBuf, nil
-			}),
-		)
+		copyCount, err := d.copyRecord(ctx, record, opts, copyPlans)
 
 		record.Release()
 
@@ -255,6 +314,7 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 
 	type writeResult struct {
 		batchNum int
+		batches  int
 		rows     int64
 		duration time.Duration
 		err      error
@@ -262,18 +322,33 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 
 	results := make(chan writeResult, parallelism*2)
 	var wg sync.WaitGroup
-
 	batchNum := int64(0)
 
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+			copyPlans := make(postgresCopyPlanCache)
+			var pending *source.RecordBatchResult
 
-			for result := range records {
+			for {
+				var result source.RecordBatchResult
+				if pending != nil {
+					result = *pending
+					pending = nil
+				} else {
+					var ok bool
+					result, ok = <-records
+					if !ok {
+						return
+					}
+				}
 				myBatch := int(atomic.AddInt64(&batchNum, 1))
 
 				if result.Err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
 					results <- writeResult{batchNum: myBatch, err: result.Err}
 					return
 				}
@@ -284,41 +359,21 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 				}
 
 				numRows := record.NumRows()
-				numCols := record.NumCols()
-
 				if numRows == 0 {
 					record.Release()
 					continue
 				}
 
 				startBatch := time.Now()
-
-				// Build column names
-				columns := make([]string, numCols)
-				for i := 0; i < int(numCols); i++ {
-					columns[i] = record.ColumnName(i)
+				copyCount, copiedBatches, next, err := d.copyRecordGroup(ctx, record, records, opts, copyPlans)
+				pending = next
+				if copiedBatches > 1 {
+					atomic.AddInt64(&batchNum, int64(copiedBatches-1))
 				}
-
-				// Use CopyFromSlice for streaming conversion
-				// Pre-allocate row buffer and reuse it for each row
-				tableIdent := parseTableIdentifier(opts.Table)
-				getters := postgresValueGetters(record, opts.Schema)
-				rowBuf := make([]any, numCols)
-				copyCount, err := d.pool.CopyFrom(
-					ctx,
-					tableIdent,
-					columns,
-					pgx.CopyFromSlice(int(numRows), func(i int) ([]any, error) {
-						for j := 0; j < int(numCols); j++ {
-							rowBuf[j] = getters[j](i)
-						}
-						return rowBuf, nil
-					}),
-				)
-				record.Release()
 
 				results <- writeResult{
 					batchNum: myBatch,
+					batches:  copiedBatches,
 					rows:     copyCount,
 					duration: time.Since(startBatch),
 					err:      err,
@@ -340,7 +395,7 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 			config.Debug("[DEST] Worker error on batch %d: %v", res.batchNum, res.err)
 		} else if res.err == nil {
 			totalRows += res.rows
-			config.Debug("[DEST] Batch %d: %d rows in %v (%.0f rows/sec)", res.batchNum, res.rows, res.duration, float64(res.rows)/res.duration.Seconds())
+			config.Debug("[DEST] Batch %d (+%d): %d rows in %v (%.0f rows/sec)", res.batchNum, res.batches-1, res.rows, res.duration, float64(res.rows)/res.duration.Seconds())
 		}
 	}
 
@@ -350,6 +405,107 @@ func (d *PostgresDestination) WriteParallel(ctx context.Context, records <-chan 
 
 	config.Debug("[DEST] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
+}
+
+func (d *PostgresDestination) copyRecord(ctx context.Context, record arrow.RecordBatch, opts destination.WriteOptions, copyPlans postgresCopyPlanCache) (int64, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Release()
+	pgxConn := conn.Conn()
+
+	plan, err := copyPlans.get(ctx, pgxConn.PgConn(), record, opts.Table)
+	if err != nil {
+		return 0, err
+	}
+	return copyPostgresRecord(ctx, pgxConn, record, opts.Schema, plan)
+}
+
+func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.RecordBatch, records <-chan source.RecordBatchResult, opts destination.WriteOptions, copyPlans postgresCopyPlanCache) (int64, int, *source.RecordBatchResult, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		record.Release()
+		return 0, 0, nil, err
+	}
+	defer conn.Release()
+	pgxConn := conn.Conn()
+
+	plan, err := copyPlans.get(ctx, pgxConn.PgConn(), record, opts.Table)
+	if err != nil {
+		record.Release()
+		return 0, 0, nil, err
+	}
+	if !recordSupportsDirectPostgresCopy(record, plan.oids) {
+		defer record.Release()
+		rows, err := copyPostgresRecord(ctx, pgxConn, record, opts.Schema, plan)
+		return rows, 1, nil, err
+	}
+
+	stream, err := newPostgresRecordCopyStream(ctx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer stream.Close()
+	tag, err := pgxConn.PgConn().CopyFrom(ctx, stream, plan.copySQL)
+	return tag.RowsAffected(), stream.Batches(), stream.Pending(), err
+}
+
+func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, record arrow.RecordBatch, tableSchema *schema.TableSchema, plan *postgresCopyPlan) (int64, error) {
+	reader, ok := newArrowCopyReader(record, tableSchema, pgxConn.TypeMap(), plan.oids)
+	if !ok {
+		getters := postgresValueGetters(record, tableSchema)
+		values := make([]any, record.NumCols())
+		return pgxConn.CopyFrom(ctx, plan.tableIdent, plan.columns, pgx.CopyFromSlice(int(record.NumRows()), func(row int) ([]any, error) {
+			for column := range values {
+				values[column] = getters[column](row)
+			}
+			return values, nil
+		}))
+	}
+
+	tag, err := pgxConn.PgConn().CopyFrom(ctx, reader, plan.copySQL)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (c postgresCopyPlanCache) get(ctx context.Context, describer postgresStatementDescriber, record arrow.RecordBatch, table string) (*postgresCopyPlan, error) {
+	if plan := c[record.Schema()]; plan != nil {
+		return plan, nil
+	}
+
+	columns := make([]string, record.NumCols())
+	quotedColumns := make([]string, record.NumCols())
+	for i := range columns {
+		columns[i] = record.ColumnName(i)
+		quotedColumns[i] = destination.QuoteIdentifier(columns[i])
+	}
+
+	tableIdent := parseTableIdentifier(table)
+	selectSQL := fmt.Sprintf("select %s from %s", strings.Join(quotedColumns, ", "), tableIdent.Sanitize())
+	description, err := describePostgresStatement(ctx, describer, selectSQL)
+	if err != nil {
+		return nil, err
+	}
+	oids := make([]uint32, len(description.Fields))
+	for i := range description.Fields {
+		oids[i] = description.Fields[i].DataTypeOID
+	}
+
+	plan := &postgresCopyPlan{
+		tableIdent: tableIdent,
+		columns:    columns,
+		oids:       oids,
+		copySQL:    fmt.Sprintf("copy %s (%s) from stdin binary", tableIdent.Sanitize(), strings.Join(quotedColumns, ", ")),
+	}
+	c[record.Schema()] = plan
+	return plan, nil
+}
+
+func describePostgresStatement(ctx context.Context, describer postgresStatementDescriber, sql string) (*pgconn.StatementDescription, error) {
+	return describer.Prepare(ctx, "", sql, nil)
 }
 
 func postgresValueGetters(record arrow.RecordBatch, tableSchema *schema.TableSchema) []func(int) any {
@@ -466,7 +622,11 @@ func postgresValueGetterForType(col arrow.Array, dataType schema.DataType) func(
 			if a.IsNull(i) {
 				return nil
 			}
-			return a.Value(i).ToFloat64(dt.Scale)
+			return pgtype.Numeric{
+				Int:   a.Value(i).BigInt(),
+				Exp:   -dt.Scale,
+				Valid: true,
+			}
 		}
 	case *array.Date32:
 		return func(i int) any {
@@ -547,21 +707,44 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
 
-	targetSchema, targetName := parseSchemaTable(targetTable)
-	stagingSchema, stagingName := parseSchemaTable(stagingTable)
+	targetSchema, targetName, err := d.resolveSchemaTable(ctx, d.pool, targetTable)
+	if err != nil {
+		return err
+	}
+	stagingSchema, stagingName, err := d.resolveSchemaTable(ctx, d.pool, stagingTable)
+	if err != nil {
+		return err
+	}
+	targetRef := quotePostgresTable(targetSchema, targetName)
+	stagingRef := quotePostgresTable(stagingSchema, stagingName)
 
 	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("postgres"))
-	oldTable := oldName
-	if targetSchema != "" {
-		oldTable = targetSchema + "." + oldName
-	}
+	oldRef := quotePostgresTable(targetSchema, oldName)
 
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != "" {
+		if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
+			return errors.New("PostgreSQL CDC conditional swap requires target, staging, and result incarnations")
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, targetRef, opts.CDCExpectedIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+			return err
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, stagingRef, opts.CDCExpectedStagingIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+			return err
+		}
+		// A PostgreSQL rename (and SET SCHEMA) keeps the relation's OID, so
+		// the staging table's incarnation is what the target name will hold
+		// after the swap.
+		if opts.CDCExpectedResultIncarnation != opts.CDCExpectedStagingIncarnation {
+			return fmt.Errorf("PostgreSQL CDC swap result incarnation %q cannot match the staging relation %q", opts.CDCExpectedResultIncarnation, opts.CDCExpectedStagingIncarnation)
+		}
+	}
 
 	// Postgres' ALTER TABLE … RENAME TO … is same-schema only. If staging lives in a
 	// different schema (the new _bruin_staging design), move it into the target's
@@ -574,28 +757,28 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
 		setSchemaSQL := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s",
-			destination.QuoteTableName(stagingTable),
+			stagingRef,
 			destination.QuoteIdentifier(targetSchema))
 		if _, err = tx.Exec(ctx, setSchemaSQL); err != nil {
 			config.LogFailedQuery(setSchemaSQL, err)
 			return fmt.Errorf("failed to move staging table to target schema: %w", err)
 		}
-		stagingTable = targetSchema + "." + stagingName
+		stagingRef = quotePostgresTable(targetSchema, stagingName)
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", destination.QuoteTableName(targetTable), destination.QuoteIdentifier(oldName)))
+	_, err = tx.Exec(ctx, fmt.Sprintf("ALTER TABLE IF EXISTS %s RENAME TO %s", targetRef, destination.QuoteIdentifier(oldName)))
 	if err != nil {
 		return fmt.Errorf("failed to rename existing target table %s: %w", targetTable, err)
 	}
 
-	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", destination.QuoteTableName(stagingTable), destination.QuoteIdentifier(targetName))
+	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingRef, destination.QuoteIdentifier(targetName))
 	if _, err = tx.Exec(ctx, renameSQL); err != nil {
 		config.LogFailedQuery(renameSQL, err)
 		return fmt.Errorf("failed to rename staging to target: %w", err)
 	}
 
-	if _, err = tx.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(oldTable))); err != nil {
-		return fmt.Errorf("failed to drop old table %s: %w", oldTable, err)
+	if _, err = tx.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", oldRef)); err != nil {
+		return fmt.Errorf("failed to drop old table %s.%s: %w", targetSchema, oldName, err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -606,12 +789,49 @@ func (d *PostgresDestination) SwapTable(ctx context.Context, opts destination.Sw
 	return nil
 }
 
+func quotePostgresTable(schemaName, tableName string) string {
+	if schemaName == "" {
+		return destination.QuoteIdentifier(tableName)
+	}
+	return destination.QuoteIdentifier(schemaName) + "." + destination.QuoteIdentifier(tableName)
+}
+
 func parseSchemaTable(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
+	parts := tablename.Split(table)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}
 	return "public", table
+}
+
+type postgresTableResolver interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (d *PostgresDestination) resolveSchemaTable(ctx context.Context, queryer postgresTableResolver, table string) (string, string, error) {
+	parts, err := validatePostgresClaimTarget(table)
+	if err != nil {
+		return "", "", err
+	}
+	if len(parts) == 2 {
+		return parts[0], parts[1], nil
+	}
+
+	var schemaName, tableName string
+	err = queryer.QueryRow(ctx, `
+		SELECT COALESCE(n.nspname, current_schema(), ''),
+		       COALESCE(c.relname, (parse_ident($1, false))[1])
+		FROM (SELECT to_regclass($1) AS oid) AS requested
+		LEFT JOIN pg_catalog.pg_class AS c ON c.oid = requested.oid
+		LEFT JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+	`, table).Scan(&schemaName, &tableName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve PostgreSQL target %q: %w", table, err)
+	}
+	if schemaName == "" {
+		return "", "", fmt.Errorf("PostgreSQL target %q has no effective schema in the current search path", table)
+	}
+	return schemaName, tableName, nil
 }
 
 func (d *PostgresDestination) Exec(ctx context.Context, sql string, args ...any) error {
@@ -653,7 +873,89 @@ func (t *pgTransaction) Rollback(ctx context.Context) error {
 // MergeTable performs an efficient upsert using INSERT ... ON CONFLICT.
 // For CDC sources (detected by presence of _cdc_deleted column), it handles
 // deleted rows specially by only updating CDC columns (preserving original data).
+// lockAndValidateCDCIncarnation locks the table by name inside the caller's
+// transaction and verifies its physical incarnation, so no swap or rebuild
+// can replace the relation between validation and the transaction's
+// mutations: replacing it requires ACCESS EXCLUSIVE, which conflicts with
+// every lock mode used here.
+func (d *PostgresDestination) lockAndValidateCDCIncarnation(ctx context.Context, tx pgx.Tx, table, expectedIncarnation, lockMode string) (string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, table)
+	if err != nil {
+		return "", err
+	}
+	resolved := quotePostgresTable(schemaName, tableName)
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+resolved+" IN "+lockMode+" MODE"); err != nil {
+		return "", err
+	}
+	current, exists, err := d.postgresTargetIncarnation(ctx, tx, resolved)
+	if err != nil {
+		return "", err
+	}
+	if !exists || current != expectedIncarnation {
+		return "", fmt.Errorf("PostgreSQL CDC target %q physical incarnation changed", table)
+	}
+	return resolved, nil
+}
+
 func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	// Begin transaction for atomic merge
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if opts.CDCExpectedIncarnation != "" {
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation, "ROW EXCLUSIVE"); err != nil {
+			return err
+		}
+	}
+	if err := d.mergeTableInTx(ctx, tx, opts); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+// MergeCDCTablesAtomically applies one CDC batch's staged changes to every
+// target table inside a single transaction, so a crash cannot leave a torn
+// cross-table state.
+func (d *PostgresDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin multi-table CDC transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, merge := range merges {
+		resolved := merge.Options.TargetTable
+		if merge.Options.CDCExpectedIncarnation != "" {
+			resolved, err = d.lockAndValidateCDCIncarnation(ctx, tx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation, "ROW EXCLUSIVE")
+			if err != nil {
+				return err
+			}
+		}
+		if merge.Truncate {
+			if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
+				return fmt.Errorf("failed to reset CDC target %s: %w", merge.Options.TargetTable, err)
+			}
+		}
+		if err := d.mergeTableInTx(ctx, tx, merge.Options); err != nil {
+			return fmt.Errorf("failed to merge CDC target %s: %w", merge.Options.TargetTable, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit multi-table CDC transaction: %w", err)
+	}
+	return nil
+}
+
+// mergeTableInTx runs the merge inside the caller's open transaction.
+func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opts destination.MergeOptions) error {
 	startMerge := time.Now()
 
 	stagingColumns := opts.Columns
@@ -669,13 +971,6 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
 	// and their staging tables have no such column to reference.
 	hasUnchangedCols := slices.Contains(stagingColumns, destination.CDCUnchangedColsColumn)
-
-	// Begin transaction for atomic merge
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
@@ -705,30 +1000,41 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		// Step 1: Upsert latest non-deleted rows (data changes).
 		// Use UPDATE ... FROM + INSERT instead of ON CONFLICT so
 		// la."_cdc_unchanged_cols" is read once per row, not once per column.
-		onTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
+		primaryKeyTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "la")
+		onTargetCondition := destination.MergeJoinCondition(
+			primaryKeyTargetCondition,
+			opts.IncrementalPredicate,
+		)
+		onLatestActiveCondition := buildJoinCondition(opts.PrimaryKeys, "la", "latest")
+		newerActiveCondition := fmt.Sprintf(
+			`(target."_cdc_lsn" IS NULL OR la."_cdc_lsn" > target."_cdc_lsn" OR (la."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false AND EXISTS (SELECT 1 FROM latest_all AS latest WHERE %s AND latest."_cdc_lsn" = la."_cdc_lsn" AND latest."_cdc_deleted" = true)))`,
+			onLatestActiveCondition,
+		)
 		unchangedRef := ""
 		if hasUnchangedCols {
 			unchangedRef = fmt.Sprintf(`la."%s"`, destination.CDCUnchangedColsColumn)
 		}
 		upsertSQL := fmt.Sprintf(
-			`WITH %s, updated AS (
+			`WITH %s, %s, updated AS (
 				UPDATE %s AS target SET %s
 				FROM latest_active la
-				WHERE %s
+				WHERE %s AND %s
 				RETURNING 1
 			)
 			INSERT INTO %s (%s)
 			SELECT %s FROM latest_active la
 			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			latestActive,
+			latestAll,
 			quotedTargetTable,
 			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
 			onTargetCondition,
+			newerActiveCondition,
 			quotedTargetTable,
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
 			quotedTargetTable,
-			onTargetCondition,
+			primaryKeyTargetCondition,
 		)
 		config.Debug("[MERGE] Executing upsert for non-deleted rows: %s", upsertSQL)
 
@@ -739,9 +1045,12 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 
 		// Step 2: Mark deletes only when the latest change is a delete
 		onLatestCondition := buildJoinCondition(opts.PrimaryKeys, "deleted", "latest")
-		onDeleteTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "deleted")
+		onDeleteTargetCondition := destination.MergeJoinCondition(
+			buildJoinCondition(opts.PrimaryKeys, "target", "deleted"),
+			opts.IncrementalPredicate,
+		)
 		updateDeletedSQL := fmt.Sprintf(
-			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true`,
+			`WITH %s, %s UPDATE %s AS target SET "_cdc_deleted" = true, "_cdc_lsn" = deleted."_cdc_lsn", "_cdc_synced_at" = deleted."_cdc_synced_at" FROM latest_deleted AS deleted JOIN latest_all AS latest ON %s WHERE %s AND latest."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR deleted."_cdc_lsn" > target."_cdc_lsn" OR (deleted."_cdc_lsn" = target."_cdc_lsn" AND COALESCE(target."_cdc_deleted", false) = false))`,
 			latestAll,
 			latestDeleted,
 			quotedTargetTable,
@@ -754,28 +1063,58 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 			config.LogFailedQuery(updateDeletedSQL, err)
 			return fmt.Errorf("failed to update deleted records: %w", err)
 		}
+
+		onInsertDeletedTargetCondition := buildJoinCondition(opts.PrimaryKeys, "target", "latest")
+		insertDeletedSQL := fmt.Sprintf(
+			`WITH %s INSERT INTO %s (%s) SELECT %s FROM latest_all AS latest WHERE latest."_cdc_deleted" = true AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			latestAll,
+			quotedTargetTable,
+			strings.Join(destQuoted, ", "),
+			strings.Join(destQuoted, ", "),
+			quotedTargetTable,
+			onInsertDeletedTargetCondition,
+		)
+		config.Debug("[MERGE] Executing CDC delete tombstone insert: %s", insertDeletedSQL)
+
+		if _, err := tx.Exec(ctx, insertDeletedSQL); err != nil {
+			config.LogFailedQuery(insertDeletedSQL, err)
+			return fmt.Errorf("failed to insert CDC delete tombstones: %w", err)
+		}
 	} else {
 		// Non-CDC mode: efficient upsert using INSERT ... ON CONFLICT.
-		// DISTINCT ON dedupes staging by PK so the same target row isn't
-		// affected twice in one statement, which Postgres rejects with
-		// SQLSTATE 21000. When an incremental key is set the latest row per PK
-		// wins; otherwise the winner is arbitrary.
+		// Unless the caller guarantees staging PK uniqueness, DISTINCT ON
+		// prevents the same target row from being affected twice in one
+		// statement, which Postgres rejects with SQLSTATE 21000. When an
+		// incremental key is set the latest row per PK wins; otherwise the
+		// winner is arbitrary.
 		pkList := strings.Join(quotedPKs, ", ")
 		orderBy := pkList
 		if opts.IncrementalKey != "" {
 			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
 		}
-		upsertSQL := fmt.Sprintf(
-			`INSERT INTO %s (%s) SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s ON CONFLICT (%s) DO UPDATE SET %s`,
-			quotedTargetTable,
-			strings.Join(destQuoted, ", "),
-			pkList,
-			strings.Join(destQuoted, ", "),
-			quotedStagingTable,
-			orderBy,
-			pkList,
-			buildConflictUpdateSet(nonPKColumns),
-		)
+		var upsertSQL string
+		if strings.TrimSpace(opts.IncrementalPredicate) != "" {
+			upsertSQL = buildPredicateMergeSQL(
+				quotedTargetTable,
+				quotedStagingTable,
+				opts.PrimaryKeys,
+				destQuoted,
+				nonPKColumns,
+				orderBy,
+				opts.IncrementalPredicate,
+				opts.StagingPrimaryKeysUnique,
+			)
+		} else {
+			stagingSelect := buildMergeStagingSelect(quotedStagingTable, pkList, destQuoted, orderBy, opts.StagingPrimaryKeysUnique)
+			upsertSQL = fmt.Sprintf(
+				`INSERT INTO %s (%s) %s ON CONFLICT (%s) DO UPDATE SET %s`,
+				quotedTargetTable,
+				strings.Join(destQuoted, ", "),
+				stagingSelect,
+				pkList,
+				buildConflictUpdateSet(nonPKColumns),
+			)
+		}
 		config.Debug("[MERGE] Executing upsert: %s", upsertSQL)
 
 		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
@@ -784,11 +1123,36 @@ func (d *PostgresDestination) MergeTable(ctx context.Context, opts destination.M
 		}
 	}
 
+	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
+	start := time.Now()
+	truncateSQL, insertSQL, err := buildTruncateInsertFromStagingSQL(opts)
+	if err != nil {
+		return err
+	}
+
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, truncateSQL); err != nil {
+		config.LogFailedQuery(truncateSQL, err)
+		return fmt.Errorf("failed to truncate target: %w", err)
+	}
+	if _, err := tx.Exec(ctx, insertSQL); err != nil {
+		config.LogFailedQuery(insertSQL, err)
+		return fmt.Errorf("failed to insert from staging: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+	config.Debug("[REPLACE] Atomic truncate+insert finalization completed in %v", time.Since(start))
 	return nil
 }
 
@@ -973,6 +1337,12 @@ func (d *PostgresDestination) TruncateTable(ctx context.Context, table string) e
 }
 
 // SupportsReplaceStrategy returns true as PostgreSQL supports the replace strategy.
+// MaxConcurrentFlushes lets the streaming flush loop merge different tables
+// concurrently. Each write+merge cycle draws its own connections from the
+// pool, so cross-table cycles are independent; the cap keeps enough pool
+// headroom for the per-table write parallelism.
+func (d *PostgresDestination) MaxConcurrentFlushes() int { return 4 }
+
 func (d *PostgresDestination) SupportsReplaceStrategy() bool { return true }
 
 // SupportsAppendStrategy returns true as PostgreSQL supports the append strategy.
@@ -980,6 +1350,8 @@ func (d *PostgresDestination) SupportsAppendStrategy() bool { return true }
 
 // SupportsMergeStrategy returns true as PostgreSQL supports the merge strategy.
 func (d *PostgresDestination) SupportsMergeStrategy() bool { return true }
+
+func (d *PostgresDestination) SupportsIncrementalPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as PostgreSQL supports the delete+insert strategy.
 func (d *PostgresDestination) SupportsDeleteInsertStrategy() bool { return true }
@@ -1012,6 +1384,408 @@ func (d *PostgresDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return *maxLSN, nil
 }
 
+func (d *PostgresDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	query := fmt.Sprintf(`
+		SELECT "event_id", "source_table", "destination_table", "state_kind", "state_generation", "state_status", "_cdc_lsn"
+		FROM %s WHERE "connector_id" = $1`, destination.QuoteTableName(table))
+	rows, err := d.pool.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []destination.CDCStateEntry
+	for rows.Next() {
+		var entry destination.CDCStateEntry
+		if err := rows.Scan(&entry.EventID, &entry.SourceTable, &entry.DestinationTable, &entry.StateKind, &entry.Generation, &entry.Status, &entry.Position); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (d *PostgresDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return err
+	}
+	var dataType string
+	err = d.pool.QueryRow(ctx,
+		`SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = '_cdc_lsn'`,
+		schemaName, tableName).Scan(&dataType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect PostgreSQL CDC state position column: %w", err)
+	}
+	if strings.EqualFold(dataType, "text") {
+		return nil
+	}
+	query := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "_cdc_lsn" TYPE TEXT`, destination.QuoteTableName(table))
+	if _, err := d.pool.Exec(ctx, query); err != nil {
+		return fmt.Errorf("failed to widen PostgreSQL CDC state position column: %w", err)
+	}
+	return nil
+}
+
+func (d *PostgresDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return "", err
+	}
+	var databaseName string
+	if err := d.pool.QueryRow(ctx, "SELECT current_database()").Scan(&databaseName); err != nil {
+		return "", fmt.Errorf("failed to resolve PostgreSQL database identity: %w", err)
+	}
+	return destination.CDCTargetKey(databaseName, schemaName, tableName), nil
+}
+
+func (d *PostgresDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	return d.postgresTargetIncarnation(ctx, d.pool, table)
+}
+
+func (d *PostgresDestination) postgresTargetIncarnation(ctx context.Context, queryer postgresTableResolver, table string) (string, bool, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, queryer, table)
+	if err != nil {
+		return "", false, err
+	}
+	resolvedTable := quotePostgresTable(schemaName, tableName)
+	var databaseOID, relationOID, relationKind string
+	err = queryer.QueryRow(ctx, `
+		SELECT d.oid::text, c.oid::text, c.relkind::text
+		FROM pg_catalog.pg_class AS c
+		CROSS JOIN pg_catalog.pg_database AS d
+		WHERE d.datname = current_database()
+		  AND c.oid = to_regclass($1)
+	`, resolvedTable).Scan(&databaseOID, &relationOID, &relationKind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read PostgreSQL CDC target incarnation for %q: %w", table, err)
+	}
+	return destination.CDCTargetKey(databaseOID, relationOID, relationKind), true, nil
+}
+
+func (d *PostgresDestination) ClaimAndPrepareEmptyCDCTarget(
+	ctx context.Context,
+	claimTable string,
+	claim destination.CDCTargetClaim,
+	opts destination.PrepareOptions,
+) (string, error) {
+	if opts.Schema == nil {
+		return "", fmt.Errorf("schema is required")
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return "", err
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, claim.DestinationTable)
+	if err != nil {
+		return "", err
+	}
+	var schemaExists bool
+	if err := tx.QueryRow(ctx, "SELECT to_regnamespace($1) IS NOT NULL", schemaName).Scan(&schemaExists); err != nil {
+		return "", err
+	}
+	if !schemaExists {
+		return "", fmt.Errorf("PostgreSQL target schema %q does not exist", schemaName)
+	}
+	canonicalTarget := destination.CDCTargetKey(schemaName, tableName)
+	insert := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ($1, $2, NOW()) ON CONFLICT ("destination_table") DO NOTHING`, destination.QuoteTableName(claimTable))
+	if _, err := tx.Exec(ctx, insert, canonicalTarget, ownerID); err != nil {
+		return "", err
+	}
+	var owner string
+	query := fmt.Sprintf(`SELECT "connector_id" FROM %s WHERE "destination_table" = $1`, destination.QuoteTableName(claimTable))
+	if err := tx.QueryRow(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return "", err
+	}
+	if owner != ownerID {
+		return "", fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	createSQL := strings.Replace(
+		buildCreateTableSQL(destination.QuoteTableName(schemaName+"."+tableName), opts.Schema.Columns, opts.PrimaryKeys),
+		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1,
+	)
+	if _, err := tx.Exec(ctx, createSQL); err != nil {
+		return "", fmt.Errorf("failed to exclusively create CDC target: %w", err)
+	}
+	incarnation, exists, err := d.postgresTargetIncarnation(ctx, tx, schemaName+"."+tableName)
+	if err != nil {
+		return "", err
+	}
+	if !exists || incarnation == "" {
+		return "", fmt.Errorf("created PostgreSQL CDC target has no physical incarnation")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return incarnation, nil
+}
+
+func (d *PostgresDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	resolved, err := d.lockAndValidateCDCIncarnation(ctx, tx, table, expectedIncarnation, "ACCESS EXCLUSIVE")
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+destination.QuoteTableName(resolved)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// SupportsCDCConditionalMerge advertises that MergeTable enforces
+// MergeOptions.CDCExpectedIncarnation in the same transaction as target DML.
+func (d *PostgresDestination) SupportsCDCConditionalMerge() bool { return true }
+
+func (d *PostgresDestination) SupportsCDCConditionalSwap() bool { return true }
+
+func (d *PostgresDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
+	stagingIncarnation, exists, err := d.CDCTargetIncarnation(ctx, stagingTable)
+	if err != nil {
+		return "", "", err
+	}
+	if !exists || stagingIncarnation == "" {
+		return "", "", fmt.Errorf("PostgreSQL CDC staging table %q has no durable physical incarnation", stagingTable)
+	}
+	// The incarnation key is name-independent (database OID, relation OID,
+	// relkind) and a rename or SET SCHEMA keeps the relation's OID, so the
+	// staging incarnation carries over to the target name unchanged.
+	_ = targetTable
+	return stagingIncarnation, stagingIncarnation, nil
+}
+
+func (d *PostgresDestination) ValidateManagedCDCState() error { return nil }
+
+type postgresManagedCDCRunLease struct {
+	conn        *pgxpool.Conn
+	classID     uint32
+	objID       uint32
+	done        chan struct{}
+	stop        chan struct{}
+	stopped     chan struct{}
+	doneOnce    sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	err         error
+	releaseErr  error
+}
+
+// AcquireManagedCDCRunLease serializes all target mutations for one managed
+// CDC connector via a session advisory lock held on a dedicated connection.
+// If the session dies, the server releases the lock and the monitor reports
+// the loss through the standard connector lease guard.
+func (d *PostgresDestination) AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error) {
+	if connectorID == "" {
+		return nil, errors.New("managed CDC connector ID is empty")
+	}
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reserve PostgreSQL CDC lease connection: %w", err)
+	}
+	key := postgresAdvisoryLockKey("ingestr_cdc_" + connectorID)
+	var acquired bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("failed to acquire PostgreSQL CDC run lease: %w", err)
+	}
+	if !acquired {
+		conn.Release()
+		return nil, fmt.Errorf("another PostgreSQL CDC run already owns connector %s", connectorID)
+	}
+	lease := &postgresManagedCDCRunLease{
+		conn:    conn,
+		classID: uint32(uint64(key) >> 32),
+		objID:   uint32(uint64(key) & 0xFFFFFFFF),
+		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	go lease.monitor()
+	return lease, nil
+}
+
+func postgresAdvisoryLockKey(name string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return int64(h.Sum64())
+}
+
+func (l *postgresManagedCDCRunLease) monitor() {
+	defer close(l.stopped)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			var held bool
+			err := l.conn.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_locks
+					WHERE locktype = 'advisory' AND objsubid = 1
+					  AND classid = $1 AND objid = $2
+					  AND pid = pg_backend_pid() AND granted
+				)`, int64(l.classID), int64(l.objID)).Scan(&held)
+			cancel()
+			if err == nil && held {
+				continue
+			}
+			if err == nil {
+				err = errors.New("advisory lock is no longer held by this session")
+			}
+			l.mu.Lock()
+			l.err = errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("PostgreSQL CDC run lease lost: %w", err))
+			l.mu.Unlock()
+			l.doneOnce.Do(func() { close(l.done) })
+			return
+		}
+	}
+}
+
+func (l *postgresManagedCDCRunLease) Done() <-chan struct{} {
+	return l.done
+}
+
+func (l *postgresManagedCDCRunLease) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
+}
+
+func (l *postgresManagedCDCRunLease) Release() error {
+	l.releaseOnce.Do(func() {
+		close(l.stop)
+		<-l.stopped
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		key := (int64(l.classID) << 32) | int64(l.objID)
+		var released bool
+		if err := l.conn.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", key).Scan(&released); err != nil {
+			l.releaseErr = fmt.Errorf("failed to release PostgreSQL CDC run lease: %w", err)
+		} else if !released {
+			l.releaseErr = errors.New("PostgreSQL CDC run lease was not held at release")
+		}
+		l.conn.Release()
+		l.doneOnce.Do(func() { close(l.done) })
+	})
+	return l.releaseErr
+}
+
+func (d *PostgresDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	if _, err := validatePostgresClaimTarget(claim.DestinationTable); err != nil {
+		return err
+	}
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, claim.DestinationTable)
+	if err != nil {
+		return err
+	}
+	canonicalTarget := destination.CDCTargetKey(schemaName, tableName)
+	insert := fmt.Sprintf(`INSERT INTO %s ("destination_table", "connector_id", "claimed_at") VALUES ($1, $2, NOW()) ON CONFLICT ("destination_table") DO NOTHING`, destination.QuoteTableName(claimTable))
+	if _, err := tx.Exec(ctx, insert, canonicalTarget, ownerID); err != nil {
+		return err
+	}
+	var owner string
+	query := fmt.Sprintf(`SELECT "connector_id" FROM %s WHERE "destination_table" = $1`, destination.QuoteTableName(claimTable))
+	if err := tx.QueryRow(ctx, query, canonicalTarget).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return fmt.Errorf("destination table %q is already claimed by CDC connector %q", canonicalTarget, owner)
+	}
+	return tx.Commit(ctx)
+}
+
+func validatePostgresClaimTarget(table string) ([]string, error) {
+	if err := tablename.TwoLevel("postgres").CheckName(table); err != nil {
+		return nil, err
+	}
+	parts := tablename.Split(table)
+	maxLength := destination.MaxIdentifierLength("postgres")
+	for _, part := range parts {
+		if len(part) > maxLength {
+			return nil, fmt.Errorf("PostgreSQL CDC target identifier %q exceeds the %d-byte limit", part, maxLength)
+		}
+	}
+	return parts, nil
+}
+
+func (d *PostgresDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	query := fmt.Sprintf(`
+		SELECT DISTINCT "event_id", "state_generation"
+		FROM %s
+		WHERE "connector_id" = $1 AND "state_kind" = 'run'
+		  AND "state_generation" = (
+			SELECT MAX("state_generation") FROM %s
+			WHERE "connector_id" = $1 AND "state_kind" = 'run'
+		  )
+		ORDER BY "event_id"`, destination.QuoteTableName(table), destination.QuoteTableName(table))
+	rows, err := d.pool.Query(ctx, query, connectorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+	defer rows.Close()
+
+	var fence destination.CDCStateFence
+	for rows.Next() {
+		var eventID string
+		var generation int64
+		if err := rows.Scan(&eventID, &generation); err != nil {
+			return destination.CDCStateFence{}, err
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, rows.Err()
+}
+
+func (d *PostgresDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(eventIDs)+1)
+	args = append(args, connectorID)
+	placeholders := make([]string, len(eventIDs))
+	for i, eventID := range eventIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, eventID)
+	}
+	query := fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = $1 AND "event_id" IN (%s)`, destination.QuoteTableName(table), strings.Join(placeholders, ", "))
+	_, err := d.pool.Exec(ctx, query, args...)
+	return err
+}
+
 func (d *PostgresDestination) SupportsCDCUnchangedCols() bool { return true }
 
 func (d *PostgresDestination) SupportsCDCMerge() bool {
@@ -1020,7 +1794,10 @@ func (d *PostgresDestination) SupportsCDCMerge() bool {
 
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	schemaName, tableName := parseSchemaTable(table)
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return nil, err
+	}
 
 	query := `
 		SELECT column_name, data_type, is_nullable,
@@ -1046,10 +1823,12 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
+		columnType, arrayType := mapPostgresColumnType(dataType, udtName)
 		col := schema.Column{
-			Name:     colName,
-			DataType: mapPostgresTypeToSchema(dataType, udtName),
-			Nullable: isNullable == "YES",
+			Name:      colName,
+			DataType:  columnType,
+			ArrayType: arrayType,
+			Nullable:  isNullable == "YES",
 		}
 
 		if numPrecision != nil {
@@ -1081,22 +1860,22 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 }
 
 func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
-	switch dataType {
-	case "boolean":
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "boolean", "bool":
 		return schema.TypeBoolean
-	case "smallint":
+	case "smallint", "int2":
 		return schema.TypeInt16
-	case "integer":
+	case "integer", "int", "int4":
 		return schema.TypeInt32
-	case "bigint":
+	case "bigint", "int8":
 		return schema.TypeInt64
-	case "real":
+	case "real", "float4":
 		return schema.TypeFloat32
-	case "double precision":
+	case "double precision", "float8":
 		return schema.TypeFloat64
 	case "numeric", "decimal":
 		return schema.TypeDecimal
-	case "character varying", "varchar", "character", "char", "text":
+	case "character varying", "varchar", "character", "char", "text", "bpchar", "name":
 		return schema.TypeString
 	case "bytea":
 		return schema.TypeBinary
@@ -1106,7 +1885,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		return schema.TypeTime
 	case "timestamp", "timestamp without time zone":
 		return schema.TypeTimestamp
-	case "timestamp with time zone":
+	case "timestamp with time zone", "timestamptz":
 		return schema.TypeTimestampTZ
 	case "interval":
 		return schema.TypeInterval
@@ -1114,7 +1893,7 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		return schema.TypeJSON
 	case "uuid":
 		return schema.TypeUUID
-	case "ARRAY":
+	case "array":
 		return schema.TypeArray
 	default:
 		if strings.HasPrefix(udtName, "_") {
@@ -1122,6 +1901,20 @@ func mapPostgresTypeToSchema(dataType, udtName string) schema.DataType {
 		}
 		return schema.TypeString
 	}
+}
+
+func mapPostgresColumnType(dataType, udtName string) (schema.DataType, schema.DataType) {
+	columnType := mapPostgresTypeToSchema(dataType, udtName)
+	if columnType != schema.TypeArray {
+		return columnType, schema.TypeUnknown
+	}
+
+	elementTypeName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(udtName)), "_")
+	elementType := mapPostgresTypeToSchema(elementTypeName, elementTypeName)
+	if elementType == schema.TypeArray {
+		elementType = schema.TypeString
+	}
+	return columnType, elementType
 }
 
 // quoteColumns returns column names wrapped in double quotes.
@@ -1166,6 +1959,78 @@ func buildConflictUpdateSet(columns []string) string {
 		sets[i] = fmt.Sprintf(`%s = EXCLUDED.%s`, destination.QuoteIdentifier(col), destination.QuoteIdentifier(col))
 	}
 	return strings.Join(sets, ", ")
+}
+
+func buildMergeStagingSelect(quotedStagingTable, pkList string, destQuoted []string, orderBy string, primaryKeysUnique bool) string {
+	columns := strings.Join(destQuoted, ", ")
+	if primaryKeysUnique {
+		return fmt.Sprintf("SELECT %s FROM %s", columns, quotedStagingTable)
+	}
+	return fmt.Sprintf("SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s", pkList, columns, quotedStagingTable, orderBy)
+}
+
+func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagingOptions) (string, string, error) {
+	destQuoted := quoteColumns(destination.DestinationColumns(opts.Columns))
+	if len(destQuoted) == 0 {
+		return "", "", fmt.Errorf("truncate+insert from staging requires at least one column")
+	}
+	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
+	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
+	stagingSelect := fmt.Sprintf("SELECT %s FROM %s", strings.Join(destQuoted, ", "), quotedStagingTable)
+	if len(opts.PrimaryKeys) > 0 {
+		pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
+		orderBy := pkList
+		if opts.IncrementalKey != "" {
+			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+		}
+		stagingSelect = buildMergeStagingSelect(
+			quotedStagingTable,
+			pkList,
+			destQuoted,
+			orderBy,
+			opts.StagingPrimaryKeysUnique,
+		)
+	}
+
+	return fmt.Sprintf("TRUNCATE TABLE %s", quotedTargetTable), fmt.Sprintf(
+		"INSERT INTO %s (%s) %s",
+		quotedTargetTable,
+		strings.Join(destQuoted, ", "),
+		stagingSelect,
+	), nil
+}
+
+func buildPredicateMergeSQL(quotedTargetTable, quotedStagingTable string, primaryKeys, destQuoted, nonPKColumns []string, orderBy, incrementalPredicate string, primaryKeysUnique bool) string {
+	pkList := strings.Join(quoteColumns(primaryKeys), ", ")
+	matchCondition := destination.MergeJoinCondition(
+		buildJoinCondition(primaryKeys, "target", "source"),
+		incrementalPredicate,
+	)
+	sourceColumns := make([]string, len(destQuoted))
+	for i, col := range destQuoted {
+		sourceColumns[i] = "source." + col
+	}
+	stagingSelect := buildMergeStagingSelect(quotedStagingTable, pkList, destQuoted, orderBy, primaryKeysUnique)
+
+	return fmt.Sprintf(
+		`WITH source AS (
+			%s
+		), updated AS (
+			UPDATE %s AS target SET %s FROM source WHERE %s RETURNING 1
+		)
+		INSERT INTO %s (%s)
+		SELECT %s FROM source
+		WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+		stagingSelect,
+		quotedTargetTable,
+		buildCDCConflictUpdateSet(nonPKColumns, "target", "source", ""),
+		matchCondition,
+		quotedTargetTable,
+		strings.Join(destQuoted, ", "),
+		strings.Join(sourceColumns, ", "),
+		quotedTargetTable,
+		matchCondition,
+	)
 }
 
 func buildCDCConflictUpdateSet(columns []string, targetAlias, sourceAlias, unchangedRef string) string {

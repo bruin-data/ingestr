@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mssql"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -29,8 +30,14 @@ func startMSSQLContainerRaw(ctx context.Context, name string) (testcontainers.Co
 		testcontainers.WithWaitStrategy(
 			wait.ForAll(
 				wait.ForListeningPort("1433/tcp"),
-				wait.ForLog("SQL Server is now ready for client connections"),
-			).WithDeadline(2*time.Minute),
+				wait.ForLog("Recovery is complete."),
+				// The "ready for client connections" log line precedes login
+				// availability by several seconds on slower hosts; probe with a
+				// real authenticated query so the first test cannot hit it.
+				wait.ForSQL("1433/tcp", "sqlserver", func(host string, port network.Port) string {
+					return fmt.Sprintf("server=%s;user id=sa;password=%s;port=%s;database=master;encrypt=disable", host, mssqlPassword, port.Port())
+				}),
+			).WithDeadline(3*time.Minute),
 		),
 	)
 	if err != nil {

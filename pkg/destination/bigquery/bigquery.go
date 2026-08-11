@@ -9,15 +9,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/bigquery"
 	gcsstorage "cloud.google.com/go/storage"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/annotation"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -32,6 +37,10 @@ const (
 	exactRowCountPollInterval          = 1 * time.Second
 	queryJobMaxAttempts                = 4
 	deleteInsertTransactionMaxAttempts = 8
+	// queryJobStartMaxAttempts caps retries of the job-submission call so a
+	// persistently retryable error (e.g. a sustained rateLimitExceeded from too
+	// many DDL ops) fails cleanly instead of retrying the start forever.
+	queryJobStartMaxAttempts = 5
 )
 
 type bigQueryLoadMethod string
@@ -77,6 +86,24 @@ type BigQueryDestination struct {
 	gcsClientMu      sync.Mutex
 
 	loadJobWriter func(ctx context.Context, dataset, table string, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error
+
+	cdcStateMu          sync.Mutex
+	cdcStateTable       string
+	cdcStateConnectorID string
+	activeCDCJobs       map[string]struct{}
+	cdcJobReconcileMu   sync.Mutex
+	cdcJobsReconciled   bool
+	cdcJobCleanupMu     sync.Mutex
+	lastCDCJobCleanup   time.Time
+	cdcStatePruneMu     sync.Mutex
+	nextCDCStatePrune   time.Time
+	datasetCaseMu       sync.Mutex
+	datasetCase         map[string]bigQueryDatasetCase
+}
+
+type bigQueryDatasetCase struct {
+	caseInsensitive bool
+	provisional     bool
 }
 
 // NewBigQueryDestination creates a new BigQuery destination.
@@ -251,9 +278,13 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	ds := d.client.DatasetInProject(project, datasetID)
 
 	// Check if dataset exists
-	_, err := ds.Metadata(ctx)
+	metadata, err := ds.Metadata(ctx)
 	if err == nil {
+		if err := d.validateDatasetLocation(project, datasetID, metadata.Location); err != nil {
+			return err
+		}
 		d.markDatasetKnown(datasetKey)
+		d.cacheDatasetCase(datasetKey, metadata.IsCaseInsensitive, false)
 		return nil
 	}
 
@@ -264,7 +295,7 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	// Dataset doesn't exist, create it
 	config.Debug("[DEST] Creating dataset: %s", datasetKey)
 
-	metadata := &bigquery.DatasetMetadata{}
+	metadata = &bigquery.DatasetMetadata{}
 	if d.location != "" {
 		metadata.Location = d.location
 	} else {
@@ -274,7 +305,15 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	if err := ds.Create(ctx, metadata); err != nil {
 		// Check if it was created by another process in the meantime
 		if isAlreadyExistsError(err) {
+			metadata, metadataErr := ds.Metadata(ctx)
+			if metadataErr != nil {
+				return fmt.Errorf("failed to check concurrently created dataset: %w", metadataErr)
+			}
+			if locationErr := d.validateDatasetLocation(project, datasetID, metadata.Location); locationErr != nil {
+				return locationErr
+			}
 			d.markDatasetKnown(datasetKey)
+			d.cacheDatasetCase(datasetKey, metadata.IsCaseInsensitive, false)
 			return nil
 		}
 		return fmt.Errorf("failed to create dataset: %w", err)
@@ -282,7 +321,48 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 
 	config.Debug("[DEST] Dataset created: %s", datasetKey)
 	d.markDatasetKnown(datasetKey)
+	d.cacheDatasetCase(datasetKey, false, false)
 	return nil
+}
+
+type datasetLocationMismatchError struct {
+	project         string
+	dataset         string
+	datasetLocation string
+	jobLocation     string
+}
+
+func (e *datasetLocationMismatchError) Error() string {
+	return fmt.Sprintf(
+		"BigQuery dataset %s:%s is in location %s, but destination jobs are configured for %s; configure the destination for %s or use a dataset in %s (for staging, select it with --staging-dataset)",
+		e.project,
+		e.dataset,
+		e.datasetLocation,
+		e.jobLocation,
+		e.datasetLocation,
+		e.jobLocation,
+	)
+}
+
+func (d *BigQueryDestination) validateDatasetLocation(project, dataset, location string) error {
+	if d.location == "" || location == "" || strings.EqualFold(d.location, location) {
+		return nil
+	}
+	return &datasetLocationMismatchError{
+		project:         project,
+		dataset:         dataset,
+		datasetLocation: location,
+		jobLocation:     d.location,
+	}
+}
+
+func (d *BigQueryDestination) cacheDatasetCase(key string, caseInsensitive, provisional bool) {
+	d.datasetCaseMu.Lock()
+	defer d.datasetCaseMu.Unlock()
+	if d.datasetCase == nil {
+		d.datasetCase = make(map[string]bigQueryDatasetCase)
+	}
+	d.datasetCase[key] = bigQueryDatasetCase{caseInsensitive: caseInsensitive, provisional: provisional}
 }
 
 func (d *BigQueryDestination) markDatasetKnown(datasetKey string) {
@@ -368,6 +448,145 @@ func jobRef(job *bigquery.Job) string {
 	return job.ID()
 }
 
+var (
+	bigQueryJobReconcileDelay  = time.Second
+	bigQueryAmbiguousJobWindow = 2 * time.Minute
+	bigQueryJobAPIAttempts     = 4
+	bigQueryJobAPICallTimeout  = 15 * time.Second
+	bigQueryCDCStateMinAge     = 45 * time.Minute
+	bigQueryCDCStateRetryDelay = 10 * time.Minute
+)
+
+func waitForBigQueryJob(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+	failedAttempts := 0
+	for {
+		callCtx, cancel := context.WithTimeout(ctx, bigQueryJobAPICallTimeout)
+		status, err := job.Wait(callCtx)
+		callTimedOut := callCtx.Err() != nil && ctx.Err() == nil
+		cancel()
+		if err == nil {
+			return status, nil
+		}
+		if ctx.Err() != nil {
+			return reconcileCanceledBigQueryJob(ctx, job)
+		}
+		if callTimedOut {
+			statusCtx, statusCancel := context.WithTimeout(ctx, bigQueryJobAPICallTimeout)
+			polledStatus, statusErr := job.Status(statusCtx)
+			statusTimedOut := statusCtx.Err() != nil && ctx.Err() == nil
+			statusCancel()
+			if statusErr == nil {
+				failedAttempts = 0
+				if polledStatus.Done() {
+					return polledStatus, nil
+				}
+				if err := sleepWithContextForLoadJob(ctx, bigQueryJobReconcileDelay); err != nil {
+					return reconcileCanceledBigQueryJob(ctx, job)
+				}
+				continue
+			}
+			err = statusErr
+			callTimedOut = statusTimedOut
+		}
+		failedAttempts++
+		if !callTimedOut && !isRetryableBigQueryAPIError(err) {
+			return status, fmt.Errorf("cannot poll BigQuery job %s: %w", jobRef(job), err)
+		}
+		if failedAttempts == bigQueryJobAPIAttempts {
+			return status, fmt.Errorf("cannot poll BigQuery job %s after %d attempts: %w", jobRef(job), failedAttempts, err)
+		}
+		if err := sleepWithContextForLoadJob(ctx, bigQueryJobReconcileDelay); err != nil {
+			return reconcileCanceledBigQueryJob(ctx, job)
+		}
+	}
+}
+
+func reconcileCanceledBigQueryJob(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+	var cancelErr error
+	callCtx, cancel := context.WithTimeout(context.Background(), bigQueryJobAPICallTimeout)
+	if err := job.Cancel(callCtx); err != nil {
+		cancelErr = err
+	}
+	cancel()
+	deadline := time.Now().Add(bigQueryAmbiguousJobWindow)
+	failedAttempts := 0
+	for {
+		callCtx, cancel := context.WithTimeout(context.Background(), bigQueryJobAPICallTimeout)
+		terminalStatus, err := job.Status(callCtx)
+		cancel()
+		if err == nil {
+			failedAttempts = 0
+			if terminalStatus.Done() {
+				return terminalStatus, context.Cause(ctx)
+			}
+		} else if !isRetryableBigQueryAPIError(err) {
+			return terminalStatus, errors.Join(context.Cause(ctx), cancelErr, fmt.Errorf("cannot reconcile BigQuery job %s: %w", jobRef(job), err))
+		} else {
+			failedAttempts++
+		}
+		if failedAttempts == bigQueryJobAPIAttempts || time.Now().After(deadline) {
+			terminalErr := err
+			if terminalErr == nil {
+				terminalErr = errors.New("job did not become terminal")
+			}
+			return terminalStatus, errors.Join(context.Cause(ctx), cancelErr, fmt.Errorf("cannot reconcile BigQuery job %s within bounded polling window: %w", jobRef(job), terminalErr))
+		}
+		time.Sleep(bigQueryJobReconcileDelay)
+	}
+}
+
+func (d *BigQueryDestination) reconcileAmbiguousBigQueryJob(ctx context.Context, jobID string) (*bigquery.Job, error) {
+	deadline := time.Now().Add(bigQueryAmbiguousJobWindow)
+	for {
+		callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		job, err := d.client.JobFromProject(callCtx, d.projectID, jobID, d.location)
+		cancel()
+		if err == nil {
+			status, terminalErr := reconcileCanceledBigQueryJob(ctx, job)
+			if status != nil && status.Done() {
+				_ = d.resolveCDCJob(context.Background(), jobID)
+			}
+			return job, terminalErr
+		}
+		if isNotFoundError(err) && time.Now().After(deadline) {
+			_ = d.resolveCDCJob(context.Background(), jobID)
+			return nil, context.Cause(ctx)
+		}
+		if !isNotFoundError(err) && !isRetryableBigQueryAPIError(err) {
+			return nil, errors.Join(context.Cause(ctx), fmt.Errorf("cannot reconcile ambiguous BigQuery job %s: %w", jobID, err))
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.Join(context.Cause(ctx), fmt.Errorf("cannot reconcile ambiguous BigQuery job %s before deadline: %w", jobID, err))
+		}
+		time.Sleep(bigQueryJobReconcileDelay)
+	}
+}
+
+func isRetryableBigQueryAPIError(err error) bool {
+	if isRetryableLoadJobError(err) {
+		return true
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr != nil {
+		switch apiErr.Code {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+			http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+	}
+	return false
+}
+
+func (d *BigQueryDestination) waitForBigQueryJob(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+	status, err := waitForBigQueryJob(ctx, job)
+	if status != nil && status.Done() {
+		if resolveErr := d.resolveCDCJob(context.Background(), job.ID()); resolveErr != nil {
+			err = errors.Join(err, resolveErr)
+		}
+	}
+	return status, err
+}
+
 // isDatePartitionColumn reports whether the named partition column is a DATE
 // column in the given internal schema. A DATE column must be referenced bare in
 // a PARTITION BY clause; TIMESTAMP/DATETIME columns must be wrapped in DATE().
@@ -403,6 +622,73 @@ func partitionByClause(column string, isDateColumn bool) string {
 		return fmt.Sprintf("PARTITION BY %s\n", quoteIdentifier(column))
 	}
 	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
+}
+
+// partitionOrClusterMismatch reports whether the table's partition/cluster spec
+// differs from the configured one. An empty configured spec means "leave as-is".
+func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata, clusterBy []string) bool {
+	if d.partitionBy != "" {
+		if meta.RangePartitioning != nil {
+			return true
+		}
+		if meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, d.partitionBy) {
+			return true
+		}
+		// Compare the partition type against what we would create; ingestr builds
+		// only Field, so the desired type is BigQuery's default.
+		if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(&bigquery.TimePartitioning{Field: d.partitionBy}) {
+			return true
+		}
+	}
+
+	if len(clusterBy) > 0 {
+		var existingCluster []string
+		if meta.Clustering != nil {
+			existingCluster = meta.Clustering.Fields
+		}
+		if len(existingCluster) != len(clusterBy) {
+			return true
+		}
+		for i := range existingCluster {
+			if !strings.EqualFold(existingCluster[i], clusterBy[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// recreateSpecGuard refuses a recreate that would silently drop a live spec half
+// the user didn't configure (recreate keeps only the configured partition/cluster).
+func (d *BigQueryDestination) recreateSpecGuard(meta *bigquery.TableMetadata, table string, clusterBy []string) error {
+	if d.partitionBy == "" && (meta.TimePartitioning != nil || meta.RangePartitioning != nil) {
+		return fmt.Errorf("changing the clustering of %s requires recreating it, which would drop its existing partitioning; pass partition_by to keep (or change) it", table)
+	}
+	if len(clusterBy) == 0 && meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
+		return fmt.Errorf("changing the partitioning of %s requires recreating it, which would drop its existing clustering (%s); pass cluster_by to keep (or change) it", table, strings.Join(meta.Clustering.Fields, ", "))
+	}
+	return nil
+}
+
+// effectiveClusterBy resolves the clustering ingestr would apply: the configured
+// cluster_by, or the default primary-key clustering when none is configured.
+func (d *BigQueryDestination) effectiveClusterBy(opts destination.SwapOptions) []string {
+	if len(d.clusterBy) > 0 {
+		return d.clusterBy
+	}
+	if opts.Schema == nil {
+		return nil
+	}
+	return defaultClusteringFromPrimaryKeys(BuildBigQuerySchema(opts.Schema), opts.Schema.PrimaryKeys)
+}
+
+// effectivePartitionType returns the time-partitioning type, resolving the unset
+// value to BigQuery's default (DAY) so a stored type compares equal to an unset one.
+func effectivePartitionType(tp *bigquery.TimePartitioning) bigquery.TimePartitioningType {
+	if tp == nil || tp.Type == "" {
+		return bigquery.DayPartitioningType
+	}
+	return tp.Type
 }
 
 type mergePartitionPruning struct {
@@ -486,6 +772,39 @@ func mergePartitionPruningDeclarations(stagingRef string, pruning *mergePartitio
 	)
 }
 
+// nonNullablePKColumns returns the lower-cased primary key columns guaranteed
+// non-NULL on at least one side of the merge join — REQUIRED in the target
+// table, or NOT NULL in the ingestion schema (so staging holds no NULL keys).
+// For these a bare equality join is equivalent to the null-safe one.
+func nonNullablePKColumns(targetMeta *bigquery.TableMetadata, tableSchema *schema.TableSchema, primaryKeys []string) map[string]bool {
+	nonNullable := make(map[string]bool)
+	if targetMeta != nil {
+		for _, f := range targetMeta.Schema {
+			if f.Required {
+				nonNullable[strings.ToLower(f.Name)] = true
+			}
+		}
+	}
+	if tableSchema != nil {
+		for _, col := range tableSchema.Columns {
+			if !col.Nullable {
+				nonNullable[strings.ToLower(col.Name)] = true
+			}
+		}
+	}
+
+	result := make(map[string]bool, len(primaryKeys))
+	for _, pk := range primaryKeys {
+		if nonNullable[strings.ToLower(pk)] {
+			result[strings.ToLower(pk)] = true
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func mergePartitionTargetPredicate(pruning *mergePartitionPruning) string {
 	if pruning == nil {
 		return ""
@@ -507,7 +826,19 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		return err
 	}
 
+	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
+		return fmt.Errorf("failed to ensure dataset exists: %w", err)
+	}
+
 	tableRef := d.client.DatasetInProject(project, dataset).Table(table)
+	cdcKeyColumns := opts.CDCKeys
+	if len(cdcKeyColumns) == 0 {
+		cdcKeyColumns = opts.PrimaryKeys
+	}
+	requiredColumns := []string(nil)
+	if opts.CDCMode {
+		requiredColumns = cdcKeyColumns
+	}
 
 	// Store partition and cluster information for use in SwapTable
 	d.partitionBy = opts.PartitionBy
@@ -519,43 +850,23 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		// If table doesn't exist, TRUNCATE fails and we fall back to CREATE.
 		tableSchema := opts.Schema
 		if opts.CDCMode {
-			tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 		}
-		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 		metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.location, opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
 		errCh := make(chan error, 1)
 		d.setPendingTableErr(tableKey, errCh)
 		go func() {
 			truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
 			config.Debug("[DEST] Truncating table: %s", opts.Table)
-			query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
-			if d.location != "" {
-				query.Location = d.location
-			}
-			job, err := query.Run(ctx)
+			job, err := d.runQueryJobWithRetry(ctx, truncateSQL, "truncate")
 			if err != nil {
-				// TRUNCATE failed to submit — table likely doesn't exist
-				errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
-				return
-			}
-			for {
-				status, err := job.Status(ctx)
-				if err != nil {
-					errCh <- fmt.Errorf("truncate status check failed (job %s): %w", jobRef(job), err)
+				if job != nil && job.LastStatus() != nil && isNotFoundError(job.LastStatus().Err()) {
+					errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
 					return
 				}
-				if status.Done() {
-					if status.Err() != nil {
-						if isNotFoundError(status.Err()) {
-							errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
-							return
-						}
-						errCh <- fmt.Errorf("truncate error (job %s): %w", jobRef(job), status.Err())
-						return
-					}
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
+				errCh <- fmt.Errorf("truncate error (job %s): %w", jobRef(job), err)
+				return
 			}
 			// TRUNCATE succeeded — table exists. Check schema evolution if needed.
 			if opts.Schema != nil {
@@ -563,17 +874,17 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 				if err == nil {
 					tableSchema := opts.Schema
 					if opts.CDCMode {
-						tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+						tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 					}
-					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 					if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
 						errCh <- fmt.Errorf("failed to update schema: %w", err)
 						return
 					}
 					latestMeta, metaErr := tableRef.Metadata(ctx)
 					if metaErr == nil {
-						if err := d.ensureLoadJobColumnRelaxation(ctx, tableRef, latestMeta, tableSchema); err != nil {
-							errCh <- fmt.Errorf("failed to relax schema for load jobs: %w", err)
+						if err := d.ensureColumnRelaxation(ctx, tableRef, latestMeta, tableSchema, opts.CDCMode, cdcKeyColumns); err != nil {
+							errCh <- fmt.Errorf("failed to relax schema: %w", err)
 							return
 						}
 						existingMeta = latestMeta
@@ -592,47 +903,150 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
-		if opts.Schema != nil {
-			tableSchema := opts.Schema
-			if opts.CDCMode {
-				tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
-			}
-			tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
-			if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
-				return fmt.Errorf("failed to add missing columns: %w", err)
-			}
-			latestMeta, metaErr := tableRef.Metadata(ctx)
-			if metaErr == nil {
-				if err := d.ensureLoadJobColumnRelaxation(ctx, tableRef, latestMeta, tableSchema); err != nil {
-					return fmt.Errorf("failed to relax schema for load jobs: %w", err)
-				}
-				existingMeta = latestMeta
-			}
-		}
-		if err := d.ensureTableExpiration(ctx, tableRef, existingMeta, opts.ExpiresAfter); err != nil {
-			return fmt.Errorf("failed to update table expiration: %w", err)
-		}
-		return nil
+		// The table existed at evolution-planning time, so a planned ALTER
+		// backs any type-kind difference.
+		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)
 	}
 	if !isNotFoundError(err) {
 		return fmt.Errorf("failed to check table existence: %w", err)
 	}
 
-	// Table doesn't exist — ensure dataset exists and create
-	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
-		return fmt.Errorf("failed to ensure dataset exists: %w", err)
-	}
-
+	// Table doesn't exist — create it
 	tableSchema := opts.Schema
 	if opts.CDCMode {
-		tableSchema = makeNonPKColumnsNullable(opts.Schema, opts.PrimaryKeys)
+		tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 	}
-	tableSchema = d.normalizeSchemaForLoadMethod(tableSchema)
+	tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
 	metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.location, opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
 
 	config.Debug("[DEST] Creating table: %s", opts.Table)
 	if err := tableRef.Create(ctx, metadata); err != nil {
+		if isAlreadyExistsError(err) {
+			winnerMeta, waitErr := waitForBigQueryTableMetadata(ctx, tableRef)
+			if waitErr != nil {
+				return fmt.Errorf("concurrently created table did not become visible: %w", waitErr)
+			}
+			// Evolution planning saw this table absent, so no ALTER is planned
+			// to reconcile a mismatching column — reject instead of deferring.
+			return d.reconcileExistingTable(ctx, tableRef, winnerMeta, opts, false)
+		}
 		return fmt.Errorf("failed to create table: %w", err)
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) reconcileExistingTable(ctx context.Context, tableRef *bigquery.Table, existingMeta *bigquery.TableMetadata, opts destination.PrepareOptions, deferTypeChanges bool) error {
+	cdcKeyColumns := opts.CDCKeys
+	if len(cdcKeyColumns) == 0 {
+		cdcKeyColumns = opts.PrimaryKeys
+	}
+	requiredColumns := []string(nil)
+	if opts.CDCMode {
+		requiredColumns = cdcKeyColumns
+	}
+	tableSchema := opts.Schema
+	if tableSchema != nil {
+		if opts.CDCMode {
+			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
+		}
+		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
+		if err := validateBigQuerySchemaCompatibility(existingMeta, tableSchema, deferTypeChanges); err != nil {
+			return err
+		}
+		if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
+			return fmt.Errorf("failed to add missing columns: %w", err)
+		}
+		latestMeta, metaErr := tableRef.Metadata(ctx)
+		if metaErr == nil {
+			if err := d.ensureColumnRelaxation(ctx, tableRef, latestMeta, tableSchema, opts.CDCMode, cdcKeyColumns); err != nil {
+				return fmt.Errorf("failed to relax schema: %w", err)
+			}
+			existingMeta = latestMeta
+		}
+	}
+	if err := d.ensureTableExpiration(ctx, tableRef, existingMeta, opts.ExpiresAfter); err != nil {
+		return fmt.Errorf("failed to update table expiration: %w", err)
+	}
+	return nil
+}
+
+func waitForBigQueryTableMetadata(ctx context.Context, tableRef *bigquery.Table) (*bigquery.TableMetadata, error) {
+	const attempts = 7
+	delay := 10 * time.Millisecond
+	for attempt := 0; attempt < attempts; attempt++ {
+		metadata, err := tableRef.Metadata(ctx)
+		if err == nil {
+			return metadata, nil
+		}
+		if !isNotFoundError(err) {
+			return nil, err
+		}
+		if attempt == attempts-1 {
+			return nil, err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(delay*2, 100*time.Millisecond)
+	}
+	return nil, errors.New("table metadata visibility retry exhausted")
+}
+
+// validateBigQuerySchemaCompatibility checks the desired schema against an
+// existing table. deferTypeChanges leaves a differing scalar type kind to
+// schema evolution's ALTER; a Repeated mismatch is always rejected.
+func validateBigQuerySchemaCompatibility(existingMeta *bigquery.TableMetadata, desired *schema.TableSchema, deferTypeChanges bool) error {
+	if existingMeta == nil || desired == nil {
+		return nil
+	}
+	existing := make(map[string]*bigquery.FieldSchema, len(existingMeta.Schema))
+	for _, field := range existingMeta.Schema {
+		existing[field.Name] = field
+	}
+	for _, desiredField := range BuildBigQuerySchema(desired) {
+		field, ok := existing[desiredField.Name]
+		if !ok {
+			continue
+		}
+		if field.Type != desiredField.Type || field.Repeated != desiredField.Repeated {
+			if deferTypeChanges && field.Repeated == desiredField.Repeated {
+				continue
+			}
+			return fmt.Errorf("bigquery table has incompatible column %q: got %s repeated=%t, want %s repeated=%t", desiredField.Name, field.Type, field.Repeated, desiredField.Type, desiredField.Repeated)
+		}
+		if err := validateBigQueryParameterizedField(field, desiredField); err != nil {
+			return fmt.Errorf("bigquery table has incompatible column %q: %w", desiredField.Name, err)
+		}
+	}
+	return nil
+}
+
+func validateBigQueryParameterizedField(existing, desired *bigquery.FieldSchema) error {
+	switch desired.Type {
+	case bigquery.StringFieldType, bigquery.BytesFieldType:
+		switch {
+		case desired.MaxLength == 0 && existing.MaxLength > 0:
+			return fmt.Errorf("existing max length %d is bounded, want unbounded", existing.MaxLength)
+		case desired.MaxLength > 0 && existing.MaxLength > 0 && existing.MaxLength < desired.MaxLength:
+			return fmt.Errorf("existing max length %d is narrower than required %d", existing.MaxLength, desired.MaxLength)
+		}
+	case bigquery.NumericFieldType, bigquery.BigNumericFieldType:
+		existingPrecision, existingScale := normalizeBigQueryDecimalPrecisionScale(existing.Type, existing.Precision, existing.Scale)
+		desiredPrecision, desiredScale := normalizeBigQueryDecimalPrecisionScale(desired.Type, desired.Precision, desired.Scale)
+		if existingScale < desiredScale {
+			return fmt.Errorf("existing scale %d is narrower than required %d", existingScale, desiredScale)
+		}
+		existingIntegerDigits := existingPrecision - existingScale
+		desiredIntegerDigits := desiredPrecision - desiredScale
+		if existingIntegerDigits < desiredIntegerDigits {
+			return fmt.Errorf("existing integer-digit capacity %d is narrower than required %d", existingIntegerDigits, desiredIntegerDigits)
+		}
 	}
 	return nil
 }
@@ -656,16 +1070,22 @@ func (d *BigQueryDestination) createTableFresh(ctx context.Context, tableRef *bi
 	return nil
 }
 
-func (d *BigQueryDestination) normalizeSchemaForLoadMethod(tableSchema *schema.TableSchema) *schema.TableSchema {
+func (d *BigQueryDestination) normalizeSchemaForLoadMethod(tableSchema *schema.TableSchema, requiredColumns []string) *schema.TableSchema {
 	if tableSchema == nil || d.effectiveLoadMethod() != loadMethodLoadJob {
 		return tableSchema
 	}
 
+	required := make(map[string]struct{}, len(requiredColumns))
+	for _, col := range requiredColumns {
+		required[strings.ToLower(col)] = struct{}{}
+	}
 	cp := *tableSchema
 	cp.Columns = make([]schema.Column, len(tableSchema.Columns))
 	for i, col := range tableSchema.Columns {
 		cp.Columns[i] = col
-		cp.Columns[i].Nullable = true
+		if _, keepRequired := required[strings.ToLower(col.Name)]; !keepRequired {
+			cp.Columns[i].Nullable = true
+		}
 	}
 
 	return &cp
@@ -693,40 +1113,46 @@ func (d *BigQueryDestination) ensureTableExpiration(
 	return nil
 }
 
-func (d *BigQueryDestination) ensureLoadJobColumnRelaxation(
+func (d *BigQueryDestination) ensureColumnRelaxation(
 	ctx context.Context,
 	tableRef *bigquery.Table,
 	existingMeta *bigquery.TableMetadata,
 	sourceSchema *schema.TableSchema,
+	cdcMode bool,
+	primaryKeys []string,
 ) error {
-	if d.effectiveLoadMethod() != loadMethodLoadJob || existingMeta == nil || sourceSchema == nil {
+	if (d.effectiveLoadMethod() != loadMethodLoadJob && !cdcMode) || existingMeta == nil || sourceSchema == nil {
 		return nil
 	}
 
 	sourceCols := make(map[string]struct{}, len(sourceSchema.Columns))
 	for _, col := range sourceSchema.Columns {
-		sourceCols[col.Name] = struct{}{}
+		sourceCols[strings.ToLower(col.Name)] = struct{}{}
 	}
 
 	keyCols := make(map[string]bool)
+	for _, col := range primaryKeys {
+		keyCols[strings.ToLower(col)] = true
+	}
 	if existingMeta.TableConstraints != nil && existingMeta.TableConstraints.PrimaryKey != nil {
 		for _, col := range existingMeta.TableConstraints.PrimaryKey.Columns {
-			keyCols[col] = true
+			keyCols[strings.ToLower(col)] = true
 		}
 	}
-	if existingMeta.Clustering != nil {
+	if !cdcMode && existingMeta.Clustering != nil {
 		for _, col := range existingMeta.Clustering.Fields {
-			keyCols[col] = true
+			keyCols[strings.ToLower(col)] = true
 		}
 	}
-
 	var (
 		updatedSchema bigquery.Schema
 		needsUpdate   bool
 	)
 	for _, field := range existingMeta.Schema {
 		fieldCopy := *field
-		if _, ok := sourceCols[field.Name]; ok && fieldCopy.Required && !keyCols[field.Name] {
+		fieldName := strings.ToLower(field.Name)
+		_, inSourceSchema := sourceCols[fieldName]
+		if (cdcMode || inSourceSchema) && fieldCopy.Required && !keyCols[fieldName] {
 			fieldCopy.Required = false
 			needsUpdate = true
 		}
@@ -737,7 +1163,7 @@ func (d *BigQueryDestination) ensureLoadJobColumnRelaxation(
 		return nil
 	}
 
-	config.Debug("[DEST] Relaxing REQUIRED columns for load-job compatibility on %s", tableRef.TableID)
+	config.Debug("[DEST] Relaxing REQUIRED non-key columns on %s", tableRef.TableID)
 	_, err := tableRef.Update(ctx, bigquery.TableMetadataToUpdate{
 		Schema: updatedSchema,
 	}, existingMeta.ETag)
@@ -764,6 +1190,9 @@ func (d *BigQueryDestination) addMissingColumns(ctx context.Context, tableRef *b
 			Type: MapDataTypeToBigQuery(col),
 		}
 		applyBigQueryDecimalPrecisionScale(field, col)
+		if (col.DataType == schema.TypeString || col.DataType == schema.TypeBinary) && col.MaxLength > 0 {
+			field.MaxLength = int64(col.MaxLength)
+		}
 		if col.DataType == schema.TypeArray && col.ArrayType != schema.TypeUnknown {
 			elemField := schema.Column{
 				DataType:  col.ArrayType,
@@ -812,6 +1241,14 @@ func (d *BigQueryDestination) WriteParallel(ctx context.Context, records <-chan 
 		if err := <-pendingErr; err != nil {
 			return fmt.Errorf("failed to prepare table: %w", err)
 		}
+	}
+
+	if opts.PreStaged != nil {
+		ps, ok := opts.PreStaged.(*preStagedLoadSet)
+		if !ok || d.effectiveLoadMethod() != loadMethodLoadJob {
+			return fmt.Errorf("pre-staged data is not compatible with this BigQuery configuration")
+		}
+		return d.writePreStaged(ctx, project, dataset, table, records, ps, opts)
 	}
 
 	if d.effectiveLoadMethod() == loadMethodLoadJob {
@@ -989,14 +1426,47 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return fmt.Errorf("failed to ensure target dataset exists: %w", err)
 	}
 
+	// BigQuery can't ALTER partitioning/clustering, so a target whose spec differs
+	// must be recreated; detect once here (safe: replace overwrites the target anyway).
+	targetRef := d.client.DatasetInProject(targetProject, targetDataset).Table(targetTableName)
+	// Resolve the clustering ingestr would apply — including the default PK
+	// clustering — so the mismatch check, guard, and CTAS all agree with the table.
+	clusterBy := d.effectiveClusterBy(opts)
+	mismatch := false
+	var targetExpiration time.Time
+	if d.partitionBy != "" || len(clusterBy) > 0 {
+		if meta, err := targetRef.Metadata(ctx); err == nil {
+			mismatch = d.partitionOrClusterMismatch(meta, clusterBy)
+			targetExpiration = meta.ExpirationTime
+			if mismatch {
+				if err := d.recreateSpecGuard(meta, targetTable, clusterBy); err != nil {
+					return err
+				}
+			}
+		} else if !isNotFoundError(err) {
+			return fmt.Errorf("failed to check target table metadata: %w", err)
+		}
+	}
+
 	stagingRef := d.client.DatasetInProject(stagingProject, stagingDataset).Table(stagingTableName)
 
 	config.Debug("[DEST] Swapping tables: %s → %s", stagingTable, targetTable)
 
 	// Copy jobs can't dedup.
 	if d.effectiveLoadMethod() == loadMethodLoadJob && len(opts.PrimaryKeys) == 0 {
-		if err := d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName); err != nil {
-			return err
+		doCopy := func() error {
+			return d.swapTableWithCopyJob(ctx, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+		}
+		var swapErr error
+		if mismatch {
+			// Partition/cluster changed: rename the target aside, copy into a fresh
+			// target with the new spec, then drop the old (restoring it on failure).
+			swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, doCopy)
+		} else {
+			swapErr = doCopy()
+		}
+		if swapErr != nil {
+			return swapErr
 		}
 		config.Debug("[DEST] Copy completed, deleting staging table")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1007,29 +1477,171 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		return nil
 	}
 
+	// CTAS path. CREATE OR REPLACE can't change an existing table's spec, so on a
+	// mismatch rename the target aside, CTAS into a fresh target, drop the old.
+	ctas := func() error {
+		return d.runCTASSwap(ctx, opts, clusterBy, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName)
+	}
+	var swapErr error
+	if mismatch {
+		swapErr = d.renameAsideSwap(ctx, targetProject, targetDataset, targetTableName, targetExpiration, ctas)
+	} else {
+		swapErr = ctas()
+	}
+	if swapErr != nil {
+		return swapErr
+	}
+
+	config.Debug("[DEST] Copy completed, deleting staging table")
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := stagingRef.Delete(cleanupCtx); err != nil {
+		config.Debug("[DEST] Failed to delete staging table: %v", err)
+	}
+
+	return nil
+}
+
+// repartitionAsideSuffix returns a unique suffix for moving a table aside.
+func repartitionAsideSuffix() string {
+	var b [8]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// renameAsideSwap repartitions the target: rename it aside, run swap (recreating a
+// fresh target), then drop the old — or rename it back (with its expiration) on failure.
+func (d *BigQueryDestination) renameAsideSwap(ctx context.Context, project, dataset, target string, originalExpiration time.Time, swap func() error) error {
+	oldName, err := d.renameTargetAside(ctx, project, dataset, target)
+	if err != nil {
+		return fmt.Errorf("failed to rename target aside for repartitioning: %w", err)
+	}
+
+	if swapErr := swap(); swapErr != nil {
+		// The swap may have failed because ctx was canceled (Ctrl-C, timeout);
+		// the restore must still run or the target stays aside and self-deletes.
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		defer cancel()
+		// A canceled wait can report failure for a swap that committed server-side;
+		// if the new target exists, keep it (don't clobber) and let the aside expire.
+		if d.tableExists(restoreCtx, project, dataset, target) {
+			return fmt.Errorf("repartition swap reported an error but the new target exists and was kept; aside table %q expires in ~24h: %w", oldName, swapErr)
+		}
+		if restoreErr := d.restoreTargetFromAside(restoreCtx, project, dataset, oldName, target, originalExpiration); restoreErr != nil {
+			return fmt.Errorf("repartition swap failed (%w); restoring aside table %q also failed: %w", swapErr, oldName, restoreErr)
+		}
+		return swapErr
+	}
+
+	// Success: drop the aside table. Best-effort — the expiration set in
+	// renameTargetAside cleans it up if this drop never lands.
+	oldFQN := fmt.Sprintf("%s.%s.%s", project, dataset, oldName)
+	if err := d.DropTable(ctx, oldFQN); err != nil {
+		config.Debug("[DEST] failed to drop aside table %s (will expire): %v", oldFQN, err)
+	}
+	return nil
+}
+
+// renameTargetAside renames target → a unique aside name and sets a 24h
+// expiration on it so it self-cleans if a later drop never runs.
+func (d *BigQueryDestination) renameTargetAside(ctx context.Context, project, dataset, table string) (string, error) {
+	// BigQuery can't RENAME a table that has a primary-key constraint; drop it
+	// first (it's informational/not-enforced; the recreated target's spec comes
+	// from the swap, as in any replace).
+	dropPKSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s DROP PRIMARY KEY IF EXISTS",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
+	if _, err := d.runQueryJobWithRetry(ctx, dropPKSQL, "drop target primary key"); err != nil {
+		return "", fmt.Errorf("failed to drop primary key before renaming %q aside: %w", table, err)
+	}
+	for range 3 {
+		oldName := table + "__ingestr_repartition_" + repartitionAsideSuffix()
+		renameSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s RENAME TO %s",
+			quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table), quoteIdentifier(oldName))
+		if _, err := d.runQueryJobWithRetry(ctx, renameSQL, "rename target aside"); err != nil {
+			// RENAME isn't idempotent: a retried job can fail even though an earlier
+			// attempt committed, so probe (detached from ctx) whether it landed.
+			probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			landed := d.tableRenameLanded(probeCtx, project, dataset, table, oldName)
+			cancel()
+			if !landed {
+				if isAlreadyExistsError(err) {
+					continue // extremely unlikely with a random suffix; try a fresh one
+				}
+				return "", fmt.Errorf("failed to rename %q aside (if it is missing, it may live under %q — rename it back manually): %w", table, oldName, err)
+			}
+		}
+		// Self-clean safety net if the final drop never runs (e.g. a crash).
+		expireSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s SET OPTIONS(expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR))",
+			quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(oldName))
+		if _, err := d.runQueryJobWithRetry(ctx, expireSQL, "set aside expiration"); err != nil {
+			config.Debug("[DEST] failed to set expiration on aside table %s: %v", oldName, err)
+		}
+		return oldName, nil
+	}
+	return "", fmt.Errorf("could not rename %q aside after 3 attempts", table)
+}
+
+// restoreTargetFromAside restores the aside table's original expiration (fixed
+// first, since it survives the rename) and renames it back to target.
+func (d *BigQueryDestination) restoreTargetFromAside(ctx context.Context, project, dataset, oldName, table string, originalExpiration time.Time) error {
+	expiration := "NULL"
+	if !originalExpiration.IsZero() {
+		expiration = fmt.Sprintf("TIMESTAMP_MICROS(%d)", originalExpiration.UnixMicro())
+	}
+	clearSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s SET OPTIONS(expiration_timestamp = %s)",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(oldName), expiration)
+	if _, err := d.runQueryJobWithRetry(ctx, clearSQL, "restore aside expiration"); err != nil {
+		return fmt.Errorf("failed to restore expiration on aside table %q — it still expires in ~24h; clear its expiration and rename it back to %q manually: %w", oldName, table, err)
+	}
+	restoreSQL := fmt.Sprintf("ALTER TABLE %s.%s.%s RENAME TO %s",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(oldName), quoteIdentifier(table))
+	if _, err := d.runQueryJobWithRetry(ctx, restoreSQL, "restore target from aside"); err != nil {
+		if d.tableRenameLanded(ctx, project, dataset, oldName, table) {
+			return nil
+		}
+		return fmt.Errorf("failed to rename aside table %q back to %q — rename it back manually: %w", oldName, table, err)
+	}
+	return nil
+}
+
+// tableRenameLanded reports whether a rename whose job errored actually committed
+// server-side (RENAME isn't idempotent, so a retried job can spuriously fail).
+func (d *BigQueryDestination) tableRenameLanded(ctx context.Context, project, dataset, from, to string) bool {
+	if !d.tableExists(ctx, project, dataset, to) {
+		return false
+	}
+	_, err := d.client.DatasetInProject(project, dataset).Table(from).Metadata(ctx)
+	return isNotFoundError(err)
+}
+
+func (d *BigQueryDestination) tableExists(ctx context.Context, project, dataset, table string) bool {
+	_, err := d.client.DatasetInProject(project, dataset).Table(table).Metadata(ctx)
+	return err == nil
+}
+
+// runCTASSwap creates/replaces the target from staging via CREATE OR REPLACE … AS
+// SELECT, applying partition/clustering. The CTAS swap step (direct or rename-aside).
+func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.SwapOptions, clusterBy []string, stagingProject, stagingDataset, stagingTableName, targetProject, targetDataset, targetTableName string) error {
 	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName))
 	selectClause := buildBigQueryDedupSelect(stagingFQN, opts.PrimaryKeys, opts.IncrementalKey)
 
-	if d.partitionBy != "" || len(d.clusterBy) > 0 {
-		// For partitioned/clustered tables, must use SQL to apply partitioning
+	if d.partitionBy != "" || len(clusterBy) > 0 {
+		// For partitioned/clustered tables, must use SQL to apply partitioning.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
-
 		if d.partitionBy != "" {
 			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
 		}
-
-		if len(d.clusterBy) > 0 {
-			clusterCols := make([]string, len(d.clusterBy))
-			for i, col := range d.clusterBy {
+		if len(clusterBy) > 0 {
+			clusterCols := make([]string, len(clusterBy))
+			for i, col := range clusterBy {
 				clusterCols[i] = quoteIdentifier(col)
 			}
 			sql += fmt.Sprintf("CLUSTER BY %s\n", strings.Join(clusterCols, ", "))
 		}
-
 		sql += "AS " + selectClause
-
 		config.Debug("[DEST] Executing SQL copy (partitioned): %s", sql)
-
 		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL copy")
 		if err != nil {
 			if job == nil {
@@ -1042,9 +1654,7 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 		// from the streaming buffer, so they'd copy 0 rows after Storage Write API writes.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s AS %s",
 			quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName), selectClause)
-
 		config.Debug("[DEST] Executing SQL swap: %s", sql)
-
 		job, err := d.runQueryJobWithRetry(ctx, sql, "SQL swap")
 		if err != nil {
 			if job == nil {
@@ -1053,14 +1663,6 @@ func (d *BigQueryDestination) SwapTable(ctx context.Context, opts destination.Sw
 			return fmt.Errorf("SQL swap job error (job %s): %w", jobRef(job), err)
 		}
 	}
-
-	config.Debug("[DEST] Copy completed, deleting staging table")
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := stagingRef.Delete(cleanupCtx); err != nil {
-		config.Debug("[DEST] Failed to delete staging table: %v", err)
-	}
-
 	return nil
 }
 
@@ -1103,57 +1705,18 @@ func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, 
 		lastJob *bigquery.Job
 		lastErr error
 	)
+	baseJobID := newBigQueryQueryJobID()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		annotatedSQL := annotation.Prepend(ctx, sql)
-		jobID := newBigQueryQueryJobID()
-		query := d.client.Query(annotatedSQL)
-		query.JobID = jobID
-		query.ProjectID = d.projectID
-		if d.location != "" {
-			query.Location = d.location
-		}
-
-		job, err := query.Run(ctx)
+		jobID := loadJobAttemptID(baseJobID, attempt)
+		job, err := d.startQueryJobWithRetry(ctx, annotatedSQL, nil, opLabel, jobID)
 		if err != nil {
-			if isBigQueryDuplicateJobError(err) {
-				recoveredJob, recoverErr := d.recoverDuplicateQueryJob(ctx, jobID, annotatedSQL)
-				if recoverErr != nil {
-					lastErr = fmt.Errorf("failed to recover duplicate %s job %s: %w", opLabel, jobID, recoverErr)
-					if attempt < maxAttempts {
-						config.Debug("[%s] Retrying after duplicate recovery error: %v", opLabel, lastErr)
-						if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, recoverErr)); sleepErr != nil {
-							return nil, sleepErr
-						}
-						continue
-					}
-					return nil, lastErr
-				}
-				config.Debug("[%s] Recovered duplicate job insert as existing job %s", opLabel, jobRef(recoveredJob))
-				job = recoveredJob
-			} else {
-				if attempt < maxAttempts && isRetryableLoadJobError(err) {
-					lastErr = err
-					config.Debug("[%s] Retrying after start error: %v", opLabel, err)
-					if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
-						return nil, sleepErr
-					}
-					continue
-				}
-				return nil, err
-			}
+			return nil, err
 		}
 		lastJob = job
 
-		status, err := job.Wait(ctx)
+		status, err := d.waitForBigQueryJob(ctx, job)
 		if err != nil {
-			if attempt < maxAttempts && isRetryableLoadJobError(err) {
-				lastErr = err
-				config.Debug("[%s] Retrying after wait error: %v", opLabel, err)
-				if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); sleepErr != nil {
-					return job, sleepErr
-				}
-				continue
-			}
 			return job, err
 		}
 		if err := status.Err(); err != nil {
@@ -1178,6 +1741,57 @@ func (d *BigQueryDestination) runQueryJobWithRetryAttempts(ctx context.Context, 
 		return lastJob, lastErr
 	}
 	return lastJob, fmt.Errorf("%s job exhausted retries", opLabel)
+}
+
+func (d *BigQueryDestination) startQueryJobWithRetry(ctx context.Context, sql string, parameters []bigquery.QueryParameter, opLabel, jobID string) (*bigquery.Job, error) {
+	if err := d.beginCDCJob(ctx, jobID); err != nil {
+		return nil, err
+	}
+	for attempt := 1; ; attempt++ {
+		query := d.client.Query(sql)
+		query.JobID = jobID
+		query.ProjectID = d.projectID
+		query.Parameters = parameters
+		if d.location != "" {
+			query.Location = d.location
+		}
+		job, err := query.Run(ctx)
+		if err == nil {
+			return job, nil
+		}
+		if ctx.Err() != nil {
+			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+		}
+		retry := isRetryableLoadJobError(err)
+		if isBigQueryDuplicateJobError(err) {
+			recovered, recoverErr := d.recoverDuplicateQueryJob(ctx, jobID, sql)
+			if recoverErr == nil {
+				config.Debug("[%s] Recovered duplicate job insert as existing job %s", opLabel, jobRef(recovered))
+				return recovered, nil
+			}
+			err = fmt.Errorf("failed to recover duplicate %s job %s: %w", opLabel, jobID, recoverErr)
+			retry = true
+		}
+		if !retry {
+			_ = d.resolveCDCJob(context.Background(), jobID)
+			return nil, err
+		}
+		if attempt >= queryJobStartMaxAttempts {
+			// The job may have been accepted under its stable ID despite the
+			// retryable error, so reconcile (cancel/confirm) rather than abandon it
+			// with its fence cleared. reconcile resolves the fence in every path; a
+			// (nil, nil) result means the job never landed, so surface a clear error.
+			job, recErr := d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+			if job == nil && recErr == nil {
+				return nil, fmt.Errorf("failed to start %s query job %s after %d attempts: %w", opLabel, jobID, attempt, err)
+			}
+			return job, recErr
+		}
+		output.Warnf("[%s] job %s start failed (attempt %d/%d): %v; retrying\n", opLabel, jobID, attempt, queryJobStartMaxAttempts, err)
+		if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(min(attempt, queryJobMaxAttempts), err)); sleepErr != nil {
+			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
+		}
+	}
 }
 
 func (d *BigQueryDestination) recoverDuplicateQueryJob(ctx context.Context, jobID, sql string) (*bigquery.Job, error) {
@@ -1278,7 +1892,7 @@ func isBigQueryAlterTypeRewriteCandidate(sql string, err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, _, _, ok := parseAlterColumnTypeSQL(sql); !ok {
+	if _, _, ok := parseAlterColumnTypesSQL(sql); !ok {
 		return false
 	}
 
@@ -1287,45 +1901,47 @@ func isBigQueryAlterTypeRewriteCandidate(sql string, err error) bool {
 		strings.Contains(msg, "assignable to the new type")
 }
 
+type alterTypeChange struct {
+	column  string
+	newType string
+}
+
+// parseAlterColumnTypeSQL parses a single-clause ALTER COLUMN SET DATA TYPE.
 func parseAlterColumnTypeSQL(sql string) (table string, column string, newType string, ok bool) {
-	const (
-		prefix      = "ALTER TABLE "
-		alterColumn = " ALTER COLUMN "
-		setDataType = " SET DATA TYPE "
-	)
-
-	trimmed := strings.TrimSpace(sql)
-	upper := strings.ToUpper(trimmed)
-	if !strings.HasPrefix(upper, prefix) {
+	table, changes, ok := parseAlterColumnTypesSQL(sql)
+	if !ok || len(changes) != 1 {
 		return "", "", "", false
 	}
+	return table, changes[0].column, changes[0].newType, true
+}
 
-	rest := trimmed[len(prefix):]
-	restUpper := upper[len(prefix):]
-	alterIdx := strings.Index(restUpper, alterColumn)
-	if alterIdx < 0 {
-		return "", "", "", false
+var (
+	alterColumnTypesRe = regexp.MustCompile(`(?is)^ALTER TABLE\s+(.+?)\s+ALTER COLUMN\s+(.+)$`)
+	alterClauseSepRe   = regexp.MustCompile(`(?i),\s+ALTER COLUMN\s+`)
+	alterClauseRe      = regexp.MustCompile("(?is)^`?([^`\\s]+)`?\\s+SET DATA TYPE\\s+(.+)$")
+)
+
+// parseAlterColumnTypesSQL parses an ALTER TABLE statement carrying one or more
+// comma-separated "ALTER COLUMN <col> SET DATA TYPE <type>" clauses, so the
+// batched form produced by Dialect.BatchAlterColumnTypesSQL can be rewritten as
+// a single CREATE OR REPLACE TABLE.
+func parseAlterColumnTypesSQL(sql string) (table string, changes []alterTypeChange, ok bool) {
+	m := alterColumnTypesRe.FindStringSubmatch(strings.TrimSpace(sql))
+	if m == nil {
+		return "", nil, false
 	}
-
-	table = strings.TrimSpace(rest[:alterIdx])
-	afterAlter := rest[alterIdx+len(alterColumn):]
-	afterAlterUpper := restUpper[alterIdx+len(alterColumn):]
-	typeIdx := strings.Index(afterAlterUpper, setDataType)
-	if typeIdx < 0 {
-		return "", "", "", false
+	for _, clause := range alterClauseSepRe.Split(m[2], -1) {
+		c := alterClauseRe.FindStringSubmatch(strings.TrimSpace(clause))
+		if c == nil {
+			return "", nil, false
+		}
+		changes = append(changes, alterTypeChange{column: c[1], newType: strings.TrimSpace(c[2])})
 	}
-
-	column = strings.Trim(afterAlter[:typeIdx], "` ")
-	newType = strings.TrimSpace(afterAlter[typeIdx+len(setDataType):])
-	if table == "" || column == "" || newType == "" {
-		return "", "", "", false
-	}
-
-	return strings.ReplaceAll(table, "`", ""), column, newType, true
+	return strings.ReplaceAll(strings.TrimSpace(m[1]), "`", ""), changes, true
 }
 
 func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context, originalSQL string) error {
-	tableName, columnName, newType, ok := parseAlterColumnTypeSQL(originalSQL)
+	tableName, changes, ok := parseAlterColumnTypesSQL(originalSQL)
 	if !ok {
 		return fmt.Errorf("not an ALTER COLUMN TYPE statement: %s", originalSQL)
 	}
@@ -1341,27 +1957,20 @@ func (d *BigQueryDestination) execAlterColumnTypeWithRewrite(ctx context.Context
 		return fmt.Errorf("failed to fetch table metadata for rewrite: %w", err)
 	}
 
-	rewrittenSQL, err := d.buildAlterColumnTypeRewriteSQL(project, dataset, table, columnName, newType, meta)
+	typeChanges := make(map[string]string, len(changes))
+	for _, c := range changes {
+		typeChanges[c.column] = c.newType
+	}
+
+	rewrittenSQL, err := d.buildBatchAlterColumnTypeRewriteSQL(project, dataset, table, typeChanges, meta)
 	if err != nil {
 		return err
 	}
 
 	config.Debug("[DEST] Rewriting unsupported ALTER COLUMN TYPE with CREATE OR REPLACE TABLE for %s.%s", dataset, table)
-	query := d.client.Query(annotation.Prepend(ctx, rewrittenSQL))
-	if d.location != "" {
-		query.Location = d.location
-	}
-
-	job, err := query.Run(ctx)
+	config.Debug("[DEST] Column type change SQL: %s\n", rewrittenSQL)
+	job, err := d.runQueryJobWithRetry(ctx, rewrittenSQL, "alter type rewrite")
 	if err != nil {
-		return fmt.Errorf("failed to start rewrite query: %w", err)
-	}
-
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("rewrite query failed (job %s): %w", jobRef(job), err)
-	}
-	if err := status.Err(); err != nil {
 		return fmt.Errorf("rewrite query error (job %s): %w", jobRef(job), err)
 	}
 
@@ -1376,8 +1985,23 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	newType string,
 	meta *bigquery.TableMetadata,
 ) (string, error) {
+	return d.buildBatchAlterColumnTypeRewriteSQL(project, dataset, table, map[string]string{columnName: newType}, meta)
+}
+
+// buildBatchAlterColumnTypeRewriteSQL rewrites the table once, casting every
+// column in typeChanges to its new type in a single CREATE OR REPLACE TABLE.
+func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
+	project string,
+	dataset string,
+	table string,
+	typeChanges map[string]string,
+	meta *bigquery.TableMetadata,
+) (string, error) {
 	if meta == nil {
 		return "", errors.New("table metadata is required")
+	}
+	if len(typeChanges) == 0 {
+		return "", errors.New("no column type changes provided")
 	}
 	if meta.RangePartitioning != nil {
 		return "", errors.New("range-partitioned tables are not supported for type rewrite")
@@ -1387,17 +2011,19 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	}
 
 	selectExprs := make([]string, 0, len(meta.Schema))
-	foundColumn := false
+	found := make(map[string]bool, len(typeChanges))
 	for _, field := range meta.Schema {
-		if field.Name == columnName {
+		if newType, ok := typeChanges[field.Name]; ok {
 			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%s AS %s) AS %s", quoteIdentifier(field.Name), newType, quoteIdentifier(field.Name)))
-			foundColumn = true
+			found[field.Name] = true
 			continue
 		}
 		selectExprs = append(selectExprs, quoteIdentifier(field.Name))
 	}
-	if !foundColumn {
-		return "", fmt.Errorf("column %q not found in table metadata", columnName)
+	for col := range typeChanges {
+		if !found[col] {
+			return "", fmt.Errorf("column %q not found in table metadata", col)
+		}
 	}
 
 	var sqlBuilder strings.Builder
@@ -1424,24 +2050,44 @@ func (d *BigQueryDestination) buildAlterColumnTypeRewriteSQL(
 	return sqlBuilder.String(), nil
 }
 
-// MergeTable performs an atomic merge operation using BigQuery's MERGE statement.
-// This merges data from stagingTable into targetTable based on primary keys.
-func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+type preparedBigQueryMerge struct {
+	destination *BigQueryDestination
+	sql         string
+}
+
+func (m *preparedBigQueryMerge) Execute(ctx context.Context) error {
 	ctx = annotation.WithStep(ctx, annotation.StepMerge)
+	config.Debug("[MERGE] Executing MERGE statement")
+	config.Debug("[MERGE] SQL: %s", m.sql)
+
+	job, err := m.destination.runQueryJobWithRetry(ctx, m.sql, "MERGE")
+	if err != nil {
+		config.LogFailedQuery(m.sql, err)
+		if job == nil {
+			return fmt.Errorf("failed to start merge job: %w", err)
+		}
+		return fmt.Errorf("merge job failed (job %s): %w", jobRef(job), err)
+	}
+
+	config.Debug("[MERGE] Merge completed successfully (job %s)", jobRef(job))
+	return nil
+}
+
+func (d *BigQueryDestination) PrepareMergeTable(ctx context.Context, opts destination.MergeOptions) (destination.PreparedStagingTableWrite, error) {
 	if len(opts.PrimaryKeys) == 0 {
-		return errors.New("merge requires at least one primary key")
+		return nil, errors.New("merge requires at least one primary key")
 	}
 
 	// Staging is always co-located with the target (same project/dataset family),
 	// so a single resolved project qualifies both sides.
 	project, stagingDataset, stagingTableName, err := d.parseTable(opts.StagingTable)
 	if err != nil {
-		return fmt.Errorf("invalid staging table name: %w", err)
+		return nil, fmt.Errorf("invalid staging table name: %w", err)
 	}
 
 	_, targetDataset, targetTableName, err := d.parseTable(opts.TargetTable)
 	if err != nil {
-		return fmt.Errorf("invalid target table name: %w", err)
+		return nil, fmt.Errorf("invalid target table name: %w", err)
 	}
 
 	// The merge target may have just been created asynchronously by PrepareTable
@@ -1450,7 +2096,7 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	if _, _, _, tableKey, resolveErr := d.resolveTable(opts.TargetTable); resolveErr == nil {
 		if pendingErr := d.takePendingTableErr(tableKey); pendingErr != nil {
 			if err := <-pendingErr; err != nil {
-				return fmt.Errorf("failed to prepare merge target table: %w", err)
+				return nil, fmt.Errorf("failed to prepare merge target table: %w", err)
 			}
 		}
 	}
@@ -1460,7 +2106,12 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 		config.Debug("[MERGE] Could not fetch target metadata for partition pruning: %v", err)
 	}
 	// Fetch target and staging table schemas to detect type mismatches
-	castMap := d.buildCastMap(ctx, project, targetDataset, targetTableName, stagingDataset, stagingTableName)
+	castMap, err := d.buildCastMap(ctx, project, targetDataset, targetTableName, stagingDataset, stagingTableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare target and staging schemas: %w", err)
+	}
+
+	nonNullablePKs := nonNullablePKColumns(targetMeta, opts.Schema, opts.PrimaryKeys)
 
 	pruning := buildMergePartitionPruning(targetMeta, opts.PrimaryKeys)
 	pruningSkipReason := ""
@@ -1482,22 +2133,18 @@ func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.M
 	}
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, pruning)
+	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate)
+	return &preparedBigQueryMerge{destination: d, sql: mergeSQL}, nil
+}
 
-	config.Debug("[MERGE] Executing MERGE statement")
-	config.Debug("[MERGE] SQL: %s", mergeSQL)
-
-	job, err := d.runQueryJobWithRetry(ctx, mergeSQL, "MERGE")
+// MergeTable performs an atomic merge operation using BigQuery's MERGE statement.
+// This merges data from stagingTable into targetTable based on primary keys.
+func (d *BigQueryDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	merge, err := d.PrepareMergeTable(ctx, opts)
 	if err != nil {
-		config.LogFailedQuery(mergeSQL, err)
-		if job == nil {
-			return fmt.Errorf("failed to start merge job: %w", err)
-		}
-		return fmt.Errorf("merge job failed (job %s): %w", jobRef(job), err)
+		return err
 	}
-
-	config.Debug("[MERGE] Merge completed successfully (job %s)", jobRef(job))
-	return nil
+	return merge.Execute(ctx)
 }
 
 // DeleteInsertTable performs a DELETE + INSERT operation for BigQuery.
@@ -1742,14 +2389,14 @@ func formatBigQueryValue(v interface{}, keyType schema.DataType) string {
 
 // buildCastMap compares target and staging table schemas and returns a map of
 // column name → target BigQuery type name for columns that need casting.
-func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetDataset, targetTable, stagingDataset, stagingTable string) map[string]string {
+func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetDataset, targetTable, stagingDataset, stagingTable string) (map[string]string, error) {
 	targetMeta, err := d.client.DatasetInProject(project, targetDataset).Table(targetTable).Metadata(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to get target table metadata: %w", err)
 	}
 	stagingMeta, err := d.client.DatasetInProject(project, stagingDataset).Table(stagingTable).Metadata(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to get staging table metadata: %w", err)
 	}
 
 	targetTypes := make(map[string]bigquery.FieldType)
@@ -1772,9 +2419,9 @@ func (d *BigQueryDestination) buildCastMap(ctx context.Context, project, targetD
 	}
 
 	if len(castMap) == 0 {
-		return nil
+		return nil, nil
 	}
-	return castMap
+	return castMap, nil
 }
 
 // castSourceCol returns the source column reference, adding a CAST if the column
@@ -1808,18 +2455,52 @@ func buildBigQueryDedupSelect(qualifiedTable string, primaryKeys []string, order
 
 // buildMergeSQL constructs a BigQuery MERGE statement
 func (d *BigQueryDestination) buildMergeSQL(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string) string {
-	return d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil)
+	return d.buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nil, nil)
 }
 
-func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, pruning *mergePartitionPruning) string {
+func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning) string {
+	return d.buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nonNullablePKs, pruning, "")
+}
+
+func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
 	destColumns := destination.DestinationColumns(allColumns)
+	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	hasActiveColumn := quoteIdentifier("__ingestr_has_active")
+	activeLSNColumn := quoteIdentifier("__ingestr_active_lsn")
+	if hasCDCDeleted && len(primaryKeys) > 0 {
+		usedNames := make(map[string]struct{}, len(allColumns)+2)
+		for _, col := range allColumns {
+			usedNames[strings.ToLower(col)] = struct{}{}
+		}
+		uniqueInternalName := func(base string) string {
+			candidate := base
+			for suffix := 2; ; suffix++ {
+				if _, exists := usedNames[strings.ToLower(candidate)]; !exists {
+					usedNames[strings.ToLower(candidate)] = struct{}{}
+					return candidate
+				}
+				candidate = fmt.Sprintf("%s_%d", base, suffix)
+			}
+		}
+		hasActiveColumn = quoteIdentifier(uniqueInternalName("__ingestr_has_active"))
+		activeLSNColumn = quoteIdentifier(uniqueInternalName("__ingestr_active_lsn"))
+	}
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		sourceCol := castSourceCol(pk, castMap)
-		onConditions[i] = fmt.Sprintf("(t.%s = %s OR (t.%s IS NULL AND %s IS NULL))", quoteIdentifier(pk), sourceCol, quoteIdentifier(pk), sourceCol)
+		// The null-safe OR disables clustered block pruning, so use bare
+		// equality when either join side is provably never NULL.
+		if nonNullablePKs[strings.ToLower(pk)] {
+			onConditions[i] = fmt.Sprintf("t.%s = %s", quoteIdentifier(pk), sourceCol)
+		} else {
+			onConditions[i] = fmt.Sprintf("(t.%s = %s OR (t.%s IS NULL AND %s IS NULL))", quoteIdentifier(pk), sourceCol, quoteIdentifier(pk), sourceCol)
+		}
 	}
 	if partitionPredicate := mergePartitionTargetPredicate(pruning); partitionPredicate != "" {
 		onConditions = append(onConditions, partitionPredicate)
+	}
+	if incrementalPredicate = strings.TrimSpace(incrementalPredicate); incrementalPredicate != "" && !hasCDCDeleted {
+		onConditions = append(onConditions, "("+incrementalPredicate+")")
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
@@ -1829,8 +2510,6 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 		pkMap[strings.ToLower(pk)] = true
 	}
 
-	// Check if this is CDC mode (has _cdc_deleted column)
-	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
 	// _cdc_unchanged_cols is only emitted by sources that can mark columns as
 	// unchanged (e.g. Postgres TOAST); other CDC sources materialize full rows
 	// and their staging tables have no such column to reference.
@@ -1879,7 +2558,7 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 			laActJoin[i] = fmt.Sprintf("(la.%s = act.%s OR (la.%s IS NULL AND act.%s IS NULL))", quoted, quoted, quoted, quoted)
 		}
 
-		selectCols := make([]string, 0, len(allColumns)+1)
+		selectCols := make([]string, 0, len(allColumns)+2)
 		for _, col := range allColumns {
 			alias := "act"
 			if pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col) {
@@ -1887,7 +2566,8 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 			}
 			selectCols = append(selectCols, fmt.Sprintf("%s.%s", alias, quoteIdentifier(col)))
 		}
-		selectCols = append(selectCols, "act.`_cdc_lsn` IS NOT NULL AS `__ingestr_has_active`")
+		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` IS NOT NULL AS %s", hasActiveColumn))
+		selectCols = append(selectCols, fmt.Sprintf("act.`_cdc_lsn` AS %s", activeLSNColumn))
 
 		fmt.Fprintf(
 			&sql,
@@ -1922,25 +2602,29 @@ func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetD
 	fmt.Fprintf(&sql, "ON %s\n", onClause)
 
 	if hasCDCDeleted {
+		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false))"
+		if incrementalPredicate != "" {
+			newerLSN = "(" + incrementalPredicate + ") AND " + newerLSN
+		}
 		// Full update whenever the window has a non-deleted change carrying row
 		// data; for deleted PKs this applies the last active values together
 		// with the delete marking. Clause order matters: BigQuery executes the
 		// first matching WHEN clause.
 		if len(updateSets) > 0 {
-			sql.WriteString("WHEN MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n")
+			hasFreshRowData := fmt.Sprintf("(s.`_cdc_deleted` = false OR (s.%s AND (t.`_cdc_lsn` IS NULL OR s.%s >= t.`_cdc_lsn`)))", hasActiveColumn, activeLSNColumn)
+			fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND %s THEN\n", newerLSN, hasFreshRowData)
 			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
 		}
 
 		// Delete-only window for an existing row: update CDC columns and keep
 		// the row data as-is (the delete change carries no usable row image for
 		// all sources).
-		sql.WriteString("WHEN MATCHED AND s.`_cdc_deleted` = true THEN\n")
+		fmt.Fprintf(&sql, "WHEN MATCHED AND %s AND s.`_cdc_deleted` = true THEN\n", newerLSN)
 		sql.WriteString("  UPDATE SET t.`_cdc_deleted` = true, t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_synced_at` = s.`_cdc_synced_at`\n")
 
-		// Insert new rows, including ones already deleted within the window
-		// (materialized as soft-deleted). A delete-only window for an unknown
-		// row has no data to materialize and is skipped.
-		sql.WriteString("WHEN NOT MATCHED AND (s.`_cdc_deleted` = false OR s.`__ingestr_has_active`) THEN\n")
+		// Insert new rows, including delete-only tombstones for unknown keys so
+		// their LSN prevents a stale active replay from resurrecting the row.
+		sql.WriteString("WHEN NOT MATCHED THEN\n")
 		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
 		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
 	} else {
@@ -2065,23 +2749,67 @@ func (d *BigQueryDestination) TruncateTable(ctx context.Context, table string) e
 	}
 
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
-	query := d.client.Query(annotation.Prepend(ctx, truncateSQL))
-	if d.location != "" {
-		query.Location = d.location
-	}
-	job, err := query.Run(ctx)
+	job, err := d.runQueryJobWithRetry(ctx, truncateSQL, "truncate")
 	if err != nil {
-		return fmt.Errorf("failed to submit truncate for %s: %w", table, err)
-	}
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("truncate wait failed for %s (job %s): %w", table, jobRef(job), err)
-	}
-	if err := status.Err(); err != nil {
 		return fmt.Errorf("failed to truncate table %s (job %s): %w", table, jobRef(job), err)
 	}
 	config.Debug("[DEST] Truncated table: %s", table)
 	return nil
+}
+
+type preparedBigQueryStagingInsert struct {
+	destination *BigQueryDestination
+	targetTable string
+	sql         string
+}
+
+func (i *preparedBigQueryStagingInsert) Execute(ctx context.Context) error {
+	job, err := i.destination.runQueryJobWithRetry(ctx, i.sql, "insert from staging")
+	if err != nil {
+		config.LogFailedQuery(i.sql, err)
+		return fmt.Errorf("failed to insert into table %s from staging (job %s): %w", i.targetTable, jobRef(job), err)
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) PrepareInsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) (destination.PreparedStagingTableWrite, error) {
+	destinationColumns := destination.DestinationColumns(opts.Columns)
+	if len(destinationColumns) == 0 {
+		return nil, errors.New("insert from staging requires at least one column")
+	}
+	targetProject, targetDataset, targetTable, _, err := d.resolveTable(opts.TargetTable)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target table name: %w", err)
+	}
+	stagingProject, stagingDataset, stagingTable, _, err := d.resolveTable(opts.StagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("invalid staging table name: %w", err)
+	}
+	columns := make([]string, len(destinationColumns))
+	selectColumns := make([]string, len(destinationColumns))
+	castMap, err := d.buildCastMap(ctx, targetProject, targetDataset, targetTable, stagingDataset, stagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare target and staging schemas: %w", err)
+	}
+	for i, column := range destinationColumns {
+		columns[i] = quoteIdentifier(column)
+		selectColumns[i] = castSourceCol(column, castMap)
+	}
+	columnList := strings.Join(columns, ", ")
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s.%s.%s (%s) SELECT %s FROM %s.%s.%s AS s",
+		quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTable), columnList,
+		strings.Join(selectColumns, ", "), quoteIdentifier(stagingProject), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTable),
+	)
+	return &preparedBigQueryStagingInsert{destination: d, targetTable: opts.TargetTable, sql: insertSQL}, nil
+}
+
+func (d *BigQueryDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+	insert, err := d.PrepareInsertFromStaging(ctx, opts)
+	if err != nil {
+		return err
+	}
+	return insert.Execute(ctx)
 }
 
 // SupportsReplaceStrategy returns true as BigQuery supports the replace strategy.
@@ -2093,6 +2821,10 @@ func (d *BigQueryDestination) SupportsAppendStrategy() bool { return true }
 // SupportsMergeStrategy returns true as BigQuery supports the merge strategy via native MERGE.
 func (d *BigQueryDestination) SupportsMergeStrategy() bool { return true }
 
+// SupportsIncrementalPredicate returns true as BigQuery applies
+// MergeOptions.IncrementalPredicate to MERGE updates.
+func (d *BigQueryDestination) SupportsIncrementalPredicate() bool { return true }
+
 // SupportsDeleteInsertStrategy returns true as BigQuery supports the delete+insert strategy.
 func (d *BigQueryDestination) SupportsDeleteInsertStrategy() bool { return true }
 
@@ -2103,6 +2835,8 @@ func (d *BigQueryDestination) SupportsSCD2Strategy() bool { return true }
 func (d *BigQueryDestination) SupportsAtomicSwap() bool { return true }
 
 func (d *BigQueryDestination) GetScheme() string { return "bigquery" }
+
+func (d *BigQueryDestination) ManagedCDCStateCatalog() string { return d.projectID }
 
 func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	project, dataset, tableName, err := d.parseTable(table)
@@ -2138,6 +2872,10 @@ func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) 
 
 		if field.Type == bigquery.NumericFieldType || field.Type == bigquery.BigNumericFieldType {
 			col.Precision, col.Scale = normalizeBigQueryDecimalPrecisionScale(field.Type, field.Precision, field.Scale)
+		}
+
+		if (col.DataType == schema.TypeString || col.DataType == schema.TypeBinary) && field.MaxLength > 0 {
+			col.MaxLength = int(field.MaxLength)
 		}
 
 		columns = append(columns, col)
@@ -2188,6 +2926,10 @@ func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+		return true
+	}
 	// Check for various "not found" error messages
 	errStr := err.Error()
 	return contains(errStr, "not found") || contains(errStr, "Not found") || contains(errStr, "NOT_FOUND")
@@ -2197,8 +2939,20 @@ func isAlreadyExistsError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) {
+		if apiErr.Code != http.StatusConflict {
+			return false
+		}
+		for _, item := range apiErr.Errors {
+			if strings.EqualFold(item.Reason, "duplicate") || strings.EqualFold(item.Reason, "alreadyExists") {
+				return true
+			}
+		}
+		return contains(apiErr.Message, "Already Exists") || contains(apiErr.Message, "already exists") || contains(apiErr.Message, "ALREADY_EXISTS")
+	}
 	errStr := err.Error()
-	return contains(errStr, "Already Exists") || contains(errStr, "already exists") || contains(errStr, "ALREADY_EXISTS") || contains(errStr, "409")
+	return contains(errStr, "Already Exists") || contains(errStr, "already exists") || contains(errStr, "ALREADY_EXISTS")
 }
 
 // contains checks if a string contains a substring
@@ -2227,6 +2981,8 @@ func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }
+
+func (d *BigQueryDestination) RequiresSerializedCDCRuns() bool { return true }
 
 func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	project, dataset, tableName, err := d.parseTable(table)
@@ -2276,6 +3032,685 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 
 	return maxLSN, nil
 }
+
+type bigQueryCDCStateRow struct {
+	EventID          string
+	Version          string
+	ConnectorID      string
+	SourceTable      string
+	DestinationTable string
+	StateKind        string
+	StateGeneration  int64
+	StateStatus      string
+	CDCLSN           string
+	RecordedAt       time.Time
+}
+
+func (r *bigQueryCDCStateRow) Save() (map[string]bigquery.Value, string, error) {
+	return map[string]bigquery.Value{
+		"event_id":          r.EventID,
+		"state_version":     r.Version,
+		"connector_id":      r.ConnectorID,
+		"source_table":      r.SourceTable,
+		"destination_table": r.DestinationTable,
+		"state_kind":        r.StateKind,
+		"state_generation":  r.StateGeneration,
+		"state_status":      r.StateStatus,
+		"_cdc_lsn":          r.CDCLSN,
+		"recorded_at":       r.RecordedAt,
+	}, r.EventID, nil
+}
+
+func (d *BigQueryDestination) WriteCDCState(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	project, dataset, tableName, err := d.parseTable(opts.Table)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	inserter := d.client.DatasetInProject(project, dataset).Table(tableName).Inserter()
+	for result := range records {
+		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
+			return result.Err
+		}
+		if result.Batch == nil {
+			continue
+		}
+		record := result.Batch
+		rows := make([]*bigQueryCDCStateRow, 0, record.NumRows())
+		for i := 0; i < int(record.NumRows()); i++ {
+			row := &bigQueryCDCStateRow{
+				EventID:          record.Column(0).(*array.String).Value(i),
+				Version:          record.Column(1).(*array.String).Value(i),
+				ConnectorID:      record.Column(2).(*array.String).Value(i),
+				SourceTable:      record.Column(3).(*array.String).Value(i),
+				DestinationTable: record.Column(4).(*array.String).Value(i),
+				StateKind:        record.Column(5).(*array.String).Value(i),
+				StateGeneration:  record.Column(6).(*array.Int64).Value(i),
+				StateStatus:      record.Column(7).(*array.String).Value(i),
+				CDCLSN:           record.Column(8).(*array.String).Value(i),
+				RecordedAt:       record.Column(9).(*array.Timestamp).Value(i).ToTime(record.Column(9).DataType().(*arrow.TimestampType).Unit),
+			}
+			rows = append(rows, row)
+			d.cdcStateMu.Lock()
+			d.cdcStateTable = opts.Table
+			d.cdcStateConnectorID = row.ConnectorID
+			d.cdcStateMu.Unlock()
+		}
+		err := inserter.Put(ctx, rows)
+		record.Release()
+		if err != nil {
+			return fmt.Errorf("failed to stream BigQuery CDC state: %w", err)
+		}
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
+	ownerID, err := claim.OwnerID()
+	if err != nil {
+		return err
+	}
+	project, dataset, tableName, err := d.parseTable(claimTable)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	targetProject, targetDataset, targetTable, err := d.parseTable(claim.DestinationTable)
+	if err != nil {
+		return err
+	}
+	if targetDataset == "" {
+		targetDataset = d.datasetID
+	}
+	canonicalTarget, err := d.canonicalCDCTarget(ctx, targetProject, targetDataset, targetTable)
+	if err != nil {
+		return err
+	}
+	quotedClaimTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	sql := fmt.Sprintf(`BEGIN TRANSACTION;
+INSERT INTO %s (destination_table, connector_id, claimed_at)
+SELECT @destination_table, @connector_id, CURRENT_TIMESTAMP()
+FROM (SELECT 1 AS singleton)
+WHERE NOT EXISTS (SELECT 1 FROM %s WHERE destination_table = @destination_table);
+ASSERT (SELECT connector_id FROM %s WHERE destination_table = @destination_table) = @connector_id AS 'CDC destination target is already claimed by another connector';
+COMMIT TRANSACTION;`, quotedClaimTable, quotedClaimTable, quotedClaimTable)
+	parameters := []bigquery.QueryParameter{
+		{Name: "destination_table", Value: canonicalTarget},
+		{Name: "connector_id", Value: ownerID},
+	}
+	annotatedSQL := annotation.Prepend(ctx, sql)
+	for attempt := 1; attempt <= deleteInsertTransactionMaxAttempts; attempt++ {
+		jobID := loadJobAttemptID(newBigQueryQueryJobID(), attempt)
+		job, err := d.startQueryJobWithRetry(ctx, annotatedSQL, parameters, "CDC target claim", jobID)
+		if err != nil {
+			return err
+		}
+		status, err := d.waitForBigQueryJob(ctx, job)
+		if err != nil {
+			return err
+		}
+		if err := status.Err(); err != nil {
+			if attempt < deleteInsertTransactionMaxAttempts && isRetryableLoadJobError(err) {
+				if err := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(attempt, err)); err != nil {
+					return err
+				}
+				continue
+			}
+			return fmt.Errorf("CDC destination target %q is already claimed by another connector: %w", canonicalTarget, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("CDC destination target %q claim exhausted retries", canonicalTarget)
+}
+
+func (d *BigQueryDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return "", false, err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	metadata, err := d.client.DatasetInProject(project, dataset).Table(tableName).Metadata(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to read BigQuery CDC target incarnation for %s: %w", table, err)
+	}
+	if metadata.CreationTime.IsZero() {
+		return "", false, fmt.Errorf("BigQuery table %s returned an empty creation time", table)
+	}
+	return bigQueryTableIncarnation(project, dataset, tableName, metadata.CreationTime), true, nil
+}
+
+func bigQueryTableIncarnation(project, dataset, table string, creationTime time.Time) string {
+	return destination.CDCTargetKey(project, dataset, table, strconv.FormatInt(creationTime.UnixNano(), 10))
+}
+
+func (d *BigQueryDestination) canonicalCDCTarget(ctx context.Context, project, dataset, table string) (string, error) {
+	key := project + "." + dataset
+	d.datasetCaseMu.Lock()
+	datasetCase, cached := d.datasetCase[key]
+	d.datasetCaseMu.Unlock()
+	if !cached {
+		metadata, err := d.client.DatasetInProject(project, dataset).Metadata(ctx)
+		provisional := false
+		if err != nil {
+			if !isNotFoundError(err) {
+				return "", fmt.Errorf("failed to read BigQuery dataset metadata for CDC target %s: %w", key, err)
+			}
+			// A first load may resolve its connector identity before PrepareTable
+			// creates the dataset. New datasets use BigQuery's case-sensitive default.
+			metadata = &bigquery.DatasetMetadata{}
+			provisional = true
+		}
+		datasetCase = bigQueryDatasetCase{caseInsensitive: metadata.IsCaseInsensitive, provisional: provisional}
+		d.cacheDatasetCase(key, datasetCase.caseInsensitive, datasetCase.provisional)
+	}
+	if datasetCase.caseInsensitive {
+		dataset = strings.ToLower(dataset)
+		table = strings.ToLower(table)
+	}
+	return destination.CDCTargetKey(project, dataset, table), nil
+}
+
+func (d *BigQueryDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return "", err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	return d.canonicalCDCTarget(ctx, project, dataset, tableName)
+}
+
+func (d *BigQueryDestination) cdcJobFence() (string, string, map[string]struct{}) {
+	d.cdcStateMu.Lock()
+	defer d.cdcStateMu.Unlock()
+	active := make(map[string]struct{}, len(d.activeCDCJobs))
+	for jobID := range d.activeCDCJobs {
+		active[jobID] = struct{}{}
+	}
+	return d.cdcStateTable, d.cdcStateConnectorID, active
+}
+
+func (d *BigQueryDestination) beginCDCJob(ctx context.Context, jobID string) error {
+	table, connectorID, _ := d.cdcJobFence()
+	if table == "" || connectorID == "" {
+		return nil
+	}
+	d.cdcStateMu.Lock()
+	if d.activeCDCJobs == nil {
+		d.activeCDCJobs = make(map[string]struct{})
+	}
+	d.activeCDCJobs[jobID] = struct{}{}
+	d.cdcStateMu.Unlock()
+	rollbackActive := true
+	defer func() {
+		if rollbackActive {
+			d.cdcStateMu.Lock()
+			delete(d.activeCDCJobs, jobID)
+			d.cdcStateMu.Unlock()
+		}
+	}()
+	if err := d.ensureCDCJobsReconciled(ctx, table, connectorID); err != nil {
+		return err
+	}
+	d.maybeCleanupCDCJobMarkers(ctx, table, connectorID)
+	if err := d.writeCDCJobMarker(ctx, table, connectorID, jobID, "pending"); err != nil {
+		return err
+	}
+	rollbackActive = false
+	return nil
+}
+
+func (d *BigQueryDestination) resolveCDCJob(ctx context.Context, jobID string) error {
+	table, connectorID, _ := d.cdcJobFence()
+	if table == "" || connectorID == "" {
+		return nil
+	}
+	if err := d.writeCDCJobMarker(ctx, table, connectorID, jobID, "resolved"); err != nil {
+		return err
+	}
+	d.releaseCDCJob(jobID)
+	return nil
+}
+
+func (d *BigQueryDestination) releaseCDCJob(jobID string) {
+	d.cdcStateMu.Lock()
+	delete(d.activeCDCJobs, jobID)
+	d.cdcStateMu.Unlock()
+}
+
+func (d *BigQueryDestination) deferCDCJobReconciliation(jobID string) {
+	d.cdcJobReconcileMu.Lock()
+	defer d.cdcJobReconcileMu.Unlock()
+	d.releaseCDCJob(jobID)
+	d.cdcJobsReconciled = false
+}
+
+func (d *BigQueryDestination) writeCDCJobMarker(ctx context.Context, table, connectorID, jobID, status string) error {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	row := &bigQueryCDCStateRow{
+		EventID: "job-" + jobID + "-" + status, Version: "v2", ConnectorID: connectorID,
+		StateKind: "job", StateStatus: status, CDCLSN: jobID, RecordedAt: time.Now().UTC(),
+	}
+	if err := d.client.DatasetInProject(project, dataset).Table(tableName).Inserter().Put(ctx, row); err != nil {
+		return fmt.Errorf("failed to persist BigQuery job fence %s: %w", jobID, err)
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) ensureCDCJobsReconciled(ctx context.Context, table, connectorID string) error {
+	d.cdcJobReconcileMu.Lock()
+	defer d.cdcJobReconcileMu.Unlock()
+	if d.cdcJobsReconciled {
+		return nil
+	}
+	if err := d.reconcilePendingCDCJobs(ctx, table, connectorID); err != nil {
+		return err
+	}
+	d.cdcJobsReconciled = true
+	return nil
+}
+
+func (d *BigQueryDestination) reconcilePendingCDCJobs(ctx context.Context, table, connectorID string) error {
+	entries, err := d.loadCDCJobMarkers(ctx, table, connectorID)
+	if err != nil {
+		return fmt.Errorf("failed to load BigQuery job fences: %w", err)
+	}
+	_, _, active := d.cdcJobFence()
+	pending := reduceCDCJobMarkers(entries)
+	for jobID, unresolved := range pending {
+		if !unresolved {
+			continue
+		}
+		if _, ok := active[jobID]; ok {
+			continue
+		}
+		if _, err := d.reconcileAmbiguousBigQueryJob(ctx, jobID); err != nil {
+			return fmt.Errorf("unresolved predecessor BigQuery job %s blocks CDC takeover: %w", jobID, err)
+		}
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) maybeCleanupCDCJobMarkers(ctx context.Context, table, connectorID string) {
+	d.cdcJobCleanupMu.Lock()
+	defer d.cdcJobCleanupMu.Unlock()
+	if !d.lastCDCJobCleanup.IsZero() && time.Since(d.lastCDCJobCleanup) < bigQueryCDCStateRetryDelay {
+		return
+	}
+	d.lastCDCJobCleanup = time.Now()
+	entries, err := d.loadCDCJobMarkers(ctx, table, connectorID)
+	if err != nil {
+		config.Debug("[BIGQUERY] Failed to load resolved CDC job markers for cleanup: %v", err)
+		return
+	}
+	jobIDs := resolvedCDCJobIDs(entries, time.Now().Add(-bigQueryCDCStateMinAge))
+	if err := d.deleteCDCJobMarkersUntracked(ctx, table, connectorID, jobIDs); err != nil {
+		config.Debug("[BIGQUERY] Deferred cleanup of %d aged CDC job markers: %v", len(jobIDs), err)
+	}
+}
+
+func resolvedCDCJobIDs(entries []destination.CDCStateEntry, cutoff time.Time) []string {
+	jobIDs := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry.StateKind == "job" && entry.Status == "resolved" && !entry.RecordedAt.After(cutoff) {
+			jobIDs[entry.Position] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(jobIDs))
+	for jobID := range jobIDs {
+		result = append(result, jobID)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func reduceCDCJobMarkers(entries []destination.CDCStateEntry) map[string]bool {
+	pending := make(map[string]bool)
+	for _, entry := range entries {
+		if entry.StateKind != "job" {
+			continue
+		}
+		if entry.Status == "resolved" {
+			pending[entry.Position] = false
+		} else if _, exists := pending[entry.Position]; !exists {
+			pending[entry.Position] = true
+		}
+	}
+	return pending
+}
+
+func (d *BigQueryDestination) loadCDCJobMarkers(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return nil, err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	query := d.client.Query(fmt.Sprintf("SELECT `state_status`, `_cdc_lsn`, `recorded_at` FROM %s WHERE `connector_id` = @connector_id AND `state_kind` = 'job'", quotedTable))
+	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
+	query.Location = d.location
+	it, err := query.Read(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var entries []destination.CDCStateEntry
+	for {
+		var row []bigquery.Value
+		if err := it.Next(&row); err != nil {
+			if err == iterator.Done {
+				return entries, nil
+			}
+			return nil, err
+		}
+		if len(row) != 3 {
+			return nil, fmt.Errorf("unexpected BigQuery CDC job marker row width %d", len(row))
+		}
+		status, statusOK := row[0].(string)
+		jobID, jobOK := row[1].(string)
+		recordedAt, recordedAtOK := row[2].(time.Time)
+		if !statusOK || !jobOK || !recordedAtOK {
+			return nil, fmt.Errorf("unexpected BigQuery CDC job marker row types")
+		}
+		entries = append(entries, destination.CDCStateEntry{StateKind: "job", Status: status, Position: jobID, RecordedAt: recordedAt})
+	}
+}
+
+func (d *BigQueryDestination) deleteCDCJobMarkersUntracked(ctx context.Context, table, connectorID string, jobIDs []string) error {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	eventIDs := make([]string, 0, len(jobIDs)*2)
+	for _, jobID := range jobIDs {
+		eventIDs = append(eventIDs, "job-"+jobID+"-pending", "job-"+jobID+"-resolved")
+	}
+	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	query := d.client.Query(fmt.Sprintf("DELETE FROM %s WHERE `connector_id` = @connector_id AND `event_id` IN UNNEST(@event_ids)", quotedTable))
+	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}, {Name: "event_ids", Value: eventIDs}}
+	query.Location = d.location
+	job, err := query.Run(ctx)
+	if err != nil {
+		return err
+	}
+	status, err := waitForBigQueryJob(ctx, job)
+	if err != nil {
+		return err
+	}
+	return status.Err()
+}
+
+func (d *BigQueryDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return nil, err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	if dataset == "" {
+		return nil, errors.New("dataset must be specified in state table name or URI path")
+	}
+
+	ctx = annotation.WithStep(ctx, annotation.StepCDCResume)
+	sql := fmt.Sprintf("SELECT `event_id`, `source_table`, `destination_table`, `state_kind`, `state_generation`, `state_status`, `_cdc_lsn` FROM %s.%s.%s WHERE `connector_id` = @connector_id",
+		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	query := d.client.Query(annotation.Prepend(ctx, sql))
+	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
+	if d.location != "" {
+		query.Location = d.location
+	}
+	it, err := query.Read(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var entries []destination.CDCStateEntry
+	for {
+		var row []bigquery.Value
+		if err := it.Next(&row); err != nil {
+			if err == iterator.Done {
+				break
+			}
+			return nil, err
+		}
+		if len(row) != 7 {
+			return nil, fmt.Errorf("unexpected BigQuery CDC state row width %d", len(row))
+		}
+		eventID, eventOK := row[0].(string)
+		sourceTable, sourceOK := row[1].(string)
+		destinationTable, destinationOK := row[2].(string)
+		kind, kindOK := row[3].(string)
+		generation, generationOK := row[4].(int64)
+		status, statusOK := row[5].(string)
+		position, positionOK := row[6].(string)
+		if !eventOK || !sourceOK || !destinationOK || !kindOK || !generationOK || !statusOK || !positionOK {
+			return nil, fmt.Errorf("unexpected BigQuery CDC state row types")
+		}
+		entries = append(entries, destination.CDCStateEntry{
+			EventID:          eventID,
+			SourceTable:      sourceTable,
+			DestinationTable: destinationTable,
+			StateKind:        kind,
+			Generation:       generation,
+			Status:           status,
+			Position:         position,
+		})
+	}
+	return entries, nil
+}
+
+// EnsureCDCStatePositionColumn widens a `_cdc_lsn STRING(64)` column left by
+// older releases to unbounded STRING. PrepareTable's schema reconciliation
+// rejects a bounded column against the now-unbounded state schema, so this
+// runs before retrying the preparation.
+func (d *BigQueryDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	if dataset == "" {
+		return errors.New("dataset must be specified in state table name or URI path")
+	}
+	meta, err := d.client.DatasetInProject(project, dataset).Table(tableName).Metadata(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	bounded := false
+	for _, field := range meta.Schema {
+		if field.Name == destination.CDCLSNColumn {
+			bounded = field.MaxLength > 0
+			break
+		}
+	}
+	if !bounded {
+		return nil
+	}
+	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN `_cdc_lsn` SET DATA TYPE STRING", quotedTable)
+	query := d.client.Query(sql)
+	if d.location != "" {
+		query.Location = d.location
+	}
+	job, err := query.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to widen BigQuery CDC state position column: %w", err)
+	}
+	status, err := waitForBigQueryJob(ctx, job)
+	if err != nil {
+		return fmt.Errorf("failed to widen BigQuery CDC state position column: %w", err)
+	}
+	if err := status.Err(); err != nil {
+		return fmt.Errorf("failed to widen BigQuery CDC state position column: %w", err)
+	}
+	return nil
+}
+
+func (d *BigQueryDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return destination.CDCStateFence{}, err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	if dataset == "" {
+		return destination.CDCStateFence{}, errors.New("dataset must be specified in state table name or URI path")
+	}
+
+	ctx = annotation.WithStep(ctx, annotation.StepCDCResume)
+	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	sql := buildCDCStateFenceQuery(quotedTable)
+	query := d.client.Query(annotation.Prepend(ctx, sql))
+	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
+	if d.location != "" {
+		query.Location = d.location
+	}
+	it, err := query.Read(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return destination.CDCStateFence{}, nil
+		}
+		return destination.CDCStateFence{}, err
+	}
+
+	var fence destination.CDCStateFence
+	for {
+		var row []bigquery.Value
+		if err := it.Next(&row); err != nil {
+			if err == iterator.Done {
+				break
+			}
+			return destination.CDCStateFence{}, err
+		}
+		if len(row) != 2 {
+			return destination.CDCStateFence{}, fmt.Errorf("unexpected BigQuery CDC fence row width %d", len(row))
+		}
+		eventID, eventOK := row[0].(string)
+		generation, generationOK := row[1].(int64)
+		if !eventOK || !generationOK {
+			return destination.CDCStateFence{}, fmt.Errorf("unexpected BigQuery CDC fence row types")
+		}
+		fence.Generation = generation
+		fence.RunEventIDs = append(fence.RunEventIDs, eventID)
+	}
+	return fence, nil
+}
+
+func buildCDCStateFenceQuery(quotedTable string) string {
+	return fmt.Sprintf("SELECT DISTINCT `event_id`, `state_generation` FROM %s WHERE `connector_id` = @connector_id AND `state_kind` = 'run' AND `state_generation` = (SELECT MAX(`state_generation`) FROM %s WHERE `connector_id` = @connector_id AND `state_kind` = 'run') ORDER BY `event_id`", quotedTable, quotedTable)
+}
+
+func (d *BigQueryDestination) DeleteCDCStateEvents(ctx context.Context, table, connectorID string, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return err
+	}
+	if dataset == "" {
+		dataset = d.datasetID
+	}
+	if dataset == "" {
+		return errors.New("dataset must be specified in state table name or URI path")
+	}
+	d.cdcStatePruneMu.Lock()
+	defer d.cdcStatePruneMu.Unlock()
+	if time.Now().Before(d.nextCDCStatePrune) {
+		return fmt.Errorf("BigQuery CDC state pruning is deferred until %s", d.nextCDCStatePrune.UTC().Format(time.RFC3339))
+	}
+
+	ctx = annotation.WithStep(ctx, annotation.StepCDCResume)
+	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	parameters := []bigquery.QueryParameter{
+		{Name: "connector_id", Value: connectorID},
+		{Name: "event_ids", Value: eventIDs},
+	}
+	ageQuery := d.client.Query(fmt.Sprintf("SELECT COUNTIF(`recorded_at` > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 45 MINUTE)) FROM %s WHERE `connector_id` = @connector_id AND `event_id` IN UNNEST(@event_ids)", quotedTable))
+	ageQuery.Parameters = parameters
+	ageQuery.Location = d.location
+	it, err := ageQuery.Read(ctx)
+	if err != nil {
+		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
+		return err
+	}
+	var row []bigquery.Value
+	if err := it.Next(&row); err != nil {
+		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
+		return err
+	}
+	if len(row) != 1 {
+		return fmt.Errorf("unexpected BigQuery CDC state age row width %d", len(row))
+	}
+	young, ok := row[0].(int64)
+	if !ok {
+		return fmt.Errorf("unexpected BigQuery CDC state age type %T", row[0])
+	}
+	if young > 0 {
+		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
+		return fmt.Errorf("BigQuery CDC state pruning deferred for %d rows still in the streaming-buffer safety window", young)
+	}
+	deleteQuery := d.client.Query(annotation.Prepend(ctx, fmt.Sprintf("DELETE FROM %s WHERE `connector_id` = @connector_id AND `event_id` IN UNNEST(@event_ids)", quotedTable)))
+	deleteQuery.Parameters = parameters
+	deleteQuery.Location = d.location
+	job, err := deleteQuery.Run(ctx)
+	if err != nil {
+		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
+		return err
+	}
+	status, err := waitForBigQueryJob(ctx, job)
+	if err != nil {
+		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
+		return err
+	}
+	if err := status.Err(); err != nil {
+		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
+		return err
+	}
+	d.nextCDCStatePrune = time.Time{}
+	return nil
+}
+
+func (d *BigQueryDestination) CDCStatePruneBatchSize() int { return 10_000 }
 
 func containsHelper(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {

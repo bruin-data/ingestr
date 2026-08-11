@@ -11,14 +11,16 @@ shopify://<shopify store URL>?api_key=token
 ```
 
 URI parameters:
-- `shopify store URI`: the URL of the Shopify store you'd like to connect to, e.g. `myawesomestore.myshopify.com`
-- `api_key`: the API key used for authentication with the Shopify API
+- `shopify store URL`: the Shopify store domain, e.g. `myawesomestore.myshopify.com`
+- `api_key`: the **Admin API access token** from your Shopify app. The query parameter is named `api_key` for compatibility, but its value is not the app's API key.
+
+For this token-based connection, these are the only required values: the store domain and its Admin API access token. You do not need to provide the app's client ID or client secret.
 
 The URI is used to connect to the Shopify API for extracting data. More details on setting up Shopify integrations can be found [here](https://shopify.dev/docs/admin-api/getting-started).
 
 ## Setting up a Shopify Integration
 
-To use the Shopify API, you need to create a custom app in the Shopify Partner Dashboard and install it in your store.
+To use the Shopify API, create a custom app in the Shopify Dev Dashboard and install it in your store.
 
 ### Step 1: Create or Select an App
 
@@ -54,11 +56,11 @@ After changing scopes:
 
 > **Important**: The access token is displayed only once. Copy and store it securely.
 
-Once you have the API key (access token) and your store name (e.g. `my-store.myshopify.com`), you can connect. Example: if your API key is stored in `SHOPIFY_API_KEY` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
+Once you have the Admin API access token and your store name (e.g. `my-store.myshopify.com`), you can connect. Example: if the access token is stored in `SHOPIFY_ADMIN_API_ACCESS_TOKEN` and your store is `my-store`, the command below will copy Shopify data into DuckDB:
 
 ```sh
-SHOPIFY_API_KEY=your_api_key \
-ingestr ingest --source-uri "shopify://my-store.myshopify.com?api_key=${SHOPIFY_API_KEY}" --source-table "orders" --dest-uri "duckdb:///shopify.duckdb" --dest-table "dest.orders"
+export SHOPIFY_ADMIN_API_ACCESS_TOKEN=your_admin_api_access_token
+ingestr ingest --source-uri "shopify://my-store.myshopify.com?api_key=${SHOPIFY_ADMIN_API_ACCESS_TOKEN}" --source-table "orders" --dest-uri "duckdb:///shopify.duckdb" --dest-table "dest.orders"
 ```
 
 The result of this command will be a table in the `shopify.duckdb` database with JSON columns.

@@ -86,6 +86,7 @@ func SourceTableSchemaFromColumnOverrides(columnsSpec, tableName string) (*schem
 			DataType:  dataType,
 			Precision: precision,
 			Scale:     scale,
+			MaxLength: ov.MaxLength,
 			Nullable:  true,
 		})
 	}
@@ -251,6 +252,7 @@ func AppendMissingOverrideColumns(tableSchema *schema.TableSchema, columnsSpec, 
 			DataType:  dataType,
 			Precision: precision,
 			Scale:     scale,
+			MaxLength: ov.MaxLength,
 			Nullable:  true,
 		})
 	}

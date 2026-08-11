@@ -6,12 +6,53 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/testutil"
 	"github.com/testcontainers/testcontainers-go"
 )
+
+var containerBackends = []string{
+	"postgres", "clickhouse", "mysql", "mssql", "oracle",
+	"cratedb", "maxcompute", "minio", "dynamodb", "cassandra", "elasticsearch", "rabbitmq", "mqtt",
+}
+
+// containerWanted reports whether the shared container for the given backend
+// should be started.
+func containerWanted(name string) bool {
+	v := strings.TrimSpace(os.Getenv("INTEGRATION_BACKENDS"))
+	if v == "" {
+		return true
+	}
+	for _, b := range strings.Split(v, ",") {
+		if strings.EqualFold(strings.TrimSpace(b), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// requireDocker skips the test when no Docker provider is available. This lets
+// the container-backed integration tests be excluded simply by running without
+// Docker (e.g. on macOS CI), while file-based tests still run.
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if !testutil.DockerProviderHealthy(context.Background()) {
+		t.Skip("requires Docker; Docker provider not available")
+	}
+}
+
+// anyContainerWanted reports whether any container-backed backend is requested.
+func anyContainerWanted() bool {
+	for _, name := range containerBackends {
+		if containerWanted(name) {
+			return true
+		}
+	}
+	return false
+}
 
 // Shared Postgres containers for integration tests.
 // Starting containers once avoids slow per-test startup.
@@ -52,6 +93,12 @@ type maxcomputeEnv struct {
 	dbPath    string
 }
 
+type elasticsearchEnv struct {
+	container testcontainers.Container
+	uri       string
+	baseURL   string
+}
+
 var (
 	pgSource        postgresEnv
 	pgDest          postgresEnv
@@ -64,6 +111,7 @@ var (
 	minioShared     minioEnv
 	dynamoDBDest    dynamoDBEnv
 	cassandraShared cassandraEnv
+	elasticShared   elasticsearchEnv
 	rabbitmqShared  rabbitmqEnv
 	mqttShared      mqttEnv
 )
@@ -79,7 +127,7 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 
-	if !testutil.DockerProviderHealthy(ctx) {
+	if anyContainerWanted() && !testutil.DockerProviderHealthy(ctx) {
 		// Treat as a skip: these tests require Docker (testcontainers).
 		_, _ = os.Stderr.WriteString("skipping integration tests: Docker provider is not available/healthy\n")
 		os.Exit(0)
@@ -87,39 +135,57 @@ func TestMain(m *testing.M) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(11)
+	wg.Add(12)
 	go func() {
 		defer wg.Done()
+		if !containerWanted("postgres") {
+			return
+		}
 		if c, uri, err := startPostgresContainerForMain(ctx, "shared-source"); err == nil {
 			pgSource = postgresEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("postgres") {
+			return
+		}
 		if c, uri, err := startPostgresContainerForMain(ctx, "shared-dest"); err == nil {
 			pgDest = postgresEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("clickhouse") {
+			return
+		}
 		if c, uri, err := startClickHouseContainerForMain(ctx, "shared-clickhouse"); err == nil {
 			chDest = clickhouseEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("mysql") {
+			return
+		}
 		if c, uri, err := startMySQLContainerForMain(ctx, "shared-mysql"); err == nil {
 			mysqlDest = mysqlEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("mssql") {
+			return
+		}
 		if c, uri, err := startMSSQLContainerForMain(ctx, "shared-mssql"); err == nil {
 			mssqlDest = mssqlEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("oracle") {
+			return
+		}
 		if uri := os.Getenv("GONG_TEST_ORACLE_URI"); uri != "" {
 			oracleDest = oracleEnv{uri: uri}
 			return
@@ -130,45 +196,73 @@ func TestMain(m *testing.M) {
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("cratedb") {
+			return
+		}
 		if c, uri, err := startCrateDBContainerForMain(ctx, "shared-cratedb"); err == nil {
 			cratedbDest = cratedbEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("maxcompute") {
+			return
+		}
 		if c, uri, dbPath, err := startMaxComputeContainerForMain(ctx, "shared-maxcompute"); err == nil {
 			maxcomputeDest = maxcomputeEnv{container: c, uri: uri, dbPath: dbPath}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("minio") {
+			return
+		}
 		if c, endpoint, uri, err := startMinioContainerForMain(ctx); err == nil {
 			minioShared = minioEnv{container: c, endpoint: endpoint, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("dynamodb") {
+			return
+		}
 		if c, uri, err := startDynamoDBContainerForMain(ctx); err == nil {
 			dynamoDBDest = dynamoDBEnv{container: c, uri: uri}
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		if !containerWanted("cassandra") {
+			return
+		}
 		if c, uri, host, port, err := startCassandraContainerForMain(ctx); err == nil {
 			cassandraShared = cassandraEnv{container: c, uri: uri, host: host, port: port}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if !containerWanted("elasticsearch") {
+			return
+		}
+		if c, uri, baseURL, err := startElasticsearchContainerForMain(ctx); err == nil {
+			elasticShared = elasticsearchEnv{container: c, uri: uri, baseURL: baseURL}
 		}
 	}()
 	wg.Wait()
 
 	// Start RabbitMQ container
-	rmqC, rmqURI, rmqErr := startRabbitMQContainerForMain(ctx)
-	if rmqErr == nil {
-		rabbitmqShared = rabbitmqEnv{container: rmqC, uri: rmqURI}
+	if containerWanted("rabbitmq") {
+		rmqC, rmqURI, rmqErr := startRabbitMQContainerForMain(ctx)
+		if rmqErr == nil {
+			rabbitmqShared = rabbitmqEnv{container: rmqC, uri: rmqURI}
+		}
 	}
 
-	mqttC, mqttURI, mqttErr := startMQTTContainerForMain(ctx)
-	if mqttErr == nil {
-		mqttShared = mqttEnv{container: mqttC, uri: mqttURI}
+	if containerWanted("mqtt") {
+		mqttC, mqttURI, mqttErr := startMQTTContainerForMain(ctx)
+		if mqttErr == nil {
+			mqttShared = mqttEnv{container: mqttC, uri: mqttURI}
+		}
 	}
 
 	code := m.Run()
@@ -177,7 +271,7 @@ func TestMain(m *testing.M) {
 		pgSource.container, pgDest.container, chDest.container,
 		mysqlDest.container, mssqlDest.container, oracleDest.container, cratedbDest.container,
 		maxcomputeDest.container, minioShared.container, dynamoDBDest.container,
-		cassandraShared.container,
+		cassandraShared.container, elasticShared.container,
 	}
 	var twg sync.WaitGroup
 	for _, c := range containers {
