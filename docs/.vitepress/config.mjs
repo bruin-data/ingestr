@@ -213,6 +213,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
+              { text: "Okta", link: "/supported-sources/okta.md" },
               { text: "Paddle", link: "/supported-sources/paddle.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
