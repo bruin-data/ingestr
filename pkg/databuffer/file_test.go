@@ -704,6 +704,136 @@ func TestCastRecordToSchema(t *testing.T) {
 	})
 }
 
+func TestCastRecordToSchema_DecimalRescale(t *testing.T) {
+	mem := memory.DefaultAllocator
+	srcType := &arrow.Decimal128Type{Precision: 8, Scale: 5}
+	tgtType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
+
+	b := array.NewDecimal128Builder(mem, srcType)
+	for _, s := range []string{"3.14159", "100.50000"} {
+		v, err := decimal128.FromString(s, srcType.Precision, srcType.Scale)
+		require.NoError(t, err)
+		b.Append(v)
+	}
+	arr := b.NewArray()
+	b.Release()
+
+	record := array.NewRecordBatch(
+		arrow.NewSchema([]arrow.Field{{Name: "amount", Type: srcType, Nullable: true}}, nil),
+		[]arrow.Array{arr}, 2,
+	)
+	arr.Release()
+	defer record.Release()
+
+	tgtSchema := arrow.NewSchema([]arrow.Field{{Name: "amount", Type: tgtType, Nullable: true}}, nil)
+
+	// safe=true is the path that previously failed with "invalid: %!s(<nil>)" when
+	// the rescale dropped scale digits (e.g. a --columns decimal precision/scale override).
+	casted, err := CastRecordToSchema(record, tgtSchema, true)
+	require.NoError(t, err)
+	defer casted.Release()
+
+	require.True(t, arrow.TypeEqual(tgtType, casted.Schema().Field(0).Type))
+	col := casted.Column(0).(*array.Decimal128)
+	assert.Equal(t, "3.14", col.Value(0).ToString(tgtType.Scale))
+	assert.Equal(t, "100.50", col.Value(1).ToString(tgtType.Scale))
+}
+
+func TestCastRecordToSchema_IntAndFloatToDecimal(t *testing.T) {
+	mem := memory.DefaultAllocator
+	tgt := &arrow.Decimal128Type{Precision: 10, Scale: 2}
+
+	makeInt := func() arrow.Array {
+		b := array.NewInt64Builder(mem)
+		b.AppendValues([]int64{5, 12345}, nil)
+		defer b.Release()
+		return b.NewArray()
+	}
+	makeFloat := func() arrow.Array {
+		b := array.NewFloat64Builder(mem)
+		b.AppendValues([]float64{3.14159, 100.5}, nil)
+		defer b.Release()
+		return b.NewArray()
+	}
+
+	cases := []struct {
+		name  string
+		arr   arrow.Array
+		want0 string
+		want1 string
+	}{
+		// int64 needs precision 21 to hold its full range, so Arrow refuses the
+		// direct int→decimal(10,2) cast; we widen through decimal(38,0) instead.
+		{"int64", makeInt(), "5.00", "12345.00"},
+		{"float64", makeFloat(), "3.14", "100.50"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			record := array.NewRecordBatch(
+				arrow.NewSchema([]arrow.Field{{Name: "v", Type: tt.arr.DataType(), Nullable: true}}, nil),
+				[]arrow.Array{tt.arr}, int64(tt.arr.Len()),
+			)
+			defer record.Release()
+			defer tt.arr.Release()
+
+			tgtSchema := arrow.NewSchema([]arrow.Field{{Name: "v", Type: tgt, Nullable: true}}, nil)
+			casted, err := CastRecordToSchema(record, tgtSchema, true)
+			require.NoError(t, err)
+			defer casted.Release()
+
+			col := casted.Column(0).(*array.Decimal128)
+			assert.Equal(t, tt.want0, col.Value(0).ToString(tgt.Scale))
+			assert.Equal(t, tt.want1, col.Value(1).ToString(tgt.Scale))
+		})
+	}
+}
+
+func TestCastRecordToSchema_DecimalOverflowErrors(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	t.Run("decimal value too large for target precision", func(t *testing.T) {
+		srcType := &arrow.Decimal128Type{Precision: 10, Scale: 5}
+		b := array.NewDecimal128Builder(mem, srcType)
+		v, err := decimal128.FromString("12345.67891", srcType.Precision, srcType.Scale)
+		require.NoError(t, err)
+		b.Append(v)
+		arr := b.NewArray()
+		b.Release()
+
+		record := array.NewRecordBatch(
+			arrow.NewSchema([]arrow.Field{{Name: "v", Type: srcType, Nullable: true}}, nil),
+			[]arrow.Array{arr}, 1,
+		)
+		arr.Release()
+		defer record.Release()
+
+		tgt := arrow.NewSchema([]arrow.Field{{Name: "v", Type: &arrow.Decimal128Type{Precision: 6, Scale: 2}, Nullable: true}}, nil)
+		_, err = CastRecordToSchema(record, tgt, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows")
+	})
+
+	t.Run("integer value too large for target precision", func(t *testing.T) {
+		b := array.NewInt64Builder(mem)
+		b.AppendValues([]int64{99999999999}, nil)
+		arr := b.NewArray()
+		b.Release()
+
+		record := array.NewRecordBatch(
+			arrow.NewSchema([]arrow.Field{{Name: "v", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil),
+			[]arrow.Array{arr}, 1,
+		)
+		arr.Release()
+		defer record.Release()
+
+		tgt := arrow.NewSchema([]arrow.Field{{Name: "v", Type: &arrow.Decimal128Type{Precision: 10, Scale: 2}, Nullable: true}}, nil)
+		_, err := CastRecordToSchema(record, tgt, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows")
+	})
+}
+
 func TestCastRecordToSchema_UnknownToJSONEncodesScalarStrings(t *testing.T) {
 	mem := memory.DefaultAllocator
 

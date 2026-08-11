@@ -297,10 +297,28 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 		}
 	}
 
+	// Arrow's safe decimal→decimal cast errors when the target scale drops digits;
+	// rescale unsafely so it truncates. castToDecimalTruncating still rejects overflow.
+	if isDecimalType(arr.DataType()) && isDecimalType(target) {
+		return castToDecimalTruncating(ctx, arr, target)
+	}
+
+	// Arrow refuses int→decimal unless the precision fits the int type's full range,
+	// even when values fit; widen through decimal(38,0) (lossless) then rescale.
+	if isIntegerType(arr.DataType()) && isDecimalType(target) {
+		wide, werr := compute.CastArray(ctx, arr, compute.UnsafeCastOptions(&arrow.Decimal128Type{Precision: 38, Scale: 0}))
+		if werr != nil {
+			return nil, werr
+		}
+		result, rerr := castToDecimalTruncating(ctx, wide, target)
+		wide.Release()
+		return result, rerr
+	}
+
 	var casted arrow.Array
 	if safe {
 		casted, err = compute.CastArray(ctx, arr, compute.SafeCastOptions(target))
-	} else if (arr.DataType().ID() == arrow.DECIMAL128 || arr.DataType().ID() == arrow.DECIMAL256) && isIntegerType(target) {
+	} else if isDecimalType(arr.DataType()) && isIntegerType(target) {
 		// Cast decimal via float64 to truncate toward zero (matching Python's int()).
 		// Arrow's direct decimal → int path rounds instead of truncating.
 		floatArr, floatErr := compute.CastArray(ctx, arr, compute.UnsafeCastOptions(arrow.PrimitiveTypes.Float64))
@@ -736,6 +754,53 @@ func isIntegerType(dt arrow.DataType) bool {
 		return true
 	}
 	return false
+}
+
+func isDecimalType(dt arrow.DataType) bool {
+	return dt.ID() == arrow.DECIMAL128 || dt.ID() == arrow.DECIMAL256
+}
+
+// castToDecimalTruncating rescales to a decimal target unsafely (a smaller scale
+// truncates toward zero), but errors when a value's magnitude overflows the precision.
+func castToDecimalTruncating(ctx context.Context, arr arrow.Array, target arrow.DataType) (arrow.Array, error) {
+	out, err := compute.CastArray(ctx, arr, compute.UnsafeCastOptions(target))
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureDecimalFits(out, target); err != nil {
+		out.Release()
+		return nil, err
+	}
+	return out, nil
+}
+
+// ensureDecimalFits reports an error if any non-null value does not fit the target
+// decimal's precision (an overflow the unsafe cast would otherwise pass through).
+func ensureDecimalFits(arr arrow.Array, target arrow.DataType) error {
+	var precision, scale int32
+	switch t := target.(type) {
+	case *arrow.Decimal128Type:
+		precision, scale = t.Precision, t.Scale
+	case *arrow.Decimal256Type:
+		precision, scale = t.Precision, t.Scale
+	default:
+		return nil
+	}
+	switch a := arr.(type) {
+	case *array.Decimal128:
+		for i := 0; i < a.Len(); i++ {
+			if !a.IsNull(i) && !a.Value(i).FitsInPrecision(precision) {
+				return fmt.Errorf("value %s overflows %s", a.Value(i).ToString(scale), target)
+			}
+		}
+	case *array.Decimal256:
+		for i := 0; i < a.Len(); i++ {
+			if !a.IsNull(i) && !a.Value(i).FitsInPrecision(precision) {
+				return fmt.Errorf("value %s overflows %s", a.Value(i).ToString(scale), target)
+			}
+		}
+	}
+	return nil
 }
 
 func isJSONType(dt arrow.DataType) bool {
