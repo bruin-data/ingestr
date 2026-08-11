@@ -77,3 +77,12 @@ ingestr ingest \
 ```
 
 For more details on how to set up key-based authentication, see [this guide](https://select.dev/docs/snowflake-developer-guide/snowflake-key-pair).
+
+## Destination-managed Postgres CDC state
+
+When Snowflake is used as a Postgres CDC destination (`postgres+cdc://` → `snowflake://`), ingestr stores resume progress in shared destination tables rather than relying on `MAX(_cdc_lsn)` in user tables:
+
+- `_BRUIN_STAGING.CDC_STATE` — append-only connector state events (run/snapshot/checkpoint)
+- `_BRUIN_STAGING.CDC_TARGETS` — ownership claims for destination tables
+
+These tables live in the connected Snowflake database (the catalog from the URI). Snowflake also supports CDC merge with unchanged-TOAST / `_cdc_unchanged_cols` preservation for Postgres `JSONB` and other TOASTed columns under `REPLICA IDENTITY DEFAULT`.
