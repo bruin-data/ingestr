@@ -225,7 +225,7 @@ func (d *SnowflakeDestination) CDCTargetIncarnation(ctx context.Context, table s
 		return "", false, fmt.Errorf("failed to read Snowflake CDC target incarnation for %s: %w", table, err)
 	}
 	if created.IsZero() {
-		return "", false, fmt.Errorf("Snowflake table %s returned an empty creation time", table)
+		return "", false, fmt.Errorf("snowflake table %s returned an empty creation time", table)
 	}
 	return destination.CDCTargetKey(catalog, tn.Schema, tn.Table, strconv.FormatInt(created.UnixNano(), 10)), true, nil
 }
