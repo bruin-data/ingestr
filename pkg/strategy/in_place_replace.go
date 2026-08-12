@@ -111,6 +111,7 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
 		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
 		PageSize:                        job.Config.PageSize,
+		MaxBatchBytes:                   job.Config.MaxBatchBytes,
 		Limit:                           job.Config.SQLLimit,
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,

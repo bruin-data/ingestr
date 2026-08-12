@@ -289,7 +289,14 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
-	cfg.MaxBatchBytes = int64(c.Int("batch-size")) << 20
+	switch mb := int64(c.Int("batch-size")); {
+	case mb <= 0:
+		cfg.MaxBatchBytes = 0 // unlimited
+	case mb > math.MaxInt64>>20:
+		cfg.MaxBatchBytes = math.MaxInt64 // avoid overflow on absurd inputs
+	default:
+		cfg.MaxBatchBytes = mb << 20
+	}
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))

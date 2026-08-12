@@ -117,7 +117,6 @@ func TestFluxxReadResource_RowCapStillApplies(t *testing.T) {
 
 func TestFluxxReadResource_RowBiggerThanLimitFlushesPerRow(t *testing.T) {
 	const total = 5
-	// Each row's payload alone exceeds the byte limit, so every row flushes on its own.
 	srv := fluxxTestServer(t, total, 4096)
 	defer srv.Close()
 
@@ -144,10 +143,7 @@ func maxInt(xs []int) int {
 	return m
 }
 
-// The working set stays bounded no matter how large the total volume is: the
-// source flushes and releases each batch as it pages, rather than accumulating
-// everything and splitting at the end. A large total therefore yields many
-// small batches, never one huge one.
+// Batch size stays bounded by the byte cap regardless of total volume.
 func TestFluxxReadResource_LargeVolumeStaysBounded(t *testing.T) {
 	const total, payload = 10000, 200 // ~225 raw JSON bytes/row
 	srv := fluxxTestServer(t, total, payload)
@@ -162,9 +158,7 @@ func TestFluxxReadResource_LargeVolumeStaysBounded(t *testing.T) {
 	require.LessOrEqual(t, maxInt(batchRows), 50, "no batch grows with total volume; each stays bounded by the byte cap")
 }
 
-// A single fetched page (100 rows in one HTTP request) is cut into several
-// batches when it exceeds the byte cap. The cut is at row boundaries as the
-// accumulator fills — the page is not "split in the middle" after the fact.
+// A single page is cut into several byte-bounded batches at row boundaries.
 func TestFluxxReadResource_SinglePageSubdividedByBytes(t *testing.T) {
 	const total, payload = 100, 200 // one page (apiPageSize=100), ~225 raw JSON bytes/row
 	srv := fluxxTestServer(t, total, payload)
@@ -179,9 +173,7 @@ func TestFluxxReadResource_SinglePageSubdividedByBytes(t *testing.T) {
 	require.LessOrEqual(t, maxInt(batchRows), 12, "each batch cut at a row boundary near the cap")
 }
 
-// The accumulator carries across page boundaries: a page never forces a new
-// batch. Proven by producing a batch LARGER than a single 100-row page, which
-// is only possible if rows from consecutive pages accumulated into one batch.
+// A batch can exceed one page: the accumulator is not reset at page boundaries.
 func TestFluxxReadResource_BatchSpansPageBoundary(t *testing.T) {
 	const total, payload = 400, 200 // pages are 100 rows (apiPageSize=100)
 	srv := fluxxTestServer(t, total, payload)
@@ -195,9 +187,7 @@ func TestFluxxReadResource_BatchSpansPageBoundary(t *testing.T) {
 	require.Greater(t, maxInt(batchRows), 100, "a batch exceeds one 100-row page => it accumulated across pages")
 }
 
-// Each row is sized by its own raw JSON length, so inter-row size differences
-// are captured (not averaged): one oversized row flushes alone, while the small
-// rows that follow group into a single batch.
+// Rows are sized individually, so a fat row flushes alone and tiny rows group.
 func TestFluxxReadResource_PerRowSizeDrivesFlush(t *testing.T) {
 	sizes := []int{5000, 5, 5, 5, 5} // row 0 huge, rest tiny
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -225,9 +215,7 @@ func TestFluxxReadResource_PerRowSizeDrivesFlush(t *testing.T) {
 	require.Equal(t, []int{1, 4}, batchRows, "oversized row flushes alone; tiny rows group — sized per-row, not averaged")
 }
 
-// The source fetches page by page on demand (100 rows/request); it never
-// downloads the whole dataset up front. Proven by the request count matching
-// the page count.
+// Data is paged on demand, not fetched all at once.
 func TestFluxxReadResource_PagesOnDemand(t *testing.T) {
 	const total = 550
 	var requests int32
