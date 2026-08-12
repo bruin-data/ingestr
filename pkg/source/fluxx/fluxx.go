@@ -410,6 +410,7 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 	totalLimit := opts.Limit
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
 	page := 1
 
 	for {
@@ -468,10 +469,18 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 			}
 
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				allItems = append(allItems, normalizeFluxxItem(itemMap, fieldsToExtract))
+				normalized := normalizeFluxxItem(itemMap, fieldsToExtract)
+				allItems = append(allItems, normalized)
+				// Track the row's serialized size so a batch also flushes on bytes,
+				// not just row count, keeping wide-row batches from ballooning.
+				if opts.MaxBatchBytes > 0 {
+					if raw, mErr := json.Marshal(normalized); mErr == nil {
+						accBytes += int64(len(raw))
+					}
+				}
 			}
 
-			if len(allItems) >= batchSize {
+			if len(allItems) >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) {
 				record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, columns, opts.ExcludeColumns)
 				if err != nil {
 					return fmt.Errorf("failed to convert to Arrow: %w", err)
@@ -479,6 +488,7 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 				results <- source.RecordBatchResult{Batch: record}
 				totalSent += len(allItems)
 				allItems = nil
+				accBytes = 0
 			}
 		}
 

@@ -125,6 +125,12 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("PAGE_SIZE", "INGESTR_PAGE_SIZE"),
 			},
 			&cli.IntFlag{
+				Name:    "batch-size",
+				Usage:   "Max size of a source record batch in MiB; sources flush on this or page-size, whichever comes first (0 = unlimited)",
+				Value:   256,
+				Sources: cli.EnvVars("BATCH_SIZE", "INGESTR_BATCH_SIZE"),
+			},
+			&cli.IntFlag{
 				Name:    "loader-file-size",
 				Usage:   "The file size to be used by the loader to split the data into multiple files",
 				Value:   25000,
@@ -283,6 +289,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
+	cfg.MaxBatchBytes = int64(c.Int("batch-size")) << 20
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))

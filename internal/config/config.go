@@ -63,6 +63,7 @@ type IngestConfig struct {
 	Debug          bool
 
 	PageSize                        int
+	MaxBatchBytes                   int64
 	LoaderFileSize                  int
 	LoaderFileFormat                string
 	ExtractParallelism              int
@@ -137,6 +138,7 @@ func DefaultConfig() *IngestConfig {
 		SchemaNaming:        "",
 		Progress:            ProgressInteractive,
 		PageSize:            25000,
+		MaxBatchBytes:       256 << 20, // 256 MiB
 		LoaderFileSize:      25000,
 		ExtractParallelism:  5,
 		FlushInterval:       30 * time.Second,
