@@ -215,6 +215,62 @@ func TestFluxxReadResource_PerRowSizeDrivesFlush(t *testing.T) {
 	require.Equal(t, []int{1, 4}, batchRows, "oversized row flushes alone; tiny rows group — sized per-row, not averaged")
 }
 
+// The bytes the flush counts match the rows that land in each emitted batch,
+// and each batch is cut exactly at the cap crossing (full batches reach the
+// cap; none overshoot by more than one row).
+func TestFluxxReadResource_ByteAccountingMatchesEmittedBatches(t *testing.T) {
+	const total, payload = 500, 500
+	capBytes := int64(20000)
+	srv := fluxxTestServer(t, total, payload)
+	defer srv.Close()
+
+	s := &FluxxSource{client: httpclient.New(httpclient.WithBaseURL(srv.URL)), accessToken: "test"}
+	cols := []schema.Column{
+		{Name: "id", DataType: schema.TypeString},
+		{Name: "payload", DataType: schema.TypeString},
+	}
+	results := make(chan source.RecordBatchResult, 64)
+	go func() {
+		defer close(results)
+		require.NoError(t, s.readResource(context.Background(), "grants", "grants", "test", cols, nil, results,
+			source.ReadOptions{PageSize: 1_000_000, MaxBatchBytes: capBytes}))
+	}()
+
+	var order []string
+	var perBatchBytes []int64
+	var maxRow int64
+	for r := range results {
+		require.NoError(t, r.Err)
+		if r.Batch == nil {
+			continue
+		}
+		idCol := r.Batch.Column(0).(*array.String)
+		plCol := r.Batch.Column(1).(*array.String)
+		var batchBytes int64
+		for i := 0; i < idCol.Len(); i++ {
+			order = append(order, idCol.Value(i))
+			// Reconstruct the exact bytes the flush counted for this row.
+			raw, err := json.Marshal(map[string]interface{}{"id": idCol.Value(i), "payload": plCol.Value(i)})
+			require.NoError(t, err)
+			batchBytes += int64(len(raw))
+			if int64(len(raw)) > maxRow {
+				maxRow = int64(len(raw))
+			}
+		}
+		perBatchBytes = append(perBatchBytes, batchBytes)
+		r.Batch.Release()
+	}
+
+	require.Equal(t, wantOrder(total), order, "no row lost, duplicated, or reordered")
+	require.Greater(t, len(perBatchBytes), 1, "should split into multiple batches")
+	for i, b := range perBatchBytes {
+		require.Less(t, b, capBytes+maxRow, "batch %d overshoots the cap by more than one row", i)
+		if i < len(perBatchBytes)-1 {
+			require.GreaterOrEqual(t, b, capBytes, "non-final batch %d flushed before reaching the cap", i)
+		}
+	}
+}
+
 // Data is paged on demand, not fetched all at once.
 func TestFluxxReadResource_PagesOnDemand(t *testing.T) {
 	const total = 550
