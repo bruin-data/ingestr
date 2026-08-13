@@ -17,6 +17,7 @@ import (
 	internalregistry "github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
+	snowflakedest "github.com/bruin-data/ingestr/pkg/destination/snowflake"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -1386,6 +1387,9 @@ func TestValidateDestinationManagedCDCState(t *testing.T) {
 	}
 	if err := validateDestinationManagedCDCState(&mockManagedCDCStateDestination{}); err != nil {
 		t.Fatalf("destination without validator was rejected: %v", err)
+	}
+	if err := validateDestinationManagedCDCState(snowflakedest.NewSnowflakeDestination()); err != nil {
+		t.Fatalf("Snowflake destination must pass managed CDC validation: %v", err)
 	}
 	if err := validateDestinationManagedCDCState(&mockUnsafeToastCDCStateDestination{}); err == nil || !strings.Contains(err.Error(), "unchanged TOAST") {
 		t.Fatalf("destination without unchanged-TOAST merge support validation error = %v", err)
