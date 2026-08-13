@@ -971,16 +971,16 @@ func RowBytes(item map[string]interface{}) int64 {
 	}
 	for k, v := range item {
 		n += int64(len(k)) + 3 // "key":
-		n += jsonLen(v)
+		n += valueLen(v)
 	}
 	return n
 }
 
-// jsonLen returns the length json.Marshal would produce for v, computed by
+// valueLen returns the length json.Marshal would produce for v, computed by
 // walking the value and counting bytes (including structural punctuation) with
 // no allocation. String escaping is not accounted for, so values with many
 // escaped characters are slightly under-counted.
-func jsonLen(v interface{}) int64 {
+func valueLen(v interface{}) int64 {
 	switch x := v.(type) {
 	case nil:
 		return 4 // null
@@ -1011,7 +1011,7 @@ func jsonLen(v interface{}) int64 {
 			n += int64(len(x) - 1)
 		}
 		for _, e := range x {
-			n += jsonLen(e)
+			n += valueLen(e)
 		}
 		return n
 	case map[string]interface{}:
@@ -1021,7 +1021,7 @@ func jsonLen(v interface{}) int64 {
 		}
 		for k, val := range x {
 			n += int64(len(k)) + 3 // "key":
-			n += jsonLen(val)
+			n += valueLen(val)
 		}
 		return n
 	default:
