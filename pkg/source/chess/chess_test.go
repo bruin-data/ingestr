@@ -1,6 +1,7 @@
 package chess
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,12 +9,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// captureOutput redirects the output package to a buffer for the duration of fn
+// and returns whatever was written, restoring the previous writers afterwards.
+func captureOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	prevOut, prevErr, prevMode := output.Current()
+	t.Cleanup(func() { output.Init(prevOut, prevErr, prevMode) })
+	var buf bytes.Buffer
+	output.Init(&buf, &buf, output.ModeText)
+	fn()
+	return buf.String()
+}
 
 func TestParsePlayersFromURI(t *testing.T) {
 	tests := []struct {
@@ -153,6 +167,128 @@ func TestChessSource_ReadUnsupportedTable(t *testing.T) {
 	_, err = s.GetTable(context.Background(), source.TableRequest{Name: "invalid"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported table")
+}
+
+func TestChessSource_DeprecationWarning(t *testing.T) {
+	t.Run("warns when players supplied in URI", func(t *testing.T) {
+		out := captureOutput(t, func() {
+			s := NewChessSource()
+			require.NoError(t, s.Connect(context.Background(), "chess://?players=hikaru"))
+		})
+		assert.Contains(t, out, "deprecated")
+		assert.Contains(t, out, "source-table")
+	})
+
+	t.Run("no warning without players in URI", func(t *testing.T) {
+		out := captureOutput(t, func() {
+			s := NewChessSource()
+			require.NoError(t, s.Connect(context.Background(), "chess://"))
+		})
+		assert.Empty(t, out)
+	})
+}
+
+func TestNormalizePlayers(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"single", "hikaru", []string{"hikaru"}},
+		{"multiple", "hikaru,magnuscarlsen", []string{"hikaru", "magnuscarlsen"}},
+		{"trims whitespace", "hikaru, magnuscarlsen , gothamchess", []string{"hikaru", "magnuscarlsen", "gothamchess"}},
+		{"drops empty entries", "hikaru,,magnuscarlsen,", []string{"hikaru", "magnuscarlsen"}},
+		{"all empty", " , ", nil},
+		{"empty string", "", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizePlayers(tt.raw))
+		})
+	}
+}
+
+func TestChessSource_GetTable_StripsInlinePlayers(t *testing.T) {
+	s := NewChessSource()
+	err := s.Connect(context.Background(), "chess://?players=testuser")
+	require.NoError(t, err)
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "profiles:hikaru,magnuscarlsen"})
+	require.NoError(t, err)
+	// The inline players must not leak into the table name.
+	assert.Equal(t, "profiles", table.Name())
+}
+
+func TestChessSource_GetTable_UnsupportedTableWithInlinePlayers(t *testing.T) {
+	s := NewChessSource()
+	err := s.Connect(context.Background(), "chess://?players=testuser")
+	require.NoError(t, err)
+
+	_, err = s.GetTable(context.Background(), source.TableRequest{Name: "invalid:hikaru"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported table")
+}
+
+func TestChessSource_InlinePlayersOverrideURI(t *testing.T) {
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"username": r.URL.Path})
+	}))
+	defer server.Close()
+
+	s := NewChessSource()
+	err := s.Connect(context.Background(), "chess://?players=uriplayer")
+	require.NoError(t, err)
+	_ = s.client.Close()
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(server.URL),
+		httpclient.WithDisableRetry(),
+	)
+	defer func() { _ = s.client.Close() }()
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "profiles:hikaru,magnuscarlsen"})
+	require.NoError(t, err)
+
+	results, err := table.Read(context.Background(), source.ReadOptions{})
+	require.NoError(t, err)
+	for range results {
+	}
+
+	assert.ElementsMatch(t, []string{"/player/hikaru", "/player/magnuscarlsen"}, requested)
+	assert.NotContains(t, requested, "/player/uriplayer")
+}
+
+func TestChessSource_FallsBackToURIPlayers(t *testing.T) {
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"username": r.URL.Path})
+	}))
+	defer server.Close()
+
+	s := NewChessSource()
+	err := s.Connect(context.Background(), "chess://?players=uriplayer")
+	require.NoError(t, err)
+	_ = s.client.Close()
+	s.client = httpclient.New(
+		httpclient.WithBaseURL(server.URL),
+		httpclient.WithDisableRetry(),
+	)
+	defer func() { _ = s.client.Close() }()
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "profiles"})
+	require.NoError(t, err)
+
+	results, err := table.Read(context.Background(), source.ReadOptions{})
+	require.NoError(t, err)
+	for range results {
+	}
+
+	assert.Equal(t, []string{"/player/uriplayer"}, requested)
 }
 
 func TestItemsToArrowRecordWithSchema(t *testing.T) {

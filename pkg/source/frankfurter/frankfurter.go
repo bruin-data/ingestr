@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -73,6 +74,7 @@ func parseFrankfurterURI(uri string) (string, error) {
 		}
 		if b := values.Get("base"); b != "" {
 			base = strings.ToUpper(b)
+			output.Warnf("Warning: specifying base in the frankfurter:// connection URI is deprecated and will be removed in a future release; provide it in the table name instead, e.g. --source-table 'latest:USD'\n")
 		}
 	}
 
@@ -105,9 +107,20 @@ func (s *FrankfurterSource) Close(ctx context.Context) error {
 
 func (s *FrankfurterSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	tableName := req.Name
+	base := s.base
+
+	// The base currency may be supplied inline in the table name (e.g. "latest:USD"),
+	// which takes precedence over the base configured on the connection URI.
+	if strings.Contains(tableName, ":") {
+		parts := strings.SplitN(tableName, ":", 2)
+		tableName = parts[0]
+		if b := strings.ToUpper(strings.TrimSpace(parts[1])); b != "" {
+			base = b
+		}
+	}
 
 	if !isValidTable(tableName) {
-		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
+		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", tableName, strings.Join(supportedTables, ", "))
 	}
 
 	tableSchema, primaryKeys := s.getSchema(tableName)
@@ -133,7 +146,7 @@ func (s *FrankfurterSource) GetTable(ctx context.Context, req source.TableReques
 			return tableSchema, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, opts)
+			return s.read(ctx, tableName, base, opts)
 		},
 	}, nil
 }
@@ -169,7 +182,7 @@ func isValidTable(table string) bool {
 	return false
 }
 
-func (s *FrankfurterSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *FrankfurterSource) read(ctx context.Context, table, base string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -180,9 +193,9 @@ func (s *FrankfurterSource) read(ctx context.Context, table string, opts source.
 		case "currencies":
 			err = s.readCurrencies(ctx, opts, results)
 		case "latest":
-			err = s.readLatest(ctx, opts, results)
+			err = s.readLatest(ctx, base, opts, results)
 		case "exchange_rates":
-			err = s.readExchangeRates(ctx, opts, results)
+			err = s.readExchangeRates(ctx, base, opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -235,10 +248,10 @@ func (s *FrankfurterSource) readCurrencies(ctx context.Context, opts source.Read
 	return nil
 }
 
-func (s *FrankfurterSource) readLatest(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *FrankfurterSource) readLatest(ctx context.Context, base string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[FRANKFURTER] Fetching latest rates")
 
-	resp, err := s.client.R(ctx).Get(fmt.Sprintf("latest?base=%s", s.base))
+	resp, err := s.client.R(ctx).Get(fmt.Sprintf("latest?base=%s", base))
 	if err != nil {
 		return fmt.Errorf("failed to fetch latest rates: %w", err)
 	}
@@ -269,7 +282,7 @@ func (s *FrankfurterSource) readLatest(ctx context.Context, opts source.ReadOpti
 	return nil
 }
 
-func (s *FrankfurterSource) readExchangeRates(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *FrankfurterSource) readExchangeRates(ctx context.Context, base string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[FRANKFURTER] Fetching exchange rates")
 
 	now := time.Now().UTC()
@@ -282,7 +295,7 @@ func (s *FrankfurterSource) readExchangeRates(ctx context.Context, opts source.R
 		endDate = now.Format("2006-01-02")
 	}
 
-	endpoint := fmt.Sprintf("%s..%s?base=%s", startDate, endDate, s.base)
+	endpoint := fmt.Sprintf("%s..%s?base=%s", startDate, endDate, base)
 	config.Debug("[FRANKFURTER] Fetching exchange rates from %s to %s", startDate, endDate)
 
 	resp, err := s.client.R(ctx).Get(endpoint)

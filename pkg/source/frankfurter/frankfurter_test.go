@@ -1,12 +1,31 @@
 package frankfurter
 
 import (
+	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/output"
+	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// captureOutput redirects the output package to a buffer for the duration of fn
+// and returns whatever was written, restoring the previous writers afterwards.
+func captureOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	prevOut, prevErr, prevMode := output.Current()
+	t.Cleanup(func() { output.Init(prevOut, prevErr, prevMode) })
+	var buf bytes.Buffer
+	output.Init(&buf, &buf, output.ModeText)
+	fn()
+	return buf.String()
+}
 
 func TestParseFrankfurterURI(t *testing.T) {
 	tests := []struct {
@@ -35,6 +54,102 @@ func TestParseFrankfurterURI(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFrankfurterSource_DeprecationWarning(t *testing.T) {
+	t.Run("warns when base supplied in URI", func(t *testing.T) {
+		out := captureOutput(t, func() {
+			s := NewFrankfurterSource()
+			require.NoError(t, s.Connect(context.Background(), "frankfurter://?base=USD"))
+		})
+		assert.Contains(t, out, "deprecated")
+		assert.Contains(t, out, "source-table")
+	})
+
+	t.Run("no warning without base in URI", func(t *testing.T) {
+		out := captureOutput(t, func() {
+			s := NewFrankfurterSource()
+			require.NoError(t, s.Connect(context.Background(), "frankfurter://"))
+		})
+		assert.Empty(t, out)
+	})
+}
+
+func TestFrankfurterSource_GetTable_StripsInlineBase(t *testing.T) {
+	s := NewFrankfurterSource()
+	require.NoError(t, s.Connect(context.Background(), "frankfurter://"))
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "latest:USD"})
+	require.NoError(t, err)
+	// The inline base must not leak into the table name.
+	assert.Equal(t, "latest", table.Name())
+}
+
+func TestFrankfurterSource_GetTable_UnsupportedTableWithInlineBase(t *testing.T) {
+	s := NewFrankfurterSource()
+	require.NoError(t, s.Connect(context.Background(), "frankfurter://"))
+
+	_, err := s.GetTable(context.Background(), source.TableRequest{Name: "invalid:USD"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported table")
+}
+
+func TestFrankfurterSource_InlineBaseOverridesURI(t *testing.T) {
+	var gotBase string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBase = r.URL.Query().Get("base")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"base":"` + gotBase + `","date":"2024-01-01","rates":{"EUR":0.9}}`))
+	}))
+	defer server.Close()
+
+	s := NewFrankfurterSource()
+	require.NoError(t, s.Connect(context.Background(), "frankfurter://?base=EUR"))
+	_ = s.client.Close()
+	s.client = ingestrhttp.New(
+		ingestrhttp.WithBaseURL(server.URL+"/"),
+		ingestrhttp.WithDisableRetry(),
+	)
+	defer func() { _ = s.client.Close() }()
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "latest:USD"})
+	require.NoError(t, err)
+
+	results, err := table.Read(context.Background(), source.ReadOptions{})
+	require.NoError(t, err)
+	for range results {
+	}
+
+	assert.Equal(t, "USD", gotBase)
+}
+
+func TestFrankfurterSource_FallsBackToURIBase(t *testing.T) {
+	var gotBase string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBase = r.URL.Query().Get("base")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"base":"` + gotBase + `","date":"2024-01-01","rates":{"USD":1.1}}`))
+	}))
+	defer server.Close()
+
+	s := NewFrankfurterSource()
+	require.NoError(t, s.Connect(context.Background(), "frankfurter://?base=GBP"))
+	_ = s.client.Close()
+	s.client = ingestrhttp.New(
+		ingestrhttp.WithBaseURL(server.URL+"/"),
+		ingestrhttp.WithDisableRetry(),
+	)
+	defer func() { _ = s.client.Close() }()
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "latest"})
+	require.NoError(t, err)
+
+	results, err := table.Read(context.Background(), source.ReadOptions{})
+	require.NoError(t, err)
+	for range results {
+	}
+
+	assert.Equal(t, "GBP", gotBase)
 }
 
 func TestFlattenRates_IncludesBaseCurrency(t *testing.T) {
