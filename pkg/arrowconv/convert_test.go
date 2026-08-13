@@ -483,15 +483,26 @@ func TestParseDecimal128BytesFast(t *testing.T) {
 }
 
 func TestRowBytes(t *testing.T) {
-	item := map[string]interface{}{"id": "42", "payload": "hello", "n": 7}
-	raw, _ := json.Marshal(item)
-	if got := RowBytes(item); got != int64(len(raw)) {
-		t.Fatalf("RowBytes = %d, want %d (serialized JSON length)", got, len(raw))
+	// RowBytes reconstructs json.Marshal's length (incl. structural punctuation)
+	// without allocating, so it matches exactly for typical rows.
+	cases := []map[string]interface{}{
+		{},
+		{"id": "42", "payload": "hello", "n": 7},
+		{"f": 3.14, "ok": true, "nope": false, "nil": nil, "neg": -1234567},
+		{"obj": map[string]interface{}{"a": "x", "b": []interface{}{1, 2, "three"}}, "arr": []interface{}{"p", "q"}},
 	}
-	if RowBytes(map[string]interface{}{"p": "xxxxxxxxxx"}) <= RowBytes(map[string]interface{}{"p": "x"}) {
-		t.Fatal("larger payload should produce larger size")
+	for _, item := range cases {
+		raw, _ := json.Marshal(item)
+		if got := RowBytes(item); got != int64(len(raw)) {
+			t.Errorf("RowBytes=%d, want %d (== len(json.Marshal)) for %v", got, len(raw), item)
+		}
 	}
-	if got := RowBytes(map[string]interface{}{}); got != int64(len("{}")) {
-		t.Fatalf("empty map RowBytes = %d, want 2", got)
+
+	// Documented limitation: string escaping is not counted, so an escape-heavy
+	// string is slightly under-counted vs json.Marshal (which expands ", <, > ...).
+	esc := map[string]interface{}{"s": `she said "hi" <b>&`}
+	raw, _ := json.Marshal(esc)
+	if RowBytes(esc) >= int64(len(raw)) {
+		t.Errorf("RowBytes should under-count escaped strings; got %d vs json %d", RowBytes(esc), len(raw))
 	}
 }

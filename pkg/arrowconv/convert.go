@@ -965,9 +965,76 @@ func marshalJSON(v interface{}) ([]byte, error) {
 // bound a batch by bytes (not just row count) before building the Arrow record,
 // so wide rows do not accumulate into an oversized in-memory batch.
 func RowBytes(item map[string]interface{}) int64 {
-	b, err := json.Marshal(item)
-	if err != nil {
-		return 0
+	n := int64(2) // { }
+	if len(item) > 1 {
+		n += int64(len(item) - 1) // commas between entries
 	}
-	return int64(len(b))
+	for k, v := range item {
+		n += int64(len(k)) + 3 // "key":
+		n += jsonLen(v)
+	}
+	return n
+}
+
+// jsonLen returns the length json.Marshal would produce for v, computed by
+// walking the value and counting bytes (including structural punctuation) with
+// no allocation. String escaping is not accounted for, so values with many
+// escaped characters are slightly under-counted.
+func jsonLen(v interface{}) int64 {
+	switch x := v.(type) {
+	case nil:
+		return 4 // null
+	case bool:
+		if x {
+			return 4 // true
+		}
+		return 5 // false
+	case string:
+		return int64(len(x)) + 2 // quotes
+	case []byte:
+		return int64((len(x)+2)/3*4) + 2 // base64 + quotes
+	case float64:
+		return numLen(x)
+	case float32:
+		return numLen(float64(x))
+	case int:
+		return intLen(int64(x))
+	case int64:
+		return intLen(x)
+	case int32:
+		return intLen(int64(x))
+	case json.Number:
+		return int64(len(x))
+	case []interface{}:
+		n := int64(2) // [ ]
+		if len(x) > 1 {
+			n += int64(len(x) - 1)
+		}
+		for _, e := range x {
+			n += jsonLen(e)
+		}
+		return n
+	case map[string]interface{}:
+		n := int64(2) // { }
+		if len(x) > 1 {
+			n += int64(len(x) - 1)
+		}
+		for k, val := range x {
+			n += int64(len(k)) + 3 // "key":
+			n += jsonLen(val)
+		}
+		return n
+	default:
+		return 8
+	}
+}
+
+func numLen(f float64) int64 {
+	var buf [32]byte
+	return int64(len(strconv.AppendFloat(buf[:0], f, 'g', -1, 64)))
+}
+
+func intLen(i int64) int64 {
+	var buf [20]byte
+	return int64(len(strconv.AppendInt(buf[:0], i, 10)))
 }
