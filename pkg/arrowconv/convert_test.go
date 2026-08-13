@@ -506,3 +506,26 @@ func TestRowBytes(t *testing.T) {
 		t.Errorf("RowBytes should under-count escaped strings; got %d vs json %d", RowBytes(esc), len(raw))
 	}
 }
+
+func TestRowBytesMatchesMarshalMany(t *testing.T) {
+	vals := []interface{}{
+		// floats (as JSON decoding produces)
+		float64(0), float64(3.14), float64(125000.75), float64(1000000),
+		float64(12345), float64(1e6), float64(1e21), float64(1e-7), float64(0.0001),
+		float64(-1000000), float64(123456789.123), float64(1.5e300),
+		// ints (Go literals)
+		0, 7, -1234567, 1000000, 9223372036854775807,
+		// strings, bool, nil
+		"hello", "", true, false, nil,
+		// nested
+		[]interface{}{1, 2.5, "x", true},
+		map[string]interface{}{"a": 1000000.0, "b": []interface{}{1e6, "y"}},
+	}
+	for _, v := range vals {
+		item := map[string]interface{}{"k": v}
+		raw, _ := json.Marshal(item)
+		if got := RowBytes(item); got != int64(len(raw)) {
+			t.Errorf("RowBytes=%d, want %d (== len(json.Marshal)) for %v -> %q", got, len(raw), v, string(raw))
+		}
+	}
+}
