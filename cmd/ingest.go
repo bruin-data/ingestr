@@ -292,10 +292,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	switch mb := int64(c.Int("batch-size")); {
 	case mb < 0:
 		return fmt.Errorf("--batch-size must be >= 0 (0 disables the limit), got %d", mb)
+	case mb > math.MaxInt64>>20:
+		return fmt.Errorf("--batch-size is too large: %d MiB", mb)
 	case mb == 0:
 		cfg.MaxBatchBytes = 0 // unlimited
-	case mb > math.MaxInt64>>20:
-		cfg.MaxBatchBytes = math.MaxInt64 // avoid overflow on absurd inputs
 	default:
 		cfg.MaxBatchBytes = mb << 20
 	}
