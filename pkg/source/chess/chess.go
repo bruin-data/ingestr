@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -86,6 +87,8 @@ func parsePlayersFromURI(uri string) ([]string, error) {
 		return strings.Split(defaultPlayers, ","), nil
 	}
 
+	output.Warnf("Warning: specifying players in the chess:// connection URI is deprecated and will be removed in a future release; provide them in the table name instead, e.g. --source-table 'profiles:hikaru,magnuscarlsen'\n")
+
 	players := strings.Split(playersParam, ",")
 	for i := range players {
 		players[i] = strings.TrimSpace(players[i])
@@ -111,6 +114,18 @@ func (s *ChessSource) Close(ctx context.Context) error {
 
 func (s *ChessSource) HandlesIncrementality() bool {
 	return true
+}
+
+// normalizePlayers splits a comma-separated list of player usernames, trimming
+// whitespace and dropping empty entries.
+func normalizePlayers(raw string) []string {
+	var players []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			players = append(players, p)
+		}
+	}
+	return players
 }
 
 func (s *ChessSource) getTables() map[string]source.SourceTable {
@@ -158,9 +173,21 @@ func (s *ChessSource) getTables() map[string]source.SourceTable {
 }
 
 func (s *ChessSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	table, ok := s.tables[req.Name]
+	tableName := req.Name
+
+	// Players may be supplied inline in the table name (e.g. "profiles:hikaru,magnuscarlsen"),
+	// which takes precedence over the players configured on the connection URI.
+	if strings.Contains(tableName, ":") {
+		parts := strings.SplitN(tableName, ":", 2)
+		tableName = parts[0]
+		if players := normalizePlayers(parts[1]); len(players) > 0 {
+			s.players = players
+		}
+	}
+
+	table, ok := s.tables[tableName]
 	if !ok {
-		return nil, fmt.Errorf("unsupported table: %s (supported: profiles, games, archives)", req.Name)
+		return nil, fmt.Errorf("unsupported table: %s (supported: profiles, games, archives)", tableName)
 	}
 	return table, nil
 }

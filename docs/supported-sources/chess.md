@@ -26,6 +26,16 @@ ingestr ingest --source-uri 'chess://?players=max2,peter23' --source-table 'prof
 
 The result of this command will be a table in the `chess.duckdb` database.
 
+## Specifying players per table
+
+Players can also be supplied directly in the `--source-table` value, appended after a colon as a comma-separated list:
+
+```sh
+ingestr ingest --source-uri 'chess://' --source-table 'profiles:max2,peter23' --dest-uri 'duckdb:///chess.duckdb' --dest-table 'players.profiles'
+```
+
+When players are given this way they take precedence over the `players` URI parameter, so you can pull different players into different tables from a single connection. If no players are given in either place, data for a default set of players is fetched.
+
 ## Tables
 
 Chess source allows ingesting the following sources into separate tables:

@@ -26,11 +26,25 @@ ingestr ingest \
 --interval-start '2025-03-20' \ 
 --interval-end '2025-03-28' \       
 --source-table 'exchange_rates' \    
---dest-uri 'duckdb///frankfurter.duckdb' \
+--dest-uri 'duckdb:///frankfurter.duckdb' \
 --dest-table 'my_schema.exchange_rates'
 ```
 
 The result of this command will be a list of currency exchange rates from 20.03.2025-28.03.2025 with INR as the base currency in your DuckDB database. 
+
+## Specifying the base currency per table
+
+The base currency can also be supplied directly in the `--source-table` value, appended after a colon:
+
+```bash
+ingestr ingest \
+--source-uri 'frankfurter://' \
+--source-table 'latest:USD' \
+--dest-uri 'duckdb:///frankfurter.duckdb' \
+--dest-table 'my_schema.latest'
+```
+
+When the base is given this way it takes precedence over the `base` URI parameter, so you can pull different base currencies into different tables from a single connection. If no base is given in either place, it defaults to `EUR`.
 
 ## Tables
 
