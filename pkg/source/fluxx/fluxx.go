@@ -471,12 +471,9 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 			if itemMap, ok := item.(map[string]interface{}); ok {
 				normalized := normalizeFluxxItem(itemMap, fieldsToExtract)
 				allItems = append(allItems, normalized)
-				// Track the row's serialized size so a batch also flushes on bytes,
-				// not just row count, keeping wide-row batches from ballooning.
+				// Flush on bytes too, not just row count, so wide rows don't balloon.
 				if opts.MaxBatchBytes > 0 {
-					if raw, mErr := json.Marshal(normalized); mErr == nil {
-						accBytes += int64(len(raw))
-					}
+					accBytes += arrowconv.RowBytes(normalized)
 				}
 			}
 

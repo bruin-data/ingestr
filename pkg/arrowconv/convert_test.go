@@ -481,3 +481,17 @@ func TestParseDecimal128BytesFast(t *testing.T) {
 		}
 	}
 }
+
+func TestRowBytes(t *testing.T) {
+	item := map[string]interface{}{"id": "42", "payload": "hello", "n": 7}
+	raw, _ := json.Marshal(item)
+	if got := RowBytes(item); got != int64(len(raw)) {
+		t.Fatalf("RowBytes = %d, want %d (serialized JSON length)", got, len(raw))
+	}
+	if RowBytes(map[string]interface{}{"p": "xxxxxxxxxx"}) <= RowBytes(map[string]interface{}{"p": "x"}) {
+		t.Fatal("larger payload should produce larger size")
+	}
+	if got := RowBytes(map[string]interface{}{}); got != int64(len("{}")) {
+		t.Fatalf("empty map RowBytes = %d, want 2", got)
+	}
+}

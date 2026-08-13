@@ -960,3 +960,14 @@ func marshalJSON(v interface{}) ([]byte, error) {
 	}
 	return b, nil
 }
+
+// RowBytes returns the serialized JSON size of a decoded row. Sources use it to
+// bound a batch by bytes (not just row count) before building the Arrow record,
+// so wide rows do not accumulate into an oversized in-memory batch.
+func RowBytes(item map[string]interface{}) int64 {
+	b, err := json.Marshal(item)
+	if err != nil {
+		return 0
+	}
+	return int64(len(b))
+}
