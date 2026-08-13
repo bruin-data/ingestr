@@ -1030,8 +1030,22 @@ func jsonLen(v interface{}) int64 {
 }
 
 func numLen(f float64) int64 {
+	// Mirror encoding/json's float formatting: 'f' in the normal range, 'e'
+	// otherwise, with json's negative-exponent cleanup (e-09 -> e-9).
+	abs := math.Abs(f)
+	format := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = 'e'
+	}
 	var buf [32]byte
-	return int64(len(strconv.AppendFloat(buf[:0], f, 'g', -1, 64)))
+	b := strconv.AppendFloat(buf[:0], f, format, -1, 64)
+	if format == 'e' {
+		n := len(b)
+		if n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
+			return int64(n - 1)
+		}
+	}
+	return int64(len(b))
 }
 
 func intLen(i int64) int64 {
