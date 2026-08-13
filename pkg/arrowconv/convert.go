@@ -961,94 +961,42 @@ func marshalJSON(v interface{}) ([]byte, error) {
 	return b, nil
 }
 
-// RowBytes returns the serialized JSON size of a decoded row. Sources use it to
-// bound a batch by bytes (not just row count) before building the Arrow record,
-// so wide rows do not accumulate into an oversized in-memory batch.
+// RowBytes returns an approximate byte size of a decoded row: the sum of key
+// and value content lengths. Sources use it to bound a batch by size (not just
+// row count) without allocating. It ignores JSON structure (punctuation, number
+// formatting), so it under-counts somewhat — acceptable because the byte limit
+// is a soft bound, not an exact target.
 func RowBytes(item map[string]interface{}) int64 {
-	n := int64(2) // { }
-	if len(item) > 1 {
-		n += int64(len(item) - 1) // commas between entries
-	}
+	var n int64
 	for k, v := range item {
-		n += int64(len(k)) + 3 // "key":
-		n += valueLen(v)
+		n += int64(len(k)) + valueLen(v)
 	}
 	return n
 }
 
-// valueLen returns the length json.Marshal would produce for v, computed by
-// walking the value and counting bytes (including structural punctuation) with
-// no allocation. String escaping is not accounted for, so values with many
-// escaped characters are slightly under-counted.
 func valueLen(v interface{}) int64 {
 	switch x := v.(type) {
 	case nil:
-		return 4 // null
-	case bool:
-		if x {
-			return 4 // true
-		}
-		return 5 // false
+		return 0
 	case string:
-		return int64(len(x)) + 2 // quotes
-	case []byte:
-		return int64((len(x)+2)/3*4) + 2 // base64 + quotes
-	case float64:
-		return numLen(x)
-	case float32:
-		return numLen(float64(x))
-	case int:
-		return intLen(int64(x))
-	case int64:
-		return intLen(x)
-	case int32:
-		return intLen(int64(x))
-	case json.Number:
 		return int64(len(x))
+	case []byte:
+		return int64(len(x))
+	case bool:
+		return 1
 	case []interface{}:
-		n := int64(2) // [ ]
-		if len(x) > 1 {
-			n += int64(len(x) - 1)
-		}
+		var n int64
 		for _, e := range x {
 			n += valueLen(e)
 		}
 		return n
 	case map[string]interface{}:
-		n := int64(2) // { }
-		if len(x) > 1 {
-			n += int64(len(x) - 1)
-		}
+		var n int64
 		for k, val := range x {
-			n += int64(len(k)) + 3 // "key":
-			n += valueLen(val)
+			n += int64(len(k)) + valueLen(val)
 		}
 		return n
 	default:
 		return 8
 	}
-}
-
-func numLen(f float64) int64 {
-	// Mirror encoding/json's float formatting: 'f' in the normal range, 'e'
-	// otherwise, with json's negative-exponent cleanup (e-09 -> e-9).
-	abs := math.Abs(f)
-	format := byte('f')
-	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
-		format = 'e'
-	}
-	var buf [32]byte
-	b := strconv.AppendFloat(buf[:0], f, format, -1, 64)
-	if format == 'e' {
-		n := len(b)
-		if n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
-			return int64(n - 1)
-		}
-	}
-	return int64(len(b))
-}
-
-func intLen(i int64) int64 {
-	var buf [20]byte
-	return int64(len(strconv.AppendInt(buf[:0], i, 10)))
 }

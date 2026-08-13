@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -249,12 +250,11 @@ func TestFluxxReadResource_ByteAccountingMatchesEmittedBatches(t *testing.T) {
 		var batchBytes int64
 		for i := 0; i < idCol.Len(); i++ {
 			order = append(order, idCol.Value(i))
-			// Reconstruct the exact bytes the flush counted for this row.
-			raw, err := json.Marshal(map[string]interface{}{"id": idCol.Value(i), "payload": plCol.Value(i)})
-			require.NoError(t, err)
-			batchBytes += int64(len(raw))
-			if int64(len(raw)) > maxRow {
-				maxRow = int64(len(raw))
+			// Reconstruct the bytes the flush counted for this row (same sizer).
+			rb := arrowconv.RowBytes(map[string]interface{}{"id": idCol.Value(i), "payload": plCol.Value(i)})
+			batchBytes += rb
+			if rb > maxRow {
+				maxRow = rb
 			}
 		}
 		perBatchBytes = append(perBatchBytes, batchBytes)

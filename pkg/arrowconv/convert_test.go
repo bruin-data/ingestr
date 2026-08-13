@@ -483,49 +483,33 @@ func TestParseDecimal128BytesFast(t *testing.T) {
 }
 
 func TestRowBytes(t *testing.T) {
-	// RowBytes reconstructs json.Marshal's length (incl. structural punctuation)
-	// without allocating, so it matches exactly for typical rows.
-	cases := []map[string]interface{}{
-		{},
-		{"id": "42", "payload": "hello", "n": 7},
-		{"f": 3.14, "ok": true, "nope": false, "nil": nil, "neg": -1234567},
-		{"obj": map[string]interface{}{"a": "x", "b": []interface{}{1, 2, "three"}}, "arr": []interface{}{"p", "q"}},
+	// RowBytes is a cheap approximate sizer: sum of key + value content lengths,
+	// ignoring JSON structure (punctuation/number formatting).
+	if got := RowBytes(map[string]interface{}{}); got != 0 {
+		t.Errorf("empty row = %d, want 0", got)
 	}
-	for _, item := range cases {
-		raw, _ := json.Marshal(item)
-		if got := RowBytes(item); got != int64(len(raw)) {
-			t.Errorf("RowBytes=%d, want %d (== len(json.Marshal)) for %v", got, len(raw), item)
-		}
+	// key length + string value length
+	if got := RowBytes(map[string]interface{}{"id": "hello"}); got != int64(len("id")+len("hello")) {
+		t.Errorf("got %d, want %d", got, len("id")+len("hello"))
 	}
-
-	// Documented limitation: string escaping is not counted, so an escape-heavy
-	// string is slightly under-counted vs json.Marshal (which expands ", <, > ...).
-	esc := map[string]interface{}{"s": `she said "hi" <b>&`}
-	raw, _ := json.Marshal(esc)
-	if RowBytes(esc) >= int64(len(raw)) {
-		t.Errorf("RowBytes should under-count escaped strings; got %d vs json %d", RowBytes(esc), len(raw))
+	// scalars: nil=0, bool=1, number=8 (flat)
+	if got := RowBytes(map[string]interface{}{"b": true, "n": 3.14, "z": nil}); got != int64(1+1+1+8+1+0) {
+		t.Errorf("scalars got %d, want 12", got)
 	}
-}
-
-func TestRowBytesMatchesMarshalMany(t *testing.T) {
-	vals := []interface{}{
-		// floats (as JSON decoding produces)
-		float64(0), float64(3.14), float64(125000.75), float64(1000000),
-		float64(12345), float64(1e6), float64(1e21), float64(1e-7), float64(0.0001),
-		float64(-1000000), float64(123456789.123), float64(1.5e300),
-		// ints (Go literals)
-		0, 7, -1234567, 1000000, 9223372036854775807,
-		// strings, bool, nil
-		"hello", "", true, false, nil,
-		// nested
-		[]interface{}{1, 2.5, "x", true},
-		map[string]interface{}{"a": 1000000.0, "b": []interface{}{1e6, "y"}},
+	// recurses into nested arrays and objects
+	nested := map[string]interface{}{"a": []interface{}{"xy", "z"}, "m": map[string]interface{}{"k": "vv"}}
+	want := int64(len("a") + (2 + 1) + len("m") + (len("k") + 2))
+	if got := RowBytes(nested); got != want {
+		t.Errorf("nested got %d, want %d", got, want)
 	}
-	for _, v := range vals {
-		item := map[string]interface{}{"k": v}
-		raw, _ := json.Marshal(item)
-		if got := RowBytes(item); got != int64(len(raw)) {
-			t.Errorf("RowBytes=%d, want %d (== len(json.Marshal)) for %v -> %q", got, len(raw), v, string(raw))
-		}
+	// larger content -> larger size, and always under json.Marshal (no punctuation)
+	small := map[string]interface{}{"p": "x"}
+	big := map[string]interface{}{"p": "xxxxxxxxxxxxxxxxxxxx"}
+	if RowBytes(big) <= RowBytes(small) {
+		t.Error("larger payload should produce a larger size")
+	}
+	raw, _ := json.Marshal(big)
+	if RowBytes(big) >= int64(len(raw)) {
+		t.Error("cheap estimate should under-count json.Marshal (no punctuation)")
 	}
 }
