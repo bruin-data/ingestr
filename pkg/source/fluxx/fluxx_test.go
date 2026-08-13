@@ -264,9 +264,11 @@ func TestFluxxReadResource_ByteAccountingMatchesEmittedBatches(t *testing.T) {
 	require.Equal(t, wantOrder(total), order, "no row lost, duplicated, or reordered")
 	require.Greater(t, len(perBatchBytes), 1, "should split into multiple batches")
 	for i, b := range perBatchBytes {
-		require.Less(t, b, capBytes+maxRow, "batch %d overshoots the cap by more than one row", i)
+		// We flush before adding a row that would exceed the cap, so no batch
+		// ever exceeds it, and each full batch is within one row of the cap.
+		require.LessOrEqual(t, b, capBytes, "batch %d exceeds the cap", i)
 		if i < len(perBatchBytes)-1 {
-			require.GreaterOrEqual(t, b, capBytes, "non-final batch %d flushed before reaching the cap", i)
+			require.Greater(t, b, capBytes-maxRow, "non-final batch %d flushed too early", i)
 		}
 	}
 }

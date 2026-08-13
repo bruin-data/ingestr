@@ -290,12 +290,10 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
 	switch mb := int64(c.Int("batch-size")); {
-	case mb < 0:
-		return fmt.Errorf("--batch-size must be >= 0 (0 disables the limit), got %d", mb)
+	case mb <= 0:
+		return fmt.Errorf("--batch-size must be a positive number of MiB, got %d", mb)
 	case mb > math.MaxInt64>>20:
 		return fmt.Errorf("--batch-size is too large: %d MiB", mb)
-	case mb == 0:
-		cfg.MaxBatchBytes = 0 // unlimited
 	default:
 		cfg.MaxBatchBytes = mb << 20
 	}
