@@ -138,7 +138,7 @@ func DefaultConfig() *IngestConfig {
 		SchemaNaming:        "",
 		Progress:            ProgressInteractive,
 		PageSize:            25000,
-		MaxBatchBytes:       256 << 20, // 256 MiB
+		MaxBatchBytes:       512 << 20, // 512 MiB
 		LoaderFileSize:      25000,
 		ExtractParallelism:  5,
 		FlushInterval:       30 * time.Second,

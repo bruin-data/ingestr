@@ -127,7 +127,7 @@ func IngestCommand() *cli.Command {
 			&cli.IntFlag{
 				Name:    "batch-size",
 				Usage:   "The maximum size of a source record batch in MiB before it is flushed",
-				Value:   256,
+				Value:   512,
 				Sources: cli.EnvVars("BATCH_SIZE", "INGESTR_BATCH_SIZE"),
 			},
 			&cli.IntFlag{
