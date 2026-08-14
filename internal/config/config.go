@@ -83,9 +83,8 @@ type IngestConfig struct {
 	NoLoadTimestamp   bool
 	NoRunID           bool
 
-	// RunID is the per-run identifier stamped into the _ingestr_run_id column
-	// and embedded into managed staging table names. Populated at runtime; empty
-	// when --no-run-id is set or in streaming mode (which stamps per flush).
+	// RunID is stamped into _ingestr_run_id and embedded in managed staging
+	// table names. Runtime-populated; empty when run id tracking is disabled.
 	RunID string
 
 	PipelinesDir   string

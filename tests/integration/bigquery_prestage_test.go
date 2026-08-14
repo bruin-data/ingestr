@@ -63,10 +63,8 @@ func dropBQTable(ctx context.Context, t *testing.T, env bqPreStageEnv, table str
 	_ = client.Dataset(env.dataset).Table(table).Delete(ctx)
 }
 
-// bqRowsWithoutLoadTS returns all rows as JSON maps ordered by the given
-// column, asserting every row carries a non-empty _ingestr_loaded_at and
-// _ingestr_run_id and removing them so two runs at different times compare
-// equal.
+// bqRowsWithoutLoadTS returns rows as JSON maps, asserting and dropping the
+// non-empty _ingestr_loaded_at/_ingestr_run_id so two runs compare equal.
 func bqRowsWithoutLoadTS(ctx context.Context, t *testing.T, env bqPreStageEnv, table, orderBy string) []map[string]any {
 	t.Helper()
 	client, err := bigquery.NewClient(ctx, env.project)

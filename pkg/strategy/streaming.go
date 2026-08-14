@@ -360,9 +360,8 @@ func withLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
 	return &out
 }
 
-// withRunIDColumn mirrors the pipeline's schema decoration for tables
-// discovered mid-stream, matching the _ingestr_run_id column added to startup
-// tables before the executor sees them.
+// withRunIDColumn mirrors the pipeline's _ingestr_run_id decoration for tables
+// discovered mid-stream, so late arrivals match the startup tables.
 func withRunIDColumn(s *schema.TableSchema) *schema.TableSchema {
 	if s == nil {
 		return nil

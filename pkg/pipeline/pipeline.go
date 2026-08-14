@@ -429,9 +429,8 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		defer func() { tracker.Stop(retErr) }()
 	}
 
-	// The load timestamp and run id are chosen before extract so that
-	// pre-staged load files (written during extract) and the replay path stamp
-	// the same values.
+	// Chosen before extract so pre-staged load files and the replay path stamp
+	// the same load timestamp and run id.
 	var loadTimestamp time.Time
 	if !p.config.NoLoadTimestamp && !p.config.Stream {
 		loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)

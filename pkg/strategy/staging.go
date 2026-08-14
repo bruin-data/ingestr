@@ -201,11 +201,8 @@ func isUnambiguousLegacyStagingIdentifier(candidate string, parts []string) bool
 	return true
 }
 
-// stagingUniqueToken returns the identifier appended to a managed staging table
-// name to make it unique for a run. When a run id is available it is used
-// (hyphens stripped so it is a valid unquoted identifier everywhere), so a
-// persisted _ingestr_run_id value can be matched back to the staging table that
-// produced it. Otherwise a nanosecond timestamp preserves the legacy behavior.
+// stagingUniqueToken makes a managed staging table name unique: the run id
+// (hyphens stripped) so rows match their staging table, else a nanosecond stamp.
 func stagingUniqueToken(runID string) string {
 	if token := strings.ReplaceAll(runID, "-", ""); token != "" {
 		return token

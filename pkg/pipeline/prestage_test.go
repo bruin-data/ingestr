@@ -286,9 +286,8 @@ func TestPreStagedUsableRejectsRunIDCollision(t *testing.T) {
 
 func TestPreStagedUsableRejectsNormalizedRunIDCollision(t *testing.T) {
 	p := preStageTestPipeline(baselinePreStageConfig(), &mockDestination{})
-	// The naming convention maps this source column onto the reserved run id
-	// column name, so the raw name never equals _ingestr_run_id but the staged
-	// destination name does.
+	// A naming convention maps this column onto the reserved run id name: the raw
+	// name differs from _ingestr_run_id but the staged destination name collides.
 	p.columnRenamer = transformer.NewColumnRenamer(map[string]string{"ingestr run id": naming.IngestrRunIDColumn})
 	transform := func(name string) string {
 		if name == "ingestr run id" {
