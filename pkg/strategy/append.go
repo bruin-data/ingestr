@@ -77,6 +77,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
 		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
 		PageSize:                        job.Config.PageSize,
+		MaxBatchBytes:                   job.Config.MaxBatchBytes,
 		Limit:                           job.Config.SQLLimit,
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,
@@ -210,6 +211,7 @@ func (s *AppendStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableI
 		ReadOptions: source.ReadOptions{
 			Parallelism:         parallelism,
 			PageSize:            job.Config.PageSize,
+			MaxBatchBytes:       job.Config.MaxBatchBytes,
 			Limit:               job.Config.SQLLimit,
 			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
 			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,

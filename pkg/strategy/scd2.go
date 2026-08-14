@@ -94,6 +94,7 @@ func (s *SCD2Strategy) Execute(ctx context.Context, job *IngestionJob) error {
 		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
 		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
 		PageSize:                        job.Config.PageSize,
+		MaxBatchBytes:                   job.Config.MaxBatchBytes,
 		Limit:                           job.Config.SQLLimit,
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,

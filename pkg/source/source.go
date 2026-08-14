@@ -110,6 +110,7 @@ type ReadOptions struct {
 	ExtractPartitionDataType        schema.DataType
 	RecordBatchBufferSize           int
 	PageSize                        int
+	MaxBatchBytes                   int64 // Flush a batch once accumulated bytes reach this; 0 = unlimited
 	Limit                           int
 	ExcludeColumns                  []string
 	Parallelism                     int

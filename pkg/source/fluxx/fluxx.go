@@ -410,7 +410,23 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 	totalLimit := opts.Limit
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
 	page := 1
+
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, columns, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -468,17 +484,25 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 			}
 
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				allItems = append(allItems, normalizeFluxxItem(itemMap, fieldsToExtract))
+				normalized := normalizeFluxxItem(itemMap, fieldsToExtract)
+				// Flush before adding a row that would push the batch over the byte
+				// cap, so an emitted batch never exceeds the limit.
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(normalized)
+					if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				allItems = append(allItems, normalized)
 			}
 
 			if len(allItems) >= batchSize {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, columns, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert to Arrow: %w", err)
+				if err := flush(); err != nil {
+					return err
 				}
-				results <- source.RecordBatchResult{Batch: record}
-				totalSent += len(allItems)
-				allItems = nil
 			}
 		}
 
@@ -491,13 +515,8 @@ func (s *FluxxSource) readResource(ctx context.Context, resourceName, endpoint, 
 		page++
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, columns, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(allItems)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[FLUXX] Resource %s: %d items", resourceName, totalSent)

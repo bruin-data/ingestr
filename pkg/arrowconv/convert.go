@@ -960,3 +960,43 @@ func marshalJSON(v interface{}) ([]byte, error) {
 	}
 	return b, nil
 }
+
+// RowBytes returns an approximate byte size of a decoded row: the sum of key
+// and value content lengths. Sources use it to bound a batch by size (not just
+// row count) without allocating. It ignores JSON structure (punctuation, number
+// formatting), so it under-counts somewhat — acceptable because the byte limit
+// is a soft bound, not an exact target.
+func RowBytes(item map[string]interface{}) int64 {
+	var n int64
+	for k, v := range item {
+		n += int64(len(k)) + valueLen(v)
+	}
+	return n
+}
+
+func valueLen(v interface{}) int64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case string:
+		return int64(len(x))
+	case []byte:
+		return int64(len(x))
+	case bool:
+		return 1
+	case []interface{}:
+		var n int64
+		for _, e := range x {
+			n += valueLen(e)
+		}
+		return n
+	case map[string]interface{}:
+		var n int64
+		for k, val := range x {
+			n += int64(len(k)) + valueLen(val)
+		}
+		return n
+	default:
+		return 8
+	}
+}

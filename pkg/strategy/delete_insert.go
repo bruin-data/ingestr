@@ -94,6 +94,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		ExtractPartitionNumericInterval: job.Config.ExtractPartitionNumericInterval,
 		ExtractPartitionAuto:            job.Config.ExtractPartitionAuto,
 		PageSize:                        job.Config.PageSize,
+		MaxBatchBytes:                   job.Config.MaxBatchBytes,
 		Limit:                           job.Config.SQLLimit,
 		ExcludeColumns:                  job.Config.SQLExcludeColumns,
 		Parallelism:                     parallelism,

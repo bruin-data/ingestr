@@ -1102,6 +1102,7 @@ func (p *Pipeline) inferSchemaFromData(
 		ExtractPartitionNumericInterval: p.config.ExtractPartitionNumericInterval,
 		ExtractPartitionAuto:            p.config.ExtractPartitionAuto,
 		PageSize:                        p.config.PageSize,
+		MaxBatchBytes:                   p.config.MaxBatchBytes,
 		Limit:                           p.config.SQLLimit,
 		ExcludeColumns:                  p.config.SQLExcludeColumns,
 		Parallelism:                     parallelism,

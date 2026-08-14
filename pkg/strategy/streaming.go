@@ -83,6 +83,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		IncrementalKey:             job.Config.IncrementalKey,
 		IntervalStart:              job.Config.IntervalStart,
 		PageSize:                   job.Config.PageSize,
+		MaxBatchBytes:              job.Config.MaxBatchBytes,
 		ExcludeColumns:             job.Config.SQLExcludeColumns,
 		Parallelism:                parallelism,
 		Schema:                     job.SourceSchema,
@@ -171,6 +172,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		ReadOptions: source.ReadOptions{
 			Parallelism:         parallelism,
 			PageSize:            job.Config.PageSize,
+			MaxBatchBytes:       job.Config.MaxBatchBytes,
 			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
 			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
 			CDCSnapshotReplace:  (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
