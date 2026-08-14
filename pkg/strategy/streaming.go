@@ -10,12 +10,12 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
-	"github.com/bruin-data/ingestr/internal/runid"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -928,7 +928,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 	start := time.Now()
 	loadTimestamp := start.UTC().Truncate(time.Microsecond)
-	runID := runid.New()
+	runID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	boundSourceTables := make(map[string]string)
 	if l.opts.StateManager != nil {
 		for recordTable, st := range l.tables {

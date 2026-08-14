@@ -515,6 +515,8 @@ func TestStreaming_RunIDIsSetPerFlushCycle(t *testing.T) {
 	first := dest.capturedRunIDs()[0]
 	require.Len(t, first, 4)
 	require.NotEmpty(t, first[0], "run id should be stamped in streaming flush")
+	require.Len(t, first[0], 32)
+	require.NotContains(t, first[0], "-")
 	for _, value := range first[1:] {
 		assert.Equal(t, first[0], value, "all rows in one flush should share a run id")
 	}
@@ -528,6 +530,8 @@ func TestStreaming_RunIDIsSetPerFlushCycle(t *testing.T) {
 
 	second := dest.capturedRunIDs()[1]
 	require.Len(t, second, 4)
+	require.Len(t, second[0], 32)
+	require.NotContains(t, second[0], "-")
 	for _, value := range second[1:] {
 		assert.Equal(t, second[0], value, "all rows in one flush should share a run id")
 	}

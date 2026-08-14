@@ -19,7 +19,6 @@ import (
 	"github.com/bruin-data/ingestr/internal/display"
 	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/internal/output"
-	"github.com/bruin-data/ingestr/internal/runid"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -32,6 +31,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/google/uuid"
 	"golang.org/x/term"
 )
 
@@ -437,7 +437,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 	var runID string
 	if !p.config.NoRunID && !p.config.Stream {
-		runID = runid.New()
+		runID = strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
 
 	// Check if source has known schema or needs inference
@@ -1453,7 +1453,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	var runID string
 	if !p.config.NoRunID {
 		if !p.config.Stream {
-			runID = runid.New()
+			runID = strings.ReplaceAll(uuid.NewString(), "-", "")
 		}
 		for i := range tables {
 			tables[i].Schema = addRunIDColumn(tables[i].Schema)
