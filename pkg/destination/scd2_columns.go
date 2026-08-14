@@ -23,10 +23,11 @@ func SCD2MetadataColumns() []string {
 // columns).
 func SCD2NonDataColumns(primaryKeys []string) []string {
 	scd := SCD2MetadataColumns()
-	out := make([]string, 0, len(primaryKeys)+len(scd)+1)
+	out := make([]string, 0, len(primaryKeys)+len(scd)+2)
 	out = append(out, primaryKeys...)
 	out = append(out, scd...)
 	out = append(out, naming.IngestrLoadedAtColumn)
+	out = append(out, naming.IngestrRunIDColumn)
 	return out
 }
 

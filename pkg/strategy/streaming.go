@@ -15,6 +15,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -204,6 +205,9 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		if !job.Config.NoLoadTimestamp {
 			ti.Schema = withLoadTimestampColumn(ti.Schema)
 		}
+		if !job.Config.NoRunID {
+			ti.Schema = withRunIDColumn(ti.Schema)
+		}
 		if ti.Schema == nil {
 			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
 		}
@@ -351,6 +355,27 @@ func withLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
 	out.Columns = append(append([]schema.Column{}, s.Columns...), schema.Column{
 		Name:     naming.IngestrLoadedAtColumn,
 		DataType: schema.TypeTimestampTZ,
+		Nullable: true,
+	})
+	return &out
+}
+
+// withRunIDColumn mirrors the pipeline's schema decoration for tables
+// discovered mid-stream, matching the _ingestr_run_id column added to startup
+// tables before the executor sees them.
+func withRunIDColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
+			return s
+		}
+	}
+	out := *s
+	out.Columns = append(append([]schema.Column{}, s.Columns...), schema.Column{
+		Name:     naming.IngestrRunIDColumn,
+		DataType: schema.TypeString,
 		Nullable: true,
 	})
 	return &out
@@ -738,6 +763,9 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	if !l.cfg.NoLoadTimestamp {
 		newSchema = withLoadTimestampColumn(newSchema)
 	}
+	if !l.cfg.NoRunID {
+		newSchema = withRunIDColumn(newSchema)
+	}
 	if st.schema.SameColumnShape(newSchema) && sameColumnNullability(st.schema, newSchema) {
 		return nil
 	}
@@ -901,6 +929,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 	start := time.Now()
 	loadTimestamp := start.UTC().Truncate(time.Microsecond)
+	runID := uuid.NewString()
 	boundSourceTables := make(map[string]string)
 	if l.opts.StateManager != nil {
 		for recordTable, st := range l.tables {
@@ -984,6 +1013,9 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
+		}
+		if col, ok := runIDColumn(st.schema); ok {
+			records = transformer.Wrap(records, transformer.NewRunID(col, runID))
 		}
 		var bytes uint64
 		records = countRecordBatchBytes(records, &bytes)
@@ -1342,6 +1374,18 @@ func loadTimestampColumn(s *schema.TableSchema) (schema.Column, bool) {
 	}
 	for _, col := range s.Columns {
 		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			return col, true
+		}
+	}
+	return schema.Column{}, false
+}
+
+func runIDColumn(s *schema.TableSchema) (schema.Column, bool) {
+	if s == nil {
+		return schema.Column{}, false
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
 			return col, true
 		}
 	}

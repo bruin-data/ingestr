@@ -17,7 +17,7 @@ func streamSchemaChangeFixture(destSchema *schema.TableSchema) (*flushLoop, *fak
 	dest := &fakeDestination{
 		tableSchemas: map[string]*schema.TableSchema{"dest_items": destSchema},
 	}
-	cfg := &config.IngestConfig{NoLoadTimestamp: true}
+	cfg := &config.IngestConfig{NoLoadTimestamp: true, NoRunID: true}
 	st := &streamTableState{
 		destTable:    "dest_items",
 		stagingTable: "stg_items",
@@ -111,7 +111,7 @@ func TestFlushLoopRefreshHonorsFreezeContract(t *testing.T) {
 			{Name: "id", DataType: schema.TypeInt32},
 		}}},
 	}
-	cfg := &config.IngestConfig{NoLoadTimestamp: true, SchemaContract: "freeze"}
+	cfg := &config.IngestConfig{NoLoadTimestamp: true, NoRunID: true, SchemaContract: "freeze"}
 	st := &streamTableState{
 		destTable: "dest_items",
 		schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
@@ -199,7 +199,7 @@ func TestFlushLoopRefreshSkipsCDCStagingColumns(t *testing.T) {
 		{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
 	}}
 	dest := &fakeDestination{tableSchemas: map[string]*schema.TableSchema{"dest_items": destSchema}}
-	cfg := &config.IngestConfig{NoLoadTimestamp: true}
+	cfg := &config.IngestConfig{NoLoadTimestamp: true, NoRunID: true}
 	st := &streamTableState{
 		destTable:    "dest_items",
 		stagingTable: "stg_items",

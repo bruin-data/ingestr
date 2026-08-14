@@ -42,6 +42,7 @@ func (p *Pipeline) maybeStartPreStage(
 	strategy config.IncrementalStrategy,
 	_ []string,
 	loadTimestamp time.Time,
+	runID string,
 ) (destination.PreStageWriter, func(string) string) {
 	if p.config.DisablePreStaging {
 		return nil, nil
@@ -75,6 +76,11 @@ func (p *Pipeline) maybeStartPreStage(
 		loadTimestampColumn = naming.IngestrLoadedAtColumn
 	}
 
+	runIDColumn := ""
+	if !p.config.NoRunID {
+		runIDColumn = naming.IngestrRunIDColumn
+	}
+
 	usesStagingTable := strategy == config.StrategyMerge ||
 		strategy == config.StrategyReplace
 
@@ -83,6 +89,8 @@ func (p *Pipeline) maybeStartPreStage(
 		KeyTransform:        keyTransform,
 		LoadTimestampColumn: loadTimestampColumn,
 		LoadTimestamp:       loadTimestamp,
+		RunIDColumn:         runIDColumn,
+		RunID:               runID,
 		StagingTable:        usesStagingTable,
 		StagingBucket:       p.config.StagingBucket,
 		LoaderFileSize:      p.config.LoaderFileSize,
@@ -167,6 +175,10 @@ func (p *Pipeline) preStagedUsable(
 	for _, col := range originalSourceSchema.Columns {
 		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
 			config.Debug("[PIPELINE] Pre-staged files unusable: source column %q collides with the load timestamp column", col.Name)
+			return false
+		}
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
+			config.Debug("[PIPELINE] Pre-staged files unusable: source column %q collides with the run id column", col.Name)
 			return false
 		}
 		final := finalName(col.Name)

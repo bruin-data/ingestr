@@ -10,10 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func isIngestrMetadataColumn(name string) bool {
+	return strings.EqualFold(name, naming.IngestrLoadedAtColumn) ||
+		strings.EqualFold(name, naming.IngestrRunIDColumn)
+}
+
 func withoutLoadTimestampTypes(types map[string]string) map[string]string {
 	out := make(map[string]string, len(types))
 	for name, typ := range types {
-		if strings.EqualFold(name, naming.IngestrLoadedAtColumn) {
+		if isIngestrMetadataColumn(name) {
 			continue
 		}
 		out[name] = typ
@@ -24,7 +29,7 @@ func withoutLoadTimestampTypes(types map[string]string) map[string]string {
 func withoutLoadTimestampColumns(cols []string) []string {
 	out := make([]string, 0, len(cols))
 	for _, col := range cols {
-		if strings.EqualFold(col, naming.IngestrLoadedAtColumn) {
+		if isIngestrMetadataColumn(col) {
 			continue
 		}
 		out = append(out, col)

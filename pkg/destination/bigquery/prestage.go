@@ -37,6 +37,10 @@ func (d *BigQueryDestination) NewPreStageWriter(ctx context.Context, opts destin
 		rowOpts.loadTimestampColumn = opts.LoadTimestampColumn
 		rowOpts.loadTimestampValue = opts.LoadTimestamp.UTC().Format(time.RFC3339Nano)
 	}
+	if opts.RunIDColumn != "" {
+		rowOpts.runIDColumn = opts.RunIDColumn
+		rowOpts.runIDValue = opts.RunID
+	}
 
 	maxRowsPerFile := opts.LoaderFileSize
 	if !opts.StagingTable && opts.StagingBucket == "" {

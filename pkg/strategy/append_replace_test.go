@@ -113,6 +113,49 @@ func TestIngestionJob_GetRecords_AddsSameLoadTimestampToEveryBatch(t *testing.T)
 	}
 }
 
+func TestIngestionJob_GetRecords_AddsSameRunIDToEveryBatch(t *testing.T) {
+	job, _, _ := minimalJob()
+	job.BufferedRecords = mustClosedRecords(
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)},
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3}, nil)},
+	)
+
+	job.RunID = transformer.NewRunID(schema.Column{
+		Name:     "_ingestr_run_id",
+		DataType: schema.TypeString,
+		Nullable: true,
+	}, "run-abc")
+
+	records, err := job.GetRecords(context.Background(), source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("GetRecords returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		result := <-records
+		if result.Err != nil {
+			t.Fatalf("record %d returned error: %v", i, result.Err)
+		}
+		if result.Batch == nil {
+			t.Fatalf("record %d batch is nil", i)
+		}
+		if got := result.Batch.ColumnName(1); got != "_ingestr_run_id" {
+			t.Fatalf("record %d column 1 = %q, want _ingestr_run_id", i, got)
+		}
+		runID := result.Batch.Column(1).(*array.String)
+		for row := 0; row < int(result.Batch.NumRows()); row++ {
+			if got := runID.Value(row); got != "run-abc" {
+				t.Fatalf("record %d row %d run id = %q, want run-abc", i, row, got)
+			}
+		}
+		result.Batch.Release()
+	}
+
+	if _, ok := <-records; ok {
+		t.Fatal("records channel still open after two batches")
+	}
+}
+
 func TestAppendStrategy_Execute_HappyPath(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.LoaderFileSize = 321

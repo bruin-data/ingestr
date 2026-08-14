@@ -50,7 +50,7 @@ func TestPostgresSchemaEvolutionRelaxesNullability(t *testing.T) {
 		SourceURI: sourceURI, SourceTable: sourceSchema + ".events",
 		DestURI: destURI, DestTable: destSchema + ".events",
 		IncrementalStrategy: config.StrategyAppend,
-		PrimaryKeys:         []string{"id"}, NoLoadTimestamp: true,
+		PrimaryKeys:         []string{"id"}, NoLoadTimestamp: true, NoRunID: true,
 	}).Run(ctx)
 	require.NoError(t, err)
 

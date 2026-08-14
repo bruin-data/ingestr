@@ -1264,6 +1264,8 @@ type jsonlRowOptions struct {
 	keyTransform        func(string) string
 	loadTimestampColumn string
 	loadTimestampValue  string
+	runIDColumn         string
+	runIDValue          string
 }
 
 func newLoadJobChunkWriter(format loadJobFileFormat, writer io.WriteCloser, targetSchema *arrow.Schema, rowOpts jsonlRowOptions) loadJobChunkWriter {
@@ -1446,6 +1448,9 @@ func writeRecordBatchAsJSONLWithOpts(writer *bufio.Writer, record arrow.RecordBa
 		}
 		if opts.loadTimestampColumn != "" {
 			row[opts.loadTimestampColumn] = opts.loadTimestampValue
+		}
+		if opts.runIDColumn != "" {
+			row[opts.runIDColumn] = opts.runIDValue
 		}
 
 		if err := encoder.Encode(row); err != nil {

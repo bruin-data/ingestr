@@ -61,6 +61,9 @@ type IngestionJob struct {
 	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
 	LoadTimestamp *transformer.LoadTimestamp
 
+	// RunID adds or replaces _ingestr_run_id with one run identifier for the job.
+	RunID *transformer.RunID
+
 	// SchemaAligner reorders and fills transformed batches to match the write schema.
 	SchemaAligner *transformer.TypeCaster
 
@@ -121,6 +124,9 @@ type MultiTableIngestionJob struct {
 
 	// LoadTimestamp adds or replaces _ingestr_loaded_at with one timestamp for the job.
 	LoadTimestamp *transformer.LoadTimestamp
+
+	// RunID adds or replaces _ingestr_run_id with one run identifier for the job.
+	RunID *transformer.RunID
 
 	ColumnRenamers     map[string]*transformer.ColumnRenamer
 	NormalizeTableInfo func(context.Context, source.SourceTableInfo, string) (source.SourceTableInfo, *transformer.ColumnRenamer, error)
@@ -296,6 +302,9 @@ func (j *MultiTableIngestionJob) ApplyLoadTimestamp(records <-chan source.Record
 	if j.LoadTimestamp != nil {
 		records = transformer.Wrap(records, j.LoadTimestamp)
 	}
+	if j.RunID != nil {
+		records = transformer.Wrap(records, j.RunID)
+	}
 	return records
 }
 
@@ -441,6 +450,10 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 
 	if j.LoadTimestamp != nil {
 		records = transformer.Wrap(records, j.LoadTimestamp)
+	}
+
+	if j.RunID != nil {
+		records = transformer.Wrap(records, j.RunID)
 	}
 
 	if j.SchemaAligner != nil {

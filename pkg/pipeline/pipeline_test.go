@@ -3115,6 +3115,55 @@ func TestAddLoadTimestampColumnKeepsExistingNameButMakesNullable(t *testing.T) {
 	}
 }
 
+func TestAddRunIDColumnCreatesNullableStringColumn(t *testing.T) {
+	got := addRunIDColumn(tschema("users", tcol("id", schema.TypeInt64)))
+
+	if len(got.Columns) != 2 {
+		t.Fatalf("len(columns) = %d, want 2", len(got.Columns))
+	}
+	col := got.Columns[1]
+	if col.Name != "_ingestr_run_id" {
+		t.Fatalf("run id column name = %q", col.Name)
+	}
+	if col.DataType != schema.TypeString {
+		t.Fatalf("run id type = %v, want %v", col.DataType, schema.TypeString)
+	}
+	if !col.Nullable {
+		t.Fatal("run id column should be nullable")
+	}
+}
+
+func TestAddRunIDColumnKeepsExistingNameButMakesNullableString(t *testing.T) {
+	existing := schema.Column{
+		Name:     "_INGESTR_RUN_ID",
+		DataType: schema.TypeInt64,
+		Nullable: false,
+	}
+	got := addRunIDColumn(tschema("users", tcol("id", schema.TypeInt64), existing))
+
+	col := got.Columns[1]
+	if col.Name != existing.Name {
+		t.Fatalf("run id column name = %q, want %q", col.Name, existing.Name)
+	}
+	if col.DataType != schema.TypeString {
+		t.Fatalf("run id type = %v, want %v", col.DataType, schema.TypeString)
+	}
+	if !col.Nullable {
+		t.Fatal("existing run id column should be treated as nullable")
+	}
+}
+
+func TestRemoveRunIDColumn(t *testing.T) {
+	got := removeRunIDColumn(tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("_ingestr_run_id", schema.TypeString),
+		tcol("name", schema.TypeString),
+	))
+
+	assertColumns(t, "columns", got.ColumnNames(), []string{"id", "name"})
+}
+
 func TestPreserveSourceCDCColumnTypes(t *testing.T) {
 	ingest := tschema(
 		"items",
@@ -3286,6 +3335,48 @@ func TestSetupIngestrColumnsDoesNotFillLoadTimestamp(t *testing.T) {
 	}
 	if p.ingestrColumnFiller != nil {
 		t.Fatal("load timestamp column must not use IngestrColumnFiller")
+	}
+}
+
+func TestBuildBufferReaderTarget_SkipsRunIDColumn(t *testing.T) {
+	p := &Pipeline{}
+	src := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+	)
+	dest := tschema(
+		"users",
+		tcol("id", schema.TypeInt64),
+		tcol("name", schema.TypeString),
+		tcol("_ingestr_run_id", schema.TypeString),
+	)
+
+	got := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
+}
+
+func TestSetupIngestrColumnsDoesNotFillRunID(t *testing.T) {
+	p := &Pipeline{
+		config: &config.IngestConfig{DestTable: "users"},
+		dest: &mockDestination{tableSchema: tschema(
+			"users",
+			tcol("id", schema.TypeInt64),
+			tcol("_ingestr_run_id", schema.TypeString),
+		)},
+	}
+	src := tschema("users", tcol("id", schema.TypeInt64))
+
+	got, err := p.setupIngestrColumns(context.Background(), src)
+	if err != nil {
+		t.Fatalf("setupIngestrColumns() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("setupIngestrColumns() returned schema with columns %v, want nil", got.ColumnNames())
+	}
+	if p.ingestrColumnFiller != nil {
+		t.Fatal("run id column must not use IngestrColumnFiller")
 	}
 }
 

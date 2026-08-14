@@ -221,6 +221,7 @@ func TestPostgresPartitionedExtraction(t *testing.T) {
 	replaceCfg.IncrementalStrategy = config.StrategyReplace
 	replaceCfg.DestinationParallelism = 8
 	replaceCfg.NoLoadTimestamp = true
+	replaceCfg.NoRunID = true
 	require.NoError(t, pipeline.New(&replaceCfg).Run(ctx))
 
 	var targetOIDAfter uint32

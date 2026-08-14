@@ -81,6 +81,7 @@ type IngestConfig struct {
 	Mask              []string
 	TrimWhitespace    bool
 	NoLoadTimestamp   bool
+	NoRunID           bool
 
 	PipelinesDir   string
 	StagingBucket  string
