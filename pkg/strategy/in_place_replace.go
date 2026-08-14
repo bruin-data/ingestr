@@ -71,7 +71,7 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 	}
 
 	targetTable := job.Config.DestTable
-	stagingTable := managedStagingTableName(job.Destination, targetTable, "ti", job.Config.StagingDataset)
+	stagingTable := managedStagingTableName(job.Destination, targetTable, "ti", job.Config.StagingDataset, job.Config.RunID)
 	output.Statusf("[REPLACE] %s | Using in-place replacement with staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{

@@ -172,8 +172,8 @@ func intersects(left, right []string) bool {
 // nil primary keys, since it already carries the PK and lives in the target's
 // schema (so the swap is a same-schema atomic rename rather than a second
 // recreate+copy). Staging tables are cleaned up on error.
-func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTable, targetTable, stagingDataset, incrementalKey string, tableSchema *schema.TableSchema, primaryKeys []string, partitionBy string, clusterBy []string) (string, error) {
-	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset)
+func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTable, targetTable, stagingDataset, incrementalKey string, tableSchema *schema.TableSchema, primaryKeys []string, partitionBy string, clusterBy []string, runID string) (string, error) {
+	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        normalised,
 		Schema:       tableSchema,
@@ -261,12 +261,12 @@ func prepareCDCConditionalSwap(ctx context.Context, dest destination.Destination
 	return opts, nil
 }
 
-func replaceStagingTableName(dest destination.Destination, targetTable, stagingDataset string) string {
+func replaceStagingTableName(dest destination.Destination, targetTable, stagingDataset, runID string) string {
 	policy := defaultReplaceStagingPolicy()
 	if provider, ok := dest.(destination.ReplaceStagingPolicyProvider); ok {
 		policy = provider.ReplaceStagingPolicy()
 	}
-	return GenerateReplaceStagingTableName(targetTable, "staging", stagingDataset, policy)
+	return GenerateReplaceStagingTableName(targetTable, "staging", stagingDataset, policy, runID)
 }
 
 func (s *ReplaceStrategy) Name() config.IncrementalStrategy {
@@ -293,7 +293,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	targetTable := job.Config.DestTable
 	writeTable := targetTable
 	if useStaging {
-		writeTable = replaceStagingTableName(job.Destination, targetTable, job.Config.StagingDataset)
+		writeTable = replaceStagingTableName(job.Destination, targetTable, job.Config.StagingDataset, job.Config.RunID)
 		output.Statusf("[STRATEGY] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), writeTable)
 	} else {
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
@@ -432,7 +432,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		if stagedDedup {
 			normalised, err := deduplicateStaging(ctx, job.Destination, writeTable, targetTable,
 				job.Config.StagingDataset, job.Config.IncrementalKey, job.Schema,
-				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy)
+				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy, job.Config.RunID)
 			if err != nil {
 				return err
 			}
@@ -503,7 +503,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			destTable := job.GetDestTableName(ti.Name)
 			writeTable := destTable
 			if useStaging {
-				writeTable = replaceStagingTableName(job.Destination, destTable, job.Config.StagingDataset)
+				writeTable = replaceStagingTableName(job.Destination, destTable, job.Config.StagingDataset, job.Config.RunID)
 			}
 
 			dedup := directDedup && replaceShouldDedup(job.Destination, ti.PrimaryKeys)
@@ -598,7 +598,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			swapPrimaryKeys := tableInfo.PrimaryKeys
 			if replaceShouldDedup(job.Destination, tableInfo.PrimaryKeys) {
 				normalised, err := deduplicateStaging(ctx, job.Destination, stagingTable, destTable,
-					job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil)
+					job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID)
 				if err != nil {
 					return fmt.Errorf("failed to deduplicate table %s: %w", tableInfo.Name, err)
 				}

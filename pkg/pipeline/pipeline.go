@@ -732,6 +732,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.PrimaryKeys = tableSchema.PrimaryKeys
 	resolvedConfig.IncrementalKey = tableSchema.IncrementalKey
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
+	resolvedConfig.RunID = runID
 
 	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
 
@@ -1494,6 +1495,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	resolvedConfig := *p.config
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
+	resolvedConfig.RunID = runID
 
 	display.PrintSummary(&resolvedConfig)
 

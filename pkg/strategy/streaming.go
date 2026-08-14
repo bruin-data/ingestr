@@ -313,7 +313,7 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
+	st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
 	output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        st.stagingTable,
@@ -392,7 +392,7 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 			// (stagingTable stays empty). See isAppendOnlyCDCTable in merge.go.
 			return prepareAppendOnlyCDCTable(ctx, dest, st.destTable, st.schema)
 		}
-		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
+		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
 		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		return prepareMergeTables(ctx, dest, mergeTableParams{
 			DestTable:    st.destTable,
