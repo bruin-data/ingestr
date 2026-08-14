@@ -173,15 +173,18 @@ func (p *Pipeline) preStagedUsable(
 
 	seen := make(map[string]bool, len(originalSourceSchema.Columns))
 	for _, col := range originalSourceSchema.Columns {
-		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+		// Compare the resolved destination name: naming conventions (e.g.
+		// snake_case) can normalize a source column onto a reserved column name,
+		// and the reserved value is injected under that normalized name.
+		final := finalName(col.Name)
+		if strings.EqualFold(final, naming.IngestrLoadedAtColumn) {
 			config.Debug("[PIPELINE] Pre-staged files unusable: source column %q collides with the load timestamp column", col.Name)
 			return false
 		}
-		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
+		if strings.EqualFold(final, naming.IngestrRunIDColumn) {
 			config.Debug("[PIPELINE] Pre-staged files unusable: source column %q collides with the run id column", col.Name)
 			return false
 		}
-		final := finalName(col.Name)
 		if keyTransform(col.Name) != final {
 			config.Debug("[PIPELINE] Pre-staged files unusable: column %q resolved to %q, staged as %q", col.Name, final, keyTransform(col.Name))
 			return false

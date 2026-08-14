@@ -275,6 +275,34 @@ func TestPreStagedUsableRejectsLoadTimestampCollision(t *testing.T) {
 	}
 }
 
+func TestPreStagedUsableRejectsRunIDCollision(t *testing.T) {
+	p := preStageTestPipeline(baselinePreStageConfig(), &mockDestination{})
+
+	src := simpleSchema(schema.Column{Name: "_INGESTR_RUN_ID", DataType: schema.TypeString})
+	if p.preStagedUsable(&preStageReport{}, identityTransform, src, simpleSchema()) {
+		t.Fatal("expected rejection when a source column collides with the run id column")
+	}
+}
+
+func TestPreStagedUsableRejectsNormalizedRunIDCollision(t *testing.T) {
+	p := preStageTestPipeline(baselinePreStageConfig(), &mockDestination{})
+	// The naming convention maps this source column onto the reserved run id
+	// column name, so the raw name never equals _ingestr_run_id but the staged
+	// destination name does.
+	p.columnRenamer = transformer.NewColumnRenamer(map[string]string{"ingestr run id": naming.IngestrRunIDColumn})
+	transform := func(name string) string {
+		if name == "ingestr run id" {
+			return naming.IngestrRunIDColumn
+		}
+		return name
+	}
+
+	src := simpleSchema(schema.Column{Name: "ingestr run id", DataType: schema.TypeString})
+	if p.preStagedUsable(&preStageReport{}, transform, src, simpleSchema()) {
+		t.Fatal("expected rejection when a normalized source column collides with the run id column")
+	}
+}
+
 func TestPreStagedUsableRejectsLegacyIngestrColumns(t *testing.T) {
 	p := preStageTestPipeline(baselinePreStageConfig(), &mockDestination{})
 	p.ingestrColumnFiller = schemaevolution.NewIngestrColumnFiller([]string{"_ingestr_extracted_at"})
