@@ -101,7 +101,9 @@ func ApplyContract(contract SchemaContract, comparison *SchemaComparison) *Contr
 }
 
 func isInternalAllowedChange(change SchemaChange) bool {
-	return change.Type == ChangeAddColumn && strings.EqualFold(change.ColumnName, naming.IngestrLoadedAtColumn)
+	return change.Type == ChangeAddColumn &&
+		(strings.EqualFold(change.ColumnName, naming.IngestrLoadedAtColumn) ||
+			strings.EqualFold(change.ColumnName, naming.IngestrRunIDColumn))
 }
 
 func isDiscardRowAllowedChange(change SchemaChange) bool {

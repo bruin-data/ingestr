@@ -43,6 +43,7 @@ func TestElasticsearchSourceToSQLite(t *testing.T) {
 	cfg.IncrementalStrategy = config.StrategyReplace
 	cfg.IncrementalStrategyExplicit = true
 	cfg.NoLoadTimestamp = true
+	cfg.NoRunID = true
 	cfg.Yes = true
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
@@ -153,6 +154,7 @@ func runElasticsearchDestinationPipeline(t *testing.T, ctx context.Context, sour
 	cfg.IncrementalStrategyExplicit = true
 	cfg.PrimaryKeys = []string{"id"}
 	cfg.NoLoadTimestamp = true
+	cfg.NoRunID = true
 	cfg.Yes = true
 	cfg.PageSize = 1
 	cfg.ExtractParallelism = 1

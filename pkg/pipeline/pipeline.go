@@ -31,6 +31,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/google/uuid"
 	"golang.org/x/term"
 )
 
@@ -428,11 +429,15 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		defer func() { tracker.Stop(retErr) }()
 	}
 
-	// The load timestamp is chosen before extract so that pre-staged load
-	// files (written during extract) and the replay path stamp the same value.
+	// Chosen before extract so pre-staged load files and the replay path stamp
+	// the same load timestamp and run id.
 	var loadTimestamp time.Time
 	if !p.config.NoLoadTimestamp && !p.config.Stream {
 		loadTimestamp = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	var runID string
+	if !p.config.NoRunID && !p.config.Stream {
+		runID = strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
 
 	// Check if source has known schema or needs inference
@@ -484,7 +489,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		// Schema inference path: read all data first. Buffer is opened later
 		config.Debug("[PIPELINE] Source has unknown schema, inferring from data...")
 		var preStage destination.PreStageWriter
-		preStage, preStageKeyTransform = p.maybeStartPreStage(ctx, preFetchStrategy, preFetchConfig.PrimaryKeys, loadTimestamp)
+		preStage, preStageKeyTransform = p.maybeStartPreStage(ctx, preFetchStrategy, preFetchConfig.PrimaryKeys, loadTimestamp, runID)
 		tableSchema, inferBuffer, preStagedData, preStageRpt, err = p.inferSchemaFromData(ctx, table, tracker, preStage, extractReadSchema)
 		defer func() {
 			if preStagedData != nil {
@@ -641,6 +646,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if !p.config.NoLoadTimestamp {
 		destSchema = addLoadTimestampColumn(destSchema)
 	}
+	if !p.config.NoRunID {
+		destSchema = addRunIDColumn(destSchema)
+	}
 
 	// Capture the schema before evolution: on incremental runs against an
 	// existing table, evolution replaces destSchema with FinalSchema, which is
@@ -675,6 +683,13 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	} else {
 		destSchema = addLoadTimestampColumn(destSchema)
 		fullSchema = addLoadTimestampColumn(fullSchema)
+	}
+	if p.config.NoRunID {
+		destSchema = removeRunIDColumn(destSchema)
+		fullSchema = removeRunIDColumn(fullSchema)
+	} else {
+		destSchema = addRunIDColumn(destSchema)
+		fullSchema = addRunIDColumn(fullSchema)
 	}
 
 	// Staging mirrors the destination schema, with staging-only CDC columns retained.
@@ -716,6 +731,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.PrimaryKeys = tableSchema.PrimaryKeys
 	resolvedConfig.IncrementalKey = tableSchema.IncrementalKey
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
+	resolvedConfig.RunID = runID
 
 	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
 
@@ -769,6 +785,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		loadTimestampTransformer = transformer.NewLoadTimestamp(loadTimestampColumnForSchema(ingestSchema), loadTimestamp)
 	}
 
+	var runIDTransformer *transformer.RunID
+	if !p.config.NoRunID && !p.config.Stream {
+		runIDTransformer = transformer.NewRunID(runIDColumnForSchema(ingestSchema), runID)
+	}
+
 	job := &strategy.IngestionJob{
 		Config:                 &resolvedConfig,
 		Table:                  table,
@@ -786,6 +807,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		ColumnMasker:           columnMasker,
 		WhitespaceTrimmer:      whitespaceTrimmer,
 		LoadTimestamp:          loadTimestampTransformer,
+		RunID:                  runIDTransformer,
 		SchemaAligner:          transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
 		EvolutionPlan:          evolutionPlan,
 		CDCStateManager:        cdcStateManager,
@@ -1428,6 +1450,15 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			tables[i].Schema = addLoadTimestampColumn(tables[i].Schema)
 		}
 	}
+	var runID string
+	if !p.config.NoRunID {
+		if !p.config.Stream {
+			runID = strings.ReplaceAll(uuid.NewString(), "-", "")
+		}
+		for i := range tables {
+			tables[i].Schema = addRunIDColumn(tables[i].Schema)
+		}
+	}
 
 	// A single predicate cannot apply across heterogeneous table schemas.
 	if strings.TrimSpace(p.config.IncrementalPredicate) != "" {
@@ -1463,6 +1494,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	resolvedConfig := *p.config
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
+	resolvedConfig.RunID = runID
 
 	display.PrintSummary(&resolvedConfig)
 
@@ -1594,6 +1626,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		loadTimestampTransformer = transformer.NewLoadTimestamp(loadTimestampColumnForSchema(nil), loadTimestamp)
 	}
 
+	var runIDTransformer *transformer.RunID
+	if !p.config.NoRunID && !p.config.Stream {
+		runIDTransformer = transformer.NewRunID(runIDColumnForSchema(nil), runID)
+	}
+
 	job := &strategy.MultiTableIngestionJob{
 		Config:            &resolvedConfig,
 		Source:            src,
@@ -1606,6 +1643,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		CDCStateManager:   cdcStateManager,
 		WhitespaceTrimmer: whitespaceTrimmer,
 		LoadTimestamp:     loadTimestampTransformer,
+		RunID:             runIDTransformer,
 		ColumnRenamers:    columnRenamers,
 		NormalizeTableInfo: func(ctx context.Context, table source.SourceTableInfo, destTable string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
 			return p.normalizeMultiTableInfo(ctx, table, destTable)
@@ -1901,7 +1939,8 @@ func (p *Pipeline) setupIngestrColumns(ctx context.Context, sourceSchema *schema
 	ingestrCols := naming.GetIngestrColumns(destSchema)
 	legacyCols := make([]string, 0, len(ingestrCols))
 	for _, colName := range ingestrCols {
-		if strings.EqualFold(colName, naming.IngestrLoadedAtColumn) {
+		if strings.EqualFold(colName, naming.IngestrLoadedAtColumn) ||
+			strings.EqualFold(colName, naming.IngestrRunIDColumn) {
 			continue
 		}
 		legacyCols = append(legacyCols, colName)
@@ -1966,6 +2005,41 @@ func removeLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
 	result.Columns = make([]schema.Column, 0, len(s.Columns))
 	for _, col := range s.Columns {
 		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			continue
+		}
+		result.Columns = append(result.Columns, col)
+	}
+	return &result
+}
+
+func addRunIDColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = append([]schema.Column{}, s.Columns...)
+
+	for i, col := range result.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
+			result.Columns[i] = runIDColumnWithName(col.Name, true)
+			return &result
+		}
+	}
+
+	result.Columns = append(result.Columns, runIDColumnWithName(naming.IngestrRunIDColumn, true))
+	return &result
+}
+
+func removeRunIDColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+
+	result := *s
+	result.Columns = make([]schema.Column, 0, len(s.Columns))
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
 			continue
 		}
 		result.Columns = append(result.Columns, col)
@@ -2095,6 +2169,25 @@ func loadTimestampColumnWithName(name string, nullable bool) schema.Column {
 	return schema.Column{
 		Name:     name,
 		DataType: schema.TypeTimestampTZ,
+		Nullable: nullable,
+	}
+}
+
+func runIDColumnForSchema(s *schema.TableSchema) schema.Column {
+	if s != nil {
+		for _, col := range s.Columns {
+			if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
+				return runIDColumnWithName(col.Name, true)
+			}
+		}
+	}
+	return runIDColumnWithName(naming.IngestrRunIDColumn, true)
+}
+
+func runIDColumnWithName(name string, nullable bool) schema.Column {
+	return schema.Column{
+		Name:     name,
+		DataType: schema.TypeString,
 		Nullable: nullable,
 	}
 }

@@ -274,13 +274,13 @@ func TestOracleStagingNamesPreserveQuotedSchemaSemantics(t *testing.T) {
 
 	for _, suffix := range []string{"staging", "merge", "stream"} {
 		t.Run(suffix, func(t *testing.T) {
-			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy)
+			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy, "")
 			require.True(t, strings.HasPrefix(quoteTable(quoted), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), quoted)
 
-			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy)
+			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy, "")
 			require.True(t, strings.HasPrefix(quoteTable(unquoted), `"APPUSER"."ORDERS_`+strings.ToUpper(suffix)+`_`), unquoted)
 
-			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy)
+			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy, "")
 			require.True(t, strings.HasPrefix(quoteTable(defaultSchema), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), defaultSchema)
 		})
 	}
@@ -292,7 +292,7 @@ func TestOracleStagingNamesEncodeQuotedTableDots(t *testing.T) {
 
 	for _, suffix := range []string{"staging", "merge", "stream"} {
 		t.Run(suffix, func(t *testing.T) {
-			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy)
+			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy, "")
 			require.NoError(t, tablename.TwoLevel("oracle").CheckName(staging))
 			parts := splitOracleIdentifiers(staging)
 			require.Len(t, parts, 2)

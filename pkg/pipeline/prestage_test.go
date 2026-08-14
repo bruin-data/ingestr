@@ -66,7 +66,7 @@ func TestMaybeStartPreStageHappyPath(t *testing.T) {
 	p := preStageTestPipeline(cfg, dest)
 
 	ts := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
-	writer, transform := p.maybeStartPreStage(context.Background(), config.StrategyMerge, []string{"_id"}, ts)
+	writer, transform := p.maybeStartPreStage(context.Background(), config.StrategyMerge, []string{"_id"}, ts, "run-1")
 	if writer == nil || transform == nil {
 		t.Fatal("expected pre-staging to start")
 	}
@@ -82,6 +82,12 @@ func TestMaybeStartPreStageHappyPath(t *testing.T) {
 	if !dest.lastOpts.LoadTimestamp.Equal(ts) {
 		t.Fatalf("LoadTimestamp = %v, want %v", dest.lastOpts.LoadTimestamp, ts)
 	}
+	if dest.lastOpts.RunIDColumn != naming.IngestrRunIDColumn {
+		t.Fatalf("RunIDColumn = %q", dest.lastOpts.RunIDColumn)
+	}
+	if dest.lastOpts.RunID != "run-1" {
+		t.Fatalf("RunID = %q, want run-1", dest.lastOpts.RunID)
+	}
 }
 
 func TestMaybeStartPreStageKeylessReplaceUsesStagingTable(t *testing.T) {
@@ -89,7 +95,7 @@ func TestMaybeStartPreStageKeylessReplaceUsesStagingTable(t *testing.T) {
 	dest := &mockPreStageDestination{writer: &mockPreStageWriter{}}
 	p := preStageTestPipeline(cfg, dest)
 
-	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyReplace, nil, time.Now())
+	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyReplace, nil, time.Now(), "run-1")
 	if writer == nil {
 		t.Fatal("expected pre-staging to start")
 	}
@@ -123,7 +129,7 @@ func TestMaybeStartPreStageGates(t *testing.T) {
 			dest := &mockPreStageDestination{writer: &mockPreStageWriter{}}
 			p := preStageTestPipeline(cfg, dest)
 
-			writer, _ := p.maybeStartPreStage(context.Background(), tc.strategy, []string{"_id"}, ts)
+			writer, _ := p.maybeStartPreStage(context.Background(), tc.strategy, []string{"_id"}, ts, "run-1")
 			if writer != nil {
 				t.Fatal("expected pre-staging to be skipped")
 			}
@@ -135,7 +141,7 @@ func TestMaybeStartPreStageSkipsNonPreStagerDestination(t *testing.T) {
 	cfg := baselinePreStageConfig()
 	p := preStageTestPipeline(cfg, &mockDestination{})
 
-	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyMerge, nil, time.Now())
+	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyMerge, nil, time.Now(), "run-1")
 	if writer != nil {
 		t.Fatal("expected pre-staging to be skipped for non-PreStager destination")
 	}
@@ -146,7 +152,7 @@ func TestMaybeStartPreStageSkipsWhenUnsupported(t *testing.T) {
 	dest := &mockPreStageDestination{err: destination.ErrPreStageUnsupported}
 	p := preStageTestPipeline(cfg, dest)
 
-	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyMerge, nil, time.Now())
+	writer, _ := p.maybeStartPreStage(context.Background(), config.StrategyMerge, nil, time.Now(), "run-1")
 	if writer != nil {
 		t.Fatal("expected pre-staging to be skipped when destination reports unsupported")
 	}
@@ -266,6 +272,33 @@ func TestPreStagedUsableRejectsLoadTimestampCollision(t *testing.T) {
 	src := simpleSchema(schema.Column{Name: "_INGESTR_LOADED_AT", DataType: schema.TypeString})
 	if p.preStagedUsable(&preStageReport{}, identityTransform, src, simpleSchema()) {
 		t.Fatal("expected rejection when a source column collides with the load timestamp column")
+	}
+}
+
+func TestPreStagedUsableRejectsRunIDCollision(t *testing.T) {
+	p := preStageTestPipeline(baselinePreStageConfig(), &mockDestination{})
+
+	src := simpleSchema(schema.Column{Name: "_INGESTR_RUN_ID", DataType: schema.TypeString})
+	if p.preStagedUsable(&preStageReport{}, identityTransform, src, simpleSchema()) {
+		t.Fatal("expected rejection when a source column collides with the run id column")
+	}
+}
+
+func TestPreStagedUsableRejectsNormalizedRunIDCollision(t *testing.T) {
+	p := preStageTestPipeline(baselinePreStageConfig(), &mockDestination{})
+	// A naming convention maps this column onto the reserved run id name: the raw
+	// name differs from _ingestr_run_id but the staged destination name collides.
+	p.columnRenamer = transformer.NewColumnRenamer(map[string]string{"ingestr run id": naming.IngestrRunIDColumn})
+	transform := func(name string) string {
+		if name == "ingestr run id" {
+			return naming.IngestrRunIDColumn
+		}
+		return name
+	}
+
+	src := simpleSchema(schema.Column{Name: "ingestr run id", DataType: schema.TypeString})
+	if p.preStagedUsable(&preStageReport{}, transform, src, simpleSchema()) {
+		t.Fatal("expected rejection when a normalized source column collides with the run id column")
 	}
 }
 

@@ -20,7 +20,7 @@ const maxStagingTableNameLen = 60
 
 const encodedStagingIdentifierPrefix = "_ingestr_hex_"
 
-func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string {
+func GenerateStagingTableName(targetTable, suffix, stagingDataset, runID string) string {
 	catalog, originSchema, tableName := splitCatalogSchemaTable(targetTable)
 	catalogRef, _, _ := splitCatalogSchemaTableRaw(targetTable)
 
@@ -38,14 +38,14 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset string) string
 	if catalogRef != "" {
 		catalog = catalogRef
 	}
-	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
+	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix, runID))
 }
 
-func managedStagingTableName(dest destination.Destination, targetTable, suffix, stagingDataset string) string {
+func managedStagingTableName(dest destination.Destination, targetTable, suffix, stagingDataset, runID string) string {
 	if provider, ok := dest.(destination.ManagedStagingPolicyProvider); ok {
-		return GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset, provider.ManagedStagingPolicy())
+		return GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset, provider.ManagedStagingPolicy(), runID)
 	}
-	return GenerateStagingTableName(targetTable, suffix, stagingDataset)
+	return GenerateStagingTableName(targetTable, suffix, stagingDataset, runID)
 }
 
 func managedCDCStateTableName(dest destination.Destination, stateTable, _ string) string {
@@ -72,7 +72,7 @@ func managedCDCStateTableName(dest destination.Destination, stateTable, _ string
 	return qualifyCatalog(catalog, fmt.Sprintf("%s.%s", stateSchema, stateTable))
 }
 
-func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy) string {
+func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy, runID string) string {
 	policy = normaliseReplaceStagingPolicy(policy)
 	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)
 	catalogRef, targetSchemaRef, _ := splitCatalogSchemaTableRaw(targetTable)
@@ -109,7 +109,7 @@ func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string,
 	}
 	embeddedName := syntheticStagingIdentifier(embeddedParts...)
 
-	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix))
+	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix, runID))
 }
 
 func defaultReplaceStagingPolicy() destination.ReplaceStagingPolicy {
@@ -201,9 +201,17 @@ func isUnambiguousLegacyStagingIdentifier(candidate string, parts []string) bool
 	return true
 }
 
-func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
-	nano := fmt.Sprintf("%d", time.Now().UnixNano())
-	tail := fmt.Sprintf("_%s_%s", suffix, nano)
+// stagingUniqueToken makes a managed staging table name unique: the run id
+// (hyphens stripped) so rows match their staging table, else a nanosecond stamp.
+func stagingUniqueToken(runID string) string {
+	if token := strings.ReplaceAll(runID, "-", ""); token != "" {
+		return token
+	}
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+func buildStagingTableName(stagingSchema, embeddedName, suffix, runID string) string {
+	tail := fmt.Sprintf("_%s_%s", suffix, stagingUniqueToken(runID))
 	// If the name would exceed the per-engine identifier limit, hash the
 	// embedded portion so the suffix and unique timestamp still fit. We keep a
 	// readable prefix plus an 8-char hash of the original embedded name.
@@ -225,8 +233,8 @@ func buildStagingTableName(stagingSchema, embeddedName, suffix string) string {
 
 // GenerateNormalisedStagingTableName returns a transient table name in the
 // TARGET table's own catalog/schema (not the staging schema).
-func GenerateNormalisedStagingTableName(targetTable, stagingDataset string) string {
-	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset)
+func GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID string) string {
+	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset, runID)
 	stagedParts := tablename.Split(staged)
 	bare := stagedParts[len(stagedParts)-1]
 	// Re-qualify the transient table in the target's own catalog/schema.

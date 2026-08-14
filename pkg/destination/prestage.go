@@ -28,6 +28,11 @@ type PreStageOptions struct {
 	LoadTimestampColumn string
 	LoadTimestamp       time.Time
 
+	// RunIDColumn, when non-empty, is injected into every staged row with
+	// RunID as its value.
+	RunIDColumn string
+	RunID       string
+
 	// StagingTable indicates the write phase targets a fresh staging table.
 	// Destinations may use it to pick file chunking policies.
 	StagingTable bool

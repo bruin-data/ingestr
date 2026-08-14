@@ -42,6 +42,7 @@ func (p *Pipeline) maybeStartPreStage(
 	strategy config.IncrementalStrategy,
 	_ []string,
 	loadTimestamp time.Time,
+	runID string,
 ) (destination.PreStageWriter, func(string) string) {
 	if p.config.DisablePreStaging {
 		return nil, nil
@@ -75,6 +76,11 @@ func (p *Pipeline) maybeStartPreStage(
 		loadTimestampColumn = naming.IngestrLoadedAtColumn
 	}
 
+	runIDColumn := ""
+	if !p.config.NoRunID {
+		runIDColumn = naming.IngestrRunIDColumn
+	}
+
 	usesStagingTable := strategy == config.StrategyMerge ||
 		strategy == config.StrategyReplace
 
@@ -83,6 +89,8 @@ func (p *Pipeline) maybeStartPreStage(
 		KeyTransform:        keyTransform,
 		LoadTimestampColumn: loadTimestampColumn,
 		LoadTimestamp:       loadTimestamp,
+		RunIDColumn:         runIDColumn,
+		RunID:               runID,
 		StagingTable:        usesStagingTable,
 		StagingBucket:       p.config.StagingBucket,
 		LoaderFileSize:      p.config.LoaderFileSize,
@@ -165,11 +173,17 @@ func (p *Pipeline) preStagedUsable(
 
 	seen := make(map[string]bool, len(originalSourceSchema.Columns))
 	for _, col := range originalSourceSchema.Columns {
-		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+		// Compare the resolved destination name: a naming convention can normalize
+		// a source column onto a reserved name, where the value is then injected.
+		final := finalName(col.Name)
+		if strings.EqualFold(final, naming.IngestrLoadedAtColumn) {
 			config.Debug("[PIPELINE] Pre-staged files unusable: source column %q collides with the load timestamp column", col.Name)
 			return false
 		}
-		final := finalName(col.Name)
+		if strings.EqualFold(final, naming.IngestrRunIDColumn) {
+			config.Debug("[PIPELINE] Pre-staged files unusable: source column %q collides with the run id column", col.Name)
+			return false
+		}
 		if keyTransform(col.Name) != final {
 			config.Debug("[PIPELINE] Pre-staged files unusable: column %q resolved to %q, staged as %q", col.Name, final, keyTransform(col.Name))
 			return false

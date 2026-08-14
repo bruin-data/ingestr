@@ -271,6 +271,27 @@ func TestBuildBigQuerySchema_LoadTimestampIsNullable(t *testing.T) {
 	}
 }
 
+func TestBuildBigQuerySchema_RunIDIsNullableString(t *testing.T) {
+	result := BuildBigQuerySchema(&schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: naming.IngestrRunIDColumn, DataType: schema.TypeString, Nullable: true},
+		},
+	})
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 field, got %d", len(result))
+	}
+	if result[0].Name != naming.IngestrRunIDColumn {
+		t.Fatalf("field name = %s, want %s", result[0].Name, naming.IngestrRunIDColumn)
+	}
+	if result[0].Type != bigquery.StringFieldType {
+		t.Fatalf("field type = %v, want StringFieldType", result[0].Type)
+	}
+	if result[0].Required {
+		t.Fatal("run id field should not be required")
+	}
+}
+
 func TestBuildTableMetadata(t *testing.T) {
 	tableSchema := &schema.TableSchema{
 		Columns: []schema.Column{

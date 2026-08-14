@@ -191,6 +191,86 @@ func TestLoadTimestamp_ReplacesExistingColumnIdempotently(t *testing.T) {
 	}
 }
 
+func TestRunID_AddsSingleValue(t *testing.T) {
+	allocator := memory.DefaultAllocator
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+
+	idBuilder := array.NewInt64Builder(allocator)
+	defer idBuilder.Release()
+	idBuilder.AppendValues([]int64{1, 2, 3}, nil)
+	idArray := idBuilder.NewArray()
+	defer idArray.Release()
+
+	inputBatch := array.NewRecordBatch(inputSchema, []arrow.Array{idArray}, 3)
+	defer inputBatch.Release()
+
+	transformer := NewRunID(schema.Column{
+		Name:     "_ingestr_run_id",
+		DataType: schema.TypeString,
+		Nullable: true,
+	}, "run-123")
+
+	result, err := transformer.Transform(inputBatch)
+	require.NoError(t, err)
+	defer result.Release()
+
+	assert.Equal(t, int64(2), result.NumCols())
+	assert.Equal(t, "_ingestr_run_id", result.ColumnName(1))
+
+	runID := result.Column(1).(*array.String)
+	for i := 0; i < 3; i++ {
+		assert.False(t, runID.IsNull(i))
+		assert.Equal(t, "run-123", runID.Value(i))
+	}
+}
+
+func TestRunID_ReplacesExistingColumnIdempotently(t *testing.T) {
+	allocator := memory.DefaultAllocator
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "_ingestr_run_id", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	idBuilder := array.NewInt64Builder(allocator)
+	defer idBuilder.Release()
+	idBuilder.AppendValues([]int64{1, 2}, nil)
+	idArray := idBuilder.NewArray()
+	defer idArray.Release()
+
+	existingBuilder := array.NewStringBuilder(allocator)
+	defer existingBuilder.Release()
+	existingBuilder.AppendValues([]string{"old", "old"}, nil)
+	existingArray := existingBuilder.NewArray()
+	defer existingArray.Release()
+
+	inputBatch := array.NewRecordBatch(inputSchema, []arrow.Array{idArray, existingArray}, 2)
+	defer inputBatch.Release()
+
+	transformer := NewRunID(schema.Column{
+		Name:     "_INGESTR_RUN_ID",
+		DataType: schema.TypeString,
+		Nullable: true,
+	}, "run-456")
+
+	first, err := transformer.Transform(inputBatch)
+	require.NoError(t, err)
+	defer first.Release()
+
+	second, err := transformer.Transform(first)
+	require.NoError(t, err)
+	defer second.Release()
+
+	assert.Equal(t, int64(2), second.NumCols())
+	assert.Equal(t, "_INGESTR_RUN_ID", second.ColumnName(1))
+
+	runID := second.Column(1).(*array.String)
+	for i := 0; i < 2; i++ {
+		assert.Equal(t, "run-456", runID.Value(i))
+	}
+}
+
 func TestChainedTransformer(t *testing.T) {
 	allocator := memory.DefaultAllocator
 

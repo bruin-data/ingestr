@@ -205,6 +205,11 @@ func IngestCommand() *cli.Command {
 				Usage:   "Disable adding the _ingestr_loaded_at load timestamp column",
 				Sources: cli.EnvVars("NO_LOAD_TIMESTAMP", "INGESTR_NO_LOAD_TIMESTAMP"),
 			},
+			&cli.BoolFlag{
+				Name:    "no-run-id",
+				Usage:   "Disable adding the _ingestr_run_id run identifier column",
+				Sources: cli.EnvVars("NO_RUN_ID", "INGESTR_NO_RUN_ID"),
+			},
 			&cli.StringFlag{
 				Name:    "pipelines-dir",
 				Usage:   "The path to store pipeline metadata",
@@ -312,6 +317,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Mask = c.StringSlice("mask")
 	cfg.TrimWhitespace = c.Bool("trim-whitespace")
 	cfg.NoLoadTimestamp = c.Bool("no-load-timestamp")
+	cfg.NoRunID = c.Bool("no-run-id")
 	cfg.PipelinesDir = c.String("pipelines-dir")
 	cfg.StagingBucket = c.String("staging-bucket")
 	cfg.StagingDataset = c.String("staging-dataset")
@@ -429,6 +435,7 @@ func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
 	properties["partitioned_extract"] = cfg.ExtractPartitionBy != ""
 	properties["trim_whitespace"] = cfg.TrimWhitespace
 	properties["load_timestamp_enabled"] = !cfg.NoLoadTimestamp
+	properties["run_id_enabled"] = !cfg.NoRunID
 	properties["strategy_selection"] = "default"
 	if cfg.IncrementalStrategyExplicit {
 		properties["strategy_selection"] = "explicit"

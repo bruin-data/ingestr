@@ -8,6 +8,35 @@ import (
 	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
+func TestStagingUniqueToken(t *testing.T) {
+	t.Run("uses run id with hyphens stripped", func(t *testing.T) {
+		got := stagingUniqueToken("c0cb3a69-242d-4d87-8c88-4c55fd85f131")
+		if got != "c0cb3a69242d4d878c884c55fd85f131" {
+			t.Fatalf("stagingUniqueToken() = %q", got)
+		}
+	})
+
+	t.Run("falls back to numeric token when no run id", func(t *testing.T) {
+		got := stagingUniqueToken("")
+		if got == "" {
+			t.Fatal("expected a non-empty fallback token")
+		}
+		for i := 0; i < len(got); i++ {
+			if got[i] < '0' || got[i] > '9' {
+				t.Fatalf("fallback token %q is not all digits", got)
+			}
+		}
+	})
+}
+
+func TestGenerateStagingTableNameEmbedsRunID(t *testing.T) {
+	runID := "c0cb3a69-242d-4d87-8c88-4c55fd85f131"
+	got := GenerateStagingTableName("analytics.users", "merge", "", runID)
+	if !strings.HasSuffix(got, "_merge_c0cb3a69242d4d878c884c55fd85f131") {
+		t.Fatalf("staging name %q does not end with the run id token", got)
+	}
+}
+
 func TestGenerateStagingTableName(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -33,7 +62,7 @@ func TestGenerateStagingTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateStagingTableName(tt.targetTable, tt.suffix, tt.stagingDataset)
+			got := GenerateStagingTableName(tt.targetTable, tt.suffix, tt.stagingDataset, "")
 			if !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Fatalf("GenerateStagingTableName(%q, %q, %q) = %q, want prefix %q",
 					tt.targetTable, tt.suffix, tt.stagingDataset, got, tt.wantPrefix)
@@ -90,12 +119,12 @@ func TestQuotedDotsRemainPlacementOnlyAcrossStagingPaths(t *testing.T) {
 		wantSchema string
 		wantSuffix string
 	}{
-		{name: "regular managed schema", got: GenerateStagingTableName(target, "merge", ""), wantSchema: DefaultStagingSchema, wantSuffix: "_merge_"},
-		{name: "replace target schema", got: GenerateReplaceStagingTableName(target, "staging", "", targetPolicy), wantSchema: `"appUser"`, wantSuffix: "_staging_"},
-		{name: "replace managed schema", got: GenerateReplaceStagingTableName(target, "staging", "", managedPolicy), wantSchema: DefaultStagingSchema, wantSuffix: "_staging_"},
-		{name: "normalised target schema", got: GenerateNormalisedStagingTableName(target, ""), wantSchema: `"appUser"`, wantSuffix: "_staging_normalised_"},
-		{name: "merge target schema", got: managedStagingTableName(targetDest, target, "merge", ""), wantSchema: `"appUser"`, wantSuffix: "_merge_"},
-		{name: "streaming CDC target schema", got: managedStagingTableName(targetDest, target, "stream", ""), wantSchema: `"appUser"`, wantSuffix: "_stream_"},
+		{name: "regular managed schema", got: GenerateStagingTableName(target, "merge", "", ""), wantSchema: DefaultStagingSchema, wantSuffix: "_merge_"},
+		{name: "replace target schema", got: GenerateReplaceStagingTableName(target, "staging", "", targetPolicy, ""), wantSchema: `"appUser"`, wantSuffix: "_staging_"},
+		{name: "replace managed schema", got: GenerateReplaceStagingTableName(target, "staging", "", managedPolicy, ""), wantSchema: DefaultStagingSchema, wantSuffix: "_staging_"},
+		{name: "normalised target schema", got: GenerateNormalisedStagingTableName(target, "", ""), wantSchema: `"appUser"`, wantSuffix: "_staging_normalised_"},
+		{name: "merge target schema", got: managedStagingTableName(targetDest, target, "merge", "", ""), wantSchema: `"appUser"`, wantSuffix: "_merge_"},
+		{name: "streaming CDC target schema", got: managedStagingTableName(targetDest, target, "stream", "", ""), wantSchema: `"appUser"`, wantSuffix: "_stream_"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -117,7 +146,7 @@ func TestQuotedDotsRemainPlacementOnlyAcrossStagingPaths(t *testing.T) {
 }
 
 func TestQuotedCatalogAndStagingSchemaRemainPlacementComponents(t *testing.T) {
-	got := GenerateStagingTableName(`"catalog.name"."app.schema"."order.events"`, "merge", `"stage.schema"`)
+	got := GenerateStagingTableName(`"catalog.name"."app.schema"."order.events"`, "merge", `"stage.schema"`, "")
 	parts := tablename.SplitRaw(got)
 	if len(parts) != 3 {
 		t.Fatalf("staging table %q has %d components, want catalog.schema.table", got, len(parts))
@@ -190,7 +219,7 @@ func TestGenerateReplaceStagingTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy)
+			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy, "")
 			if !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Fatalf("GenerateReplaceStagingTableName(%q, %q) = %q, want prefix %q",
 					tt.targetTable, tt.stagingDataset, got, tt.wantPrefix)
@@ -231,7 +260,7 @@ func TestManagedStagingTableName_UsesDestinationPolicy(t *testing.T) {
 		},
 	}
 
-	got := managedStagingTableName(dest, "users", "merge", "")
+	got := managedStagingTableName(dest, "users", "merge", "", "")
 	if !strings.HasPrefix(got, "app.users_merge_") {
 		t.Fatalf("managedStagingTableName() = %q, want prefix %q", got, "app.users_merge_")
 	}
@@ -246,7 +275,7 @@ func TestManagedStagingTableName_ExplicitDatasetOverridesDestinationPolicy(t *te
 		},
 	}
 
-	got := managedStagingTableName(dest, "analytics.users", "merge", "scratch")
+	got := managedStagingTableName(dest, "analytics.users", "merge", "scratch", "")
 	if !strings.HasPrefix(got, "scratch.analytics__users_merge_") {
 		t.Fatalf("managedStagingTableName() = %q, want prefix %q", got, "scratch.analytics__users_merge_")
 	}
@@ -266,9 +295,9 @@ func TestOracleStyleQuotedSchemaSurvivesEveryManagedStagingPath(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "replace", got: replaceStagingTableName(dest, `"appUser".orders`, ""), want: `"appUser".orders_staging_`},
-		{name: "merge", got: managedStagingTableName(dest, `"appUser".orders`, "merge", ""), want: `"appUser".orders_merge_`},
-		{name: "managed CDC stream", got: managedStagingTableName(dest, `"appUser".orders`, "stream", ""), want: `"appUser".orders_stream_`},
+		{name: "replace", got: replaceStagingTableName(dest, `"appUser".orders`, "", ""), want: `"appUser".orders_staging_`},
+		{name: "merge", got: managedStagingTableName(dest, `"appUser".orders`, "merge", "", ""), want: `"appUser".orders_merge_`},
+		{name: "managed CDC stream", got: managedStagingTableName(dest, `"appUser".orders`, "stream", "", ""), want: `"appUser".orders_stream_`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

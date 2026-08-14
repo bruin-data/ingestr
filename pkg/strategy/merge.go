@@ -178,7 +178,7 @@ func (s *MergeStrategy) RequiresIncrementalKey() bool {
 
 func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Generate staging table name
-	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "merge", job.Config.StagingDataset)
+	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "merge", job.Config.StagingDataset, job.Config.RunID)
 	output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	isCDC := hasCDCColumns(job.Schema)
 	if isCDC {
@@ -403,7 +403,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				return
 			}
 
-			stagingTable := managedStagingTableName(job.Destination, destTable, "merge", job.Config.StagingDataset)
+			stagingTable := managedStagingTableName(job.Destination, destTable, "merge", job.Config.StagingDataset, job.Config.RunID)
 
 			if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
 				DestTable:    destTable,

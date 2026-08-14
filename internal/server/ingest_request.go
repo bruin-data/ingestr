@@ -40,6 +40,7 @@ type RunJobRequest struct {
 	Mask                     []string `json:"mask"`
 	TrimWhitespace           bool     `json:"trimWhitespace"`
 	NoLoadTimestamp          bool     `json:"noLoadTimestamp"`
+	NoRunID                  bool     `json:"noRunId"`
 
 	PipelinesDir     string `json:"pipelinesDir"`
 	StagingBucket    string `json:"stagingBucket"`
@@ -106,6 +107,7 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendStringSlice("mask", r.Mask)
 	appendBool("trim-whitespace", r.TrimWhitespace)
 	appendBool("no-load-timestamp", r.NoLoadTimestamp)
+	appendBool("no-run-id", r.NoRunID)
 	appendString("pipelines-dir", r.PipelinesDir)
 	appendString("staging-bucket", r.StagingBucket)
 	appendString("staging-dataset", r.StagingDataset)

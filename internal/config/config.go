@@ -81,6 +81,11 @@ type IngestConfig struct {
 	Mask              []string
 	TrimWhitespace    bool
 	NoLoadTimestamp   bool
+	NoRunID           bool
+
+	// RunID is stamped into _ingestr_run_id and embedded in managed staging
+	// table names. Runtime-populated; empty when run id tracking is disabled.
+	RunID string
 
 	PipelinesDir   string
 	StagingBucket  string

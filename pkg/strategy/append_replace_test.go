@@ -113,6 +113,91 @@ func TestIngestionJob_GetRecords_AddsSameLoadTimestampToEveryBatch(t *testing.T)
 	}
 }
 
+func TestIngestionJob_GetRecords_AddsSameRunIDToEveryBatch(t *testing.T) {
+	job, _, _ := minimalJob()
+	job.BufferedRecords = mustClosedRecords(
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)},
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3}, nil)},
+	)
+
+	job.RunID = transformer.NewRunID(schema.Column{
+		Name:     "_ingestr_run_id",
+		DataType: schema.TypeString,
+		Nullable: true,
+	}, "run-abc")
+
+	records, err := job.GetRecords(context.Background(), source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("GetRecords returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		result := <-records
+		if result.Err != nil {
+			t.Fatalf("record %d returned error: %v", i, result.Err)
+		}
+		if result.Batch == nil {
+			t.Fatalf("record %d batch is nil", i)
+		}
+		if got := result.Batch.ColumnName(1); got != "_ingestr_run_id" {
+			t.Fatalf("record %d column 1 = %q, want _ingestr_run_id", i, got)
+		}
+		runID := result.Batch.Column(1).(*array.String)
+		for row := 0; row < int(result.Batch.NumRows()); row++ {
+			if got := runID.Value(row); got != "run-abc" {
+				t.Fatalf("record %d row %d run id = %q, want run-abc", i, row, got)
+			}
+		}
+		result.Batch.Release()
+	}
+
+	if _, ok := <-records; ok {
+		t.Fatal("records channel still open after two batches")
+	}
+}
+
+func TestMultiTableIngestionJob_ApplyBatchTransformation_AddsSameRunID(t *testing.T) {
+	job := &MultiTableIngestionJob{
+		RunID: transformer.NewRunID(schema.Column{
+			Name:     "_ingestr_run_id",
+			DataType: schema.TypeString,
+			Nullable: true,
+		}, "run-mt"),
+	}
+	in := mustClosedRecords(
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)},
+		source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3}, nil)},
+	)
+
+	out := job.ApplyBatchTransformation(context.Background(), in)
+	count := 0
+	for result := range out {
+		require.NoError(t, result.Err)
+		require.NotNil(t, result.Batch)
+		require.Equal(t, "_ingestr_run_id", result.Batch.ColumnName(1))
+		col := result.Batch.Column(1).(*array.String)
+		for row := 0; row < int(result.Batch.NumRows()); row++ {
+			require.Equal(t, "run-mt", col.Value(row))
+		}
+		result.Batch.Release()
+		count++
+	}
+	require.Equal(t, 2, count)
+}
+
+func TestMultiTableIngestionJob_ApplyBatchTransformation_NoRunID(t *testing.T) {
+	job := &MultiTableIngestionJob{} // RunID nil => no run id column added
+
+	in := mustClosedRecords(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1}, nil)})
+	out := job.ApplyBatchTransformation(context.Background(), in)
+
+	result := <-out
+	require.NoError(t, result.Err)
+	require.Equal(t, int64(1), result.Batch.NumCols(), "no run id column should be added")
+	require.Equal(t, "id", result.Batch.ColumnName(0))
+	result.Batch.Release()
+}
+
 func TestAppendStrategy_Execute_HappyPath(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.LoaderFileSize = 321

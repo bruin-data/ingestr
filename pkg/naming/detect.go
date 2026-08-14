@@ -10,6 +10,7 @@ import (
 const (
 	IngestrColumnPrefix   = "_dlt_"
 	IngestrLoadedAtColumn = "_ingestr_loaded_at"
+	IngestrRunIDColumn    = "_ingestr_run_id"
 )
 
 // Common ingestr metadata columns
@@ -24,7 +25,8 @@ var IngestrMetadataColumns = []string{
 // IsIngestrColumn returns true if the column name is an ingestr metadata column.
 func IsIngestrColumn(name string) bool {
 	return strings.HasPrefix(strings.ToLower(name), IngestrColumnPrefix) ||
-		strings.EqualFold(name, IngestrLoadedAtColumn)
+		strings.EqualFold(name, IngestrLoadedAtColumn) ||
+		strings.EqualFold(name, IngestrRunIDColumn)
 }
 
 // HasIngestrColumns returns true if the schema contains any ingestr metadata columns.

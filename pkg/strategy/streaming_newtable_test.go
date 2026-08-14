@@ -181,7 +181,7 @@ func TestStreaming_PassesPreparedTablesToReadAll(t *testing.T) {
 		records: records,
 	}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    &fakeDestination{},
 		Tables:         src.tables,
@@ -313,7 +313,7 @@ func TestStreaming_NewTableCollisionFailsBeforePrepare(t *testing.T) {
 	dest := &fakeDestination{}
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{startup}, records: records}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    dest,
 		Tables:         src.tables,
@@ -350,7 +350,7 @@ func TestStreaming_NewTablePhysicalAliasClaimFailsBeforePrepare(t *testing.T) {
 
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{startup}, records: records}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    dest,
 		Tables:         src.tables,
@@ -398,7 +398,7 @@ func TestStreaming_NewTableExistingUnprovenTargetFailsBeforeSideEffects(t *testi
 	close(records)
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{newTableInfo(startup)}, records: records}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    dest,
 		Tables:         src.tables,
@@ -458,7 +458,7 @@ func TestStreaming_NewTableCompletedStateAuthorizesReplacement(t *testing.T) {
 	close(records)
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{newTableInfo(startup)}, records: records}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    dest,
 		Tables:         src.tables,
@@ -513,7 +513,7 @@ func TestStreaming_NewTableCompletedStateValidatesExistingMergeTargetPrimaryKey(
 	close(records)
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{newTableInfo(startup)}, records: records}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    dest,
 		Tables:         src.tables,
@@ -549,7 +549,7 @@ func TestStreaming_NewTableAbsentTargetCanBeClaimedAndPrepared(t *testing.T) {
 	close(records)
 	src := &announcingMultiTableSource{tables: []source.SourceTableInfo{newTableInfo(startup)}, records: records}
 	job := &MultiTableIngestionJob{
-		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, FlushInterval: time.Hour, FlushRecords: 1},
+		Config:         &config.IngestConfig{FullRefresh: true, NoLoadTimestamp: true, NoRunID: true, FlushInterval: time.Hour, FlushRecords: 1},
 		Source:         src,
 		Destination:    dest,
 		Tables:         src.tables,

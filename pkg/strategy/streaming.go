@@ -15,6 +15,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -204,6 +205,9 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		if !job.Config.NoLoadTimestamp {
 			ti.Schema = withLoadTimestampColumn(ti.Schema)
 		}
+		if !job.Config.NoRunID {
+			ti.Schema = withRunIDColumn(ti.Schema)
+		}
 		if ti.Schema == nil {
 			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
 		}
@@ -309,7 +313,7 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
+	st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
 	output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        st.stagingTable,
@@ -356,6 +360,26 @@ func withLoadTimestampColumn(s *schema.TableSchema) *schema.TableSchema {
 	return &out
 }
 
+// withRunIDColumn mirrors the pipeline's _ingestr_run_id decoration for tables
+// discovered mid-stream, so late arrivals match the startup tables.
+func withRunIDColumn(s *schema.TableSchema) *schema.TableSchema {
+	if s == nil {
+		return nil
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
+			return s
+		}
+	}
+	out := *s
+	out.Columns = append(append([]schema.Column{}, s.Columns...), schema.Column{
+		Name:     naming.IngestrRunIDColumn,
+		DataType: schema.TypeString,
+		Nullable: true,
+	})
+	return &out
+}
+
 // prepareTable sets up the destination (and staging, for merge) tables for one
 // stream table and records the staging name on the state.
 func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.Destination, cfg *config.IngestConfig, st *streamTableState) error {
@@ -367,7 +391,7 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 			// (stagingTable stays empty). See isAppendOnlyCDCTable in merge.go.
 			return prepareAppendOnlyCDCTable(ctx, dest, st.destTable, st.schema)
 		}
-		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset)
+		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
 		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		return prepareMergeTables(ctx, dest, mergeTableParams{
 			DestTable:    st.destTable,
@@ -738,6 +762,9 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	if !l.cfg.NoLoadTimestamp {
 		newSchema = withLoadTimestampColumn(newSchema)
 	}
+	if !l.cfg.NoRunID {
+		newSchema = withRunIDColumn(newSchema)
+	}
 	if st.schema.SameColumnShape(newSchema) && sameColumnNullability(st.schema, newSchema) {
 		return nil
 	}
@@ -901,6 +928,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 	start := time.Now()
 	loadTimestamp := start.UTC().Truncate(time.Microsecond)
+	runID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	boundSourceTables := make(map[string]string)
 	if l.opts.StateManager != nil {
 		for recordTable, st := range l.tables {
@@ -984,6 +1012,9 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
+		}
+		if col, ok := runIDColumn(st.schema); ok {
+			records = transformer.Wrap(records, transformer.NewRunID(col, runID))
 		}
 		var bytes uint64
 		records = countRecordBatchBytes(records, &bytes)
@@ -1342,6 +1373,18 @@ func loadTimestampColumn(s *schema.TableSchema) (schema.Column, bool) {
 	}
 	for _, col := range s.Columns {
 		if strings.EqualFold(col.Name, naming.IngestrLoadedAtColumn) {
+			return col, true
+		}
+	}
+	return schema.Column{}, false
+}
+
+func runIDColumn(s *schema.TableSchema) (schema.Column, bool) {
+	if s == nil {
+		return schema.Column{}, false
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, naming.IngestrRunIDColumn) {
 			return col, true
 		}
 	}
