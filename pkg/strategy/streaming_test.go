@@ -305,6 +305,129 @@ func streamTestSchemaWithLoadTimestamp() *schema.TableSchema {
 	return &result
 }
 
+func streamTestSchemaWithRunID() *schema.TableSchema {
+	s := streamTestSchema()
+	result := *s
+	result.Columns = append([]schema.Column{}, s.Columns...)
+	result.Columns = append(result.Columns, schema.Column{
+		Name:     naming.IngestrRunIDColumn,
+		DataType: schema.TypeString,
+		Nullable: true,
+	})
+	return &result
+}
+
+type runIDCapturingDest struct {
+	*fakeDestination
+	mu          sync.Mutex
+	writeRunIDs [][]string
+}
+
+func (d *runIDCapturingDest) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	d.fakeDestination.mu.Lock()
+	d.calls = append(d.calls, "WriteParallel")
+	d.writeCalls = append(d.writeCalls, opts)
+	writeErr := d.writeErr
+	d.fakeDestination.mu.Unlock()
+
+	var ids []string
+	for result := range records {
+		if result.Batch != nil {
+			values, err := runIDValues(result.Batch)
+			if err != nil {
+				result.Batch.Release()
+				return err
+			}
+			ids = append(ids, values...)
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+
+	d.mu.Lock()
+	d.writeRunIDs = append(d.writeRunIDs, ids)
+	d.mu.Unlock()
+	return writeErr
+}
+
+func (d *runIDCapturingDest) capturedRunIDs() [][]string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	out := make([][]string, len(d.writeRunIDs))
+	for i, values := range d.writeRunIDs {
+		out[i] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func runIDValues(batch arrow.RecordBatch) ([]string, error) {
+	idx := -1
+	for i := 0; i < int(batch.NumCols()); i++ {
+		if strings.EqualFold(batch.ColumnName(i), naming.IngestrRunIDColumn) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("missing %s column", naming.IngestrRunIDColumn)
+	}
+
+	col, ok := batch.Column(idx).(*array.String)
+	if !ok {
+		return nil, fmt.Errorf("%s column is %T, want *array.String", naming.IngestrRunIDColumn, batch.Column(idx))
+	}
+
+	values := make([]string, int(batch.NumRows()))
+	for row := 0; row < int(batch.NumRows()); row++ {
+		values[row] = col.Value(row)
+	}
+	return values, nil
+}
+
+type columnSetCapturingDest struct {
+	*fakeDestination
+	mu      sync.Mutex
+	columns [][]string
+}
+
+func (d *columnSetCapturingDest) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	d.fakeDestination.mu.Lock()
+	d.calls = append(d.calls, "WriteParallel")
+	d.writeCalls = append(d.writeCalls, opts)
+	writeErr := d.writeErr
+	d.fakeDestination.mu.Unlock()
+
+	for result := range records {
+		if result.Batch != nil {
+			var names []string
+			for i := 0; i < int(result.Batch.NumCols()); i++ {
+				names = append(names, result.Batch.ColumnName(i))
+			}
+			d.mu.Lock()
+			d.columns = append(d.columns, names)
+			d.mu.Unlock()
+			result.Batch.Release()
+		}
+		if result.Err != nil {
+			return result.Err
+		}
+	}
+	return writeErr
+}
+
+func (d *columnSetCapturingDest) capturedColumns() [][]string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([][]string, len(d.columns))
+	for i, v := range d.columns {
+		out[i] = append([]string(nil), v...)
+	}
+	return out
+}
+
 func mergeTableState(name string) *streamTableState {
 	return &streamTableState{
 		destTable:    name,
@@ -351,6 +474,96 @@ func loadTimestampValues(batch arrow.RecordBatch) ([]int64, error) {
 		values[row] = int64(col.Value(row))
 	}
 	return values, nil
+}
+
+func TestWithRunIDColumn(t *testing.T) {
+	base := streamTestSchema()
+
+	decorated := withRunIDColumn(base)
+	require.Len(t, decorated.Columns, len(base.Columns)+1)
+	last := decorated.Columns[len(decorated.Columns)-1]
+	assert.Equal(t, naming.IngestrRunIDColumn, last.Name)
+	assert.Equal(t, schema.TypeString, last.DataType)
+	assert.True(t, last.Nullable)
+
+	// Idempotent: a schema that already carries the column is returned unchanged.
+	again := withRunIDColumn(decorated)
+	assert.Len(t, again.Columns, len(decorated.Columns))
+}
+
+func TestStreaming_RunIDIsSetPerFlushCycle(t *testing.T) {
+	dest := &runIDCapturingDest{fakeDestination: &fakeDestination{}}
+	loop := newTestLoop(dest, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  4,
+		Strategy:      config.StrategyAppend,
+	}, map[string]*streamTableState{"": {destTable: "ds.tbl", schema: streamTestSchemaWithRunID()}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	records := make(chan source.RecordBatchResult)
+	done := make(chan error, 1)
+	go func() { done <- loop.run(ctx, records) }()
+
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)}
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{3, 4}, nil)}
+
+	require.Eventually(t, func() bool {
+		return len(dest.capturedRunIDs()) == 1
+	}, 5*time.Second, time.Millisecond)
+
+	first := dest.capturedRunIDs()[0]
+	require.Len(t, first, 4)
+	require.NotEmpty(t, first[0], "run id should be stamped in streaming flush")
+	for _, value := range first[1:] {
+		assert.Equal(t, first[0], value, "all rows in one flush should share a run id")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{5, 6, 7, 8}, nil)}
+
+	require.Eventually(t, func() bool {
+		return len(dest.capturedRunIDs()) == 2
+	}, 5*time.Second, time.Millisecond)
+
+	second := dest.capturedRunIDs()[1]
+	require.Len(t, second, 4)
+	for _, value := range second[1:] {
+		assert.Equal(t, second[0], value, "all rows in one flush should share a run id")
+	}
+	assert.NotEqual(t, first[0], second[0], "later flushes should get a fresh run id")
+
+	cancel()
+	close(records)
+	require.NoError(t, <-done)
+}
+
+func TestStreaming_NoRunIDLeavesColumnUnset(t *testing.T) {
+	dest := &columnSetCapturingDest{fakeDestination: &fakeDestination{}}
+	loop := newFlushLoop(dest, &config.IngestConfig{ExtractParallelism: 2, NoRunID: true}, StreamingOptions{
+		FlushInterval: time.Hour,
+		FlushRecords:  2,
+		Strategy:      config.StrategyAppend,
+	}, map[string]*streamTableState{"": {destTable: "ds.tbl", schema: streamTestSchema()}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	records := make(chan source.RecordBatchResult)
+	done := make(chan error, 1)
+	go func() { done <- loop.run(ctx, records) }()
+
+	records <- source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)}
+
+	require.Eventually(t, func() bool {
+		return len(dest.capturedColumns()) == 1
+	}, 5*time.Second, time.Millisecond)
+
+	assert.NotContains(t, dest.capturedColumns()[0], naming.IngestrRunIDColumn,
+		"streaming with --no-run-id must not add the run id column")
+
+	cancel()
+	close(records)
+	require.NoError(t, <-done)
 }
 
 func TestStreaming_CountTriggerFlushes(t *testing.T) {
