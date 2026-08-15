@@ -2530,7 +2530,10 @@ func (p *Pipeline) applyColumnOverrides(sourceSchema *schema.TableSchema) error 
 
 		if override.DataType != schema.TypeUnknown {
 			newCol := override.ApplyToColumn(col)
-			if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale || col.MaxLength != newCol.MaxLength {
+			if col.DataType == schema.TypeUnknown {
+				output.Infof("Column override: %q type set to %s(p=%v,s=%v,len=%v)\n",
+					col.Name, newCol.DataType, newCol.Precision, newCol.Scale, newCol.MaxLength)
+			} else if col.DataType != newCol.DataType || col.Precision != newCol.Precision || col.Scale != newCol.Scale || col.MaxLength != newCol.MaxLength {
 				output.Infof("Column override: %q type changed from %s(p=%v,s=%v,len=%v) to %s(p=%v,s=%v,len=%v)\n",
 					col.Name, col.DataType, col.Precision, col.Scale, col.MaxLength, newCol.DataType, newCol.Precision, newCol.Scale, newCol.MaxLength)
 			}
