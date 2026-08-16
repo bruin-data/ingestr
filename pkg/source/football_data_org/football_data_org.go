@@ -247,11 +247,8 @@ func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results 
 	return nil
 }
 
-// sendBatches emits a fully-built slice of items as one or more Arrow records,
-// splitting so no single record exceeds opts.MaxBatchBytes (a soft byte cap).
-// When the cap is unset (0) the whole slice is emitted as a single record,
-// preserving the previous behavior. Item order is never changed and no row is
-// dropped or duplicated.
+// sendBatches emits items as one or more Arrow records, flushing before a
+// record would exceed opts.MaxBatchBytes. A cap of 0 emits a single record.
 func sendBatches(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if len(items) == 0 {
 		return nil

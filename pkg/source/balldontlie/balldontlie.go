@@ -208,10 +208,8 @@ func (s *BallDontLieSource) stream(ctx context.Context, cfg tableConfig, opts so
 	return nil
 }
 
-// sendBatch converts a page of items to an Arrow record and streams it to the
-// results channel. Empty pages are skipped so no zero-row batch is emitted.
-// When opts.MaxBatchBytes is set, the page is split into multiple smaller
-// batches so a single in-memory Arrow batch stays under the soft byte cap.
+// sendBatch streams a page as one or more Arrow records, flushing before a
+// record would exceed opts.MaxBatchBytes. A cap of 0 emits one record per page.
 func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if len(items) == 0 {
 		return nil
