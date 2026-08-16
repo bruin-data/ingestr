@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -577,6 +578,60 @@ func TestGetTable(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, table)
 	assert.False(t, table.HasKnownSchema())
+}
+
+func TestReadJSONLFileLimitWithByteFlush(t *testing.T) {
+	s := NewBlobstoreSource()
+	input := strings.NewReader("{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n{\"id\":5}\n")
+	results := make(chan source.RecordBatchResult, 5)
+	var totalRows int64
+	var batchNum int
+
+	err := s.readJSONLFile(context.Background(), input, results, &totalRows, &batchNum, 3, source.ReadOptions{
+		Limit:         3,
+		MaxBatchBytes: 1,
+	}, blobstoreFileMetadata{})
+	require.NoError(t, err)
+	close(results)
+
+	var emittedRows int64
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		emittedRows += result.Batch.NumRows()
+		batchRows = append(batchRows, result.Batch.NumRows())
+		result.Batch.Release()
+	}
+	require.Equal(t, int64(3), emittedRows)
+	require.Equal(t, int64(3), totalRows)
+	require.Equal(t, []int64{1, 1, 1}, batchRows)
+}
+
+func TestReadCSVFileLimitWithByteFlush(t *testing.T) {
+	s := NewBlobstoreSource()
+	input := strings.NewReader("id\n1\n2\n3\n4\n5\n")
+	results := make(chan source.RecordBatchResult, 5)
+	var totalRows int64
+	var batchNum int
+
+	err := s.readCSVFile(context.Background(), input, "", results, &totalRows, &batchNum, 3, source.ReadOptions{
+		Limit:         3,
+		MaxBatchBytes: 1,
+	}, blobstoreFileMetadata{})
+	require.NoError(t, err)
+	close(results)
+
+	var emittedRows int64
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		emittedRows += result.Batch.NumRows()
+		batchRows = append(batchRows, result.Batch.NumRows())
+		result.Batch.Release()
+	}
+	require.Equal(t, int64(3), emittedRows)
+	require.Equal(t, int64(3), totalRows)
+	require.Equal(t, []int64{1, 1, 1}, batchRows)
 }
 
 func TestHandlesIncrementality_BlobstoreUsesFrameworkKeyHandling(t *testing.T) {

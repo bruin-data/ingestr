@@ -7,14 +7,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/testutil"
-	_ "github.com/bruin-data/ingestr/pkg/source/stripe"
+	"github.com/bruin-data/ingestr/pkg/source"
+	stripesource "github.com/bruin-data/ingestr/pkg/source/stripe"
+	"github.com/stretchr/testify/require"
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/coupon"
 	"github.com/stripe/stripe-go/v81/customer"
@@ -26,6 +31,101 @@ import (
 	"github.com/stripe/stripe-go/v81/setupintent"
 	"github.com/stripe/stripe-go/v81/taxrate"
 )
+
+func TestStripeByteLimitedBatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	apiKey := os.Getenv("STRIPE_API_KEY")
+	if apiKey == "" {
+		t.Skip("Set STRIPE_API_KEY to run Stripe integration tests")
+	}
+
+	ctx := context.Background()
+	stripeSource := stripesource.NewStripeSource()
+	require.NoError(t, stripeSource.Connect(ctx, "stripe://?api_key="+url.QueryEscape(apiKey)))
+	t.Cleanup(func() {
+		require.NoError(t, stripeSource.Close(ctx))
+	})
+
+	t.Run("event_fanout", func(t *testing.T) {
+		intervalEnd := time.Now().UTC()
+		intervalStart := intervalEnd.Add(-29 * 24 * time.Hour)
+		assertStripeByteLimitedRead(t, ctx, stripeSource, "payment_intent", source.ReadOptions{
+			IntervalStart: &intervalStart,
+			IntervalEnd:   &intervalEnd,
+			Limit:         3,
+			PageSize:      100,
+			Parallelism:   1,
+		})
+	})
+
+	t.Run("subscription_items", func(t *testing.T) {
+		assertStripeByteLimitedRead(t, ctx, stripeSource, "subscription_item:sync", source.ReadOptions{
+			Limit:    3,
+			PageSize: 100,
+		})
+	})
+}
+
+func assertStripeByteLimitedRead(
+	t *testing.T,
+	ctx context.Context,
+	stripeSource *stripesource.StripeSource,
+	tableName string,
+	opts source.ReadOptions,
+) {
+	t.Helper()
+
+	table, err := stripeSource.GetTable(ctx, source.TableRequest{Name: tableName})
+	require.NoError(t, err)
+
+	uncapped, uncappedBatchRows := readStripeTable(t, ctx, table, opts)
+	defer uncapped.Release()
+
+	opts.MaxBatchBytes = 1
+	capped, cappedBatchRows := readStripeTable(t, ctx, table, opts)
+	defer capped.Release()
+
+	require.True(t, array.TableEqual(uncapped, capped))
+	require.Equal(t, int64(opts.Limit), uncapped.NumRows())
+	require.Equal(t, []int64{int64(opts.Limit)}, uncappedBatchRows)
+	require.Len(t, cappedBatchRows, opts.Limit)
+	for _, rows := range cappedBatchRows {
+		require.Equal(t, int64(1), rows)
+	}
+}
+
+func readStripeTable(
+	t *testing.T,
+	ctx context.Context,
+	table source.SourceTable,
+	opts source.ReadOptions,
+) (arrow.Table, []int64) {
+	t.Helper()
+
+	results, err := table.Read(ctx, opts)
+	require.NoError(t, err)
+
+	var records []arrow.RecordBatch
+	defer func() {
+		for _, record := range records {
+			record.Release()
+		}
+	}()
+
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		require.NotNil(t, result.Batch)
+		records = append(records, result.Batch)
+		batchRows = append(batchRows, result.Batch.NumRows())
+	}
+
+	require.NotEmpty(t, records)
+	return array.NewTableFromRecords(records[0].Schema(), records), batchRows
+}
 
 func TestStripeEventsIntegration(t *testing.T) {
 	if testing.Short() {

@@ -225,6 +225,22 @@ func (s *CouchbaseSource) read(ctx context.Context, bucket, scope, collection st
 		batchNum := 0
 		totalRows := int64(0)
 		items := make([]map[string]interface{}, 0, batchSize)
+		var accBytes int64
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+			if err := sendBatch(ctx, items, opts, results); err != nil {
+				return err
+			}
+			batchNum++
+			totalRows += int64(len(items))
+			config.Debug("[COUCHBASE] Batch %d: %d rows (total: %d) in %v", batchNum, len(items), totalRows, time.Since(startTotal))
+			items = make([]map[string]interface{}, 0, batchSize)
+			accBytes = 0
+			return nil
+		}
 
 		for result.Next() {
 			select {
@@ -240,17 +256,23 @@ func (s *CouchbaseSource) read(ctx context.Context, bucket, scope, collection st
 				return
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						sendErr(err)
+						return
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, row)
 
 			if len(items) >= batchSize {
-				if err := sendBatch(ctx, items, opts, results); err != nil {
+				if err := flush(); err != nil {
 					sendErr(err)
 					return
 				}
-				batchNum++
-				totalRows += int64(len(items))
-				config.Debug("[COUCHBASE] Batch %d: %d rows (total: %d) in %v", batchNum, len(items), totalRows, time.Since(startTotal))
-				items = make([]map[string]interface{}, 0, batchSize)
 			}
 
 		}
@@ -260,13 +282,9 @@ func (s *CouchbaseSource) read(ctx context.Context, bucket, scope, collection st
 			return
 		}
 
-		if len(items) > 0 {
-			if err := sendBatch(ctx, items, opts, results); err != nil {
-				sendErr(err)
-				return
-			}
-			batchNum++
-			totalRows += int64(len(items))
+		if err := flush(); err != nil {
+			sendErr(err)
+			return
 		}
 
 		config.Debug("[COUCHBASE] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
