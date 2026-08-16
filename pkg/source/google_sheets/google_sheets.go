@@ -204,7 +204,28 @@ func (s *GoogleSheetsSource) readSheet(ctx context.Context, spreadsheetID, sheet
 	}
 
 	rows := resp.Values[1:]
-	items := make([]map[string]interface{}, 0, len(rows))
+	if opts.Limit > 0 && len(rows) > opts.Limit {
+		rows = rows[:opts.Limit]
+	}
+
+	var items []map[string]interface{}
+	var accBytes int64
+	total := 0
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		total += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for _, row := range rows {
 		item := make(map[string]interface{}, len(headers))
 		for i, header := range headers {
@@ -214,24 +235,23 @@ func (s *GoogleSheetsSource) readSheet(ctx context.Context, spreadsheetID, sheet
 				item[header] = nil
 			}
 		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, item)
 	}
 
-	if opts.Limit > 0 && len(items) > opts.Limit {
-		items = items[:opts.Limit]
+	if err := flush(); err != nil {
+		return err
 	}
 
-	if len(items) == 0 {
-		return nil
-	}
-
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert to Arrow: %w", err)
-	}
-	results <- source.RecordBatchResult{Batch: record}
-
-	config.Debug("[GSHEETS] sheet %s.%s: %d rows read", spreadsheetID, sheetName, len(items))
+	config.Debug("[GSHEETS] sheet %s.%s: %d rows read", spreadsheetID, sheetName, total)
 	return nil
 }
 

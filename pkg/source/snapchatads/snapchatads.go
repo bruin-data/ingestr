@@ -459,7 +459,22 @@ func (s *SnapchatAdsSource) fetchItems(ctx context.Context, endpoint, wrapperKey
 		return fmt.Errorf("failed to parse %s items: %w", wrapperKey, err)
 	}
 
-	items := make([]map[string]interface{}, 0, len(wrapperItems))
+	var items []map[string]interface{}
+	var accBytes int64
+	total := 0
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", wrapperKey, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
 	for _, wrapper := range wrapperItems {
 		var subStatus string
 		_ = json.Unmarshal(wrapper["sub_request_status"], &subStatus)
@@ -477,26 +492,47 @@ func (s *SnapchatAdsSource) fetchItems(ctx context.Context, endpoint, wrapperKey
 		if err := json.Unmarshal(innerData, &item); err != nil {
 			return fmt.Errorf("failed to parse %s item: %w", innerKey, err)
 		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, item)
+		total++
 	}
 
-	if len(items) == 0 {
-		return nil
+	if err := flush(); err != nil {
+		return err
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert %s to Arrow: %w", wrapperKey, err)
-	}
-	results <- source.RecordBatchResult{Batch: record}
-
-	config.Debug("[SnapchatAds] Fetched %d items from %s", len(items), endpoint)
+	config.Debug("[SnapchatAds] Fetched %d items from %s", total, endpoint)
 	return nil
 }
 
 func (s *SnapchatAdsSource) fetchItemsPaginated(ctx context.Context, endpoint, wrapperKey, innerKey string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	params := map[string]string{"limit": "1000"}
 	totalSent := 0
+
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", wrapperKey, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -534,7 +570,7 @@ func (s *SnapchatAdsSource) fetchItemsPaginated(ctx context.Context, endpoint, w
 			return fmt.Errorf("failed to parse %s items: %w", wrapperKey, err)
 		}
 
-		items := make([]map[string]interface{}, 0, len(wrapperItems))
+		pageCount := 0
 		for _, wrapper := range wrapperItems {
 			var subStatus string
 			_ = json.Unmarshal(wrapper["sub_request_status"], &subStatus)
@@ -549,19 +585,24 @@ func (s *SnapchatAdsSource) fetchItemsPaginated(ctx context.Context, endpoint, w
 			if err := json.Unmarshal(innerData, &item); err != nil {
 				return fmt.Errorf("failed to parse %s item: %w", innerKey, err)
 			}
-			items = append(items, item)
-		}
-
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", wrapperKey, err)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+			items = append(items, item)
+			pageCount++
 		}
 
-		config.Debug("[SnapchatAds] Fetched %d items from %s (total: %d)", len(items), endpoint, totalSent)
+		if err := flush(); err != nil {
+			return err
+		}
+
+		config.Debug("[SnapchatAds] Fetched %d items from %s (total: %d)", pageCount, endpoint, totalSent)
 
 		var paging struct {
 			NextLink string `json:"next_link"`
@@ -925,11 +966,36 @@ func (s *SnapchatAdsSource) fetchStats(ctx context.Context, endpoint string, par
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, statsMetricsColumns, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert stats to Arrow: %w", err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, statsMetricsColumns, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert stats to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: record}
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
 
 	config.Debug("[SnapchatAds] Fetched %d stats records from %s", len(items), endpoint)
 	return nil

@@ -211,12 +211,38 @@ func (s *WiseSource) readProfiles(ctx context.Context, opts source.ReadOptions, 
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(profiles, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert profiles to Arrow: %w", err)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert profiles to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
+	for _, row := range profiles {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, row)
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
 	config.Debug("[WISE] Sent %d profile records", len(profiles))
 	return nil
 }
@@ -283,12 +309,38 @@ func (s *WiseSource) readTransfers(ctx context.Context, opts source.ReadOptions,
 				break
 			}
 
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(transfers, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert transfers to Arrow: %w", err)
+			var items []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(items) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert transfers to Arrow: %w", err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				items = nil
+				accBytes = 0
+				return nil
 			}
 
-			results <- source.RecordBatchResult{Batch: record}
+			for _, row := range transfers {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				items = append(items, row)
+			}
+
+			if err := flush(); err != nil {
+				return err
+			}
 			totalSent += len(transfers)
 			config.Debug("[WISE] Profile %s: sent %d transfers (total: %d)", profileID.String(), len(transfers), totalSent)
 
@@ -381,12 +433,38 @@ func (s *WiseSource) readBalances(ctx context.Context, opts source.ReadOptions, 
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(allBalances, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert balances to Arrow: %w", err)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert balances to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
+	for _, row := range allBalances {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, row)
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
 	config.Debug("[WISE] Sent %d balance records", len(allBalances))
 	return nil
 }

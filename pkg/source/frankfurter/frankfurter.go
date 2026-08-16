@@ -236,12 +236,35 @@ func (s *FrankfurterSource) readCurrencies(ctx context.Context, opts source.Read
 		return items[i]["currency_code"].(string) < items[j]["currency_code"].(string)
 	})
 
-	if len(items) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, currencyFields, opts.ExcludeColumns)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, currencyFields, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert currencies to Arrow: %w", err)
 		}
 		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[FRANKFURTER] Fetched %d currencies", len(items))
@@ -270,12 +293,35 @@ func (s *FrankfurterSource) readLatest(ctx context.Context, base string, opts so
 
 	items := s.flattenRates(result.Date, result.Base, result.Rates)
 
-	if len(items) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, rateFields, opts.ExcludeColumns)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, rateFields, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert latest rates to Arrow: %w", err)
 		}
 		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[FRANKFURTER] Fetched %d latest rates", len(items))
@@ -326,12 +372,35 @@ func (s *FrankfurterSource) readExchangeRates(ctx context.Context, base string, 
 		allItems = append(allItems, s.flattenRates(date, result.Base, rates)...)
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, rateFields, opts.ExcludeColumns)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, rateFields, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert exchange rates to Arrow: %w", err)
 		}
 		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+	for _, row := range allItems {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[FRANKFURTER] Fetched %d exchange rate records", len(allItems))
