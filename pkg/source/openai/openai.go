@@ -367,18 +367,42 @@ func sendBatch(ctx context.Context, items []map[string]interface{}, opts source.
 	if opts.Schema != nil {
 		columns = opts.Schema.Columns
 	}
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert api_usage data to Arrow: %w", err)
-	}
 
-	select {
-	case <-ctx.Done():
-		record.Release()
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, columns, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert api_usage data to Arrow: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		batch = nil
+		accBytes = 0
 		return nil
 	}
+
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 func checkResponse(resp *httpclient.Response) error {

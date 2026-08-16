@@ -262,6 +262,23 @@ func (s *SurveyMonkeySource) paginateAndSend(ctx context.Context, cfg paginateCo
 		pageSize = maxPageSize
 	}
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.label, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for page <= maxPages {
 		select {
 		case <-ctx.Done():
@@ -309,15 +326,22 @@ func (s *SurveyMonkeySource) paginateAndSend(ctx context.Context, cfg paginateCo
 					item[k] = v
 				}
 			}
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, item)
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.label, err)
+		if err := flush(); err != nil {
+			return err
 		}
-
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
 		config.Debug("[SURVEYMONKEY] %s page %d: sent %d records (total: %d)", cfg.label, page, len(items), totalSent)
 
 		if !hasNextPage(body) {

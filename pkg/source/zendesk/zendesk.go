@@ -434,6 +434,23 @@ func (s *ZendeskSource) readIncremental(ctx context.Context, endpoint, key strin
 	cursor := ""
 	totalProcessed := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", key, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalProcessed += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -468,7 +485,6 @@ func (s *ZendeskSource) readIncremental(ctx context.Context, endpoint, key strin
 			break
 		}
 
-		rows := make([]map[string]interface{}, 0, len(items))
 		endOutOfRange := false
 		for _, item := range items {
 			if row, ok := item.(map[string]interface{}); ok {
@@ -476,17 +492,21 @@ func (s *ZendeskSource) readIncremental(ctx context.Context, endpoint, key strin
 					endOutOfRange = true
 					continue
 				}
-				rows = append(rows, row)
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 			}
 		}
 
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", key, err)
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalProcessed += len(rows)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if endOutOfRange {
@@ -516,6 +536,23 @@ func (s *ZendeskSource) paginateAndSend(ctx context.Context, endpoint, key strin
 	nextURL := endpoint
 	totalProcessed := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", key, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalProcessed += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for nextURL != "" {
 		select {
 		case <-ctx.Done():
@@ -542,20 +579,23 @@ func (s *ZendeskSource) paginateAndSend(ctx context.Context, endpoint, key strin
 			break
 		}
 
-		rows := make([]map[string]interface{}, 0, len(items))
 		for _, item := range items {
 			if row, ok := item.(map[string]interface{}); ok {
-				rows = append(rows, row)
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 			}
 		}
 
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", key, err)
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalProcessed += len(rows)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		nextURL = getCursorNextPage(result)
@@ -599,6 +639,23 @@ func (s *ZendeskSource) readTalkIncremental(ctx context.Context, endpoint, key s
 	nextURL := ""
 	totalProcessed := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", key, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalProcessed += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -635,7 +692,6 @@ func (s *ZendeskSource) readTalkIncremental(ctx context.Context, endpoint, key s
 			break
 		}
 
-		rows := make([]map[string]interface{}, 0, len(items))
 		endOutOfRange := false
 		for _, item := range items {
 			row, ok := item.(map[string]interface{})
@@ -652,16 +708,20 @@ func (s *ZendeskSource) readTalkIncremental(ctx context.Context, endpoint, key s
 				}
 			}
 
-			rows = append(rows, row)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 		}
 
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", key, err)
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalProcessed += len(rows)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if endOutOfRange {
@@ -916,6 +976,23 @@ func (s *ZendeskSource) readChats(ctx context.Context, opts source.ReadOptions, 
 	nextURL := ""
 	totalProcessed := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for chats: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalProcessed += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -953,7 +1030,6 @@ func (s *ZendeskSource) readChats(ctx context.Context, opts source.ReadOptions, 
 			break
 		}
 
-		rows := make([]map[string]interface{}, 0, len(items))
 		endOutOfRange := false
 		for _, item := range items {
 			row, ok := item.(map[string]interface{})
@@ -977,16 +1053,20 @@ func (s *ZendeskSource) readChats(ctx context.Context, opts source.ReadOptions, 
 				}
 			}
 
-			rows = append(rows, row)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 		}
 
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for chats: %w", err)
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalProcessed += len(rows)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if endOutOfRange {

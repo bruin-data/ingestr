@@ -133,6 +133,25 @@ func (s *SocrataSource) read(ctx context.Context, datasetID string, opts source.
 		totalSent := 0
 		batchNum := 0
 
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert to Arrow: %w", err)
+			}
+			batchNum++
+			totalSent += len(batch)
+			config.Debug("[SOCRATA] Sending batch %d with %d rows (total: %d)", batchNum, len(batch), totalSent)
+			results <- source.RecordBatchResult{Batch: record}
+			batch = nil
+			accBytes = 0
+			return nil
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -173,16 +192,24 @@ func (s *SocrataSource) read(ctx context.Context, datasetID string, opts source.
 				break
 			}
 
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
-				return
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							results <- source.RecordBatchResult{Err: err}
+							return
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 			}
 
-			batchNum++
-			totalSent += len(items)
-			config.Debug("[SOCRATA] Sending batch %d with %d rows (total: %d)", batchNum, len(items), totalSent)
-			results <- source.RecordBatchResult{Batch: record}
+			if err := flush(); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
 
 			if opts.Limit > 0 && totalSent >= opts.Limit {
 				config.Debug("[SOCRATA] Reached limit of %d rows", opts.Limit)

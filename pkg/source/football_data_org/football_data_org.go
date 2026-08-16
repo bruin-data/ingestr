@@ -247,6 +247,34 @@ func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results 
 	return nil
 }
 
+// sendBatches emits a fully-built slice of items as one or more Arrow records,
+// splitting so no single record exceeds opts.MaxBatchBytes (a soft byte cap).
+// When the cap is unset (0) the whole slice is emitted as a single record,
+// preserving the previous behavior. Item order is never changed and no row is
+// dropped or duplicated.
+func sendBatches(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(items) == 0 {
+		return nil
+	}
+	if opts.MaxBatchBytes <= 0 {
+		return sendBatch(items, opts, results)
+	}
+	start := 0
+	var accBytes int64
+	for i, row := range items {
+		rowBytes := arrowconv.RowBytes(row)
+		if i > start && accBytes+rowBytes > opts.MaxBatchBytes {
+			if err := sendBatch(items[start:i], opts, results); err != nil {
+				return err
+			}
+			start = i
+			accBytes = 0
+		}
+		accBytes += rowBytes
+	}
+	return sendBatch(items[start:], opts, results)
+}
+
 func (s *FootballDataOrgSource) readTeams(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	payload, err := s.get(ctx, competitionEndpoint(s.competition, "teams"), map[string]string{"season": s.season}, unfoldConfig{})
 	if err != nil {
@@ -268,7 +296,7 @@ func (s *FootballDataOrgSource) readTeams(ctx context.Context, opts source.ReadO
 			break
 		}
 	}
-	return sendBatch(out, opts, results)
+	return sendBatches(out, opts, results)
 }
 
 func (s *FootballDataOrgSource) readStadiums(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -305,7 +333,7 @@ func (s *FootballDataOrgSource) readStadiums(ctx context.Context, opts source.Re
 			"raw":            team,
 		})
 		if opts.Limit > 0 && len(items) >= opts.Limit {
-			return sendBatch(items[:opts.Limit], opts, results)
+			return sendBatches(items[:opts.Limit], opts, results)
 		}
 	}
 
@@ -338,14 +366,14 @@ func (s *FootballDataOrgSource) readStadiums(ctx context.Context, opts source.Re
 			"raw":            match,
 		})
 		if opts.Limit > 0 && len(items) >= opts.Limit {
-			return sendBatch(items[:opts.Limit], opts, results)
+			return sendBatches(items[:opts.Limit], opts, results)
 		}
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
 		return valueString(items[i]["venue_key"]) < valueString(items[j]["venue_key"])
 	})
-	return sendBatch(items, opts, results)
+	return sendBatches(items, opts, results)
 }
 
 func (s *FootballDataOrgSource) readStandings(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -386,11 +414,11 @@ func (s *FootballDataOrgSource) readStandings(ctx context.Context, opts source.R
 				"season":         season,
 			})
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				return sendBatch(out[:opts.Limit], opts, results)
+				return sendBatches(out[:opts.Limit], opts, results)
 			}
 		}
 	}
-	return sendBatch(out, opts, results)
+	return sendBatches(out, opts, results)
 }
 
 func (s *FootballDataOrgSource) readMatches(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -406,10 +434,10 @@ func (s *FootballDataOrgSource) readMatches(ctx context.Context, opts source.Rea
 		}
 		out = append(out, match)
 		if opts.Limit > 0 && len(out) >= opts.Limit {
-			return sendBatch(out[:opts.Limit], opts, results)
+			return sendBatches(out[:opts.Limit], opts, results)
 		}
 	}
-	return sendBatch(out, opts, results)
+	return sendBatches(out, opts, results)
 }
 
 func (s *FootballDataOrgSource) readPlayers(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -451,11 +479,11 @@ func (s *FootballDataOrgSource) readPlayers(ctx context.Context, opts source.Rea
 				"player":  player,
 			})
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				return sendBatch(out[:opts.Limit], opts, results)
+				return sendBatches(out[:opts.Limit], opts, results)
 			}
 		}
 	}
-	return sendBatch(out, opts, results)
+	return sendBatches(out, opts, results)
 }
 
 func (s *FootballDataOrgSource) readMatchEvents(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -486,7 +514,7 @@ func (s *FootballDataOrgSource) readMatchEvents(ctx context.Context, opts source
 				}
 				out = append(out, makeEvent(matchID, group.name, idx, event))
 				if opts.Limit > 0 && len(out) >= opts.Limit {
-					return sendBatch(out[:opts.Limit], opts, results)
+					return sendBatches(out[:opts.Limit], opts, results)
 				}
 			}
 		}
@@ -498,11 +526,11 @@ func (s *FootballDataOrgSource) readMatchEvents(ctx context.Context, opts source
 			}
 			out = append(out, makeEvent(matchID, "substitution", idx, event))
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				return sendBatch(out[:opts.Limit], opts, results)
+				return sendBatches(out[:opts.Limit], opts, results)
 			}
 		}
 	}
-	return sendBatch(out, opts, results)
+	return sendBatches(out, opts, results)
 }
 
 func (s *FootballDataOrgSource) fetchRawMatches(ctx context.Context, opts source.ReadOptions, unfold unfoldConfig) ([]map[string]interface{}, error) {

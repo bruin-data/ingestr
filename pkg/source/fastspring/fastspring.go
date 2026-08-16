@@ -245,16 +245,39 @@ func (s *FastspringSource) readWithDetails(ctx context.Context, table string, tc
 			return nil
 		}
 
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(valid, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- source.RecordBatchResult{Batch: rec}:
+			}
+			batch = nil
+			accBytes = 0
+			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: rec}:
+
+		for _, row := range valid {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 		}
-		return nil
+		return flush()
 	}
 
 	chunkCh := make(chan []string)
@@ -637,16 +660,42 @@ func (s *FastspringSource) fetchReport(ctx context.Context, table string, rc rep
 		}
 		rows := env.Report
 		if len(rows) > 0 {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
+			var batch []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case results <- source.RecordBatchResult{Batch: rec}:
+				}
+				batch = nil
+				accBytes = 0
+				return nil
+			}
+
+			for _, row := range rows {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
+			}
+			if err := flush(); err != nil {
+				return err
 			}
 			totalSent += len(rows)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: rec}:
-			}
 		}
 
 		if len(rows) < reportPageSize {

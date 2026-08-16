@@ -294,14 +294,36 @@ func (s *HostawaySource) readSingleEndpoint(ctx context.Context, endpoint, label
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		config.Debug("[HOSTAWAY] sent %d %s records", len(batch), label)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[HOSTAWAY] sent %d %s records", len(items), label)
-	return nil
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	return flush()
 }
 
 func (s *HostawaySource) readPaginatedEndpoint(ctx context.Context, endpoint, label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -309,6 +331,24 @@ func (s *HostawaySource) readPaginatedEndpoint(ctx context.Context, endpoint, la
 
 	offset := 0
 	totalSent := 0
+
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		config.Debug("[HOSTAWAY] %s sent %d records (total: %d)", label, len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -337,20 +377,32 @@ func (s *HostawaySource) readPaginatedEndpoint(ctx context.Context, endpoint, la
 			break
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 		}
 
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
-		config.Debug("[HOSTAWAY] %s page at offset %d: sent %d records (total: %d)", label, offset, len(items), totalSent)
+		if err := flush(); err != nil {
+			return err
+		}
 
 		if len(items) < maxPageSize {
 			break
 		}
 
 		offset += maxPageSize
+	}
+
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[HOSTAWAY] finished reading %s: %d total records", label, totalSent)
@@ -406,6 +458,24 @@ func (s *HostawaySource) paginateWithClientFilter(ctx context.Context, endpoint,
 	offset := 0
 	totalSent := 0
 
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		config.Debug("[HOSTAWAY] %s sent %d records (total: %d)", label, len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -433,22 +503,24 @@ func (s *HostawaySource) paginateWithClientFilter(ctx context.Context, endpoint,
 			break
 		}
 
-		var filtered []map[string]any
 		for _, item := range items {
-			if filterByInterval(item, filterField, opts.IntervalStart, opts.IntervalEnd) {
-				filtered = append(filtered, item)
+			if !filterByInterval(item, filterField, opts.IntervalStart, opts.IntervalEnd) {
+				continue
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, item)
 		}
 
-		if len(filtered) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(filtered, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
-			}
-
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(filtered)
-			config.Debug("[HOSTAWAY] %s page at offset %d: sent %d/%d records (total: %d)", label, offset, len(filtered), len(items), totalSent)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if len(items) < maxPageSize {
@@ -456,6 +528,10 @@ func (s *HostawaySource) paginateWithClientFilter(ctx context.Context, endpoint,
 		}
 
 		offset += maxPageSize
+	}
+
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[HOSTAWAY] finished reading %s: %d total records", label, totalSent)
@@ -652,6 +728,31 @@ func (s *HostawaySource) fetchPerResourceParallel(ctx context.Context, ids []jso
 		go func() {
 			defer wg.Done()
 
+			var batch []map[string]any
+			var accBytes int64
+			flush := func() bool {
+				if len(batch) == 0 {
+					return true
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("failed to convert %s to Arrow: %w", label, err):
+					default:
+					}
+					cancel()
+					return false
+				}
+				select {
+				case <-workerCtx.Done():
+					return false
+				case results <- source.RecordBatchResult{Batch: record}:
+				}
+				batch = nil
+				accBytes = 0
+				return true
+			}
+
 			for id := range idCh {
 				select {
 				case <-workerCtx.Done():
@@ -684,21 +785,26 @@ func (s *HostawaySource) fetchPerResourceParallel(ctx context.Context, ids []jso
 					continue
 				}
 
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					select {
-					case errCh <- fmt.Errorf("failed to convert %s to Arrow: %w", label, err):
-					default:
+				for _, row := range items {
+					if opts.MaxBatchBytes > 0 {
+						rowBytes := arrowconv.RowBytes(row)
+						if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+							if !flush() {
+								return
+							}
+						}
+						accBytes += rowBytes
 					}
-					cancel()
-					return
+					batch = append(batch, row)
 				}
 
-				select {
-				case <-workerCtx.Done():
+				if !flush() {
 					return
-				case results <- source.RecordBatchResult{Batch: record}:
 				}
+			}
+
+			if !flush() {
+				return
 			}
 		}()
 	}

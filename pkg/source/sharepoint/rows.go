@@ -125,15 +125,39 @@ func emitItems(ctx context.Context, results chan<- source.RecordBatchResult, ite
 		return opts.Limit > 0 && *total >= opts.Limit, nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
-	if err != nil {
-		return false, fmt.Errorf("failed to convert rows to Arrow: %w", err)
+	flush := func(batch []map[string]interface{}) error {
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert rows to Arrow: %w", err)
+		}
+		if err := send(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
+			record.Release() // not delivered to the consumer; free its buffers
+			return err
+		}
+		*total += len(batch)
+		return nil
 	}
-	if err := send(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
-		record.Release() // not delivered to the consumer; free its buffers
+
+	if opts.MaxBatchBytes > 0 {
+		start := 0
+		var accBytes int64
+		for i, row := range items {
+			rowBytes := arrowconv.RowBytes(row)
+			if i > start && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(items[start:i]); err != nil {
+					return false, err
+				}
+				start = i
+				accBytes = 0
+			}
+			accBytes += rowBytes
+		}
+		if err := flush(items[start:]); err != nil {
+			return false, err
+		}
+	} else if err := flush(items); err != nil {
 		return false, err
 	}
-	*total += len(items)
 
 	return opts.Limit > 0 && *total >= opts.Limit, nil
 }

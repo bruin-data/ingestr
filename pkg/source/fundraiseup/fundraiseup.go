@@ -200,6 +200,22 @@ func (s *FundraiseUpSource) paginateAndSend(
 	totalSent := 0
 	startingAfter := ""
 
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -245,12 +261,22 @@ func (s *FundraiseUpSource) paginateAndSend(
 			items = items[:opts.Limit-totalSent]
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 		}
 
-		results <- source.RecordBatchResult{Batch: record}
+		if err := flush(); err != nil {
+			return err
+		}
 		totalSent += len(items)
 
 		config.Debug("[FUNDRAISEUP] fetched %d records from %s (total: %d)", len(items), endpoint, totalSent)

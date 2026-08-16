@@ -327,6 +327,25 @@ func (s *SolidGateSource) paginateTable(ctx context.Context, opts source.ReadOpt
 	totalSent := 0
 	batchNum := 0
 
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, tableSchema, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
+		}
+
+		batchNum++
+		config.Debug("[SOLIDGATE] Sending batch %d with %d %s (total: %d)", batchNum, len(batch), tableName, totalSent)
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -363,15 +382,23 @@ func (s *SolidGateSource) paginateTable(ctx context.Context, opts source.ReadOpt
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, tableSchema, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
+				totalSent++
 			}
 
-			batchNum++
-			totalSent += len(items)
-			config.Debug("[SOLIDGATE] Sending batch %d with %d %s (total: %d)", batchNum, len(items), tableName, totalSent)
-			results <- source.RecordBatchResult{Batch: record}
+			if err := flush(); err != nil {
+				return err
+			}
 
 			if opts.Limit > 0 && totalSent >= opts.Limit {
 				config.Debug("[SOLIDGATE] Reached limit of %d %s", opts.Limit, tableName)
@@ -464,14 +491,38 @@ func (s *SolidGateSource) readFinancialEntries(ctx context.Context, opts source.
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, financialEntrySchema, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert financial_entries to Arrow: %w", err)
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, financialEntrySchema, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert financial_entries to Arrow: %w", err)
+		}
+
+		config.Debug("[SOLIDGATE] Sending %d financial_entries", len(batch))
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	config.Debug("[SOLIDGATE] Sending %d financial_entries", len(items))
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 func (s *SolidGateSource) pollReportURL(ctx context.Context, reportURL string) ([]byte, error) {
