@@ -7,13 +7,9 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-// inferWithCap reproduces the accumulate-and-flush loop that every []map API
-// source runs: rows are appended to a batch and the batch is flushed (converted
-// to an Arrow record and handed to the inferrer) whenever adding the next row
-// would push the accumulated byte size past maxBatchBytes. A maxBatchBytes of 0
-// disables the cap, producing a single batch over all rows — the pre-change
-// behavior. This lets the test compare "one big batch" against "many small
-// batches" over identical input.
+// inferWithCap runs the source accumulate-and-flush loop over rows, feeding each
+// emitted batch to a fresh inferrer, and returns the inferred schema. A
+// maxBatchBytes of 0 emits a single batch over all rows.
 func inferWithCap(t *testing.T, rows []map[string]interface{}, cols []schema.Column, maxBatchBytes int64) *schema.TableSchema {
 	t.Helper()
 
@@ -67,14 +63,10 @@ func columnMap(ts *schema.TableSchema) map[string]schema.Column {
 	return m
 }
 
-// TestSchemaInferenceIsBatchGroupingInvariant is the core safety guarantee for
-// the MaxBatchBytes rollout: splitting a source's output into more, smaller
-// batches must not change the schema the pipeline infers for the destination.
-// The []map sources pass nil columns, so every field is discovered from row
-// data; if inference depended on how rows were grouped into batches, a capped
-// first batch could miss columns that only appear in later rows. This asserts
-// it does not — the same rows produce the same schema whether emitted as one
-// batch or one-row-per-batch.
+// TestSchemaInferenceIsBatchGroupingInvariant asserts that splitting rows into
+// more batches does not change the inferred schema. []map sources pass nil
+// columns, so fields are discovered from row data; a capped first batch could
+// otherwise miss columns that only appear in later rows.
 func TestSchemaInferenceIsBatchGroupingInvariant(t *testing.T) {
 	// Heterogeneous rows: keys that appear only in early rows, keys that appear
 	// only in late rows, a column whose type changes across rows, and a column
