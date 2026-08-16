@@ -56,8 +56,8 @@ func TestParseURI(t *testing.T) {
 		},
 		{
 			name: "api_key with special characters",
-			uri:  "hostaway://?api_key=eyJhbGciOiJSUzI1NiJ9.test",
-			want: "eyJhbGciOiJSUzI1NiJ9.test",
+			uri:  "hostaway://?api_key=dummy.key-with_special.chars",
+			want: "dummy.key-with_special.chars",
 		},
 	}
 
