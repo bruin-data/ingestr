@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -53,9 +52,57 @@ func TestParseOneLakeURI(t *testing.T) {
 			wantLH:    "lh",
 			wantLayou: "{table_name}.parquet",
 		},
+		{
+			name:   "workspace with raw space",
+			uri:    "onelake://Fabric Dev/lh",
+			wantWS: "Fabric Dev",
+			wantLH: "lh",
+		},
+		{
+			name:   "workspace percent encoded",
+			uri:    "onelake://Fabric%20Dev/Sales%20LH",
+			wantWS: "Fabric Dev",
+			wantLH: "Sales LH",
+		},
+		{
+			name:   "workspace with literal percent",
+			uri:    "onelake://100% Club/lh",
+			wantWS: "100% Club",
+			wantLH: "lh",
+		},
+		{
+			name:   "guid workspace and lakehouse",
+			uri:    "onelake://11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222",
+			wantWS: "11111111-1111-1111-1111-111111111111",
+			wantLH: "22222222-2222-2222-2222-222222222222",
+		},
+		{
+			name:    "sas token with escapes",
+			uri:     "onelake://ws/lh?sas_token=sv%3D2021%26sig%3Dab%2Fcd%3D",
+			wantWS:  "ws",
+			wantLH:  "lh",
+			wantSAS: "sv=2021&sig=ab/cd=",
+		},
+		{
+			name:      "encoded layout",
+			uri:       "onelake://ws/lh?layout=%7Btable_name%7D.parquet",
+			wantWS:    "ws",
+			wantLH:    "lh",
+			wantLayou: "{table_name}.parquet",
+		},
+		{
+			name:   "trailing slash",
+			uri:    "onelake://ws/lh/",
+			wantWS: "ws",
+			wantLH: "lh",
+		},
 		{name: "missing lakehouse", uri: "onelake://ws", wantErr: true},
 		{name: "nested lakehouse", uri: "onelake://ws/a/b", wantErr: true},
 		{name: "wrong scheme", uri: "s3://ws/lh", wantErr: true},
+		{name: "encoded lakehouse separator", uri: "onelake://ws/a%2Fb", wantErr: true},
+		{name: "encoded workspace separator", uri: "onelake://a%2Fb/lh", wantErr: true},
+		{name: "missing workspace", uri: "onelake:///lh", wantErr: true},
+		{name: "no scheme separator", uri: "onelake:ws/lh", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -74,6 +121,15 @@ func TestParseOneLakeURI(t *testing.T) {
 			assert.Equal(t, tt.wantLayou, parsed.layout)
 		})
 	}
+}
+
+func TestParseOneLakeURIDoesNotLeakSecrets(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseOneLakeURI("onelake://ws/a/b?client_secret=supersecret&sas_token=topsecret")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "supersecret")
+	assert.NotContains(t, err.Error(), "topsecret")
 }
 
 func TestParseTarget(t *testing.T) {
@@ -118,6 +174,40 @@ func TestItemAndDirPaths(t *testing.T) {
 	// Already-typed item segment is preserved.
 	d2 := &OneLakeDestination{lakehouse: "wh.Warehouse", relPath: "t"}
 	assert.Equal(t, "wh.Warehouse", d2.itemPath())
+}
+
+func TestItemPathGUID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		lakehouse string
+		want      string
+	}{
+		{"22222222-2222-2222-2222-222222222222", "22222222-2222-2222-2222-222222222222"},
+		{"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"},
+		// Non-canonical GUID spellings are not valid Fabric path segments, so they
+		// are treated as ordinary names.
+		{"22222222222222222222222222222222", "22222222222222222222222222222222.Lakehouse"},
+		{"urn:uuid:22222222-2222-2222-2222-222222222222", "urn:uuid:22222222-2222-2222-2222-222222222222.Lakehouse"},
+	}
+	for _, c := range cases {
+		d := &OneLakeDestination{lakehouse: c.lakehouse, relPath: "users"}
+		assert.Equal(t, c.want, d.itemPath(), c.lakehouse)
+	}
+
+	d := &OneLakeDestination{lakehouse: "22222222-2222-2222-2222-222222222222", relPath: "users"}
+	assert.Equal(t, "22222222-2222-2222-2222-222222222222/Tables/users", d.tableDir())
+}
+
+func TestNewOneLakeFileClientEscapesWorkspace(t *testing.T) {
+	t.Parallel()
+
+	d := NewOneLakeDestination()
+	require.NoError(t, d.Connect(t.Context(), "onelake://Fabric Dev/lh?sas_token=sig=abc"))
+
+	client, err := d.newOneLakeFileClient("lh.Lakehouse/Tables/users/x.parquet")
+	require.NoError(t, err)
+	assert.Contains(t, client.DFSURL(), "/Fabric%20Dev/lh.Lakehouse/Tables/users/x.parquet")
 }
 
 func TestConnectBuildsClient(t *testing.T) {
@@ -276,16 +366,6 @@ func TestBuildAppendCommit(t *testing.T) {
 	// No protocol/metaData on append commits.
 	_, hasProtocol := lines[0]["protocol"]
 	assert.False(t, hasProtocol)
-}
-
-func TestDeltaCommitRenameOptionsUsesIfNoneMatchAny(t *testing.T) {
-	t.Parallel()
-
-	opts := deltaCommitRenameOptions()
-	require.NotNil(t, opts.AccessConditions)
-	require.NotNil(t, opts.AccessConditions.ModifiedAccessConditions)
-	require.NotNil(t, opts.AccessConditions.ModifiedAccessConditions.IfNoneMatch)
-	assert.Equal(t, azcore.ETagAny, *opts.AccessConditions.ModifiedAccessConditions.IfNoneMatch)
 }
 
 func TestDeltaCommitTempPathStaysOutsideDeltaLog(t *testing.T) {

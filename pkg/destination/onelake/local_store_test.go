@@ -127,6 +127,30 @@ func (c *localDataLakeClient) Download(ctx context.Context, _ string, path strin
 	return os.ReadFile(fullPath)
 }
 
+func (c *localDataLakeClient) RenameIfNotExists(ctx context.Context, _ string, srcPath, destPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	src, err := c.path(srcPath)
+	if err != nil {
+		return err
+	}
+	dest, err := c.path(destPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	if err := os.Link(src, dest); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return errDeltaCommitConflict
+		}
+		return err
+	}
+	return os.Remove(src)
+}
+
 func (c *localDataLakeClient) publishCommit(ctx context.Context, logDir string, version int64, commit []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -177,7 +201,6 @@ func newLocalOneLakeDestination(root string) (*OneLakeDestination, *localDataLak
 		client:    client,
 		layout:    defaultLayout,
 	}
-	destination.publishCommit = client.publishCommit
 	return destination, client
 }
 

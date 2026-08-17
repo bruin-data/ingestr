@@ -68,3 +68,36 @@ func TestParseSchemeVariants(t *testing.T) {
 		})
 	}
 }
+
+// A OneLake workspace name may contain a space, which url.Parse rejects in the
+// authority position — both raw ("invalid character") and percent-encoded
+// ("invalid URL escape"). Parse must hand these to the connector untouched.
+func TestParseSkipsStrictParseForAuthorityOpaqueSchemes(t *testing.T) {
+	for _, raw := range []string{
+		"onelake://Fabric Dev/lh",
+		"onelake://Fabric%20Dev/lh?client_secret=s",
+	} {
+		parsed, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(%q): unexpected error: %v", raw, err)
+		}
+		if parsed.Scheme != "onelake" {
+			t.Errorf("Parse(%q): scheme = %q, want onelake", raw, parsed.Scheme)
+		}
+		if parsed.RawURI != raw {
+			t.Errorf("Parse(%q): RawURI = %q", raw, parsed.RawURI)
+		}
+		if parsed.Params == nil {
+			t.Errorf("Parse(%q): Params is nil", raw)
+		}
+		// The authority is deliberately left unparsed; the connector reads RawURI.
+		if parsed.Host != "" || parsed.Database != "" {
+			t.Errorf("Parse(%q): host = %q, database = %q, want both empty", raw, parsed.Host, parsed.Database)
+		}
+	}
+
+	// The leniency is scoped to onelake: other schemes still validate the host.
+	if _, err := Parse("postgres://Fabric Dev/db"); err == nil {
+		t.Error("Parse(postgres with a space in the host): expected an error")
+	}
+}

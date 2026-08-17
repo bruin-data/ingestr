@@ -14,11 +14,30 @@ onelake://<workspace>/<lakehouse>?tenant_id=<tenant_id>&client_id=<client_id>&cl
 ```
 
 URI parameters:
-- `workspace`: the Fabric workspace name or GUID (the URI host)
-- `lakehouse`: the Lakehouse name or GUID (the URI path). A `.Lakehouse` item suffix is added automatically; pass an explicit suffix (e.g. `mywh.Warehouse`) to target a different item type.
+- `workspace`: the Fabric workspace name or GUID (the first path segment)
+- `lakehouse`: the Lakehouse name or GUID (the second path segment). A `.Lakehouse` item suffix is added automatically **unless the value is a GUID or already contains a `.`** — Fabric addresses items by GUID with no type suffix. Pass an explicit suffix (e.g. `mywh.Warehouse`) to target a different item type.
 - `tenant_id`, `client_id`, `client_secret` (optional): Microsoft Entra service principal credentials
 - `sas_token` (optional): a SAS token issued for OneLake
 - `layout` (optional): file-name template for **Files** mode (default `{load_id}.{file_id}.{ext}`); supports `{table_name}`, `{load_id}`, `{file_id}` and `{ext}`
+
+### Names, spaces and GUIDs
+
+The workspace and the item may each independently be a friendly name or a GUID, and the
+two forms can be mixed (a named workspace with a GUID item is fine, and vice versa).
+
+Workspace and item names containing spaces work either quoted or percent-encoded — both
+spellings resolve to the same name:
+
+```bash
+--dest-uri "onelake://Fabric Dev/Sales LH"
+--dest-uri "onelake://Fabric%20Dev/Sales%20LH"
+```
+
+Prefer the `%20` form in config files and CI, where quoting is easier to get wrong.
+
+Neither segment may contain a `/`. A literal `%` in a name needs no escaping unless it is
+followed by two hex digits, in which case write it as `%25` (so a workspace actually named
+`Fabric%20Dev` is `Fabric%2520Dev`).
 
 The **mode and table** come from `--dest-table`, mirroring OneLake's path layout:
 - `Tables/<name>` (or `Tables/<schema>/<name>`) → a Delta table
@@ -29,6 +48,12 @@ For Delta tables, `.` and `/` are interchangeable separators and the leading `Ta
 
 The final object path is:
 `https://onelake.dfs.fabric.microsoft.com/<workspace>/<lakehouse>.Lakehouse/<Tables|Files>/<rest>`
+
+or, addressing both by GUID:
+`https://onelake.dfs.fabric.microsoft.com/<workspaceGUID>/<itemGUID>/<Tables|Files>/<rest>`
+
+Names are percent-encoded on the wire, so the `Fabric Dev` workspace becomes
+`https://onelake.dfs.fabric.microsoft.com/Fabric%20Dev/...`.
 
 ## Authentication
 
@@ -58,6 +83,16 @@ ingestr ingest \
     --source-table "public.users" \
     --dest-uri "onelake://myworkspace/mylakehouse?sas_token=$SAS_TOKEN" \
     --dest-table "Files/exports/users"
+```
+
+Load into a workspace whose name contains a space, addressing the Lakehouse by GUID:
+
+```bash
+ingestr ingest \
+    --source-uri "postgres://user:pass@host:5432/db" \
+    --source-table "public.users" \
+    --dest-uri "onelake://Fabric%20Dev/22222222-2222-2222-2222-222222222222?tenant_id=$TENANT_ID&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET" \
+    --dest-table "Tables/users"
 ```
 
 Append new rows to an existing Delta table (adds a new Delta commit):

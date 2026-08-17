@@ -26,6 +26,11 @@ var fileBasedSchemes = map[string]bool{
 	"sqlite": true, "duckdb": true, "motherduck": true, "md": true, "mmap": true,
 }
 
+// authorityOpaqueSchemes carry a value in the authority position that url.Parse
+// cannot represent — a OneLake workspace name may contain a space. Their
+// connectors parse the raw URI themselves.
+var authorityOpaqueSchemes = map[string]bool{"onelake": true}
+
 func Parse(rawURI string) (*ParsedURI, error) {
 	scheme, err := ExtractScheme(rawURI)
 	if err != nil {
@@ -34,8 +39,10 @@ func Parse(rawURI string) (*ParsedURI, error) {
 
 	normalizedScheme := NormalizeScheme(scheme)
 
-	// For file-based schemes, skip url.Parse to avoid Windows path issues
-	if fileBasedSchemes[normalizedScheme] {
+	// Skip url.Parse where it cannot represent the URI: file-based schemes carry
+	// Windows paths, and authority-opaque schemes carry names with characters that
+	// are invalid in a host.
+	if fileBasedSchemes[normalizedScheme] || authorityOpaqueSchemes[normalizedScheme] {
 		return &ParsedURI{
 			Scheme: normalizedScheme,
 			RawURI: rawURI,
