@@ -4,17 +4,26 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
 	datalakedirectory "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/directory"
 	datalakefile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	datalakefilesystem "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 )
+
+// dfsServiceVersion matches the version the azdatalake SDK sends, so the
+// hand-built rename request below behaves like the rest of the client.
+const dfsServiceVersion = "2026-02-06"
+
+const dfsTokenScope = "https://storage.azure.com/.default"
 
 // OneLakeDNSSuffix is the DFS endpoint suffix for Microsoft Fabric OneLake.
 // OneLake speaks the ADLS Gen2 protocol with a fixed account name of "onelake".
@@ -34,6 +43,8 @@ const OneLakeManagedPrefixSegments = 2
 type DataLakeClient struct {
 	accountName         string
 	dnsSuffix           string
+	sasToken            string
+	pipeline            azruntime.Pipeline
 	newFileClient       func(pathURL string) (*datalakefile.Client, error)
 	newDirectoryClient  func(pathURL string) (*datalakedirectory.Client, error)
 	newFilesystemClient func(fsURL string) (*datalakefilesystem.Client, error)
@@ -45,6 +56,9 @@ func NewDataLakeClientWithToken(accountName, dnsSuffix string, cred azcore.Token
 	return &DataLakeClient{
 		accountName: accountName,
 		dnsSuffix:   dnsSuffix,
+		pipeline: azruntime.NewPipeline("ingestr-adlsutil", "v1", azruntime.PipelineOptions{
+			PerRetry: []policy.Policy{azruntime.NewBearerTokenPolicy(cred, []string{dfsTokenScope}, nil)},
+		}, nil),
 		newFileClient: func(pathURL string) (*datalakefile.Client, error) {
 			return datalakefile.NewClient(pathURL, cred, nil)
 		},
@@ -63,6 +77,8 @@ func NewDataLakeClientWithSAS(accountName, dnsSuffix, sasToken string) *DataLake
 	return &DataLakeClient{
 		accountName: accountName,
 		dnsSuffix:   dnsSuffix,
+		sasToken:    sasToken,
+		pipeline:    azruntime.NewPipeline("ingestr-adlsutil", "v1", azruntime.PipelineOptions{}, nil),
 		newFileClient: func(pathURL string) (*datalakefile.Client, error) {
 			return datalakefile.NewClientWithNoCredential(AppendSASToken(pathURL, sasToken), nil)
 		},
@@ -209,6 +225,51 @@ func (c *DataLakeClient) DeleteDir(ctx context.Context, fileSystem, dirPath stri
 		return fmt.Errorf("failed to delete directory %s: %w", dirPath, err)
 	}
 	return nil
+}
+
+// RenameIfNotExists moves srcPath to destPath, failing with a ConditionNotMet
+// response error if destPath already exists.
+//
+// It issues the DFS rename directly rather than going through
+// datalakefile.Client.Rename, which derives the x-ms-rename-source header from
+// the percent-decoded URL path. Azure requires that header to be percent-encoded,
+// and a OneLake workspace name may contain characters that need escaping.
+func (c *DataLakeClient) RenameIfNotExists(ctx context.Context, fileSystem, srcPath, destPath string) error {
+	destURL, err := c.pathURL(fileSystem, destPath)
+	if err != nil {
+		return err
+	}
+
+	source := renameSourceHeader(fileSystem, srcPath)
+	if c.sasToken != "" {
+		source += "?" + c.sasToken
+	}
+
+	req, err := azruntime.NewRequest(ctx, http.MethodPut, AppendSASToken(destURL+"?resource=file", c.sasToken))
+	if err != nil {
+		return fmt.Errorf("failed to build rename request for %s: %w", destPath, err)
+	}
+	req.Raw().Header.Set("x-ms-version", dfsServiceVersion)
+	req.Raw().Header.Set("x-ms-rename-source", source)
+	req.Raw().Header.Set("If-None-Match", string(azcore.ETagAny))
+
+	resp, err := c.pipeline.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", srcPath, destPath, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if !azruntime.HasStatusCode(resp, http.StatusCreated, http.StatusOK) {
+		return azruntime.NewResponseError(resp)
+	}
+	return nil
+}
+
+// renameSourceHeader builds the percent-encoded "/<filesystem>/<path>" value the
+// DFS rename expects in x-ms-rename-source.
+func renameSourceHeader(fileSystem, path string) string {
+	u := &url.URL{Path: "/" + strings.Trim(fileSystem, "/") + "/" + strings.Trim(path, "/")}
+	return u.EscapedPath()
 }
 
 // DeltaLogEntry identifies a Delta JSON commit and its storage version.

@@ -48,6 +48,7 @@ type dataLakeClient interface {
 	ListLogVersions(context.Context, string, string) ([]int64, error)
 	ListLogEntries(context.Context, string, string) ([]adlsutil.DeltaLogEntry, error)
 	Download(context.Context, string, string) ([]byte, error)
+	RenameIfNotExists(context.Context, string, string, string) error
 }
 
 // OneLakeDestination writes data to a Microsoft Fabric OneLake lakehouse. It can
@@ -94,28 +95,40 @@ type parsedOneLakeURI struct {
 	layout            string
 }
 
-func parseOneLakeURI(uri string) (*parsedOneLakeURI, error) {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return nil, err
+// parseOneLakeURI splits onelake://<workspace>/<lakehouse>?<params>. url.Parse
+// cannot be used: the workspace sits in the authority, where it rejects both raw
+// spaces and percent-escaped ASCII, and Fabric workspace names may contain
+// spaces. Errors never quote the URI, which carries credentials.
+func parseOneLakeURI(rawURI string) (*parsedOneLakeURI, error) {
+	scheme, rest, ok := strings.Cut(rawURI, "://")
+	if !ok {
+		return nil, fmt.Errorf("invalid OneLake URI: expected onelake://<workspace>/<lakehouse>")
 	}
-	if u.Scheme != "onelake" {
-		return nil, fmt.Errorf("unsupported scheme for OneLake: %s", u.Scheme)
+	if !strings.EqualFold(scheme, "onelake") {
+		return nil, fmt.Errorf("unsupported scheme for OneLake: %s", scheme)
 	}
 
-	workspace := u.Host
-	lakehouse := strings.Trim(u.Path, "/")
-	if workspace == "" {
-		return nil, fmt.Errorf("workspace is required: onelake://<workspace>/<lakehouse>")
+	path, rawQuery, _ := strings.Cut(rest, "?")
+	// Segments are split before decoding so an encoded separator inside a name is
+	// not mistaken for a real one.
+	segments := strings.Split(strings.TrimRight(path, "/"), "/")
+	if len(segments) > 2 {
+		return nil, fmt.Errorf("lakehouse must be a single path segment, got %q", strings.Join(segments[1:], "/"))
 	}
-	if lakehouse == "" {
+
+	workspace := decodeURISegment(segments[0])
+	if workspace == "" || strings.Contains(workspace, "/") {
+		return nil, fmt.Errorf("workspace must be a single non-empty path segment: onelake://<workspace>/<lakehouse>")
+	}
+	if len(segments) < 2 {
 		return nil, fmt.Errorf("lakehouse is required: onelake://<workspace>/<lakehouse>")
 	}
-	if strings.Contains(lakehouse, "/") {
-		return nil, fmt.Errorf("lakehouse must be a single path segment, got %q", lakehouse)
+	lakehouse := decodeURISegment(segments[1])
+	if lakehouse == "" || strings.Contains(lakehouse, "/") {
+		return nil, fmt.Errorf("lakehouse must be a single non-empty path segment: onelake://<workspace>/<lakehouse>")
 	}
 
-	q := u.Query()
+	q, _ := url.ParseQuery(rawQuery)
 	return &parsedOneLakeURI{
 		workspace:         workspace,
 		lakehouse:         lakehouse,
@@ -123,6 +136,16 @@ func parseOneLakeURI(uri string) (*parsedOneLakeURI, error) {
 		clientCredentials: adlsutil.ParseClientCredentials(q),
 		layout:            q.Get("layout"),
 	}, nil
+}
+
+// decodeURISegment percent-decodes a path segment, leaving it untouched when it
+// is not valid percent-encoding so a name containing a literal "%" still works.
+func decodeURISegment(segment string) string {
+	decoded, err := url.PathUnescape(segment)
+	if err != nil {
+		return segment
+	}
+	return decoded
 }
 
 func (d *OneLakeDestination) Connect(ctx context.Context, uri string) error {
@@ -161,12 +184,20 @@ func (d *OneLakeDestination) Close(ctx context.Context) error {
 	return nil
 }
 
-// itemPath returns the OneLake item segment, e.g. "mylakehouse.Lakehouse".
+// itemPath returns the OneLake item segment, e.g. "mylakehouse.Lakehouse". A
+// GUID addresses the item directly and Fabric rejects a type suffix on it.
 func (d *OneLakeDestination) itemPath() string {
-	if strings.Contains(d.lakehouse, ".") {
+	if strings.Contains(d.lakehouse, ".") || isItemGUID(d.lakehouse) {
 		return d.lakehouse
 	}
 	return d.lakehouse + ".Lakehouse"
+}
+
+// isItemGUID reports whether s is a canonical 8-4-4-4-12 GUID. The length gate
+// rejects the urn, braced and dashless forms uuid.Validate also accepts, none of
+// which is a valid Fabric path segment.
+func isItemGUID(s string) bool {
+	return len(s) == 36 && uuid.Validate(s) == nil
 }
 
 // tableDir returns the path of a Delta table directory within the filesystem.
@@ -413,21 +444,25 @@ func (d *OneLakeDestination) uploadDeltaCommit(ctx context.Context, logDir strin
 		return fmt.Errorf("failed to upload temporary delta commit %s: %w", tempPath, err)
 	}
 
-	tempFileClient, err := d.newOneLakeFileClient(tempPath)
-	if err != nil {
-		return err
-	}
-
-	if _, err := tempFileClient.Rename(ctx, commitPath, deltaCommitRenameOptions()); err != nil {
-		if _, deleteErr := tempFileClient.Delete(ctx, nil); deleteErr != nil {
-			config.Debug("[ONELAKE] Failed to delete temporary delta commit %s: %v", tempPath, deleteErr)
-		}
+	if err := d.client.RenameIfNotExists(ctx, d.workspace, tempPath, commitPath); err != nil {
+		d.deleteTempCommit(ctx, tempPath)
 		if isDeltaCommitConflict(err) {
 			return errDeltaCommitConflict
 		}
 		return fmt.Errorf("failed to publish delta commit %s: %w", commitPath, err)
 	}
 	return nil
+}
+
+func (d *OneLakeDestination) deleteTempCommit(ctx context.Context, tempPath string) {
+	tempFileClient, err := d.newOneLakeFileClient(tempPath)
+	if err != nil {
+		config.Debug("[ONELAKE] Failed to build client for temporary delta commit %s: %v", tempPath, err)
+		return
+	}
+	if _, err := tempFileClient.Delete(ctx, nil); err != nil {
+		config.Debug("[ONELAKE] Failed to delete temporary delta commit %s: %v", tempPath, err)
+	}
 }
 
 func (d *OneLakeDestination) newOneLakeFileClient(path string) (*datalakefile.Client, error) {
@@ -452,24 +487,13 @@ func (d *OneLakeDestination) ensureDirectories(ctx context.Context, path string)
 	return d.client.EnsureDirectoriesSkippingPrefix(ctx, d.workspace, path, adlsutil.OneLakeManagedPrefixSegments)
 }
 
-func deltaCommitRenameOptions() *datalakefile.RenameOptions {
-	etagAny := azcore.ETagAny
-	return &datalakefile.RenameOptions{
-		AccessConditions: &datalakefile.AccessConditions{
-			ModifiedAccessConditions: &datalakefile.ModifiedAccessConditions{
-				IfNoneMatch: &etagAny,
-			},
-		},
-	}
-}
-
 func deltaCommitTempPath(logDir string) string {
 	tableDir := strings.TrimSuffix(logDir, "/_delta_log")
 	return tableDir + "/_bruin_delta_tmp/" + uuid.New().String() + ".tmp"
 }
 
 func isDeltaCommitConflict(err error) bool {
-	return datalakeerror.HasCode(
+	return errors.Is(err, errDeltaCommitConflict) || datalakeerror.HasCode(
 		err,
 		datalakeerror.ConditionNotMet,
 		datalakeerror.PathAlreadyExists,
