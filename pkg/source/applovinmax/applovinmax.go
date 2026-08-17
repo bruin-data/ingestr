@@ -8,11 +8,17 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
@@ -27,6 +33,8 @@ const (
 	rateLimitBurst = 5
 	defaultDays    = 30
 	workerCount    = 5
+	maxBatchRows   = 5_000
+	maxBatchBytes  = 16 << 20
 )
 
 var supportedTables = []string{"user_ad_revenue"}
@@ -175,7 +183,10 @@ func (s *AppLovinMaxSource) read(ctx context.Context, opts source.ReadOptions) (
 	go func() {
 		defer close(results)
 		if err := s.readUserAdRevenue(ctx, opts, results); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			select {
+			case results <- source.RecordBatchResult{Err: err}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
@@ -186,6 +197,50 @@ type fetchTask struct {
 	app      string
 	date     string
 	platform string
+}
+
+type rowLimiter struct {
+	limit int64
+	used  atomic.Int64
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newRowLimiter(limit int) *rowLimiter {
+	return &rowLimiter{
+		limit: int64(limit),
+		done:  make(chan struct{}),
+	}
+}
+
+func (l *rowLimiter) take() bool {
+	if l.limit <= 0 {
+		return true
+	}
+
+	for {
+		used := l.used.Load()
+		if used >= l.limit {
+			return false
+		}
+		if l.used.CompareAndSwap(used, used+1) {
+			if used+1 == l.limit {
+				l.once.Do(func() { close(l.done) })
+			}
+			return true
+		}
+	}
+}
+
+func (l *rowLimiter) exhausted() bool {
+	return l.limit > 0 && l.used.Load() >= l.limit
+}
+
+func (l *rowLimiter) doneCh() <-chan struct{} {
+	if l.limit <= 0 {
+		return nil
+	}
+	return l.done
 }
 
 func (s *AppLovinMaxSource) readUserAdRevenue(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -209,13 +264,15 @@ func (s *AppLovinMaxSource) readUserAdRevenue(ctx context.Context, opts source.R
 
 	config.Debug("[APPLOVINMAX] %d fetch tasks across %d apps, %d platforms", len(tasks), len(s.applications), len(platforms))
 
-	taskCh := make(chan fetchTask, len(tasks))
+	taskCh := make(chan fetchTask)
 	var wg sync.WaitGroup
 
 	parallelism := opts.Parallelism
 	if parallelism <= 0 {
 		parallelism = workerCount
 	}
+	parallelism = min(parallelism, workerCount)
+	limiter := newRowLimiter(opts.Limit)
 
 	errCh := make(chan error, parallelism)
 	for i := 0; i < parallelism; i++ {
@@ -229,34 +286,20 @@ func (s *AppLovinMaxSource) readUserAdRevenue(ctx context.Context, opts source.R
 				default:
 				}
 
-				items, err := s.fetchDayPlatform(ctx, task.app, task.date, task.platform)
+				if limiter.exhausted() {
+					return
+				}
+
+				rows, err := s.fetchDayPlatform(ctx, task.app, task.date, task.platform, opts, limiter, results)
 				if err != nil {
-					errCh <- err
+					select {
+					case errCh <- err:
+					case <-ctx.Done():
+					}
 					cancel()
 					return
 				}
-
-				if len(items) == 0 {
-					continue
-				}
-
-				schemaCols := []schema.Column{
-					{Name: "partition_date", DataType: schema.TypeDate, Nullable: false},
-				}
-
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, schemaCols, opts.ExcludeColumns)
-				if err != nil {
-					errCh <- fmt.Errorf("failed to convert user_ad_revenue to Arrow: %w", err)
-					cancel()
-					return
-				}
-
-				select {
-				case results <- source.RecordBatchResult{Batch: record}:
-				case <-ctx.Done():
-					return
-				}
-				config.Debug("[APPLOVINMAX] sent %d records for app=%s date=%s platform=%s", len(items), task.app, task.date, task.platform)
+				config.Debug("[APPLOVINMAX] sent %d records for app=%s date=%s platform=%s", rows, task.app, task.date, task.platform)
 			}
 		}()
 	}
@@ -267,6 +310,8 @@ func (s *AppLovinMaxSource) readUserAdRevenue(ctx context.Context, opts source.R
 			select {
 			case taskCh <- task:
 			case <-ctx.Done():
+				return
+			case <-limiter.doneCh():
 				return
 			}
 		}
@@ -284,7 +329,13 @@ func (s *AppLovinMaxSource) readUserAdRevenue(ctx context.Context, opts source.R
 	return nil
 }
 
-func (s *AppLovinMaxSource) fetchDayPlatform(ctx context.Context, app, date, platform string) ([]map[string]interface{}, error) {
+func (s *AppLovinMaxSource) fetchDayPlatform(
+	ctx context.Context,
+	app, date, platform string,
+	opts source.ReadOptions,
+	limiter *rowLimiter,
+	results chan<- source.RecordBatchResult,
+) (int, error) {
 	resp, err := s.client.R(ctx).
 		SetQueryParam("api_key", s.apiKey).
 		SetQueryParam("date", date).
@@ -293,96 +344,301 @@ func (s *AppLovinMaxSource) fetchDayPlatform(ctx context.Context, app, date, pla
 		SetQueryParam("aggregated", "false").
 		Get("/max/userAdRevenueReport")
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch user_ad_revenue for app=%s date=%s platform=%s: %w", app, date, platform, err)
+		return 0, fmt.Errorf("failed to fetch user_ad_revenue for app=%s date=%s platform=%s: %w", app, date, platform, err)
 	}
 
 	if resp.StatusCode() == http.StatusNotFound {
 		if strings.Contains(resp.String(), "No Mediation App Id found for platform") {
 			config.Debug("[APPLOVINMAX] no data for app=%s platform=%s (not configured), skipping", app, platform)
-			return nil, nil
+			return 0, nil
 		}
 		if strings.Contains(resp.String(), "Data does not exist for specified date") {
 			config.Debug("[APPLOVINMAX] no data for app=%s date=%s platform=%s (no data for date), skipping", app, date, platform)
-			return nil, nil
+			return 0, nil
 		}
 	}
 
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("applovinmax API returned status %d for app=%s date=%s platform=%s: %s", resp.StatusCode(), app, date, platform, resp.String())
+		return 0, fmt.Errorf("applovinmax API returned status %d for app=%s date=%s platform=%s: %s", resp.StatusCode(), app, date, platform, resp.String())
 	}
 
 	var body map[string]interface{}
 	if err := resp.JSON(&body); err != nil {
-		return nil, fmt.Errorf("failed to parse user_ad_revenue response: %w", err)
+		return 0, fmt.Errorf("failed to parse user_ad_revenue response: %w", err)
 	}
 
 	csvURL, ok := body["ad_revenue_report_url"].(string)
 	if !ok || csvURL == "" {
 		config.Debug("[APPLOVINMAX] no ad_revenue_report_url for app=%s date=%s platform=%s", app, date, platform)
-		return nil, nil
+		return 0, nil
 	}
 
-	items, err := s.downloadCSV(ctx, csvURL)
+	rows, err := s.downloadCSV(ctx, csvURL, date, platform, opts, limiter, results)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download CSV for app=%s date=%s platform=%s: %w", app, date, platform, err)
+		return 0, fmt.Errorf("failed to download CSV for app=%s date=%s platform=%s: %w", app, date, platform, err)
 	}
 
-	for _, item := range items {
-		item["partition_date"] = date
-		item["platform"] = platform
-	}
-
-	return items, nil
+	return rows, nil
 }
 
-func (s *AppLovinMaxSource) downloadCSV(ctx context.Context, csvURL string) ([]map[string]interface{}, error) {
+func (s *AppLovinMaxSource) downloadCSV(
+	ctx context.Context,
+	csvURL, date, platform string,
+	opts source.ReadOptions,
+	limiter *rowLimiter,
+	results chan<- source.RecordBatchResult,
+) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, csvURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CSV request: %w", err)
+		return 0, fmt.Errorf("failed to create CSV request: %w", err)
 	}
 
 	httpClient := &http.Client{Timeout: 120 * time.Second}
 	httpResp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download CSV: %w", err)
+		return 0, fmt.Errorf("failed to download CSV: %w", err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("CSV download returned status %d", httpResp.StatusCode)
+		return 0, fmt.Errorf("CSV download returned status %d", httpResp.StatusCode)
 	}
 
-	reader := csv.NewReader(httpResp.Body)
+	return streamCSV(ctx, httpResp.Body, date, platform, opts, limiter, results)
+}
+
+type csvFieldSource struct {
+	indexes []int
+	value   any
+	static  bool
+}
+
+type csvBatchBuilder struct {
+	schema  *arrow.Schema
+	rb      *array.RecordBuilder
+	sources []csvFieldSource
+	buf     []byte
+	rows    int
+	bytes   int64
+}
+
+func newCSVBatchBuilder(headers []string, date, platform string, excludeColumns []string) *csvBatchBuilder {
+	exclude := make(map[string]bool, len(excludeColumns))
+	for _, column := range excludeColumns {
+		exclude[strings.ToLower(column)] = true
+	}
+
+	headerIndexes := make(map[string][]int, len(headers))
+	for i, header := range headers {
+		headerIndexes[header] = append(headerIndexes[header], i)
+	}
+
+	columnNames := make([]string, 0, len(headerIndexes)+1)
+	for name := range headerIndexes {
+		if name != "partition_date" && name != "platform" {
+			columnNames = append(columnNames, name)
+		}
+	}
+	columnNames = append(columnNames, "platform")
+	sort.Strings(columnNames)
+
+	fields := make([]arrow.Field, 0, len(columnNames)+1)
+	sources := make([]csvFieldSource, 0, len(columnNames)+1)
+	if !exclude["partition_date"] {
+		fields = append(fields, arrow.Field{Name: "partition_date", Type: schema.DataTypeToArrowType(schema.Column{DataType: schema.TypeDate}), Nullable: false})
+		sources = append(sources, csvFieldSource{value: date, static: true})
+	}
+	for _, name := range columnNames {
+		if exclude[strings.ToLower(name)] {
+			continue
+		}
+		fields = append(fields, arrow.Field{Name: name, Type: schema.UnknownArrowType, Nullable: true})
+		if name == "platform" {
+			sources = append(sources, csvFieldSource{value: platform, static: true})
+		} else {
+			sources = append(sources, csvFieldSource{indexes: headerIndexes[name]})
+		}
+	}
+
+	arrowSchema := arrow.NewSchema(fields, nil)
+	return &csvBatchBuilder{
+		schema:  arrowSchema,
+		rb:      array.NewRecordBuilder(memory.NewGoAllocator(), arrowSchema),
+		sources: sources,
+	}
+}
+
+func (b *csvBatchBuilder) appendRow(record []string, rowBytes int64) {
+	for i, fieldSource := range b.sources {
+		builder := b.rb.Field(i)
+		if fieldSource.static {
+			b.appendValue(builder, fieldSource.value)
+			continue
+		}
+
+		value, ok := lastNonEmptyCSVValue(record, fieldSource.indexes)
+		if !ok {
+			builder.AppendNull()
+			continue
+		}
+		b.appendValue(builder, tryParseNumeric(strings.TrimSpace(value)))
+	}
+	b.rows++
+	b.bytes += rowBytes
+}
+
+func (b *csvBatchBuilder) appendValue(builder array.Builder, value any) {
+	extensionBuilder, ok := builder.(*array.ExtensionBuilder)
+	if !ok {
+		arrowconv.AppendValue(builder, value)
+		return
+	}
+	stringBuilder := extensionBuilder.StorageBuilder().(*array.StringBuilder)
+	switch typed := value.(type) {
+	case json.Number:
+		stringBuilder.Append(string(typed))
+	case string:
+		b.appendJSONString(stringBuilder, typed)
+	default:
+		arrowconv.AppendValue(builder, value)
+	}
+}
+
+func (b *csvBatchBuilder) appendJSONString(builder *array.StringBuilder, value string) {
+	if !utf8.ValidString(value) {
+		arrowconv.AppendUnknownValue(builder, value)
+		return
+	}
+	for i := 0; i < len(value); i++ {
+		if char := value[i]; char == '"' || char == '\\' || char < 0x20 {
+			arrowconv.AppendUnknownValue(builder, value)
+			return
+		}
+	}
+	b.buf = append(b.buf[:0], '"')
+	b.buf = append(b.buf, value...)
+	b.buf = append(b.buf, '"')
+	builder.BinaryBuilder.Append(b.buf)
+}
+
+func (b *csvBatchBuilder) finish() arrow.RecordBatch {
+	rows := b.rows
+	b.rows = 0
+	b.bytes = 0
+	if len(b.sources) == 0 {
+		return array.NewRecordBatch(b.schema, nil, int64(rows))
+	}
+	return b.rb.NewRecordBatch()
+}
+
+func (b *csvBatchBuilder) release() {
+	b.rb.Release()
+}
+
+func streamCSV(
+	ctx context.Context,
+	input io.Reader,
+	date, platform string,
+	opts source.ReadOptions,
+	limiter *rowLimiter,
+	results chan<- source.RecordBatchResult,
+) (int, error) {
+	reader := csv.NewReader(input)
 
 	headers, err := reader.Read()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read CSV headers: %w", err)
+		return 0, fmt.Errorf("failed to read CSV headers: %w", err)
 	}
 
-	var items []map[string]any
+	batchRows, batchBytes := effectiveBatchLimits(opts)
+	builder := newCSVBatchBuilder(headers, date, platform, opts.ExcludeColumns)
+	defer builder.release()
+
+	totalRows := 0
+	flush := func() error {
+		if builder.rows == 0 {
+			return nil
+		}
+		record := builder.finish()
+		rows := int(record.NumRows())
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+			totalRows += rows
+			return nil
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
+	}
+
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to read CSV row: %w", err)
+			return totalRows, fmt.Errorf("failed to read CSV row: %w", err)
 		}
 
-		item := make(map[string]any, len(headers)+2)
-		for i, header := range headers {
-			if i < len(record) {
-				val := strings.TrimSpace(record[i])
-				if val == "" {
-					continue
-				}
-				item[header] = tryParseNumeric(val)
+		if !limiter.take() {
+			break
+		}
+
+		rowBytes := estimateCSVRowBytes(headers, record, date, platform)
+		if builder.rows > 0 && (builder.rows >= batchRows || builder.bytes+rowBytes > batchBytes) {
+			if err := flush(); err != nil {
+				return totalRows, err
 			}
 		}
-		items = append(items, item)
+		builder.appendRow(record, rowBytes)
+
+		if builder.rows >= batchRows || limiter.exhausted() {
+			if err := flush(); err != nil {
+				return totalRows, err
+			}
+		}
+		if limiter.exhausted() {
+			break
+		}
 	}
 
-	return items, nil
+	if err := flush(); err != nil {
+		return totalRows, err
+	}
+	return totalRows, nil
+}
+
+func effectiveBatchLimits(opts source.ReadOptions) (int, int64) {
+	rows := opts.PageSize
+	if rows <= 0 || rows > maxBatchRows {
+		rows = maxBatchRows
+	}
+	bytes := opts.MaxBatchBytes
+	if bytes <= 0 || bytes > maxBatchBytes {
+		bytes = maxBatchBytes
+	}
+	return rows, bytes
+}
+
+func lastNonEmptyCSVValue(record []string, indexes []int) (string, bool) {
+	for i := len(indexes) - 1; i >= 0; i-- {
+		index := indexes[i]
+		if index < len(record) && strings.TrimSpace(record[index]) != "" {
+			return record[index], true
+		}
+	}
+	return "", false
+}
+
+func estimateCSVRowBytes(headers, record []string, date, platform string) int64 {
+	size := int64(len("partition_date") + len(date) + len("platform") + len(platform))
+	for i, value := range record {
+		if i >= len(headers) {
+			break
+		}
+		size += int64(len(headers[i]) + len(strings.TrimSpace(value)))
+	}
+	return size
 }
 
 func resolveDateRange(intervalStart, intervalEnd interface{}) (time.Time, time.Time) {
