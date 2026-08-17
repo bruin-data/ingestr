@@ -29,6 +29,7 @@ JDBC_PACKAGES = {
     "mssql": "com.microsoft.sqlserver:mssql-jdbc:12.6.1.jre11",
     "sqlserver": "com.microsoft.sqlserver:mssql-jdbc:12.6.1.jre11",
     "duckdb": "org.duckdb:duckdb_jdbc:1.0.0",
+    "clickhouse": "com.clickhouse:clickhouse-jdbc:0.6.5",
 }
 
 DUCKDB_COLUMN_TYPES = (
@@ -162,6 +163,22 @@ def duckdb_config(uri: str) -> dict:
     }
 
 
+def clickhouse_config(uri: str) -> dict:
+    parsed = urlparse(uri)
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    database = parsed.path.lstrip("/") or "default"
+    http_port = params.pop("http_port", "8123")
+    params.pop("secure", None)
+    url = f"jdbc:clickhouse://{parsed.hostname}:{http_port}/{database}"
+    if params:
+        url += f"?{query_string(params)}"
+    return {
+        "url": url,
+        "driver": "com.clickhouse.jdbc.ClickHouseDriver",
+        "properties": parse_credentials(parsed),
+    }
+
+
 def jdbc_config(db_type: str, uri: str) -> dict:
     if db_type == "postgres":
         return postgres_config(uri)
@@ -171,6 +188,8 @@ def jdbc_config(db_type: str, uri: str) -> dict:
         return mssql_config(uri)
     if db_type == "duckdb":
         return duckdb_config(uri)
+    if db_type == "clickhouse":
+        return clickhouse_config(uri)
     raise ValueError(f"Unsupported Spark benchmark database type: {db_type}")
 
 
@@ -250,6 +269,9 @@ def write_destination(df, args):
     if args.dest_type == "duckdb":
         options["createTableColumnTypes"] = DUCKDB_COLUMN_TYPES
         output = df.coalesce(1)
+    elif args.dest_type == "clickhouse":
+        options["createTableOptions"] = "ENGINE = MergeTree ORDER BY tuple()"
+        options["isolationLevel"] = "NONE"
 
     output.write.format("jdbc").mode("overwrite").options(**options).save()
 

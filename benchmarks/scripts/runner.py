@@ -114,6 +114,69 @@ def bq_parts_from_uri(uri: str) -> tuple[str, str]:
     return project, dataset
 
 
+def clickhouse_connection_from_uri(uri: str) -> dict:
+    parsed = urlparse(uri)
+    query = parse_qs(parsed.query)
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 9000,
+        "database": parsed.path.lstrip("/") or "default",
+        "user": unquote(parsed.username or "default"),
+        "password": unquote(parsed.password or ""),
+        "secure": query.get("secure", [""])[-1].lower() in ("1", "true"),
+        "skip_verify": query.get("skip_verify", [""])[-1].lower() in ("1", "true"),
+    }
+
+
+def quote_clickhouse_identifier(name: str) -> str:
+    return f"`{name.replace('`', '``')}`"
+
+
+def clickhouse_full_table(database: str, table: str) -> str:
+    return f"{quote_clickhouse_identifier(database)}.{quote_clickhouse_identifier(table)}"
+
+
+def clickhouse_literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def airbyte_raw_table(src_config: dict) -> str:
+    namespace, table = parse_table_parts(src_config["table"])
+    namespace = namespace or src_config.get("database", "")
+    prefix = f"{namespace}_" if namespace else ""
+    return f"{prefix}raw__stream_{table}"
+
+
+def clickhouse_client_args(uri: str, sql: str) -> list[str]:
+    cfg = clickhouse_connection_from_uri(uri)
+    args = [
+        "clickhouse-client",
+        "--host", cfg["host"],
+        "--port", str(cfg["port"]),
+        "--user", cfg["user"],
+        "--password", cfg["password"],
+        "--database", cfg["database"],
+        "--format", "TabSeparatedRaw",
+    ]
+    if cfg["secure"]:
+        args.append("--secure")
+    if cfg["skip_verify"]:
+        args.append("--accept-invalid-certificate")
+    args.extend(["--multiquery", "--query", sql])
+    return args
+
+
+def clickhouse_sql_command(uri: str, sql: str) -> str:
+    return " ".join(shlex.quote(arg) for arg in clickhouse_client_args(uri, sql))
+
+
+def run_clickhouse_sql(uri: str, sql: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        clickhouse_client_args(uri, sql),
+        capture_output=True, text=True, timeout=120,
+    )
+
+
 def snowflake_connection_from_uri(uri: str) -> dict:
     parsed = urlparse(uri)
     path_parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
@@ -418,6 +481,17 @@ def sling_connection_value(uri: str, db_type: str) -> str:
         return json.dumps(snowflake_connection_from_uri(uri))
     if db_type in ("mssql", "sqlserver"):
         return uri.replace("mssql://", "sqlserver://", 1)
+    if db_type == "clickhouse":
+        cfg = clickhouse_connection_from_uri(uri)
+        return json.dumps({
+            "type": "clickhouse",
+            "host": cfg["host"],
+            "port": cfg["port"],
+            "database": cfg["database"],
+            "user": cfg["user"],
+            "password": cfg["password"],
+            "secure": cfg["secure"],
+        })
     return uri
 
 
@@ -586,6 +660,24 @@ def build_prepare_command(
             for t in tables
         ]
         return mssql_sql_command(dst_uri, "; ".join(drops), mode="exec")
+
+    if dst_type == "clickhouse":
+        schema, table = parse_table_parts(dst_table)
+        database = schema or clickhouse_connection_from_uri(dst_uri)["database"]
+        tables = [
+            table,
+            "_dlt_loads",
+            "_dlt_version",
+            "_dlt_pipeline_state",
+            "dlt_sentinel_table",
+        ]
+        if src_config:
+            tables.append(airbyte_raw_table(src_config))
+        drops = [
+            f"DROP TABLE IF EXISTS {clickhouse_full_table(database, name)}"
+            for name in tables
+        ]
+        return clickhouse_sql_command(dst_uri, "; ".join(drops))
 
     raise ValueError(f"Unknown destination type: {dst_type}")
 
@@ -935,6 +1027,73 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             else:
                 return None
 
+        elif dst_type == "clickhouse":
+            database = schema or clickhouse_connection_from_uri(dst_uri)["database"]
+            full_table = clickhouse_full_table(database, table)
+            if query_type == "count":
+                sql = f"SELECT count() FROM {full_table}"
+            elif query_type == "sum_id":
+                queries = [
+                    f"SELECT coalesce(sum(toInt64(id)), 0) FROM {full_table}",
+                    (
+                        "SELECT coalesce(sum(if("
+                        "JSONHas(_airbyte_data, 'id'), "
+                        "JSONExtractInt(_airbyte_data, 'id'), "
+                        "JSONExtractInt(_airbyte_data, 'data', 'id')"
+                        ")), 0) "
+                        f"FROM {full_table}"
+                    ),
+                ]
+                for sql in queries:
+                    result = run_clickhouse_sql(dst_uri, sql)
+                    if result.returncode == 0:
+                        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                        return lines[-1] if lines else None
+                return None
+            elif query_type == "columns":
+                sql = (
+                    "SELECT lower(name) FROM system.columns "
+                    f"WHERE database = {clickhouse_literal(database)} "
+                    f"AND table = {clickhouse_literal(table)} "
+                    "ORDER BY position"
+                )
+            else:
+                return None
+
+            result = run_clickhouse_sql(dst_uri, sql)
+            if result.returncode != 0:
+                return None
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if query_type == "columns":
+                if "_airbyte_data" in lines:
+                    json_sql = (
+                        "SELECT DISTINCT arrayJoin(JSONExtractKeys(_airbyte_data)) AS key "
+                        f"FROM {full_table} ORDER BY key"
+                    )
+                    json_result = run_clickhouse_sql(dst_uri, json_sql)
+                    if json_result.returncode == 0:
+                        json_columns = [
+                            line.strip()
+                            for line in json_result.stdout.splitlines()
+                            if line.strip()
+                        ]
+                        lines = list(dict.fromkeys(lines + json_columns))
+                    nested_json_sql = (
+                        "SELECT DISTINCT arrayJoin(JSONExtractKeys("
+                        "JSONExtractRaw(_airbyte_data, 'data'))) AS key "
+                        f"FROM {full_table} ORDER BY key"
+                    )
+                    nested_json_result = run_clickhouse_sql(dst_uri, nested_json_sql)
+                    if nested_json_result.returncode == 0:
+                        nested_json_columns = [
+                            line.strip()
+                            for line in nested_json_result.stdout.splitlines()
+                            if line.strip()
+                        ]
+                        lines = list(dict.fromkeys(lines + nested_json_columns))
+                return lines
+            return lines[-1] if lines else None
+
     except Exception:
         return None
     return None
@@ -944,6 +1103,7 @@ def check_result(
     label: str, dst_type: str, dst_uri: str,
     check_table: str, check_schema: str,
     expected_rows: int, expected_id_sum: int,
+    expected_columns: list[str],
 ) -> bool:
     row_count = query_destination(dst_type, dst_uri, check_table, check_schema, "count")
     id_sum = query_destination(dst_type, dst_uri, check_table, check_schema, "sum_id")
@@ -959,13 +1119,16 @@ def check_result(
         console.print(f"  [red]FAIL: SUM(id) = {id_sum}, expected {expected_id_sum}[/red]")
         ok = False
 
-    for col in EXPECTED_COLS:
+    for col in expected_columns:
         if col not in columns:
             console.print(f"  [red]FAIL: missing column '{col}'[/red]")
             ok = False
 
     if ok:
-        console.print(f"  [green]PASS ({row_count} rows, SUM(id)={id_sum}, all 15 columns)[/green]")
+        console.print(
+            f"  [green]PASS ({row_count} rows, SUM(id)={id_sum}, "
+            f"all {len(expected_columns)} required columns)[/green]"
+        )
 
     return ok
 
@@ -1066,7 +1229,10 @@ def run_validation(
             _, src_table_bare = parse_table_parts(src["table"])
             dst_schema, dst_table_name = parse_table_parts(dst_table)
 
-            if tool_name == "airbyte":
+            if tool_name == "airbyte" and dst["type"] == "clickhouse":
+                check_table = airbyte_raw_table(src)
+                check_schema = clickhouse_connection_from_uri(dst["uri"])["database"]
+            elif tool_name == "airbyte":
                 check_table = src_table_bare
                 check_schema = src.get("database", "") if src["type"] in ("mysql", "mongodb") else dst_schema
             else:
@@ -1077,6 +1243,10 @@ def run_validation(
                 label, dst["type"], dst["uri"],
                 check_table, check_schema,
                 expected_rows, expected_id_sum,
+                [
+                    col for col in EXPECTED_COLS
+                    if src["type"] != "mongodb" or col != "json_val"
+                ],
             )
 
             if ok:

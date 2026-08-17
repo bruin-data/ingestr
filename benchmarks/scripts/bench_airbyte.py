@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import tempfile
+from urllib.parse import parse_qs, unquote, urlparse
 
 os.environ["AIRBYTE_ANALYTICS_DISABLED"] = "1"
 os.environ.setdefault("DO_NOT_TRACK", "1")
@@ -100,7 +101,8 @@ def _patch_namespace_bug():
                         type=Type.STATE,
                         state=state_provider.get_stream_state(stream_name),
                     )
-                yield _stream_success_with_ns(stream_name, namespace)
+                if os.environ.get("BENCH_AIRBYTE_OMIT_TRACE") != "1":
+                    yield _stream_success_with_ns(stream_name, namespace)
 
         return cls(generator())
 
@@ -211,6 +213,21 @@ def parse_mongodb_uri(uri: str, source_table: str) -> dict:
     }
 
 
+def parse_clickhouse_uri(uri: str) -> dict:
+    parsed = urlparse(uri)
+    query = parse_qs(parsed.query)
+    database = parsed.path.lstrip("/") or "default"
+    return {
+        "host": docker_host(parsed.hostname),
+        "port": int(query.get("http_port", [8123])[-1]),
+        "database": database,
+        "username": unquote(parsed.username or "default"),
+        "password": unquote(parsed.password or ""),
+        "ssl": query.get("secure", [""])[-1].lower() in ("1", "true"),
+        "raw_data_schema": database,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-uri", required=True)
@@ -278,6 +295,12 @@ def main():
         destination = ab.get_destination(
             "destination-duckdb",
             config={"destination_path": db_path},
+        )
+    elif dest_uri.startswith("clickhouse://"):
+        os.environ["BENCH_AIRBYTE_OMIT_TRACE"] = "1"
+        destination = ab.get_destination(
+            "destination-clickhouse",
+            config=parse_clickhouse_uri(dest_uri),
         )
     else:
         print(f"Unsupported destination: {dest_uri}", file=sys.stderr)

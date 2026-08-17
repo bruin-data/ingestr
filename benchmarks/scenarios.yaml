@@ -51,6 +51,12 @@ destinations:
     table: "dbo.bench_data"
     docker: bench-mssql-dest
 
+  local_clickhouse:
+    type: clickhouse
+    uri: "clickhouse://bench_user:bench_pass@localhost:9001/bench_dest?http_port=8124&secure=0"
+    table: "bench_dest.bench_data"
+    docker: bench-clickhouse-dest
+
   remote_postgres:
     type: postgres
     uri_from_env: BENCH_REMOTE_PG_URI
@@ -101,6 +107,18 @@ scenarios:
   - source: local_duckdb
     destination: local_sqlserver
 
+  - source: local_postgres
+    destination: local_clickhouse
+
+  - source: local_mysql
+    destination: local_clickhouse
+
+  - source: local_mongodb
+    destination: local_clickhouse
+
+  - source: local_duckdb
+    destination: local_clickhouse
+
   # Remote Postgres (requires BENCH_REMOTE_PG_URI env var)
   - source: local_postgres
     destination: remote_postgres
@@ -147,7 +165,7 @@ tools:
     binary: bin/ingestr
 
   ingestr:
-    command_prefix: "uv tool run --python 3.13 --with pyodbc ingestr@0.14.155 ingest"
+    command_prefix: "uv tool run --python 3.12 --with pyodbc ingestr@0.14.155 ingest"
     requires: uv
     uri_scheme_overrides:
       postgres: postgresql

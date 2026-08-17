@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb")
+REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb" "clickhouse-client")
 OPTIONAL_TOOLS=("uv" "sling" "java")
 
 errors=0
