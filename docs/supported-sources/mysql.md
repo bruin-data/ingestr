@@ -70,10 +70,10 @@ Requirements:
 CDC URI parameters:
 - `mode`: **deprecated and ignored.** Continuous ingestion is controlled by `--stream`. `mode=batch` is accepted as a no-op; `mode=stream` is rejected unless `--stream` is also passed.
 - `server_id`: optional positive uint32 replication server id; generated automatically when omitted. Pin a unique value for scheduled or overlapping CDC runs.
-- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` names a single table; the destination is then `--dest-table`. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 - `flavor`: `mysql` or `mariadb`; inferred from the URI scheme unless overridden.
 
-Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
+Omit `--source-table` to replicate every table in the database, or pass a comma-separated list (for example `users,orders`) to replicate only those. Multi-table CDC snapshots each selected table independently and then stream each table from its own snapshot position. Each table is consistent on its own, but a multi-table run is not a single global point-in-time snapshot across all tables.
 
 ### Tutorial
 

@@ -70,13 +70,31 @@ How quickly a change is noticed depends on the table. A busy table surfaces it r
 
 ### Multi-table CDC
 
-If you omit `--source-table`, most CDC connectors run in multi-table mode and replicate every eligible table in the source's capture set. Each table is snapshotted and streamed from its own position; a multi-table run is not a single global point-in-time snapshot across all tables, but each table is individually consistent. Use the `dest_schema` URI parameter to control where multi-table output lands. It applies to multi-table runs only: once `--source-table` is set, the destination comes from `--dest-table` and `dest_schema` is ignored.
+If you omit `--source-table`, most CDC connectors run in multi-table mode and replicate every eligible table in the source's capture set. Each table is snapshotted and streamed from its own position; a multi-table run is not a single global point-in-time snapshot across all tables, but each table is individually consistent. Use the `dest_schema` URI parameter to control where multi-table output lands. It applies to multi-table runs only: once `--source-table` names a single table, the destination comes from `--dest-table` and `dest_schema` is ignored.
 
 ```plaintext
 postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics
 ```
 
-For PostgreSQL, a schema change to a table already in the stream is handled in process, as described above. A brand-new table showing up is a bigger event: a one-shot run simply picks it up on its next start, but a running stream can't snapshot it mid-flight — when the periodic check finds one, the stream stops cleanly before touching any destination data and expects whatever supervises it (systemd, Kubernetes, a scheduler) to start it again. The restarted process snapshots the new table and then continues from the WAL still held by the existing slot, so no changes are missed in between. If you manage the publication yourself, remember to add the new table to it — ingestr won't do it for you.
+To replicate only some of those tables, give `--source-table` a comma-separated list. This is still a multi-table run — `dest_schema` applies, and each table gets its own destination table — just restricted to the tables you name.
+
+```bash
+ingestr ingest \
+    --source-uri "postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics" \
+    --source-table "public.users,public.orders" \
+    --dest-uri "bigquery://my-project"
+```
+
+Name tables the way the connector reports them: schema-qualified for PostgreSQL outside the `public` schema (`sales.orders`) and for SQL Server always (`dbo.users`), bare for MySQL, Vitess, PlanetScale and MongoDB. Matching is case-insensitive, and a qualifier that the connector drops is accepted either way, so `public.users` and `users` both select the same PostgreSQL table. A name that matches nothing fails the run rather than quietly ingesting less than you asked for.
+
+Two things to know before switching an existing pipeline to a list:
+
+- **The table set is fixed for the run.** A new table at the source is not picked up while a subset is in effect, and the stream is not interrupted by one appearing.
+- **A subset is a separate connector.** Its replication slot, run lease and CDC state are keyed to the set of tables you named, so changing the list — or moving between a list and no list — starts a fresh snapshot rather than resuming. That is deliberate: the slot for one subset advances past changes to the tables it filters out, so resuming a different set from it would silently skip them. It also means the old connector's replication slot is left behind holding WAL; drop it once you have moved off it.
+
+For PostgreSQL, listing tables does **not** narrow the publication. `ingestr_publication` is shared across every managed run against the database, so narrowing it would make concurrent pipelines overwrite each other's capture set. The source still receives the other tables' changes and discards them. To stop PostgreSQL from sending them at all, create your own publication and pass `?publication=`, which ingestr never rewrites.
+
+For PostgreSQL, a schema change to a table already in the stream is handled in process, as described above. A brand-new table showing up is a bigger event (unless `--source-table` names a fixed list, in which case new tables are ignored): a one-shot run simply picks it up on its next start, but a running stream can't snapshot it mid-flight — when the periodic check finds one, the stream stops cleanly before touching any destination data and expects whatever supervises it (systemd, Kubernetes, a scheduler) to start it again. The restarted process snapshots the new table and then continues from the WAL still held by the existing slot, so no changes are missed in between. If you manage the publication yourself, remember to add the new table to it — ingestr won't do it for you.
 
 ## Supported CDC platforms
 

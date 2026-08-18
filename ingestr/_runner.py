@@ -198,7 +198,12 @@ def build_ingest_args(
     query_annotations: Optional[Union[str, Mapping[str, Any]]] = None,
     extra_args: Optional[Sequence[object]] = None,
 ) -> List[str]:
-    """Build CLI arguments for `ingestr ingest` without executing the command."""
+    """Build CLI arguments for `ingestr ingest` without executing the command.
+
+    ``source_table`` is passed through verbatim, so a CDC source can be given a
+    comma-separated list (``"public.users,public.orders"``) to replicate just
+    those tables.
+    """
 
     args = ["ingest"]
     _append_option(args, "source-uri", source_uri)

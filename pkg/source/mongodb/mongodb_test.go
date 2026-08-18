@@ -537,20 +537,26 @@ func TestParseMongoCDCNamespace(t *testing.T) {
 	}
 }
 
-func TestMongoCDCMatchesTableIsCaseSensitive(t *testing.T) {
-	filter := []string{"users", "app.orders"}
+func TestMongoCDCSelectTables(t *testing.T) {
+	src := &MongoDBCDCSource{database: "app"}
+	if err := src.SelectTables([]string{"users", "app.orders"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	if !mongoCDCMatchesTable(filter, "app", "users") {
-		t.Fatal("expected exact collection match")
+	for _, collection := range []string{"users", "orders", "Users", "ORDERS"} {
+		if !src.selection.Includes(collection) {
+			t.Fatalf("expected %q to be selected", collection)
+		}
 	}
-	if !mongoCDCMatchesTable(filter, "app", "orders") {
-		t.Fatal("expected exact qualified collection match")
+	if src.selection.Includes("invoices") {
+		t.Fatal("did not expect an unrequested collection to be selected")
 	}
-	if mongoCDCMatchesTable(filter, "app", "Users") {
-		t.Fatal("did not expect case-insensitive collection match")
+
+	if err := src.SelectTables([]string{"users", "other.users"}); err == nil {
+		t.Fatal("expected a collection naming a different database to be rejected")
 	}
-	if mongoCDCMatchesTable(filter, "App", "orders") {
-		t.Fatal("did not expect case-insensitive database match")
+	if err := src.SelectTables([]string{"users", "app.users"}); err == nil {
+		t.Fatal("expected two spellings of the same collection to be rejected")
 	}
 }
 

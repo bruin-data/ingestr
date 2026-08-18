@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,6 +91,7 @@ type MSSQLCDCSource struct {
 	lag            *mssqlLagState
 	health         captureHealth
 	guidConversion bool
+	selection      *source.TableSelection
 
 	stateMu sync.Mutex
 	state   source.CDCStateCommitToken
@@ -458,45 +458,57 @@ type skippedTable struct {
 	reason string
 }
 
+// mssqlTableSelectionOptions describes how SQL Server CDC names its tables.
+// Names are always schema-qualified, including dbo, so no rewriting is needed.
+var mssqlTableSelectionOptions = source.TableSelectionOptions{
+	Subject: "SQL Server CDC table",
+	Scope:   "SQL Server CDC-enabled tables",
+	Hint:    "use schema-qualified names (e.g. dbo.users)",
+}
+
+// SelectTables restricts this source to the named tables.
+func (s *MSSQLCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, mssqlTableSelectionOptions)
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
 // selectTables applies the requested-table filter. A filter entry that
 // matches nothing is a hard error: silently ingesting nothing (and, in
 // streaming mode, polling forever) would hide a typo or an unqualified
 // table name.
 func selectTables(allTables []source.SourceTableInfo, skipped []skippedTable, requested []string) ([]source.SourceTableInfo, error) {
-	filter := map[string]string{}
-	for _, table := range requested {
-		table = strings.TrimSpace(table)
-		if table == "" {
-			continue
-		}
-		filter[strings.ToLower(table)] = table
+	selection, err := source.NewTableSelection(requested, mssqlTableSelectionOptions)
+	if err != nil {
+		return nil, err
 	}
-	filtered := len(filter) > 0
-
-	selected := make([]source.SourceTableInfo, 0, len(allTables))
-	for _, table := range allTables {
-		key := strings.ToLower(table.Name)
-		if filtered && filter[key] == "" {
-			continue
-		}
-		delete(filter, key)
-		selected = append(selected, table)
-	}
-
-	for _, st := range skipped {
-		if requestedName, ok := filter[strings.ToLower(st.name)]; ok {
-			return nil, fmt.Errorf("SQL Server CDC table %s cannot be ingested: %s", requestedName, st.reason)
-		}
-	}
-	if len(filter) > 0 {
-		missing := make([]string, 0, len(filter))
-		for _, requestedName := range filter {
-			missing = append(missing, requestedName)
-		}
-		sort.Strings(missing)
-		return nil, fmt.Errorf("tables not found among SQL Server CDC-enabled tables: %s; use schema-qualified names (e.g. dbo.users)", strings.Join(missing, ", "))
+	selected := selection.FilterTables(allTables)
+	if err := selection.Validate(tableInfoNames(selected), skippedReasons(skipped)); err != nil {
+		return nil, err
 	}
 	return selected, nil
+}
+
+func tableInfoNames(tables []source.SourceTableInfo) []string {
+	names := make([]string, 0, len(tables))
+	for _, table := range tables {
+		names = append(names, table.Name)
+	}
+	return names
+}
+
+func skippedReasons(skipped []skippedTable) map[string]string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	reasons := make(map[string]string, len(skipped))
+	for _, st := range skipped {
+		reasons[st.name] = st.reason
+	}
+	return reasons
 }
 
 // getTables lists ingestible CDC-enabled tables. Tables that cannot join a
@@ -515,6 +527,11 @@ func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInf
 	tables := make([]source.SourceTableInfo, 0, len(metas))
 	var skipped []skippedTable
 	for _, meta := range metas {
+		// Filter before the per-table schema, incarnation and fingerprint
+		// queries so an unselected table costs nothing.
+		if !s.selection.Includes(tableName(meta)) {
+			continue
+		}
 		tableSchema, err := s.getCapturedSchema(ctx, meta)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get schema for %s: %w", tableName(meta), err)
@@ -549,6 +566,9 @@ func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInf
 		})
 	}
 
+	if err := s.selection.Validate(tableInfoNames(tables), skippedReasons(skipped)); err != nil {
+		return nil, skipped, err
+	}
 	if len(tables) == 0 {
 		return nil, skipped, fmt.Errorf("no SQL Server CDC-enabled tables with a primary key found")
 	}
@@ -2130,6 +2150,7 @@ func isZeroLSN(lsn string) bool {
 var (
 	_ source.Source           = (*MSSQLCDCSource)(nil)
 	_ source.MultiTableSource = (*MSSQLCDCSource)(nil)
+	_ source.TableSelector    = (*MSSQLCDCSource)(nil)
 	_ source.StreamingSource  = (*MSSQLCDCSource)(nil)
 	_ source.SourceTable      = (*CDCTable)(nil)
 )

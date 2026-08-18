@@ -12,6 +12,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -64,7 +65,11 @@ type PostgresCDCSource struct {
 	// managedPublication is true when ingestr owns the publication (none was
 	// supplied in the URI) and may reconcile its table set.
 	managedPublication bool
-	cdcConfig          CDCConfig
+	// selection restricts the capture set to the tables the user named. It is
+	// set once before any discovery runs and read-only afterwards, so the
+	// discovery timer and the stream-rebuild path can both consult it.
+	selection *source.TableSelection
+	cdcConfig CDCConfig
 	// serverVersion is the source's server_version_num, used to gate pgoutput
 	// options added in newer PostgreSQL releases.
 	serverVersion int
@@ -928,6 +933,19 @@ type skippedTable struct {
 	reason skipReason
 }
 
+// reasonText explains the exclusion without naming a publication, for callers
+// that already have the table in hand.
+func (s skippedTable) reasonText() string {
+	switch s.reason {
+	case skipUnlogged:
+		return "it is unlogged; changes to unlogged tables are not replicated"
+	case skipNoReplicaIdentity:
+		return "it has no replica identity (no primary key); including it would make UPDATE/DELETE on the source fail"
+	default:
+		return "it cannot be replicated"
+	}
+}
+
 // warning returns the user-facing message describing why the table is skipped.
 func (s skippedTable) warning(pubName string) string {
 	switch s.reason {
@@ -1120,8 +1138,68 @@ func (s *PostgresCDCSource) IsMultiTable() bool {
 	return true
 }
 
-// GetTables returns all tables in the publication with their schemas.
+// postgresTableSelectionOptions describes how PostgreSQL CDC names its tables.
+// publicationTableFullName leaves a table in the public schema unqualified, so
+// "public.users" and "users" both have to resolve to the same table.
+var postgresTableSelectionOptions = source.TableSelectionOptions{
+	Subject:      "PostgreSQL CDC table",
+	Scope:        "the publication's replicable tables",
+	Hint:         "qualify a table outside the public schema (e.g. sales.orders)",
+	Canonicalize: canonicalPublicationTableName,
+}
+
+func canonicalPublicationTableName(name string) (string, error) {
+	parts := tablename.Split(name)
+	switch len(parts) {
+	case 1:
+		return publicationTableFullName("public", parts[0]), nil
+	case 2:
+		return publicationTableFullName(parts[0], parts[1]), nil
+	default:
+		return "", fmt.Errorf("PostgreSQL CDC table name must be table or schema.table, %q given", name)
+	}
+}
+
+// SelectTables restricts this source to the named tables. The managed
+// publication is deliberately left alone: it is a shared, database-scoped
+// object that every managed run reconciles, so narrowing it here would make
+// concurrent pipelines overwrite each other's capture set. Use ?publication=
+// to control what the WAL carries.
+func (s *PostgresCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, postgresTableSelectionOptions)
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
+// unpublishableReasons explains why tables are absent from the capture set.
+// The exclusions happen in SQL (replicaIdentityClause), so without this a
+// keyless or unlogged table would be reported as simply not found.
+func (s *PostgresCDCSource) unpublishableReasons(ctx context.Context) map[string]string {
+	_, skipped, err := selectPublishableTables(ctx, s.queryPool)
+	if err != nil {
+		return nil
+	}
+	reasons := make(map[string]string, len(skipped))
+	for _, st := range skipped {
+		reasons[publicationTableFullName(st.ref.schema, st.ref.name)] = st.reasonText()
+	}
+	return reasons
+}
+
+// GetTables returns the tables in the publication with their schemas,
+// narrowed to the user's selection when one was given.
 func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
+	return s.getTables(ctx, true)
+}
+
+// getTables lists the capture set. validateSelection is true only for the
+// caller that establishes the run's table set; the mid-stream re-listing passes
+// false so a selected table disappearing at the source keeps its existing
+// coverage-gap handling instead of failing the stream.
+func (s *PostgresCDCSource) getTables(ctx context.Context, validateSelection bool) ([]source.SourceTableInfo, error) {
 	// Check if this is a "FOR ALL TABLES" publication
 	var pubAllTables bool
 	err := s.queryPool.QueryRow(ctx, "SELECT puballtables FROM pg_publication WHERE pubname = $1", s.cdcConfig.Publication).Scan(&pubAllTables)
@@ -1179,6 +1257,12 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 		fullName := publicationTableFullName(schemaName, tableName)
 
+		// Filter before the per-table schema and fingerprint queries so an
+		// unselected table costs nothing.
+		if !s.selection.Includes(fullName) {
+			continue
+		}
+
 		// Get schema for this table
 		tableSchema, err := getTableSchema(ctx, s.queryPool, fullName)
 		if err != nil {
@@ -1210,6 +1294,22 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	if validateSelection && !s.selection.Empty() {
+		names := make([]string, 0, len(tables))
+		for _, table := range tables {
+			names = append(names, table.Name)
+		}
+		if err := s.selection.Validate(names, nil); err != nil {
+			// A table can also be missing because it is unpublishable rather
+			// than absent. Re-check with the exclusion reasons, which cost an
+			// extra catalog query only on this already-failing path.
+			if detailed := s.selection.Validate(names, s.unpublishableReasons(ctx)); detailed != nil {
+				return nil, detailed
+			}
+			return nil, err
+		}
 	}
 
 	if len(tables) == 0 {
@@ -1252,7 +1352,9 @@ func publicationTableFullName(schemaName, tableName string) string {
 // reconciled to it); for a user-supplied publication it is the publication's
 // membership (or all eligible tables for FOR ALL TABLES publications).
 func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[string]struct{}, error) {
-	incarnations, err := s.listEligibleTableIncarnations(ctx)
+	// Unfiltered on purpose: this backs single-table validation, which never
+	// runs alongside a selection.
+	incarnations, err := s.listAllEligibleTableIncarnations(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1263,7 +1365,27 @@ func (s *PostgresCDCSource) listEligibleTableNames(ctx context.Context) (map[str
 	return names, nil
 }
 
+// listEligibleTableIncarnations reports the tables the stream should currently
+// cover, narrowed to the user's selection. The periodic new-table check reads
+// it, so a table outside the selection never registers as newly appeared.
 func (s *PostgresCDCSource) listEligibleTableIncarnations(ctx context.Context) (map[string]string, error) {
+	incarnations, err := s.listAllEligibleTableIncarnations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.selection.Empty() {
+		return incarnations, nil
+	}
+	selected := make(map[string]string, len(incarnations))
+	for name, incarnation := range incarnations {
+		if s.selection.Includes(name) {
+			selected[name] = incarnation
+		}
+	}
+	return selected, nil
+}
+
+func (s *PostgresCDCSource) listAllEligibleTableIncarnations(ctx context.Context) (map[string]string, error) {
 	names := make(map[string]string)
 
 	if s.managedPublication {
@@ -1447,6 +1569,7 @@ const (
 var (
 	_ source.Source            = (*PostgresCDCSource)(nil)
 	_ source.MultiTableSource  = (*PostgresCDCSource)(nil)
+	_ source.TableSelector     = (*PostgresCDCSource)(nil)
 	_ source.StreamingSource   = (*PostgresCDCSource)(nil)
 	_ source.StreamCommitter   = (*PostgresCDCSource)(nil)
 	_ source.CDCBatchFinalizer = (*PostgresCDCSource)(nil)

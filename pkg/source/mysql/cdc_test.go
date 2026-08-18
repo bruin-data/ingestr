@@ -1531,3 +1531,67 @@ func TestMySQLCDCTableReadErrorsWhenResumePositionInvalid(t *testing.T) {
 	assert.False(t, ok)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestMySQLCDCSelectTablesNarrowsDiscovery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
+			AddRow("bad").
+			AddRow("good"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	// A database-qualified name resolves to the bare name the source reports.
+	require.NoError(t, src.SelectTables([]string{"app.good"}))
+
+	// The filter is applied while listing, so an unselected table never reaches
+	// the per-table schema queries and never enters the inventory that the
+	// snapshot-boundary checks compare against.
+	names, err := src.getMySQLCDCTableNames(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"good"}, names)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLCDCSelectTablesRejectsUnknownTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("good"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	require.NoError(t, src.SelectTables([]string{"good", "typo"}))
+
+	// Ingesting nothing for "typo" would hide the mistake, and in streaming
+	// mode the run would poll forever.
+	_, err = src.getMySQLCDCTableNames(t.Context(), db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "typo")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLCDCSelectTablesIgnoresUnselectedTableAppearing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("good").AddRow("late"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	require.NoError(t, src.SelectTables([]string{"good"}))
+
+	// "late" showing up mid-run must not trip the inventory-drift guard, which
+	// compares against what discovery saw.
+	names, err := src.getMySQLCDCTableNames(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"good"}, names)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

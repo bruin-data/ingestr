@@ -175,7 +175,7 @@ ingestr ingest \
 This path reads a consistent snapshot of the collection first, then follows the change stream for inserts, updates, and deletes. It produces the `_cdc_lsn` (a change-stream resume token), `_cdc_deleted`, and `_cdc_synced_at` metadata columns and resumes from the stored token on subsequent runs. Incremental runs use the `merge` strategy so changes are applied by `_id`; deletes are soft (`_cdc_deleted = true`, and because MongoDB delete events carry only the `_id`, the row's other values are left untouched). Run with `--full-refresh` to rebuild from a fresh snapshot, or `--stream` to ingest continuously instead of once per invocation.
 
 CDC URI parameters:
-- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` names a single table; the destination is then `--dest-table`. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 
 Requirements:
 - Change streams require a **replica set** (or sharded cluster); they aren't available on a standalone `mongod`. Atlas clusters already satisfy this.

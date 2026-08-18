@@ -14,6 +14,7 @@ ingestr uses a basic form of usage telemetry to understand adoption at a high le
   - source and destination connector types, such as `postgres` or `bigquery`
   - execution mode, such as batch, stream, or CDC stream
   - non-identifying feature flags, such as full refresh, multi-table, masking, and schema inference
+  - whether the run read one table, a named subset, or every table — never which tables
   - coarse duration and CPU-capacity buckets
   - coarse deployment and invocation categories, such as Kubernetes, container, CI, or interactive
 

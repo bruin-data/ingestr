@@ -79,7 +79,7 @@ Requirements:
 
 CDC URI parameters:
 - `capture_instance`: optional capture-instance name; defaults to the single instance registered for the table.
-- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` names a single table; the destination is then `--dest-table`. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 
 For a full walkthrough — enabling CDC and replicating a table into DuckDB — see [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md).
 

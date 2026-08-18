@@ -2,6 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pglogrepl"
@@ -202,4 +203,73 @@ func TestBuildReplicationConnString(t *testing.T) {
 	poolURI := buildReplicationConnString("postgres://user:pass@localhost:5432/mydb?pool_max_conns=1&sslmode=disable")
 	assert.NotContains(t, poolURI, "pool_max_conns")
 	assert.Contains(t, poolURI, "sslmode=disable")
+}
+
+func TestCanonicalPublicationTableName(t *testing.T) {
+	// publicationTableFullName leaves public-schema tables unqualified, so both
+	// spellings have to resolve to the same name.
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "users", want: "users"},
+		{in: "public.users", want: "users"},
+		{in: "sales.orders", want: "sales.orders"},
+		{in: `"Sales"."Orders"`, want: "Sales.Orders"},
+		{in: `"od.d"`, want: "od.d"},
+		{in: "db.public.users", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := canonicalPublicationTableName(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("canonicalPublicationTableName(%q) = %q, want an error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("canonicalPublicationTableName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostgresCDCSelectTables(t *testing.T) {
+	src := &PostgresCDCSource{}
+	if err := src.SelectTables([]string{"public.users", "sales.orders"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The names the source reports are what the selection must match.
+	if !src.selection.Includes("users") {
+		t.Fatal("expected public.users to match the bare name the source reports")
+	}
+	if !src.selection.Includes("sales.orders") {
+		t.Fatal("expected sales.orders to match")
+	}
+	if src.selection.Includes("invoices") {
+		t.Fatal("did not expect an unrequested table to match")
+	}
+
+	if err := src.SelectTables([]string{"users", "public.users"}); err == nil {
+		t.Fatal("expected two spellings of the same table to be rejected")
+	}
+}
+
+func TestSkippedTableReasonText(t *testing.T) {
+	// A requested-but-unpublishable table must explain itself rather than
+	// reporting as simply not found, since the exclusion happens in SQL.
+	unlogged := skippedTable{ref: pgTableRef{schema: "public", name: "scratch"}, reason: skipUnlogged}
+	if got := unlogged.reasonText(); !strings.Contains(got, "unlogged") {
+		t.Fatalf("reasonText = %q, want it to mention unlogged", got)
+	}
+	keyless := skippedTable{ref: pgTableRef{schema: "public", name: "audit"}, reason: skipNoReplicaIdentity}
+	if got := keyless.reasonText(); !strings.Contains(got, "replica identity") {
+		t.Fatalf("reasonText = %q, want it to mention replica identity", got)
+	}
 }

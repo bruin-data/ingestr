@@ -37,6 +37,7 @@ type PlanetScaleCDCSource struct {
 	db         *sql.DB
 	keyspace   string
 	destSchema string
+	selection  *source.TableSelection
 	host       string
 	username   string
 	password   string
@@ -156,6 +157,24 @@ func (s *PlanetScaleCDCSource) GetTables(ctx context.Context) ([]source.SourceTa
 	return s.getTables(ctx)
 }
 
+// planetScaleTableSelectionOptions describes how this source names its tables. Names
+// are bare, so an optional keyspace prefix is stripped.
+var planetScaleTableSelectionOptions = source.TableSelectionOptions{
+	Subject:      "PlanetScale CDC table",
+	Scope:        "the keyspace's tables",
+	Canonicalize: bareTableName,
+}
+
+// SelectTables restricts this source to the named tables.
+func (s *PlanetScaleCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, planetScaleTableSelectionOptions)
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
 func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT TABLE_NAME
@@ -174,6 +193,13 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, fmt.Errorf("failed to scan PlanetScale table: %w", err)
+		}
+
+		// Filter before the per-table schema and support checks: an unselected
+		// table costs nothing, and a keyless table outside the selection no
+		// longer blocks the whole keyspace.
+		if !s.selection.Includes(tableName) {
+			continue
 		}
 
 		fullSchema, err := getMySQLSchema(ctx, s.db, s.keyspace, tableName)
@@ -196,6 +222,13 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 		})
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(tables))
+	for _, table := range tables {
+		names = append(names, table.Name)
+	}
+	if err := s.selection.Validate(names, nil); err != nil {
 		return nil, err
 	}
 	if len(tables) == 0 {
@@ -1073,5 +1106,6 @@ var (
 	_ source.Source           = (*PlanetScaleCDCSource)(nil)
 	_ source.StreamingSource  = (*PlanetScaleCDCSource)(nil)
 	_ source.MultiTableSource = (*PlanetScaleCDCSource)(nil)
+	_ source.TableSelector    = (*PlanetScaleCDCSource)(nil)
 	_ source.SourceTable      = (*PlanetScaleCDCTable)(nil)
 )

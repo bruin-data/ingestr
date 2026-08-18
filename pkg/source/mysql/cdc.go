@@ -28,6 +28,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/mysqluri"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -96,6 +97,10 @@ type MySQLCDCSource struct {
 	state             source.CDCStateCommitToken
 	schemaMu          sync.Mutex
 	discoveredSchemas map[string]*schema.TableSchema
+	// selection restricts the capture set to the tables the user named. It is
+	// applied in getMySQLCDCTableNames so both the discovered schemas and every
+	// later inventory re-check see the same narrowed set.
+	selection *source.TableSelection
 	// keylessWarned dedupes the append-only notice per table: discovery runs
 	// repeatedly (initial run, catch-up runs, streaming rediscovery) and the
 	// warning should print once per table, not once per pass.
@@ -522,6 +527,39 @@ func (s *MySQLCDCSource) getTables(ctx context.Context, validateSupported bool) 
 	return tables, nil
 }
 
+// bareTableName strips an optional database or keyspace prefix from a
+// user-supplied name. MySQL, Vitess and PlanetScale all report bare table
+// names, so "app.users" and "users" must resolve to the same table.
+func bareTableName(name string) (string, error) {
+	parts := tablename.Split(name)
+	switch len(parts) {
+	case 1:
+		return parts[0], nil
+	case 2:
+		return parts[1], nil
+	default:
+		return "", fmt.Errorf("table name must be table or database.table, %q given", name)
+	}
+}
+
+// mysqlTableSelectionOptions describes how MySQL CDC names its tables. Names
+// are bare, so an optional database prefix is stripped.
+var mysqlTableSelectionOptions = source.TableSelectionOptions{
+	Subject:      "MySQL CDC table",
+	Scope:        "the database's tables",
+	Canonicalize: bareTableName,
+}
+
+// SelectTables restricts this source to the named tables.
+func (s *MySQLCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, mysqlTableSelectionOptions)
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
 func (s *MySQLCDCSource) getMySQLCDCTableNames(ctx context.Context, q mysqlCDCPositionQueryer) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT TABLE_NAME
@@ -541,9 +579,15 @@ func (s *MySQLCDCSource) getMySQLCDCTableNames(ctx context.Context, q mysqlCDCPo
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, fmt.Errorf("failed to scan MySQL table: %w", err)
 		}
+		if !s.selection.Includes(tableName) {
+			continue
+		}
 		tableNames = append(tableNames, tableName)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.selection.Validate(tableNames, nil); err != nil {
 		return nil, err
 	}
 	return tableNames, nil
@@ -3195,6 +3239,7 @@ func mysqlBinlogSequence(name string) uint64 {
 var (
 	_ source.Source           = (*MySQLCDCSource)(nil)
 	_ source.MultiTableSource = (*MySQLCDCSource)(nil)
+	_ source.TableSelector    = (*MySQLCDCSource)(nil)
 	_ source.StreamingSource  = (*MySQLCDCSource)(nil)
 	_ source.SourceTable      = (*MySQLCDCTable)(nil)
 )

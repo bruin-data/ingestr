@@ -18,6 +18,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/strategy"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
 )
@@ -41,7 +42,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "source-table",
-				Usage:   "The table name in the source to fetch (optional for CDC multi-table mode)",
+				Usage:   "The table name in the source to fetch (optional for CDC multi-table mode; CDC sources also accept a comma-separated list to replicate just those tables)",
 				Sources: cli.EnvVars("SOURCE_TABLE", "INGESTR_SOURCE_TABLE"),
 			},
 			&cli.StringFlag{
@@ -280,7 +281,9 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 
 	cfg.SourceURI = c.String("source-uri")
 	cfg.DestURI = c.String("dest-uri")
-	cfg.SourceTable = c.String("source-table")
+	if err := applySourceTable(cfg, c.String("source-table")); err != nil {
+		return err
+	}
 	cfg.DestTable = c.String("dest-table")
 	cfg.IncrementalKey = c.String("incremental-key")
 	cfg.IncrementalPredicate = c.String("incremental-predicate")
@@ -416,6 +419,46 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	return nil
 }
 
+// applySourceTable routes --source-table to either the single-table field or
+// the multi-table subset.
+//
+// The value is only ever split for CDC sources, and only when it contains a
+// comma. Every other source keeps the raw string: --source-table legitimately
+// carries commas elsewhere, in custom queries ("query:SELECT a, b FROM t") and
+// in structured SaaS table specs ("campaigns:123,456").
+func applySourceTable(cfg *config.IngestConfig, raw string) error {
+	if !strings.ContainsRune(raw, ',') || !config.IsCDCSourceURI(cfg.SourceURI) {
+		cfg.SourceTable = raw
+		return nil
+	}
+	names := tablename.SplitList(raw)
+	switch len(names) {
+	case 0:
+		// Widening an intended subset to the whole database would be the worst
+		// possible reading of a malformed list, so refuse it.
+		return fmt.Errorf("--source-table lists no table names")
+	case 1:
+		cfg.SourceTable = names[0]
+	default:
+		cfg.SourceTable = ""
+		cfg.SourceTables = names
+	}
+	return nil
+}
+
+// telemetryTableSelection reports how the run chose its tables. It is an
+// allowlisted enum: table names must never reach telemetry.
+func telemetryTableSelection(cfg *config.IngestConfig) string {
+	switch {
+	case len(cfg.SourceTables) > 0:
+		return "subset"
+	case cfg.SourceTable != "":
+		return "single"
+	default:
+		return "all"
+	}
+}
+
 func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
 	properties := map[string]any{}
 	if cfg == nil {
@@ -430,6 +473,7 @@ func ingestTelemetryProperties(cfg *config.IngestConfig) map[string]any {
 	properties["execution_mode"] = telemetryExecutionMode(cfg)
 	properties["full_refresh"] = cfg.FullRefresh
 	properties["multi_table"] = cfg.IsCDCSource() && cfg.SourceTable == ""
+	properties["table_selection"] = telemetryTableSelection(cfg)
 	properties["schema_inference_disabled"] = cfg.NoInference
 	properties["masking_enabled"] = len(cfg.Mask) > 0
 	properties["partitioned_extract"] = cfg.ExtractPartitionBy != ""

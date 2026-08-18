@@ -43,6 +43,13 @@ type IngestConfig struct {
 	SourceTable string
 	DestTable   string
 
+	// SourceTables restricts a multi-table CDC run to the named tables. It is
+	// populated from a comma-separated --source-table and is mutually
+	// exclusive with SourceTable: a single name stays in SourceTable and takes
+	// the single-table path, two or more move here and leave SourceTable empty
+	// so the multi-table path runs against just this set.
+	SourceTables []string
+
 	IncrementalStrategy         IncrementalStrategy
 	IncrementalStrategyExplicit bool
 	IncrementalKey              string
@@ -159,8 +166,11 @@ func (c *IngestConfig) Validate() error {
 		return &ValidationError{Field: "dest-uri", Message: "is required"}
 	}
 	// Source table is required unless this is a CDC source (multi-table mode)
-	if c.SourceTable == "" && !c.IsCDCSource() {
+	if c.SourceTable == "" && len(c.SourceTables) == 0 && !c.IsCDCSource() {
 		return &ValidationError{Field: "source-table", Message: "is required"}
+	}
+	if err := c.validateSourceTables(); err != nil {
+		return err
 	}
 	if c.DestTable == "" {
 		c.DestTable = c.SourceTable
@@ -284,11 +294,58 @@ func (c *IngestConfig) validateExtractPartitioning() error {
 
 // IsCDCSource returns true if the source URI is a CDC source.
 func (c *IngestConfig) IsCDCSource() bool {
-	schemeEnd := strings.Index(c.SourceURI, "://")
+	return IsCDCSourceURI(c.SourceURI)
+}
+
+// IsCDCSourceURI reports whether a source URI names a CDC connector. It is
+// exported so the CLI can decide how to parse --source-table before a config
+// exists.
+func IsCDCSourceURI(sourceURI string) bool {
+	schemeEnd := strings.Index(sourceURI, "://")
 	if schemeEnd == -1 {
 		return false
 	}
-	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+cdc")
+	return strings.Contains(strings.ToLower(sourceURI[:schemeEnd]), "+cdc")
+}
+
+// validateSourceTables checks the multi-table subset produced by a
+// comma-separated --source-table.
+func (c *IngestConfig) validateSourceTables() error {
+	if len(c.SourceTables) == 0 {
+		return nil
+	}
+	if c.SourceTable != "" {
+		return &ValidationError{
+			Field:   "source-table",
+			Message: "cannot name both a single table and a table list",
+		}
+	}
+	if !c.IsCDCSource() {
+		return &ValidationError{
+			Field:   "source-table",
+			Message: "accepts a comma-separated list of tables for CDC sources only",
+		}
+	}
+	if len(c.SourceTables) < 2 {
+		return &ValidationError{
+			Field:   "source-table",
+			Message: "table list needs at least two tables; name one table directly to ingest it alone",
+		}
+	}
+	seen := make(map[string]struct{}, len(c.SourceTables))
+	for _, table := range c.SourceTables {
+		if strings.TrimSpace(table) == "" {
+			return &ValidationError{Field: "source-table", Message: "table list has an empty entry"}
+		}
+		if _, ok := seen[table]; ok {
+			return &ValidationError{
+				Field:   "source-table",
+				Message: fmt.Sprintf("table list repeats %s", table),
+			}
+		}
+		seen[table] = struct{}{}
+	}
+	return nil
 }
 
 // validateCDCMode enforces the deprecation of the ?mode= CDC URI parameter.

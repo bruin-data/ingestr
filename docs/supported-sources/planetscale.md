@@ -81,7 +81,7 @@ Position is tracked per shard and serialized into `_cdc_lsn`, and subsequent run
 
 CDC URI parameters:
 - `tls`: auto-enabled for the `ps_mysql://` scheme; set it explicitly only to choose a different mode (see [TLS](#tls)).
-- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` names a single table; the destination is then `--dest-table`. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 
 Requirements:
 - PlanetScale database credentials (`user:password`) with read access to the branch/keyspace.

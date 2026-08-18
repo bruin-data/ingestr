@@ -195,7 +195,10 @@ func (s *Server) resolveRunRequest(req *RunJobRequest) error {
 	if req.DestURI == "" {
 		return fmt.Errorf("dest-uri is required")
 	}
-	if req.DestTable == "" {
+	// A comma-separated sourceTable selects a CDC subset, whose destination
+	// tables are derived per table; copying the list here would name one
+	// nonsense table.
+	if req.DestTable == "" && !strings.Contains(req.SourceTable, ",") {
 		req.DestTable = req.SourceTable
 	}
 	if req.IncrementalStrategy == "" && req.Strategy != "" {

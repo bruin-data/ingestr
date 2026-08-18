@@ -478,3 +478,88 @@ func TestIngestConfigValidate_ChangeTrackingAllowsExplicitReplaceWithFullRefresh
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
+
+func TestIngestConfigValidate_SourceTables(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(c *IngestConfig)
+		wantErr string
+	}{
+		{
+			name:   "valid subset",
+			mutate: func(c *IngestConfig) { c.SourceTables = []string{"users", "orders"} },
+		},
+		{
+			name: "single table is unaffected",
+			mutate: func(c *IngestConfig) {
+				c.SourceTable = "users"
+			},
+		},
+		{
+			name: "cannot combine with a single table",
+			mutate: func(c *IngestConfig) {
+				c.SourceTable = "users"
+				c.SourceTables = []string{"users", "orders"}
+			},
+			wantErr: "both a single table and a table list",
+		},
+		{
+			name: "non-cdc source rejected",
+			mutate: func(c *IngestConfig) {
+				c.SourceURI = "postgres://localhost:5432/db"
+				c.SourceTables = []string{"users", "orders"}
+			},
+			wantErr: "CDC sources only",
+		},
+		{
+			name:    "single-entry list rejected",
+			mutate:  func(c *IngestConfig) { c.SourceTables = []string{"users"} },
+			wantErr: "at least two tables",
+		},
+		{
+			name:    "blank entry rejected",
+			mutate:  func(c *IngestConfig) { c.SourceTables = []string{"users", " "} },
+			wantErr: "empty entry",
+		},
+		{
+			name:    "duplicate entry rejected",
+			mutate:  func(c *IngestConfig) { c.SourceTables = []string{"users", "users"} },
+			wantErr: "repeats users",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost:5432/db"
+			cfg.DestURI = "duckdb://out.duckdb"
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIngestConfigValidate_SubsetLeavesDestTableEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://localhost:5432/db"
+	cfg.DestURI = "duckdb://out.duckdb"
+	cfg.SourceTables = []string{"users", "orders"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Multi-table runs derive each destination table from the source table, so
+	// DestTable must not be defaulted to a joined name.
+	if cfg.DestTable != "" {
+		t.Fatalf("DestTable = %q, want empty", cfg.DestTable)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -128,6 +129,18 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if validator, ok := src.(source.ConnectorPreflightValidator); ok {
 		if err := validator.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{Streaming: p.config.Stream}); err != nil {
 			return fmt.Errorf("source connector preflight failed: %w", err)
+		}
+	}
+	// Hand the source its table subset before anything discovers tables, so
+	// every later listing -- the initial GetTables, a streaming source's own
+	// re-discovery, and the periodic new-table check -- sees the same set.
+	if len(p.config.SourceTables) > 0 {
+		selector, ok := src.(source.TableSelector)
+		if !ok {
+			return fmt.Errorf("source does not support replicating a subset of tables; name a single table with --source-table, or omit it to replicate every table")
+		}
+		if err := selector.SelectTables(p.config.SourceTables); err != nil {
+			return err
 		}
 	}
 
@@ -277,7 +290,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 	if hasIgnoredDestSchema(p.config) {
-		output.Warnf("Warning: dest_schema is ignored when --source-table is set; the destination is %q. Omit --source-table for multi-table mode, or qualify --dest-table instead\n", p.config.DestTable)
+		output.Warnf("Warning: dest_schema is ignored when --source-table names a single table; the destination is %q. Omit --source-table, or list several tables, for multi-table mode, or qualify --dest-table instead\n", p.config.DestTable)
 	}
 	sourceIncarnation := ""
 	sourceSchemaFingerprint := ""
@@ -2821,6 +2834,11 @@ func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.Conne
 		cfg.SourceTable,
 		destinationTarget,
 	}
+	// Appended only when a subset is in play, so runs without one keep the
+	// connector ID they already have and never re-snapshot on upgrade.
+	if selection := cdcSelectionIdentity(cfg); selection != "" {
+		identityParts = append(identityParts, selection)
+	}
 	connectorIdentity := strings.Join(identityParts, "\x00")
 	sum := sha256.Sum256([]byte(connectorIdentity))
 	return fmt.Sprintf("%x", sum[:8])
@@ -2873,14 +2891,40 @@ func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Dest
 }
 
 func genericCDCConnectorID(cfg *config.IngestConfig) string {
-	identity := strings.Join([]string{
+	parts := []string{
 		canonicalCDCStateURI(cfg.SourceURI),
 		canonicalCDCStateURI(cfg.DestURI),
 		cfg.SourceTable,
 		cfg.DestTable,
-	}, "\x00")
+	}
+	if selection := cdcSelectionIdentity(cfg); selection != "" {
+		parts = append(parts, selection)
+	}
+	identity := strings.Join(parts, "\x00")
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+// cdcSelectionIdentity contributes a table subset to the connector identity, so
+// a subset run gets its own replication slot, run lease and CDC state rather
+// than sharing them with the all-tables run against the same source and
+// destination.
+//
+// Sharing would be unsafe in both directions. The slot advances past changes to
+// tables the run filters out, so a later wider run would resume from a position
+// that has already skipped them and silently lose data; and --full-refresh
+// resets the state manager's completion markers wholesale, which would discard
+// the snapshot state of every table outside the subset. An empty selection
+// hashes to the empty string, so all-tables runs keep the identity they have
+// today.
+func cdcSelectionIdentity(cfg *config.IngestConfig) string {
+	if len(cfg.SourceTables) == 0 {
+		return ""
+	}
+	names := make([]string, len(cfg.SourceTables))
+	copy(names, cfg.SourceTables)
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
 func canonicalCDCStateURI(rawURI string) string {
