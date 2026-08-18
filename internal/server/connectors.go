@@ -310,6 +310,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("customerio", "Customer.io", []string{"customerio"}, true, false),
 		genericURIConnector("databricks", "Databricks", []string{"databricks"}, true, true),
 		genericURIConnector("db2", "Db2", []string{"db2", "ibmdb2"}, true, false),
+		genericURIConnector("deel", "Deel", []string{"deel"}, true, false),
 		genericURIConnector("discard", "Discard", []string{"discard"}, false, true),
 		genericURIConnector("docebo", "Docebo", []string{"docebo"}, true, false),
 		genericURIConnector("ducklake", "DuckLake", []string{"ducklake"}, true, true),
