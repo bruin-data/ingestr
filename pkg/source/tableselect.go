@@ -9,7 +9,8 @@ import (
 // TableSelector is an optional capability for multi-table sources that can
 // restrict their capture set to a user-supplied list of tables. The pipeline
 // calls SelectTables once, right after Connect, so the selection is in place
-// before any table discovery runs.
+// before any table discovery runs -- including a source's own re-listing
+// inside ReadAll and any periodic new-table check.
 type TableSelector interface {
 	SelectTables(names []string) error
 }
@@ -29,6 +30,14 @@ type TableSelectionOptions struct {
 	Canonicalize func(string) (string, error)
 }
 
+// requestedTable is one entry of the user's list, kept in both spellings: the
+// canonical form is what discovered names are compared against, the raw form is
+// what diagnostics quote back.
+type requestedTable struct {
+	raw       string
+	canonical string
+}
+
 // TableSelection is an immutable, canonicalized set of requested tables.
 //
 // Every method is pure and a nil selection means "all tables", so a source can
@@ -36,37 +45,37 @@ type TableSelectionOptions struct {
 // concurrently without synchronisation.
 type TableSelection struct {
 	opts  TableSelectionOptions
-	byKey map[string]string // folded canonical name -> the user's original spelling
+	byKey map[string]requestedTable // folded canonical name -> request
 }
 
 // NewTableSelection canonicalizes and validates the requested names. It returns
 // a nil selection when nothing was requested, which every method treats as
 // "select everything".
 func NewTableSelection(requested []string, opts TableSelectionOptions) (*TableSelection, error) {
-	byKey := make(map[string]string, len(requested))
+	byKey := make(map[string]requestedTable, len(requested))
 	for _, raw := range requested {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
 		}
-		name := raw
+		canonical := raw
 		if opts.Canonicalize != nil {
-			canonical, err := opts.Canonicalize(raw)
+			rewritten, err := opts.Canonicalize(raw)
 			if err != nil {
 				return nil, err
 			}
-			name = canonical
+			canonical = rewritten
 		}
-		key := strings.ToLower(name)
+		key := strings.ToLower(canonical)
 		// Two spellings can collapse only after canonicalization (Postgres
 		// "public.users" and "users"), so name both to make the fix obvious.
 		if previous, ok := byKey[key]; ok {
-			if previous == raw {
+			if previous.raw == raw {
 				return nil, fmt.Errorf("%s %s is listed more than once", opts.Subject, raw)
 			}
-			return nil, fmt.Errorf("%s %s and %s name the same table", opts.Subject, previous, raw)
+			return nil, fmt.Errorf("%s %s and %s name the same table", opts.Subject, previous.raw, raw)
 		}
-		byKey[key] = raw
+		byKey[key] = requestedTable{raw: raw, canonical: canonical}
 	}
 	if len(byKey) == 0 {
 		return nil, nil
@@ -79,47 +88,66 @@ func (s *TableSelection) Empty() bool {
 	return s == nil || len(s.byKey) == 0
 }
 
-// Includes reports whether name was requested. A nil selection includes
-// everything.
-func (s *TableSelection) Includes(name string) bool {
+// Resolve maps a source's discovered inventory onto the requested subset,
+// returning the names to ingest.
+//
+// Matching is case-insensitive so a user need not reproduce the catalog's
+// casing, but an exact spelling always wins: a source holding both "users" and
+// "Users" ingests only the one that was named. A request that matches several
+// discovered names and none of them exactly is genuinely ambiguous, and
+// resolving fails rather than quietly ingesting all of them.
+func (s *TableSelection) Resolve(inventory []string) (map[string]struct{}, error) {
+	selected := make(map[string]struct{}, len(inventory))
 	if s.Empty() {
-		return true
+		for _, name := range inventory {
+			selected[name] = struct{}{}
+		}
+		return selected, nil
 	}
-	_, ok := s.byKey[strings.ToLower(name)]
-	return ok
-}
 
-// FilterNames returns the requested subset of all, preserving order.
-func (s *TableSelection) FilterNames(all []string) []string {
-	if s.Empty() {
-		return all
-	}
-	filtered := make([]string, 0, len(s.byKey))
-	for _, name := range all {
-		if s.Includes(name) {
-			filtered = append(filtered, name)
+	matches := make(map[string][]string, len(s.byKey))
+	for _, name := range inventory {
+		key := strings.ToLower(name)
+		if _, ok := s.byKey[key]; ok {
+			matches[key] = append(matches[key], name)
 		}
 	}
-	return filtered
-}
 
-// FilterTables returns the requested subset of all, preserving order.
-func (s *TableSelection) FilterTables(all []SourceTableInfo) []SourceTableInfo {
-	if s.Empty() {
-		return all
+	keys := make([]string, 0, len(matches))
+	for key := range matches {
+		keys = append(keys, key)
 	}
-	filtered := make([]SourceTableInfo, 0, len(s.byKey))
-	for _, table := range all {
-		if s.Includes(table.Name) {
-			filtered = append(filtered, table)
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		found := matches[key]
+		request := s.byKey[key]
+		if len(found) == 1 {
+			selected[found[0]] = struct{}{}
+			continue
 		}
+		exact := ""
+		for _, name := range found {
+			if name == request.canonical {
+				exact = name
+				break
+			}
+		}
+		if exact == "" {
+			sorted := append([]string(nil), found...)
+			sort.Strings(sorted)
+			return nil, fmt.Errorf("%s %s matches several tables that differ only in case (%s); name one of them exactly",
+				s.opts.Subject, request.raw, strings.Join(sorted, ", "))
+		}
+		selected[exact] = struct{}{}
 	}
-	return filtered
+	return selected, nil
 }
 
 // Validate reports requested tables that the source cannot ingest. present is
-// the full inventory the source discovered; ineligible maps a present-but-
-// unusable table to the reason it was excluded (no primary key, unlogged, …).
+// what the source actually discovered for this selection; ineligible maps a
+// present-but-unusable table to the reason it was excluded (no primary key,
+// unlogged, ...).
 //
 // A requested name that matches nothing is an error rather than a silent
 // no-op: ingesting nothing would hide a typo, and in streaming mode the run
@@ -138,14 +166,14 @@ func (s *TableSelection) Validate(present []string, ineligible map[string]string
 	}
 
 	missing := make([]string, 0, len(s.byKey))
-	for key, raw := range s.byKey {
+	for key, request := range s.byKey {
 		if _, ok := found[key]; ok {
 			continue
 		}
 		if reason, ok := reasons[key]; ok {
-			return fmt.Errorf("%s %s cannot be ingested: %s", s.opts.Subject, raw, reason)
+			return fmt.Errorf("%s %s cannot be ingested: %s", s.opts.Subject, request.raw, reason)
 		}
-		missing = append(missing, raw)
+		missing = append(missing, request.raw)
 	}
 	if len(missing) == 0 {
 		return nil

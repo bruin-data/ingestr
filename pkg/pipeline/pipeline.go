@@ -2905,18 +2905,12 @@ func genericCDCConnectorID(cfg *config.IngestConfig) string {
 	return fmt.Sprintf("%x", sum[:8])
 }
 
-// cdcSelectionIdentity contributes a table subset to the connector identity, so
-// a subset run gets its own replication slot, run lease and CDC state rather
-// than sharing them with the all-tables run against the same source and
-// destination.
-//
-// Sharing would be unsafe in both directions. The slot advances past changes to
-// tables the run filters out, so a later wider run would resume from a position
-// that has already skipped them and silently lose data; and --full-refresh
-// resets the state manager's completion markers wholesale, which would discard
-// the snapshot state of every table outside the subset. An empty selection
-// hashes to the empty string, so all-tables runs keep the identity they have
-// today.
+// cdcSelectionIdentity gives a table subset its own replication slot, run lease
+// and CDC state. Sharing them with the all-tables run would lose data both
+// ways: the slot advances past changes to filtered-out tables, and
+// --full-refresh resets completion markers wholesale. An empty selection
+// returns "" and is left out of the identity, so existing connectors keep the
+// ID they have.
 func cdcSelectionIdentity(cfg *config.IngestConfig) string {
 	if len(cfg.SourceTables) == 0 {
 		return ""

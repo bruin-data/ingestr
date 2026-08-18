@@ -476,22 +476,6 @@ func (s *MSSQLCDCSource) SelectTables(names []string) error {
 	return nil
 }
 
-// selectTables applies the requested-table filter. A filter entry that
-// matches nothing is a hard error: silently ingesting nothing (and, in
-// streaming mode, polling forever) would hide a typo or an unqualified
-// table name.
-func selectTables(allTables []source.SourceTableInfo, skipped []skippedTable, requested []string) ([]source.SourceTableInfo, error) {
-	selection, err := source.NewTableSelection(requested, mssqlTableSelectionOptions)
-	if err != nil {
-		return nil, err
-	}
-	selected := selection.FilterTables(allTables)
-	if err := selection.Validate(tableInfoNames(selected), skippedReasons(skipped)); err != nil {
-		return nil, err
-	}
-	return selected, nil
-}
-
 func tableInfoNames(tables []source.SourceTableInfo) []string {
 	names := make([]string, 0, len(tables))
 	for _, table := range tables {
@@ -524,12 +508,21 @@ func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInf
 		return nil, nil, fmt.Errorf("no SQL Server CDC-enabled tables found")
 	}
 
-	tables := make([]source.SourceTableInfo, 0, len(metas))
+	inventory := make([]string, 0, len(metas))
+	for _, meta := range metas {
+		inventory = append(inventory, tableName(meta))
+	}
+	// Resolve before the per-table schema, incarnation and fingerprint queries
+	// so an unselected table costs nothing.
+	selected, err := s.selection.Resolve(inventory)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tables := make([]source.SourceTableInfo, 0, len(selected))
 	var skipped []skippedTable
 	for _, meta := range metas {
-		// Filter before the per-table schema, incarnation and fingerprint
-		// queries so an unselected table costs nothing.
-		if !s.selection.Includes(tableName(meta)) {
+		if _, ok := selected[tableName(meta)]; !ok {
 			continue
 		}
 		tableSchema, err := s.getCapturedSchema(ctx, meta)
@@ -576,11 +569,7 @@ func (s *MSSQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInf
 }
 
 func (s *MSSQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	allTables, skipped, err := s.getTables(ctx)
-	if err != nil {
-		return nil, err
-	}
-	selected, err := selectTables(allTables, skipped, opts.Tables)
+	selected, _, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}

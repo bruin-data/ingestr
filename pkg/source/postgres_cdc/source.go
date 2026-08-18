@@ -1248,20 +1248,42 @@ func (s *PostgresCDCSource) getTables(ctx context.Context, validateSelection boo
 	}
 	defer func() { rows.Close() }()
 
-	var tables []source.SourceTableInfo
+	type publicationTable struct {
+		fullName    string
+		incarnation string
+	}
+	var inventory []publicationTable
 	for rows.Next() {
 		var schemaName, tableName, incarnation string
 		if err := rows.Scan(&schemaName, &tableName, &incarnation); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
+		inventory = append(inventory, publicationTable{
+			fullName:    publicationTableFullName(schemaName, tableName),
+			incarnation: incarnation,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
 
-		fullName := publicationTableFullName(schemaName, tableName)
+	names := make([]string, 0, len(inventory))
+	for _, entry := range inventory {
+		names = append(names, entry.fullName)
+	}
+	// Resolve before the per-table schema and fingerprint queries so an
+	// unselected table costs nothing.
+	selected, err := s.selection.Resolve(names)
+	if err != nil {
+		return nil, err
+	}
 
-		// Filter before the per-table schema and fingerprint queries so an
-		// unselected table costs nothing.
-		if !s.selection.Includes(fullName) {
+	tables := make([]source.SourceTableInfo, 0, len(selected))
+	for _, entry := range inventory {
+		if _, ok := selected[entry.fullName]; !ok {
 			continue
 		}
+		fullName, incarnation := entry.fullName, entry.incarnation
 
 		// Get schema for this table
 		tableSchema, err := getTableSchema(ctx, s.queryPool, fullName)
@@ -1292,20 +1314,16 @@ func (s *PostgresCDCSource) getTables(ctx context.Context, validateSelection boo
 		config.Debug("[CDC] Found table in publication: %s (PKs: %v)", fullName, tableSchema.PrimaryKeys)
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
-	}
-
 	if validateSelection && !s.selection.Empty() {
-		names := make([]string, 0, len(tables))
+		found := make([]string, 0, len(tables))
 		for _, table := range tables {
-			names = append(names, table.Name)
+			found = append(found, table.Name)
 		}
-		if err := s.selection.Validate(names, nil); err != nil {
+		if err := s.selection.Validate(found, nil); err != nil {
 			// A table can also be missing because it is unpublishable rather
 			// than absent. Re-check with the exclusion reasons, which cost an
 			// extra catalog query only on this already-failing path.
-			if detailed := s.selection.Validate(names, s.unpublishableReasons(ctx)); detailed != nil {
+			if detailed := s.selection.Validate(found, s.unpublishableReasons(ctx)); detailed != nil {
 				return nil, detailed
 			}
 			return nil, err
@@ -1376,11 +1394,17 @@ func (s *PostgresCDCSource) listEligibleTableIncarnations(ctx context.Context) (
 	if s.selection.Empty() {
 		return incarnations, nil
 	}
-	selected := make(map[string]string, len(incarnations))
-	for name, incarnation := range incarnations {
-		if s.selection.Includes(name) {
-			selected[name] = incarnation
-		}
+	names := make([]string, 0, len(incarnations))
+	for name := range incarnations {
+		names = append(names, name)
+	}
+	resolved, err := s.selection.Resolve(names)
+	if err != nil {
+		return nil, err
+	}
+	selected := make(map[string]string, len(resolved))
+	for name := range resolved {
+		selected[name] = incarnations[name]
 	}
 	return selected, nil
 }

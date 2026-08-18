@@ -26,8 +26,12 @@ func TestTableSelectionEmptySelectsEverything(t *testing.T) {
 	if !selection.Empty() {
 		t.Fatal("a nil selection is empty")
 	}
-	if !selection.Includes("anything") {
-		t.Fatal("a nil selection includes every table")
+	resolved, err := selection.Resolve([]string{"anything", "else"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("a nil selection resolves to every table, got %v", resolved)
 	}
 	if err := selection.Validate(nil, nil); err != nil {
 		t.Fatalf("a nil selection never fails validation: %v", err)
@@ -42,11 +46,62 @@ func TestTableSelectionMatchesCaseInsensitively(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !selection.Includes("dbo.users") {
+	resolved, err := selection.Resolve([]string{"dbo.users", "dbo.orders"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := resolved["dbo.users"]; !ok {
 		t.Fatal("expected a case-insensitive match")
 	}
-	if selection.Includes("dbo.orders") {
+	if _, ok := resolved["dbo.orders"]; ok {
 		t.Fatal("did not expect an unrequested table to match")
+	}
+}
+
+// Case-insensitive matching must not pull in a second, distinctly-cased table.
+func TestTableSelectionPrefersExactSpelling(t *testing.T) {
+	selection, err := NewTableSelection([]string{"users"}, TableSelectionOptions{Subject: "table", Scope: "tables"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resolved, err := selection.Resolve([]string{"users", "Users"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("resolved = %v, want only the exactly-named table", resolved)
+	}
+	if _, ok := resolved["users"]; !ok {
+		t.Fatalf("resolved = %v, want users", resolved)
+	}
+
+	// The other spelling is selectable in its own right.
+	upper, err := NewTableSelection([]string{"Users"}, TableSelectionOptions{Subject: "table", Scope: "tables"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resolved, err = upper.Resolve([]string{"users", "Users"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := resolved["Users"]; !ok || len(resolved) != 1 {
+		t.Fatalf("resolved = %v, want only Users", resolved)
+	}
+}
+
+func TestTableSelectionRejectsUnresolvableCaseCollision(t *testing.T) {
+	selection, err := NewTableSelection([]string{"USERS"}, TableSelectionOptions{Subject: "table", Scope: "tables"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Neither discovered table is spelled the way the user asked, so picking
+	// one would be a guess and picking both would ingest an unrequested table.
+	_, err = selection.Resolve([]string{"users", "Users"})
+	if err == nil {
+		t.Fatal("expected an ambiguous request to be rejected")
+	}
+	if !strings.Contains(err.Error(), "users") || !strings.Contains(err.Error(), "Users") {
+		t.Fatalf("error should name both candidates, got %v", err)
 	}
 }
 
@@ -59,11 +114,18 @@ func TestTableSelectionCanonicalizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !selection.Includes("users") {
+	resolved, err := selection.Resolve([]string{"users", "sales.orders", "invoices"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := resolved["users"]; !ok {
 		t.Fatal("public.users should canonicalize to users")
 	}
-	if !selection.Includes("sales.orders") {
+	if _, ok := resolved["sales.orders"]; !ok {
 		t.Fatal("sales.orders should stay qualified")
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("resolved = %v, want exactly the two requested tables", resolved)
 	}
 }
 
@@ -132,21 +194,6 @@ func TestTableSelectionValidatePrefersIneligibleReason(t *testing.T) {
 	}
 }
 
-func TestTableSelectionFilters(t *testing.T) {
-	selection, err := NewTableSelection([]string{"users"}, TableSelectionOptions{Subject: "table", Scope: "tables"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	names := selection.FilterNames([]string{"users", "orders"})
-	if len(names) != 1 || names[0] != "users" {
-		t.Fatalf("FilterNames = %v, want [users]", names)
-	}
-	tables := selection.FilterTables([]SourceTableInfo{{Name: "orders"}, {Name: "users"}})
-	if len(tables) != 1 || tables[0].Name != "users" {
-		t.Fatalf("FilterTables = %v, want [users]", tables)
-	}
-}
-
 // The discovery timer and the stream-rebuild path consult one selection
 // concurrently, so matching must not mutate it.
 func TestTableSelectionIsSafeForConcurrentUse(t *testing.T) {
@@ -159,8 +206,7 @@ func TestTableSelectionIsSafeForConcurrentUse(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for j := 0; j < 200; j++ {
-				selection.Includes("users")
-				selection.FilterNames([]string{"users", "orders", "invoices"})
+				_, _ = selection.Resolve([]string{"users", "orders", "invoices"})
 				_ = selection.Validate([]string{"users", "orders"}, nil)
 			}
 		}()

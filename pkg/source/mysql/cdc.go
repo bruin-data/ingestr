@@ -573,19 +573,30 @@ func (s *MySQLCDCSource) getMySQLCDCTableNames(ctx context.Context, q mysqlCDCPo
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tableNames []string
+	var inventory []string
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, fmt.Errorf("failed to scan MySQL table: %w", err)
 		}
-		if !s.selection.Includes(tableName) {
-			continue
-		}
-		tableNames = append(tableNames, tableName)
+		inventory = append(inventory, tableName)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if s.selection.Empty() {
+		return inventory, nil
+	}
+
+	selected, err := s.selection.Resolve(inventory)
+	if err != nil {
+		return nil, err
+	}
+	tableNames := make([]string, 0, len(selected))
+	for _, tableName := range inventory {
+		if _, ok := selected[tableName]; ok {
+			tableNames = append(tableNames, tableName)
+		}
 	}
 	if err := s.selection.Validate(tableNames, nil); err != nil {
 		return nil, err
@@ -642,28 +653,19 @@ func (s *MySQLCDCSource) warnKeylessTable(name string) {
 	fmt.Printf("Warning: table %s has no primary key; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
-func (s *MySQLCDCSource) getSelectedTables(ctx context.Context, opts source.MultiTableReadOptions) ([]source.SourceTableInfo, error) {
+// getSelectedTables lists the tables this run covers. getMySQLCDCTableNames has
+// already applied the user's selection, so the inventory it returns is the set
+// every later drift check compares against.
+func (s *MySQLCDCSource) getSelectedTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	tableNames, err := s.getMySQLCDCTableNames(ctx, s.db)
 	if err != nil {
 		return nil, err
 	}
-	if len(tableNames) == 0 && len(opts.Tables) == 0 {
+	if len(tableNames) == 0 {
 		return nil, fmt.Errorf("no MySQL tables found in database %s", s.database)
 	}
 
-	filter := map[string]bool{}
-	for _, table := range opts.Tables {
-		filter[strings.ToLower(table)] = true
-	}
-
-	selectedNames := make([]string, 0, len(tableNames))
-	for _, tableName := range tableNames {
-		if len(filter) > 0 && !filter[strings.ToLower(tableName)] {
-			continue
-		}
-		selectedNames = append(selectedNames, tableName)
-	}
-	selected, err := s.loadMySQLCDCTables(ctx, selectedNames, false)
+	selected, err := s.loadMySQLCDCTables(ctx, tableNames, false)
 	if err != nil {
 		return nil, err
 	}
@@ -676,11 +678,11 @@ func (s *MySQLCDCSource) getSelectedTables(ctx context.Context, opts source.Mult
 }
 
 func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	selected, err := s.getSelectedTables(ctx, opts)
+	selected, err := s.getSelectedTables(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.validateMySQLCDCDiscoveredSchemas(selected, opts.Tables); err != nil {
+	if err := s.validateMySQLCDCDiscoveredSchemas(selected); err != nil {
 		return nil, err
 	}
 
@@ -718,7 +720,7 @@ func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRead
 			}
 
 			inventoryValidator := func(validationCtx context.Context, q mysqlCDCPositionQueryer) error {
-				return s.validateMySQLCDCInventory(validationCtx, q, opts.Tables)
+				return s.validateMySQLCDCInventory(validationCtx, q)
 			}
 			snapshotCheckpoint, err := s.snapshotTable(ctx, meta, table.Schema, opts.ReadOptions, results, table.Name, inventoryValidator)
 			if err != nil {
@@ -757,7 +759,11 @@ func cloneMySQLCDCTableSchema(tableSchema *schema.TableSchema) *schema.TableSche
 	return &cloned
 }
 
-func (s *MySQLCDCSource) validateMySQLCDCDiscoveredSchemas(selected []source.SourceTableInfo, requested []string) error {
+// validateMySQLCDCDiscoveredSchemas checks that the tables this run covers have
+// not changed since discovery. The inventory is already narrowed to the user's
+// selection, so a table outside it can appear or vanish without disturbing the
+// run.
+func (s *MySQLCDCSource) validateMySQLCDCDiscoveredSchemas(selected []source.SourceTableInfo) error {
 	s.schemaMu.Lock()
 	defer s.schemaMu.Unlock()
 	if s.discoveredSchemas == nil {
@@ -767,10 +773,8 @@ func (s *MySQLCDCSource) validateMySQLCDCDiscoveredSchemas(selected []source.Sou
 		}
 	}
 	current := make(map[string]*schema.TableSchema, len(selected))
-	currentFolded := make(map[string]struct{}, len(selected))
 	for _, table := range selected {
 		current[table.Name] = table.Schema
-		currentFolded[strings.ToLower(table.Name)] = struct{}{}
 		expected, exists := s.discoveredSchemas[table.Name]
 		if !exists {
 			return fmt.Errorf("MySQL table %s appeared after CDC table discovery and before snapshots began; retry so it can be prepared safely", table.Name)
@@ -779,23 +783,18 @@ func (s *MySQLCDCSource) validateMySQLCDCDiscoveredSchemas(selected []source.Sou
 			return fmt.Errorf("MySQL table %s changed after CDC schema discovery and before its snapshot; run with --full-refresh to restart with the current schema", table.Name)
 		}
 	}
-	if len(requested) == 0 {
-		for table := range s.discoveredSchemas {
-			if _, exists := current[table]; !exists {
-				return fmt.Errorf("MySQL table %s changed after CDC schema discovery and before its snapshot; run with --full-refresh to restart with the current schema", table)
-			}
-		}
-		return nil
-	}
-	for _, table := range requested {
-		if _, exists := currentFolded[strings.ToLower(table)]; !exists {
-			return fmt.Errorf("selected MySQL table %s is no longer available after CDC table discovery; run with --full-refresh to restart with the current schema", table)
+	for table := range s.discoveredSchemas {
+		if _, exists := current[table]; !exists {
+			return fmt.Errorf("MySQL table %s changed after CDC schema discovery and before its snapshot; run with --full-refresh to restart with the current schema", table)
 		}
 	}
 	return nil
 }
 
-func (s *MySQLCDCSource) validateMySQLCDCInventory(ctx context.Context, q mysqlCDCPositionQueryer, requested []string) error {
+// validateMySQLCDCInventory re-lists at a snapshot boundary and fails if the
+// set of tables this run covers has shifted. Both sides are narrowed to the
+// user's selection, so tables outside it are invisible to the comparison.
+func (s *MySQLCDCSource) validateMySQLCDCInventory(ctx context.Context, q mysqlCDCPositionQueryer) error {
 	tableNames, err := s.getMySQLCDCTableNames(ctx, q)
 	if err != nil {
 		return err
@@ -811,26 +810,14 @@ func (s *MySQLCDCSource) validateMySQLCDCInventory(ctx context.Context, q mysqlC
 	for table := range s.discoveredSchemas {
 		expected[strings.ToLower(table)] = table
 	}
-	if len(requested) == 0 {
-		for table, original := range expected {
-			if _, exists := current[table]; !exists {
-				return fmt.Errorf("MySQL table %s changed after CDC schema discovery and before snapshots began; run with --full-refresh to restart with the current schema", original)
-			}
+	for table, original := range expected {
+		if _, exists := current[table]; !exists {
+			return fmt.Errorf("MySQL table %s changed after CDC schema discovery and before snapshots began; run with --full-refresh to restart with the current schema", original)
 		}
-		for table := range current {
-			if _, exists := expected[table]; !exists {
-				return fmt.Errorf("MySQL table %s appeared after CDC table discovery and before snapshots began; retry so it can be prepared safely", table)
-			}
-		}
-		return nil
 	}
-	for _, table := range requested {
-		folded := strings.ToLower(table)
-		if _, discovered := expected[folded]; !discovered {
-			return fmt.Errorf("selected MySQL table %s appeared after CDC table discovery; retry so it can be prepared safely", table)
-		}
-		if _, exists := current[folded]; !exists {
-			return fmt.Errorf("selected MySQL table %s is no longer available after CDC table discovery; run with --full-refresh to restart with the current schema", table)
+	for table := range current {
+		if _, exists := expected[table]; !exists {
+			return fmt.Errorf("MySQL table %s appeared after CDC table discovery and before snapshots began; retry so it can be prepared safely", table)
 		}
 	}
 	return nil

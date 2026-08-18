@@ -247,11 +247,11 @@ func (s *MongoDBCDCSource) IsMultiTable() bool {
 }
 
 func (s *MongoDBCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
-	return s.getTables(ctx, nil)
+	return s.getTables(ctx)
 }
 
 func (s *MongoDBCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	tables, err := s.getTables(ctx, opts.Tables)
+	tables, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +402,7 @@ func mongoCDCPrimaryKeys(pks []string) ([]string, error) {
 	return nil, fmt.Errorf("MongoDB CDC currently requires _id as the primary key because delete events only include documentKey")
 }
 
-func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]source.SourceTableInfo, error) {
+func (s *MongoDBCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	if s.database == "" {
 		return nil, fmt.Errorf("MongoDB CDC multi-table mode requires a database in the source URI")
 	}
@@ -413,23 +413,17 @@ func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]so
 	}
 	sort.Strings(collections)
 
-	selection := s.selection
-	if len(filter) > 0 {
-		// A caller-supplied filter (tests, and the legacy
-		// MultiTableReadOptions.Tables field) narrows further.
-		explicit, err := source.NewTableSelection(filter, s.selectionOptions())
-		if err != nil {
-			return nil, err
-		}
-		selection = explicit
+	// Resolve before inferring collection schemas, which samples documents and
+	// is the expensive part of discovery.
+	requested, err := s.selection.Resolve(collections)
+	if err != nil {
+		return nil, err
 	}
 
-	selected := make([]source.SourceTableInfo, 0, len(collections))
+	selected := make([]source.SourceTableInfo, 0, len(requested))
 	pks := []string{"_id"}
 	for _, collection := range collections {
-		// Filter before inferring the collection schema, which samples
-		// documents and is the expensive part of discovery.
-		if !selection.Includes(collection) {
+		if _, ok := requested[collection]; !ok {
 			continue
 		}
 		ns := mongoNamespace{Database: s.database, Collection: collection, Name: collection}
@@ -448,7 +442,7 @@ func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]so
 	for _, table := range selected {
 		names = append(names, table.Name)
 	}
-	if err := selection.Validate(names, nil); err != nil {
+	if err := s.selection.Validate(names, nil); err != nil {
 		return nil, err
 	}
 	if len(selected) == 0 {

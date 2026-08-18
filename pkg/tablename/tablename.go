@@ -98,17 +98,17 @@ func splitRaw(name string, sep byte) []string {
 			continue
 		}
 
-		switch {
-		case ch == sep:
+		switch ch {
+		case sep:
 			parts = append(parts, cur.String())
 			cur.Reset()
-		case ch == '[':
+		case '[':
 			closer = ']'
 			cur.WriteByte(ch)
-		case ch == '"':
+		case '"':
 			closer = '"'
 			cur.WriteByte(ch)
-		case ch == '`':
+		case '`':
 			closer = '`'
 			cur.WriteByte(ch)
 		default:

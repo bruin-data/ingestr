@@ -246,13 +246,17 @@ func TestPostgresCDCSelectTables(t *testing.T) {
 	}
 
 	// The names the source reports are what the selection must match.
-	if !src.selection.Includes("users") {
+	resolved, err := src.selection.Resolve([]string{"users", "sales.orders", "invoices"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := resolved["users"]; !ok {
 		t.Fatal("expected public.users to match the bare name the source reports")
 	}
-	if !src.selection.Includes("sales.orders") {
+	if _, ok := resolved["sales.orders"]; !ok {
 		t.Fatal("expected sales.orders to match")
 	}
-	if src.selection.Includes("invoices") {
+	if _, ok := resolved["invoices"]; ok {
 		t.Fatal("did not expect an unrequested table to match")
 	}
 

@@ -363,13 +363,6 @@ type SourceTableInfo struct {
 // MultiTableReadOptions extends ReadOptions for multi-table reads.
 type MultiTableReadOptions struct {
 	ReadOptions
-	// Tables filters to specific tables (empty = all tables).
-	//
-	// Deprecated: the pipeline no longer sets this. A user-requested subset
-	// reaches the source through TableSelector before any discovery runs, so it
-	// also narrows a source's own re-listing. Kept for tests and for callers
-	// that drive a source directly.
-	Tables                      []string
 	KnownTables                 []string          // Tables already prepared by the pipeline before ReadAll
 	CDCResumeLSNs               map[string]string // Per-table CDC resume LSNs: table name → max LSN already processed
 	CDCResumeIncarnations       map[string]string

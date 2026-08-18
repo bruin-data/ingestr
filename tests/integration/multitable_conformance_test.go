@@ -116,8 +116,13 @@ func (s *mockMultiTableSource) GetTables(ctx context.Context) ([]source.SourceTa
 	}
 	sort.Strings(tableNames)
 
+	selected, err := s.selection.Resolve(tableNames)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, name := range tableNames {
-		if !s.selection.Includes(name) {
+		if _, ok := selected[name]; !ok {
 			continue
 		}
 		filePath := s.tables[name]
@@ -156,6 +161,15 @@ func (s *mockMultiTableSource) GetTables(ctx context.Context) ([]source.SourceTa
 }
 
 func (s *mockMultiTableSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	names := make([]string, 0, len(s.tables))
+	for name := range s.tables {
+		names = append(names, name)
+	}
+	selected, err := s.selection.Resolve(names)
+	if err != nil {
+		return nil, err
+	}
+
 	results := make(chan source.RecordBatchResult, 16)
 
 	go func() {
@@ -166,7 +180,7 @@ func (s *mockMultiTableSource) ReadAll(ctx context.Context, opts source.MultiTab
 			if ctx.Err() != nil {
 				return
 			}
-			if !s.selection.Includes(tableName) {
+			if _, ok := selected[tableName]; !ok {
 				continue
 			}
 

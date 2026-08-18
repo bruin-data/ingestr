@@ -188,17 +188,29 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tables []source.SourceTableInfo
+	var inventory []string
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, fmt.Errorf("failed to scan PlanetScale table: %w", err)
 		}
+		inventory = append(inventory, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-		// Filter before the per-table schema and support checks: an unselected
-		// table costs nothing, and a keyless table outside the selection no
-		// longer blocks the whole keyspace.
-		if !s.selection.Includes(tableName) {
+	// Resolve before the per-table schema and support checks: an unselected
+	// table costs nothing, and a keyless table outside the selection no longer
+	// blocks the whole keyspace.
+	selected, err := s.selection.Resolve(inventory)
+	if err != nil {
+		return nil, err
+	}
+
+	tables := make([]source.SourceTableInfo, 0, len(selected))
+	for _, tableName := range inventory {
+		if _, ok := selected[tableName]; !ok {
 			continue
 		}
 
@@ -221,9 +233,6 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 			DestSchema:  s.destSchema,
 		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	names := make([]string, 0, len(tables))
 	for _, table := range tables {
 		names = append(names, table.Name)
@@ -243,17 +252,9 @@ func (s *PlanetScaleCDCSource) ReadAll(ctx context.Context, opts source.MultiTab
 		return nil, err
 	}
 
-	filter := map[string]bool{}
-	for _, table := range opts.Tables {
-		filter[strings.ToLower(table)] = true
-	}
-
 	targets := make([]psdbCDCTarget, 0, len(all))
 	resumeByTable := make(map[string]string, len(all))
 	for _, info := range all {
-		if len(filter) > 0 && !filter[strings.ToLower(info.Name)] {
-			continue
-		}
 		_, bare := parseMySQLTableName(s.keyspace, info.Name)
 		targets = append(targets, psdbCDCTarget{bareName: bare, resultName: info.Name, schema: info.Schema})
 		if lsn := strings.TrimSpace(opts.CDCResumeLSNs[info.Name]); lsn != "" {
