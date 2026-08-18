@@ -1508,6 +1508,14 @@ def main():
         console.print("[red]No scenarios to run (check env vars for remote destinations).[/red]")
         sys.exit(1)
 
+    uses_clickhouse = any(
+        destinations[scenario["destination"]]["type"] == "clickhouse"
+        for scenario in active_scenarios
+    )
+    if uses_clickhouse and shutil.which("clickhouse-client") is None:
+        console.print("[red]Required tool 'clickhouse-client' not found.[/red]")
+        sys.exit(1)
+
     names = [scenario_name(s["source"], s["destination"]) for s in active_scenarios]
     console.print(f"    Scenarios: {', '.join(names)}")
 
