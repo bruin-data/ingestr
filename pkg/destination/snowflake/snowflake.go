@@ -1490,9 +1490,14 @@ func cdcMergeAssign(colName, colQuoted, targetExpr, sourceExpr, unchangedColsExp
 	// The source emits _cdc_unchanged_cols using the source column names (e.g. lower case).
 	// The merge column name may be folded to upper case when the schema is read
 	// back from the destination on an incremental run, so compare case-insensitively.
+	//
+	// ARRAY_CONTAINS returns NULL when the marker list is NULL/unparseable;
+	// plain IFF would then fall through to source and wipe TOAST/VARIANT
+	// targets. COALESCE(..., TRUE) fails closed: preserve the target unless the
+	// marker is a valid JSON array that does not list this column.
 	colLit := strings.ReplaceAll(strings.ToLower(colName), "'", "''")
 	return fmt.Sprintf(
-		"%s = IFF(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(LOWER(%s))), %s, %s)",
+		"%s = IFF(COALESCE(ARRAY_CONTAINS(TO_VARIANT('%s'), TRY_PARSE_JSON(LOWER(%s))), TRUE), %s, %s)",
 		colQuoted, colLit, unchangedColsExpr, targetExpr, sourceExpr,
 	)
 }

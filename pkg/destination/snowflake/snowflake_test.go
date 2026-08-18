@@ -105,7 +105,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
 
 		assert.Contains(t, sql, `AND (source."_CDC_DELETED" = false OR (source."__INGESTR_HAS_ACTIVE" AND (target."_CDC_LSN" IS NULL OR source."__INGESTR_ACTIVE_LSN" >= target."_CDC_LSN"))) THEN`)
-		assert.Contains(t, sql, `"CONFIG_DATA" = IFF(ARRAY_CONTAINS(TO_VARIANT('config_data'), TRY_PARSE_JSON(LOWER(source."_CDC_UNCHANGED_COLS"))), target."CONFIG_DATA", source."CONFIG_DATA")`)
+		assert.Contains(t, sql, `"CONFIG_DATA" = IFF(COALESCE(ARRAY_CONTAINS(TO_VARIANT('config_data'), TRY_PARSE_JSON(LOWER(source."_CDC_UNCHANGED_COLS"))), TRUE), target."CONFIG_DATA", source."CONFIG_DATA")`)
 		// staging-only column must not be persisted on the destination
 		assert.Contains(t, sql, "INSERT (\"ID\", \"NAME\", \"CONFIG_DATA\", \"_CDC_LSN\", \"_CDC_DELETED\", \"_CDC_SYNCED_AT\")\n")
 		assert.NotContains(t, sql, `INSERT ("ID", "NAME", "CONFIG_DATA", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT", "_CDC_UNCHANGED_COLS")`)

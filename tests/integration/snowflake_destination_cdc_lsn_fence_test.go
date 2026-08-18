@@ -241,6 +241,98 @@ func TestSnowflakeDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T)
 	require.Equal(t, "2026-01-03", synced)
 }
 
+// Unchanged-TOAST preservation on a VARIANT column: the staged value carries no
+// authoritative payload (NULL or empty), so the merge must keep the target JSON
+// unless the marker list explicitly says the column changed.
+func TestSnowflakeDestinationCDCMergePreservesUnchangedVariant(t *testing.T) {
+	snowflakeTestURI := os.Getenv("GONG_TEST_SNOWFLAKE_URI")
+	if snowflakeTestURI == "" {
+		t.Skip("GONG_TEST_SNOWFLAKE_URI not set")
+	}
+
+	ctx := t.Context()
+	targetTable := "PUBLIC.CDC_VARIANT_TARGET_" + uniqueSuffix()
+	stagingTable := "PUBLIC.CDC_VARIANT_STAGING_" + uniqueSuffix()
+	dest := snowflakedest.NewSnowflakeDestination()
+	require.NoError(t, dest.Connect(ctx, snowflakeTestURI))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := snowflakeOpenDB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+stagingTable)
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+targetTable)
+	})
+
+	const originalJSON = `{"items":[1,2,3],"nested":{"a":"b"}}`
+	for _, statement := range []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			ID NUMBER(38,0),
+			PAYLOAD VARIANT,
+			STATUS VARCHAR,
+			_CDC_LSN VARCHAR,
+			_CDC_DELETED BOOLEAN,
+			_CDC_SYNCED_AT TIMESTAMP_NTZ
+		)`, targetTable),
+		fmt.Sprintf(`CREATE TABLE %s (
+			ID NUMBER(38,0),
+			PAYLOAD VARIANT,
+			STATUS VARCHAR,
+			_CDC_LSN VARCHAR,
+			_CDC_DELETED BOOLEAN,
+			_CDC_SYNCED_AT TIMESTAMP_NTZ,
+			_cdc_unchanged_cols VARCHAR
+		)`, stagingTable),
+		fmt.Sprintf(`INSERT INTO %s SELECT 1, PARSE_JSON('%s'), 'pending', '00000000000000000010', false, '2026-01-01'`, targetTable, originalJSON),
+	} {
+		require.NoError(t, dest.Exec(ctx, statement))
+	}
+
+	opts := destination.MergeOptions{
+		TargetTable:  targetTable,
+		StagingTable: stagingTable,
+		PrimaryKeys:  []string{"id"},
+		Columns: []string{
+			"ID", "PAYLOAD", "STATUS",
+			destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn,
+		},
+	}
+	stage := func(values string) {
+		t.Helper()
+		require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+stagingTable))
+		require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", stagingTable, values)))
+		require.NoError(t, dest.MergeTable(ctx, opts))
+	}
+
+	preserved := []struct {
+		name   string
+		values string
+		status string
+	}{
+		{"null payload with marker", `(1, NULL, 'done', '00000000000000000020', false, '2026-01-02', '["payload"]')`, "done"},
+		{"empty payload with marker", `(1, ''::VARIANT, 'done-2', '00000000000000000030', false, '2026-01-03', '["payload"]')`, "done-2"},
+	}
+	for _, tc := range preserved {
+		stage(tc.values)
+		var matches bool
+		var status, typeOf string
+		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT EQUAL_NULL(PARSE_JSON('%s'), PAYLOAD), TYPEOF(PAYLOAD), STATUS FROM %s WHERE ID = 1
+		`, originalJSON, targetTable)).Scan(&matches, &typeOf, &status))
+		require.True(t, matches, "%s: target VARIANT must survive (TYPEOF=%s)", tc.name, typeOf)
+		require.Equal(t, tc.status, status, tc.name)
+	}
+
+	stage(`(1, NULL, 'cleared', '00000000000000000050', false, '2026-01-05', '[]')`)
+	var payloadIsNull bool
+	var status string
+	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT PAYLOAD IS NULL, STATUS FROM %s WHERE ID = 1", targetTable,
+	)).Scan(&payloadIsNull, &status))
+	require.True(t, payloadIsNull, "intentional NULL with empty marker must clear the target")
+	require.Equal(t, "cleared", status)
+}
+
 func assertSnowflakeCDCRow(t *testing.T, ctx context.Context, db *sql.DB, table, wantPayload, wantLSN string, wantDeleted bool) {
 	t.Helper()
 	var payload, lsn string
