@@ -349,7 +349,7 @@ jobs:
         uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -358,9 +358,19 @@ jobs:
             BRANCH_NAME=${{ github.ref_name }}
 
   docker-test:
-    runs-on: depot-ubuntu-latest
-    name: Test Docker Image
+    runs-on: ${{ matrix.runner }}
+    name: Test Docker Image (${{ matrix.arch }})
     needs: [docker-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each runner is natively the architecture under test, so `docker pull`
+        # resolves the matching variant out of the multi-arch manifest on its own.
+        include:
+          - arch: amd64
+            runner: depot-ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: read
