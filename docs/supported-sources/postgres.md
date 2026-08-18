@@ -35,16 +35,18 @@ CDC-specific URI parameters (all optional):
 - `slot`: the replication slot name. When omitted, ingestr derives a stable name from the publication.
 - `state_id`: an optional stable identity for this logical connector. Ingestr otherwise derives one from the source, destination, slot/publication, and table configuration. Set it when multiple otherwise-identical CDC connectors write to the same destination and must keep independent state.
 - `mode`: **deprecated and ignored.** Continuous ingestion is controlled by `--stream`. `mode=batch` is accepted as a no-op; `mode=stream` is rejected unless `--stream` is also passed.
-- `dest_schema`: optional destination schema/dataset for multi-table CDC runs. It is ignored when `--source-table` is set; in that case the destination is `--dest-table` (defaulting to the source table name), which must carry its own schema/dataset qualifier.
+- `dest_schema`: optional destination schema/dataset for multi-table CDC runs. It is ignored when `--source-table` names a single table; in that case the destination is `--dest-table` (defaulting to the source table name), which must carry its own schema/dataset qualifier. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 - `discover_interval`: how often a running stream re-checks the source for new tables (default `30s`, e.g. `1m`, `10s`). Set to `0` or `off` to disable mid-stream discovery.
 
-Without `--source-table`, CDC runs in multi-table mode and replicates every table in the publication. Deletes are soft: rows are kept in the destination with `_cdc_deleted = true`.
+Without `--source-table`, CDC runs in multi-table mode and replicates every table in the publication. Pass a comma-separated `--source-table` (for example `public.users,sales.orders`) to replicate only some of them; tables in the `public` schema can be named with or without the schema. Deletes are soft: rows are kept in the destination with `_cdc_deleted = true`.
+
+Listing tables does not narrow the publication — `ingestr_publication` is shared by every managed run against the database — so PostgreSQL still sends the other tables' changes and ingestr discards them. Supply your own `publication=` to control what the WAL carries. A subset also gets its own replication slot and CDC state, so changing the list starts a fresh snapshot; see [Multi-table CDC](/getting-started/cdc#multi-table-cdc).
 
 CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. A table becomes resumable only after its complete snapshot marker is durable, so an interrupted snapshot is safely replaced on restart. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
 
 ### New tables
 
-Tables created on the source after CDC has been set up are picked up automatically:
+Tables created on the source after CDC has been set up are picked up automatically, unless `--source-table` names a fixed list — a subset never grows on its own:
 
 - **Without `--stream`**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
 - **With `--stream`**: the running stream re-checks the source every `discover_interval`. When a new eligible table appears, the stream exits before changing destination data and reports that a restart is required. On restart, the table is included in the normal snapshot-and-stream path while the replication slot retains intervening WAL.

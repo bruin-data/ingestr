@@ -11,12 +11,26 @@ import (
 	"github.com/fatih/color"
 )
 
+// sourceTableSummary describes the tables the run will read. The confirmation
+// prompt is the user's last chance to catch a mistyped table list, so a subset
+// has to be visible here rather than showing an empty source table.
+func sourceTableSummary(cfg *config.IngestConfig) string {
+	if len(cfg.SourceTables) == 0 {
+		return cfg.SourceTable
+	}
+	const maxNamed = 5
+	if len(cfg.SourceTables) <= maxNamed {
+		return fmt.Sprintf("%d tables (%s)", len(cfg.SourceTables), strings.Join(cfg.SourceTables, ", "))
+	}
+	return fmt.Sprintf("%d tables (%s, ...)", len(cfg.SourceTables), strings.Join(cfg.SourceTables[:maxNamed], ", "))
+}
+
 func PrintSummary(cfg *config.IngestConfig) {
 	if output.IsJSON() {
 		output.EventStart(output.StartInfo{
 			SourceType:     displayFromURI(cfg.SourceURI)[0],
 			DestType:       displayFromURI(cfg.DestURI)[0],
-			SourceTable:    cfg.SourceTable,
+			SourceTable:    sourceTableSummary(cfg),
 			DestTable:      cfg.DestTable,
 			Strategy:       string(cfg.IncrementalStrategy),
 			IncrementalKey: cfg.IncrementalKey,
@@ -48,7 +62,7 @@ func PrintSummary(cfg *config.IngestConfig) {
 		}
 	}
 
-	printConnectionLine("Source:", displayFromURI(cfg.SourceURI), cfg.SourceTable)
+	printConnectionLine("Source:", displayFromURI(cfg.SourceURI), sourceTableSummary(cfg))
 	printConnectionLine("Destination:", displayFromURI(cfg.DestURI), cfg.DestTable)
 
 	strategyValue := string(cfg.IncrementalStrategy)

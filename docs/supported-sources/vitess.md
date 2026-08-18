@@ -61,11 +61,11 @@ Vitess CDC URI parameters:
 - `grpc_host`: optional vtgate gRPC host; defaults to the host in the URI.
 - `grpc_tls`: optional override for the gRPC connection's TLS, independent of `tls`. `true` verifies the server certificate, `skip-verify` skips verification, `false` forces plaintext. When omitted, the gRPC connection inherits `tls` (`true`/`skip-verify` enable it; `preferred` and custom CA names do not).
 - `mode`: deprecated and ignored; continuous ingestion is controlled by `--stream`.
-- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` is set; the destination is then `--dest-table`.
+- `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` names a single table; the destination is then `--dest-table`. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 
 Requirements:
 - The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).
-- Source tables must have primary keys, or `--primary-key` must be provided.
+- Source tables must have primary keys, or `--primary-key` must be provided. A keyless table fails a whole-keyspace run; name the tables you want with a comma-separated `--source-table` to replicate the rest of the keyspace around it.
 - Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
 - Multi-table streaming cannot start with a mix of already-synced tables and new tables without stored cursors. Run once without `--stream` to establish cursors for the new tables, or use `--full-refresh` to rebuild all selected tables before starting the stream.
 

@@ -17,7 +17,7 @@ ingestr ingest \
 
 - `--source-uri TEXT`: Required. Specifies the URI of the data source.
 - `--dest-uri TEXT`: Required. Specifies the URI of the destination where data will be ingested.
-- `--source-table TEXT`: Required. Defines the source table to fetch data from.
+- `--source-table TEXT`: Defines the source table to fetch data from. Required except for CDC sources, which replicate every table in their capture set when it is omitted. CDC sources also accept a comma-separated list (`public.users,public.orders`) to replicate just those tables; see [Multi-table CDC](/getting-started/cdc#multi-table-cdc).
 
 ## Optional flags
 

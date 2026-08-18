@@ -363,7 +363,6 @@ type SourceTableInfo struct {
 // MultiTableReadOptions extends ReadOptions for multi-table reads.
 type MultiTableReadOptions struct {
 	ReadOptions
-	Tables                      []string          // Filter to specific tables (empty = all tables)
 	KnownTables                 []string          // Tables already prepared by the pipeline before ReadAll
 	CDCResumeLSNs               map[string]string // Per-table CDC resume LSNs: table name → max LSN already processed
 	CDCResumeIncarnations       map[string]string

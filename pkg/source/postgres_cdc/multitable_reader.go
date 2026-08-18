@@ -378,7 +378,10 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 		}
 	}
 
-	tables, err := r.source.GetTables(ctx)
+	// Re-list without re-validating the selection: a selected table that has
+	// disappeared is handled by the coverage-gap path below, not by failing the
+	// stream.
+	tables, err := r.source.getTables(ctx, false)
 	if err != nil {
 		return 0, fmt.Errorf("failed to refresh table list: %w", err)
 	}

@@ -37,6 +37,7 @@ type PlanetScaleCDCSource struct {
 	db         *sql.DB
 	keyspace   string
 	destSchema string
+	selection  *source.TableSelection
 	host       string
 	username   string
 	password   string
@@ -156,6 +157,24 @@ func (s *PlanetScaleCDCSource) GetTables(ctx context.Context) ([]source.SourceTa
 	return s.getTables(ctx)
 }
 
+// planetScaleTableSelectionOptions describes how this source names its tables. Names
+// are bare, so an optional keyspace prefix is stripped.
+var planetScaleTableSelectionOptions = source.TableSelectionOptions{
+	Subject:      "PlanetScale CDC table",
+	Scope:        "the keyspace's tables",
+	Canonicalize: bareTableName,
+}
+
+// SelectTables restricts this source to the named tables.
+func (s *PlanetScaleCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, planetScaleTableSelectionOptions)
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
 func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT TABLE_NAME
@@ -169,11 +188,30 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tables []source.SourceTableInfo
+	var inventory []string
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, fmt.Errorf("failed to scan PlanetScale table: %w", err)
+		}
+		inventory = append(inventory, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Resolve before the per-table schema and support checks: an unselected
+	// table costs nothing, and a keyless table outside the selection no longer
+	// blocks the whole keyspace.
+	selected, err := s.selection.Resolve(inventory)
+	if err != nil {
+		return nil, err
+	}
+
+	tables := make([]source.SourceTableInfo, 0, len(selected))
+	for _, tableName := range inventory {
+		if _, ok := selected[tableName]; !ok {
+			continue
 		}
 
 		fullSchema, err := getMySQLSchema(ctx, s.db, s.keyspace, tableName)
@@ -195,7 +233,11 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 			DestSchema:  s.destSchema,
 		})
 	}
-	if err := rows.Err(); err != nil {
+	names := make([]string, 0, len(tables))
+	for _, table := range tables {
+		names = append(names, table.Name)
+	}
+	if err := s.selection.Validate(names, nil); err != nil {
 		return nil, err
 	}
 	if len(tables) == 0 {
@@ -210,17 +252,9 @@ func (s *PlanetScaleCDCSource) ReadAll(ctx context.Context, opts source.MultiTab
 		return nil, err
 	}
 
-	filter := map[string]bool{}
-	for _, table := range opts.Tables {
-		filter[strings.ToLower(table)] = true
-	}
-
 	targets := make([]psdbCDCTarget, 0, len(all))
 	resumeByTable := make(map[string]string, len(all))
 	for _, info := range all {
-		if len(filter) > 0 && !filter[strings.ToLower(info.Name)] {
-			continue
-		}
 		_, bare := parseMySQLTableName(s.keyspace, info.Name)
 		targets = append(targets, psdbCDCTarget{bareName: bare, resultName: info.Name, schema: info.Schema})
 		if lsn := strings.TrimSpace(opts.CDCResumeLSNs[info.Name]); lsn != "" {
@@ -1073,5 +1107,6 @@ var (
 	_ source.Source           = (*PlanetScaleCDCSource)(nil)
 	_ source.StreamingSource  = (*PlanetScaleCDCSource)(nil)
 	_ source.MultiTableSource = (*PlanetScaleCDCSource)(nil)
+	_ source.TableSelector    = (*PlanetScaleCDCSource)(nil)
 	_ source.SourceTable      = (*PlanetScaleCDCTable)(nil)
 )

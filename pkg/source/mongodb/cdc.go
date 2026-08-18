@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -52,6 +53,7 @@ type MongoDBCDCSource struct {
 	uri       string
 	cdcConfig MongoDBCDCConfig
 	lag       *mongoLagState
+	selection *source.TableSelection
 }
 
 // mongoLagState tracks the cluster time of the last processed change event
@@ -245,11 +247,11 @@ func (s *MongoDBCDCSource) IsMultiTable() bool {
 }
 
 func (s *MongoDBCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
-	return s.getTables(ctx, nil)
+	return s.getTables(ctx)
 }
 
 func (s *MongoDBCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
-	tables, err := s.getTables(ctx, opts.Tables)
+	tables, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +402,7 @@ func mongoCDCPrimaryKeys(pks []string) ([]string, error) {
 	return nil, fmt.Errorf("MongoDB CDC currently requires _id as the primary key because delete events only include documentKey")
 }
 
-func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]source.SourceTableInfo, error) {
+func (s *MongoDBCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	if s.database == "" {
 		return nil, fmt.Errorf("MongoDB CDC multi-table mode requires a database in the source URI")
 	}
@@ -411,10 +413,17 @@ func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]so
 	}
 	sort.Strings(collections)
 
-	selected := make([]source.SourceTableInfo, 0, len(collections))
+	// Resolve before inferring collection schemas, which samples documents and
+	// is the expensive part of discovery.
+	requested, err := s.selection.Resolve(collections)
+	if err != nil {
+		return nil, err
+	}
+
+	selected := make([]source.SourceTableInfo, 0, len(requested))
 	pks := []string{"_id"}
 	for _, collection := range collections {
-		if len(filter) > 0 && !mongoCDCMatchesTable(filter, s.database, collection) {
+		if _, ok := requested[collection]; !ok {
 			continue
 		}
 		ns := mongoNamespace{Database: s.database, Collection: collection, Name: collection}
@@ -429,22 +438,50 @@ func (s *MongoDBCDCSource) getTables(ctx context.Context, filter []string) ([]so
 			DestSchema:  s.cdcConfig.DestSchema,
 		})
 	}
+	names := make([]string, 0, len(selected))
+	for _, table := range selected {
+		names = append(names, table.Name)
+	}
+	if err := s.selection.Validate(names, nil); err != nil {
+		return nil, err
+	}
 	if len(selected) == 0 {
-		if len(filter) > 0 {
-			return nil, fmt.Errorf("no MongoDB collections matched %s", strings.Join(filter, ", "))
-		}
 		return nil, fmt.Errorf("no MongoDB collections found in database %s", s.database)
 	}
 	return selected, nil
 }
 
-func mongoCDCMatchesTable(filter []string, db, collection string) bool {
-	for _, table := range filter {
-		if table == collection || table == db+"."+collection {
-			return true
-		}
+// selectionOptions describes how MongoDB CDC names its collections. A
+// collection is reported bare, so an optional database prefix is stripped.
+func (s *MongoDBCDCSource) selectionOptions() source.TableSelectionOptions {
+	return source.TableSelectionOptions{
+		Subject: "MongoDB collection",
+		Scope:   fmt.Sprintf("the collections in database %s", s.database),
+		Canonicalize: func(name string) (string, error) {
+			parts := tablename.Split(name)
+			switch len(parts) {
+			case 1:
+				return parts[0], nil
+			case 2:
+				if !strings.EqualFold(parts[0], s.database) {
+					return "", fmt.Errorf("MongoDB collection %q names database %q, but the source URI selects %q", name, parts[0], s.database)
+				}
+				return parts[1], nil
+			default:
+				return "", fmt.Errorf("MongoDB collection name must be collection or database.collection, %q given", name)
+			}
+		},
 	}
-	return false
+}
+
+// SelectTables restricts this source to the named collections.
+func (s *MongoDBCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, s.selectionOptions())
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
 }
 
 func (s *MongoDBCDCSource) inferCollectionSchema(ctx context.Context, ns mongoNamespace, primaryKeys []string) (*schema.TableSchema, error) {
@@ -1026,5 +1063,6 @@ var (
 	_ source.Source           = (*MongoDBCDCSource)(nil)
 	_ source.StreamingSource  = (*MongoDBCDCSource)(nil)
 	_ source.MultiTableSource = (*MongoDBCDCSource)(nil)
+	_ source.TableSelector    = (*MongoDBCDCSource)(nil)
 	_ source.SourceTable      = (*MongoDBCDCTable)(nil)
 )

@@ -356,21 +356,58 @@ func TestSelectTables(t *testing.T) {
 	}
 	skipped := []skippedTable{{name: "dbo.audit_log", reason: "it has no primary key"}}
 
-	selected, err := selectTables(all, skipped, nil)
+	selectTables := func(requested []string) ([]source.SourceTableInfo, error) {
+		selection, err := source.NewTableSelection(requested, mssqlTableSelectionOptions)
+		if err != nil {
+			return nil, err
+		}
+		resolved, err := selection.Resolve(tableInfoNames(all))
+		if err != nil {
+			return nil, err
+		}
+		selected := make([]source.SourceTableInfo, 0, len(resolved))
+		for _, table := range all {
+			if _, ok := resolved[table.Name]; ok {
+				selected = append(selected, table)
+			}
+		}
+		if err := selection.Validate(tableInfoNames(selected), skippedReasons(skipped)); err != nil {
+			return nil, err
+		}
+		return selected, nil
+	}
+
+	selected, err := selectTables(nil)
 	require.NoError(t, err)
 	assert.Len(t, selected, 2, "no filter selects every ingestible table")
 
-	selected, err = selectTables(all, skipped, []string{"DBO.Users"})
+	selected, err = selectTables([]string{"DBO.Users"})
 	require.NoError(t, err)
 	require.Len(t, selected, 1)
 	assert.Equal(t, "dbo.users", selected[0].Name)
 
-	_, err = selectTables(all, skipped, []string{"dbo.users", "dbo.missing"})
+	_, err = selectTables([]string{"dbo.users", "dbo.missing"})
 	assert.ErrorContains(t, err, "dbo.missing")
 	assert.ErrorContains(t, err, "schema-qualified")
 
-	_, err = selectTables(all, skipped, []string{"dbo.audit_log"})
+	// A table that exists but cannot be ingested says why, rather than
+	// reporting as missing.
+	_, err = selectTables([]string{"dbo.audit_log"})
 	assert.ErrorContains(t, err, "no primary key")
+}
+
+func TestMSSQLCDCSelectTables(t *testing.T) {
+	src := &MSSQLCDCSource{}
+	require.NoError(t, src.SelectTables([]string{"DBO.Users"}))
+
+	// SQL Server reports schema-qualified names; matching is case-insensitive.
+	resolved, err := src.selection.Resolve([]string{"dbo.users", "dbo.orders"})
+	require.NoError(t, err)
+	assert.Contains(t, resolved, "dbo.users")
+	assert.NotContains(t, resolved, "dbo.orders")
+
+	require.Error(t, src.SelectTables([]string{"dbo.users", "DBO.USERS"}),
+		"two spellings of the same table must be rejected")
 }
 
 func TestValidateCapturedPrimaryKeys(t *testing.T) {

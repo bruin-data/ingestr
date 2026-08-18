@@ -3883,3 +3883,58 @@ func TestValidateMultiTableNamespace(t *testing.T) {
 		})
 	}
 }
+
+func TestCDCConnectorIDIsolatesTableSubsets(t *testing.T) {
+	// A subset run must not share a slot or CDC state with the all-tables run
+	// against the same source and destination. Sharing would let the slot
+	// advance past changes to filtered-out tables, so a later wider run would
+	// resume from a position that has already skipped them; and --full-refresh
+	// resets the state manager's completion markers wholesale, discarding the
+	// snapshot state of every table outside the subset.
+	all := &config.IngestConfig{
+		SourceURI: "mysql+cdc://reader@source/app",
+		DestURI:   "mysql://loader@warehouse/analytics",
+	}
+	subset := *all
+	subset.SourceTables = []string{"users", "orders"}
+	otherSubset := *all
+	otherSubset.SourceTables = []string{"users", "invoices"}
+
+	require.NotEqual(t, genericCDCConnectorID(all), genericCDCConnectorID(&subset),
+		"a table subset must not share connector state with the all-tables run")
+	require.NotEqual(t, genericCDCConnectorID(&subset), genericCDCConnectorID(&otherSubset),
+		"different table subsets must not share connector state")
+
+	// Order is not meaningful, so the same set must resolve to the same ID.
+	reordered := *all
+	reordered.SourceTables = []string{"orders", "users"}
+	require.Equal(t, genericCDCConnectorID(&subset), genericCDCConnectorID(&reordered))
+
+	require.NotEqual(t,
+		cdcSlotSuffix(canonicalCDCStateURI(all.DestURI)+"\x00"+genericCDCConnectorID(all)),
+		cdcSlotSuffix(canonicalCDCStateURI(subset.DestURI)+"\x00"+genericCDCConnectorID(&subset)),
+		"a table subset must not share an automatic replication slot with the all-tables run")
+}
+
+func TestCDCConnectorIDUnchangedWithoutASubset(t *testing.T) {
+	// Existing pipelines must keep the connector ID they have today, byte for
+	// byte, or every running CDC connector would re-snapshot on upgrade. The
+	// selection is appended only when there is one, so no extra separator
+	// creeps into the hashed identity.
+	cfg := &config.IngestConfig{
+		SourceURI:   "mysql+cdc://reader@source/app",
+		SourceTable: "orders",
+		DestURI:     "mysql://loader@warehouse/analytics",
+		DestTable:   "orders",
+	}
+	require.Equal(t, "", cdcSelectionIdentity(cfg))
+
+	legacy := strings.Join([]string{
+		canonicalCDCStateURI(cfg.SourceURI),
+		canonicalCDCStateURI(cfg.DestURI),
+		cfg.SourceTable,
+		cfg.DestTable,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(legacy))
+	require.Equal(t, fmt.Sprintf("%x", sum[:8]), genericCDCConnectorID(cfg))
+}

@@ -55,6 +55,28 @@ func Split(name string) []string {
 // identifier delimiters and escaping. It is intended for code that must render
 // a derived identifier back into the same catalog or schema.
 func SplitRaw(name string) []string {
+	return splitRaw(name, '.')
+}
+
+// SplitList breaks a comma-separated list of table identifiers into its
+// elements, honoring the same quoting rules as Split so a quoted identifier
+// containing a comma stays whole. Elements are trimmed and empty ones dropped.
+// Quoting is preserved so callers can parse each element with Split.
+func SplitList(list string) []string {
+	if strings.TrimSpace(list) == "" {
+		return nil
+	}
+	parts := splitRaw(list, ',')
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			names = append(names, part)
+		}
+	}
+	return names
+}
+
+func splitRaw(name string, sep byte) []string {
 	name = strings.TrimSpace(name)
 	var parts []string
 	var cur strings.Builder
@@ -77,6 +99,9 @@ func SplitRaw(name string) []string {
 		}
 
 		switch ch {
+		case sep:
+			parts = append(parts, cur.String())
+			cur.Reset()
 		case '[':
 			closer = ']'
 			cur.WriteByte(ch)
@@ -86,9 +111,6 @@ func SplitRaw(name string) []string {
 		case '`':
 			closer = '`'
 			cur.WriteByte(ch)
-		case '.':
-			parts = append(parts, cur.String())
-			cur.Reset()
 		default:
 			cur.WriteByte(ch)
 		}

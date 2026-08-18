@@ -537,20 +537,45 @@ func TestParseMongoCDCNamespace(t *testing.T) {
 	}
 }
 
-func TestMongoCDCMatchesTableIsCaseSensitive(t *testing.T) {
-	filter := []string{"users", "app.orders"}
+func TestMongoCDCSelectTables(t *testing.T) {
+	src := &MongoDBCDCSource{database: "app"}
+	if err := src.SelectTables([]string{"users", "app.orders"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	if !mongoCDCMatchesTable(filter, "app", "users") {
-		t.Fatal("expected exact collection match")
+	// Both a bare and a database-qualified request resolve to the collection
+	// name the source reports, case-insensitively.
+	resolved, err := src.selection.Resolve([]string{"Users", "ORDERS", "invoices"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !mongoCDCMatchesTable(filter, "app", "orders") {
-		t.Fatal("expected exact qualified collection match")
+	for _, collection := range []string{"Users", "ORDERS"} {
+		if _, ok := resolved[collection]; !ok {
+			t.Fatalf("expected %q to be selected", collection)
+		}
 	}
-	if mongoCDCMatchesTable(filter, "app", "Users") {
-		t.Fatal("did not expect case-insensitive collection match")
+	if _, ok := resolved["invoices"]; ok {
+		t.Fatal("did not expect an unrequested collection to be selected")
 	}
-	if mongoCDCMatchesTable(filter, "App", "orders") {
-		t.Fatal("did not expect case-insensitive database match")
+
+	// MongoDB collection names are case-sensitive, so a case-insensitive match
+	// must never pull in a second collection alongside the one requested.
+	resolved, err = src.selection.Resolve([]string{"users", "Users", "orders"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := resolved["Users"]; ok {
+		t.Fatalf("resolved = %v, want only the exactly-named users", resolved)
+	}
+	if _, ok := resolved["users"]; !ok {
+		t.Fatalf("resolved = %v, want users", resolved)
+	}
+
+	if err := src.SelectTables([]string{"users", "other.users"}); err == nil {
+		t.Fatal("expected a collection naming a different database to be rejected")
+	}
+	if err := src.SelectTables([]string{"users", "app.users"}); err == nil {
+		t.Fatal("expected two spellings of the same collection to be rejected")
 	}
 }
 

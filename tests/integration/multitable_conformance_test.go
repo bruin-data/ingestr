@@ -39,6 +39,7 @@ type mockMultiTableSource struct {
 	tables    map[string]string // table name -> file path
 	schemas   map[string]*schema.TableSchema
 	connected bool
+	selection *source.TableSelection
 }
 
 func newMockMultiTableSource() *mockMultiTableSource {
@@ -93,6 +94,18 @@ func (s *mockMultiTableSource) IsMultiTable() bool {
 	return true
 }
 
+func (s *mockMultiTableSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, source.TableSelectionOptions{
+		Subject: "test table",
+		Scope:   "the source's tables",
+	})
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
 func (s *mockMultiTableSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	var tables []source.SourceTableInfo
 
@@ -103,7 +116,15 @@ func (s *mockMultiTableSource) GetTables(ctx context.Context) ([]source.SourceTa
 	}
 	sort.Strings(tableNames)
 
+	selected, err := s.selection.Resolve(tableNames)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, name := range tableNames {
+		if _, ok := selected[name]; !ok {
+			continue
+		}
 		filePath := s.tables[name]
 		tblSchema, err := s.inferSchemaFromFile(filePath)
 		if err != nil {
@@ -128,10 +149,27 @@ func (s *mockMultiTableSource) GetTables(ctx context.Context) ([]source.SourceTa
 		})
 	}
 
+	names := make([]string, 0, len(tables))
+	for _, table := range tables {
+		names = append(names, table.Name)
+	}
+	if err := s.selection.Validate(names, nil); err != nil {
+		return nil, err
+	}
+
 	return tables, nil
 }
 
 func (s *mockMultiTableSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	names := make([]string, 0, len(s.tables))
+	for name := range s.tables {
+		names = append(names, name)
+	}
+	selected, err := s.selection.Resolve(names)
+	if err != nil {
+		return nil, err
+	}
+
 	results := make(chan source.RecordBatchResult, 16)
 
 	go func() {
@@ -141,6 +179,9 @@ func (s *mockMultiTableSource) ReadAll(ctx context.Context, opts source.MultiTab
 		for tableName, filePath := range s.tables {
 			if ctx.Err() != nil {
 				return
+			}
+			if _, ok := selected[tableName]; !ok {
+				continue
 			}
 
 			batches, err := s.readJSONLFile(filePath, tableName)
@@ -747,4 +788,5 @@ func createMultiTableTestFile(t *testing.T, name string, items []map[string]inte
 var (
 	_ source.Source           = (*mockMultiTableSource)(nil)
 	_ source.MultiTableSource = (*mockMultiTableSource)(nil)
+	_ source.TableSelector    = (*mockMultiTableSource)(nil)
 )

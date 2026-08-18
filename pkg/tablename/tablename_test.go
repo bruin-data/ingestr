@@ -137,3 +137,47 @@ func TestContainerToCreate(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitList(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"single", "users", []string{"users"}},
+		{"two", "users,orders", []string{"users", "orders"}},
+		{"qualified", "public.users, sales.orders", []string{"public.users", "sales.orders"}},
+		{"quoted comma", `"od,d".t,public.users`, []string{`"od,d".t`, "public.users"}},
+		{"bracketed comma", "[a,b].c,d", []string{"[a,b].c", "d"}},
+		{"backticked comma", "`a,b`,c", []string{"`a,b`", "c"}},
+		{"trailing comma", "users,orders,", []string{"users", "orders"}},
+		{"blank entries", " users , , orders ", []string{"users", "orders"}},
+		{"empty", "", nil},
+		{"separators only", " , ", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SplitList(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("SplitList(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("SplitList(%q) = %v, want %v", tt.in, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSplitListElementsStayParsable(t *testing.T) {
+	// A list element keeps its quoting so callers can Split it themselves.
+	names := SplitList(`"od,d"."t.1",users`)
+	if len(names) != 2 {
+		t.Fatalf("SplitList = %v, want 2 elements", names)
+	}
+	parts := Split(names[0])
+	if len(parts) != 2 || parts[0] != "od,d" || parts[1] != "t.1" {
+		t.Fatalf("Split(%q) = %v, want [od,d t.1]", names[0], parts)
+	}
+}

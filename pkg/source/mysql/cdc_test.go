@@ -170,7 +170,8 @@ func TestMySQLCDCReadAllValidatesOnlySelectedTables(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
 
 	src := &MySQLCDCSource{db: db, database: "app"}
-	selected, err := src.getSelectedTables(context.Background(), source.MultiTableReadOptions{Tables: []string{"good"}})
+	require.NoError(t, src.SelectTables([]string{"good"}))
+	selected, err := src.getSelectedTables(context.Background())
 	require.NoError(t, err)
 	require.Len(t, selected, 1)
 	assert.Equal(t, "good", selected[0].Name)
@@ -210,7 +211,8 @@ func TestMySQLCDCReadAllInitializesFilteredDiscoveryWithoutGetTables(t *testing.
 		WillReturnRows(sqlmock.NewRows([]string{"File", "Position"}).AddRow("mysql-bin.000012", "345"))
 
 	src := &MySQLCDCSource{db: db, database: "app"}
-	results, err := src.ReadAll(t.Context(), source.MultiTableReadOptions{Tables: []string{"good"}})
+	require.NoError(t, src.SelectTables([]string{"good"}))
+	results, err := src.ReadAll(t.Context(), source.MultiTableReadOptions{})
 	require.NoError(t, err)
 	var batches int
 	for result := range results {
@@ -283,8 +285,9 @@ func TestMySQLCDCReadAllRejectsMissingOrEmptyInventoryWithoutGetTables(t *testin
 			WithArgs("app").
 			WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("other"))
 		src := &MySQLCDCSource{db: db, database: "app"}
-		_, err = src.ReadAll(t.Context(), source.MultiTableReadOptions{Tables: []string{"missing"}})
-		require.ErrorContains(t, err, "no longer available")
+		require.NoError(t, src.SelectTables([]string{"missing"}))
+		_, err = src.ReadAll(t.Context(), source.MultiTableReadOptions{})
+		require.ErrorContains(t, err, "missing")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -460,7 +463,8 @@ func TestMySQLCDCReadAllIgnoresUnrequestedInventoryChangesAtSnapshotBoundaries(t
 		WillReturnRows(sqlmock.NewRows([]string{"File", "Position"}).AddRow("mysql-bin.000012", "345"))
 
 	src := &MySQLCDCSource{db: db, database: "app"}
-	results, err := src.ReadAll(t.Context(), source.MultiTableReadOptions{Tables: []string{"first", "second"}})
+	require.NoError(t, src.SelectTables([]string{"first", "second"}))
+	results, err := src.ReadAll(t.Context(), source.MultiTableReadOptions{})
 	require.NoError(t, err)
 	var batches int
 	for result := range results {
@@ -1075,22 +1079,19 @@ func TestValidateMySQLCDCSnapshotSchemaRejectsDiscoveryRace(t *testing.T) {
 func TestValidateMySQLCDCDiscoveredSchemasRejectsMultiTableRace(t *testing.T) {
 	expected := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
 	src := &MySQLCDCSource{discoveredSchemas: map[string]*schema.TableSchema{"items": expected}}
-	require.NoError(t, src.validateMySQLCDCDiscoveredSchemas([]source.SourceTableInfo{{Name: "items", Schema: cloneMySQLCDCTableSchema(expected)}}, nil))
+	require.NoError(t, src.validateMySQLCDCDiscoveredSchemas([]source.SourceTableInfo{{Name: "items", Schema: cloneMySQLCDCTableSchema(expected)}}))
 
 	changed := cloneMySQLCDCTableSchema(expected)
 	changed.Columns = append(changed.Columns, schema.Column{Name: "added", DataType: schema.TypeString})
-	require.ErrorContains(t, src.validateMySQLCDCDiscoveredSchemas([]source.SourceTableInfo{{Name: "items", Schema: changed}}, nil), "--full-refresh")
+	require.ErrorContains(t, src.validateMySQLCDCDiscoveredSchemas([]source.SourceTableInfo{{Name: "items", Schema: changed}}), "--full-refresh")
 	require.ErrorContains(t, src.validateMySQLCDCDiscoveredSchemas([]source.SourceTableInfo{
 		{Name: "items", Schema: expected},
 		{Name: "late", Schema: expected},
-	}, nil), "appeared after")
+	}), "appeared after")
 
-	src.discoveredSchemas["ignored"] = cloneMySQLCDCTableSchema(expected)
-	require.NoError(t, src.validateMySQLCDCDiscoveredSchemas(
-		[]source.SourceTableInfo{{Name: "items", Schema: cloneMySQLCDCTableSchema(expected)}},
-		[]string{"items"},
-	))
-	require.ErrorContains(t, src.validateMySQLCDCDiscoveredSchemas(nil, []string{"items"}), "no longer available")
+	// A discovered table vanishing between discovery and its snapshot is a
+	// drift the run cannot absorb, whether or not a subset was requested.
+	require.ErrorContains(t, src.validateMySQLCDCDiscoveredSchemas(nil), "--full-refresh")
 }
 
 func TestBeginMySQLConsistentSnapshotLocksAroundPosition(t *testing.T) {
@@ -1153,7 +1154,7 @@ func TestBeginMySQLConsistentSnapshotValidatesInventoryBeforeUnlock(t *testing.T
 	}
 
 	_, err = beginMySQLConsistentSnapshotWithValidation(ctx, conn, func(validationCtx context.Context, q mysqlCDCPositionQueryer) error {
-		return src.validateMySQLCDCInventory(validationCtx, q, nil)
+		return src.validateMySQLCDCInventory(validationCtx, q)
 	})
 	require.ErrorContains(t, err, "appeared after")
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -1529,5 +1530,69 @@ func TestMySQLCDCTableReadErrorsWhenResumePositionInvalid(t *testing.T) {
 
 	_, ok = <-records
 	assert.False(t, ok)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLCDCSelectTablesNarrowsDiscovery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
+			AddRow("bad").
+			AddRow("good"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	// A database-qualified name resolves to the bare name the source reports.
+	require.NoError(t, src.SelectTables([]string{"app.good"}))
+
+	// The filter is applied while listing, so an unselected table never reaches
+	// the per-table schema queries and never enters the inventory that the
+	// snapshot-boundary checks compare against.
+	names, err := src.getMySQLCDCTableNames(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"good"}, names)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLCDCSelectTablesRejectsUnknownTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("good"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	require.NoError(t, src.SelectTables([]string{"good", "typo"}))
+
+	// Ingesting nothing for "typo" would hide the mistake, and in streaming
+	// mode the run would poll forever.
+	_, err = src.getMySQLCDCTableNames(t.Context(), db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "typo")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLCDCSelectTablesIgnoresUnselectedTableAppearing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("good").AddRow("late"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	require.NoError(t, src.SelectTables([]string{"good"}))
+
+	// "late" showing up mid-run must not trip the inventory-drift guard, which
+	// compares against what discovery saw.
+	names, err := src.getMySQLCDCTableNames(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"good"}, names)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

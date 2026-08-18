@@ -49,6 +49,7 @@ type VitessCDCSource struct {
 	db         *sql.DB
 	keyspace   string
 	destSchema string
+	selection  *source.TableSelection
 	grpcTarget string
 	grpcCreds  credentials.TransportCredentials
 }
@@ -170,6 +171,24 @@ func (s *VitessCDCSource) GetTables(ctx context.Context) ([]source.SourceTableIn
 	return s.getTables(ctx)
 }
 
+// vitessTableSelectionOptions describes how this source names its tables. Names
+// are bare, so an optional keyspace prefix is stripped.
+var vitessTableSelectionOptions = source.TableSelectionOptions{
+	Subject:      "Vitess CDC table",
+	Scope:        "the keyspace's tables",
+	Canonicalize: bareTableName,
+}
+
+// SelectTables restricts this source to the named tables.
+func (s *VitessCDCSource) SelectTables(names []string) error {
+	selection, err := source.NewTableSelection(names, vitessTableSelectionOptions)
+	if err != nil {
+		return err
+	}
+	s.selection = selection
+	return nil
+}
+
 func (s *VitessCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT TABLE_NAME
@@ -183,11 +202,30 @@ func (s *VitessCDCSource) getTables(ctx context.Context) ([]source.SourceTableIn
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tables []source.SourceTableInfo
+	var inventory []string
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, fmt.Errorf("failed to scan Vitess table: %w", err)
+		}
+		inventory = append(inventory, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Resolve before the per-table schema and support checks: an unselected
+	// table costs nothing, and a keyless table outside the selection no longer
+	// blocks the whole keyspace.
+	selected, err := s.selection.Resolve(inventory)
+	if err != nil {
+		return nil, err
+	}
+
+	tables := make([]source.SourceTableInfo, 0, len(selected))
+	for _, tableName := range inventory {
+		if _, ok := selected[tableName]; !ok {
+			continue
 		}
 
 		fullSchema, err := getMySQLSchema(ctx, s.db, s.keyspace, tableName)
@@ -209,7 +247,11 @@ func (s *VitessCDCSource) getTables(ctx context.Context) ([]source.SourceTableIn
 			DestSchema:  s.destSchema,
 		})
 	}
-	if err := rows.Err(); err != nil {
+	names := make([]string, 0, len(tables))
+	for _, table := range tables {
+		names = append(names, table.Name)
+	}
+	if err := s.selection.Validate(names, nil); err != nil {
 		return nil, err
 	}
 	if len(tables) == 0 {
@@ -224,17 +266,9 @@ func (s *VitessCDCSource) ReadAll(ctx context.Context, opts source.MultiTableRea
 		return nil, err
 	}
 
-	filter := map[string]bool{}
-	for _, table := range opts.Tables {
-		filter[strings.ToLower(table)] = true
-	}
-
 	targets := make([]vitessCDCTarget, 0, len(all))
 	resumeByBare := make(map[string]string, len(all))
 	for _, info := range all {
-		if len(filter) > 0 && !filter[strings.ToLower(info.Name)] {
-			continue
-		}
 		_, bare := parseMySQLTableName(s.keyspace, info.Name)
 		targets = append(targets, vitessCDCTarget{bareName: bare, resultName: info.Name, schema: info.Schema})
 		if lsn := strings.TrimSpace(opts.CDCResumeLSNs[info.Name]); lsn != "" {
@@ -1062,5 +1096,6 @@ var (
 	_ source.Source           = (*VitessCDCSource)(nil)
 	_ source.StreamingSource  = (*VitessCDCSource)(nil)
 	_ source.MultiTableSource = (*VitessCDCSource)(nil)
+	_ source.TableSelector    = (*VitessCDCSource)(nil)
 	_ source.SourceTable      = (*VitessCDCTable)(nil)
 )
