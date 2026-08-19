@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
+	datalakefile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -210,7 +212,7 @@ func TestRenameIfNotExistsSendsEscapedSourceAndIfNoneMatch(t *testing.T) {
 	assert.Equal(t, "*", transport.req.Header.Get("If-None-Match"))
 	assert.Equal(t, dfsServiceVersion, transport.req.Header.Get("x-ms-version"))
 	assert.Equal(t, "/Fabric%20Dev/lh.Lakehouse/Tables/t/_delta_log/00000000000000000001.json", transport.req.URL.EscapedPath())
-	assert.Equal(t, "resource=file", transport.req.URL.RawQuery)
+	assert.Equal(t, "mode=legacy", transport.req.URL.RawQuery)
 }
 
 func TestRenameIfNotExistsReportsConflictAsResponseError(t *testing.T) {
@@ -240,6 +242,68 @@ func TestRenameIfNotExistsAppendsSASToken(t *testing.T) {
 	}
 
 	require.NoError(t, client.RenameIfNotExists(t.Context(), "Fabric Dev", "a/b.tmp", "a/c.json"))
-	assert.Equal(t, "resource=file&sv=2021&sig=abc", transport.req.URL.RawQuery)
+	assert.Equal(t, "mode=legacy&sv=2021&sig=abc", transport.req.URL.RawQuery)
 	assert.Equal(t, "/Fabric%20Dev/a/b.tmp?sv=2021&sig=abc", transport.req.Header.Get("x-ms-rename-source"))
+}
+
+// TestRenameIfNotExistsMatchesSDKRequest pins the hand-built rename to the
+// request datalakefile.Client.Rename produces. The two diverged once already:
+// sending "resource=file" instead of "mode=legacy" turned the Create Path call
+// into a plain create, and OneLake rejected x-ms-rename-source with a 400
+// UnsupportedHeader. Only the header value may differ, and only for names that
+// need percent-encoding, which is why the rename is hand-built at all.
+func TestRenameIfNotExistsMatchesSDKRequest(t *testing.T) {
+	const (
+		workspace = "FabricDev"
+		srcPath   = "lh.Lakehouse/Tables/t/_bruin_delta_tmp/x.tmp"
+		destPath  = "lh.Lakehouse/Tables/t/_delta_log/00000000000000000000.json"
+	)
+
+	srcURL, err := PathURLWithSuffix(OneLakeAccountName, OneLakeDNSSuffix, workspace, srcPath)
+	require.NoError(t, err)
+
+	sdkTransport := &recordingTransport{status: http.StatusCreated}
+	sdkClient, err := datalakefile.NewClientWithNoCredential(srcURL, &datalakefile.ClientOptions{
+		ClientOptions: policy.ClientOptions{Transport: sdkTransport},
+	})
+	require.NoError(t, err)
+
+	etagAny := azcore.ETagAny
+	_, err = sdkClient.Rename(t.Context(), destPath, &datalakefile.RenameOptions{
+		AccessConditions: &datalakefile.AccessConditions{
+			ModifiedAccessConditions: &datalakefile.ModifiedAccessConditions{IfNoneMatch: &etagAny},
+		},
+	})
+	require.NoError(t, err)
+
+	ourTransport := &recordingTransport{status: http.StatusCreated}
+	client := &DataLakeClient{
+		accountName: OneLakeAccountName,
+		dnsSuffix:   OneLakeDNSSuffix,
+		pipeline: azruntime.NewPipeline("test", "v1", azruntime.PipelineOptions{}, &policy.ClientOptions{
+			Transport: ourTransport,
+		}),
+	}
+	require.NoError(t, client.RenameIfNotExists(t.Context(), workspace, srcPath, destPath))
+
+	require.NotNil(t, sdkTransport.req)
+	require.NotNil(t, ourTransport.req)
+	assert.Equal(t, sdkTransport.req.Method, ourTransport.req.Method)
+	assert.Equal(t, sdkTransport.req.URL.EscapedPath(), ourTransport.req.URL.EscapedPath())
+	assert.Equal(t, sdkTransport.req.URL.RawQuery, ourTransport.req.URL.RawQuery)
+	for _, header := range []string{"x-ms-rename-source", "x-ms-version", "If-None-Match"} {
+		assert.Equal(t, headerValue(sdkTransport.req.Header, header), headerValue(ourTransport.req.Header, header), header)
+	}
+}
+
+// headerValue looks a header up without canonicalizing the name. The generated
+// SDK client assigns straight into the map with lowercase keys, so http.Header.Get
+// misses those entries even though the wire format is case-insensitive.
+func headerValue(h http.Header, name string) string {
+	for key, values := range h {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
 }
