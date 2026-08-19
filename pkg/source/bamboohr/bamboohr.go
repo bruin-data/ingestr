@@ -611,11 +611,11 @@ func timesheetWindow(opts source.ReadOptions, now time.Time, companyTimezone *ti
 	today := calendarDate(now.In(companyTimezone))
 	end := today
 	if opts.IntervalEnd != nil {
-		end = calendarDate(*opts.IntervalEnd)
+		end = calendarDate(opts.IntervalEnd.In(companyTimezone))
 	}
 	start := end.AddDate(0, 0, -364)
 	if opts.IntervalStart != nil {
-		start = calendarDate(*opts.IntervalStart)
+		start = calendarDate(opts.IntervalStart.In(companyTimezone))
 	}
 
 	if start.After(end) {

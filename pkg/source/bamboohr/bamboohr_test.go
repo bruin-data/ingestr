@@ -382,6 +382,22 @@ func TestTimesheetWindowUsesCompanyTimezoneForToday(t *testing.T) {
 	assert.Equal(t, "2026-08-18", end)
 }
 
+func TestTimesheetWindowUsesCompanyTimezoneForExplicitBounds(t *testing.T) {
+	denver, err := time.LoadLocation("America/Denver")
+	require.NoError(t, err)
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	startBoundary := time.Date(2026, time.August, 19, 1, 0, 0, 0, time.UTC)
+	endBoundary := time.Date(2026, time.August, 20, 1, 0, 0, 0, time.UTC)
+
+	start, end, err := timesheetWindow(source.ReadOptions{
+		IntervalStart: &startBoundary,
+		IntervalEnd:   &endBoundary,
+	}, now, denver)
+	require.NoError(t, err)
+	assert.Equal(t, "2026-08-18", start)
+	assert.Equal(t, "2026-08-19", end)
+}
+
 func TestJSONUseNumberPreservesLargeIntegers(t *testing.T) {
 	var payload map[string]interface{}
 	require.NoError(t, jsonUseNumber([]byte(`{"id":9007199254740993}`), &payload))
