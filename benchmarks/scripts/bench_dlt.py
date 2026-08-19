@@ -1,7 +1,8 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#     "dlt[postgres,duckdb,bigquery,snowflake,mssql]==1.27.2",
+#     "dlt[postgres,duckdb,bigquery,snowflake,mssql,clickhouse]==1.27.2",
+#     "clickhouse-connect>=0.7.7,<1",
 #     "dlt-verified-sources @ git+https://github.com/dlt-hub/verified-sources.git@75b3ec17eab99d0079d9f61b7f47fc8b899a5738",
 #     "duckdb-engine>=0.17.0",
 #     "pendulum>=3.0.0",
@@ -18,7 +19,7 @@ import argparse
 import json
 import os
 import tempfile
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 os.environ.setdefault("RUNTIME__LOG_LEVEL", "ERROR")
 os.environ.setdefault("RUNTIME__DLTHUB_TELEMETRY", "false")
@@ -64,6 +65,21 @@ def patch_dlt_mssql_json_type():
 
 def duckdb_path_from_uri(uri: str) -> str:
     return uri.split("duckdb:///", 1)[1]
+
+
+def clickhouse_credentials_from_uri(uri: str) -> dict:
+    parsed = urlparse(uri)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    secure = query.get("secure", "0").lower() in ("1", "true")
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 9000,
+        "http_port": int(query.get("http_port", "8123")),
+        "database": parsed.path.lstrip("/") or "default",
+        "username": unquote(parsed.username or "default"),
+        "password": unquote(parsed.password or ""),
+        "secure": int(secure),
+    }
 
 
 def parse_mongodb_table(table: str) -> tuple[str, str, dict | None]:
@@ -197,15 +213,20 @@ def main():
     elif dest_uri.startswith(("mssql://", "sqlserver://", "mssql+pyodbc://")):
         patch_dlt_mssql_json_type()
         destination = dlt.destinations.mssql(credentials=normalize_mssql_uri(dest_uri))
+    elif dest_uri.startswith("clickhouse://"):
+        destination = dlt.destinations.clickhouse(
+            credentials=clickhouse_credentials_from_uri(dest_uri),
+        )
     else:
         raise ValueError(f"Unsupported destination: {dest_uri}")
 
     pipeline_kwargs = dict(
         pipeline_name="bench_dlt",
         destination=destination,
-        dataset_name=dest_schema or "main",
         pipelines_dir=os.path.join(tempfile.mkdtemp(), "dlt_pipelines"),
     )
+    if not dest_uri.startswith("clickhouse://"):
+        pipeline_kwargs["dataset_name"] = dest_schema or "main"
     pipeline = dlt.pipeline(**pipeline_kwargs)
 
     run_kwargs = dict(
