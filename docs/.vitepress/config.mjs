@@ -205,6 +205,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "CleverTap", link: "/supported-sources/clevertap.md" },
               { text: "ClickUp", link: "/supported-sources/clickup.md" },
               { text: "Cursor", link: "/supported-sources/cursor.md" },
+              { text: "Deel", link: "/supported-sources/deel.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
               { text: "Dune", link: "/supported-sources/dune.md" },
               {
