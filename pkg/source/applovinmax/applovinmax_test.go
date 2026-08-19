@@ -1,10 +1,14 @@
 package applovinmax
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,4 +229,123 @@ func TestTryParseNumeric(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestStreamCSVBatchesRows(t *testing.T) {
+	input := strings.NewReader("event_id,revenue\n1,0.1\n2,0.2\n3,0.3\n4,0.4\n5,0.5\n")
+	results := make(chan source.RecordBatchResult, 3)
+
+	rows, err := streamCSV(
+		context.Background(),
+		input,
+		"2026-08-16",
+		"ios",
+		source.ReadOptions{PageSize: 2},
+		newRowLimiter(0),
+		results,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 5, rows)
+
+	close(results)
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		require.NotNil(t, result.Batch)
+		batchRows = append(batchRows, result.Batch.NumRows())
+		fields := result.Batch.Schema().Fields()
+		fieldNames := make([]string, len(fields))
+		for i, field := range fields {
+			fieldNames[i] = field.Name
+		}
+		assert.Equal(t, []string{"partition_date", "event_id", "platform", "revenue"}, fieldNames)
+		result.Batch.Release()
+	}
+	assert.Equal(t, []int64{2, 2, 1}, batchRows)
+}
+
+func TestStreamCSVHonorsLimitAcrossBatches(t *testing.T) {
+	input := strings.NewReader("event_id\n1\n2\n3\n4\n5\n6\n7\n")
+	results := make(chan source.RecordBatchResult, 2)
+	limiter := newRowLimiter(5)
+
+	rows, err := streamCSV(
+		context.Background(),
+		input,
+		"2026-08-16",
+		"android",
+		source.ReadOptions{PageSize: 3},
+		limiter,
+		results,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 5, rows)
+	assert.True(t, limiter.exhausted())
+
+	close(results)
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		batchRows = append(batchRows, result.Batch.NumRows())
+		result.Batch.Release()
+	}
+	assert.Equal(t, []int64{3, 2}, batchRows)
+}
+
+func TestStreamCSVEmitsBeforeInputCompletes(t *testing.T) {
+	reader, writer := io.Pipe()
+	results := make(chan source.RecordBatchResult)
+	finished := make(chan struct {
+		rows int
+		err  error
+	}, 1)
+
+	go func() {
+		rows, err := streamCSV(
+			context.Background(),
+			reader,
+			"2026-08-16",
+			"fireos",
+			source.ReadOptions{PageSize: 2},
+			newRowLimiter(0),
+			results,
+		)
+		finished <- struct {
+			rows int
+			err  error
+		}{rows: rows, err: err}
+	}()
+
+	_, err := io.WriteString(writer, "event_id,revenue\n1,0.1\n2,0.2\n")
+	require.NoError(t, err)
+
+	select {
+	case result := <-results:
+		require.NoError(t, result.Err)
+		require.EqualValues(t, 2, result.Batch.NumRows())
+		result.Batch.Release()
+	case <-time.After(time.Second):
+		t.Fatal("expected a batch before the CSV input was closed")
+	}
+
+	require.NoError(t, writer.Close())
+	completion := <-finished
+	require.NoError(t, completion.err)
+	assert.Equal(t, 2, completion.rows)
+}
+
+func TestEffectiveBatchLimitsCapsProductionDefaults(t *testing.T) {
+	rows, bytes := effectiveBatchLimits(source.ReadOptions{
+		PageSize:      25_000,
+		MaxBatchBytes: 512 << 20,
+	})
+	assert.Equal(t, maxBatchRows, rows)
+	assert.EqualValues(t, maxBatchBytes, bytes)
+
+	rows, bytes = effectiveBatchLimits(source.ReadOptions{
+		PageSize:      100,
+		MaxBatchBytes: 1 << 20,
+	})
+	assert.Equal(t, 100, rows)
+	assert.EqualValues(t, 1<<20, bytes)
 }
