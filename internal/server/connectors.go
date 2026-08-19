@@ -296,6 +296,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("attio", "Attio", []string{"attio"}, true, false),
 		genericURIConnector("avro", "Avro File", []string{"avro"}, true, false),
 		genericURIConnector("balldontlie", "balldontlie", []string{"balldontlie"}, true, false),
+		genericURIConnector("bamboohr", "BambooHR", []string{"bamboohr"}, true, false),
 		genericURIConnector("blobstore", "Object Storage", []string{"s3", "gs", "gcs", "az", "azure", "adls", "adlsgen2", "azdatalake", "abfs", "abfss"}, true, true),
 		genericURIConnector("braze", "Braze", []string{"braze"}, true, false),
 		genericURIConnector("bruin", "Bruin", []string{"bruin"}, true, false),
