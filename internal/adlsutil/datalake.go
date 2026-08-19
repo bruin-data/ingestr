@@ -235,9 +235,8 @@ func (c *DataLakeClient) DeleteDir(ctx context.Context, fileSystem, dirPath stri
 // the percent-decoded URL path. Azure requires that header to be percent-encoded,
 // and a OneLake workspace name may contain characters that need escaping.
 //
-// The request mirrors what the SDK sends: "mode=legacy" marks the Create Path
-// call as a rename. Sending "resource=file" instead makes it a plain create,
-// and OneLake then rejects x-ms-rename-source as an unsupported header.
+// "mode=legacy" is what marks the Create Path call as a rename; with
+// "resource=file" it is a plain create, which rejects x-ms-rename-source.
 func (c *DataLakeClient) RenameIfNotExists(ctx context.Context, fileSystem, srcPath, destPath string) error {
 	destURL, err := c.pathURL(fileSystem, destPath)
 	if err != nil {

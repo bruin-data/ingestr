@@ -247,11 +247,8 @@ func TestRenameIfNotExistsAppendsSASToken(t *testing.T) {
 }
 
 // TestRenameIfNotExistsMatchesSDKRequest pins the hand-built rename to the
-// request datalakefile.Client.Rename produces. The two diverged once already:
-// sending "resource=file" instead of "mode=legacy" turned the Create Path call
-// into a plain create, and OneLake rejected x-ms-rename-source with a 400
-// UnsupportedHeader. Only the header value may differ, and only for names that
-// need percent-encoding, which is why the rename is hand-built at all.
+// request datalakefile.Client.Rename produces. Only x-ms-rename-source may
+// differ, and only for names needing percent-encoding.
 func TestRenameIfNotExistsMatchesSDKRequest(t *testing.T) {
 	const (
 		workspace = "FabricDev"
@@ -296,9 +293,8 @@ func TestRenameIfNotExistsMatchesSDKRequest(t *testing.T) {
 	}
 }
 
-// headerValue looks a header up without canonicalizing the name. The generated
-// SDK client assigns straight into the map with lowercase keys, so http.Header.Get
-// misses those entries even though the wire format is case-insensitive.
+// headerValue looks a header up without canonicalizing the name: the generated
+// SDK client assigns straight into the map with lowercase keys that Get misses.
 func headerValue(h http.Header, name string) string {
 	for key, values := range h {
 		if strings.EqualFold(key, name) && len(values) > 0 {
