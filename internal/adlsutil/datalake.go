@@ -234,6 +234,9 @@ func (c *DataLakeClient) DeleteDir(ctx context.Context, fileSystem, dirPath stri
 // datalakefile.Client.Rename, which derives the x-ms-rename-source header from
 // the percent-decoded URL path. Azure requires that header to be percent-encoded,
 // and a OneLake workspace name may contain characters that need escaping.
+//
+// "mode=legacy" is what marks the Create Path call as a rename; with
+// "resource=file" it is a plain create, which rejects x-ms-rename-source.
 func (c *DataLakeClient) RenameIfNotExists(ctx context.Context, fileSystem, srcPath, destPath string) error {
 	destURL, err := c.pathURL(fileSystem, destPath)
 	if err != nil {
@@ -245,7 +248,7 @@ func (c *DataLakeClient) RenameIfNotExists(ctx context.Context, fileSystem, srcP
 		source += "?" + c.sasToken
 	}
 
-	req, err := azruntime.NewRequest(ctx, http.MethodPut, AppendSASToken(destURL+"?resource=file", c.sasToken))
+	req, err := azruntime.NewRequest(ctx, http.MethodPut, AppendSASToken(destURL+"?mode=legacy", c.sasToken))
 	if err != nil {
 		return fmt.Errorf("failed to build rename request for %s: %w", destPath, err)
 	}
