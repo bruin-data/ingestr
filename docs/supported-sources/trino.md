@@ -10,7 +10,7 @@ ingestr supports Trino as both a source and destination.
 The URI format for Trino is as follows:
 
 ```plaintext
-trino://<username>:<password>@<host>:<port>/<catalog>
+trino://<username>:<password>@<host>:<port>/<catalog>/<schema>
 ```
 
 URI parameters:
@@ -19,6 +19,11 @@ URI parameters:
 - `host`: the Trino server hostname or IP address
 - `port`: the Trino server port (default: 8080)
 - `catalog`: the Trino catalog to connect to
+- `schema`: the default schema (default: `default`)
+
+Destination URI parameters:
+
+- `json_type`: controls how ingestr writes JSON columns. `varchar` is the default and works across Trino catalogs. `variant` writes Iceberg v3 `VARIANT` columns and requires Trino 481 or newer.
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Trino dialect [here](https://github.com/trinodb/trino-python-client).
 
@@ -79,6 +84,20 @@ ingestr ingest \
     --dest-table 'sales.orders'
 ```
 
+### Iceberg v3 variant columns
+
+Use `json_type=variant` to preserve JSON values as native Iceberg v3 semi-structured data:
+
+```bash
+ingestr ingest \
+    --source-uri 'postgresql://user:pass@localhost:5432/sourcedb' \
+    --source-table 'public.events' \
+    --dest-uri 'trino://admin@localhost:8080/iceberg/sales?json_type=variant' \
+    --dest-table 'sales.events'
+```
+
+Ingestr creates new tables with `WITH (format_version = 3)` and writes JSON values as `VARIANT`. Existing tables must already use Iceberg format version 3; ingestr does not upgrade them implicitly.
+
 ## Supported write dispositions
 When using Trino as a destination, ingestr supports `replace`, `append`, `merge`, and `scd2`.
 
@@ -86,7 +105,7 @@ When using Trino as a destination, ingestr supports `replace`, `append`, `merge`
 
 ## Data type handling
 Trino automatically handles most SQL data type conversions. When used as a destination:
-- JSON types are converted to TEXT/VARCHAR
+- JSON types are converted to `VARCHAR` by default, or to Iceberg v3 `VARIANT` with `json_type=variant`
 - Binary types are converted to TEXT/VARCHAR
 - All integer types are mapped to BIGINT for compatibility
 
@@ -94,5 +113,5 @@ Trino automatically handles most SQL data type conversions. When used as a desti
 
 ### As a destination
 - Case-sensitive identifiers (table and column names preserve case)
-- JSON and Binary types are converted to STRING
+- `VARIANT` JSON columns require Iceberg format version 3 and Trino 481 or newer
 - Memory catalog does not support DELETE and UPDATE operations (affects merge/scd2 in test environments)
