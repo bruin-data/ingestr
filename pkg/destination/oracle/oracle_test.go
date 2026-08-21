@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/strategy"
@@ -152,6 +153,24 @@ func TestBuildConnStrings(t *testing.T) {
 			},
 		},
 		{
+			name: "Exadata scheme",
+			uri:  "exadata://user:pass@scan.example.com:1521/EXAPDB",
+			want: []string{
+				"oracle://user:pass@scan.example.com:1521/?SID=EXAPDB",
+				"oracle://user:pass@scan.example.com:1521/EXAPDB",
+			},
+		},
+		{
+			name: "Oracle Exadata aliases",
+			uri:  "oracle_exadata://user:pass@scan.example.com:1521/?service_name=EXAPDB",
+			want: []string{"oracle://user:pass@scan.example.com:1521/EXAPDB"},
+		},
+		{
+			name: "Exadata RAC and wallet options",
+			uri:  "oracle+exadata://user:pass@scan1.example.com:1521/?service_name=EXAPDB&server=scan2.example.com%3A1521&SSL=true&WALLET=%2Fsecure%2Fwallet",
+			want: []string{"oracle://user:pass@scan1.example.com:1521/EXAPDB?SSL=true&WALLET=%2Fsecure%2Fwallet&server=scan2.example.com%3A1521"},
+		},
+		{
 			name: "explicit service name",
 			uri:  "oracle://user:pass@host:1521/?service_name=XEPDB1",
 			want: []string{"oracle://user:pass@host:1521/XEPDB1"},
@@ -186,6 +205,25 @@ func TestBuildConnStrings(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+func TestOracleDestinationSchemes(t *testing.T) {
+	dest := NewOracleDestination()
+	assert.ElementsMatch(t, []string{
+		"oracle",
+		"oracle+cx_oracle",
+		"exadata",
+		"oracle+exadata",
+		"oracle_exadata",
+	}, dest.Schemes())
+}
+
+func TestExadataDestinationSchemesAreRegistered(t *testing.T) {
+	for _, scheme := range []string{"exadata", "oracle+exadata", "oracle_exadata"} {
+		constructor, err := registry.Default.GetDestinationConstructor(scheme)
+		require.NoError(t, err)
+		assert.IsType(t, &OracleDestination{}, constructor())
 	}
 }
 

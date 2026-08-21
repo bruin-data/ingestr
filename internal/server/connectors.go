@@ -319,6 +319,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("elasticsearch", "Elasticsearch", []string{"elasticsearch"}, true, true),
 		genericURIConnector("espn", "ESPN", []string{"espn"}, true, false),
 		genericURIConnector("eventhubs", "Azure Event Hubs", []string{"eventhubs", "eventhub", "azure-event-hubs", "azureeventhubs"}, true, false),
+		genericURIConnector("exadata", "Oracle Exadata", []string{"exadata", "oracle+exadata", "oracle_exadata"}, false, true),
 		genericURIConnector("fabric", "Microsoft Fabric", []string{"fabric"}, true, true),
 		genericURIConnector("facebookads", "Facebook Ads", []string{"facebookads"}, true, false),
 		genericURIConnector("fastspring", "FastSpring", []string{"fastspring"}, true, false),
