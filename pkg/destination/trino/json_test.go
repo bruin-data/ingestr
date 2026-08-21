@@ -80,9 +80,11 @@ func TestValidateExistingVariantTable(t *testing.T) {
 	tests := []struct {
 		name        string
 		version     string
+		columnType  string
 		wantErrText string
 	}{
-		{name: "version 3", version: "3"},
+		{name: "version 3 with variant column", version: "3", columnType: "variant"},
+		{name: "version 3 with varchar column", version: "3", columnType: "varchar", wantErrText: "requires existing JSON column iceberg.events.records.payload to use VARIANT; found varchar"},
 		{name: "version 2", version: "2", wantErrText: "uses format version 2"},
 		{name: "invalid version", version: "unknown", wantErrText: `invalid format version "unknown"`},
 	}
@@ -100,8 +102,12 @@ func TestValidateExistingVariantTable(t *testing.T) {
 				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT value FROM "iceberg"."events"."records$properties" WHERE key = 'format-version'`)).
 				WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(tt.version))
+			if tt.version == "3" {
+				mock.ExpectQuery(regexp.QuoteMeta(`SELECT column_name, data_type FROM "iceberg".information_schema.columns WHERE table_schema = 'events' AND table_name = 'records'`)).
+					WillReturnRows(sqlmock.NewRows([]string{"column_name", "data_type"}).AddRow("payload", tt.columnType))
+			}
 
-			err = dest.validateExistingVariantTable(t.Context(), "iceberg", "events", "records")
+			err = dest.validateExistingVariantTable(t.Context(), "iceberg", "events", "records", []schema.Column{{Name: "payload", DataType: schema.TypeJSON}})
 			if tt.wantErrText == "" {
 				require.NoError(t, err)
 			} else {
@@ -123,6 +129,6 @@ func TestValidateExistingVariantTableAllowsMissingTable(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM "iceberg".information_schema.tables WHERE table_schema = 'events' AND table_name = 'records'`)).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}))
 
-	require.NoError(t, dest.validateExistingVariantTable(t.Context(), "iceberg", "events", "records"))
+	require.NoError(t, dest.validateExistingVariantTable(t.Context(), "iceberg", "events", "records", []schema.Column{{Name: "payload", DataType: schema.TypeJSON}}))
 	require.NoError(t, mock.ExpectationsWereMet())
 }

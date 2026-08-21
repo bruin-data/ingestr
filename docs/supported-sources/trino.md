@@ -96,7 +96,7 @@ ingestr ingest \
     --dest-table 'sales.events'
 ```
 
-Ingestr creates new tables with `WITH (format_version = 3)` and writes JSON values as `VARIANT`. Existing tables must already use Iceberg format version 3; ingestr does not upgrade them implicitly.
+Ingestr creates new tables with `WITH (format_version = 3)` and writes JSON values as `VARIANT`. Existing tables must already use Iceberg format version 3 and their corresponding JSON columns must be `VARIANT`; ingestr does not upgrade tables or columns implicitly.
 
 ## Supported write dispositions
 When using Trino as a destination, ingestr supports `replace`, `append`, `merge`, and `scd2`.

@@ -76,7 +76,7 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 	if d.jsonType.normalized() == jsonTypeVariant && !opts.DropFirst {
-		if err := d.validateExistingVariantTable(ctx, catalog, schemaName, tableName); err != nil {
+		if err := d.validateExistingVariantTable(ctx, catalog, schemaName, tableName, opts.Schema.Columns); err != nil {
 			return err
 		}
 	}
@@ -103,7 +103,7 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 	return nil
 }
 
-func (d *TrinoDestination) validateExistingVariantTable(ctx context.Context, catalog, schemaName, tableName string) error {
+func (d *TrinoDestination) validateExistingVariantTable(ctx context.Context, catalog, schemaName, tableName string, columns []schema.Column) error {
 	existsSQL := fmt.Sprintf(
 		"SELECT 1 FROM %s.information_schema.tables WHERE table_schema = %s AND table_name = %s",
 		quoteIdentifier(catalog), escapeString(schemaName), escapeString(tableName),
@@ -131,6 +131,40 @@ func (d *TrinoDestination) validateExistingVariantTable(ctx context.Context, cat
 	}
 	if version < 3 {
 		return fmt.Errorf("json_type=variant requires an Iceberg format version 3 table; existing table %s.%s.%s uses format version %d", catalog, schemaName, tableName, version)
+	}
+
+	expectedTypes := make(map[string]string)
+	for _, col := range columns {
+		if col.DataType == schema.TypeJSON || col.DataType == schema.TypeArray && col.ArrayType == schema.TypeJSON {
+			expectedTypes[col.Name] = mapDataTypeToTrino(col, jsonTypeVariant)
+		}
+	}
+	if len(expectedTypes) == 0 {
+		return nil
+	}
+
+	columnsSQL := fmt.Sprintf(
+		"SELECT column_name, data_type FROM %s.information_schema.columns WHERE table_schema = %s AND table_name = %s",
+		quoteIdentifier(catalog), escapeString(schemaName), escapeString(tableName),
+	)
+	rows, err := d.db.QueryContext(ctx, columnsSQL)
+	if err != nil {
+		return fmt.Errorf("failed to read columns for existing Trino table %s.%s.%s: %w", catalog, schemaName, tableName, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var name, dataType string
+		if err := rows.Scan(&name, &dataType); err != nil {
+			return fmt.Errorf("failed to read column type for existing Trino table %s.%s.%s: %w", catalog, schemaName, tableName, err)
+		}
+		expected, ok := expectedTypes[name]
+		if ok && !strings.EqualFold(strings.ReplaceAll(dataType, " ", ""), strings.ReplaceAll(expected, " ", "")) {
+			return fmt.Errorf("json_type=variant requires existing JSON column %s.%s.%s.%s to use %s; found %s", catalog, schemaName, tableName, name, expected, dataType)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to read columns for existing Trino table %s.%s.%s: %w", catalog, schemaName, tableName, err)
 	}
 	return nil
 }
