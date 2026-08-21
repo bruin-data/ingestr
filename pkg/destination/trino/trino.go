@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,13 +21,14 @@ import (
 )
 
 type TrinoDestination struct {
-	db      *sql.DB
-	catalog string
-	schema  string
+	db       *sql.DB
+	catalog  string
+	schema   string
+	jsonType jsonTypeMode
 }
 
 func NewTrinoDestination() *TrinoDestination {
-	return &TrinoDestination{}
+	return &TrinoDestination{jsonType: jsonTypeVarchar}
 }
 
 func (d *TrinoDestination) Schemes() []string {
@@ -34,12 +36,12 @@ func (d *TrinoDestination) Schemes() []string {
 }
 
 func (d *TrinoDestination) Connect(ctx context.Context, uri string) error {
-	dsn, catalog, schemaName, err := parseTrinoURI(uri)
+	connectionConfig, err := parseTrinoURI(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse Trino URI: %w", err)
 	}
 
-	db, err := sql.Open("trino", dsn)
+	db, err := sql.Open("trino", connectionConfig.dsn)
 	if err != nil {
 		return fmt.Errorf("failed to open Trino connection: %w", err)
 	}
@@ -50,9 +52,10 @@ func (d *TrinoDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.db = db
-	d.catalog = catalog
-	d.schema = schemaName
-	config.Debug("[TRINO] Connected to catalog: %s, schema: %s", catalog, schemaName)
+	d.catalog = connectionConfig.catalog
+	d.schema = connectionConfig.schema
+	d.jsonType = connectionConfig.jsonType
+	config.Debug("[TRINO] Connected to catalog: %s, schema: %s, JSON type: %s", d.catalog, d.schema, d.jsonType)
 	return nil
 }
 
@@ -72,6 +75,11 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 	if err := d.ensureSchemaExists(ctx, catalog, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
+	if d.jsonType.normalized() == jsonTypeVariant && !opts.DropFirst {
+		if err := d.validateExistingVariantTable(ctx, catalog, schemaName, tableName, opts.Schema.Columns); err != nil {
+			return err
+		}
+	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
@@ -84,7 +92,7 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(catalog, schemaName, tableName, opts.Schema.Columns)
+	createSQL := buildCreateTableSQL(catalog, schemaName, tableName, opts.Schema.Columns, d.jsonType)
 	config.Debug("[TRINO] CREATE SQL: %s", createSQL)
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
@@ -92,6 +100,72 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 	}
 	config.Debug("[TRINO] CREATE TABLE took %v", time.Since(startCreate))
 
+	return nil
+}
+
+func (d *TrinoDestination) validateExistingVariantTable(ctx context.Context, catalog, schemaName, tableName string, columns []schema.Column) error {
+	existsSQL := fmt.Sprintf(
+		"SELECT 1 FROM %s.information_schema.tables WHERE table_schema = %s AND table_name = %s",
+		quoteIdentifier(catalog), escapeString(schemaName), escapeString(tableName),
+	)
+	var one int
+	err := d.db.QueryRowContext(ctx, existsSQL).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to check whether Trino table exists: %w", err)
+	}
+
+	propertiesTable := fmt.Sprintf(
+		"%s.%s.%s",
+		quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName+"$properties"),
+	)
+	var rawVersion string
+	if err := d.db.QueryRowContext(ctx, "SELECT value FROM "+propertiesTable+" WHERE key = 'format-version'").Scan(&rawVersion); err != nil {
+		return fmt.Errorf("json_type=variant requires an Iceberg format version 3 table; failed to read properties for existing table %s.%s.%s: %w", catalog, schemaName, tableName, err)
+	}
+	version, err := strconv.Atoi(rawVersion)
+	if err != nil {
+		return fmt.Errorf("json_type=variant requires an Iceberg format version 3 table; existing table %s.%s.%s has invalid format version %q", catalog, schemaName, tableName, rawVersion)
+	}
+	if version < 3 {
+		return fmt.Errorf("json_type=variant requires an Iceberg format version 3 table; existing table %s.%s.%s uses format version %d", catalog, schemaName, tableName, version)
+	}
+
+	expectedTypes := make(map[string]string)
+	for _, col := range columns {
+		if col.DataType == schema.TypeJSON || col.DataType == schema.TypeArray && col.ArrayType == schema.TypeJSON {
+			expectedTypes[col.Name] = mapDataTypeToTrino(col, jsonTypeVariant)
+		}
+	}
+	if len(expectedTypes) == 0 {
+		return nil
+	}
+
+	columnsSQL := fmt.Sprintf(
+		"SELECT column_name, data_type FROM %s.information_schema.columns WHERE table_schema = %s AND table_name = %s",
+		quoteIdentifier(catalog), escapeString(schemaName), escapeString(tableName),
+	)
+	rows, err := d.db.QueryContext(ctx, columnsSQL)
+	if err != nil {
+		return fmt.Errorf("failed to read columns for existing Trino table %s.%s.%s: %w", catalog, schemaName, tableName, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var name, dataType string
+		if err := rows.Scan(&name, &dataType); err != nil {
+			return fmt.Errorf("failed to read column type for existing Trino table %s.%s.%s: %w", catalog, schemaName, tableName, err)
+		}
+		expected, ok := expectedTypes[name]
+		if ok && !strings.EqualFold(strings.ReplaceAll(dataType, " ", ""), strings.ReplaceAll(expected, " ", "")) {
+			return fmt.Errorf("json_type=variant requires existing JSON column %s.%s.%s.%s to use %s; found %s", catalog, schemaName, tableName, name, expected, dataType)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to read columns for existing Trino table %s.%s.%s: %w", catalog, schemaName, tableName, err)
+	}
 	return nil
 }
 
@@ -175,7 +249,7 @@ func (d *TrinoDestination) writeBatch(ctx context.Context, records <-chan source
 				chunkEnd = numRows
 			}
 
-			insertSQL := buildInsertSQLWithValues(catalog, schemaName, tableName, columns, record, int(chunkStart), int(chunkEnd))
+			insertSQL := buildInsertSQLWithValues(catalog, schemaName, tableName, columns, record, int(chunkStart), int(chunkEnd), d.jsonType)
 
 			if _, err := d.db.ExecContext(ctx, insertSQL); err != nil {
 				config.LogFailedQuery(insertSQL, err)
@@ -434,10 +508,31 @@ func (d *TrinoDestination) GetTableSchema(ctx context.Context, table string) (*s
 	return nil, nil
 }
 
-func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
+type jsonTypeMode string
+
+const (
+	jsonTypeVarchar jsonTypeMode = "varchar"
+	jsonTypeVariant jsonTypeMode = "variant"
+)
+
+type trinoConnectionConfig struct {
+	dsn      string
+	catalog  string
+	schema   string
+	jsonType jsonTypeMode
+}
+
+func (m jsonTypeMode) normalized() jsonTypeMode {
+	if m == jsonTypeVariant {
+		return jsonTypeVariant
+	}
+	return jsonTypeVarchar
+}
+
+func parseTrinoURI(uri string) (trinoConnectionConfig, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return "", "", "", fmt.Errorf("invalid URI: %w", err)
+		return trinoConnectionConfig{}, fmt.Errorf("invalid URI: %w", err)
 	}
 
 	host := parsed.Hostname()
@@ -451,15 +546,13 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 	}
 
 	pathParts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	catalog := "memory"
 	if len(pathParts) >= 1 && pathParts[0] != "" {
 		catalog = pathParts[0]
-	} else {
-		catalog = "memory"
 	}
+	schemaName := "default"
 	if len(pathParts) >= 2 {
 		schemaName = pathParts[1]
-	} else {
-		schemaName = "default"
 	}
 
 	username := ""
@@ -475,6 +568,10 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 
 	scheme := "http"
 	query := parsed.Query()
+	jsonType, err := parseJSONTypeMode(query.Get("json_type"))
+	if err != nil {
+		return trinoConnectionConfig{}, err
+	}
 	if query.Get("secure") == "true" || query.Get("SSL") == "true" || strings.EqualFold(query.Get("http_scheme"), "https") {
 		scheme = "https"
 	}
@@ -483,7 +580,7 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 
 	customClient, err := buildAndRegisterCustomClient(query)
 	if err != nil {
-		return "", "", "", err
+		return trinoConnectionConfig{}, err
 	}
 
 	userinfo := url.PathEscape(username)
@@ -491,7 +588,7 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 		userinfo = url.PathEscape(username) + ":" + url.PathEscape(password)
 	}
 
-	dsn = fmt.Sprintf("%s://%s@%s:%s?catalog=%s&schema=%s",
+	dsn := fmt.Sprintf("%s://%s@%s:%s?catalog=%s&schema=%s",
 		scheme, userinfo, host, port, catalog, schemaName)
 
 	if customClient != "" {
@@ -507,7 +604,23 @@ func parseTrinoURI(uri string) (dsn, catalog, schemaName string, err error) {
 		}
 	}
 
-	return dsn, catalog, schemaName, nil
+	return trinoConnectionConfig{
+		dsn:      dsn,
+		catalog:  catalog,
+		schema:   schemaName,
+		jsonType: jsonType,
+	}, nil
+}
+
+func parseJSONTypeMode(raw string) (jsonTypeMode, error) {
+	switch jsonTypeMode(strings.ToLower(strings.TrimSpace(raw))) {
+	case "", jsonTypeVarchar:
+		return jsonTypeVarchar, nil
+	case jsonTypeVariant:
+		return jsonTypeVariant, nil
+	default:
+		return "", fmt.Errorf("trino uri: invalid json_type %q; expected varchar or variant", raw)
+	}
 }
 
 // isReservedURIKey lists query parameters consumed by parseTrinoURI itself —
@@ -517,6 +630,8 @@ func isReservedURIKey(key string) bool {
 	case "secure", "SSL", "http_scheme":
 		return true
 	case "cert", "key", "http_headers", "verify":
+		return true
+	case "json_type":
 		return true
 	case "custom_client":
 		// We register our own client; never forward a user-supplied value
@@ -534,10 +649,10 @@ func (d *TrinoDestination) parseTableName(table string) (catalog, schemaName, ta
 	return tn.Catalog, tn.Schema, tn.Table
 }
 
-func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Column) string {
+func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Column, jsonType jsonTypeMode) string {
 	var colDefs []string
 	for _, col := range columns {
-		colType := MapDataTypeToTrino(col)
+		colType := mapDataTypeToTrino(col, jsonType)
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
@@ -546,11 +661,14 @@ func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Col
 		quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(table),
 		strings.Join(colDefs, ",\n  "),
 	)
+	if jsonType.normalized() == jsonTypeVariant {
+		sql += "\nWITH (format_version = 3)"
+	}
 
 	return sql
 }
 
-func buildInsertSQLWithValues(catalog, schemaName, table string, columns []string, record arrow.RecordBatch, startRow, endRow int) string {
+func buildInsertSQLWithValues(catalog, schemaName, table string, columns []string, record arrow.RecordBatch, startRow, endRow int, jsonType jsonTypeMode) string {
 	quotedCols := make([]string, len(columns))
 	for i, col := range columns {
 		quotedCols[i] = quoteIdentifier(col)
@@ -560,7 +678,7 @@ func buildInsertSQLWithValues(catalog, schemaName, table string, columns []strin
 	for rowIdx := startRow; rowIdx < endRow; rowIdx++ {
 		var values []string
 		for colIdx := 0; colIdx < len(columns); colIdx++ {
-			values = append(values, formatValueForSQL(record.Column(colIdx), rowIdx))
+			values = append(values, formatValueForSQL(record.Column(colIdx), rowIdx, jsonType))
 		}
 		rows = append(rows, "("+strings.Join(values, ", ")+")")
 	}
@@ -571,9 +689,9 @@ func buildInsertSQLWithValues(catalog, schemaName, table string, columns []strin
 		strings.Join(rows, ", "))
 }
 
-func formatValueForSQL(arr arrow.Array, idx int) string {
+func formatValueForSQL(arr arrow.Array, idx int, jsonType jsonTypeMode) string {
 	if arr.IsNull(idx) {
-		return castNull(arr.DataType())
+		return castNull(arr.DataType(), jsonType)
 	}
 
 	switch a := arr.(type) {
@@ -636,17 +754,21 @@ func formatValueForSQL(arr arrow.Array, idx int) string {
 		if extType.ExtensionName() == "json" {
 			storage := a.Storage()
 			if strArr, ok := storage.(*array.String); ok {
-				return fmt.Sprintf("JSON %s", escapeString(strArr.Value(idx)))
+				value := escapeString(strArr.Value(idx))
+				if jsonType.normalized() == jsonTypeVariant {
+					return fmt.Sprintf("CAST(JSON %s AS VARIANT)", value)
+				}
+				return value
 			}
 		}
 		storage := a.Storage()
-		return formatValueForSQL(storage, idx)
+		return formatValueForSQL(storage, idx, jsonType)
 	case *array.List:
 		start, end := a.ValueOffsets(idx)
 		listValues := a.ListValues()
 		var elements []string
 		for i := int(start); i < int(end); i++ {
-			elements = append(elements, formatValueForSQL(listValues, i))
+			elements = append(elements, formatValueForSQL(listValues, i, jsonType))
 		}
 		return "ARRAY[" + strings.Join(elements, ", ") + "]"
 	default:
@@ -654,7 +776,7 @@ func formatValueForSQL(arr arrow.Array, idx int) string {
 	}
 }
 
-func castNull(dt arrow.DataType) string {
+func castNull(dt arrow.DataType, jsonType jsonTypeMode) string {
 	switch dt.ID() {
 	case arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64, arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64:
 		return "CAST(NULL AS BIGINT)"
@@ -671,7 +793,17 @@ func castNull(dt arrow.DataType) string {
 	case arrow.BINARY:
 		return "CAST(NULL AS VARBINARY)"
 	case arrow.EXTENSION:
-		return "CAST(NULL AS JSON)"
+		ext, ok := dt.(arrow.ExtensionType)
+		if !ok {
+			return "CAST(NULL AS VARCHAR)"
+		}
+		if ext.ExtensionName() == schema.JSONExtensionName {
+			if jsonType.normalized() == jsonTypeVariant {
+				return "CAST(NULL AS VARIANT)"
+			}
+			return "CAST(NULL AS VARCHAR)"
+		}
+		return castNull(ext.StorageType(), jsonType)
 	default:
 		return "CAST(NULL AS VARCHAR)"
 	}
