@@ -689,6 +689,21 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "dataset not found in job location is permanent",
+			err:  gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging was not found in location EU"},
+			want: false,
+		},
+		{
+			name: "wrapped dataset not found in job location is permanent",
+			err:  fmt.Errorf("query failed: %w", &gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging was not found in location EU"}),
+			want: false,
+		},
+		{
+			name: "untyped dataset not found in job location is permanent",
+			err:  errors.New("Not found: Dataset my-project:_bruin_staging was not found in location EU"),
+			want: false,
+		},
+		{
 			name: "table not found stays non-retryable (real bug, not propagation)",
 			err:  gcbq.Error{Reason: "notFound", Message: "Not found: Table my-project:_bruin_staging.orders"},
 			want: false,
