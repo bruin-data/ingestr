@@ -83,13 +83,6 @@ func matchesStreamHeartbeat(message *pglogrepl.LogicalDecodingMessage) bool {
 	return message != nil && !message.Transactional && message.Prefix == streamHeartbeatPrefix
 }
 
-func batchCaughtUpLSN(decoded, emitted pglogrepl.LSN) pglogrepl.LSN {
-	if emitted > decoded {
-		return emitted
-	}
-	return decoded
-}
-
 func validateBatchBarrierSupport(serverVersion int) error {
 	if serverVersion < 140000 {
 		return fmt.Errorf("PostgreSQL CDC batch mode requires PostgreSQL 14 or newer for a safe logical-decoding barrier (server reports %d); use --stream or upgrade PostgreSQL", serverVersion)

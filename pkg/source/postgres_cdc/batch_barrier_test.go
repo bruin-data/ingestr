@@ -118,9 +118,44 @@ func TestBatchBarrierVersionRequirement(t *testing.T) {
 	require.NoError(t, validateBatchBarrierSupport(140000))
 }
 
-func TestBatchCaughtUpLSNIncludesEmittedBarrierEnd(t *testing.T) {
-	assert.Equal(t, pglogrepl.LSN(30), batchCaughtUpLSN(20, 30))
-	assert.Equal(t, pglogrepl.LSN(30), batchCaughtUpLSN(30, 20))
+// TestBatchCheckpointStaysAtEmittedBarrier is a regression test for a run that
+// persisted checkpoint 00008367/1181E504 while its slot sat around 661/...,
+// leaving the next run unable to resume and forcing a replacement snapshot.
+// The checkpoint used to be max(decoded, emitted), so a decoded position past
+// the barrier — the protocol position, which also advances on keepalives and on
+// WAL that was never handed to the destination — became the resume point. Only
+// the SQL-emitted barrier LSN is known to have everything before it decoded and
+// flushed, so it is what a completed batch persists and confirms.
+func TestBatchCheckpointStaysAtEmittedBarrier(t *testing.T) {
+	const (
+		emitted  = pglogrepl.LSN(30)
+		startLSN = pglogrepl.LSN(20)
+	)
+
+	// The barrier marker is decoded at protocol position 40, past the LSN that
+	// pg_logical_emit_message reported for it.
+	repl := &fakeReplicator{steps: []replStep{
+		{hadActivity: true, lsn: 25, changes: makeInsertChanges(1, 1, 25)},
+		{hadActivity: true, lsn: 40, barrier: true},
+	}}
+	results := make(chan source.RecordBatchResult, 4)
+	require.NoError(t, streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false))
+	close(results)
+	for res := range results {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+	require.Greater(t, repl.CurrentLSN(), emitted, "the decoded position must run past the barrier for this test to mean anything")
+
+	src := NewPostgresCDCSource()
+	src.checkpointBatchBarrier(context.Background(), emitted, startLSN, "slot")
+
+	assert.Equal(t, emitted, src.caughtUp.Committed())
+	assert.Equal(t, FormatLSN(emitted), src.CDCState().Position, "the persisted checkpoint must be the emitted barrier, not the decoded position")
+
+	require.NoError(t, src.FinalizeBatch(context.Background()))
+	assert.Equal(t, FormatLSN(emitted), src.CDCState().Position)
 }
 
 func TestReadersRejectPre14BatchBeforeSnapshot(t *testing.T) {
