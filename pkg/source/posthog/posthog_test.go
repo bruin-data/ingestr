@@ -116,6 +116,44 @@ func TestPostHogSourceGetTable(t *testing.T) {
 	}
 }
 
+func TestParseElementsChain(t *testing.T) {
+	// Ground truth captured from PostHog's REST /events/ endpoint (elements
+	// array) for the corresponding elements_chain.
+	chain := `button.btn.btn-primary:attr__class="btn btn-primary"attr__id="upgrade-plan"attr_id="upgrade-plan"nth-child="1"nth-of-type="1";a.link:attr__href="/x"href="/x"nth-child="2"nth-of-type="1"`
+	got := parseElementsChain(chain)
+	require.Len(t, got, 2)
+
+	assert.Equal(t, "button", got[0]["tag_name"])
+	assert.Equal(t, []string{"btn", "btn-primary"}, got[0]["attr_class"])
+	assert.Equal(t, "upgrade-plan", got[0]["attr_id"])
+	assert.Equal(t, 1, got[0]["nth_child"])
+	assert.Equal(t, 1, got[0]["nth_of_type"])
+	assert.Nil(t, got[0]["href"])
+	assert.Equal(t, 0, got[0]["order"])
+	assert.Equal(t, map[string]interface{}{
+		"attr__class": "btn btn-primary",
+		"attr__id":    "upgrade-plan",
+	}, got[0]["attributes"])
+
+	assert.Equal(t, "a", got[1]["tag_name"])
+	assert.Equal(t, "/x", got[1]["href"])
+	assert.Equal(t, 2, got[1]["nth_child"])
+	assert.Equal(t, 1, got[1]["order"])
+
+	assert.Empty(t, parseElementsChain(""))
+}
+
+func TestParseElementsChainQuotedSpecials(t *testing.T) {
+	// Attribute values may contain escaped quotes and unescaped ; : = chars.
+	chain := `a:attr__title="say \"hi\""attr__style="color: red; x=y"text="Click"nth-child="1"`
+	got := parseElementsChain(chain)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Click", got[0]["text"])
+	attrs := got[0]["attributes"].(map[string]interface{})
+	assert.Equal(t, `say \"hi\"`, attrs["attr__title"])
+	assert.Equal(t, "color: red; x=y", attrs["attr__style"])
+}
+
 func TestFoldEventPersonFields(t *testing.T) {
 	items := []map[string]interface{}{
 		{

@@ -408,6 +408,7 @@ func (s *PostHogSource) queryEventsAndSend(ctx context.Context, opts source.Read
 		}
 
 		foldEventPersonFields(normalizeEventItems(items))
+		addElementsFromChain(items)
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert events to Arrow: %w", err)

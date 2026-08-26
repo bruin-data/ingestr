@@ -70,4 +70,4 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 > The `property_definitions` table requires a sub-type suffix (`:event`, `:person`, or `:session`) to specify which type of property definitions to ingest.
 
 > [!NOTE]
-> The `events` table exposes element data through the `elements_chain` column (PostHog's raw, canonical form). A parsed `elements` array column is not available.
+> The `events` table exposes element data as both the raw `elements_chain` string and a parsed `elements` array, matching the fields the previous endpoint returned.
