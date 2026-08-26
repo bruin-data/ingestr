@@ -1599,7 +1599,7 @@ func (s *MSSQLCDCSource) rowsToSnapshotBatches(ctx context.Context, rows *sql.Ro
 
 	var pending arrow.RecordBatch
 	for {
-		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, func(builders []array.Builder) {
+		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, opts.MaxBatchBytes, s.guidConversion, func(builders []array.Builder) {
 			appendCDCValues(builders, len(sourceColumns), incompleteLSN, false, syncedAt)
 		})
 		if err != nil {
@@ -1662,7 +1662,7 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(ctx context.Context, rows *sql.Rows
 	}
 
 	for {
-		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, syncedAt, pairer)
+		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, opts.MaxBatchBytes, s.guidConversion, syncedAt, pairer)
 		if err != nil {
 			return err
 		}
@@ -1809,7 +1809,7 @@ func normalizeSourceValue(col schema.Column, val any, guidConversion bool) (any,
 	return normalized, nil
 }
 
-func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
+func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, maxBatchBytes int64, guidConversion bool, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1824,6 +1824,7 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			releaseBuilders(builders)
@@ -1837,6 +1838,9 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 				return nil, 0, err
 			}
 			arrowconv.AppendValue(builders[i], val)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
 		appendCDC(builders)
 
@@ -1844,12 +1848,15 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 		if batchSize > 0 && rowCount >= int64(batchSize) {
 			break
 		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
+			break
+		}
 	}
 
 	return finishBatch(rows, arrowSchema, builders, rowCount)
 }
 
-func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
+func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, maxBatchBytes int64, guidConversion bool, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1864,6 +1871,7 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 	}
 
 	var rowCount int64
+	var accBytes int64
 	exhausted := true
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
@@ -1890,11 +1898,14 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 		for _, change := range pairer.push(values, lsn, op) {
 			for i, v := range change.values {
 				arrowconv.AppendValue(builders[i], v)
+				if maxBatchBytes > 0 {
+					accBytes += arrowconv.ValueBytes(v)
+				}
 			}
 			appendCDCValues(builders, len(sourceColumns), change.lsn, change.deleted, syncedAt)
 			rowCount++
 		}
-		if batchSize > 0 && rowCount >= int64(batchSize) {
+		if (batchSize > 0 && rowCount >= int64(batchSize)) || (maxBatchBytes > 0 && accBytes >= maxBatchBytes) {
 			exhausted = false
 			break
 		}

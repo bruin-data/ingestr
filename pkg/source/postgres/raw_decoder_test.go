@@ -82,7 +82,7 @@ func TestRowsToArrowRecordBatchUsesRawPostgresValues(t *testing.T) {
 		},
 	}
 
-	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 25_000)
+	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 25_000, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestRowsToArrowRecordBatchHandlesBinaryPostgresValues(t *testing.T) {
 		}},
 	}
 
-	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 1)
+	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

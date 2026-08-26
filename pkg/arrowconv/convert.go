@@ -974,6 +974,12 @@ func RowBytes(item map[string]interface{}) int64 {
 	return n
 }
 
+// ValueBytes returns the approximate content size of a decoded value using the
+// same estimation as RowBytes.
+func ValueBytes(v interface{}) int64 {
+	return valueLen(v)
+}
+
 func valueLen(v interface{}) int64 {
 	switch x := v.(type) {
 	case nil:

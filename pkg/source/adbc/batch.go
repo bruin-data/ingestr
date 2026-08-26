@@ -36,10 +36,9 @@ func CopyString(s string) string {
 	return string([]byte(s))
 }
 
-// RowsToArrowBatch converts sql.Rows to an Arrow record batch.
-// It reads up to batchSize rows and builds an Arrow record.
-// Returns the record, row count, and any error.
-func RowsToArrowBatch(rows *sql.Rows, arrowSchema *arrow.Schema, batchSize int) (arrow.RecordBatch, int64, error) {
+// RowsToArrowBatch converts up to batchSize SQL rows to Arrow, stopping when
+// maxBatchBytes is reached. A zero limit disables the respective bound.
+func RowsToArrowBatch(rows *sql.Rows, arrowSchema *arrow.Schema, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	numFields := arrowSchema.NumFields()
 	builders := make([]array.Builder, numFields)
@@ -49,6 +48,7 @@ func RowsToArrowBatch(rows *sql.Rows, arrowSchema *arrow.Schema, batchSize int) 
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		// Create scan destinations
 		values := make([]interface{}, numFields)
@@ -68,10 +68,16 @@ func RowsToArrowBatch(rows *sql.Rows, arrowSchema *arrow.Schema, batchSize int) 
 			// CRITICAL: Copy values to avoid ADBC Arrow buffer lifetime issues
 			actualVal = CopyValue(actualVal)
 			arrowconv.AppendValue(builders[i], actualVal)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(actualVal)
+			}
 		}
 		rowCount++
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}
