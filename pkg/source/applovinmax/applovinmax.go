@@ -584,7 +584,7 @@ func streamCSV(
 			break
 		}
 
-		rowBytes := estimateCSVRowBytes(headers, record, date, platform)
+		rowBytes := estimateCSVRowBytes(record, date, platform)
 		if builder.rows > 0 && (builder.rows >= batchRows || builder.bytes+rowBytes > batchBytes) {
 			if err := flush(); err != nil {
 				return totalRows, err
@@ -630,15 +630,11 @@ func lastNonEmptyCSVValue(record []string, indexes []int) (string, bool) {
 	return "", false
 }
 
-func estimateCSVRowBytes(headers, record []string, date, platform string) int64 {
-	size := int64(len("partition_date") + len(date) + len("platform") + len(platform))
-	for i, value := range record {
-		if i >= len(headers) {
-			break
-		}
-		size += int64(len(headers[i]) + len(strings.TrimSpace(value)))
-	}
-	return size
+// estimateCSVRowBytes approximates a row's content size for the byte-bounded
+// batcher: the CSV cells (via the shared arrowconv estimator) plus the injected
+// partition_date/platform values.
+func estimateCSVRowBytes(record []string, date, platform string) int64 {
+	return arrowconv.CellsBytes(record) + int64(len(date)+len(platform))
 }
 
 func resolveDateRange(intervalStart, intervalEnd interface{}) (time.Time, time.Time) {
