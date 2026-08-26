@@ -961,11 +961,8 @@ func marshalJSON(v interface{}) ([]byte, error) {
 	return b, nil
 }
 
-// RowBytes returns an approximate byte size of a decoded row: the sum of key
-// and value content lengths. Sources use it to bound a batch by size (not just
-// row count) without allocating. It ignores JSON structure (punctuation, number
-// formatting), so it under-counts somewhat — acceptable because the byte limit
-// is a soft bound, not an exact target.
+// RowBytes returns an approximate byte size of a decoded row (sum of key and
+// value content lengths), used to bound a batch by size as a soft limit.
 func RowBytes(item map[string]interface{}) int64 {
 	var n int64
 	for k, v := range item {
@@ -974,12 +971,8 @@ func RowBytes(item map[string]interface{}) int64 {
 	return n
 }
 
-// CellsBytes approximates the content size of a row-oriented record whose values
-// are already raw string cells (e.g. a CSV record). It is the []string analog of
-// RowBytes: sources use it to bound a batch by size without allocating a map just
-// to measure it. Each cell is measured through valueLen so the per-value byte
-// rule stays single-sourced; column names are fixed header metadata, not per-row
-// payload, so only cell content is counted.
+// CellsBytes is the []string analog of RowBytes for raw CSV cells: it sums each
+// cell through valueLen so the per-value byte rule stays single-sourced.
 func CellsBytes(cells []string) int64 {
 	var n int64
 	for _, cell := range cells {

@@ -631,8 +631,7 @@ func lastNonEmptyCSVValue(record []string, indexes []int) (string, bool) {
 }
 
 // estimateCSVRowBytes approximates a row's content size for the byte-bounded
-// batcher: the CSV cells (via the shared arrowconv estimator) plus the injected
-// partition_date/platform values.
+// batcher: the CSV cells plus the injected partition_date/platform values.
 func estimateCSVRowBytes(record []string, date, platform string) int64 {
 	return arrowconv.CellsBytes(record) + int64(len(date)+len(platform))
 }
