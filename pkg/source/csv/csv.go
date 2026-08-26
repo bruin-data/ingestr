@@ -241,7 +241,7 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 
 			builder.appendRow(record)
 			if opts.MaxBatchBytes > 0 {
-				accBytes += csvRowBytes(record)
+				accBytes += arrowconv.CellsBytes(record)
 			}
 
 			if builder.rows >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) {
@@ -262,16 +262,6 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 	}()
 
 	return results, nil
-}
-
-// csvRowBytes approximates the content size of a raw CSV record so batches can
-// honor opts.MaxBatchBytes alongside the row-count limit.
-func csvRowBytes(record []string) int64 {
-	var n int64
-	for _, cell := range record {
-		n += int64(len(cell))
-	}
-	return n
 }
 
 // batchBuilder builds record batches directly from CSV records, bypassing

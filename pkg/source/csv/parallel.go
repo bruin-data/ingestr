@@ -16,6 +16,7 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -340,7 +341,7 @@ func (p *segmentParser) parse(seg csvSegment) []source.RecordBatchResult {
 
 		p.builder.appendRow(record)
 		if p.opts.MaxBatchBytes > 0 {
-			p.accBytes += csvRowBytes(record)
+			p.accBytes += arrowconv.CellsBytes(record)
 		}
 		if p.builder.rows >= p.batchSize || (p.opts.MaxBatchBytes > 0 && p.accBytes >= p.opts.MaxBatchBytes) {
 			out = append(out, source.RecordBatchResult{Batch: p.builder.finish()})

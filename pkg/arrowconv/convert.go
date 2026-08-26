@@ -974,6 +974,20 @@ func RowBytes(item map[string]interface{}) int64 {
 	return n
 }
 
+// CellsBytes approximates the content size of a row-oriented record whose values
+// are already raw string cells (e.g. a CSV record). It is the []string analog of
+// RowBytes: sources use it to bound a batch by size without allocating a map just
+// to measure it. Each cell is measured through valueLen so the per-value byte
+// rule stays single-sourced; column names are fixed header metadata, not per-row
+// payload, so only cell content is counted.
+func CellsBytes(cells []string) int64 {
+	var n int64
+	for _, cell := range cells {
+		n += valueLen(cell)
+	}
+	return n
+}
+
 func valueLen(v interface{}) int64 {
 	switch x := v.(type) {
 	case nil:
