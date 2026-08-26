@@ -116,6 +116,27 @@ func TestPostHogSourceGetTable(t *testing.T) {
 	}
 }
 
+func TestFoldEventPersonFields(t *testing.T) {
+	items := []map[string]interface{}{
+		{
+			"id":                "evt_1",
+			"person_id":         "person-1",
+			"person_properties": map[string]interface{}{"email": "a@b.co"},
+		},
+		{"id": "evt_2"},
+	}
+
+	foldEventPersonFields(items)
+
+	assert.NotContains(t, items[0], "person_id")
+	assert.NotContains(t, items[0], "person_properties")
+	assert.Equal(t, map[string]interface{}{
+		"id":         "person-1",
+		"properties": map[string]interface{}{"email": "a@b.co"},
+	}, items[0]["person"])
+	assert.NotContains(t, items[1], "person")
+}
+
 func TestPostHogSourceReadEventsUsesQueryKeysetPagination(t *testing.T) {
 	var requestCount atomic.Int32
 	var queries []string
@@ -138,7 +159,8 @@ func TestPostHogSourceReadEventsUsesQueryKeysetPagination(t *testing.T) {
 		call := requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 
-		columns := []string{"id", "event", "distinct_id", "timestamp", "properties", "elements_chain"}
+		assert.Contains(t, body.Query.Query, "person_id, person.properties AS person_properties")
+		columns := []string{"id", "event", "distinct_id", "timestamp", "properties", "elements_chain", "person_id", "person_properties"}
 		if call == 1 {
 			assert.Contains(t, body.Query.Query, "timestamp > toDateTime64('2026-01-01 00:00:00.000000', 6)")
 			assert.Contains(t, body.Query.Query, "timestamp < toDateTime64('2026-01-02 00:00:00.000000', 6)")
@@ -146,8 +168,8 @@ func TestPostHogSourceReadEventsUsesQueryKeysetPagination(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"columns": columns,
 				"results": [][]any{
-					{"evt_1", "$pageview", "user-1", "2026-01-01T08:00:00Z", `{"browser":"Safari"}`, ""},
-					{"evt_2", "signup", "user-2", "2026-01-01T09:00:00Z", `{"plan":"pro"}`, ""},
+					{"evt_1", "$pageview", "user-1", "2026-01-01T08:00:00Z", `{"browser":"Safari"}`, "", "person-1", `{"email":"a@b.co"}`},
+					{"evt_2", "signup", "user-2", "2026-01-01T09:00:00Z", `{"plan":"pro"}`, "", "person-2", `{"email":"c@d.co"}`},
 				},
 			})
 			return
@@ -157,7 +179,7 @@ func TestPostHogSourceReadEventsUsesQueryKeysetPagination(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"columns": columns,
 			"results": [][]any{
-				{"evt_3", "purchase", "user-3", "2026-01-01T10:00:00Z", `{"amount":42}`, ""},
+				{"evt_3", "purchase", "user-3", "2026-01-01T10:00:00Z", `{"amount":42}`, "", "person-3", `{"email":"e@f.co"}`},
 			},
 		})
 	}))

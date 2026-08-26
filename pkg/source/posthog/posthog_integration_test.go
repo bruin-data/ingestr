@@ -144,6 +144,7 @@ func TestPostHogPipeline(t *testing.T) {
 				{Name: "event", DataType: schema.TypeString},
 				{Name: "timestamp", DataType: schema.TypeTimestampTZ},
 				{Name: "properties", DataType: schema.TypeJSON},
+				{Name: "person", DataType: schema.TypeJSON},
 			},
 			MinExpectedRowCount: 13,
 			Rows: []testutil.ExpectedRow{

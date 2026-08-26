@@ -407,7 +407,8 @@ func (s *PostHogSource) queryEventsAndSend(ctx context.Context, opts source.Read
 			return nil
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(normalizeEventItems(items), nil, opts.ExcludeColumns)
+		foldEventPersonFields(normalizeEventItems(items))
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert events to Arrow: %w", err)
 		}
@@ -475,7 +476,7 @@ func buildEventsQuery(start, end *time.Time, cursor *eventCursor, limit int) str
 	}
 
 	return fmt.Sprintf(
-		"SELECT uuid AS id, event, distinct_id, timestamp, properties, elements_chain FROM events%s ORDER BY timestamp, uuid LIMIT %d",
+		"SELECT uuid AS id, event, distinct_id, timestamp, properties, elements_chain, person_id, person.properties AS person_properties FROM events%s ORDER BY timestamp, uuid LIMIT %d",
 		where, limit)
 }
 
@@ -520,9 +521,29 @@ func decodePaginatedResponse(body []byte) (paginatedResponse, error) {
 	return response, nil
 }
 
+// foldEventPersonFields collapses the flat person_id/person_properties columns
+// returned by HogQL into a single nested person object, matching the shape the
+// REST /events/ endpoint used to return.
+func foldEventPersonFields(items []map[string]interface{}) {
+	for _, item := range items {
+		person := make(map[string]interface{}, 2)
+		if id, ok := item["person_id"]; ok {
+			person["id"] = id
+		}
+		if props, ok := item["person_properties"]; ok {
+			person["properties"] = props
+		}
+		delete(item, "person_id")
+		delete(item, "person_properties")
+		if len(person) > 0 {
+			item["person"] = person
+		}
+	}
+}
+
 func normalizeEventItems(items []map[string]interface{}) []map[string]interface{} {
 	for _, item := range items {
-		for _, field := range []string{"properties", "person", "elements", "elements_chain"} {
+		for _, field := range []string{"properties", "person", "person_properties", "elements", "elements_chain"} {
 			raw, ok := item[field]
 			if !ok {
 				continue
