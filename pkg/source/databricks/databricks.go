@@ -270,36 +270,45 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 			return
 		}
 
-		s.processResults(ctx, resp, arrowSchema, columns, results)
+		s.processResults(ctx, resp, arrowSchema, columns, opts.MaxBatchBytes, results)
 	}()
 
 	return results, nil
 }
 
-func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, columns []schema.Column, results chan<- source.RecordBatchResult) {
+func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, columns []schema.Column, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
 	batchSize := defaultBatchSize
 	alloc := memory.NewGoAllocator()
 
-	processChunk := func(dataArray [][]string) {
-		if len(dataArray) == 0 {
-			return
+	flush := func(chunk [][]string) bool {
+		batch, err := s.buildRecordBatch(alloc, arrowSchema, columns, chunk)
+		if err != nil {
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build record batch: %w", err)}
+			return false
 		}
+		results <- source.RecordBatchResult{Batch: batch}
+		config.Debug("[DATABRICKS] Sent batch with %d rows", len(chunk))
+		return true
+	}
 
-		for start := 0; start < len(dataArray); start += batchSize {
-			end := start + batchSize
-			if end > len(dataArray) {
-				end = len(dataArray)
+	processChunk := func(dataArray [][]string) {
+		start := 0
+		var accBytes int64
+		for i, row := range dataArray {
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.CellsBytes(row)
 			}
-
-			chunk := dataArray[start:end]
-			batch, err := s.buildRecordBatch(alloc, arrowSchema, columns, chunk)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to build record batch: %w", err)}
-				return
+			rows := i - start + 1
+			if rows >= batchSize || (maxBatchBytes > 0 && accBytes >= maxBatchBytes) {
+				if !flush(dataArray[start : i+1]) {
+					return
+				}
+				start = i + 1
+				accBytes = 0
 			}
-
-			results <- source.RecordBatchResult{Batch: batch}
-			config.Debug("[DATABRICKS] Sent batch with %d rows", len(chunk))
+		}
+		if start < len(dataArray) {
+			flush(dataArray[start:])
 		}
 	}
 
@@ -425,7 +434,7 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 		}
 		arrowSchema := buildArrowSchema(columns)
 
-		s.processResults(ctx, resp, arrowSchema, columns, results)
+		s.processResults(ctx, resp, arrowSchema, columns, opts.MaxBatchBytes, results)
 	}()
 
 	return results, nil

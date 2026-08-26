@@ -1,11 +1,14 @@
 package databricks
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
+	dbsql "github.com/databricks/databricks-sdk-go/service/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,4 +101,36 @@ func TestBuildRecordBatchPreservesEmptyStringCells(t *testing.T) {
 	assert.True(t, values.IsNull(2))
 	assert.False(t, values.IsNull(3))
 	assert.Equal(t, "value", values.Value(3))
+}
+
+func TestProcessResultsByteCap(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+		{Name: "b", DataType: schema.TypeString, Nullable: true},
+	}
+	const rowCount = 60
+	rows := make([][]string, rowCount)
+	for i := range rows {
+		rows[i] = []string{"0123456789", "0123456789"} // 20 content bytes/row
+	}
+	resp := &dbsql.StatementResponse{Result: &dbsql.ResultData{DataArray: rows}}
+
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 50, results)
+	}()
+
+	batches := 0
+	total := int64(0)
+	for res := range results {
+		require.NoError(t, res.Err)
+		require.NotNil(t, res.Batch)
+		batches++
+		total += res.Batch.NumRows()
+		res.Batch.Release()
+	}
+
+	assert.Equal(t, int64(rowCount), total)
+	assert.Greater(t, batches, 1, "50-byte cap should split 60 rows into many batches")
 }
