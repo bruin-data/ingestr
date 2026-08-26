@@ -56,7 +56,7 @@ The PostHog source allows you to ingest the following tables:
 | ----- | -- | ------- | ------------ | ------- |
 | persons | id | last_seen_at | merge | People/users tracked in your project |
 | feature_flags | id | updated_at | merge | Feature flags configuration |
-| events | id | timestamp | append | Raw event data, supports server-side filtering with `after`/`before` parameters |
+| events | id | timestamp | append | Raw event data |
 | cohorts | id | last_calculation | merge | User cohorts defined in your project |
 | event_definitions | id | last_updated_at | merge | Event type definitions |
 | property_definitions:event | id | updated_at | merge | Event property definitions |

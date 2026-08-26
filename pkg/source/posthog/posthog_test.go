@@ -116,60 +116,48 @@ func TestPostHogSourceGetTable(t *testing.T) {
 	}
 }
 
-func TestPostHogSourceReadEventsUsesPaginationAndIntervals(t *testing.T) {
+func TestPostHogSourceReadEventsUsesQueryKeysetPagination(t *testing.T) {
 	var requestCount atomic.Int32
+	var queries []string
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
-		assert.Equal(t, "/api/projects/test-project/events/", r.URL.Path)
+		assert.Equal(t, "/api/projects/test-project/query/", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		var body struct {
+			Query struct {
+				Kind  string `json:"kind"`
+				Query string `json:"query"`
+			} `json:"query"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, "HogQLQuery", body.Query.Kind)
+		queries = append(queries, body.Query.Query)
 
 		call := requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 
+		columns := []string{"id", "event", "distinct_id", "timestamp", "properties", "elements_chain"}
 		if call == 1 {
-			assert.Equal(t, "2", r.URL.Query().Get("limit"))
-			assert.Equal(t, "2026-01-01T00:00:00Z", r.URL.Query().Get("after"))
-			assert.Equal(t, "2026-01-02T00:00:00Z", r.URL.Query().Get("before"))
-
+			assert.Contains(t, body.Query.Query, "timestamp > toDateTime64('2026-01-01 00:00:00.000000', 6)")
+			assert.Contains(t, body.Query.Query, "timestamp < toDateTime64('2026-01-02 00:00:00.000000', 6)")
+			assert.Contains(t, body.Query.Query, "LIMIT 2")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"next": server.URL + "/api/projects/test-project/events/?offset=2&limit=2",
-				"results": []map[string]any{
-					{
-						"id":          "evt_1",
-						"distinct_id": "user-1",
-						"event":       "$pageview",
-						"timestamp":   "2026-01-01T08:00:00Z",
-						"properties":  `{"browser":"Safari"}`,
-						"person":      `{"id":1}`,
-						"elements":    `[{"tag_name":"a"}]`,
-					},
-					{
-						"id":          "evt_2",
-						"distinct_id": "user-2",
-						"event":       "signup",
-						"timestamp":   "2026-01-01T09:00:00Z",
-						"properties":  `{"plan":"pro"}`,
-						"person":      `{"id":2}`,
-						"elements":    `[]`,
-					},
+				"columns": columns,
+				"results": [][]any{
+					{"evt_1", "$pageview", "user-1", "2026-01-01T08:00:00Z", `{"browser":"Safari"}`, ""},
+					{"evt_2", "signup", "user-2", "2026-01-01T09:00:00Z", `{"plan":"pro"}`, ""},
 				},
 			})
 			return
 		}
 
+		assert.Contains(t, body.Query.Query, "(timestamp, uuid) > (toDateTime64('2026-01-01 09:00:00.000000', 6), toUUID('evt_2'))")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"next": nil,
-			"results": []map[string]any{
-				{
-					"id":          "evt_3",
-					"distinct_id": "user-3",
-					"event":       "purchase",
-					"timestamp":   "2026-01-01T10:00:00Z",
-					"properties":  `{"amount":42}`,
-					"person":      `{"id":3}`,
-					"elements":    `[]`,
-				},
+			"columns": columns,
+			"results": [][]any{
+				{"evt_3", "purchase", "user-3", "2026-01-01T10:00:00Z", `{"amount":42}`, ""},
 			},
 		})
 	}))
