@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -196,5 +197,59 @@ func TestRead_BuildsBatchesDirectly(t *testing.T) {
 		if ok == wantName[i].null || (ok && got != wantName[i].val) {
 			t.Errorf("name[%d] = (%q, notnull=%v); want (%q, notnull=%v)", i, got, ok, wantName[i].val, !wantName[i].null)
 		}
+	}
+}
+
+func TestRead_ByteCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wide.csv")
+	wide := strings.Repeat("x", 2048)
+	var b strings.Builder
+	b.WriteString("id,name\n")
+	const rows = 50
+	for i := 0; i < rows; i++ {
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte(',')
+		b.WriteString(wide)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(max int64) (batches, total int) {
+		src := NewCSVSource()
+		if err := src.Connect(context.Background(), "csv://"+path); err != nil {
+			t.Fatal(err)
+		}
+		table, err := src.GetTable(context.Background(), source.TableRequest{Name: "t"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := table.Read(context.Background(), source.ReadOptions{PageSize: 100_000, MaxBatchBytes: max})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for res := range ch {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			batches++
+			total += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
+		return batches, total
+	}
+
+	offB, offR := run(0)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d, want 1", offB)
+	}
+	onB, onR := run(4096)
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d, want >1", onB)
+	}
+	if offR != onR || offR != rows {
+		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, rows)
 	}
 }

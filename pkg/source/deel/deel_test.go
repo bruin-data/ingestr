@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,6 +155,45 @@ func TestSendItemsStopsOnCancellation(t *testing.T) {
 	err := sendItems(ctx, []map[string]any{{"id": "one"}}, endpointMeta{}, source.ReadOptions{}, make(chan source.RecordBatchResult))
 	if err != context.Canceled {
 		t.Fatalf("sendItems returned %v, want context.Canceled", err)
+	}
+}
+
+func TestSendItemsByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	items := make([]map[string]any, 50)
+	for i := range items {
+		items[i] = map[string]any{"id": strconv.Itoa(i), "name": wide}
+	}
+
+	run := func(max int64) (batches, rows int) {
+		results := make(chan source.RecordBatchResult)
+		go func() {
+			defer close(results)
+			if err := sendItems(context.Background(), items, endpointMeta{}, source.ReadOptions{MaxBatchBytes: max}, results); err != nil {
+				t.Errorf("sendItems returned %v", err)
+			}
+		}()
+		for res := range results {
+			if res.Err != nil {
+				t.Fatalf("batch error: %v", res.Err)
+			}
+			batches++
+			rows += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
+		return batches, rows
+	}
+
+	offB, offR := run(0)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d, want 1", offB)
+	}
+	onB, onR := run(4096)
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d, want >1", onB)
+	}
+	if offR != onR || offR != len(items) {
+		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, len(items))
 	}
 }
 

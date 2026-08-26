@@ -280,6 +280,7 @@ type segmentParser struct {
 	builder   *batchBuilder
 	incIdx    []int
 	startTime *time.Time
+	accBytes  int64
 }
 
 func newSegmentParser(headers []string, opts source.ReadOptions, batchSize int) *segmentParser {
@@ -338,8 +339,12 @@ func (p *segmentParser) parse(seg csvSegment) []source.RecordBatchResult {
 		}
 
 		p.builder.appendRow(record)
-		if p.builder.rows >= p.batchSize {
+		if p.opts.MaxBatchBytes > 0 {
+			p.accBytes += csvRowBytes(record)
+		}
+		if p.builder.rows >= p.batchSize || (p.opts.MaxBatchBytes > 0 && p.accBytes >= p.opts.MaxBatchBytes) {
 			out = append(out, source.RecordBatchResult{Batch: p.builder.finish()})
+			p.accBytes = 0
 		}
 	}
 

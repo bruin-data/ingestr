@@ -212,6 +212,42 @@ func TestSplitSegments_TruncatedFileReturnsError(t *testing.T) {
 	}
 }
 
+func TestSegmentParser_ByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	var sb strings.Builder
+	const rows = 40
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&sb, "%d,%s\n", i, wide)
+	}
+	seg := csvSegment{data: []byte(sb.String()), startRecord: 2}
+
+	run := func(max int64) (batches, total int) {
+		p := newSegmentParser([]string{"id", "name"}, source.ReadOptions{MaxBatchBytes: max}, 100_000)
+		defer p.builder.rb.Release()
+		for _, res := range p.parse(seg) {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			batches++
+			total += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
+		return batches, total
+	}
+
+	offB, offR := run(0)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d, want 1", offB)
+	}
+	onB, onR := run(4096)
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d, want >1", onB)
+	}
+	if offR != onR || offR != rows {
+		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, rows)
+	}
+}
+
 func TestLastRecordBoundary(t *testing.T) {
 	tests := []struct {
 		name        string
