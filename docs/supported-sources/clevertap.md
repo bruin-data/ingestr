@@ -1,7 +1,7 @@
 # CleverTap
 [CleverTap](https://clevertap.com/) is a customer engagement and retention platform that combines analytics, segmentation, and cross-channel campaigns for mobile and web apps.
 
-ingestr supports CleverTap as a source.
+ingestr supports CleverTap as both a source and a destination.
 
 ## URI format
 
@@ -127,3 +127,71 @@ The other tables always load in full and ignore the interval.
 
 > [!NOTE]
 > Notification events such as push impressions and clicks cannot be exported from CleverTap and are skipped automatically.
+
+# CleverTap as a destination
+
+ingestr can write user profiles and events into CleverTap through its [Upload API](https://developer.clevertap.com/docs/upload-user-profiles-api). Each source row is sent as one profile or event record, and rows are uploaded in bulk — up to 1000 records per request.
+
+## URI format
+
+```
+clevertap://?account_id=<account_id>&passcode=<passcode>&region=<region>
+```
+
+The parameters are the same as the source (`account_id`, `passcode`, `region`). `timezone` is not used when writing.
+
+## What to upload
+
+Every row you send becomes one CleverTap record. The base of the `--dest-table` value (before the `?`) selects the record type — `profiles` or `events` — and the parameters after it tell ingestr which columns carry the special fields. Every other column is uploaded as an attribute under its own name. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never uploaded.
+
+### Profiles
+
+```sh
+ingestr ingest \
+  --source-uri "postgres://user:pass@host:5432/db" \
+  --source-table "public.marketing_users" \
+  --dest-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123&region=eu1" \
+  --dest-table "profiles?identity_column=email"
+```
+
+| Parameter | Required? | Description |
+| --------- | --------- | ----------- |
+| `identity` **or** `identity_column` | **Required** | A fixed identifier applied to every row (`identity`), or the source column holding each row's identifier (`identity_column`). One of the two must be set. For example, `identity_column=email` takes each row's identifier from the `email` column, while `identity=vip_user` tags every row with the same identifier. |
+| `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
+| `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
+
+Strategy:
+- **Always merged on CleverTap's side** — profiles are upserted by identity, so whichever strategy you run, re-sending a user updates their attributes instead of creating a duplicate.
+- **No interval** — with no `--incremental-key`, the whole table is re-sent each run. Fine for small user bases.
+- **`--incremental-key`** (such as `updated_at`) with **`--interval-start`/`--interval-end`** — sends only the rows in that window instead of the whole table. Use this for large user bases.
+
+### Events
+
+```sh
+ingestr ingest \
+  --source-uri "bigquery://my-project/analytics?credentials_path=/creds.json" \
+  --source-table "analytics.purchases" \
+  --dest-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123&region=eu1" \
+  --dest-table "events?identity_column=user_id&ts=purchased_at&event_name=Charged" \
+  --incremental-key purchased_at \
+  --interval-start 2024-01-01 \
+  --interval-end 2024-01-02
+```
+
+| Parameter | Required? | Description |
+| --------- | --------- | ----------- |
+| `event_name` **or** `event_name_column` | **Required** | A fixed event name applied to every row (`event_name`), or a column whose value is the event name per row (`event_name_column`) for tables that mix event types. |
+| `identity` **or** `identity_column` | **Required** | A fixed identifier applied to every row (`identity`), or the source column holding each row's identifier (`identity_column`). One of the two must be set. For example, `identity_column=email` takes each row's identifier from the `email` column, while `identity=vip_user` tags every row with the same identifier. |
+| `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
+| `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
+| `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
+
+Strategy:
+- **Always appended on CleverTap's side** — whichever strategy you run, each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate.
+- **`--incremental-key`** (usually the same column as `ts`) with **`--interval-start`/`--interval-end`** — uploads only the events in that window, so you control exactly which events are sent each run.
+
+> [!NOTE]
+> Every record must carry an identifier (`identity`, `objectId`, `FBID`, or `GPID`); rows with an empty identity value are skipped. CleverTap resolves users by this identifier the same way a primary key deduplicates a table.
+
+> [!NOTE]
+> CleverTap accepts up to 1000 records per request and limits uploads to 3 concurrent requests per account; ingestr batches and rate-limits accordingly.
