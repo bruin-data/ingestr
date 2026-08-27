@@ -212,7 +212,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			return nil, fmt.Errorf("newly discovered table %s has no schema", ti.Name)
 		}
 		st := &streamTableState{
-			destTable:         multiTableDestName(job.Destination, ti),
+			destTable:         multiTableDestName(job.Destination, ti, job.Config.CDCTableNaming),
 			schema:            ti.Schema,
 			primaryKeys:       ti.PrimaryKeys,
 			incrementalKey:    ti.Schema.IncrementalKey,
@@ -333,9 +333,9 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 
 // multiTableDestName computes the destination table name for a source table
 // discovered mid-stream, matching the pipeline's upfront naming.
-func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo) string {
+func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo, naming config.TableNaming) string {
 	namer, _ := dest.(destination.MultiTableNamer)
-	return destination.ResolveMultiTableName(dest.GetScheme(), namer, ti.DestSchema, ti.Name)
+	return destination.ResolveMultiTableName(dest.GetScheme(), namer, ti.DestSchema, ti.Name, naming)
 }
 
 // withLoadTimestampColumn mirrors the pipeline's schema decoration for tables

@@ -76,6 +76,8 @@ If you omit `--source-table`, most CDC connectors run in multi-table mode and re
 postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics
 ```
 
+When `dest_schema` is set, a schema-qualified source table is by default flattened into the table name (`sales.orders` → `analytics.sales_orders`) so tables from different source schemas cannot collide. If you are replicating a single source schema and want the plain table names instead, pass `--cdc-table-naming=table` to get `sales.orders` → `analytics.orders`; two source schemas containing a table with the same name then fail the run with a collision error. Note that the naming mode is part of the connector's identity: switching it starts a fresh replication slot, state and snapshot, and the previously written tables are left in place.
+
 To replicate only some of those tables, give `--source-table` a comma-separated list. This is still a multi-table run — `dest_schema` applies, and each table gets its own destination table — just restricted to the tables you name.
 
 ```bash
