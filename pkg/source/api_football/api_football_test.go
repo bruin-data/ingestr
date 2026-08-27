@@ -2,14 +2,17 @@ package api_football
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
@@ -249,4 +252,54 @@ func fixtureServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 
 func fixturesPayload() string {
 	return `{"errors":[],"paging":{"current":1,"total":1},"response":[{"fixture":{"id":1001,"referee":"Ref Name","timezone":"UTC","date":"2026-06-11T00:00:00+00:00","timestamp":1781136000,"periods":{"first":1781136000,"second":1781139600},"venue":{"id":200,"name":"MetLife Stadium","city":"East Rutherford"},"status":{"long":"Not Started","short":"NS","elapsed":null,"extra":null}},"league":{"id":1,"name":"World Cup","country":"World","season":2026,"round":"Group Stage - 1"},"teams":{"home":{"id":50,"name":"Brazil","logo":"bra","winner":null},"away":{"id":51,"name":"France","logo":"fra","winner":null}},"goals":{"home":null,"away":null},"score":{"halftime":{"home":null,"away":null},"fulltime":{"home":null,"away":null},"extratime":{"home":null,"away":null},"penalty":{"home":null,"away":null}}}]}`
+}
+
+func TestAPIFootballByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rows := []map[string]interface{}{}
+		for i := 0; i < 50; i++ {
+			rows = append(rows, map[string]interface{}{
+				"team":  map[string]interface{}{"id": i, "name": wide},
+				"venue": map[string]interface{}{"id": i},
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"response": rows,
+			"paging":   map[string]interface{}{"current": 1, "total": 1},
+		})
+	}))
+	defer srv.Close()
+
+	run := func(max int64) (int64, int64) {
+		s := &APIFootballSource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+		cfg := s.tables()["teams"]
+		results, err := s.read(context.Background(), cfg, source.ReadOptions{MaxBatchBytes: max})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b, rw int64
+		for res := range results {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			b++
+			rw += res.Batch.NumRows()
+			res.Batch.Release()
+		}
+		return b, rw
+	}
+
+	offB, offR := run(0)
+	onB, onR := run(4096)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d want 1", offB)
+	}
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d want >1", onB)
+	}
+	if offR != onR || offR != 50 {
+		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
+	}
 }

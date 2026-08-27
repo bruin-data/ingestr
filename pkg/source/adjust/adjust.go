@@ -282,14 +282,38 @@ func (s *AdjustSource) readEvents(ctx context.Context, appTokens string, opts so
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert events to Arrow: %w", err)
+	config.Debug("[ADJUST] Sending %d events", len(items))
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert events to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	config.Debug("[ADJUST] Sending %d events", len(items))
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 var defaultPrimaryKeys = []string{
@@ -362,15 +386,40 @@ func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens, attribution
 		return nil
 	}
 
+	config.Debug("[ADJUST] Sending %d campaigns", len(result.Rows))
+
 	cols := buildTypeHintColumns(strings.Join(defaultDimensions, ","), strings.Join(defaultMetrics, ","))
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, cols, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert campaigns to Arrow: %w", err)
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert campaigns to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	config.Debug("[ADJUST] Sending %d campaigns", len(result.Rows))
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range result.Rows {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 var creativePrimaryKeys = []string{"campaign", "day", "app", "store_type", "channel", "country", "adgroup", "creative"}
@@ -419,15 +468,40 @@ func (s *AdjustSource) readCreatives(ctx context.Context, appTokens, attribution
 		return nil
 	}
 
+	config.Debug("[ADJUST] Sending %d creatives", len(result.Rows))
+
 	cols := buildTypeHintColumns(strings.Join(creativeDimensions, ","), strings.Join(defaultMetrics, ","))
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, cols, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert creatives to Arrow: %w", err)
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert creatives to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	config.Debug("[ADJUST] Sending %d creatives", len(result.Rows))
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range result.Rows {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 func (s *AdjustSource) readCustom(ctx context.Context, table string, appTokens string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -477,15 +551,40 @@ func (s *AdjustSource) readCustom(ctx context.Context, table string, appTokens s
 		return nil
 	}
 
+	config.Debug("[ADJUST] Sending %d custom report rows", len(result.Rows))
+
 	cols := buildTypeHintColumns(dimensions, metrics)
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, cols, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert custom report to Arrow: %w", err)
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert custom report to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	config.Debug("[ADJUST] Sending %d custom report rows", len(result.Rows))
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range result.Rows {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 var requiredCustomDimensions = []string{

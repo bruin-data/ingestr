@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
@@ -315,4 +317,54 @@ func standingsPayload() string {
 
 func newsPayload() string {
 	return `{"articles":[{"id":49094173,"nowId":"1-49094173","contentKey":"49094173-1-293-1","type":"Media","headline":"Are the Cowboys legit contenders this season?","description":"Are the Cowboys legit contenders this season?","lastModified":"2026-06-17T13:21:31Z","published":"2026-06-17T13:21:31Z","premium":false,"byline":"ESPN","images":[{"url":"https://example.com/image.jpg"}],"categories":[{"type":"league","description":"NFL"}],"links":{"web":{"href":"https://www.espn.com/video/clip/_/id/49094173/test"}}}]}`
+}
+
+func TestESPNByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		articles := []map[string]interface{}{}
+		for i := 0; i < 50; i++ {
+			articles = append(articles, map[string]interface{}{"id": i, "name": wide})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"articles": articles})
+	}))
+	defer srv.Close()
+
+	run := func(max int64) (int64, int64) {
+		s := &ESPNSource{
+			client:  httpclient.New(httpclient.WithBaseURL(srv.URL)),
+			sport:   "football",
+			league:  "nfl",
+			limit:   100,
+			baseURL: srv.URL,
+		}
+		cfg := s.tables()["news"]
+		results, err := s.read(context.Background(), cfg, source.ReadOptions{MaxBatchBytes: max})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b, rw int64
+		for res := range results {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			b++
+			rw += res.Batch.NumRows()
+			res.Batch.Release()
+		}
+		return b, rw
+	}
+
+	offB, offR := run(0)
+	onB, onR := run(4096)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d want 1", offB)
+	}
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d want >1", onB)
+	}
+	if offR != onR || offR != 50 {
+		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
+	}
 }

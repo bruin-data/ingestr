@@ -340,12 +340,35 @@ func (s *IsocPulseSource) fetchMetric(ctx context.Context, metric string, opts [
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, readOpts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert %s data to Arrow: %w", metric, err)
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, readOpts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s data to Arrow: %w", metric, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		config.Debug("[ISOC-PULSE] Sent %d records for %s", len(batch), metric)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[ISOC-PULSE] Sent %d records for %s", len(items), metric)
-	return nil
+	for _, row := range items {
+		if readOpts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > readOpts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }

@@ -234,14 +234,33 @@ func (s *APIFootballSource) readTeams(ctx context.Context, opts source.ReadOptio
 	}
 
 	out := make([]map[string]any, 0, len(items))
+	var accBytes int64
+	flush := func() error {
+		if err := sendBatch(out, opts, results); err != nil {
+			return err
+		}
+		out = nil
+		accBytes = 0
+		return nil
+	}
 	for _, item := range items {
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"id":    nestedMap(item, "team")["id"],
 			"team":  item["team"],
 			"venue": item["venue"],
-		})
+		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(out) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		out = append(out, row)
 	}
-	return sendBatch(out, opts, results)
+	return flush()
 }
 
 func (s *APIFootballSource) readStadiums(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -310,6 +329,15 @@ func (s *APIFootballSource) readStandings(ctx context.Context, opts source.ReadO
 	}
 
 	out := make([]map[string]any, 0)
+	var accBytes int64
+	flush := func() error {
+		if err := sendBatch(out, opts, results); err != nil {
+			return err
+		}
+		out = nil
+		accBytes = 0
+		return nil
+	}
 	for _, item := range items {
 		league := nestedMap(item, "league")
 		// Keep the league object raw, minus the standings array it embeds
@@ -335,18 +363,28 @@ func (s *APIFootballSource) readStandings(ctx context.Context, opts source.ReadO
 				if !ok {
 					continue
 				}
-				out = append(out, map[string]any{
+				row := map[string]any{
 					"league_id":  league["id"],
 					"season":     league["season"],
 					"group_name": standing["group"],
 					"team_id":    nestedMap(standing, "team")["id"],
 					"league":     leagueHeader,
 					"standing":   standing,
-				})
+				}
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(out) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				out = append(out, row)
 			}
 		}
 	}
-	return sendBatch(out, opts, results)
+	return flush()
 }
 
 func (s *APIFootballSource) readMatches(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -356,17 +394,36 @@ func (s *APIFootballSource) readMatches(ctx context.Context, opts source.ReadOpt
 		return err
 	}
 	out := make([]map[string]any, 0, len(fixtures))
+	var accBytes int64
+	flush := func() error {
+		if err := sendBatch(out, opts, results); err != nil {
+			return err
+		}
+		out = nil
+		accBytes = 0
+		return nil
+	}
 	for _, item := range fixtures {
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"id":      nestedMap(item, "fixture")["id"],
 			"fixture": item["fixture"],
 			"league":  item["league"],
 			"teams":   item["teams"],
 			"goals":   item["goals"],
 			"score":   item["score"],
-		})
+		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(out) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		out = append(out, row)
 	}
-	return sendBatch(out, opts, results)
+	return flush()
 }
 
 func (s *APIFootballSource) readPlayers(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -392,14 +449,33 @@ func (s *APIFootballSource) readPlayers(ctx context.Context, opts source.ReadOpt
 			return fmt.Errorf("malformed api-football response from /players: %w", err)
 		}
 		out := make([]map[string]any, 0, len(items))
+		var accBytes int64
+		flush := func() error {
+			if err := sendBatch(out, opts, results); err != nil {
+				return err
+			}
+			out = nil
+			accBytes = 0
+			return nil
+		}
 		for _, item := range items {
-			out = append(out, map[string]any{
+			row := map[string]any{
 				"id":         nestedMap(item, "player")["id"],
 				"player":     item["player"],
 				"statistics": item["statistics"],
-			})
+			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(out) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			out = append(out, row)
 		}
-		if err := sendBatch(out, opts, results); err != nil {
+		if err := flush(); err != nil {
 			return err
 		}
 		current, total := paging(payload)
@@ -438,6 +514,15 @@ func (s *APIFootballSource) readMatchEvents(ctx context.Context, opts source.Rea
 			return fmt.Errorf("malformed api-football response from /fixtures/events: %w", err)
 		}
 		out := make([]map[string]any, 0, len(items))
+		var accBytes int64
+		flush := func() error {
+			if err := sendBatch(out, opts, results); err != nil {
+				return err
+			}
+			out = nil
+			accBytes = 0
+			return nil
+		}
 		for idx, item := range items {
 			row := make(map[string]any, len(item)+2)
 			maps.Copy(row, item)
@@ -445,9 +530,18 @@ func (s *APIFootballSource) readMatchEvents(ctx context.Context, opts source.Rea
 			// overwrite the merge primary key.
 			row["event_key"] = makeEventKey(fixtureID, idx, item)
 			row["fixture_id"] = fixtureObj["id"]
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(out) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			out = append(out, row)
 		}
-		if err := sendBatch(out, opts, results); err != nil {
+		if err := flush(); err != nil {
 			return err
 		}
 	}

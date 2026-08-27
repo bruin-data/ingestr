@@ -324,6 +324,26 @@ func (s *GoogleSearchConsoleSource) fetchSearchAnalytics(ctx context.Context, cf
 	hasTime := cfg.timeDimension() != ""
 	dataState := cfg.dataState()
 
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to arrow: %w", err)
+		}
+		select {
+		case out <- source.RecordBatchResult{Batch: rec}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for startRow := int64(0); ; startRow += maxRowsPerRequest {
 		select {
 		case <-ctx.Done():
@@ -352,7 +372,6 @@ func (s *GoogleSearchConsoleSource) fetchSearchAnalytics(ctx context.Context, cf
 			break
 		}
 
-		items := make([]map[string]any, 0, len(resp.Rows))
 		for _, row := range resp.Rows {
 			item := make(map[string]any, len(apiDims)+5)
 			item["site_url"] = siteURL
@@ -381,17 +400,21 @@ func (s *GoogleSearchConsoleSource) fetchSearchAnalytics(ctx context.Context, cf
 			item["impressions"] = int64(row.Impressions)
 			item["ctr"] = row.Ctr
 			item["position"] = row.Position
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, item)
 		}
 
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to arrow: %w", err)
-		}
-		select {
-		case out <- source.RecordBatchResult{Batch: rec}:
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := flush(); err != nil {
+			return err
 		}
 
 		config.Debug("[GOOGLE SEARCH CONSOLE] Site %q: fetched %d rows (startRow: %d)", siteURL, len(resp.Rows), startRow)
@@ -414,22 +437,45 @@ func (s *GoogleSearchConsoleSource) fetchSites(ctx context.Context, opts source.
 		return nil
 	}
 
-	items := make([]map[string]any, 0, len(resp.SiteEntry))
-	for _, site := range resp.SiteEntry {
-		items = append(items, map[string]any{
-			"site_url":         site.SiteUrl,
-			"permission_level": site.PermissionLevel,
-		})
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to arrow: %w", err)
+		}
+		select {
+		case out <- source.RecordBatchResult{Batch: rec}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		items = nil
+		accBytes = 0
+		return nil
 	}
 
-	rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert to arrow: %w", err)
+	for _, site := range resp.SiteEntry {
+		item := map[string]any{
+			"site_url":         site.SiteUrl,
+			"permission_level": site.PermissionLevel,
+		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, item)
 	}
-	select {
-	case out <- source.RecordBatchResult{Batch: rec}:
-	case <-ctx.Done():
-		return ctx.Err()
+
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[GOOGLE SEARCH CONSOLE] fetched %d sites", len(resp.SiteEntry))
@@ -446,9 +492,28 @@ func (s *GoogleSearchConsoleSource) fetchSitemaps(ctx context.Context, opts sour
 		return nil
 	}
 
-	items := make([]map[string]any, 0, len(resp.Sitemap))
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to arrow: %w", err)
+		}
+		select {
+		case out <- source.RecordBatchResult{Batch: rec}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for _, sm := range resp.Sitemap {
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"site_url":          siteURL,
 			"path":              sm.Path,
 			"type":              sm.Type,
@@ -458,17 +523,21 @@ func (s *GoogleSearchConsoleSource) fetchSitemaps(ctx context.Context, opts sour
 			"last_submitted":    parseTimestamp(sm.LastSubmitted),
 			"errors":            sm.Errors,
 			"warnings":          sm.Warnings,
-		})
+		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, item)
 	}
 
-	rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert to arrow: %w", err)
-	}
-	select {
-	case out <- source.RecordBatchResult{Batch: rec}:
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[GOOGLE SEARCH CONSOLE] Site %q: fetched %d sitemaps", siteURL, len(resp.Sitemap))

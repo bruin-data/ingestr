@@ -165,12 +165,41 @@ func (s *JSONAPISource) ReadSpec(ctx context.Context, spec TableSpec, opts sourc
 		if len(rows) == 0 {
 			return
 		}
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, spec.Columns, opts.ExcludeColumns)
-		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert %s to Arrow: %w", spec.Name, err)}
+
+		var items []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, spec.Columns, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert %s to Arrow: %w", spec.Name, err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			items = nil
+			accBytes = 0
+			return nil
+		}
+
+		for _, row := range rows {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						results <- source.RecordBatchResult{Err: err}
+						return
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
 			return
 		}
-		results <- source.RecordBatchResult{Batch: record}
 	}()
 
 	return results, nil

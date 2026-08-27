@@ -512,6 +512,28 @@ func (s *CleverTapSource) cursorExport(
 
 		if len(page.Records) > 0 {
 			items := make([]map[string]interface{}, 0, len(page.Records))
+			var accBytes int64
+
+			flush := func() error {
+				if len(items) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert %s records to Arrow: %w", endpoint, err)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case results <- source.RecordBatchResult{Batch: record}:
+				}
+				totalSent += len(items)
+				config.Debug("[CLEVERTAP] %s sent %d records (total: %d)", endpoint, len(items), totalSent)
+				items = nil
+				accBytes = 0
+				return nil
+			}
+
 			for _, raw := range page.Records {
 				if transform != nil {
 					raw = transform(raw)
@@ -519,22 +541,21 @@ func (s *CleverTapSource) cursorExport(
 				if keep != nil && !keep(raw) {
 					continue
 				}
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(raw)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
 				items = append(items, raw)
 			}
 
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s records to Arrow: %w", endpoint, err)
+			if err := flush(); err != nil {
+				return err
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalSent += len(items)
-			config.Debug("[CLEVERTAP] %s sent %d records (total: %d)", endpoint, len(items), totalSent)
 		}
 
 		cursor = page.NextCursor
@@ -675,18 +696,46 @@ func (s *CleverTapSource) readSchema(ctx context.Context, schemaType, responseKe
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert %s schema to Arrow: %w", schemaType, err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	sent := 0
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s schema to Arrow: %w", schemaType, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		sent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
-	config.Debug("[CLEVERTAP] %s schema sent %d records", schemaType, len(items))
+	config.Debug("[CLEVERTAP] %s schema sent %d records", schemaType, sent)
 	return nil
 }
 
@@ -718,18 +767,46 @@ func (s *CleverTapSource) readCategoryGroups(ctx context.Context, opts source.Re
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(body.List, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert category groups to Arrow: %w", err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	sent := 0
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert category groups to Arrow: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		sent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	for _, row := range body.List {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
-	config.Debug("[CLEVERTAP] category_groups sent %d records", len(body.List))
+	config.Debug("[CLEVERTAP] category_groups sent %d records", sent)
 	return nil
 }
 
@@ -921,15 +998,41 @@ func (s *CleverTapSource) readContentBlocks(ctx context.Context, opts source.Rea
 			break
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(body.ContentBlocks, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert content blocks to Arrow: %w", err)
+		var batch []map[string]interface{}
+		var accBytes int64
+
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert content blocks to Arrow: %w", err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- source.RecordBatchResult{Batch: record}:
+			}
+			batch = nil
+			accBytes = 0
+			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
+		for _, row := range body.ContentBlocks {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		totalSent += len(body.ContentBlocks)
@@ -981,18 +1084,46 @@ func (s *CleverTapSource) readMessageReports(ctx context.Context, opts source.Re
 		liftMessageID(m)
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(body.Messages, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert message reports to Arrow: %w", err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	sent := 0
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert message reports to Arrow: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		sent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	for _, row := range body.Messages {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
-	config.Debug("[CLEVERTAP] message_reports sent %d records", len(body.Messages))
+	config.Debug("[CLEVERTAP] message_reports sent %d records", sent)
 	return nil
 }
 
@@ -1046,14 +1177,41 @@ func (s *CleverTapSource) readCampaigns(ctx context.Context, opts source.ReadOpt
 	config.Debug("[CLEVERTAP] reading campaigns")
 
 	return s.fetchCampaigns(ctx, opts, func(targets []map[string]interface{}) error {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(targets, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert campaigns to Arrow: %w", err)
+		var batch []map[string]interface{}
+		var accBytes int64
+
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert campaigns to Arrow: %w", err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- source.RecordBatchResult{Batch: record}:
+			}
+			batch = nil
+			accBytes = 0
+			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
+
+		for _, row := range targets {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 		config.Debug("[CLEVERTAP] campaigns sent %d records", len(targets))
 		return nil

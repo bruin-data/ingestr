@@ -683,12 +683,40 @@ func (s *RedditAdsSource) readAccounts(ctx context.Context, accountIDs []string,
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert accounts to Arrow: %w", err)
+	var batch []map[string]any
+	var accBytes int64
+	sent := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert accounts to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		sent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[REDDITADS] accounts: sent %d records", len(items))
+
+	for _, item := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, item)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	config.Debug("[REDDITADS] accounts: sent %d records", sent)
 	return nil
 }
 
@@ -786,14 +814,41 @@ func (s *RedditAdsSource) paginateEntity(ctx context.Context, accountID, endpoin
 		// with no in-range rows doesn't stop the scan early.
 		filtered := filterItemsByInterval(items, entityIncrementalKey[label], opts.IntervalStart, opts.IntervalEnd)
 		if len(filtered) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(filtered, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+			var batch []map[string]any
+			var accBytes int64
+			pageSent := 0
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				totalSent += len(batch)
+				pageSent += len(batch)
+				batch = nil
+				accBytes = 0
+				return nil
 			}
 
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(filtered)
-			config.Debug("[REDDITADS] %s (account %s) page %d: sent %d records (total: %d)", label, accountID, page, len(filtered), totalSent)
+			for _, item := range filtered {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(item)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, item)
+			}
+			if err := flush(); err != nil {
+				return err
+			}
+			config.Debug("[REDDITADS] %s (account %s) page %d: sent %d records (total: %d)", label, accountID, page, pageSent, totalSent)
 		}
 
 		nextURL := getNextURL(body)
@@ -932,12 +987,39 @@ func (s *RedditAdsSource) fetchReport(ctx context.Context, accountID, level stri
 
 	convertMicrocurrency(items, metrics)
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert report data to Arrow: %w", err)
+	var batch []map[string]any
+	var accBytes int64
+	sent := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert report data to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		sent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[REDDITADS] report (account %s): sent %d records", accountID, len(items))
+	for _, item := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, item)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	config.Debug("[REDDITADS] report (account %s): sent %d records", accountID, sent)
 	return nil
 }
