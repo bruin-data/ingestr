@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+local_bin="$HOME/.local/bin"
+go_version="$(awk '/^go / { print $2; exit }' "$repo_root/go.mod")"
+node_version="22.14.0"
+npm_version="11.10.0"
+
+mkdir -p "$local_bin" "$HOME/.local/share"
+export PATH="$local_bin:$HOME/go/bin:$PATH"
+
+step() {
+  local label="$1"
+  shift
+  printf '==> %s\n' "$label"
+  time "$@"
+}
+
+install_go() {
+  local install_dir="$HOME/.local/share/go/$go_version"
+  if [[ -x "$install_dir/bin/go" ]] && [[ "$($install_dir/bin/go version)" == "go version go${go_version} "* ]]; then
+    return
+  fi
+
+  local arch
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  curl -fsSL "https://go.dev/dl/go${go_version}.linux-${arch}.tar.gz" -o "$tmp_dir/go.tar.gz"
+  rm -rf "$install_dir"
+  mkdir -p "$install_dir"
+  tar -xzf "$tmp_dir/go.tar.gz" --strip-components=1 -C "$install_dir"
+  rm -rf "$tmp_dir"
+}
+
+install_node() {
+  local install_dir="$HOME/.local/share/node/$node_version"
+  if [[ ! -x "$install_dir/bin/node" ]] || [[ "$($install_dir/bin/node --version)" != "v${node_version}" ]]; then
+    local arch
+    case "$(uname -m)" in
+      x86_64) arch=x64 ;;
+      aarch64 | arm64) arch=arm64 ;;
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+    esac
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    curl -fsSL "https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${arch}.tar.xz" -o "$tmp_dir/node.tar.xz"
+    rm -rf "$install_dir"
+    mkdir -p "$install_dir"
+    tar -xJf "$tmp_dir/node.tar.xz" --strip-components=1 -C "$install_dir"
+    rm -rf "$tmp_dir"
+  fi
+
+  if [[ "$($install_dir/bin/npm --version)" != "$npm_version" ]]; then
+    "$install_dir/bin/node" "$install_dir/lib/node_modules/npm/bin/npm-cli.js" \
+      install --global --prefix "$install_dir" "npm@$npm_version"
+  fi
+}
+
+install_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    return
+  fi
+
+  UV_INSTALL_DIR="$local_bin" UV_NO_MODIFY_PATH=1 \
+    sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+}
+
+step "Installing Go $go_version" install_go
+step "Installing Node.js $node_version and npm $npm_version" install_node
+
+go_root="$HOME/.local/share/go/$go_version"
+node_root="$HOME/.local/share/node/$node_version"
+ln -sfn "$go_root/bin/go" "$local_bin/go"
+ln -sfn "$go_root/bin/gofmt" "$local_bin/gofmt"
+for executable in node npm npx corepack; do
+  ln -sfn "$node_root/bin/$executable" "$local_bin/$executable"
+done
+
+profile_marker="# ingestr orb toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# ingestr orb toolchain
+export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
+EOF
+fi
+
+step "Installing uv" install_uv
+step "Downloading Go modules" go mod download
+step "Installing Go development tools" make setup
+step "Installing Python SDK dependencies" uv sync --frozen --extra sdk
+step "Installing documentation dependencies" npm ci
+
+printf '==> Orb setup complete\n'
