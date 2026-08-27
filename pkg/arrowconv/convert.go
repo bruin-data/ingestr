@@ -980,6 +980,16 @@ func ValueBytes(v interface{}) int64 {
 	return valueLen(v)
 }
 
+// CellsBytes is the []string analog of RowBytes for raw CSV cells: it sums each
+// cell through valueLen so the per-value byte rule stays single-sourced.
+func CellsBytes(cells []string) int64 {
+	var n int64
+	for _, cell := range cells {
+		n += valueLen(cell)
+	}
+	return n
+}
+
 func valueLen(v interface{}) int64 {
 	switch x := v.(type) {
 	case nil:

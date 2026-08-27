@@ -16,6 +16,7 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -280,6 +281,7 @@ type segmentParser struct {
 	builder   *batchBuilder
 	incIdx    []int
 	startTime *time.Time
+	accBytes  int64
 }
 
 func newSegmentParser(headers []string, opts source.ReadOptions, batchSize int) *segmentParser {
@@ -298,6 +300,11 @@ func newSegmentParser(headers []string, opts source.ReadOptions, batchSize int) 
 
 func (p *segmentParser) parse(seg csvSegment) []source.RecordBatchResult {
 	var out []source.RecordBatchResult
+
+	// The parser is reused across segments; the trailing flush below (and the
+	// error path) finish() the builder without touching accBytes, so start each
+	// segment from a clean byte count rather than carrying the prior tail over.
+	p.accBytes = 0
 
 	cr := csv.NewReader(bytes.NewReader(seg.data))
 	cr.FieldsPerRecord = -1
@@ -338,8 +345,12 @@ func (p *segmentParser) parse(seg csvSegment) []source.RecordBatchResult {
 		}
 
 		p.builder.appendRow(record)
-		if p.builder.rows >= p.batchSize {
+		if p.opts.MaxBatchBytes > 0 {
+			p.accBytes += arrowconv.CellsBytes(record)
+		}
+		if p.builder.rows >= p.batchSize || (p.opts.MaxBatchBytes > 0 && p.accBytes >= p.opts.MaxBatchBytes) {
 			out = append(out, source.RecordBatchResult{Batch: p.builder.finish()})
+			p.accBytes = 0
 		}
 	}
 
