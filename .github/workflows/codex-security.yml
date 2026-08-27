@@ -2,8 +2,7 @@ name: codex_security
 
 on:
   schedule:
-    # Daily at 04:27 UTC. Deliberately off the hour: GitHub queues scheduled
-    # workflows, and runs starting on the hour are the most likely to be delayed.
+    # Off the hour: GitHub delays scheduled runs starting at :00 the most.
     - cron: '27 4 * * *'
   workflow_dispatch:
     inputs:
@@ -15,24 +14,19 @@ on:
 permissions:
   contents: read
   security-events: write
-  # upload-sarif reads the workflow run; only required in private repositories.
-  actions: read
+  actions: read # upload-sarif, private repositories only
 
-# A full scan is expensive, and Code Scanning tracks alerts per (ref, category),
-# so two concurrent uploads for the same ref would fight over alert state.
+# Two concurrent uploads for the same ref would fight over alert state.
 concurrency:
   group: codex-security-${{ github.repository }}
   cancel-in-progress: false
 
 env:
   CODEX_SECURITY_VERSION: '0.1.20'
-  # Stops the scan once estimated spend exceeds this many USD. A stopped scan
-  # has incomplete coverage, which fails the job rather than uploading partial
-  # results. Raise it here if scans start hitting the ceiling.
+  # Estimated USD ceiling per scan; exceeding it stops the scan.
   CODEX_SECURITY_MAX_COST: '20'
-  # Scan state, artifacts, and the exported SARIF all live outside the checkout
-  # so findings and source snippets never become repository files. The scanner
-  # also requires its output directory to be outside any enclosing git worktree.
+  # Outside the checkout: keeps findings out of the repo, and the scanner
+  # rejects an output directory inside the scanned worktree.
   SCAN_ROOT: /tmp/codex-security
   CODEX_SECURITY_STATE_DIR: /tmp/codex-security/state
   CODEX_SECURITY_NO_UPDATE_NOTICE: '1'
@@ -58,11 +52,9 @@ jobs:
       - name: Checkout default branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Pinned explicitly so a manual dispatch from a topic branch still
-          # scans, and reports against, the default branch.
+          # Scan the default branch even when dispatched from a topic branch.
           ref: ${{ steps.target.outputs.branch }}
-          # The scanner runs an agent with shell access inside the checkout;
-          # keep the Actions token out of the working tree.
+          # The scanner runs an agent with shell access inside the checkout.
           persist-credentials: false
 
       - name: Record scanned commit
@@ -121,17 +113,14 @@ jobs:
             --output-dir "${SCAN_ROOT}/results" \
             --max-cost "$max_cost" || status=$?
 
-          # Exit 0 means the scan completed with full coverage, whether or not it
-          # found vulnerabilities. Findings are triaged in Code Scanning and must
-          # not fail this workflow. Every other status is operational: the scan
-          # never produced a trustworthy full picture, so uploading its partial
-          # results would resolve alerts it simply never got around to re-finding.
+          # Only exit 0 means full coverage; partial results are never uploaded.
+          # Rationale in .github/SECURITY_SCANNING.md.
           case "$status" in
             0)
               echo "Scan completed with full coverage. Findings, if any, are reported through Code Scanning."
               ;;
             2)
-              echo "::error::Codex Security could not complete the scan (invalid input, incomplete coverage, or a runtime error). Nothing is uploaded, so existing Code Scanning alerts are left untouched. If the scan stopped on the ${max_cost} USD ceiling, raise CODEX_SECURITY_MAX_COST."
+              echo "::error::Codex Security could not complete the scan (invalid input, incomplete coverage, or a runtime error). Nothing is uploaded. If it stopped on the ${max_cost} USD ceiling, raise CODEX_SECURITY_MAX_COST."
               ;;
             130|143)
               echo "::error::Codex Security was interrupted before it finished (exit ${status})."
@@ -163,8 +152,7 @@ jobs:
           # Report against the default branch even when dispatched elsewhere.
           ref: refs/heads/${{ steps.target.outputs.branch }}
           sha: ${{ steps.commit.outputs.sha }}
-          # Scopes alert tracking to this tool so adding another scanner later
-          # does not resolve each other's alerts.
+          # Scopes alert tracking so a second scanner cannot resolve these.
           category: codex-security
 
       - name: Summarize findings
@@ -184,8 +172,7 @@ jobs:
             else
               echo "Reported ${total} finding(s):"
               echo
-              # Severity levels only. Titles, locations, and messages stay in
-              # Code Scanning rather than the job log.
+              # Levels only; titles and locations stay in Code Scanning.
               jq -r '[.runs[].results[]?]
                      | group_by(.level // "warning")
                      | .[]
