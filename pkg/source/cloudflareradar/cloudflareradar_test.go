@@ -53,6 +53,30 @@ func TestIsValidTable(t *testing.T) {
 	}
 }
 
+func TestRowLimiter(t *testing.T) {
+	items := []map[string]interface{}{{"id": 1}, {"id": 2}}
+	limiter := &rowLimiter{limit: 3}
+
+	first, reached := limiter.trim(items)
+	if len(first) != 2 || reached {
+		t.Fatalf("first page: got %d items and reached=%t", len(first), reached)
+	}
+	second, reached := limiter.trim(items)
+	if len(second) != 1 || !reached || second[0]["id"] != 1 {
+		t.Fatalf("second page: got %v and reached=%t", second, reached)
+	}
+	third, reached := limiter.trim(items)
+	if len(third) != 0 || !reached {
+		t.Fatalf("third page: got %d items and reached=%t", len(third), reached)
+	}
+
+	unlimited := &rowLimiter{}
+	got, reached := unlimited.trim(items)
+	if len(got) != len(items) || reached {
+		t.Fatalf("unlimited: got %d items and reached=%t", len(got), reached)
+	}
+}
+
 func TestParseAPITable(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -75,7 +99,7 @@ func TestParseAPITable(t *testing.T) {
 		{name: "radar prefix", table: "api:/radar/dns/summary/query_type", wantPath: "dns/summary/query_type", wantQuery: map[string][]string{"format": {"json"}}},
 		{name: "full URL", table: "api:https://example.com/radar/http/timeseries", wantErr: "expected api:<path>"},
 		{name: "parent traversal", table: "api:http/../dns/timeseries", wantErr: "invalid Cloudflare Radar API path"},
-		{name: "non-JSON format", table: "api:http/timeseries?format=csv", wantErr: "only support format=json"},
+		{name: "non-JSON format", table: "api:http/timeseries?format=csv", wantErr: "only format=json is supported"},
 	}
 
 	for _, tt := range tests {

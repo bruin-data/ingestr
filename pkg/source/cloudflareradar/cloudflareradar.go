@@ -37,6 +37,30 @@ type tableConfig struct {
 	maxPageSize      int
 }
 
+type rowLimiter struct {
+	limit int
+	sent  int
+}
+
+func (l *rowLimiter) trim(items []map[string]interface{}) ([]map[string]interface{}, bool) {
+	if l.limit <= 0 {
+		return items, false
+	}
+	remaining := l.limit - l.sent
+	if remaining <= 0 {
+		return nil, true
+	}
+	if len(items) > remaining {
+		items = items[:remaining]
+	}
+	l.sent += len(items)
+	return items, l.sent >= l.limit
+}
+
+func (l *rowLimiter) reached() bool {
+	return l.limit > 0 && l.sent >= l.limit
+}
+
 var supportedTables = map[string]tableConfig{
 	"annotations":             {endpoint: "/radar/annotations", resultField: "annotations", primaryKey: "id", incrementalKey: "startDate", defaultDateRange: "364d"},
 	"autonomous_systems":      {endpoint: "/radar/entities/asns", resultField: "asns", primaryKey: "asn", maxPageSize: 100},
@@ -139,7 +163,7 @@ func (s *CloudflareRadarSource) GetTable(ctx context.Context, req source.TableRe
 		TableStrategy:       strategy,
 		KnownSchema:         false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
-			return nil, fmt.Errorf("Cloudflare Radar source uses schema inference")
+			return nil, fmt.Errorf("schema inference is required for Cloudflare Radar source")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 			return s.read(ctx, req.Name, table, opts)
@@ -165,11 +189,12 @@ func (s *CloudflareRadarSource) read(ctx context.Context, name string, table tab
 	go func() {
 		defer close(results)
 
+		limiter := &rowLimiter{limit: opts.Limit}
 		var err error
 		if name == "datasets" {
-			err = s.readDatasets(ctx, table, opts, results)
+			err = s.readDatasets(ctx, table, opts, limiter, results)
 		} else {
-			err = s.paginateAndSend(ctx, name, table, opts, nil, results)
+			err = s.paginateAndSend(ctx, name, table, opts, nil, limiter, results)
 		}
 		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
@@ -178,16 +203,19 @@ func (s *CloudflareRadarSource) read(ctx context.Context, name string, table tab
 	return results, nil
 }
 
-func (s *CloudflareRadarSource) readDatasets(ctx context.Context, table tableConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *CloudflareRadarSource) readDatasets(ctx context.Context, table tableConfig, opts source.ReadOptions, limiter *rowLimiter, results chan<- source.RecordBatchResult) error {
 	for _, datasetType := range []string{"RANKING_BUCKET", "REPORT"} {
-		if err := s.paginateAndSend(ctx, "datasets", table, opts, map[string]string{"datasetType": datasetType}, results); err != nil {
+		if err := s.paginateAndSend(ctx, "datasets", table, opts, map[string]string{"datasetType": datasetType}, limiter, results); err != nil {
 			return err
+		}
+		if limiter.reached() {
+			return nil
 		}
 	}
 	return nil
 }
 
-func (s *CloudflareRadarSource) paginateAndSend(ctx context.Context, name string, table tableConfig, opts source.ReadOptions, extra map[string]string, results chan<- source.RecordBatchResult) error {
+func (s *CloudflareRadarSource) paginateAndSend(ctx context.Context, name string, table tableConfig, opts source.ReadOptions, extra map[string]string, limiter *rowLimiter, results chan<- source.RecordBatchResult) error {
 	maxPageSize := maxOffsetPageSize
 	if table.pageNumber {
 		maxPageSize = maxPageNumberSize
@@ -234,6 +262,8 @@ func (s *CloudflareRadarSource) paginateAndSend(ctx context.Context, name string
 		if len(items) == 0 {
 			return nil
 		}
+		fetchedCount := len(items)
+		items, reachedLimit := limiter.trim(items)
 
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
@@ -241,7 +271,7 @@ func (s *CloudflareRadarSource) paginateAndSend(ctx context.Context, name string
 		}
 		results <- source.RecordBatchResult{Batch: record}
 
-		if len(items) < pageSize {
+		if reachedLimit || fetchedCount < pageSize {
 			return nil
 		}
 	}

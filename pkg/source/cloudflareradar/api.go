@@ -62,7 +62,7 @@ func (s *CloudflareRadarSource) getAPITable(req source.TableRequest) (source.Sou
 		TableStrategy:       strategy,
 		KnownSchema:         false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
-			return nil, fmt.Errorf("Cloudflare Radar API tables use schema inference")
+			return nil, fmt.Errorf("schema inference is required for Cloudflare Radar API tables")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 			return s.readAPI(ctx, req.Name, table, opts)
@@ -88,7 +88,7 @@ func parseAPITable(name string) (apiTable, error) {
 	}
 	query := parsed.Query()
 	if format := query.Get("format"); format != "" && format != "json" {
-		return apiTable{}, fmt.Errorf("Cloudflare Radar API tables only support format=json")
+		return apiTable{}, fmt.Errorf("only format=json is supported for Cloudflare Radar API tables")
 	}
 	query.Set("format", "json")
 
@@ -113,11 +113,13 @@ func (s *CloudflareRadarSource) readAPI(ctx context.Context, name string, table 
 func (s *CloudflareRadarSource) fetchAPI(ctx context.Context, name string, table apiTable, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	query := cloneValues(table.query)
 	setAPIDateRange(query, opts)
+	limiter := &rowLimiter{limit: opts.Limit}
 	if table.config == nil {
 		items, err := s.fetchAPIRows(ctx, name, table.path, query, "")
 		if err != nil {
 			return err
 		}
+		items, _ = limiter.trim(items)
 		return sendAPIItems(name, items, opts, results)
 	}
 
@@ -151,10 +153,12 @@ func (s *CloudflareRadarSource) fetchAPI(ctx context.Context, name string, table
 		if len(items) == 0 {
 			return nil
 		}
+		fetchedCount := len(items)
+		items, reachedLimit := limiter.trim(items)
 		if err := sendAPIItems(name, items, opts, results); err != nil {
 			return err
 		}
-		if len(items) < pageSize {
+		if reachedLimit || fetchedCount < pageSize {
 			return nil
 		}
 	}
