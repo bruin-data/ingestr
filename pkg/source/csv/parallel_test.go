@@ -248,6 +248,39 @@ func TestSegmentParser_ByteCap(t *testing.T) {
 	}
 }
 
+func TestSegmentParser_ByteCapIgnoresCarryOver(t *testing.T) {
+	// A worker reuses one parser across segments, and a segment's tail is emitted
+	// by the trailing flush without resetting accBytes. Simulate that residual and
+	// assert it does not split a fresh, wholly sub-cap segment: pre-fix, the first
+	// row would immediately cross the cap and flush early (2 batches).
+	var sb strings.Builder
+	const rows = 6
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&sb, "%d,name-%d\n", i, i)
+	}
+	seg := csvSegment{data: []byte(sb.String()), startRecord: 2}
+
+	p := newSegmentParser([]string{"id", "name"}, source.ReadOptions{MaxBatchBytes: 4096}, 100_000)
+	defer p.builder.rb.Release()
+	p.accBytes = 1 << 20 // residual left by a prior segment's trailing flush
+
+	var batches, total int
+	for _, res := range p.parse(seg) {
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		batches++
+		total += int(res.Batch.NumRows())
+		res.Batch.Release()
+	}
+	if batches != 1 {
+		t.Fatalf("carry-over accBytes split a sub-cap segment: got %d batches, want 1", batches)
+	}
+	if total != rows {
+		t.Fatalf("row count mismatch: got %d want %d", total, rows)
+	}
+}
+
 func TestLastRecordBoundary(t *testing.T) {
 	tests := []struct {
 		name        string
