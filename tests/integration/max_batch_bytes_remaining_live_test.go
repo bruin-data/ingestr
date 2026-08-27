@@ -38,6 +38,7 @@ func TestMSSQLChangeTrackingMaxBatchBytesLive(t *testing.T) {
 }
 
 func TestSpannerMaxBatchBytesLive(t *testing.T) {
+	requireDocker(t)
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
