@@ -151,6 +151,7 @@ func (s *AthenaSource) streamQuery(
 	arrowSchema *arrow.Schema,
 	columns []schema.Column,
 	batchSize int,
+	maxBatchBytes int64,
 	out chan<- source.RecordBatchResult,
 ) error {
 	execID, err := s.startQuery(ctx, query, database)
@@ -160,7 +161,7 @@ func (s *AthenaSource) streamQuery(
 	if err := s.waitForQuery(ctx, execID); err != nil {
 		return err
 	}
-	return s.streamQueryFromExecID(ctx, execID, arrowSchema, columns, batchSize, out)
+	return s.streamQueryFromExecID(ctx, execID, arrowSchema, columns, batchSize, maxBatchBytes, out)
 }
 
 func (s *AthenaSource) streamQueryFromExecID(
@@ -169,6 +170,7 @@ func (s *AthenaSource) streamQueryFromExecID(
 	arrowSchema *arrow.Schema,
 	columns []schema.Column,
 	batchSize int,
+	maxBatchBytes int64,
 	out chan<- source.RecordBatchResult,
 ) error {
 	mem := memory.NewGoAllocator()
@@ -208,6 +210,7 @@ func (s *AthenaSource) streamQueryFromExecID(
 		skipHeader = true
 		builders   = newBuilders()
 		rowCount   int64
+		accBytes   int64
 	)
 
 	for {
@@ -248,13 +251,17 @@ func (s *AthenaSource) streamQueryFromExecID(
 						}
 						return fmt.Errorf("failed to append value for column %s: %w", columns[colIdx].Name, err)
 					}
+					if maxBatchBytes > 0 && strPtr != nil {
+						accBytes += int64(len(*strPtr))
+					}
 				}
 				rowCount++
 
-				if batchSize > 0 && rowCount >= int64(batchSize) {
+				if (batchSize > 0 && rowCount >= int64(batchSize)) || (maxBatchBytes > 0 && accBytes >= maxBatchBytes) {
 					flush(builders, rowCount)
 					builders = newBuilders()
 					rowCount = 0
+					accBytes = 0
 				}
 			}
 		}

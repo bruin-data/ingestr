@@ -358,7 +358,7 @@ func (s *SpannerSource) read(ctx context.Context, table string, tableSchema *sch
 
 		for {
 			startBatch := time.Now()
-			record, count, err := s.rowsToArrowBatch(iter, arrowSchema, columns, batchSize)
+			record, count, err := s.rowsToArrowBatch(iter, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -381,7 +381,7 @@ func (s *SpannerSource) read(ctx context.Context, table string, tableSchema *sch
 	return results, nil
 }
 
-func (s *SpannerSource) rowsToArrowBatch(iter *spanner.RowIterator, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func (s *SpannerSource) rowsToArrowBatch(iter *spanner.RowIterator, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 	for i, field := range arrowSchema.Fields() {
@@ -389,6 +389,7 @@ func (s *SpannerSource) rowsToArrowBatch(iter *spanner.RowIterator, arrowSchema 
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for {
 		row, err := iter.Next()
 		if err == iterator.Done {
@@ -404,10 +405,16 @@ func (s *SpannerSource) rowsToArrowBatch(iter *spanner.RowIterator, arrowSchema 
 		for i := range columns {
 			val := extractColumnValue(row, i, columns[i])
 			arrowconv.AppendValue(builders[i], val)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
 		rowCount++
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}
@@ -629,13 +636,50 @@ func (s *SpannerSource) ExecuteCustomQuery(ctx context.Context, query string, op
 		for i, field := range arrowSchema.Fields() {
 			builders[i] = array.NewBuilder(mem, field.Type)
 		}
+		defer func() {
+			for _, builder := range builders {
+				builder.Release()
+			}
+		}()
 
-		// Process first row
-		for i := range columns {
-			val := extractColumnValue(firstRow, i, columns[i])
-			arrowconv.AppendValue(builders[i], val)
+		var rowCount int64
+		var accBytes int64
+		appendRow := func(row *spanner.Row) {
+			for i := range columns {
+				val := extractColumnValue(row, i, columns[i])
+				arrowconv.AppendValue(builders[i], val)
+				if opts.MaxBatchBytes > 0 {
+					accBytes += arrowconv.ValueBytes(val)
+				}
+			}
+			rowCount++
 		}
-		rowCount := int64(1)
+		shouldFlush := func() bool {
+			return rowCount >= int64(batchSize) || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes)
+		}
+		flush := func() {
+			arrays := make([]arrow.Array, len(builders))
+			for i, builder := range builders {
+				arrays[i] = builder.NewArray()
+			}
+			record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
+			for _, arr := range arrays {
+				arr.Release()
+			}
+			results <- source.RecordBatchResult{Batch: record}
+
+			for i, builder := range builders {
+				builder.Release()
+				builders[i] = array.NewBuilder(mem, arrowSchema.Field(i).Type)
+			}
+			rowCount = 0
+			accBytes = 0
+		}
+
+		appendRow(firstRow)
+		if shouldFlush() {
+			flush()
+		}
 
 		for {
 			row, err := iter.Next()
@@ -643,50 +687,18 @@ func (s *SpannerSource) ExecuteCustomQuery(ctx context.Context, query string, op
 				break
 			}
 			if err != nil {
-				for _, b := range builders {
-					b.Release()
-				}
 				results <- source.RecordBatchResult{Err: err}
 				return
 			}
 
-			for i := range columns {
-				val := extractColumnValue(row, i, columns[i])
-				arrowconv.AppendValue(builders[i], val)
-			}
-			rowCount++
-
-			if rowCount >= int64(batchSize) {
-				arrays := make([]arrow.Array, len(builders))
-				for i, b := range builders {
-					arrays[i] = b.NewArray()
-				}
-				record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
-				for _, arr := range arrays {
-					arr.Release()
-				}
-				results <- source.RecordBatchResult{Batch: record}
-
-				// Reset for next batch
-				for i, b := range builders {
-					b.Release()
-					builders[i] = array.NewBuilder(mem, arrowSchema.Field(i).Type)
-				}
-				rowCount = 0
+			appendRow(row)
+			if shouldFlush() {
+				flush()
 			}
 		}
 
 		if rowCount > 0 {
-			arrays := make([]arrow.Array, len(builders))
-			for i, b := range builders {
-				arrays[i] = b.NewArray()
-				b.Release()
-			}
-			record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
-			for _, arr := range arrays {
-				arr.Release()
-			}
-			results <- source.RecordBatchResult{Batch: record}
+			flush()
 		}
 	}()
 

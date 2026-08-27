@@ -279,7 +279,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	var totalRows int64
 
 	for {
-		record, count, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, batchSize, lsnStr, syncedAt)
+		record, count, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, batchSize, opts.MaxBatchBytes, lsnStr, syncedAt)
 		if err != nil {
 			return fmt.Errorf("failed to convert rows to batch: %w", err)
 		}
@@ -301,7 +301,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	return nil
 }
 
-func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, lsn string, syncedAt time.Time) (arrow.RecordBatch, int64, error) {
+func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64, lsn string, syncedAt time.Time) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 
 	// Create builders for all columns including CDC columns
@@ -311,6 +311,7 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		values, err := rows.Values()
 		if err != nil {
@@ -330,6 +331,9 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 				return nil, 0, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
 			}
 			arrowconv.AppendValue(builders[i], converted)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
 
 		builders[len(columns)].(*array.StringBuilder).Append(lsn)
@@ -340,6 +344,9 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 		rowCount++
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}

@@ -80,6 +80,7 @@ func TestSnapshotRowsToBatchDoesNotTreatFirstRowDecodeErrorAsEmpty(t *testing.T)
 		buildArrowSchema(columns),
 		columns[:1],
 		100,
+		0,
 		"0/1",
 		time.Now(),
 	)

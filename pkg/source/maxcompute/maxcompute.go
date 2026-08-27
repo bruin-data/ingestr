@@ -163,7 +163,7 @@ func (s *MaxComputeSource) read(ctx context.Context, table string, tableSchema *
 		return s.readStorageAPI(ctx, table, columns, opts)
 	}
 	query := buildSelectQuery(table, columns, opts)
-	return s.queryToRecordBatches(ctx, query, columns, opts.PageSize)
+	return s.queryToRecordBatches(ctx, query, columns, opts.PageSize, opts.MaxBatchBytes)
 }
 
 func (s *MaxComputeSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -209,7 +209,7 @@ func (s *MaxComputeSource) ExecuteCustomQuery(ctx context.Context, query string,
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -224,7 +224,7 @@ func (s *MaxComputeSource) ExecuteCustomQuery(ctx context.Context, query string,
 	return results, nil
 }
 
-func (s *MaxComputeSource) queryToRecordBatches(ctx context.Context, query string, columns []schema.Column, batchSize int) (<-chan source.RecordBatchResult, error) {
+func (s *MaxComputeSource) queryToRecordBatches(ctx context.Context, query string, columns []schema.Column, batchSize int, maxBatchBytes int64) (<-chan source.RecordBatchResult, error) {
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
@@ -242,7 +242,7 @@ func (s *MaxComputeSource) queryToRecordBatches(ctx context.Context, query strin
 		defer func() { _ = rows.Close() }()
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, maxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -495,7 +495,7 @@ func intervalLiteral(columns []schema.Column, key string, value time.Time) strin
 	return fmt.Sprintf("'%s'", value.Format("2006-01-02 15:04:05"))
 }
 
-func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 	for i, field := range arrowSchema.Fields() {
@@ -508,6 +508,7 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			for _, b := range builders {
@@ -516,10 +517,17 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 			return nil, 0, fmt.Errorf("failed to scan row: %w", err)
 		}
 		for i, dest := range scanDest {
-			arrowconv.AppendValue(builders[i], convertValue(*dest.(*interface{})))
+			val := *dest.(*interface{})
+			arrowconv.AppendValue(builders[i], convertValue(val))
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
 		rowCount++
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}

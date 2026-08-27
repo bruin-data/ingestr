@@ -513,3 +513,31 @@ func TestRowBytes(t *testing.T) {
 		t.Error("cheap estimate should under-count json.Marshal (no punctuation)")
 	}
 }
+
+func TestValueBytes(t *testing.T) {
+	// ValueBytes is the per-value sizer SQL sources call per scanned column; it
+	// must agree with the per-value contribution RowBytes uses internally.
+	if got := ValueBytes(nil); got != 0 {
+		t.Errorf("nil = %d, want 0", got)
+	}
+	if got := ValueBytes(true); got != 1 {
+		t.Errorf("bool = %d, want 1", got)
+	}
+	if got := ValueBytes(int64(42)); got != 8 {
+		t.Errorf("number = %d, want 8", got)
+	}
+	if got := ValueBytes("hello"); got != int64(len("hello")) {
+		t.Errorf("string = %d, want %d", got, len("hello"))
+	}
+	if got := ValueBytes([]byte("abcd")); got != 4 {
+		t.Errorf("bytes = %d, want 4", got)
+	}
+	// larger content -> larger size
+	if ValueBytes("xxxxxxxxxx") <= ValueBytes("x") {
+		t.Error("larger value should produce a larger size")
+	}
+	// RowBytes of a single-column row equals key length + ValueBytes(value)
+	if got, want := RowBytes(map[string]interface{}{"k": "value"}), int64(len("k"))+ValueBytes("value"); got != want {
+		t.Errorf("RowBytes/ValueBytes disagree: got %d, want %d", got, want)
+	}
+}

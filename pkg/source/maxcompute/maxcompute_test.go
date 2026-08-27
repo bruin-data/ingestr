@@ -61,7 +61,7 @@ func TestRowsToArrowRecordBatchReturnsIteratorErrorBeforeFirstRow(t *testing.T) 
 	defer func() { _ = rows.Close() }()
 
 	columns := []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}}
-	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 100)
+	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 100, 0)
 	if !errors.Is(err, errRowsIteration) {
 		t.Fatalf("rowsToArrowRecordBatch error = %v, want %v", err, errRowsIteration)
 	}

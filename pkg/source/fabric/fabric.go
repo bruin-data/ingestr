@@ -332,7 +332,7 @@ func (s *FabricSource) read(ctx context.Context, table string, tableSchema *sche
 
 		for {
 			startBatch := time.Now()
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -396,7 +396,7 @@ func (s *FabricSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -494,7 +494,7 @@ func quoteColumn(name string) string {
 	return fmt.Sprintf("[%s]", strings.ReplaceAll(name, "]", "]]"))
 }
 
-func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 
@@ -508,6 +508,7 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			for _, b := range builders {
@@ -519,10 +520,16 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 		for i, dest := range scanDest {
 			val := *dest.(*interface{})
 			arrowconv.AppendValue(builders[i], val)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
 		rowCount++
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}

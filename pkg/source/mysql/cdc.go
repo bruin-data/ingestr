@@ -2661,7 +2661,7 @@ func rowsToMySQLCDCSnapshotBatches(rows *sql.Rows, tableSchema *schema.TableSche
 	syncedAt := time.Now().UTC()
 
 	for {
-		record, count, err := buildMySQLCDCSQLBatch(rows, tableSchema, sourceColumns, batchSize, func(builders []array.Builder) {
+		record, count, err := buildMySQLCDCSQLBatch(rows, tableSchema, sourceColumns, batchSize, opts.MaxBatchBytes, func(builders []array.Builder) {
 			appendMySQLCDCValues(builders, len(sourceColumns), cdcLSN, false, syncedAt)
 		})
 		if err != nil {
@@ -2674,7 +2674,7 @@ func rowsToMySQLCDCSnapshotBatches(rows *sql.Rows, tableSchema *schema.TableSche
 	}
 }
 
-func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
+func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, maxBatchBytes int64, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -2689,6 +2689,7 @@ func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sour
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			releaseMySQLCDCBuilders(builders)
@@ -2702,11 +2703,17 @@ func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sour
 				return nil, 0, err
 			}
 			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(value, sourceColumns[i]))
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(value)
+			}
 		}
 		appendCDC(builders)
 
 		rowCount++
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}

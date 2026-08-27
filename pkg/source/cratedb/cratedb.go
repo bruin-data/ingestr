@@ -247,7 +247,7 @@ func (s *CrateDBSource) read(ctx context.Context, table string, tableSchema *sch
 
 		for {
 			startBatch := time.Now()
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -317,7 +317,7 @@ func (s *CrateDBSource) ExecuteCustomQuery(ctx context.Context, query string, op
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -412,7 +412,7 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	return query
 }
 
-func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 
@@ -421,6 +421,7 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		values, err := rows.Values()
 		if err != nil {
@@ -432,10 +433,16 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 
 		for i, val := range values {
 			arrowconv.AppendValue(builders[i], convertValue(val))
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
 		rowCount++
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}
