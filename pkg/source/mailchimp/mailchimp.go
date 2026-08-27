@@ -500,6 +500,23 @@ func (s *MailchimpSource) paginateAndSend(ctx context.Context, endpoint, respons
 	offset := 0
 	totalSent := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -532,13 +549,21 @@ func (s *MailchimpSource) paginateAndSend(ctx context.Context, endpoint, respons
 		items = filterItemsByInterval(items, intervalFields, opts.IntervalStart, opts.IntervalEnd)
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 			}
-
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+			if err := flush(); err != nil {
+				return err
+			}
 			config.Debug("[Mailchimp] %s offset %d: sent %d records (total: %d)", endpoint, offset, len(items), totalSent)
 		}
 
@@ -691,6 +716,23 @@ func (s *MailchimpSource) fetchNestedItems(ctx context.Context, cfg nestedTableC
 	offset := 0
 	totalSent := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.childEndpoint, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -728,13 +770,21 @@ func (s *MailchimpSource) fetchNestedItems(ctx context.Context, cfg nestedTableC
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.childEndpoint, err)
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 			}
-
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 
 		if len(items) < maxPageSize {

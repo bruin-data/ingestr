@@ -174,6 +174,24 @@ func (s *AttioSource) getPages(ctx context.Context, method string, endpoint stri
 	limit := 1000
 	totalSent := 0
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		config.Debug("[ATTIO] Fetched %d items from %s (total: %d)", len(items), endpoint, totalSent)
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -217,22 +235,25 @@ func (s *AttioSource) getPages(ctx context.Context, method string, endpoint stri
 			break
 		}
 
-		items := make([]map[string]interface{}, 0, len(response.Data))
 		for _, raw := range response.Data {
 			if transform != nil {
 				raw = transform(raw)
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(raw)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, raw)
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		if err := flush(); err != nil {
+			return err
 		}
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
-
-		config.Debug("[ATTIO] Fetched %d items from %s (total: %d)", len(items), endpoint, totalSent)
 
 		if method == "GET" || len(response.Data) < limit {
 			break

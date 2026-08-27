@@ -521,6 +521,20 @@ func (s *ZoomSource) paginateEndpoint(
 	batchNum := 0
 	nextPageToken := ""
 
+	flush := func(batch []map[string]interface{}) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		}
+		batchNum++
+		config.Debug("[ZOOM] Sending batch %d with %d %s", batchNum, len(batch), endpoint)
+		results <- source.RecordBatchResult{Batch: record}
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -582,14 +596,27 @@ func (s *ZoomSource) paginateEndpoint(
 			items = items[:opts.Limit-totalSent]
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		if opts.MaxBatchBytes > 0 {
+			var batch []map[string]interface{}
+			var accBytes int64
+			for _, item := range items {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(batch); err != nil {
+						return err
+					}
+					batch = nil
+					accBytes = 0
+				}
+				accBytes += rowBytes
+				batch = append(batch, item)
+			}
+			if err := flush(batch); err != nil {
+				return err
+			}
+		} else if err := flush(items); err != nil {
+			return err
 		}
-
-		batchNum++
-		config.Debug("[ZOOM] Sending batch %d with %d %s (total sent: %d)", batchNum, len(items), endpoint, totalSent+len(items))
-		results <- source.RecordBatchResult{Batch: record}
 		totalSent += len(items)
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {

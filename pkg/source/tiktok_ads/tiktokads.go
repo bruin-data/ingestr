@@ -409,6 +409,22 @@ func (s *TiktokAdsSource) fetchPages(ctx context.Context, dimensions, metrics []
 	dimensionsJSON, _ := json.Marshal(dimensions)
 	metricsJSON, _ := json.Marshal(metrics)
 
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, schemaCols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -480,16 +496,26 @@ func (s *TiktokAdsSource) fetchPages(ctx context.Context, dimensions, metrics []
 			break
 		}
 
-		items := flattenItems(apiResp.Data.List, loc)
+		pageItems := flattenItems(apiResp.Data.List, loc)
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, schemaCols, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		for _, row := range pageItems {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
 
-		results <- source.RecordBatchResult{Batch: record}
+		if err := flush(); err != nil {
+			return err
+		}
 
-		config.Debug("[TIKTOK] Sent %d records (page %d/%d)", len(items), page, apiResp.Data.PageInfo.TotalPage)
+		config.Debug("[TIKTOK] Sent %d records (page %d/%d)", len(pageItems), page, apiResp.Data.PageInfo.TotalPage)
 
 		if page >= apiResp.Data.PageInfo.TotalPage {
 			break

@@ -341,6 +341,47 @@ func extractNextCursor(body map[string]interface{}) string {
 	return parsed.Query().Get("page[after]")
 }
 
+// sendItemsBounded emits items as one Arrow record, or, when opts.MaxBatchBytes
+// is set, as multiple records each bounded by that soft byte cap. Callers must
+// ensure len(items) > 0.
+func sendItemsBounded(ctx context.Context, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult, label string) error {
+	send := func(batch []map[string]interface{}) error {
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		return nil
+	}
+
+	if opts.MaxBatchBytes <= 0 {
+		return send(items)
+	}
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	for _, row := range items {
+		rowBytes := arrowconv.RowBytes(row)
+		if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+			if err := send(batch); err != nil {
+				return err
+			}
+			batch = nil
+			accBytes = 0
+		}
+		accBytes += rowBytes
+		batch = append(batch, row)
+	}
+	if len(batch) > 0 {
+		return send(batch)
+	}
+	return nil
+}
+
 // paginateAndSend handles cursor-based pagination for v2 endpoints.
 func (s *G2Source) paginateAndSend(ctx context.Context, endpoint, label, intervalField string, opts source.ReadOptions, results chan<- source.RecordBatchResult, serverFilters map[string]string) error {
 	totalProcessed := 0
@@ -391,15 +432,8 @@ func (s *G2Source) paginateAndSend(ctx context.Context, endpoint, label, interva
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
-			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
+			if err := sendItemsBounded(ctx, items, opts, results, label); err != nil {
+				return err
 			}
 
 			totalProcessed += len(items)
@@ -635,15 +669,8 @@ func (s *G2Source) readResourceForProduct(ctx context.Context, resource, product
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return processed, fmt.Errorf("failed to build arrow record for %s: %w", resource, err)
-			}
-
-			select {
-			case <-ctx.Done():
-				return processed, ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
+			if err := sendItemsBounded(ctx, items, opts, results, resource); err != nil {
+				return processed, err
 			}
 
 			processed += len(items)

@@ -434,6 +434,28 @@ func (s *PipedriveSource) paginateAndSend(ctx context.Context, endpoint, label, 
 	start := 0
 	totalSent := 0
 
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		totalSent += len(batch)
+		config.Debug("[PIPEDRIVE] %s: sent %d records (total: %d)", label, len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -477,20 +499,20 @@ func (s *PipedriveSource) paginateAndSend(ctx context.Context, endpoint, label, 
 			s.applyCustomFields(items, entity)
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalSent += len(items)
-			config.Debug("[PIPEDRIVE] %s: sent %d records (total: %d)", label, len(items), totalSent)
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if body.AdditionalData == nil || body.AdditionalData.Pagination == nil || !body.AdditionalData.Pagination.MoreItemsInCollection {
@@ -525,6 +547,28 @@ func (s *PipedriveSource) readRecents(ctx context.Context, table string, opts so
 	}
 	start := 0
 	totalSent := 0
+
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		totalSent += len(batch)
+		config.Debug("[PIPEDRIVE] %s: sent %d records (total: %d)", label, len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
 
 	config.Debug("[PIPEDRIVE] reading %s via /recents (since_timestamp=%s)", table, sinceTimestamp)
 
@@ -589,20 +633,20 @@ func (s *PipedriveSource) readRecents(ctx context.Context, table string, opts so
 			s.applyCustomFields(items, cfEntity)
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalSent += len(items)
-			config.Debug("[PIPEDRIVE] %s: sent %d records (total: %d)", label, len(items), totalSent)
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if body.AdditionalData == nil || body.AdditionalData.Pagination == nil || !body.AdditionalData.Pagination.MoreItemsInCollection {
@@ -693,6 +737,28 @@ func (s *PipedriveSource) readLeads(ctx context.Context, opts source.ReadOptions
 	start := 0
 	totalSent := 0
 
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for leads: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		totalSent += len(batch)
+		config.Debug("[PIPEDRIVE] leads: sent %d records (total: %d)", len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -733,20 +799,20 @@ func (s *PipedriveSource) readLeads(ctx context.Context, opts source.ReadOptions
 		items := filterByInterval(itemsAfterStart, source.ReadOptions{IntervalEnd: opts.IntervalEnd})
 		s.applyCustomFields(items, "deal")
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for leads: %w", err)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalSent += len(items)
-			config.Debug("[PIPEDRIVE] leads: sent %d records (total: %d)", len(items), totalSent)
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		// Early stop: sorted DESC, so if items were dropped by IntervalStart, remaining pages are older
@@ -813,6 +879,38 @@ func (s *PipedriveSource) readDealsFlow(ctx context.Context, opts source.ReadOpt
 
 				endpoint := fmt.Sprintf("/deals/%d/flow", dealID)
 				start := 0
+
+				var batch []map[string]any
+				var accBytes int64
+				flush := func() bool {
+					if len(batch) == 0 {
+						return true
+					}
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+					if err != nil {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("failed to build arrow record for deals_flow (deal %d): %w", dealID, err)
+							cancel()
+						}
+						mu.Unlock()
+						return false
+					}
+					select {
+					case <-ctx.Done():
+						return false
+					case results <- source.RecordBatchResult{Batch: record}:
+					}
+					mu.Lock()
+					totalSent += len(batch)
+					count := totalSent
+					mu.Unlock()
+					config.Debug("[PIPEDRIVE] deals_flow: sent %d records for deal %d (total: %d)", len(batch), dealID, count)
+					batch = nil
+					accBytes = 0
+					return true
+				}
+
 				for {
 					resp, err := s.client.R(ctx).
 						SetQueryParam("api_token", s.apiToken).
@@ -875,29 +973,20 @@ func (s *PipedriveSource) readDealsFlow(ctx context.Context, opts source.ReadOpt
 						items = append(items, item)
 					}
 
-					if len(items) > 0 {
-						record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-						if err != nil {
-							mu.Lock()
-							if firstErr == nil {
-								firstErr = fmt.Errorf("failed to build arrow record for deals_flow (deal %d): %w", dealID, err)
-								cancel()
+					for _, row := range items {
+						if opts.MaxBatchBytes > 0 {
+							rowBytes := arrowconv.RowBytes(row)
+							if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+								if !flush() {
+									return
+								}
 							}
-							mu.Unlock()
-							return
+							accBytes += rowBytes
 						}
-
-						select {
-						case <-ctx.Done():
-							return
-						case results <- source.RecordBatchResult{Batch: record}:
-						}
-
-						mu.Lock()
-						totalSent += len(items)
-						count := totalSent
-						mu.Unlock()
-						config.Debug("[PIPEDRIVE] deals_flow: sent %d records for deal %d (total: %d)", len(items), dealID, count)
+						batch = append(batch, row)
+					}
+					if !flush() {
+						return
 					}
 
 					if body.AdditionalData == nil || body.AdditionalData.Pagination == nil || !body.AdditionalData.Pagination.MoreItemsInCollection {
@@ -953,6 +1042,38 @@ func (s *PipedriveSource) readDealSubResource(ctx context.Context, subResource, 
 
 				endpoint := fmt.Sprintf("/deals/%d/%s", dealID, subResource)
 				start := 0
+
+				var batch []map[string]any
+				var accBytes int64
+				flush := func() bool {
+					if len(batch) == 0 {
+						return true
+					}
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+					if err != nil {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("failed to build arrow record for %s (deal %d): %w", label, dealID, err)
+							cancel()
+						}
+						mu.Unlock()
+						return false
+					}
+					select {
+					case <-ctx.Done():
+						return false
+					case results <- source.RecordBatchResult{Batch: record}:
+					}
+					mu.Lock()
+					totalSent += len(batch)
+					count := totalSent
+					mu.Unlock()
+					config.Debug("[PIPEDRIVE] %s: sent %d records for deal %d (total: %d)", label, len(batch), dealID, count)
+					batch = nil
+					accBytes = 0
+					return true
+				}
+
 				for {
 					resp, err := s.client.R(ctx).
 						SetQueryParam("api_token", s.apiToken).
@@ -993,28 +1114,21 @@ func (s *PipedriveSource) readDealSubResource(ctx context.Context, subResource, 
 						break
 					}
 
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(body.Data, nil, opts.ExcludeColumns)
-					if err != nil {
-						mu.Lock()
-						if firstErr == nil {
-							firstErr = fmt.Errorf("failed to build arrow record for %s (deal %d): %w", label, dealID, err)
-							cancel()
+					for _, row := range body.Data {
+						if opts.MaxBatchBytes > 0 {
+							rowBytes := arrowconv.RowBytes(row)
+							if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+								if !flush() {
+									return
+								}
+							}
+							accBytes += rowBytes
 						}
-						mu.Unlock()
+						batch = append(batch, row)
+					}
+					if !flush() {
 						return
 					}
-
-					select {
-					case <-ctx.Done():
-						return
-					case results <- source.RecordBatchResult{Batch: record}:
-					}
-
-					mu.Lock()
-					totalSent += len(body.Data)
-					count := totalSent
-					mu.Unlock()
-					config.Debug("[PIPEDRIVE] %s: sent %d records for deal %d (total: %d)", label, len(body.Data), dealID, count)
 
 					if body.AdditionalData == nil || body.AdditionalData.Pagination == nil || !body.AdditionalData.Pagination.MoreItemsInCollection {
 						break

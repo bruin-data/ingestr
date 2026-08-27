@@ -317,6 +317,26 @@ func (s *GoogleAnalyticsSource) fetchCustomReport(ctx context.Context, cfg *repo
 	dims := cfg.apiDimensions()
 	mets := cfg.apiMetrics()
 
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to arrow: %w", err)
+		}
+		select {
+		case out <- source.RecordBatchResult{Batch: rec}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for offset := int64(0); ; offset += maxRowsPerRequest {
 		select {
 		case <-ctx.Done():
@@ -345,14 +365,20 @@ func (s *GoogleAnalyticsSource) fetchCustomReport(ctx context.Context, cfg *repo
 		items := rowsToItems(resp.Rows, resp.MetricHeaders, cfg, map[string]any{
 			"property_id": strconv.FormatInt(prop.id, 10),
 		})
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to arrow: %w", err)
+		for _, item := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, item)
 		}
-		select {
-		case out <- source.RecordBatchResult{Batch: rec}:
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := flush(); err != nil {
+			return err
 		}
 
 		config.Debug("[GOOGLE ANALYTICS] Property %d: fetched %d rows (offset: %d)", prop.id, len(resp.Rows), offset)
@@ -362,7 +388,7 @@ func (s *GoogleAnalyticsSource) fetchCustomReport(ctx context.Context, cfg *repo
 		}
 	}
 
-	return nil
+	return flush()
 }
 
 func (s *GoogleAnalyticsSource) fetchRealtimeReport(ctx context.Context, cfg *reportConfig, opts source.ReadOptions, prop propertyInfo, out chan<- source.RecordBatchResult) error {
@@ -384,14 +410,41 @@ func (s *GoogleAnalyticsSource) fetchRealtimeReport(ctx context.Context, cfg *re
 		"ingested_at": time.Now().UTC(),
 		"property_id": strconv.FormatInt(prop.id, 10),
 	})
-	rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert to arrow: %w", err)
+
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to arrow: %w", err)
+		}
+		select {
+		case out <- source.RecordBatchResult{Batch: rec}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-	select {
-	case out <- source.RecordBatchResult{Batch: rec}:
-	case <-ctx.Done():
-		return ctx.Err()
+
+	for _, item := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, item)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[GOOGLE ANALYTICS] Property %d: fetched %d rows from realtime report", prop.id, len(resp.Rows))

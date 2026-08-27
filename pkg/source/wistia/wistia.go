@@ -722,16 +722,40 @@ func sendBatch(ctx context.Context, items []map[string]interface{}, opts source.
 		cols = opts.Schema.Columns
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert Wistia response to Arrow: %w", err)
+	emit := func(batch []map[string]interface{}) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert Wistia response to Arrow: %w", err)
+		}
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+			return nil
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
 	}
 
-	select {
-	case results <- source.RecordBatchResult{Batch: record}:
-		return nil
-	case <-ctx.Done():
-		record.Release()
-		return ctx.Err()
+	if opts.MaxBatchBytes > 0 {
+		var pending []map[string]interface{}
+		var accBytes int64
+		for _, row := range items {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(pending) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := emit(pending); err != nil {
+					return err
+				}
+				pending = nil
+				accBytes = 0
+			}
+			accBytes += rowBytes
+			pending = append(pending, row)
+		}
+		return emit(pending)
 	}
+
+	return emit(items)
 }

@@ -369,15 +369,40 @@ func (s *IndeedSource) readCampaigns(ctx context.Context, opts source.ReadOption
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(campaigns, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to build arrow record for campaigns: %w", err)
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for campaigns: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	for _, row := range campaigns {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[INDEED] finished reading campaigns: %d total records", len(campaigns))
@@ -586,17 +611,45 @@ func (s *IndeedSource) readCampaignSubResourceEntries(ctx context.Context, campa
 				return
 			}
 
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				cancelWorkers()
-				sendErr(workerCtx, results, fmt.Errorf("failed to build arrow record for %s campaign %s: %w", label, campaignID, err))
-				return
+			var batch []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to build arrow record for %s campaign %s: %w", label, campaignID, err)
+				}
+				select {
+				case <-workerCtx.Done():
+					record.Release()
+					return workerCtx.Err()
+				case results <- source.RecordBatchResult{Batch: record}:
+				}
+				batch = nil
+				accBytes = 0
+				return nil
 			}
 
-			select {
-			case <-workerCtx.Done():
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							cancelWorkers()
+							sendErr(workerCtx, results, err)
+							return
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
+			}
+			if err := flush(); err != nil {
+				cancelWorkers()
+				sendErr(workerCtx, results, err)
 				return
-			case results <- source.RecordBatchResult{Batch: record}:
 			}
 
 			config.Debug("[INDEED] %s: fetched %d entries for campaign %s", label, len(items), campaignID)
@@ -701,17 +754,45 @@ func (s *IndeedSource) readCampaignStats(ctx context.Context, opts source.ReadOp
 				return
 			}
 
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				cancelWorkers()
-				sendErr(workerCtx, results, fmt.Errorf("failed to build arrow record for campaign_stats campaign %s: %w", campaignID, err))
-				return
+			var batch []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to build arrow record for campaign_stats campaign %s: %w", campaignID, err)
+				}
+				select {
+				case <-workerCtx.Done():
+					record.Release()
+					return workerCtx.Err()
+				case results <- source.RecordBatchResult{Batch: record}:
+				}
+				batch = nil
+				accBytes = 0
+				return nil
 			}
 
-			select {
-			case <-workerCtx.Done():
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							cancelWorkers()
+							sendErr(workerCtx, results, err)
+							return
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
+			}
+			if err := flush(); err != nil {
+				cancelWorkers()
+				sendErr(workerCtx, results, err)
 				return
-			case results <- source.RecordBatchResult{Batch: record}:
 			}
 
 			config.Debug("[INDEED] campaign_stats: fetched %d stats for campaign %s", len(items), campaignID)
@@ -783,15 +864,40 @@ func (s *IndeedSource) readAccount(ctx context.Context, opts source.ReadOptions,
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to build arrow record for account: %w", err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for account: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[INDEED] account: sent %d records", len(items))
@@ -839,15 +945,40 @@ func (s *IndeedSource) readTrafficStats(ctx context.Context, opts source.ReadOpt
 			item["date"] = dateStr
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to build arrow record for traffic_stats %s: %w", dateStr, err)
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to build arrow record for traffic_stats %s: %w", dateStr, err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- source.RecordBatchResult{Batch: record}:
+			}
+			batch = nil
+			accBytes = 0
+			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		totalProcessed += len(items)

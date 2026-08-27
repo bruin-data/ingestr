@@ -390,6 +390,21 @@ func (s *DoceboSource) runParallelFetch(ctx context.Context, opts source.ReadOpt
 	if res, ok := doceboResources[cfg.TableName]; ok {
 		cols = res.Columns
 	}
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		results <- source.RecordBatchResult{Batch: rec}
+		items = nil
+		accBytes = 0
+		return nil
+	}
 	for result := range resultChan {
 		select {
 		case <-ctx.Done():
@@ -402,11 +417,21 @@ func (s *DoceboSource) runParallelFetch(ctx context.Context, opts source.ReadOpt
 		if len(result.batch) == 0 {
 			continue
 		}
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(result.batch, cols, opts.ExcludeColumns)
-		if err != nil {
+		for _, row := range result.batch {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+		if err := flush(); err != nil {
 			return err
 		}
-		results <- source.RecordBatchResult{Batch: rec}
 	}
 	return nil
 }
@@ -420,13 +445,35 @@ func (s *DoceboSource) readPaginatedTable(ctx context.Context, opts source.ReadO
 	if res, ok := doceboResources[tableName]; ok {
 		cols = res.Columns
 	}
-	return s.getPaginatedData(ctx, endpoint, pageSize, params, func(batch []map[string]interface{}) error {
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
 		if err != nil {
 			return err
 		}
 		results <- source.RecordBatchResult{Batch: rec}
+		items = nil
+		accBytes = 0
 		return nil
+	}
+	return s.getPaginatedData(ctx, endpoint, pageSize, params, func(batch []map[string]interface{}) error {
+		for _, row := range batch {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+		return flush()
 	})
 }
 
@@ -1052,6 +1099,22 @@ func (s *DoceboSource) readSurveyAnswers(ctx context.Context, opts source.ReadOp
 		cols = res.Columns
 	}
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		results <- source.RecordBatchResult{Batch: rec}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for result := range surveyResultChan {
 		select {
 		case <-ctx.Done():
@@ -1061,11 +1124,21 @@ func (s *DoceboSource) readSurveyAnswers(ctx context.Context, opts source.ReadOp
 		if result.err != nil || len(result.rows) == 0 {
 			continue
 		}
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(result.rows, cols, opts.ExcludeColumns)
-		if err != nil {
+		for _, row := range result.rows {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+		if err := flush(); err != nil {
 			return err
 		}
-		results <- source.RecordBatchResult{Batch: rec}
 	}
 	return nil
 }

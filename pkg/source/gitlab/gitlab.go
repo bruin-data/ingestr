@@ -176,16 +176,38 @@ func (s *GitLabSource) read(ctx context.Context, cfg tableConfig, opts source.Re
 			err = s.streamPerProject(ctx, cfg, opts, results)
 		} else {
 			err = s.paginate(ctx, cfg.endpoint, cfg.queryParams, cfg.supportsUpdatedFilter, opts, func(items []map[string]interface{}) error {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
+				var batch []map[string]interface{}
+				var accBytes int64
+				flush := func() error {
+					if len(batch) == 0 {
+						return nil
+					}
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+					if err != nil {
+						return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
+					}
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case results <- source.RecordBatchResult{Batch: record}:
+					}
+					batch = nil
+					accBytes = 0
+					return nil
 				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case results <- source.RecordBatchResult{Batch: record}:
+				for _, row := range items {
+					if opts.MaxBatchBytes > 0 {
+						rowBytes := arrowconv.RowBytes(row)
+						if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+							if err := flush(); err != nil {
+								return err
+							}
+						}
+						accBytes += rowBytes
+					}
+					batch = append(batch, row)
 				}
-				return nil
+				return flush()
 			})
 		}
 		if err != nil {
@@ -243,16 +265,38 @@ func (s *GitLabSource) streamPerProject(ctx context.Context, cfg tableConfig, op
 				}
 				endpoint := "/projects/" + id + "/" + cfg.perProjectResource
 				err := s.paginate(ctx, endpoint, cfg.queryParams, cfg.supportsUpdatedFilter, opts, func(items []map[string]interface{}) error {
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-					if err != nil {
-						return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
+					var batch []map[string]interface{}
+					var accBytes int64
+					flush := func() error {
+						if len(batch) == 0 {
+							return nil
+						}
+						record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+						if err != nil {
+							return fmt.Errorf("failed to convert gitlab data to Arrow: %w", err)
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case results <- source.RecordBatchResult{Batch: record}:
+						}
+						batch = nil
+						accBytes = 0
+						return nil
 					}
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case results <- source.RecordBatchResult{Batch: record}:
+					for _, row := range items {
+						if opts.MaxBatchBytes > 0 {
+							rowBytes := arrowconv.RowBytes(row)
+							if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+								if err := flush(); err != nil {
+									return err
+								}
+							}
+							accBytes += rowBytes
+						}
+						batch = append(batch, row)
 					}
-					return nil
+					return flush()
 				})
 				if err != nil {
 					// Member projects routinely disable issues/MRs (404) or

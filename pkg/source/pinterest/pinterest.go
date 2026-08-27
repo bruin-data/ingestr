@@ -200,19 +200,46 @@ func (s *PinterestSource) paginateAndSend(ctx context.Context, endpoint, label s
 		items := filterByInterval(body.Items, opts)
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+			var batch []map[string]any
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+				}
+
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case results <- source.RecordBatchResult{Batch: record}:
+				}
+
+				totalSent += len(batch)
+				config.Debug("[PINTEREST] %s: sent %d records (total: %d)", label, len(batch), totalSent)
+				batch = nil
+				accBytes = 0
+				return nil
 			}
 
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 			}
 
-			totalSent += len(items)
-			config.Debug("[PINTEREST] %s: sent %d records (total: %d)", label, len(items), totalSent)
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 
 		if body.Bookmark == "" {

@@ -262,6 +262,30 @@ func paginateAndSend(ctx context.Context, client *httpclient.Client, initialURL,
 	currentURL := initialURL
 	totalProcessed := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+
+		totalProcessed += len(batch)
+		config.Debug("[KLAVIYO] %s: sent %d records (total: %d)", label, len(batch), totalProcessed)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -291,20 +315,20 @@ func paginateAndSend(ctx context.Context, client *httpclient.Client, initialURL,
 			items = flattenAttributes(items)
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		for _, item := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalProcessed += len(items)
-			config.Debug("[KLAVIYO] %s: sent %d records (total: %d)", label, len(items), totalProcessed)
+			batch = append(batch, item)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		nextURL, ok := body.Links["next"].(string)
@@ -321,6 +345,30 @@ func paginateAndSend(ctx context.Context, client *httpclient.Client, initialURL,
 func paginateWithClientFilter(ctx context.Context, client *httpclient.Client, endpoint, label, dateField string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	currentURL := endpoint
 	totalProcessed := 0
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+
+		totalProcessed += len(batch)
+		config.Debug("[KLAVIYO] %s: sent %d records (total: %d)", label, len(batch), totalProcessed)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -371,20 +419,20 @@ func paginateWithClientFilter(ctx context.Context, client *httpclient.Client, en
 			filtered = append(filtered, item)
 		}
 
-		if len(filtered) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(filtered, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		for _, item := range filtered {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalProcessed += len(filtered)
-			config.Debug("[KLAVIYO] %s: sent %d records (total: %d)", label, len(filtered), totalProcessed)
+			batch = append(batch, item)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		nextURL, ok := body.Links["next"].(string)
@@ -605,6 +653,30 @@ func (s *KlaviyoSource) readCampaigns(ctx context.Context, opts source.ReadOptio
 		currentURL := buildFilterURL("/campaigns/", params)
 		totalProcessed := 0
 
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to build arrow record for campaigns (%s): %w", channelType, err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- source.RecordBatchResult{Batch: record}:
+			}
+
+			totalProcessed += len(batch)
+			config.Debug("[KLAVIYO] campaigns (%s): sent %d records (total: %d)", channelType, len(batch), totalProcessed)
+			batch = nil
+			accBytes = 0
+			return nil
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -634,20 +706,20 @@ func (s *KlaviyoSource) readCampaigns(ctx context.Context, opts source.ReadOptio
 				item["campaign_type"] = channelType
 			}
 
-			if len(items) > 0 {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to build arrow record for campaigns (%s): %w", channelType, err)
+			for _, item := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(item)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
 				}
-
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case results <- source.RecordBatchResult{Batch: record}:
-				}
-
-				totalProcessed += len(items)
-				config.Debug("[KLAVIYO] campaigns (%s): sent %d records (total: %d)", channelType, len(items), totalProcessed)
+				batch = append(batch, item)
+			}
+			if err := flush(); err != nil {
+				return err
 			}
 
 			nextURL, ok := body.Links["next"].(string)

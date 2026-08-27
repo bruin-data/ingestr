@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -364,4 +365,59 @@ func collectBatches(t *testing.T, ch <-chan source.RecordBatchResult) []source.R
 		results = append(results, result)
 	}
 	return results
+}
+
+func TestPostHogByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		rows := []map[string]interface{}{}
+		if calls == 1 {
+			for i := 0; i < 50; i++ {
+				rows = append(rows, map[string]interface{}{"id": i, "name": wide})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": len(rows), "next": "", "results": rows})
+	}))
+	defer srv.Close()
+
+	run := func(max int64) (int64, int64) {
+		calls = 0
+		s := &PostHogSource{
+			projectID: "1",
+			client:    httpclient.New(httpclient.WithBaseURL(srv.URL)),
+		}
+		cfg, err := resolveTableConfig("annotations")
+		if err != nil {
+			t.Fatal(err)
+		}
+		results, err := s.readTable(context.Background(), cfg, source.ReadOptions{MaxBatchBytes: max})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b, rw int64
+		for res := range results {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			b++
+			rw += res.Batch.NumRows()
+			res.Batch.Release()
+		}
+		return b, rw
+	}
+
+	offB, offR := run(0)
+	onB, onR := run(4096)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d want 1", offB)
+	}
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d want >1", onB)
+	}
+	if offR != onR || offR != 50 {
+		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
+	}
 }

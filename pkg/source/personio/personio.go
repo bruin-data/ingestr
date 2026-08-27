@@ -334,16 +334,44 @@ func (s *PersonioSource) fetchAll(ctx context.Context, opts source.ReadOptions, 
 	totalSent := 0
 	batchNum := 0
 
-	return s.paginate(ctx, cfg, defaultPageSize, func(items []map[string]interface{}) (bool, error) {
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
-			return true, fmt.Errorf("failed to convert %s to Arrow: %w", cfg.resource, err)
+			return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.resource, err)
 		}
 
 		batchNum++
 		totalSent += len(items)
 		config.Debug("[PERSONIO] Sending batch %d with %d %s (total: %d)", batchNum, len(items), cfg.resource, totalSent)
 		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
+	err := s.paginate(ctx, cfg, defaultPageSize, func(pageItems []map[string]interface{}) (bool, error) {
+		for _, row := range pageItems {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return true, err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+
+		if err := flush(); err != nil {
+			return true, err
+		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
 			config.Debug("[PERSONIO] Reached limit of %d %s", opts.Limit, cfg.resource)
@@ -351,6 +379,11 @@ func (s *PersonioSource) fetchAll(ctx context.Context, opts source.ReadOptions, 
 		}
 		return false, nil
 	})
+	if err != nil {
+		return err
+	}
+
+	return flush()
 }
 
 func (s *PersonioSource) readEmployees(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {

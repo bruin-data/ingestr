@@ -319,14 +319,40 @@ func (s *GorgiasSource) paginateAndSend(ctx context.Context, meta tableMeta, tab
 		}
 
 		if len(filtered) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(filtered, meta.tableColumns, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", table, err)
+			var items []map[string]any
+			var accBytes int64
+			flush := func() error {
+				if len(items) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, meta.tableColumns, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to build arrow record for %s: %w", table, err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				totalSent += len(items)
+				config.Debug("[GORGIAS] Sent %d %s records (total: %d)", len(items), table, totalSent)
+				items = nil
+				accBytes = 0
+				return nil
 			}
 
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(filtered)
-			config.Debug("[GORGIAS] Sent %d %s records (total: %d)", len(filtered), table, totalSent)
+			for _, row := range filtered {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				items = append(items, row)
+			}
+
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {

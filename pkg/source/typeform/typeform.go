@@ -332,12 +332,37 @@ func (s *TypeformSource) paginatePages(ctx context.Context, cfg pageConfig, opts
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.label, err)
+			var batch []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.label, err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				totalSent += len(batch)
+				batch = nil
+				accBytes = 0
+				return nil
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+			for _, item := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(item)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, item)
+			}
+			if err := flush(); err != nil {
+				return err
+			}
 			config.Debug("[TYPEFORM] %s page %d: sent %d records (total: %d)", cfg.label, page, len(items), totalSent)
 		}
 
@@ -480,11 +505,36 @@ func (s *TypeformSource) readFormResponses(ctx context.Context, formID string, o
 			}
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert responses for form %s to Arrow: %w", formID, err)
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert responses for form %s to Arrow: %w", formID, err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			batch = nil
+			accBytes = 0
+			return nil
 		}
-		results <- source.RecordBatchResult{Batch: record}
+		for _, item := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, item)
+		}
+		if err := flush(); err != nil {
+			return err
+		}
 		totalSent += len(items)
 		config.Debug("[TYPEFORM] form %s: sent %d responses (total: %d)", formID, len(items), totalSent)
 

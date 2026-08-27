@@ -459,14 +459,39 @@ func (s *PlusVibeAI) paginateAndSend(ctx context.Context, endpoint string, table
 			break
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, schema, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to build arrow record for %s: %w", table, err)
+		var batch []map[string]any
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, schema, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to build arrow record for %s: %w", table, err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			totalSent += len(batch)
+			config.Debug("[PLUSVIBEAI] Sent %d %s records (total: %d)", len(batch), table, totalSent)
+			batch = nil
+			accBytes = 0
+			return nil
 		}
 
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
-		config.Debug("[PLUSVIBEAI] Sent %d %s records (total: %d)", len(items), table, totalSent)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
+		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
 			break
