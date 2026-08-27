@@ -184,6 +184,9 @@ test-glossary.yml
 CLAUDE.local.md
 .mcp.json
 
+# Amp orb portal metadata
+.amp/portals/*
+
 # Test credentials
 *_credentials.env
 *.credentials
