@@ -114,6 +114,7 @@ func (s *AvroSource) read(ctx context.Context, opts source.ReadOptions) (<-chan 
 		defer func() { _ = f.Close() }()
 
 		items := make([]map[string]interface{}, 0, batchSize)
+		var accBytes int64
 		var totalRows int
 		var batchNum int
 
@@ -142,6 +143,7 @@ func (s *AvroSource) read(ctx context.Context, opts source.ReadOptions) (<-chan 
 				return false
 			}
 			items = make([]map[string]interface{}, 0, batchSize)
+			accBytes = 0
 			return true
 		}
 
@@ -156,6 +158,15 @@ func (s *AvroSource) read(ctx context.Context, opts source.ReadOptions) (<-chan 
 			if err := decoder.Decode(&item); err != nil {
 				send(source.RecordBatchResult{Err: fmt.Errorf("failed to decode Avro record: %w", err)})
 				return
+			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if !flush() {
+						return
+					}
+				}
+				accBytes += rowBytes
 			}
 			items = append(items, item)
 

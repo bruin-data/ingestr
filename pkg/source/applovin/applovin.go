@@ -403,6 +403,7 @@ func (s *AppLovinSource) fetch(ctx context.Context, endpoint string, columns []s
 	totalLimit := opts.Limit
 	totalSent := 0
 	var pendingData []map[string]interface{}
+	var accBytes int64
 
 	sendBatch := func() error {
 		if len(pendingData) == 0 {
@@ -418,6 +419,7 @@ func (s *AppLovinSource) fetch(ctx context.Context, endpoint string, columns []s
 		config.Debug("[APPLOVIN] Sent batch with %d records (total: %d)", len(pendingData), totalSent+len(pendingData))
 		totalSent += len(pendingData)
 		pendingData = nil
+		accBytes = 0
 		return nil
 	}
 
@@ -432,6 +434,16 @@ func (s *AppLovinSource) fetch(ctx context.Context, endpoint string, columns []s
 		for _, item := range result.data {
 			if totalLimit > 0 && totalSent+len(pendingData) >= totalLimit {
 				break
+			}
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(pendingData) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := sendBatch(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
 			pendingData = append(pendingData, item)
 

@@ -138,6 +138,28 @@ func (s *DynamoDBSource) read(ctx context.Context, table string, opts source.Rea
 		batchNum := 0
 		totalRows := int64(0)
 		var items []map[string]any
+		var accBytes int64
+		var startBatch time.Time
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert to Arrow: %w", err)
+			}
+
+			batchNum++
+			totalRows += int64(len(items))
+			config.Debug("[DYNAMODB] Batch %d: %d items read in %v (total: %d)", batchNum, len(items), time.Since(startBatch), totalRows)
+
+			results <- source.RecordBatchResult{Batch: record}
+			items = nil
+			accBytes = 0
+			return nil
+		}
 
 		for paginator.HasMorePages() {
 			select {
@@ -147,7 +169,7 @@ func (s *DynamoDBSource) read(ctx context.Context, table string, opts source.Rea
 			default:
 			}
 
-			startBatch := time.Now()
+			startBatch = time.Now()
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to scan DynamoDB table %q: %w", table, err)}
@@ -160,6 +182,17 @@ func (s *DynamoDBSource) read(ctx context.Context, table string, opts source.Rea
 					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to unmarshal DynamoDB item: %w", err)}
 					return
 				}
+
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(m)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							results <- source.RecordBatchResult{Err: err}
+							return
+						}
+					}
+					accBytes += rowBytes
+				}
 				items = append(items, m)
 			}
 
@@ -168,18 +201,10 @@ func (s *DynamoDBSource) read(ctx context.Context, table string, opts source.Rea
 					break
 				}
 
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
+				if err := flush(); err != nil {
+					results <- source.RecordBatchResult{Err: err}
 					return
 				}
-
-				batchNum++
-				totalRows += int64(len(items))
-				config.Debug("[DYNAMODB] Batch %d: %d items read in %v (total: %d)", batchNum, len(items), time.Since(startBatch), totalRows)
-
-				results <- source.RecordBatchResult{Batch: record}
-				items = nil
 			}
 		}
 

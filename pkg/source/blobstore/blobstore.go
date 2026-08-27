@@ -1107,7 +1107,29 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 	items := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	lineNum := 0
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+
+		*batchNum++
+		*totalRows += int64(len(items))
+		config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
+
+		if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+			return err
+		}
+		items = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1122,24 +1144,24 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 			return fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
 		}
 
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, item)
 
-		if len(items) >= batchSize {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert to Arrow: %w", err)
-			}
-
-			*batchNum++
-			*totalRows += int64(len(items))
-			config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-			if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+		reachedLimit := opts.Limit > 0 && *totalRows+int64(len(items)) >= int64(opts.Limit)
+		if len(items) >= batchSize || reachedLimit {
+			if err := flush(); err != nil {
 				return err
 			}
-			items = make([]map[string]interface{}, 0, batchSize)
 
-			if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
+			if reachedLimit {
 				break
 			}
 		}
@@ -1149,22 +1171,7 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 		return fmt.Errorf("error reading JSONL file: %w", err)
 	}
 
-	if len(items) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(items))
-		config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-		if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return flush()
 }
 
 func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tableEncoding string, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
@@ -1181,7 +1188,29 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 	}
 
 	rows := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	lineNum := 1
+
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
+		}
+
+		*batchNum++
+		*totalRows += int64(len(rows))
+		config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
+
+		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+			return err
+		}
+		rows = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		record, err := csvReader.Read()
@@ -1199,45 +1228,30 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 				row[h] = parseCSVValue(record[i])
 			}
 		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(rows) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		rows = append(rows, row)
 
-		if len(rows) >= batchSize {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
-			}
-
-			*batchNum++
-			*totalRows += int64(len(rows))
-			config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
-
-			if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+		reachedLimit := opts.Limit > 0 && *totalRows+int64(len(rows)) >= int64(opts.Limit)
+		if len(rows) >= batchSize || reachedLimit {
+			if err := flush(); err != nil {
 				return err
 			}
-			rows = make([]map[string]interface{}, 0, batchSize)
 
-			if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
+			if reachedLimit {
 				break
 			}
 		}
 	}
 
-	if len(rows) > 0 {
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(rows))
-		config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
-
-		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return flush()
 }
 
 func sendRecordBatchWithMetadata(results chan<- source.RecordBatchResult, record arrow.RecordBatch, metadata blobstoreFileMetadata) error {

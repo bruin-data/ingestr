@@ -626,6 +626,7 @@ func emitSegmentExport(ctx context.Context, data []byte, segmentID string, opts 
 	}
 
 	batch := make([]map[string]interface{}, 0, subscriptionsBatch)
+	var accBytes int64
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -636,6 +637,7 @@ func emitSegmentExport(ctx context.Context, data []byte, segmentID string, opts 
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -660,6 +662,16 @@ func emitSegmentExport(ctx context.Context, data []byte, segmentID string, opts 
 				return fmt.Errorf("failed to parse user record: %w", err)
 			}
 			user["segment_id"] = segmentID
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(user)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						_ = rc.Close()
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			batch = append(batch, user)
 			if len(batch) >= subscriptionsBatch {
 				if err := flush(); err != nil {

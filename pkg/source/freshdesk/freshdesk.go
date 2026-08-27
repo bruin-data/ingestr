@@ -213,6 +213,30 @@ func (s *FreshdeskSource) paginateAndSend(ctx context.Context, endpoint, label s
 	totalProcessed := 0
 	limit := opts.Limit
 
+	var rows []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+
+		totalProcessed += len(rows)
+		rows = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -251,7 +275,6 @@ func (s *FreshdeskSource) paginateAndSend(ctx context.Context, endpoint, label s
 			break
 		}
 
-		rows := make([]map[string]interface{}, 0, len(items))
 		endOutOfRange := false
 		for _, row := range items {
 			if ts, ok := row["updated_at"].(string); ok {
@@ -266,6 +289,15 @@ func (s *FreshdeskSource) paginateAndSend(ctx context.Context, endpoint, label s
 				}
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(rows) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			rows = append(rows, row)
 
 			if limit > 0 && totalProcessed+len(rows) >= limit {
@@ -275,19 +307,8 @@ func (s *FreshdeskSource) paginateAndSend(ctx context.Context, endpoint, label s
 			}
 		}
 
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
-			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalProcessed += len(rows)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if endOutOfRange {
@@ -330,6 +351,30 @@ func (s *FreshdeskSource) readTicketsSearch(ctx context.Context, query string, o
 	totalProcessed := 0
 	limit := opts.Limit
 
+	var rows []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for search tickets: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+
+		totalProcessed += len(rows)
+		rows = nil
+		accBytes = 0
+		return nil
+	}
+
 	for page := 1; page <= searchMaxPages; page++ {
 		select {
 		case <-ctx.Done():
@@ -358,7 +403,6 @@ func (s *FreshdeskSource) readTicketsSearch(ctx context.Context, query string, o
 			break
 		}
 
-		rows := make([]map[string]interface{}, 0, len(rawResults))
 		done := false
 		for _, item := range rawResults {
 			row, ok := item.(map[string]interface{})
@@ -377,6 +421,15 @@ func (s *FreshdeskSource) readTicketsSearch(ctx context.Context, query string, o
 				}
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(rows) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			rows = append(rows, row)
 
 			if limit > 0 && totalProcessed+len(rows) >= limit {
@@ -386,19 +439,8 @@ func (s *FreshdeskSource) readTicketsSearch(ctx context.Context, query string, o
 			}
 		}
 
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for search tickets: %w", err)
-			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			totalProcessed += len(rows)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if done || len(rawResults) < 30 {

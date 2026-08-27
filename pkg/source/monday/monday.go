@@ -719,7 +719,7 @@ func (s *MondaySource) readAccountRoles(ctx context.Context, opts source.ReadOpt
 		}
 	}
 	`
-	return s.readSimpleList(ctx, results, query, "account_roles", accountRolesFields, s.transformAccountRoles, "account roles", opts.ExcludeColumns)
+	return s.readSimpleList(ctx, results, query, "account_roles", accountRolesFields, s.transformAccountRoles, "account roles", opts.ExcludeColumns, opts.MaxBatchBytes)
 }
 
 func (s *MondaySource) transformAccountRoles(node map[string]interface{}) map[string]interface{} {
@@ -807,6 +807,7 @@ func (s *MondaySource) readPaginatedList(
 
 	itemsChan, errChan := s.paginateGraphQL(ctx, query, fieldName, maxPageSize, nil)
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -819,6 +820,7 @@ func (s *MondaySource) readPaginatedList(
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -842,7 +844,17 @@ func (s *MondaySource) readPaginatedList(
 				config.Debug("[Monday] Finished reading %s: %d total records", logName, totalProcessed)
 				return nil
 			}
-			batch = append(batch, transform(item))
+			row := transform(item)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 			totalProcessed++
 			if len(batch) >= defaultBatchSize {
 				if err := flush(); err != nil {
@@ -941,8 +953,10 @@ func (s *MondaySource) sendUpdatesBatches(
 	updates []map[string]interface{},
 	results chan<- source.RecordBatchResult,
 	excludeColumns []string,
+	maxBatchBytes int64,
 ) error {
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -955,11 +969,22 @@ func (s *MondaySource) sendUpdatesBatches(
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
 	for _, update := range updates {
-		batch = append(batch, normalizeDictionaries(update))
+		row := normalizeDictionaries(update)
+		if maxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > maxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
 		totalProcessed++
 		if len(batch) >= defaultBatchSize {
 			if err := flush(); err != nil {
@@ -982,8 +1007,10 @@ func (s *MondaySource) consumeUpdatesChan(
 	errCh <-chan error,
 	excludeColumns []string,
 	results chan<- source.RecordBatchResult,
+	maxBatchBytes int64,
 ) error {
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -996,6 +1023,7 @@ func (s *MondaySource) consumeUpdatesChan(
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -1026,7 +1054,17 @@ func (s *MondaySource) consumeUpdatesChan(
 				config.Debug("[Monday] Finished reading updates: %d total records", totalProcessed)
 				return nil
 			}
-			batch = append(batch, normalizeDictionaries(update))
+			row := normalizeDictionaries(update)
+			if maxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > maxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 			totalProcessed++
 			if len(batch) >= defaultBatchSize {
 				if err := flush(); err != nil {
@@ -1201,7 +1239,7 @@ func (s *MondaySource) readUpdates(ctx context.Context, opts source.ReadOptions,
 		if len(updates) == 0 {
 			return nil
 		}
-		return s.sendUpdatesBatches(updates, results, opts.ExcludeColumns)
+		return s.sendUpdatesBatches(updates, results, opts.ExcludeColumns, opts.MaxBatchBytes)
 	}
 
 	startTime, endTime, ok := parseDateRange(startStr, endStr)
@@ -1214,7 +1252,7 @@ func (s *MondaySource) readUpdates(ctx context.Context, opts source.ReadOptions,
 		if len(updates) == 0 {
 			return nil
 		}
-		return s.sendUpdatesBatches(updates, results, opts.ExcludeColumns)
+		return s.sendUpdatesBatches(updates, results, opts.ExcludeColumns, opts.MaxBatchBytes)
 	}
 	if startTime.After(endTime) {
 		return fmt.Errorf("invalid date range: from_date after to_date")
@@ -1285,7 +1323,7 @@ func (s *MondaySource) readUpdates(ctx context.Context, opts source.ReadOptions,
 		close(updatesCh)
 	}()
 
-	return s.consumeUpdatesChan(ctxFetch, updatesCh, workerErrCh, opts.ExcludeColumns, results)
+	return s.consumeUpdatesChan(ctxFetch, updatesCh, workerErrCh, opts.ExcludeColumns, results, opts.MaxBatchBytes)
 }
 
 // readTeams reads teams in a single request and sends them as record batches.
@@ -1304,7 +1342,7 @@ func (s *MondaySource) readTeams(ctx context.Context, opts source.ReadOptions, r
 		}
 	}
 	`
-	return s.readSimpleList(ctx, results, query, "teams", teamsFields, normalizeDictionaries, "teams", opts.ExcludeColumns)
+	return s.readSimpleList(ctx, results, query, "teams", teamsFields, normalizeDictionaries, "teams", opts.ExcludeColumns, opts.MaxBatchBytes)
 }
 
 // readTags reads tags in a single request and sends them as record batches.
@@ -1318,7 +1356,7 @@ func (s *MondaySource) readTags(ctx context.Context, opts source.ReadOptions, re
 		}
 	}
 	`
-	return s.readSimpleList(ctx, results, query, "tags", tagsFields, normalizeDictionaries, "tags", opts.ExcludeColumns)
+	return s.readSimpleList(ctx, results, query, "tags", tagsFields, normalizeDictionaries, "tags", opts.ExcludeColumns, opts.MaxBatchBytes)
 }
 
 // readCustomActivities reads custom activities in a single request and sends them as record batches.
@@ -1334,7 +1372,7 @@ func (s *MondaySource) readCustomActivities(ctx context.Context, opts source.Rea
 		}
 	}
 	`
-	return s.readSimpleList(ctx, results, query, "custom_activity", customActivitiesFields, normalizeDictionaries, "custom activities", opts.ExcludeColumns)
+	return s.readSimpleList(ctx, results, query, "custom_activity", customActivitiesFields, normalizeDictionaries, "custom activities", opts.ExcludeColumns, opts.MaxBatchBytes)
 }
 
 func (s *MondaySource) readSimpleList(
@@ -1346,6 +1384,7 @@ func (s *MondaySource) readSimpleList(
 	transform func(map[string]interface{}) map[string]interface{},
 	logName string,
 	excludeColumns []string,
+	maxBatchBytes int64,
 ) error {
 	config.Debug("[Monday] Reading %s", logName)
 
@@ -1365,6 +1404,7 @@ func (s *MondaySource) readSimpleList(
 	}
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -1377,6 +1417,7 @@ func (s *MondaySource) readSimpleList(
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -1385,7 +1426,17 @@ func (s *MondaySource) readSimpleList(
 		if !ok {
 			continue
 		}
-		batch = append(batch, transform(itemMap))
+		row := transform(itemMap)
+		if maxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > maxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
 		totalProcessed++
 		if len(batch) >= defaultBatchSize {
 			if err := flush(); err != nil {
@@ -1510,6 +1561,7 @@ func (s *MondaySource) readItems(ctx context.Context, opts source.ReadOptions, r
 	`
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -1522,6 +1574,7 @@ func (s *MondaySource) readItems(ctx context.Context, opts source.ReadOptions, r
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -1532,7 +1585,17 @@ func (s *MondaySource) readItems(ctx context.Context, opts source.ReadOptions, r
 				continue
 			}
 			itemMap["board_id"] = boardID
-			batch = append(batch, normalizeDictionaries(itemMap))
+			row := normalizeDictionaries(itemMap)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 			totalProcessed++
 			if len(batch) >= defaultBatchSize {
 				if err := flush(); err != nil {
@@ -1661,6 +1724,7 @@ func (s *MondaySource) readBoardScopedUpdates(ctx context.Context, opts source.R
 	`
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -1673,6 +1737,7 @@ func (s *MondaySource) readBoardScopedUpdates(ctx context.Context, opts source.R
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -1700,7 +1765,17 @@ func (s *MondaySource) readBoardScopedUpdates(ctx context.Context, opts source.R
 					"creator":    upd["creator"],
 					"item":       map[string]interface{}{"id": item["id"], "name": item["name"]},
 				}
-				batch = append(batch, normalizeDictionaries(rec))
+				row := normalizeDictionaries(rec)
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
 				totalProcessed++
 				if len(batch) >= defaultBatchSize {
 					if err := flush(); err != nil {
@@ -1939,6 +2014,7 @@ func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOpt
 	}
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -1951,6 +2027,7 @@ func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOpt
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -1995,6 +2072,15 @@ func (s *MondaySource) readBoardColumns(ctx context.Context, opts source.ReadOpt
 				}
 				if v, ok := colMap["id"]; ok && v != nil {
 					row["id"] = fmt.Sprint(v)
+				}
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
 				}
 				batch = append(batch, row)
 				totalProcessed++
@@ -2045,6 +2131,7 @@ func (s *MondaySource) readBoardViews(ctx context.Context, opts source.ReadOptio
 	}
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -2057,6 +2144,7 @@ func (s *MondaySource) readBoardViews(ctx context.Context, opts source.ReadOptio
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -2100,6 +2188,15 @@ func (s *MondaySource) readBoardViews(ctx context.Context, opts source.ReadOptio
 				}
 				if v, ok := viewMap["id"]; ok && v != nil {
 					row["id"] = fmt.Sprint(v)
+				}
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
 				}
 				batch = append(batch, row)
 				totalProcessed++
@@ -2408,6 +2505,7 @@ collectLoop:
 	}()
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -2420,6 +2518,7 @@ collectLoop:
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -2442,7 +2541,17 @@ collectLoop:
 				return nil
 			}
 
-			batch = append(batch, s.transformWorkspaces(wsMap))
+			row := s.transformWorkspaces(wsMap)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 			totalProcessed++
 			if len(batch) >= defaultBatchSize {
 				if err := flush(); err != nil {
@@ -2596,6 +2705,7 @@ collectLoop:
 	}()
 
 	batch := make([]map[string]interface{}, 0, defaultBatchSize)
+	var accBytes int64
 	totalProcessed := 0
 
 	flush := func() error {
@@ -2608,6 +2718,7 @@ collectLoop:
 		}
 		results <- source.RecordBatchResult{Batch: record}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -2630,7 +2741,17 @@ collectLoop:
 				return nil
 			}
 
-			batch = append(batch, normalizeDictionaries(webhookMap))
+			row := normalizeDictionaries(webhookMap)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 			totalProcessed++
 			if len(batch) >= defaultBatchSize {
 				if err := flush(); err != nil {

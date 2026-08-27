@@ -208,7 +208,24 @@ func (s *InfluxDBSource) readV3(ctx context.Context, measurement string, opts so
 		}
 
 		var items []map[string]any
+		var accBytes int64
 		totalSent := 0
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert InfluxDB records to Arrow: %w", err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			totalSent += len(items)
+			config.Debug("[INFLUXDB] Sent %d records (total: %d)", len(items), totalSent)
+			items = nil
+			accBytes = 0
+			return nil
+		}
 
 		for iterator.Next() {
 			select {
@@ -219,18 +236,23 @@ func (s *InfluxDBSource) readV3(ctx context.Context, measurement string, opts so
 			}
 
 			row := iterator.Value()
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						results <- source.RecordBatchResult{Err: err}
+						return
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, row)
 
 			if len(items) >= batchSize {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert InfluxDB records to Arrow: %w", err)}
+				if err := flush(); err != nil {
+					results <- source.RecordBatchResult{Err: err}
 					return
 				}
-				results <- source.RecordBatchResult{Batch: record}
-				totalSent += len(items)
-				config.Debug("[INFLUXDB] Sent %d records (total: %d)", len(items), totalSent)
-				items = nil
 			}
 		}
 
@@ -239,14 +261,9 @@ func (s *InfluxDBSource) readV3(ctx context.Context, measurement string, opts so
 			return
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert InfluxDB records to Arrow: %w", err)}
-				return
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
 		}
 
 		config.Debug("[INFLUXDB] Read completed (v3), total records: %d", totalSent)
@@ -299,7 +316,24 @@ func (s *InfluxDBSource) readFlux(ctx context.Context, measurement string, opts 
 		}
 
 		var items []map[string]any
+		var accBytes int64
 		totalSent := 0
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+			rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert InfluxDB records to Arrow: %w", err)
+			}
+			results <- source.RecordBatchResult{Batch: rec}
+			totalSent += len(items)
+			config.Debug("[INFLUXDB] Sent %d records (total: %d)", len(items), totalSent)
+			items = nil
+			accBytes = 0
+			return nil
+		}
 
 		for result.Next() {
 			select {
@@ -322,19 +356,24 @@ func (s *InfluxDBSource) readFlux(ctx context.Context, measurement string, opts 
 			}
 
 			if len(item) > 0 {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(item)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							results <- source.RecordBatchResult{Err: err}
+							return
+						}
+					}
+					accBytes += rowBytes
+				}
 				items = append(items, item)
 			}
 
 			if len(items) >= batchSize {
-				rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert InfluxDB records to Arrow: %w", err)}
+				if err := flush(); err != nil {
+					results <- source.RecordBatchResult{Err: err}
 					return
 				}
-				results <- source.RecordBatchResult{Batch: rec}
-				totalSent += len(items)
-				config.Debug("[INFLUXDB] Sent %d records (total: %d)", len(items), totalSent)
-				items = nil
 			}
 		}
 
@@ -343,14 +382,9 @@ func (s *InfluxDBSource) readFlux(ctx context.Context, measurement string, opts 
 			return
 		}
 
-		if len(items) > 0 {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert InfluxDB records to Arrow: %w", err)}
-				return
-			}
-			results <- source.RecordBatchResult{Batch: rec}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
 		}
 
 		config.Debug("[INFLUXDB] Read completed (flux), total records: %d", totalSent)
