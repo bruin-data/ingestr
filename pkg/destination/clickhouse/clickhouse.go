@@ -645,6 +645,9 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 			DataType: mapClickHouseTypeToSchema(colType),
 			Nullable: strings.HasPrefix(colType, "Nullable("),
 		}
+		if col.DataType == schema.TypeDecimal {
+			col.Precision, col.Scale = parseClickHouseDecimal(colType)
+		}
 
 		columns = append(columns, col)
 	}
@@ -662,6 +665,52 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 		Schema:  database,
 		Columns: columns,
 	}, nil
+}
+
+var (
+	// DESCRIBE renders this form with a space after the comma.
+	clickHouseDecimalPS = regexp.MustCompile(`(?i)^Decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
+	clickHouseDecimalW  = regexp.MustCompile(`(?i)^Decimal(32|64|128|256)\(\s*(\d+)\s*\)$`)
+)
+
+// parseClickHouseDecimal extracts precision and scale from a ClickHouse decimal type.
+//
+// Leaving them at zero makes schemaevolution.normalizedDecimal read the column back as a
+// phantom Decimal(38, 0); widening a real Decimal(38, 9) against that asks for precision
+// 38+9=47 and fails every sync after the first.
+func parseClickHouseDecimal(colType string) (precision, scale int) {
+	t := strings.TrimSpace(colType)
+unwrap:
+	for {
+		switch {
+		case strings.HasPrefix(t, "Nullable("):
+			t = strings.TrimSuffix(strings.TrimPrefix(t, "Nullable("), ")")
+		case strings.HasPrefix(t, "LowCardinality("):
+			t = strings.TrimSuffix(strings.TrimPrefix(t, "LowCardinality("), ")")
+		default:
+			break unwrap
+		}
+		t = strings.TrimSpace(t)
+	}
+	if m := clickHouseDecimalPS.FindStringSubmatch(t); m != nil {
+		p, _ := strconv.Atoi(m[1])
+		s, _ := strconv.Atoi(m[2])
+		return p, s
+	}
+	if m := clickHouseDecimalW.FindStringSubmatch(t); m != nil {
+		s, _ := strconv.Atoi(m[2])
+		switch m[1] {
+		case "32":
+			return 9, s
+		case "64":
+			return 18, s
+		case "128":
+			return 38, s
+		case "256":
+			return 76, s
+		}
+	}
+	return 0, 0
 }
 
 func mapClickHouseTypeToSchema(colType string) schema.DataType {

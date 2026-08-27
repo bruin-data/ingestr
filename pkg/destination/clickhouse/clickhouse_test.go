@@ -406,3 +406,58 @@ func TestBeginTransactionUnsupported(t *testing.T) {
 		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
 	}
 }
+
+func TestParseClickHouseDecimal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		colType   string
+		precision int
+		scale     int
+	}{
+		// DESCRIBE renders Decimal(P, S) WITH a space; a parser that assumes
+		// "Decimal(38,9)" silently returns 0,0 and reintroduces the bug below.
+		{"Decimal(38, 9)", 38, 9},
+		{"Decimal(38,9)", 38, 9},
+		{"Nullable(Decimal(38, 9))", 38, 9},
+		{"LowCardinality(Decimal(18, 4))", 18, 4},
+		{"Decimal(30, 10)", 30, 10},
+		// Width-suffixed forms: precision is implied, and this is what ingestr's
+		// own mapper emits (Decimal128(9) by default).
+		{"Decimal32(2)", 9, 2},
+		{"Decimal64(4)", 18, 4},
+		{"Decimal128(9)", 38, 9},
+		{"Nullable(Decimal128(9))", 38, 9},
+		{"Decimal256(20)", 76, 20},
+		// Non-decimals must not report a precision.
+		{"String", 0, 0},
+		{"Nullable(DateTime64(6, 'UTC'))", 0, 0},
+	}
+
+	for _, tt := range tests {
+		p, s := parseClickHouseDecimal(tt.colType)
+		if p != tt.precision || s != tt.scale {
+			t.Errorf("parseClickHouseDecimal(%q) = (%d, %d), want (%d, %d)",
+				tt.colType, p, s, tt.precision, tt.scale)
+		}
+	}
+}
+
+// Regression: the destination column must report its scale. Read back as
+// Decimal(38, 0) the widener computes 38 integer digits and then requires
+// precision 38+9=47, failing every sync after the first.
+func TestParseClickHouseDecimalPreservesScaleForWidening(t *testing.T) {
+	t.Parallel()
+
+	const sourceScale = 9
+
+	p, s := parseClickHouseDecimal("Nullable(Decimal(38, 9))")
+	if p != 38 || s != sourceScale {
+		t.Fatalf("got (%d, %d), want (38, %d)", p, s, sourceScale)
+	}
+
+	intDigits := p - s
+	if required := intDigits + sourceScale; required > 38 {
+		t.Fatalf("widening requires precision %d, exceeds the maximum of 38", required)
+	}
+}
