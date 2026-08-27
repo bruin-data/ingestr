@@ -112,3 +112,4 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Internet Society Pulse](/supported-sources/isoc-pulse.md)
 - [Kalshi](/supported-sources/kalshi.md)
 - [Polymarket](/supported-sources/polymarket.md)
+- [RIPEstat](/supported-sources/ripestat.md)
