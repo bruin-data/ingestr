@@ -115,6 +115,8 @@ Pull requests are welcome. However, please open an issue first to discuss what y
 > [!NOTE]
 > After cloning `ingestr` make sure to run `make setup` to install githooks.
 
+A [daily Codex Security scan](.github/SECURITY_SCANNING.md) runs against the default branch; its findings are reviewed under Security → Code scanning.
+
 ## Supported sources & destinations
 <table>
     <tr>

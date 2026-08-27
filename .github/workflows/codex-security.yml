@@ -1,0 +1,196 @@
+name: codex_security
+
+on:
+  schedule:
+    # Daily at 04:27 UTC. Deliberately off the hour: GitHub queues scheduled
+    # workflows, and runs starting on the hour are the most likely to be delayed.
+    - cron: '27 4 * * *'
+  workflow_dispatch:
+    inputs:
+      max_cost:
+        description: 'Estimated USD cost ceiling for this run (blank uses CODEX_SECURITY_MAX_COST)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  security-events: write
+  # upload-sarif reads the workflow run; only required in private repositories.
+  actions: read
+
+# A full scan is expensive, and Code Scanning tracks alerts per (ref, category),
+# so two concurrent uploads for the same ref would fight over alert state.
+concurrency:
+  group: codex-security-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  CODEX_SECURITY_VERSION: '0.1.20'
+  # Stops the scan once estimated spend exceeds this many USD. A stopped scan
+  # has incomplete coverage, which fails the job rather than uploading partial
+  # results. Raise it here if scans start hitting the ceiling.
+  CODEX_SECURITY_MAX_COST: '20'
+  # Scan state, artifacts, and the exported SARIF all live outside the checkout
+  # so findings and source snippets never become repository files. The scanner
+  # also requires its output directory to be outside any enclosing git worktree.
+  SCAN_ROOT: /tmp/codex-security
+  CODEX_SECURITY_STATE_DIR: /tmp/codex-security/state
+  CODEX_SECURITY_NO_UPDATE_NOTICE: '1'
+
+jobs:
+  scan:
+    name: full scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Resolve default branch
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          branch="$DEFAULT_BRANCH"
+          if [ -z "$branch" ]; then
+            branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
+          fi
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Pinned explicitly so a manual dispatch from a topic branch still
+          # scans, and reports against, the default branch.
+          ref: ${{ steps.target.outputs.branch }}
+          # The scanner runs an agent with shell access inside the checkout;
+          # keep the Actions token out of the working tree.
+          persist-credentials: false
+
+      - name: Record scanned commit
+        id: commit
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Setup Python
+        id: python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Codex Security
+        run: npm install -g "@openai/codex-security@${CODEX_SECURITY_VERSION}"
+
+      - name: Prepare scan workspace
+        run: |
+          rm -rf "$SCAN_ROOT"
+          mkdir -p "$SCAN_ROOT"
+          # The scanner rejects an output location that other users can read.
+          chmod 700 "$SCAN_ROOT"
+
+      - name: Run Codex Security scan
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          INPUT_MAX_COST: ${{ inputs.max_cost }}
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "::error::OPENAI_API_KEY is not available. Add it as an Actions secret for this repository."
+            exit 1
+          fi
+
+          max_cost="${INPUT_MAX_COST:-}"
+          if [ -z "$max_cost" ]; then
+            max_cost="$CODEX_SECURITY_MAX_COST"
+          fi
+          case "$max_cost" in
+            ''|*[!0-9.]*)
+              echo "::error::max_cost must be a number, got '${max_cost}'."
+              exit 1
+              ;;
+          esac
+
+          status=0
+          codex-security scan "$GITHUB_WORKSPACE" \
+            --auth api-key \
+            --headless \
+            --output-dir "${SCAN_ROOT}/results" \
+            --max-cost "$max_cost" || status=$?
+
+          # Exit 0 means the scan completed with full coverage, whether or not it
+          # found vulnerabilities. Findings are triaged in Code Scanning and must
+          # not fail this workflow. Every other status is operational: the scan
+          # never produced a trustworthy full picture, so uploading its partial
+          # results would resolve alerts it simply never got around to re-finding.
+          case "$status" in
+            0)
+              echo "Scan completed with full coverage. Findings, if any, are reported through Code Scanning."
+              ;;
+            2)
+              echo "::error::Codex Security could not complete the scan (invalid input, incomplete coverage, or a runtime error). Nothing is uploaded, so existing Code Scanning alerts are left untouched. If the scan stopped on the ${max_cost} USD ceiling, raise CODEX_SECURITY_MAX_COST."
+              ;;
+            130|143)
+              echo "::error::Codex Security was interrupted before it finished (exit ${status})."
+              ;;
+            *)
+              echo "::error::Codex Security exited with an unexpected status ${status}."
+              ;;
+          esac
+          exit "$status"
+
+      - name: Export SARIF
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          codex-security export "${SCAN_ROOT}/results" \
+            --export-format sarif \
+            --source-root "$GITHUB_WORKSPACE" \
+            --output "${SCAN_ROOT}/results.sarif"
+
+          if [ ! -s "${SCAN_ROOT}/results.sarif" ]; then
+            echo "::error::SARIF export produced no output at ${SCAN_ROOT}/results.sarif."
+            exit 1
+          fi
+
+      - name: Upload SARIF to Code Scanning
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        with:
+          sarif_file: ${{ env.SCAN_ROOT }}/results.sarif
+          # Report against the default branch even when dispatched elsewhere.
+          ref: refs/heads/${{ steps.target.outputs.branch }}
+          sha: ${{ steps.commit.outputs.sha }}
+          # Scopes alert tracking to this tool so adding another scanner later
+          # does not resolve each other's alerts.
+          category: codex-security
+
+      - name: Summarize findings
+        env:
+          BRANCH: ${{ steps.target.outputs.branch }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          sarif="${SCAN_ROOT}/results.sarif"
+          total="$(jq '[.runs[].results[]?] | length' "$sarif")"
+          {
+            echo "### Codex Security scan"
+            echo
+            echo "Scanned \`${BRANCH}\` at \`${SHA}\`."
+            echo
+            if [ "$total" -eq 0 ]; then
+              echo "No findings reported."
+            else
+              echo "Reported ${total} finding(s):"
+              echo
+              # Severity levels only. Titles, locations, and messages stay in
+              # Code Scanning rather than the job log.
+              jq -r '[.runs[].results[]?]
+                     | group_by(.level // "warning")
+                     | .[]
+                     | "- \(.[0].level // "warning"): \(length)"' "$sarif"
+            fi
+            echo
+            echo "Review them under [Security → Code scanning](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/security/code-scanning)."
+          } >> "$GITHUB_STEP_SUMMARY"
