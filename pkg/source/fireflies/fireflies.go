@@ -357,19 +357,39 @@ func (s *FirefliesSource) fetchAndSend(
 	}
 
 	var transformed []map[string]interface{}
-	for _, item := range items {
-		if itemMap, ok := item.(map[string]interface{}); ok {
-			transformed = append(transformed, transform(itemMap))
+	var accBytes int64
+	flush := func() error {
+		if len(transformed) == 0 {
+			return nil
 		}
-	}
-
-	if len(transformed) > 0 {
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(transformed, fields, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
 		}
 		config.Debug("[FIREFLIES] Sending %d %s records", len(transformed), tableName)
 		results <- source.RecordBatchResult{Batch: record}
+		transformed = nil
+		accBytes = 0
+		return nil
+	}
+	for _, item := range items {
+		if itemMap, ok := item.(map[string]interface{}); ok {
+			row := transform(itemMap)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(transformed) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			transformed = append(transformed, row)
+		}
+	}
+
+	if err := flush(); err != nil {
+		return err
 	}
 
 	return nil
@@ -430,17 +450,11 @@ func (s *FirefliesSource) paginateAndSend(
 		config.Debug("[FIREFLIES] Got %d items", len(items))
 
 		var transformed []map[string]interface{}
-		for _, item := range items {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				transformed = append(transformed, transform(itemMap))
+		var accBytes int64
+		flush := func() error {
+			if len(transformed) == 0 {
+				return nil
 			}
-
-			if opts.Limit > 0 && totalSent+len(transformed) >= opts.Limit {
-				break
-			}
-		}
-
-		if len(transformed) > 0 {
 			record, err := arrowconv.ItemsToArrowRecordWithSchema(transformed, fields, opts.ExcludeColumns)
 			if err != nil {
 				return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
@@ -450,6 +464,32 @@ func (s *FirefliesSource) paginateAndSend(
 			config.Debug("[FIREFLIES] Sending batch %d with %d %s", batchNum, len(transformed), tableName)
 			results <- source.RecordBatchResult{Batch: record}
 			totalSent += len(transformed)
+			transformed = nil
+			accBytes = 0
+			return nil
+		}
+		for _, item := range items {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				row := transform(itemMap)
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(transformed) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				transformed = append(transformed, row)
+			}
+
+			if opts.Limit > 0 && totalSent+len(transformed) >= opts.Limit {
+				break
+			}
+		}
+
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -994,13 +1034,38 @@ func (s *FirefliesSource) readTranscripts(ctx context.Context, opts source.ReadO
 					res.items = res.items[:remaining]
 				}
 
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(res.items, transcriptFields, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert transcripts to Arrow: %w", err)
+				var batch []map[string]interface{}
+				var accBytes int64
+				flushBatch := func() error {
+					if len(batch) == 0 {
+						return nil
+					}
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, transcriptFields, opts.ExcludeColumns)
+					if err != nil {
+						return fmt.Errorf("failed to convert transcripts to Arrow: %w", err)
+					}
+					results <- source.RecordBatchResult{Batch: record}
+					totalSent += len(batch)
+					config.Debug("[FIREFLIES] Sent batch with %d transcripts (total: %d)", len(batch), totalSent)
+					batch = nil
+					accBytes = 0
+					return nil
 				}
-				results <- source.RecordBatchResult{Batch: record}
-				totalSent += len(res.items)
-				config.Debug("[FIREFLIES] Sent batch with %d transcripts (total: %d)", len(res.items), totalSent)
+				for _, row := range res.items {
+					if opts.MaxBatchBytes > 0 {
+						rowBytes := arrowconv.RowBytes(row)
+						if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+							if err := flushBatch(); err != nil {
+								return err
+							}
+						}
+						accBytes += rowBytes
+					}
+					batch = append(batch, row)
+				}
+				if err := flushBatch(); err != nil {
+					return err
+				}
 			}
 
 			if !res.hasMore {
@@ -1340,21 +1405,42 @@ func (s *FirefliesSource) readAnalytics(ctx context.Context, table string, opts 
 
 	// Filter out nil results and send
 	var allItems []map[string]interface{}
-	for _, item := range resultItems {
-		if item != nil {
-			allItems = append(allItems, item)
+	var accBytes int64
+	sentCount := 0
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
 		}
-	}
-
-	if len(allItems) > 0 {
 		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, analyticsFields, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert analytics to Arrow: %w", err)
 		}
 		results <- source.RecordBatchResult{Batch: record}
+		sentCount += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
+	for _, item := range resultItems {
+		if item != nil {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			allItems = append(allItems, item)
+		}
 	}
 
-	config.Debug("[FIREFLIES] Sent %d analytics records", len(allItems))
+	if err := flush(); err != nil {
+		return err
+	}
+
+	config.Debug("[FIREFLIES] Sent %d analytics records", sentCount)
 	return nil
 }
 

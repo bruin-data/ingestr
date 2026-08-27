@@ -208,18 +208,43 @@ func (s *BallDontLieSource) stream(ctx context.Context, cfg tableConfig, opts so
 	return nil
 }
 
-// sendBatch converts a page of items to an Arrow record and streams it to the
-// results channel. Empty pages are skipped so no zero-row batch is emitted.
+// sendBatch streams a page as one or more Arrow records, flushing before a
+// record would exceed opts.MaxBatchBytes. A cap of 0 emits one record per page.
 func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	if len(items) == 0 {
 		return nil
 	}
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert balldontlie data to Arrow: %w", err)
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert balldontlie data to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 func checkResponse(endpoint string, resp *httpclient.Response) error {

@@ -974,6 +974,12 @@ func RowBytes(item map[string]interface{}) int64 {
 	return n
 }
 
+// ValueBytes returns the approximate content size of a decoded value using the
+// same estimation as RowBytes.
+func ValueBytes(v interface{}) int64 {
+	return valueLen(v)
+}
+
 // CellsBytes is the []string analog of RowBytes for raw CSV cells: it sums each
 // cell through valueLen so the per-value byte rule stays single-sourced.
 func CellsBytes(cells []string) int64 {

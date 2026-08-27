@@ -579,13 +579,36 @@ func emitPage(label string, opts source.ReadOptions, results chan<- source.Recor
 	if len(items) == 0 {
 		return nil
 	}
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+	flush := func(batch []map[string]interface{}) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		config.Debug("[APPLEADS] %s: sent %d records", label, len(batch))
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[APPLEADS] %s: sent %d records", label, len(items))
-	return nil
+	if opts.MaxBatchBytes <= 0 {
+		return flush(items)
+	}
+	var batch []map[string]interface{}
+	var accBytes int64
+	for _, row := range items {
+		rowBytes := arrowconv.RowBytes(row)
+		if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+			if err := flush(batch); err != nil {
+				return err
+			}
+			batch = nil
+			accBytes = 0
+		}
+		accBytes += rowBytes
+		batch = append(batch, row)
+	}
+	return flush(batch)
 }
 
 func (s *AppleAdsSource) readCampaigns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {

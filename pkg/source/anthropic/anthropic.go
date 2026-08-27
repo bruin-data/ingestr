@@ -203,6 +203,22 @@ func (s *AnthropicSource) readClaudeCodeUsage(ctx context.Context, opts source.R
 	totalLimit := opts.Limit
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert items to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
 
 	for currentDate := startDate; !currentDate.After(endDate); currentDate = currentDate.AddDate(0, 0, 1) {
 		select {
@@ -251,16 +267,23 @@ func (s *AnthropicSource) readClaudeCodeUsage(ctx context.Context, opts source.R
 					continue
 				}
 
-				allItems = append(allItems, flattenClaudeCodeUsageItem(itemMap))
+				normalized := flattenClaudeCodeUsageItem(itemMap)
+
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(normalized)
+					if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				allItems = append(allItems, normalized)
 
 				if len(allItems) >= batchSize {
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-					if err != nil {
-						return fmt.Errorf("failed to convert items to Arrow: %w", err)
+					if err := flush(); err != nil {
+						return err
 					}
-					results <- source.RecordBatchResult{Batch: record}
-					totalSent += len(allItems)
-					allItems = nil
 				}
 			}
 
@@ -276,13 +299,8 @@ func (s *AnthropicSource) readClaudeCodeUsage(ctx context.Context, opts source.R
 		}
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert items to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(allItems)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[ANTHROPIC] Sent %d claude_code_usage records", totalSent)
@@ -404,7 +422,23 @@ func (s *AnthropicSource) readUsageReport(ctx context.Context, opts source.ReadO
 
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
 	var nextPage string
+
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert items to Arrow: %w", err)
+		}
+		resultsChan <- source.RecordBatchResult{Batch: record}
+		totalSent += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -462,16 +496,22 @@ func (s *AnthropicSource) readUsageReport(ctx context.Context, opts source.ReadO
 				}
 
 				item := flattenUsageReportItem(resultMap, startingAt, endingAt)
+
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(item)
+					if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
 				allItems = append(allItems, item)
 
 				if len(allItems) >= batchSize {
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-					if err != nil {
-						return fmt.Errorf("failed to convert items to Arrow: %w", err)
+					if err := flush(); err != nil {
+						return err
 					}
-					resultsChan <- source.RecordBatchResult{Batch: record}
-					totalSent += len(allItems)
-					allItems = nil
 				}
 			}
 		}
@@ -487,13 +527,8 @@ func (s *AnthropicSource) readUsageReport(ctx context.Context, opts source.ReadO
 		}
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert items to Arrow: %w", err)
-		}
-		resultsChan <- source.RecordBatchResult{Batch: record}
-		totalSent += len(allItems)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[ANTHROPIC] Sent %d usage_report records", totalSent)
@@ -547,7 +582,23 @@ func (s *AnthropicSource) readCostReport(ctx context.Context, opts source.ReadOp
 
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
 	var nextPage string
+
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert items to Arrow: %w", err)
+		}
+		resultsChan <- source.RecordBatchResult{Batch: record}
+		totalSent += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -605,16 +656,22 @@ func (s *AnthropicSource) readCostReport(ctx context.Context, opts source.ReadOp
 
 				resultMap["bucket_start"] = startingAt
 				resultMap["bucket_end"] = endingAt
+
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(resultMap)
+					if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
 				allItems = append(allItems, resultMap)
 
 				if len(allItems) >= batchSize {
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-					if err != nil {
-						return fmt.Errorf("failed to convert items to Arrow: %w", err)
+					if err := flush(); err != nil {
+						return err
 					}
-					resultsChan <- source.RecordBatchResult{Batch: record}
-					totalSent += len(allItems)
-					allItems = nil
 				}
 			}
 		}
@@ -630,13 +687,8 @@ func (s *AnthropicSource) readCostReport(ctx context.Context, opts source.ReadOp
 		}
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert items to Arrow: %w", err)
-		}
-		resultsChan <- source.RecordBatchResult{Batch: record}
-		totalSent += len(allItems)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[ANTHROPIC] Sent %d cost_report records", totalSent)
@@ -714,6 +766,22 @@ func (s *AnthropicSource) readWorkspaceMembers(ctx context.Context, opts source.
 
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert items to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
 
 	for _, ws := range workspaces {
 		wsMap, ok := ws.(map[string]interface{})
@@ -761,16 +829,22 @@ func (s *AnthropicSource) readWorkspaceMembers(ctx context.Context, opts source.
 				}
 
 				itemMap["workspace_id"] = workspaceID
+
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(itemMap)
+					if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
 				allItems = append(allItems, itemMap)
 
 				if len(allItems) >= batchSize {
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-					if err != nil {
-						return fmt.Errorf("failed to convert items to Arrow: %w", err)
+					if err := flush(); err != nil {
+						return err
 					}
-					results <- source.RecordBatchResult{Batch: record}
-					totalSent += len(allItems)
-					allItems = nil
 				}
 			}
 
@@ -786,13 +860,8 @@ func (s *AnthropicSource) readWorkspaceMembers(ctx context.Context, opts source.
 		}
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert items to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(allItems)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[ANTHROPIC] Sent %d workspace_members records", totalSent)
@@ -808,7 +877,23 @@ func (s *AnthropicSource) readPaginatedList(ctx context.Context, opts source.Rea
 	totalLimit := opts.Limit
 	totalSent := 0
 	var allItems []map[string]interface{}
+	var accBytes int64
 	var afterID string
+
+	flush := func() error {
+		if len(allItems) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert items to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(allItems)
+		allItems = nil
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		select {
@@ -853,16 +938,21 @@ func (s *AnthropicSource) readPaginatedList(ctx context.Context, opts source.Rea
 				tf(itemMap)
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(itemMap)
+				if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			allItems = append(allItems, itemMap)
 
 			if len(allItems) >= batchSize {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert items to Arrow: %w", err)
+				if err := flush(); err != nil {
+					return err
 				}
-				results <- source.RecordBatchResult{Batch: record}
-				totalSent += len(allItems)
-				allItems = nil
 			}
 		}
 
@@ -877,13 +967,8 @@ func (s *AnthropicSource) readPaginatedList(ctx context.Context, opts source.Rea
 		}
 	}
 
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert items to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(allItems)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[ANTHROPIC] Sent %d %s records", totalSent, tableName)

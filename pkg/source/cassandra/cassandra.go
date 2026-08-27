@@ -149,6 +149,7 @@ func (s *CassandraSource) readQuery(ctx context.Context, query string, args []in
 		}()
 
 		var items []map[string]interface{}
+		var accBytes int64
 		batchSize := pageSize
 		if batchSize <= 0 {
 			batchSize = defaultBatchSize
@@ -156,6 +157,23 @@ func (s *CassandraSource) readQuery(ctx context.Context, query string, args []in
 		batchNum := 0
 		totalRows := int64(0)
 		colByName := columnsByName(columns)
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert Cassandra rows to Arrow: %w", err)
+			}
+			batchNum++
+			totalRows += int64(len(items))
+			config.Debug("[CASSANDRA] Batch %d: %d rows read (total: %d)", batchNum, len(items), totalRows)
+			results <- source.RecordBatchResult{Batch: record}
+			items = nil
+			accBytes = 0
+			return nil
+		}
 
 		for {
 			row := make(map[string]interface{})
@@ -167,32 +185,30 @@ func (s *CassandraSource) readQuery(ctx context.Context, query string, args []in
 			for key, value := range row {
 				normalized[key] = normalizeValue(value, colByName[key])
 			}
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(normalized)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						results <- source.RecordBatchResult{Err: err}
+						return
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, normalized)
 
 			if len(items) >= batchSize {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
-				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert Cassandra rows to Arrow: %w", err)}
+				if err := flush(); err != nil {
+					results <- source.RecordBatchResult{Err: err}
 					return
 				}
-				batchNum++
-				totalRows += int64(len(items))
-				config.Debug("[CASSANDRA] Batch %d: %d rows read (total: %d)", batchNum, len(items), totalRows)
-				results <- source.RecordBatchResult{Batch: record}
-				items = nil
 			}
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert Cassandra rows to Arrow: %w", err)}
-				return
-			}
-			batchNum++
-			totalRows += int64(len(items))
-			config.Debug("[CASSANDRA] Batch %d: %d rows read (total: %d)", batchNum, len(items), totalRows)
-			results <- source.RecordBatchResult{Batch: record}
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
 		}
 
 		config.Debug("[CASSANDRA] Total: %d rows in %d batches", totalRows, batchNum)

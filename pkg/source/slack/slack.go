@@ -169,6 +169,23 @@ func (s *SlackSource) read(ctx context.Context, table string, opts source.ReadOp
 func (s *SlackSource) getPages(ctx context.Context, resource, responsePath string, params map[string]interface{}, tsFields map[string]bool, extraContext map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	nextCursor := ""
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", resource, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		config.Debug("[SLACK] Sent %d items from %s", len(items), resource)
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -212,7 +229,6 @@ func (s *SlackSource) getPages(ctx context.Context, resource, responsePath strin
 			break
 		}
 
-		items := make([]map[string]interface{}, 0, len(rawItems))
 		for _, raw := range rawItems {
 			item, ok := raw.(map[string]interface{})
 			if !ok {
@@ -222,16 +238,20 @@ func (s *SlackSource) getPages(ctx context.Context, resource, responsePath strin
 			for k, v := range extraContext {
 				item[k] = v
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, item)
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", resource, err)
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			config.Debug("[SLACK] Sent %d items from %s", len(items), resource)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		nextCursor = ""

@@ -523,18 +523,40 @@ func (s *salesforceSource) getRecordsBulk(ctx context.Context, sobject, query st
 	}
 
 	nRecords := 0
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert batch to arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: arrowRec}
+		nRecords += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 	err = s.bulkGetQueryResults(ctx, jobID, batchID, func(records []map[string]interface{}) error {
 		if len(records) == 0 {
 			return nil
 		}
 		s.processRecords(records, dateFields)
-		arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(records, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert batch to arrow: %w", err)
+		for _, row := range records {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
-		results <- source.RecordBatchResult{Batch: arrowRec}
-		nRecords += len(records)
-		return nil
+		return flush()
 	})
 	if err != nil {
 		return err
@@ -546,6 +568,22 @@ func (s *salesforceSource) getRecordsBulk(ctx context.Context, sobject, query st
 
 func (s *salesforceSource) getRecordsREST(ctx context.Context, query string, dateFields map[string]bool, opts source.ReadOptions, results chan<- source.RecordBatchResult, sobject string) error {
 	nRecords := 0
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert batch to arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: arrowRec}
+		nRecords += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	result, err := s.client.Query(query)
 	if err != nil {
@@ -560,12 +598,21 @@ func (s *salesforceSource) getRecordsREST(ctx context.Context, query string, dat
 
 		if len(batch) > 0 {
 			s.processRecords(batch, dateFields)
-			arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert batch to arrow: %w", err)
+			for _, row := range batch {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				items = append(items, row)
 			}
-			results <- source.RecordBatchResult{Batch: arrowRec}
-			nRecords += len(batch)
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 
 		if result.Done || result.NextRecordsURL == "" {

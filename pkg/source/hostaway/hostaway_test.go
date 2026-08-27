@@ -1,9 +1,17 @@
 package hostaway
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
+
+	httpclient "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/stretchr/testify/require"
 )
 
 func mustParseTime(s string) time.Time {
@@ -48,8 +56,8 @@ func TestParseURI(t *testing.T) {
 		},
 		{
 			name: "api_key with special characters",
-			uri:  "hostaway://?api_key=eyJhbGciOiJSUzI1NiJ9.test",
-			want: "eyJhbGciOiJSUzI1NiJ9.test",
+			uri:  "hostaway://?api_key=dummy.key-with_special.chars",
+			want: "dummy.key-with_special.chars",
 		},
 	}
 
@@ -152,6 +160,40 @@ func TestExtractResult(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadPaginatedEndpointPreservesPageBatchesWithByteCap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+		require.NoError(t, err)
+
+		count := maxPageSize
+		if offset > 0 {
+			count = 1
+		}
+		items := make([]map[string]any, count)
+		for i := range items {
+			items[i] = map[string]any{"id": offset + i}
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"result": items}))
+	}))
+	defer server.Close()
+
+	s := &HostawaySource{client: httpclient.New(httpclient.WithBaseURL(server.URL))}
+	defer func() { require.NoError(t, s.client.Close()) }()
+
+	results := make(chan source.RecordBatchResult, 2)
+	err := s.readPaginatedEndpoint(context.Background(), "/reservations", "reservations", source.ReadOptions{MaxBatchBytes: 1 << 20}, results)
+	require.NoError(t, err)
+	close(results)
+
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		batchRows = append(batchRows, result.Batch.NumRows())
+		result.Batch.Release()
+	}
+	require.Equal(t, []int64{maxPageSize, 1}, batchRows)
 }
 
 func TestJsonUseNumber(t *testing.T) {

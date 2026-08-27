@@ -281,6 +281,22 @@ func (s *DuneSource) readQueries(ctx context.Context, opts source.ReadOptions, r
 	pageLimit := 100
 	totalSent := 0
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for queries: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -311,12 +327,21 @@ func (s *DuneSource) readQueries(ctx context.Context, opts source.ReadOptions, r
 			break
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Queries, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to build arrow record for queries: %w", err)
+		for _, row := range result.Queries {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
-
-		results <- source.RecordBatchResult{Batch: record}
+		if err := flush(); err != nil {
+			return err
+		}
 		totalSent += len(result.Queries)
 		config.Debug("[DUNE] Sent %d queries (total: %d)", len(result.Queries), totalSent)
 
@@ -397,6 +422,22 @@ func (s *DuneSource) fetchResults(ctx context.Context, executionID string, opts 
 	offset := 0
 	totalSent := 0
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -430,12 +471,21 @@ func (s *DuneSource) fetchResults(ctx context.Context, executionID string, opts 
 			break
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to build arrow record: %w", err)
+		for _, row := range rows {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
-
-		results <- source.RecordBatchResult{Batch: record}
+		if err := flush(); err != nil {
+			return err
+		}
 		totalSent += len(rows)
 		config.Debug("[DUNE] Sent %d result rows (total: %d)", len(rows), totalSent)
 

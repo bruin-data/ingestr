@@ -1609,14 +1609,37 @@ func (s *LinearSource) paginateAndSend(
 			items = filterByUpdatedAt(items, opts.IntervalStart, opts.IntervalEnd)
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, fields, opts.ExcludeColumns)
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, fields, opts.ExcludeColumns)
 			if err != nil {
 				return fmt.Errorf("failed to build arrow record: %w", err)
 			}
 			results <- source.RecordBatchResult{Batch: record}
-			totalRecords += len(items)
-			config.Debug("[LINEAR] Sent %d records (total: %d)", len(items), totalRecords)
+			totalRecords += len(batch)
+			config.Debug("[LINEAR] Sent %d records (total: %d)", len(batch), totalRecords)
+			batch = nil
+			accBytes = 0
+			return nil
+		}
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		// Check pagination

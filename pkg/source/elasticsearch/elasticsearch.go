@@ -225,28 +225,49 @@ func (s *ElasticsearchSource) readIndex(ctx context.Context, index string, opts 
 
 	totalSent := 0
 
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert documents to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		config.Debug("[ELASTICSEARCH] Sent %d documents from %s (total: %d)", len(items), index, totalSent)
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		hits := searchResult.Hits.Hits
 		if len(hits) == 0 {
 			break
 		}
 
-		items := make([]map[string]any, 0, len(hits))
 		for _, hit := range hits {
 			doc := make(map[string]any, len(hit.Source)+1)
 			doc["id"] = hit.ID
 			maps.Copy(doc, hit.Source)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(doc)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, doc)
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert documents to Arrow: %w", err)
+		if err := flush(); err != nil {
+			return err
 		}
-
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
-		config.Debug("[ELASTICSEARCH] Sent %d documents from %s (total: %d)", len(items), index, totalSent)
 
 		select {
 		case <-ctx.Done():

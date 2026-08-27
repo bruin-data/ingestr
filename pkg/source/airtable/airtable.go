@@ -217,6 +217,28 @@ func (s *AirtableSource) readTable(ctx context.Context, ref tableRef, opts sourc
 	offset := ""
 	totalSent := 0
 
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert records to Arrow: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		totalSent += len(items)
+		config.Debug("[AIRTABLE] Sent %d records (total: %d)", len(items), totalSent)
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -255,24 +277,27 @@ func (s *AirtableSource) readTable(ctx context.Context, ref tableRef, opts sourc
 			break
 		}
 
-		items, err := flattenRecords(body.Records)
+		pageItems, err := flattenRecords(body.Records)
 		if err != nil {
 			return fmt.Errorf("failed to flatten records from table %s: %w", ref.tableName, err)
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert records to Arrow: %w", err)
+		for _, row := range pageItems {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
+		if err := flush(); err != nil {
+			return err
 		}
-
-		totalSent += len(items)
-		config.Debug("[AIRTABLE] Sent %d records (total: %d)", len(items), totalSent)
 
 		if body.Offset == "" {
 			break
