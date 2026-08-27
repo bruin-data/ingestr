@@ -292,6 +292,35 @@ func TestStreamCSVHonorsLimitAcrossBatches(t *testing.T) {
 	assert.Equal(t, []int64{3, 2}, batchRows)
 }
 
+func TestStreamCSVSplitsByMaxBatchBytes(t *testing.T) {
+	// 6 single-cell rows, each 10 content bytes; date+platform add 13 more, so
+	// estimateCSVRowBytes = 23/row. PageSize huge so only the byte cap splits.
+	// A 50-byte cap fits two rows (46) but not three (69) -> [2, 2, 2].
+	input := strings.NewReader("event_id\n0123456789\n0123456789\n0123456789\n0123456789\n0123456789\n0123456789\n")
+	results := make(chan source.RecordBatchResult, 4)
+
+	rows, err := streamCSV(
+		context.Background(),
+		input,
+		"2026-08-16", // 10 bytes
+		"ios",        // 3 bytes
+		source.ReadOptions{PageSize: 1_000_000, MaxBatchBytes: 50},
+		newRowLimiter(0),
+		results,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 6, rows)
+
+	close(results)
+	var batchRows []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		batchRows = append(batchRows, result.Batch.NumRows())
+		result.Batch.Release()
+	}
+	assert.Equal(t, []int64{2, 2, 2}, batchRows, "50-byte cap must split the 23-byte rows two per batch")
+}
+
 func TestStreamCSVEmitsBeforeInputCompletes(t *testing.T) {
 	reader, writer := io.Pipe()
 	results := make(chan source.RecordBatchResult)
