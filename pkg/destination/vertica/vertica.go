@@ -271,16 +271,14 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 	}
 
 	// The transient backup name is derived from the staging name, which is unique
-	// per run, so concurrent replace jobs never contend for it and it never
-	// collides with an unrelated table. Any same-name leftover can only be this
-	// job's own crashed prior run, so dropping it before the swap is safe.
+	// per run, so concurrent replace jobs never contend for it and it will not
+	// collide with an unrelated table. The name is never dropped beforehand: if it
+	// were somehow occupied the atomic rename below fails cleanly, leaving both
+	// staging and target intact rather than destroying whatever held the name.
 	oldName := destination.ShortenIdentifier(stagingName+"_old", stagingName+"_old", destination.MaxIdentifierLength("vertica"))
 	oldTable := oldName
 	if targetSchema != "" {
 		oldTable = targetSchema + "." + oldName
-	}
-	if err := d.DropTable(ctx, oldTable); err != nil {
-		return err
 	}
 
 	// Vertica renames multiple tables atomically in one statement, so target and
@@ -292,6 +290,8 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 		return fmt.Errorf("failed to swap staging table %s into %s: %w", stagingTable, targetTable, err)
 	}
 
+	// oldTable now holds the displaced target this swap just created, so dropping
+	// it is safe.
 	if err := d.DropTable(ctx, oldTable); err != nil {
 		config.Debug("[VERTICA] Warning: failed to drop old table %s after swap: %v", oldTable, err)
 	}

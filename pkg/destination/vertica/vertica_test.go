@@ -234,10 +234,9 @@ func TestRenameSwapBackupNameFromStaging(t *testing.T) {
 	existsQuery := `SELECT COUNT\(\*\) FROM v_catalog\.tables WHERE table_schema = \? AND table_name = \?`
 	mock.ExpectQuery(existsQuery).WithArgs("public", "users").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	// The backup name is derived from the unique staging name, dropped before the
-	// swap, then the atomic rename displaces the target onto it.
-	mock.ExpectExec(`DROP TABLE IF EXISTS "public"."users_stg_run1_old" CASCADE`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The backup name is derived from the unique staging name and is never dropped
+	// before the swap, so no pre-existing table is destroyed. The atomic rename
+	// displaces the target onto it, and only that displaced target is dropped after.
 	mock.ExpectExec(`ALTER TABLE "public"."users", "public"."users_stg_run1" RENAME TO "users_stg_run1_old", "users"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DROP TABLE IF EXISTS "public"."users_stg_run1_old" CASCADE`).
