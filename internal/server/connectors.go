@@ -392,6 +392,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("sendgrid", "SendGrid", []string{"sendgrid"}, true, false),
 		genericURIConnector("sharepoint", "SharePoint", []string{"sharepoint"}, true, false),
 		genericURIConnector("shopify", "Shopify", []string{"shopify"}, true, false),
+		genericURIConnector("sklik", "Sklik", []string{"sklik"}, true, false),
 		genericURIConnector("slack", "Slack", []string{"slack"}, true, false),
 		genericURIConnector("smartsheet", "Smartsheet", []string{"smartsheet"}, true, false),
 		genericURIConnector("snapchatads", "Snapchat Ads", []string{"snapchatads"}, true, false),

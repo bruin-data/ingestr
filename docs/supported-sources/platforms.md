@@ -19,6 +19,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Mailchimp](/supported-sources/mailchimp.md)
 - [Pinterest](/supported-sources/pinterest.md)
 - [Reddit Ads](/supported-sources/reddit_ads.md)
+- [Sklik](/supported-sources/sklik.md)
 - [Snapchat Ads](/supported-sources/snapchat-ads.md)
 - [TikTok Ads](/supported-sources/tiktok-ads.md)
 
