@@ -49,6 +49,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 ## Commerce, payments, billing, and finance
 
 - [2Checkout](/supported-sources/twocheckout.md)
+- [ABRA Flexi](/supported-sources/abra.md)
 - [Apple App Store](/supported-sources/appstore.md)
 - [Chargebee](/supported-sources/chargebee.md)
 - [FastSpring](/supported-sources/fastspring.md)

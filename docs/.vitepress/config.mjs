@@ -183,6 +183,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             link: "/supported-sources/platforms.md",
             collapsed: false,
             items: [
+              { text: "ABRA Flexi", link: "/supported-sources/abra.md" },
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "Allium", link: "/supported-sources/allium.md" },
