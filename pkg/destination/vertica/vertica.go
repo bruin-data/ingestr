@@ -270,12 +270,14 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 		return nil
 	}
 
-	// The transient backup name is derived from the staging name, which is unique
-	// per run, so concurrent replace jobs never contend for it and it will not
-	// collide with an unrelated table. The name is never dropped beforehand: if it
-	// were somehow occupied the atomic rename below fails cleanly, leaving both
-	// staging and target intact rather than destroying whatever held the name.
-	oldName := destination.ShortenIdentifier(stagingName+"_old", stagingName+"_old", destination.MaxIdentifierLength("vertica"))
+	// Pick a free name for the displaced target rather than dropping whatever
+	// holds a fixed one: probing never destroys an unrelated table, and basing it
+	// on the run-unique staging name keeps concurrent replace jobs from ever
+	// probing the same candidates.
+	oldName, err := d.freeTransientName(ctx, targetSchema, stagingName+"_old")
+	if err != nil {
+		return err
+	}
 	oldTable := oldName
 	if targetSchema != "" {
 		oldTable = targetSchema + "." + oldName
@@ -298,6 +300,33 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 	return nil
 }
 
+// freeTransientName returns a name in schemaName that no table currently
+// occupies, derived from base with a numeric suffix on collision. It never drops
+// an existing table, so an unrelated table sharing the base name is stepped over
+// rather than destroyed. base comes from the run-unique staging name, so
+// concurrent jobs never probe the same candidates.
+func (d *VerticaDestination) freeTransientName(ctx context.Context, schemaName, base string) (string, error) {
+	maxLen := destination.MaxIdentifierLength("vertica")
+	for i := 0; ; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s_%d", base, i+1)
+		}
+		name := destination.ShortenIdentifier(candidate, candidate, maxLen)
+		qualified := name
+		if schemaName != "" {
+			qualified = schemaName + "." + name
+		}
+		exists, err := d.tableExists(ctx, qualified)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return name, nil
+		}
+	}
+}
+
 // copySwapTable handles a swap where staging lives in a different schema (Vertica
 // cannot rename across schemas). It loads the replacement into a temp table in
 // the target schema first so the existing target survives until the atomic swap.
@@ -308,14 +337,18 @@ func (d *VerticaDestination) copySwapTable(ctx context.Context, opts destination
 
 	targetSchema, _ := splitSchemaTable(opts.TargetTable)
 	_, stagingName := splitSchemaTable(opts.StagingTable)
-	tempTable := stagingName
-	if targetSchema != "" {
-		tempTable = targetSchema + "." + stagingName
-	}
 
-	if err := d.DropTable(ctx, tempTable); err != nil {
+	// Probe for a free temp name instead of dropping whatever holds the staging
+	// basename in the target schema, so an unrelated table is never destroyed.
+	tempName, err := d.freeTransientName(ctx, targetSchema, stagingName)
+	if err != nil {
 		return err
 	}
+	tempTable := tempName
+	if targetSchema != "" {
+		tempTable = targetSchema + "." + tempName
+	}
+
 	if err := d.PrepareTable(ctx, destination.PrepareOptions{
 		Table:       tempTable,
 		Schema:      opts.Schema,

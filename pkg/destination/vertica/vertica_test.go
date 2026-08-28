@@ -234,9 +234,12 @@ func TestRenameSwapBackupNameFromStaging(t *testing.T) {
 	existsQuery := `SELECT COUNT\(\*\) FROM v_catalog\.tables WHERE table_schema = \? AND table_name = \?`
 	mock.ExpectQuery(existsQuery).WithArgs("public", "users").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	// The backup name is derived from the unique staging name and is never dropped
-	// before the swap, so no pre-existing table is destroyed. The atomic rename
-	// displaces the target onto it, and only that displaced target is dropped after.
+	// The backup name is derived from the unique staging name and probed for
+	// availability (never dropped beforehand), so no pre-existing table is
+	// destroyed. The atomic rename displaces the target onto it, and only that
+	// displaced target is dropped after.
+	mock.ExpectQuery(existsQuery).WithArgs("public", "users_stg_run1_old").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec(`ALTER TABLE "public"."users", "public"."users_stg_run1" RENAME TO "users_stg_run1_old", "users"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DROP TABLE IF EXISTS "public"."users_stg_run1_old" CASCADE`).
@@ -244,6 +247,30 @@ func TestRenameSwapBackupNameFromStaging(t *testing.T) {
 
 	if err := d.renameSwap(context.Background(), "public.users_stg_run1", "public.users"); err != nil {
 		t.Fatalf("renameSwap() error: %v", err)
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestFreeTransientNameStepsOverOccupied(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	d := &VerticaDestination{db: db, currentSchema: "public"}
+
+	existsQuery := `SELECT COUNT\(\*\) FROM v_catalog\.tables WHERE table_schema = \? AND table_name = \?`
+	// The base name and its first suffix are taken by unrelated tables; the probe
+	// steps over both without issuing any DROP, then settles on the free name.
+	mock.ExpectQuery(existsQuery).WithArgs("public", "stg_old").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(existsQuery).WithArgs("public", "stg_old_2").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(existsQuery).WithArgs("public", "stg_old_3").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	got, err := d.freeTransientName(context.Background(), "public", "stg_old")
+	require.NoError(t, err)
+	if got != "stg_old_3" {
+		t.Errorf("freeTransientName() = %q, want stg_old_3", got)
 	}
 	require.NoError(t, mock.ExpectationsWereMet())
 }
