@@ -265,16 +265,47 @@ func (s *CloudflareRadarSource) paginateAndSend(ctx context.Context, name string
 		fetchedCount := len(items)
 		items, reachedLimit := limiter.trim(items)
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert Cloudflare Radar %s to Arrow: %w", name, err)
+		if err := emitRecords(name, items, opts, results); err != nil {
+			return err
 		}
-		results <- source.RecordBatchResult{Batch: record}
 
 		if reachedLimit || fetchedCount < pageSize {
 			return nil
 		}
 	}
+}
+
+func emitRecords(name string, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if len(items) == 0 {
+		return nil
+	}
+	send := func(batch []map[string]interface{}) error {
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert Cloudflare Radar %s to Arrow: %w", name, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		return nil
+	}
+	if opts.MaxBatchBytes <= 0 {
+		return send(items)
+	}
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	for _, row := range items {
+		rowBytes := arrowconv.RowBytes(row)
+		if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+			if err := send(batch); err != nil {
+				return err
+			}
+			batch = nil
+			accBytes = 0
+		}
+		batch = append(batch, row)
+		accBytes += rowBytes
+	}
+	return send(batch)
 }
 
 func setDateRange(params map[string]string, opts source.ReadOptions, defaultDateRange string) {

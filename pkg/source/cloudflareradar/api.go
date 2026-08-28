@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -245,15 +244,7 @@ func (s *CloudflareRadarSource) fetchAPIRows(ctx context.Context, name, path str
 }
 
 func sendAPIItems(name string, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	if len(items) == 0 {
-		return nil
-	}
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert Cloudflare Radar %s to Arrow: %w", name, err)
-	}
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	return emitRecords(name, items, opts, results)
 }
 
 func cloneValues(values url.Values) url.Values {
