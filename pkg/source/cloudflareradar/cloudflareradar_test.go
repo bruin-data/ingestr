@@ -78,6 +78,45 @@ func TestRowLimiter(t *testing.T) {
 	}
 }
 
+func TestEmitRecordsByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	items := make([]map[string]interface{}, 50)
+	for i := range items {
+		items[i] = map[string]interface{}{"id": i, "name": wide}
+	}
+
+	run := func(max int64) (int64, int64) {
+		results := make(chan source.RecordBatchResult, len(items))
+		if err := emitRecords("test", items, source.ReadOptions{MaxBatchBytes: max}, results); err != nil {
+			t.Fatal(err)
+		}
+		close(results)
+		var batches, rows int64
+		for res := range results {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			batches++
+			rows += res.Batch.NumRows()
+			res.Batch.Release()
+		}
+		return batches, rows
+	}
+
+	offB, offR := run(0)
+	if offB != 1 || offR != int64(len(items)) {
+		t.Fatalf("cap-off: batches=%d rows=%d, want 1 and %d", offB, offR, len(items))
+	}
+
+	onB, onR := run(4096)
+	if onB <= 1 {
+		t.Fatalf("cap-on: batches=%d, want >1", onB)
+	}
+	if onR != offR {
+		t.Fatalf("cap-on rows=%d != cap-off rows=%d", onR, offR)
+	}
+}
+
 func TestParseAPITable(t *testing.T) {
 	tests := []struct {
 		name      string
