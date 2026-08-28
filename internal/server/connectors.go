@@ -324,6 +324,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("exadata", "Oracle Exadata", []string{"exadata", "oracle+exadata", "oracle_exadata"}, false, true),
 		genericURIConnector("fabric", "Microsoft Fabric", []string{"fabric"}, true, true),
 		genericURIConnector("facebookads", "Facebook Ads", []string{"facebookads"}, true, false),
+		genericURIConnector("fakturoid", "Fakturoid", []string{"fakturoid"}, true, false),
 		genericURIConnector("fastspring", "FastSpring", []string{"fastspring"}, true, false),
 		genericURIConnector("fireflies", "Fireflies", []string{"fireflies"}, true, false),
 		genericURIConnector("fluxx", "Fluxx", []string{"fluxx"}, true, false),
