@@ -601,6 +601,15 @@ func (d *CleverTapDestination) SupportsDeleteInsertStrategy() bool { return fals
 func (d *CleverTapDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *CleverTapDestination) SupportsAtomicSwap() bool           { return false }
 
+// timestampUnit reports the array's declared time unit, defaulting to
+// microseconds when the type is not the expected timestamp type.
+func timestampUnit(a *array.Timestamp) arrow.TimeUnit {
+	if tt, ok := a.DataType().(*arrow.TimestampType); ok {
+		return tt.Unit
+	}
+	return arrow.Microsecond
+}
+
 // epochSeconds converts a timestamp column value to CleverTap's Unix-seconds ts.
 func epochSeconds(arr arrow.Array, idx int) (int64, bool) {
 	if arr.IsNull(idx) {
@@ -608,7 +617,7 @@ func epochSeconds(arr arrow.Array, idx int) (int64, bool) {
 	}
 	switch a := arr.(type) {
 	case *array.Timestamp:
-		return a.Value(idx).ToTime(arrow.Microsecond).Unix(), true
+		return a.Value(idx).ToTime(timestampUnit(a)).Unix(), true
 	case *array.Date32:
 		return a.Value(idx).ToTime().Unix(), true
 	case *array.Date64:
@@ -680,7 +689,7 @@ func arrowToValue(arr arrow.Array, idx int) interface{} {
 	case *array.Date64:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Timestamp:
-		return a.Value(idx).ToTime(arrow.Microsecond).Format(time.RFC3339Nano)
+		return a.Value(idx).ToTime(timestampUnit(a)).Format(time.RFC3339Nano)
 	case *array.Struct:
 		structType := a.DataType().(*arrow.StructType)
 		fields := structType.Fields()

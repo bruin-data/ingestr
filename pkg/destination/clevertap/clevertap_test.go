@@ -181,6 +181,31 @@ func TestIdentityAndIDValueMutuallyExclusive(t *testing.T) {
 	require.ErrorContains(t, err, "not both")
 }
 
+func TestEventTSSecondUnit(t *testing.T) {
+	server, bodies := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	s := arrow.NewSchema([]arrow.Field{
+		{Name: "user_id", Type: arrow.BinaryTypes.String},
+		{Name: "purchased_at", Type: &arrow.TimestampType{Unit: arrow.Second}},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, s)
+	defer b.Release()
+	b.Field(0).(*array.StringBuilder).AppendValues([]string{"u-1"}, nil)
+	secs := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC).Unix()
+	b.Field(1).(*array.TimestampBuilder).AppendValues([]arrow.Timestamp{arrow.Timestamp(secs)}, nil)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: b.NewRecordBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+		Table: "events?identity_column=user_id&ts=purchased_at&event_name=Charged",
+	}))
+
+	rec := (*bodies)[0].D[0]
+	assert.Equal(t, float64(secs), rec["ts"])
+}
+
 func TestMissingIdentityColumnFailsFast(t *testing.T) {
 	server, _ := newUploadServer(t)
 	d := connectTestDestination(t, server.URL)
