@@ -304,6 +304,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("clevertap", "CleverTap", []string{"clevertap"}, true, true),
 		genericURIConnector("clickhouse", "ClickHouse", []string{"clickhouse"}, true, true),
 		genericURIConnector("clickup", "ClickUp", []string{"clickup"}, true, false),
+		genericURIConnector("cloudflareradar", "Cloudflare Radar", []string{"cloudflare-radar", "cloudflareradar"}, true, false),
 		genericURIConnector("couchbase", "Couchbase", []string{"couchbase"}, true, false),
 		genericURIConnector("cratedb", "CrateDB", []string{"cratedb"}, true, true),
 		genericURIConnector("cursor", "Cursor", []string{"cursor"}, true, false),

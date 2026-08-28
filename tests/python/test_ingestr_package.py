@@ -353,7 +353,8 @@ class IngestrPackageTest(unittest.TestCase):
     def test_release_platform_uses_goreleaser_asset_names(self):
         with patch("platform.system", return_value="Linux"):
             with patch("platform.machine", return_value="aarch64"):
-                release = ingestr_runner._release_platform()
+                with patch("ingestr._runner._linux_uses_musl", return_value=False):
+                    release = ingestr_runner._release_platform()
 
         self.assertEqual(ingestr_runner._release_archive_name(release), "ingestr_Linux_arm64.tar.gz")
 

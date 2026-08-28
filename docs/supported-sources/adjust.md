@@ -82,6 +82,8 @@ The `campaigns` and `creatives` tables pull revenue by cohort window from D0 up 
 
 Adjust data may change going back, which means you'll need to change your start date to get the latest data. The `lookback_days` parameter allows you to specify how many days to go back when calculating the start date, and takes care of automatically updating the start date and getting the past data as well. It defaults to 30 days.
 
+Reports grouped by `day` or `hour`, including the predefined `campaigns` and `creatives` tables, are requested one day at a time and emitted as separate batches. Concurrency uses the global `--extract-parallelism` setting, including its default, and is limited only by the number of daily windows. Use `--extract-parallelism 1` for sequential requests. Custom reports grouped only by `week`, `month`, `quarter`, or `year` use a single request so that Adjust calculates each aggregate over the full requested period.
+
 ## Tables
 Adjust source allows ingesting data from various sources:
 
