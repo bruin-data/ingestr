@@ -292,8 +292,14 @@ func TestImplicitTableStageName(t *testing.T) {
 }
 
 func TestBuildCopyIntoSQLUsesParquetLogicalTypes(t *testing.T) {
-	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789")
-	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789 FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil)
+	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
+	assert.Equal(t, want, got)
+}
+
+func TestBuildCopyIntoSQLWithFilesList(t *testing.T) {
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet", "batch_1_1.parquet"})
+	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILES = ('batch_0_1.parquet', 'batch_1_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
 	assert.Equal(t, want, got)
 }
 
@@ -492,6 +498,7 @@ func newSingleRowRecordBatch() arrow.RecordBatch {
 // fix) lets the shared pool be time-shared safely regardless of numTables *
 // Parallelism, so the write completes instead of hanging.
 func TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0") // one PUT per batch so expectations are deterministic
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
@@ -512,7 +519,7 @@ func TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure(t *testing.T) {
 		tableConfigs[name] = destination.TableWriteConfig{DestTable: fmt.Sprintf("public.%s", name)}
 
 		for j := 0; j < batchesPerTable; j++ {
-			mock.ExpectExec("PUT file://data.parquet").WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
 		}
 		mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
 	}
