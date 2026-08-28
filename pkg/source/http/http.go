@@ -226,7 +226,27 @@ func readCSV(_ context.Context, reader io.Reader, results chan<- source.RecordBa
 	}
 
 	rows := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	lineNum := 1
+
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, schemaCols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
+		}
+
+		*batchNum++
+		*totalRows += int64(len(rows))
+		config.Debug("[HTTP] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
+
+		results <- source.RecordBatchResult{Batch: rec}
+		rows = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		record, err := csvReader.Read()
@@ -259,34 +279,27 @@ func readCSV(_ context.Context, reader io.Reader, results chan<- source.RecordBa
 				}
 			}
 		}
+
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(rows) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		rows = append(rows, row)
 
 		if len(rows) >= batchSize {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, schemaCols, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
+			if err := flush(); err != nil {
+				return err
 			}
-
-			*batchNum++
-			*totalRows += int64(len(rows))
-			config.Debug("[HTTP] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
-
-			results <- source.RecordBatchResult{Batch: rec}
-			rows = make([]map[string]interface{}, 0, batchSize)
 		}
 	}
 
-	if len(rows) > 0 {
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, schemaCols, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(rows))
-		config.Debug("[HTTP] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
-
-		results <- source.RecordBatchResult{Batch: rec}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	return nil
@@ -363,31 +376,12 @@ func readJSON(_ context.Context, data []byte, results chan<- source.RecordBatchR
 
 func readJSONArray(decoder *json.Decoder, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
 	items := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 
-	for decoder.More() {
-		var item map[string]interface{}
-		if err := decoder.Decode(&item); err != nil {
-			return fmt.Errorf("failed to decode JSON array element: %w", err)
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
 		}
-
-		items = append(items, item)
-
-		if len(items) >= batchSize {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert JSON to Arrow: %w", err)
-			}
-
-			*batchNum++
-			*totalRows += int64(len(items))
-			config.Debug("[HTTP] JSON batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-			results <- source.RecordBatchResult{Batch: rec}
-			items = make([]map[string]interface{}, 0, batchSize)
-		}
-	}
-
-	if len(items) > 0 {
 		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 		if err != nil {
 			return fmt.Errorf("failed to convert JSON to Arrow: %w", err)
@@ -398,6 +392,37 @@ func readJSONArray(decoder *json.Decoder, results chan<- source.RecordBatchResul
 		config.Debug("[HTTP] JSON batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
 
 		results <- source.RecordBatchResult{Batch: rec}
+		items = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
+
+	for decoder.More() {
+		var item map[string]interface{}
+		if err := decoder.Decode(&item); err != nil {
+			return fmt.Errorf("failed to decode JSON array element: %w", err)
+		}
+
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, item)
+
+		if len(items) >= batchSize {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := flush(); err != nil {
+		return err
 	}
 
 	return nil
@@ -430,7 +455,27 @@ func readJSONL(_ context.Context, reader io.Reader, results chan<- source.Record
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 	items := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	lineNum := 0
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert JSONL to Arrow: %w", err)
+		}
+
+		*batchNum++
+		*totalRows += int64(len(items))
+		config.Debug("[HTTP] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
+
+		results <- source.RecordBatchResult{Batch: rec}
+		items = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -447,20 +492,21 @@ func readJSONL(_ context.Context, reader io.Reader, results chan<- source.Record
 			return fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
 		}
 
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, item)
 
 		if len(items) >= batchSize {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert JSONL to Arrow: %w", err)
+			if err := flush(); err != nil {
+				return err
 			}
-
-			*batchNum++
-			*totalRows += int64(len(items))
-			config.Debug("[HTTP] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-			results <- source.RecordBatchResult{Batch: rec}
-			items = make([]map[string]interface{}, 0, batchSize)
 		}
 	}
 
@@ -468,17 +514,8 @@ func readJSONL(_ context.Context, reader io.Reader, results chan<- source.Record
 		return fmt.Errorf("error reading JSONL data: %w", err)
 	}
 
-	if len(items) > 0 {
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert JSONL to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(items))
-		config.Debug("[HTTP] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-		results <- source.RecordBatchResult{Batch: rec}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	return nil

@@ -990,11 +990,36 @@ func sendItems(ctx context.Context, items []map[string]any, meta endpointMeta, o
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert Deel records to Arrow: %w", err)
+	flush := func(batch []map[string]any) error {
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert Deel records to Arrow: %w", err)
+		}
+		return sendResult(ctx, results, source.RecordBatchResult{Batch: record})
 	}
-	return sendResult(ctx, results, source.RecordBatchResult{Batch: record})
+
+	if opts.MaxBatchBytes <= 0 {
+		return flush(items)
+	}
+
+	var batch []map[string]any
+	var accBytes int64
+	for _, item := range items {
+		rowBytes := arrowconv.RowBytes(item)
+		if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+			if err := flush(batch); err != nil {
+				return err
+			}
+			batch = nil
+			accBytes = 0
+		}
+		batch = append(batch, item)
+		accBytes += rowBytes
+	}
+	if len(batch) > 0 {
+		return flush(batch)
+	}
+	return nil
 }
 
 func sendResult(ctx context.Context, results chan<- source.RecordBatchResult, result source.RecordBatchResult) error {

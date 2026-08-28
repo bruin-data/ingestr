@@ -56,7 +56,7 @@ The PostHog source allows you to ingest the following tables:
 | ----- | -- | ------- | ------------ | ------- |
 | persons | id | last_seen_at | merge | People/users tracked in your project |
 | feature_flags | id | updated_at | merge | Feature flags configuration |
-| events | id | timestamp | append | Raw event data, supports server-side filtering with `after`/`before` parameters |
+| events | id | timestamp | append | Raw event data, including the resolved person and their properties |
 | cohorts | id | last_calculation | merge | User cohorts defined in your project |
 | event_definitions | id | last_updated_at | merge | Event type definitions |
 | property_definitions:event | id | updated_at | merge | Event property definitions |
@@ -68,3 +68,6 @@ Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
 > [!NOTE]
 > The `property_definitions` table requires a sub-type suffix (`:event`, `:person`, or `:session`) to specify which type of property definitions to ingest.
+
+> [!NOTE]
+> The `events` table exposes element data as both the raw `elements_chain` string and a parsed `elements` array, matching the fields the previous endpoint returned.

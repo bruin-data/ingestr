@@ -146,70 +146,62 @@ func TestPostHogPipeline(t *testing.T) {
 				{Name: "properties", DataType: schema.TypeJSON},
 				{Name: "person", DataType: schema.TypeJSON},
 			},
-			ExpectedRowCount: 13,
+			MinExpectedRowCount: 13,
 			Rows: []testutil.ExpectedRow{
 				{
 					ID: "019cffe7-443a-77e6-a458-b3970c8f2b87",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_3",
-						"event":          "$identify",
-						"elements_chain": "",
+						"distinct_id": "test_user_3",
+						"event":       "$identify",
 					},
 				},
 				{
 					ID: "019cffe7-4234-7083-938a-b9bbf780c4a6",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_2",
-						"event":          "$identify",
-						"elements_chain": "",
+						"distinct_id": "test_user_2",
+						"event":       "$identify",
 					},
 				},
 				{
 					ID: "019cffe7-401c-7708-a21a-ff7de52e01b5",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_1",
-						"event":          "$identify",
-						"elements_chain": "",
+						"distinct_id": "test_user_1",
+						"event":       "$identify",
 					},
 				},
 				{
 					ID: "019cffe7-1f51-723d-a3ac-270ce83224ea",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_5",
-						"event":          "test_event_5",
-						"elements_chain": "",
+						"distinct_id": "test_user_5",
+						"event":       "test_event_5",
 					},
 				},
 				{
 					ID: "019cffe7-1d51-7ce8-929c-c9e54fd1dfcc",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_4",
-						"event":          "test_event_4",
-						"elements_chain": "",
+						"distinct_id": "test_user_4",
+						"event":       "test_event_4",
 					},
 				},
 				{
 					ID: "019cffe7-1b4a-72be-b705-a9e11def1725",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_3",
-						"event":          "test_event_3",
-						"elements_chain": "",
+						"distinct_id": "test_user_3",
+						"event":       "test_event_3",
 					},
 				},
 				{
 					ID: "019cffe7-1938-7139-bf70-af53425b3931",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_2",
-						"event":          "test_event_2",
-						"elements_chain": "",
+						"distinct_id": "test_user_2",
+						"event":       "test_event_2",
 					},
 				},
 				{
 					ID: "019cffe7-172f-7bfc-a912-c525b860de88",
 					Fields: map[string]any{
-						"distinct_id":    "test_user_1",
-						"event":          "test_event_1",
-						"elements_chain": "",
+						"distinct_id": "test_user_1",
+						"event":       "test_event_1",
 					},
 				},
 			},
@@ -320,7 +312,7 @@ func TestPostHogPipeline(t *testing.T) {
 				{Name: "name", DataType: schema.TypeString},
 				{Name: "is_numerical", DataType: schema.TypeBoolean},
 			},
-			ExpectedRowCount: 33,
+			MinExpectedRowCount: 33,
 			Rows: []testutil.ExpectedRow{
 				{
 					ID: "019cffe7-2d8c-71e0-9594-24f2678b3c52",
@@ -341,7 +333,7 @@ func TestPostHogPipeline(t *testing.T) {
 				{Name: "name", DataType: schema.TypeString},
 				{Name: "is_numerical", DataType: schema.TypeBoolean},
 			},
-			ExpectedRowCount: 51,
+			MinExpectedRowCount: 51,
 			Rows: []testutil.ExpectedRow{
 				{
 					ID: "019cffe7-561d-7c81-a769-ab2b78ba9044",

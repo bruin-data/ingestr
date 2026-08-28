@@ -440,18 +440,41 @@ func (s *OktaSource) send(ctx context.Context, spec readSpec, opts source.ReadOp
 			return nil
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- source.RecordBatchResult{Batch: record}:
+			}
+			total += len(batch)
+			config.Debug("[OKTA] %s: sent %d rows (total: %d)", label, len(batch), total)
+			batch = nil
+			accBytes = 0
+			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
+
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
 		}
-		total += len(items)
-		config.Debug("[OKTA] %s: sent %d rows (total: %d)", label, len(items), total)
-		return nil
+		return flush()
 	})
 	if err != nil {
 		return err

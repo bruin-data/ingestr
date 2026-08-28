@@ -212,6 +212,75 @@ func TestSplitSegments_TruncatedFileReturnsError(t *testing.T) {
 	}
 }
 
+func TestSegmentParser_ByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	var sb strings.Builder
+	const rows = 40
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&sb, "%d,%s\n", i, wide)
+	}
+	seg := csvSegment{data: []byte(sb.String()), startRecord: 2}
+
+	run := func(max int64) (batches, total int) {
+		p := newSegmentParser([]string{"id", "name"}, source.ReadOptions{MaxBatchBytes: max}, 100_000)
+		defer p.builder.rb.Release()
+		for _, res := range p.parse(seg) {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			batches++
+			total += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
+		return batches, total
+	}
+
+	offB, offR := run(0)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d, want 1", offB)
+	}
+	onB, onR := run(4096)
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d, want >1", onB)
+	}
+	if offR != onR || offR != rows {
+		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, rows)
+	}
+}
+
+func TestSegmentParser_ByteCapIgnoresCarryOver(t *testing.T) {
+	// A worker reuses one parser across segments, and a segment's tail is emitted
+	// by the trailing flush without resetting accBytes. Simulate that residual and
+	// assert it does not split a fresh, wholly sub-cap segment: pre-fix, the first
+	// row would immediately cross the cap and flush early (2 batches).
+	var sb strings.Builder
+	const rows = 6
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&sb, "%d,name-%d\n", i, i)
+	}
+	seg := csvSegment{data: []byte(sb.String()), startRecord: 2}
+
+	p := newSegmentParser([]string{"id", "name"}, source.ReadOptions{MaxBatchBytes: 4096}, 100_000)
+	defer p.builder.rb.Release()
+	p.accBytes = 1 << 20 // residual left by a prior segment's trailing flush
+
+	var batches, total int
+	for _, res := range p.parse(seg) {
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		batches++
+		total += int(res.Batch.NumRows())
+		res.Batch.Release()
+	}
+	if batches != 1 {
+		t.Fatalf("carry-over accBytes split a sub-cap segment: got %d batches, want 1", batches)
+	}
+	if total != rows {
+		t.Fatalf("row count mismatch: got %d want %d", total, rows)
+	}
+}
+
 func TestLastRecordBoundary(t *testing.T) {
 	tests := []struct {
 		name        string

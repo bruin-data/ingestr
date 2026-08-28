@@ -1599,8 +1599,9 @@ func (s *MSSQLCDCSource) rowsToSnapshotBatches(ctx context.Context, rows *sql.Ro
 
 	var pending arrow.RecordBatch
 	for {
-		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, func(builders []array.Builder) {
+		record, count, err := buildBatch(rows, tableSchema, sourceColumns, batchSize, opts.MaxBatchBytes, s.guidConversion, func(builders []array.Builder) int64 {
 			appendCDCValues(builders, len(sourceColumns), incompleteLSN, false, syncedAt)
+			return cdcMetadataBytes(incompleteLSN)
 		})
 		if err != nil {
 			if pending != nil {
@@ -1662,7 +1663,7 @@ func (s *MSSQLCDCSource) rowsToChangeBatches(ctx context.Context, rows *sql.Rows
 	}
 
 	for {
-		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, s.guidConversion, syncedAt, pairer)
+		record, count, err := buildChangeBatch(rows, tableSchema, sourceColumns, batchSize, opts.MaxBatchBytes, s.guidConversion, syncedAt, pairer)
 		if err != nil {
 			return err
 		}
@@ -1809,7 +1810,7 @@ func normalizeSourceValue(col schema.Column, val any, guidConversion bool) (any,
 	return normalized, nil
 }
 
-func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, appendCDC func([]array.Builder)) (arrow.RecordBatch, int64, error) {
+func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, maxBatchBytes int64, guidConversion bool, appendCDC func([]array.Builder) int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1824,6 +1825,7 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			releaseBuilders(builders)
@@ -1837,11 +1839,20 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 				return nil, 0, err
 			}
 			arrowconv.AppendValue(builders[i], val)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(val)
+			}
 		}
-		appendCDC(builders)
+		metaBytes := appendCDC(builders)
+		if maxBatchBytes > 0 {
+			accBytes += metaBytes
+		}
 
 		rowCount++
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}
@@ -1849,7 +1860,7 @@ func buildBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns [
 	return finishBatch(rows, arrowSchema, builders, rowCount)
 }
 
-func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, guidConversion bool, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
+func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceColumns []schema.Column, batchSize int, maxBatchBytes int64, guidConversion bool, syncedAt time.Time, pairer *updatePairer) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	arrowSchema := buildArrowSchema(tableSchema.Columns)
 
@@ -1864,6 +1875,7 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 	}
 
 	var rowCount int64
+	var accBytes int64
 	exhausted := true
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
@@ -1890,11 +1902,17 @@ func buildChangeBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sourceCol
 		for _, change := range pairer.push(values, lsn, op) {
 			for i, v := range change.values {
 				arrowconv.AppendValue(builders[i], v)
+				if maxBatchBytes > 0 {
+					accBytes += arrowconv.ValueBytes(v)
+				}
 			}
 			appendCDCValues(builders, len(sourceColumns), change.lsn, change.deleted, syncedAt)
+			if maxBatchBytes > 0 {
+				accBytes += cdcMetadataBytes(change.lsn)
+			}
 			rowCount++
 		}
-		if batchSize > 0 && rowCount >= int64(batchSize) {
+		if (batchSize > 0 && rowCount >= int64(batchSize)) || (maxBatchBytes > 0 && accBytes >= maxBatchBytes) {
 			exhausted = false
 			break
 		}
@@ -1945,6 +1963,13 @@ func appendCDCValues(builders []array.Builder, offset int, lsn string, deleted b
 	builders[offset].(*array.StringBuilder).Append(lsn)
 	builders[offset+1].(*array.BooleanBuilder).Append(deleted)
 	builders[offset+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+}
+
+// cdcMetadataBytes approximates the byte footprint of the CDC metadata columns
+// appended per row (_lsn string + _deleted bool + _synced_at timestamp) so the
+// MaxBatchBytes accounting reflects the full emitted row, not just source values.
+func cdcMetadataBytes(lsn string) int64 {
+	return int64(len(lsn)) + 1 + 8
 }
 
 func operationValue(v any) (int, error) {

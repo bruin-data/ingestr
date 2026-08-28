@@ -465,6 +465,7 @@ func (s *ChessSource) readGames(ctx context.Context, opts source.ReadOptions, re
 	totalSent := 0
 	batchNum := 0
 	var pendingGames []map[string]interface{}
+	var accBytes int64
 
 	sendBatch := func() error {
 		if len(pendingGames) == 0 {
@@ -481,6 +482,7 @@ func (s *ChessSource) readGames(ctx context.Context, opts source.ReadOptions, re
 		results <- source.RecordBatchResult{Batch: record}
 		totalSent += len(pendingGames)
 		pendingGames = nil
+		accBytes = 0
 		return nil
 	}
 
@@ -494,6 +496,15 @@ func (s *ChessSource) readGames(ctx context.Context, opts source.ReadOptions, re
 				break
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(game)
+				if len(pendingGames) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := sendBatch(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			pendingGames = append(pendingGames, game)
 
 			if len(pendingGames) >= batchSize {

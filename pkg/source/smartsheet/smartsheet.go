@@ -223,12 +223,52 @@ func (s *SmartsheetSource) read(ctx context.Context, sheetID string, opts source
 	go func() {
 		defer close(results)
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
-		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
+		// Preserve the original behavior of emitting one (possibly empty) batch so
+		// schema inference still creates the destination table for a zero-row sheet.
+		if len(items) == 0 {
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
+				return
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			config.Debug("[SMARTSHEET] Sheet %s: %d rows read", sheetID, len(items))
 			return
 		}
-		results <- source.RecordBatchResult{Batch: record}
+
+		var batch []map[string]interface{}
+		var accBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, columns, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert to Arrow: %w", err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			batch = nil
+			accBytes = 0
+			return nil
+		}
+
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						results <- source.RecordBatchResult{Err: err}
+						return
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
+		}
 
 		config.Debug("[SMARTSHEET] Sheet %s: %d rows read", sheetID, len(items))
 	}()

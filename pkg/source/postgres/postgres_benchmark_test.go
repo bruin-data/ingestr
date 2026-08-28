@@ -151,7 +151,7 @@ func BenchmarkPostgresRowBatchToArrow(b *testing.B) {
 			rows := &syntheticBenchmarkRows{
 				fields: fields, values: values, typeMap: pgtype.NewMap(), rows: benchmarkPostgresBatchSize,
 			}
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, benchmarkPostgresBatchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, benchmarkPostgresBatchSize, 0)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -289,7 +289,7 @@ func TestPostgresRawBatchMatchesLegacyForBenchmarkTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer legacy.Release()
-	optimized, _, err := rowsToArrowRecordBatch(rawRows, arrowSchema, columns, 1)
+	optimized, _, err := rowsToArrowRecordBatch(rawRows, arrowSchema, columns, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

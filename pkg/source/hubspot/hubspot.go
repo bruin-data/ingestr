@@ -716,12 +716,34 @@ func (s *Hubspotsource) readPipelines(ctx context.Context, opts source.ReadOptio
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to build arrow record: %w", err)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range rows {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, row)
+	}
+	return flush()
 }
 
 func (s *Hubspotsource) readPipelineStages(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -760,12 +782,34 @@ func (s *Hubspotsource) readPipelineStages(ctx context.Context, opts source.Read
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to build arrow record: %w", err)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range rows {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, row)
+	}
+	return flush()
 }
 
 func (s *Hubspotsource) fetchPropertyNames(ctx context.Context, tableName string) ([]string, error) {
@@ -861,17 +905,38 @@ func (s *Hubspotsource) paginatedFetch(ctx context.Context, endpoint string, pro
 		}
 
 		if len(listResp.Results) > 0 {
-			items := make([]map[string]interface{}, 0, len(listResp.Results))
+			var items []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(items) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to build arrow record: %w", err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				totalProcessed += len(items)
+				items = nil
+				accBytes = 0
+				return nil
+			}
 			for _, item := range listResp.Results {
-				items = append(items, flattenCRMResult(item))
+				row := flattenCRMResult(item)
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				items = append(items, row)
 			}
-
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record: %w", err)
+			if err := flush(); err != nil {
+				return err
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalProcessed += len(items)
 		}
 
 		if listResp.Paging == nil || listResp.Paging.Next == nil {
@@ -1234,11 +1299,36 @@ func (s *Hubspotsource) searchCRMObjects(ctx context.Context, cfg tableConfig, p
 					}
 				}
 
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(objects, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to build arrow record: %w", err)
+				var items []map[string]interface{}
+				var accBytes int64
+				flush := func() error {
+					if len(items) == 0 {
+						return nil
+					}
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+					if err != nil {
+						return fmt.Errorf("failed to build arrow record: %w", err)
+					}
+					results <- source.RecordBatchResult{Batch: record}
+					items = nil
+					accBytes = 0
+					return nil
 				}
-				results <- source.RecordBatchResult{Batch: record}
+				for _, row := range objects {
+					if opts.MaxBatchBytes > 0 {
+						rowBytes := arrowconv.RowBytes(row)
+						if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+							if err := flush(); err != nil {
+								return err
+							}
+						}
+						accBytes += rowBytes
+					}
+					items = append(items, row)
+				}
+				if err := flush(); err != nil {
+					return err
+				}
 				windowYielded += len(objects)
 				totalProcessed += len(objects)
 			}
@@ -1394,11 +1484,36 @@ func (s *Hubspotsource) sweepArchivedCRMObjects(ctx context.Context, cfg tableCo
 						}
 					}
 
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(objects, nil, opts.ExcludeColumns)
-					if err != nil {
-						return fmt.Errorf("failed to build arrow record: %w", err)
+					var items []map[string]interface{}
+					var accBytes int64
+					flush := func() error {
+						if len(items) == 0 {
+							return nil
+						}
+						record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+						if err != nil {
+							return fmt.Errorf("failed to build arrow record: %w", err)
+						}
+						results <- source.RecordBatchResult{Batch: record}
+						items = nil
+						accBytes = 0
+						return nil
 					}
-					results <- source.RecordBatchResult{Batch: record}
+					for _, row := range objects {
+						if opts.MaxBatchBytes > 0 {
+							rowBytes := arrowconv.RowBytes(row)
+							if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+								if err := flush(); err != nil {
+									return err
+								}
+							}
+							accBytes += rowBytes
+						}
+						items = append(items, row)
+					}
+					if err := flush(); err != nil {
+						return err
+					}
 					totalProcessed += len(objects)
 				}
 			}
@@ -1686,11 +1801,36 @@ func (s *Hubspotsource) batchReadHistory(ctx context.Context, objectType string,
 			rows = append(rows, flattenHistoryRows(r)...)
 		}
 		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return totalRows, fmt.Errorf("failed to build arrow record: %w", err)
+			var items []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(items) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to build arrow record: %w", err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				items = nil
+				accBytes = 0
+				return nil
 			}
-			results <- source.RecordBatchResult{Batch: record}
+			for _, row := range rows {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return totalRows, err
+						}
+					}
+					accBytes += rowBytes
+				}
+				items = append(items, row)
+			}
+			if err := flush(); err != nil {
+				return totalRows, err
+			}
 			totalRows += len(rows)
 		}
 	}

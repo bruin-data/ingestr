@@ -292,7 +292,23 @@ func (s *PrimerSource) readPayments(ctx context.Context, statuses []string, opts
 	}()
 
 	var batch []map[string]any
+	var accBytes int64
 	totalSent := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		totalSent += len(batch)
+		config.Debug("[PRIMER] Sending batch of %d payments (total: %d)", len(batch), totalSent)
+		results <- source.RecordBatchResult{Batch: rec}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
 	for res := range resultChan {
 		select {
 		case <-ctx.Done():
@@ -302,26 +318,24 @@ func (s *PrimerSource) readPayments(ctx context.Context, statuses []string, opts
 		if res.err != nil {
 			return res.err
 		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(res.data)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		batch = append(batch, res.data)
 		if len(batch) >= defaultPageSize {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-			if err != nil {
+			if err := flush(); err != nil {
 				return err
 			}
-			totalSent += len(batch)
-			config.Debug("[PRIMER] Sending batch of %d payments (total: %d)", len(batch), totalSent)
-			results <- source.RecordBatchResult{Batch: rec}
-			batch = nil
 		}
 	}
-	if len(batch) > 0 {
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-		if err != nil {
-			return err
-		}
-		totalSent += len(batch)
-		config.Debug("[PRIMER] Sending batch of %d payments (total: %d)", len(batch), totalSent)
-		results <- source.RecordBatchResult{Batch: rec}
+	if err := flush(); err != nil {
+		return err
 	}
 	config.Debug("[PRIMER] Finished reading payments, total: %d", totalSent)
 	return nil

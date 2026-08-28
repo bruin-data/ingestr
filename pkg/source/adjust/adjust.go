@@ -284,14 +284,38 @@ func (s *AdjustSource) readEvents(ctx context.Context, appTokens string, opts so
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert events to Arrow: %w", err)
+	config.Debug("[ADJUST] Sending %d events", len(items))
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert events to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	config.Debug("[ADJUST] Sending %d events", len(items))
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+
+	return flush()
 }
 
 var defaultPrimaryKeys = []string{
@@ -389,10 +413,10 @@ func (s *AdjustSource) readReport(ctx context.Context, name, dimensions, metrics
 	cols := buildTypeHintColumns(dimensions, metrics)
 
 	type periodResult struct {
-		period   string
-		record   arrow.RecordBatch
-		rowCount int
-		err      error
+		period  string
+		records []arrow.RecordBatch
+		rows    int
+		err     error
 	}
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
@@ -415,12 +439,12 @@ func (s *AdjustSource) readReport(ctx context.Context, name, dimensions, metrics
 						return
 					}
 
-					record, rowCount, err := s.fetchReportPeriod(workerCtx, name, dimensions, metrics, period, params, cols, opts.ExcludeColumns)
-					result := periodResult{period: period, record: record, rowCount: rowCount, err: err}
+					records, rowCount, err := s.fetchReportPeriod(workerCtx, name, dimensions, metrics, period, params, cols, opts.ExcludeColumns, opts.MaxBatchBytes)
+					result := periodResult{period: period, records: records, rows: rowCount, err: err}
 					select {
 					case fetched <- result:
 					case <-workerCtx.Done():
-						if record != nil {
+						for _, record := range records {
 							record.Release()
 						}
 						return
@@ -459,23 +483,33 @@ func (s *AdjustSource) readReport(ctx context.Context, name, dimensions, metrics
 			}
 			continue
 		}
-		if result.record == nil {
+		if len(result.records) == 0 {
 			continue
 		}
 		if firstErr != nil {
-			result.record.Release()
+			for _, record := range result.records {
+				record.Release()
+			}
 			continue
 		}
 
-		totalRows += result.rowCount
-		config.Debug("[ADJUST] Sending %d %s rows for %s", result.rowCount, name, result.period)
-		select {
-		case results <- source.RecordBatchResult{Batch: result.record}:
-		case <-ctx.Done():
-			result.record.Release()
-			if firstErr == nil {
-				firstErr = ctx.Err()
-				cancelWorkers()
+		totalRows += result.rows
+		config.Debug("[ADJUST] Sending %d %s rows for %s", result.rows, name, result.period)
+		for i, record := range result.records {
+			select {
+			case results <- source.RecordBatchResult{Batch: record}:
+			case <-ctx.Done():
+				record.Release()
+				for _, pending := range result.records[i+1:] {
+					pending.Release()
+				}
+				if firstErr == nil {
+					firstErr = ctx.Err()
+					cancelWorkers()
+				}
+			}
+			if firstErr != nil {
+				break
 			}
 		}
 	}
@@ -499,7 +533,7 @@ func reportWorkerCount(parallelism, periodCount int) int {
 	return min(parallelism, periodCount)
 }
 
-func (s *AdjustSource) fetchReportPeriod(ctx context.Context, name, dimensions, metrics, datePeriod string, params map[string]string, cols []schema.Column, excludeColumns []string) (arrow.RecordBatch, int, error) {
+func (s *AdjustSource) fetchReportPeriod(ctx context.Context, name, dimensions, metrics, datePeriod string, params map[string]string, cols []schema.Column, excludeColumns []string, maxBatchBytes int64) ([]arrow.RecordBatch, int, error) {
 	req := s.client.R(ctx).
 		SetQueryParam("dimensions", dimensions).
 		SetQueryParam("metrics", metrics).
@@ -529,11 +563,47 @@ func (s *AdjustSource) fetchReportPeriod(ctx context.Context, name, dimensions, 
 		return nil, 0, nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(result.Rows, cols, excludeColumns)
+	records, err := rowsToArrowRecords(result.Rows, cols, excludeColumns, maxBatchBytes)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to convert %s to Arrow for %s: %w", name, datePeriod, err)
 	}
-	return record, len(result.Rows), nil
+	return records, len(result.Rows), nil
+}
+
+func rowsToArrowRecords(rows []map[string]interface{}, cols []schema.Column, excludeColumns []string, maxBatchBytes int64) ([]arrow.RecordBatch, error) {
+	var records []arrow.RecordBatch
+	var batch []map[string]interface{}
+	var accumulatedBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, excludeColumns)
+		if err != nil {
+			return err
+		}
+		records = append(records, record)
+		batch = nil
+		accumulatedBytes = 0
+		return nil
+	}
+
+	for _, row := range rows {
+		if maxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accumulatedBytes+rowBytes > maxBatchBytes {
+				if err := flush(); err != nil {
+					return nil, err
+				}
+			}
+			accumulatedBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 var requiredCustomDimensions = []string{

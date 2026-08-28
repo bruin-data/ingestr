@@ -410,7 +410,7 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 		arrowSchema := BuildArrowSchema(columns)
 
 		for {
-			record, count, err := RowsToArrowBatch(rows, arrowSchema, batchSize)
+			record, count, err := RowsToArrowBatch(rows, arrowSchema, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -529,7 +529,7 @@ func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []sche
 
 		for {
 			startBatch := time.Now()
-			record, count, err := RowsToArrowBatch(rows, arrowSchema, batchSize)
+			record, count, err := RowsToArrowBatch(rows, arrowSchema, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return

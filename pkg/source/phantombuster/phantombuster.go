@@ -173,6 +173,23 @@ func (s *PhantombusterSource) readCompletedPhantoms(ctx context.Context, agentID
 	var beforeEndedAt string
 	limit := "100"
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		config.Debug("[PHANTOMBUSTER] Sent %d items", len(items))
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -234,13 +251,20 @@ func (s *PhantombusterSource) readCompletedPhantoms(ctx context.Context, agentID
 			if err != nil {
 				return err
 			}
-			if len(rows) > 0 {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert to Arrow: %w", err)
+			for _, row := range rows {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
 				}
-				results <- source.RecordBatchResult{Batch: record}
-				config.Debug("[PHANTOMBUSTER] Sent %d items", len(rows))
+				items = append(items, row)
+			}
+			if err := flush(); err != nil {
+				return err
 			}
 		}
 

@@ -292,6 +292,27 @@ func (s *MixpanelSource) readEvents(ctx context.Context, opts source.ReadOptions
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 
 	batch := make([]map[string]interface{}, 0, 500)
+	var accBytes int64
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, eventColumns, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for events: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+
+		batch = batch[:0]
+		accBytes = 0
+		return nil
+	}
 
 	for scanner.Scan() {
 		select {
@@ -313,21 +334,21 @@ func (s *MixpanelSource) readEvents(ctx context.Context, opts source.ReadOptions
 
 		s.flattenProperties(event)
 
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(event)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		batch = append(batch, event)
 
 		if len(batch) >= 500 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, eventColumns, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to build arrow record for events: %w", err)
+			if err := flush(); err != nil {
+				return err
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- source.RecordBatchResult{Batch: record}:
-			}
-
-			batch = batch[:0]
 		}
 	}
 
@@ -335,17 +356,8 @@ func (s *MixpanelSource) readEvents(ctx context.Context, opts source.ReadOptions
 		return fmt.Errorf("failed to read events response: %w", err)
 	}
 
-	if len(batch) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, eventColumns, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to build arrow record for events: %w", err)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
-		}
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[MIXPANEL] finished reading events")

@@ -188,7 +188,7 @@ func (s *AthenaSource) read(ctx context.Context, table string, tableSchema *sche
 	go func() {
 		defer close(out)
 		query := buildSelectQuery(db, tbl, columns, opts)
-		if err := s.streamQuery(ctx, query, db, arrowSchema, columns, batchSize, out); err != nil {
+		if err := s.streamQuery(ctx, query, db, arrowSchema, columns, batchSize, opts.MaxBatchBytes, out); err != nil {
 			out <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -333,7 +333,7 @@ func (s *AthenaSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 		}
 		arrowSchema := buildArrowSchema(columns)
 
-		if err := s.streamQueryFromExecID(ctx, execID, arrowSchema, columns, batchSize, out); err != nil {
+		if err := s.streamQueryFromExecID(ctx, execID, arrowSchema, columns, batchSize, opts.MaxBatchBytes, out); err != nil {
 			out <- source.RecordBatchResult{Err: err}
 		}
 	}()

@@ -275,26 +275,67 @@ type tableMeta struct {
 }
 
 var salesforceTableMeta = map[string]tableMeta{
-	"account":                  {"Account", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"campaign":                 {"Campaign", config.StrategyReplace, []string{"Id"}, ""},
-	"campaign_history":         {"CampaignHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
-	"campaign_member":          {"CampaignMember", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"contact":                  {"Contact", config.StrategyReplace, []string{"Id"}, ""},
-	"contact_history":          {"ContactHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
-	"event":                    {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"lead":                     {"Lead", config.StrategyReplace, []string{"Id"}, ""},
-	"lead_history":             {"LeadHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
-	"opportunity":              {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_contact_role": {"OpportunityContactRole", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"opportunity_history":      {"OpportunityHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
-	"opportunity_line_item":    {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"pricebook":                {"Pricebook2", config.StrategyReplace, []string{"Id"}, ""},
-	"pricebook_entry":          {"PricebookEntry", config.StrategyReplace, []string{"Id"}, ""},
-	"product":                  {"Product2", config.StrategyReplace, []string{"Id"}, ""},
-	"task":                     {"Task", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
-	"user":                     {"User", config.StrategyReplace, nil, ""},
-	"user_history":             {"UserHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
-	"user_role":                {"UserRole", config.StrategyReplace, nil, ""},
+	"account":                   {"Account", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"account_history":           {"AccountHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"agent_work":                {"AgentWork", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"campaign":                  {"Campaign", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"campaign_history":          {"CampaignHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"campaign_member":           {"CampaignMember", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"campaign_member_status":    {"CampaignMemberStatus", config.StrategyReplace, []string{"Id"}, ""},
+	"case":                      {"Case", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"case_feed":                 {"CaseFeed", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"case_history":              {"CaseHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"case_milestone":            {"CaseMilestone", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"contact":                   {"Contact", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"contact_history":           {"ContactHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"content_document":          {"ContentDocument", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"content_version":           {"ContentVersion", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"conversation":              {"Conversation", config.StrategyMerge, []string{"Id"}, "LastModifiedDate"},
+	"conversation_entry":        {"ConversationEntry", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"conversation_participant":  {"ConversationParticipant", config.StrategyMerge, []string{"Id"}, "LastModifiedDate"},
+	"dashboard":                 {"Dashboard", config.StrategyReplace, []string{"Id"}, ""},
+	"dashboard_component":       {"DashboardComponent", config.StrategyReplace, []string{"Id"}, ""},
+	"email_message":             {"EmailMessage", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"event":                     {"Event", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"event_relation":            {"EventRelation", config.StrategyReplace, []string{"Id"}, ""},
+	"feed_comment":              {"FeedComment", config.StrategyReplace, []string{"Id"}, ""},
+	"folder":                    {"Folder", config.StrategyReplace, []string{"Id"}, ""},
+	"forecasting_quota":         {"ForecastingQuota", config.StrategyReplace, []string{"Id"}, ""},
+	"group":                     {"Group", config.StrategyReplace, []string{"Id"}, ""},
+	"lead":                      {"Lead", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"lead_history":              {"LeadHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"opportunity":               {"Opportunity", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_contact_role":  {"OpportunityContactRole", config.StrategyReplace, []string{"Id"}, ""},
+	"opportunity_field_history": {"OpportunityFieldHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"opportunity_history":       {"OpportunityHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"opportunity_line_item":     {"OpportunityLineItem", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"opportunity_split":         {"OpportunitySplit", config.StrategyReplace, []string{"Id"}, ""},
+	"opportunity_split_type":    {"OpportunitySplitType", config.StrategyReplace, []string{"Id"}, ""},
+	"permission_set":            {"PermissionSet", config.StrategyReplace, []string{"Id"}, ""},
+	"permission_set_assignment": {"PermissionSetAssignment", config.StrategyReplace, []string{"Id"}, ""},
+	"pricebook":                 {"Pricebook2", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"pricebook_entry":           {"PricebookEntry", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"product":                   {"Product2", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"profile":                   {"Profile", config.StrategyReplace, []string{"Id"}, ""},
+	"record_type":               {"RecordType", config.StrategyReplace, []string{"Id"}, ""},
+	"report":                    {"Report", config.StrategyReplace, []string{"Id"}, ""},
+	"service_presence_status":   {"ServicePresenceStatus", config.StrategyReplace, []string{"Id"}, ""},
+	"survey_invitation":         {"SurveyInvitation", config.StrategyReplace, []string{"Id"}, ""},
+	"survey_question_score":     {"SurveyQuestionScore", config.StrategyReplace, []string{"Id"}, ""},
+	"survey_response":           {"SurveyResponse", config.StrategyReplace, []string{"Id"}, ""},
+	"survey_subject":            {"SurveySubject", config.StrategyReplace, []string{"Id"}, ""},
+	"task":                      {"Task", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"task_relation":             {"TaskRelation", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"topic":                     {"Topic", config.StrategyReplace, []string{"Id"}, ""},
+	"topic_assignment":          {"TopicAssignment", config.StrategyReplace, []string{"Id"}, ""},
+	"upgrades_history":          {"Upgrades__History", config.StrategyReplace, []string{"Id"}, ""},
+	"user":                      {"User", config.StrategyReplace, nil, ""},
+	"user_history":              {"UserHistory", config.StrategyMerge, []string{"Id"}, "CreatedDate"},
+	"user_role":                 {"UserRole", config.StrategyReplace, nil, ""},
+	"user_service_presence":     {"UserServicePresence", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"voice_call":                {"VoiceCall", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"voice_call_feed":           {"VoiceCallFeed", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
+	"voice_call_recording":      {"VoiceCallRecording", config.StrategyMerge, []string{"Id"}, "SystemModstamp"},
 }
 
 func (s *salesforceSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -523,18 +564,40 @@ func (s *salesforceSource) getRecordsBulk(ctx context.Context, sobject, query st
 	}
 
 	nRecords := 0
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert batch to arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: arrowRec}
+		nRecords += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 	err = s.bulkGetQueryResults(ctx, jobID, batchID, func(records []map[string]interface{}) error {
 		if len(records) == 0 {
 			return nil
 		}
 		s.processRecords(records, dateFields)
-		arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(records, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert batch to arrow: %w", err)
+		for _, row := range records {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
-		results <- source.RecordBatchResult{Batch: arrowRec}
-		nRecords += len(records)
-		return nil
+		return flush()
 	})
 	if err != nil {
 		return err
@@ -546,6 +609,22 @@ func (s *salesforceSource) getRecordsBulk(ctx context.Context, sobject, query st
 
 func (s *salesforceSource) getRecordsREST(ctx context.Context, query string, dateFields map[string]bool, opts source.ReadOptions, results chan<- source.RecordBatchResult, sobject string) error {
 	nRecords := 0
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert batch to arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: arrowRec}
+		nRecords += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	result, err := s.client.Query(query)
 	if err != nil {
@@ -560,12 +639,21 @@ func (s *salesforceSource) getRecordsREST(ctx context.Context, query string, dat
 
 		if len(batch) > 0 {
 			s.processRecords(batch, dateFields)
-			arrowRec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert batch to arrow: %w", err)
+			for _, row := range batch {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				items = append(items, row)
 			}
-			results <- source.RecordBatchResult{Batch: arrowRec}
-			nRecords += len(batch)
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 
 		if result.Done || result.NextRecordsURL == "" {

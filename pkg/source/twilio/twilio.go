@@ -310,6 +310,24 @@ func (s *TwilioSource) paginateAndSend(ctx context.Context, cfg tableConfig, opt
 	first := true
 	totalSent := 0
 
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.resource, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		config.Debug("[TWILIO] %s: sent %d records (total: %d)", cfg.resource, len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -339,14 +357,21 @@ func (s *TwilioSource) paginateAndSend(ctx context.Context, cfg tableConfig, opt
 			items = filterItemsByInterval(items, cfg.dateField, opts.IntervalStart, opts.IntervalEnd)
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.resource, err)
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
-			config.Debug("[TWILIO] %s: sent %d records (total: %d)", cfg.resource, len(items), totalSent)
+			batch = append(batch, row)
+		}
+
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if nextPageURI == "" {

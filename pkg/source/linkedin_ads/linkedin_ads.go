@@ -406,19 +406,47 @@ func (s *LinkedInAdsSource) runParallelAccountFetch(
 }
 
 // sendAsArrowRecord converts items to Arrow format and sends to results channel.
-func sendAsArrowRecord(items []map[string]interface{}, cols []schema.Column, excludeColumns []string, results chan<- source.RecordBatchResult, tableName string) error {
+func sendAsArrowRecord(items []map[string]interface{}, cols []schema.Column, excludeColumns []string, maxBatchBytes int64, results chan<- source.RecordBatchResult, tableName string) error {
 	if len(items) == 0 {
 		config.Debug("[LINKEDIN_ADS] No %s found", tableName)
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, excludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	sent := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, excludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", tableName, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		sent += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[LINKEDIN_ADS] Sent %d %s", len(items), tableName)
+	for _, row := range items {
+		if maxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > maxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+
+	config.Debug("[LINKEDIN_ADS] Sent %d %s", sent, tableName)
 	return nil
 }
 
@@ -504,7 +532,7 @@ func (s *LinkedInAdsSource) readAdAccounts(ctx context.Context, opts source.Read
 		return fmt.Errorf("failed to fetch ad accounts: %w", err)
 	}
 
-	return sendAsArrowRecord(accounts, nil, opts.ExcludeColumns, results, "ad_accounts")
+	return sendAsArrowRecord(accounts, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "ad_accounts")
 }
 
 func (s *LinkedInAdsSource) readAdAccountUsers(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -542,7 +570,7 @@ func (s *LinkedInAdsSource) readAdAccountUsers(ctx context.Context, opts source.
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "ad_account_users")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "ad_account_users")
 }
 
 func (s *LinkedInAdsSource) readCampaignGroups(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -579,7 +607,7 @@ func (s *LinkedInAdsSource) readCampaignGroups(ctx context.Context, opts source.
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "campaign_groups")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "campaign_groups")
 }
 
 func (s *LinkedInAdsSource) readCampaigns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -616,7 +644,7 @@ func (s *LinkedInAdsSource) readCampaigns(ctx context.Context, opts source.ReadO
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "campaigns")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "campaigns")
 }
 
 func (s *LinkedInAdsSource) readCreatives(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -653,7 +681,7 @@ func (s *LinkedInAdsSource) readCreatives(ctx context.Context, opts source.ReadO
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "creatives")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "creatives")
 }
 
 func (s *LinkedInAdsSource) readConversions(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -691,7 +719,7 @@ func (s *LinkedInAdsSource) readConversions(ctx context.Context, opts source.Rea
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "conversions")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "conversions")
 }
 
 func (s *LinkedInAdsSource) readLeadForms(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -729,7 +757,7 @@ func (s *LinkedInAdsSource) readLeadForms(ctx context.Context, opts source.ReadO
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "lead_forms")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "lead_forms")
 }
 
 func (s *LinkedInAdsSource) readLeadFormResponses(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -777,7 +805,7 @@ func (s *LinkedInAdsSource) readLeadFormResponses(ctx context.Context, opts sour
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, "lead_form_responses")
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, "lead_form_responses")
 }
 
 func (s *LinkedInAdsSource) readDmpSegments(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -830,7 +858,7 @@ func (s *LinkedInAdsSource) readPerAccountCursor(ctx context.Context, opts sourc
 		return err
 	}
 
-	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, results, tableName)
+	return sendAsArrowRecord(allItems, nil, opts.ExcludeColumns, opts.MaxBatchBytes, results, tableName)
 }
 
 // ----------------------------------------------------------------------------
@@ -916,7 +944,7 @@ func (s *LinkedInAdsSource) readCustomAnalytics(ctx context.Context, cfg *custom
 		dateHints = dailyDateColumns
 	}
 
-	return sendAsArrowRecord(allItems, dateHints, opts.ExcludeColumns, results, "custom_reports")
+	return sendAsArrowRecord(allItems, dateHints, opts.ExcludeColumns, opts.MaxBatchBytes, results, "custom_reports")
 }
 
 var _ source.Source = (*LinkedInAdsSource)(nil)

@@ -639,6 +639,27 @@ func (s *ShopifySource) readOrders(ctx context.Context, opts source.ReadOptions,
 	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		normalizeItems(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, orderFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert orders to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[SHOPIFY] Sending orders batch %d with %d records", batchNum, len(items))
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	for paginator.HasNext() {
 		select {
@@ -664,26 +685,26 @@ func (s *ShopifySource) readOrders(ctx context.Context, opts source.ReadOptions,
 			break
 		}
 
-		var items []map[string]interface{}
 		for _, order := range resp.Orders {
-			items = append(items, s.transformOrder(order))
+			normalized := s.transformOrder(order)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(normalized)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, normalized)
 
 			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
 				break
 			}
 		}
 
-		if len(items) > 0 {
-			normalizeItems(items)
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, orderFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert orders to Arrow: %w", err)
-			}
-
-			batchNum++
-			config.Debug("[SHOPIFY] Sending orders batch %d with %d records", batchNum, len(items))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -814,6 +835,27 @@ func (s *ShopifySource) readCustomers(ctx context.Context, opts source.ReadOptio
 	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		normalizeItems(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, customerFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert customers to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[SHOPIFY] Sending customers batch %d with %d records", batchNum, len(items))
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	for paginator.HasNext() {
 		select {
@@ -839,26 +881,26 @@ func (s *ShopifySource) readCustomers(ctx context.Context, opts source.ReadOptio
 			break
 		}
 
-		var items []map[string]interface{}
 		for _, customer := range resp.Customers {
-			items = append(items, s.transformCustomer(customer))
+			normalized := s.transformCustomer(customer)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(normalized)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, normalized)
 
 			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
 				break
 			}
 		}
 
-		if len(items) > 0 {
-			normalizeItems(items)
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, customerFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert customers to Arrow: %w", err)
-			}
-
-			batchNum++
-			config.Debug("[SHOPIFY] Sending customers batch %d with %d records", batchNum, len(items))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -1379,6 +1421,27 @@ func (s *ShopifySource) readEvents(ctx context.Context, opts source.ReadOptions,
 	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		normalizeItems(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, eventFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert events to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[SHOPIFY] Sending events batch %d with %d records", batchNum, len(items))
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	for paginator.HasNext() {
 		select {
@@ -1404,25 +1467,25 @@ func (s *ShopifySource) readEvents(ctx context.Context, opts source.ReadOptions,
 			break
 		}
 
-		var items []map[string]interface{}
 		for _, event := range resp.Events {
-			items = append(items, s.transformEvent(event))
+			normalized := s.transformEvent(event)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(normalized)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, normalized)
 			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
 				break
 			}
 		}
 
-		if len(items) > 0 {
-			normalizeItems(items)
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, eventFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert events to Arrow: %w", err)
-			}
-
-			batchNum++
-			config.Debug("[SHOPIFY] Sending events batch %d with %d records", batchNum, len(items))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -1465,6 +1528,27 @@ func (s *ShopifySource) readTransactions(ctx context.Context, opts source.ReadOp
 	totalSent := 0
 	batchNum := 0
 	stop := false
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		normalizeItems(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, transactionFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert transactions to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[SHOPIFY] Sending transactions batch %d with %d records", batchNum, len(items))
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	for paginator.HasNext() && !stop {
 		select {
@@ -1490,7 +1574,6 @@ func (s *ShopifySource) readTransactions(ctx context.Context, opts source.ReadOp
 			break
 		}
 
-		var items []map[string]interface{}
 		hasInterval := opts.IntervalStart != nil || opts.IntervalEnd != nil
 		for _, txn := range resp.Transactions {
 			processedAtStr := getString(txn, "processed_at")
@@ -1529,6 +1612,15 @@ func (s *ShopifySource) readTransactions(ctx context.Context, opts source.ReadOp
 				"source_order_transaction_id": getIntPtr(txn, "source_order_transaction_id"),
 				"processed_at":                parseTimestampPtr(processedAtStr),
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, item)
 
 			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
@@ -1536,17 +1628,8 @@ func (s *ShopifySource) readTransactions(ctx context.Context, opts source.ReadOp
 			}
 		}
 
-		if len(items) > 0 {
-			normalizeItems(items)
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, transactionFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert transactions to Arrow: %w", err)
-			}
-
-			batchNum++
-			config.Debug("[SHOPIFY] Sending transactions batch %d with %d records", batchNum, len(items))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -1630,6 +1713,27 @@ func (s *ShopifySource) paginateAndSend(
 	var cursor *string
 	totalSent := 0
 	batchNum := 0
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		normalizeItems(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", rootField, err)
+		}
+
+		batchNum++
+		config.Debug("[SHOPIFY] Sending batch %d with %d %s", batchNum, len(items), rootField)
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	timestampField := "updated_at"
 	if rootField == "events" {
@@ -1675,7 +1779,6 @@ func (s *ShopifySource) paginateAndSend(
 			break
 		}
 
-		var items []map[string]interface{}
 		for _, edge := range edges {
 			edgeMap, ok := edge.(map[string]interface{})
 			if !ok {
@@ -1687,6 +1790,15 @@ func (s *ShopifySource) paginateAndSend(
 			}
 
 			transformed := transform(node)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(transformed)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, transformed)
 
 			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
@@ -1694,17 +1806,8 @@ func (s *ShopifySource) paginateAndSend(
 			}
 		}
 
-		if len(items) > 0 {
-			normalizeItems(items)
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, columns, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", rootField, err)
-			}
-
-			batchNum++
-			config.Debug("[SHOPIFY] Sending batch %d with %d %s", batchNum, len(items), rootField)
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -1953,6 +2056,27 @@ func (s *ShopifySource) readPriceRules(ctx context.Context, opts source.ReadOpti
 	paginator := httpclient.NewLinkHeaderPaginator(endpoint)
 	totalSent := 0
 	batchNum := 0
+	var items []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		normalizeItems(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, priceRuleFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert price_rules to Arrow: %w", err)
+		}
+
+		batchNum++
+		config.Debug("[SHOPIFY] Sending price_rules batch %d with %d records", batchNum, len(items))
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		items = nil
+		accBytes = 0
+		return nil
+	}
 
 	for paginator.HasNext() {
 		select {
@@ -1978,26 +2102,26 @@ func (s *ShopifySource) readPriceRules(ctx context.Context, opts source.ReadOpti
 			break
 		}
 
-		var items []map[string]interface{}
 		for _, pr := range resp.PriceRules {
-			items = append(items, s.transformPriceRule(pr))
+			normalized := s.transformPriceRule(pr)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(normalized)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, normalized)
 
 			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
 				break
 			}
 		}
 
-		if len(items) > 0 {
-			normalizeItems(items)
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, priceRuleFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert price_rules to Arrow: %w", err)
-			}
-
-			batchNum++
-			config.Debug("[SHOPIFY] Sending price_rules batch %d with %d records", batchNum, len(items))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {

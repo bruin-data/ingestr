@@ -185,6 +185,7 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		batchNum := 0
 		totalRows := 0
 		lineNum := 1
+		var accBytes int64
 
 		flush := func() bool {
 			rec := builder.finish()
@@ -239,11 +240,15 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			}
 
 			builder.appendRow(record)
+			if opts.MaxBatchBytes > 0 {
+				accBytes += arrowconv.CellsBytes(record)
+			}
 
-			if builder.rows >= batchSize {
+			if builder.rows >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) {
 				if !flush() {
 					return
 				}
+				accBytes = 0
 			}
 		}
 

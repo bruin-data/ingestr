@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +201,49 @@ func TestCustomQueryExtractPartitioning(t *testing.T) {
 		result.Batch.Release()
 	}
 	assert.Equal(t, int64(4), rowCount)
+}
+
+func TestReadRespectsMaxBatchBytes(t *testing.T) {
+	ctx := context.Background()
+	src := NewSQLiteSource()
+	uri := "sqlite:///" + filepath.Join(t.TempDir(), "source.db")
+	require.NoError(t, src.Connect(ctx, uri))
+	t.Cleanup(func() { require.NoError(t, src.Close(ctx)) })
+
+	_, err := src.db.ExecContext(ctx, `CREATE TABLE wide (id INTEGER, blob TEXT);`)
+	require.NoError(t, err)
+
+	const rowCount = 20
+	payload := strings.Repeat("x", 1024) // ~1 KiB per row
+	for i := 0; i < rowCount; i++ {
+		_, err := src.db.ExecContext(ctx, `INSERT INTO wide VALUES (?, ?);`, i, payload)
+		require.NoError(t, err)
+	}
+
+	read := func(maxBatchBytes int64) (batches int, total int64) {
+		table, err := src.GetTable(ctx, source.TableRequest{Name: "wide"})
+		require.NoError(t, err)
+		records, err := table.Read(ctx, source.ReadOptions{MaxBatchBytes: maxBatchBytes})
+		require.NoError(t, err)
+		for result := range records {
+			require.NoError(t, result.Err)
+			batches++
+			total += result.Batch.NumRows()
+			result.Batch.Release()
+		}
+		return batches, total
+	}
+
+	// No cap: one page holds all 20 rows in a single batch.
+	uncappedBatches, uncappedTotal := read(0)
+	assert.Equal(t, int64(rowCount), uncappedTotal)
+	assert.Equal(t, 1, uncappedBatches)
+
+	// ~4 KiB cap over ~1 KiB rows forces the reader to flush several batches,
+	// while still delivering every row exactly once.
+	cappedBatches, cappedTotal := read(4096)
+	assert.Equal(t, int64(rowCount), cappedTotal)
+	assert.Greater(t, cappedBatches, 1, "byte cap should split the read into multiple batches")
 }
 
 func TestExtractTableName(t *testing.T) {

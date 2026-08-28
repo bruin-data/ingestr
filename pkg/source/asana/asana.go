@@ -311,6 +311,22 @@ func (s *AsanaSource) paginateAndSend(
 	totalSent := 0
 	offset := ""
 
+	var items []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -348,24 +364,34 @@ func (s *AsanaSource) paginateAndSend(
 			return fmt.Errorf("failed to parse %s response: %w", endpoint, err)
 		}
 
-		items := result.Data
-		if len(items) == 0 {
+		pageItems := result.Data
+		if len(pageItems) == 0 {
 			break
 		}
 
-		if opts.Limit > 0 && totalSent+len(items) > opts.Limit {
-			items = items[:opts.Limit-totalSent]
+		if opts.Limit > 0 && totalSent+len(pageItems) > opts.Limit {
+			pageItems = pageItems[:opts.Limit-totalSent]
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+		for _, row := range pageItems {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
 
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
+		if err := flush(); err != nil {
+			return err
+		}
+		totalSent += len(pageItems)
 
-		config.Debug("[ASANA] fetched %d records from %s (total: %d)", len(items), endpoint, totalSent)
+		config.Debug("[ASANA] fetched %d records from %s (total: %d)", len(pageItems), endpoint, totalSent)
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
 			break

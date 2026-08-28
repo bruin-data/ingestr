@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,60 +117,108 @@ func TestPostHogSourceGetTable(t *testing.T) {
 	}
 }
 
-func TestPostHogSourceReadEventsUsesPaginationAndIntervals(t *testing.T) {
-	var requestCount atomic.Int32
+func TestParseElementsChain(t *testing.T) {
+	// Ground truth captured from PostHog's REST /events/ endpoint (elements
+	// array) for the corresponding elements_chain.
+	chain := `button.btn.btn-primary:attr__class="btn btn-primary"attr__id="upgrade-plan"attr_id="upgrade-plan"nth-child="1"nth-of-type="1";a.link:attr__href="/x"href="/x"nth-child="2"nth-of-type="1"`
+	got := parseElementsChain(chain)
+	require.Len(t, got, 2)
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	assert.Equal(t, "button", got[0]["tag_name"])
+	assert.Equal(t, []string{"btn", "btn-primary"}, got[0]["attr_class"])
+	assert.Equal(t, "upgrade-plan", got[0]["attr_id"])
+	assert.Equal(t, 1, got[0]["nth_child"])
+	assert.Equal(t, 1, got[0]["nth_of_type"])
+	assert.Nil(t, got[0]["href"])
+	assert.Equal(t, 0, got[0]["order"])
+	assert.Equal(t, map[string]interface{}{
+		"attr__class": "btn btn-primary",
+		"attr__id":    "upgrade-plan",
+	}, got[0]["attributes"])
+
+	assert.Equal(t, "a", got[1]["tag_name"])
+	assert.Equal(t, "/x", got[1]["href"])
+	assert.Equal(t, 2, got[1]["nth_child"])
+	assert.Equal(t, 1, got[1]["order"])
+
+	assert.Empty(t, parseElementsChain(""))
+}
+
+func TestParseElementsChainQuotedSpecials(t *testing.T) {
+	// Attribute values may contain escaped quotes and unescaped ; : = chars.
+	chain := `a:attr__title="say \"hi\""attr__style="color: red; x=y"text="Click"nth-child="1"`
+	got := parseElementsChain(chain)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Click", got[0]["text"])
+	attrs := got[0]["attributes"].(map[string]interface{})
+	assert.Equal(t, `say \"hi\"`, attrs["attr__title"])
+	assert.Equal(t, "color: red; x=y", attrs["attr__style"])
+}
+
+func TestFoldEventPersonFields(t *testing.T) {
+	items := []map[string]interface{}{
+		{
+			"id":                "evt_1",
+			"person_id":         "person-1",
+			"person_properties": map[string]interface{}{"email": "a@b.co"},
+		},
+		{"id": "evt_2"},
+	}
+
+	foldEventPersonFields(items)
+
+	assert.NotContains(t, items[0], "person_id")
+	assert.NotContains(t, items[0], "person_properties")
+	assert.Equal(t, map[string]interface{}{
+		"id":         "person-1",
+		"properties": map[string]interface{}{"email": "a@b.co"},
+	}, items[0]["person"])
+	assert.NotContains(t, items[1], "person")
+}
+
+func TestPostHogSourceReadEventsUsesQueryKeysetPagination(t *testing.T) {
+	var requestCount atomic.Int32
+	var queries []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
-		assert.Equal(t, "/api/projects/test-project/events/", r.URL.Path)
+		assert.Equal(t, "/api/projects/test-project/query/", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		var body struct {
+			Query struct {
+				Kind  string `json:"kind"`
+				Query string `json:"query"`
+			} `json:"query"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, "HogQLQuery", body.Query.Kind)
+		queries = append(queries, body.Query.Query)
 
 		call := requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 
+		assert.Contains(t, body.Query.Query, "person_id, person.properties AS person_properties")
+		columns := []string{"id", "event", "distinct_id", "timestamp", "properties", "elements_chain", "person_id", "person_properties"}
 		if call == 1 {
-			assert.Equal(t, "2", r.URL.Query().Get("limit"))
-			assert.Equal(t, "2026-01-01T00:00:00Z", r.URL.Query().Get("after"))
-			assert.Equal(t, "2026-01-02T00:00:00Z", r.URL.Query().Get("before"))
-
+			assert.Contains(t, body.Query.Query, "timestamp > toDateTime64('2026-01-01 00:00:00.000000', 6)")
+			assert.Contains(t, body.Query.Query, "timestamp < toDateTime64('2026-01-02 00:00:00.000000', 6)")
+			assert.Contains(t, body.Query.Query, "LIMIT 2")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"next": server.URL + "/api/projects/test-project/events/?offset=2&limit=2",
-				"results": []map[string]any{
-					{
-						"id":          "evt_1",
-						"distinct_id": "user-1",
-						"event":       "$pageview",
-						"timestamp":   "2026-01-01T08:00:00Z",
-						"properties":  `{"browser":"Safari"}`,
-						"person":      `{"id":1}`,
-						"elements":    `[{"tag_name":"a"}]`,
-					},
-					{
-						"id":          "evt_2",
-						"distinct_id": "user-2",
-						"event":       "signup",
-						"timestamp":   "2026-01-01T09:00:00Z",
-						"properties":  `{"plan":"pro"}`,
-						"person":      `{"id":2}`,
-						"elements":    `[]`,
-					},
+				"columns": columns,
+				"results": [][]any{
+					{"evt_1", "$pageview", "user-1", "2026-01-01T08:00:00Z", `{"browser":"Safari"}`, "", "person-1", `{"email":"a@b.co"}`},
+					{"evt_2", "signup", "user-2", "2026-01-01T09:00:00Z", `{"plan":"pro"}`, "", "person-2", `{"email":"c@d.co"}`},
 				},
 			})
 			return
 		}
 
+		assert.Contains(t, body.Query.Query, "(timestamp, uuid) > (toDateTime64('2026-01-01 09:00:00.000000', 6), toUUID('evt_2'))")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"next": nil,
-			"results": []map[string]any{
-				{
-					"id":          "evt_3",
-					"distinct_id": "user-3",
-					"event":       "purchase",
-					"timestamp":   "2026-01-01T10:00:00Z",
-					"properties":  `{"amount":42}`,
-					"person":      `{"id":3}`,
-					"elements":    `[]`,
-				},
+			"columns": columns,
+			"results": [][]any{
+				{"evt_3", "purchase", "user-3", "2026-01-01T10:00:00Z", `{"amount":42}`, "", "person-3", `{"email":"e@f.co"}`},
 			},
 		})
 	}))
@@ -316,4 +365,59 @@ func collectBatches(t *testing.T, ch <-chan source.RecordBatchResult) []source.R
 		results = append(results, result)
 	}
 	return results
+}
+
+func TestPostHogByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		rows := []map[string]interface{}{}
+		if calls == 1 {
+			for i := 0; i < 50; i++ {
+				rows = append(rows, map[string]interface{}{"id": i, "name": wide})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": len(rows), "next": "", "results": rows})
+	}))
+	defer srv.Close()
+
+	run := func(max int64) (int64, int64) {
+		calls = 0
+		s := &PostHogSource{
+			projectID: "1",
+			client:    httpclient.New(httpclient.WithBaseURL(srv.URL)),
+		}
+		cfg, err := resolveTableConfig("annotations")
+		if err != nil {
+			t.Fatal(err)
+		}
+		results, err := s.readTable(context.Background(), cfg, source.ReadOptions{MaxBatchBytes: max})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b, rw int64
+		for res := range results {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			b++
+			rw += res.Batch.NumRows()
+			res.Batch.Release()
+		}
+		return b, rw
+	}
+
+	offB, offR := run(0)
+	onB, onR := run(4096)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d want 1", offB)
+	}
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d want >1", onB)
+	}
+	if offR != onR || offR != 50 {
+		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
+	}
 }

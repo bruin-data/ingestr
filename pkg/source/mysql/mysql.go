@@ -432,7 +432,7 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 		defer close(results)
 
 		query := buildSelectQuery(table, columns, opts)
-		usedDirect, err := s.readQueryDirect(ctx, query, columns, arrowSchema, batchSize, startTotal, results)
+		usedDirect, err := s.readQueryDirect(ctx, query, columns, arrowSchema, batchSize, opts.MaxBatchBytes, startTotal, results)
 		if usedDirect {
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
@@ -462,7 +462,7 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 
 		for {
 			startBatch := time.Now()
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -487,7 +487,7 @@ func (s *MySQLSource) readQuery(ctx context.Context, table string, columns []sch
 
 var errDirectDriverRowsUnsupported = errors.New("direct driver rows unsupported")
 
-func (s *MySQLSource) readQueryDirect(ctx context.Context, query string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, results chan<- source.RecordBatchResult) (bool, error) {
+func (s *MySQLSource) readQueryDirect(ctx context.Context, query string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, maxBatchBytes int64, startTotal time.Time, results chan<- source.RecordBatchResult) (bool, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return true, fmt.Errorf("failed to acquire connection: %w", err)
@@ -529,7 +529,7 @@ func (s *MySQLSource) readQueryDirect(ctx context.Context, query string, columns
 		allocator := newMySQLArrowAllocator()
 		for {
 			startBatch := time.Now()
-			record, count, err := driverRowsToArrowRecordBatchWithAllocator(rows, arrowSchema, columns, batchSize, dataCapacities, allocator)
+			record, count, err := driverRowsToArrowRecordBatchWithAllocator(rows, arrowSchema, columns, batchSize, maxBatchBytes, dataCapacities, allocator)
 			if err != nil {
 				return err
 			}
@@ -672,7 +672,7 @@ func (s *MySQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -796,7 +796,7 @@ func quoteColumn(name string) string {
 	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
-func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 
@@ -814,6 +814,7 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
 		if err := rows.Scan(scanDest...); err != nil {
 			for _, b := range builders {
@@ -824,10 +825,16 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 
 		for i, dest := range scanDest {
 			appendMySQLScannedValue(builders[i], dest)
+			if maxBatchBytes > 0 {
+				accBytes += mysqlScannedValueBytes(dest)
+			}
 		}
 		rowCount++
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}
@@ -861,11 +868,11 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 	return record, rowCount, nil
 }
 
-func driverRowsToArrowRecordBatch(rows driver.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, dataCapacities []int) (arrow.RecordBatch, int64, error) {
-	return driverRowsToArrowRecordBatchWithAllocator(rows, arrowSchema, columns, batchSize, dataCapacities, newMySQLArrowAllocator())
+func driverRowsToArrowRecordBatch(rows driver.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64, dataCapacities []int) (arrow.RecordBatch, int64, error) {
+	return driverRowsToArrowRecordBatchWithAllocator(rows, arrowSchema, columns, batchSize, maxBatchBytes, dataCapacities, newMySQLArrowAllocator())
 }
 
-func driverRowsToArrowRecordBatchWithAllocator(rows driver.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, dataCapacities []int, mem memory.Allocator) (arrow.RecordBatch, int64, error) {
+func driverRowsToArrowRecordBatchWithAllocator(rows driver.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64, dataCapacities []int, mem memory.Allocator) (arrow.RecordBatch, int64, error) {
 	builders := make([]array.Builder, len(columns))
 	for i, field := range arrowSchema.Fields() {
 		builders[i] = array.NewBuilder(mem, field.Type)
@@ -888,6 +895,7 @@ func driverRowsToArrowRecordBatchWithAllocator(rows driver.Rows, arrowSchema *ar
 
 	values := make([]driver.Value, len(columns))
 	var rowCount int64
+	var accBytes int64
 	for batchSize <= 0 || rowCount < int64(batchSize) {
 		err := rows.Next(values)
 		if errors.Is(err, io.EOF) {
@@ -899,8 +907,14 @@ func driverRowsToArrowRecordBatchWithAllocator(rows driver.Rows, arrowSchema *ar
 		}
 		for i, value := range values {
 			appenders[i](value)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(value)
+			}
 		}
 		rowCount++
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
+			break
+		}
 	}
 
 	if rowCount == 0 {
@@ -1221,6 +1235,19 @@ func appendMySQLScannedValue(builder array.Builder, dest interface{}) {
 		return
 	}
 	appendMySQLValue(builder, *dest.(*interface{}))
+}
+
+// mysqlScannedValueBytes measures the scan destinations produced by
+// mysqlScanDestination.
+func mysqlScannedValueBytes(dest interface{}) int64 {
+	switch d := dest.(type) {
+	case *sql.RawBytes:
+		return int64(len(*d))
+	case *interface{}:
+		return arrowconv.ValueBytes(*d)
+	default:
+		return 8
+	}
 }
 
 func appendMySQLValue(builder array.Builder, val interface{}) {

@@ -1139,6 +1139,19 @@ func (s *CustomerIOSource) readCustomers(ctx context.Context, opts source.ReadOp
 
 	seen := make(map[string]bool)
 	var batch []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := sendBatch(batch, opts, results); err != nil {
+			return err
+		}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
 
 	for _, segment := range segments {
 		select {
@@ -1191,13 +1204,22 @@ func (s *CustomerIOSource) readCustomers(ctx context.Context, opts source.ReadOp
 					continue
 				}
 				seen[cioID] = true
+
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(item)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
 				batch = append(batch, item)
 
 				if len(batch) >= membersPageSize {
-					if err := sendBatch(batch, opts, results); err != nil {
+					if err := flush(); err != nil {
 						return err
 					}
-					batch = nil
 				}
 			}
 
@@ -1209,10 +1231,7 @@ func (s *CustomerIOSource) readCustomers(ctx context.Context, opts source.ReadOp
 		}
 	}
 
-	if len(batch) > 0 {
-		return sendBatch(batch, opts, results)
-	}
-	return nil
+	return flush()
 }
 
 func (s *CustomerIOSource) readCustomerAttributes(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {

@@ -165,6 +165,24 @@ func (s *ChargebeeSource) readEndpoint(ctx context.Context, table string, ep end
 	applyTimeFilter(params, ep.incrementalKey, toTime(opts.IntervalStart), toTime(opts.IntervalEnd))
 
 	totalSent := 0
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		totalSent += len(items)
+		config.Debug("[CHARGEBEE] Sending batch of %d %s (total: %d)", len(items), table, totalSent)
+		results <- source.RecordBatchResult{Batch: rec}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -181,7 +199,6 @@ func (s *ChargebeeSource) readEndpoint(ctx context.Context, table string, ep end
 			return fmt.Errorf("chargebee %s request failed with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
 		}
 
-		items := make([]map[string]interface{}, 0, len(resp.List))
 		for _, entry := range resp.List {
 			raw, ok := entry[ep.resourceKey]
 			if !ok {
@@ -191,17 +208,20 @@ func (s *ChargebeeSource) readEndpoint(ctx context.Context, table string, ep end
 			if err := json.Unmarshal(raw, &obj); err != nil {
 				return fmt.Errorf("failed to decode %s record: %w", table, err)
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(obj)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, obj)
 		}
 
-		if len(items) > 0 {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return err
-			}
-			totalSent += len(items)
-			config.Debug("[CHARGEBEE] Sending batch of %d %s (total: %d)", len(items), table, totalSent)
-			results <- source.RecordBatchResult{Batch: rec}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if resp.NextOffset == "" {

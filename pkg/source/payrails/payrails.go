@@ -439,12 +439,37 @@ func sendItems(results chan<- source.RecordBatchResult, items []map[string]inter
 	if len(items) == 0 {
 		return nil
 	}
-	rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return err
+
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		results <- source.RecordBatchResult{Batch: rec}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-	results <- source.RecordBatchResult{Batch: rec}
-	return nil
+
+	for _, item := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, item)
+	}
+
+	return flush()
 }
 
 func createdAtFilter(start, end *time.Time) string {

@@ -264,7 +264,25 @@ func (s *AppsflyerSource) read(ctx context.Context, meta tableMeta, schemaCols [
 			batchSize = 1000
 		}
 
-		for i := 0; i < len(data); i += batchSize {
+		var allItems []map[string]any
+		var accBytes int64
+
+		flush := func() error {
+			if len(allItems) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, schemaCols, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert to Arrow: %w", err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			config.Debug("[APPSFLYER] Sent batch with %d records", len(allItems))
+			allItems = nil
+			accBytes = 0
+			return nil
+		}
+
+		for _, item := range data {
 			select {
 			case <-ctx.Done():
 				results <- source.RecordBatchResult{Err: ctx.Err()}
@@ -272,15 +290,29 @@ func (s *AppsflyerSource) read(ctx context.Context, meta tableMeta, schemaCols [
 			default:
 			}
 
-			end := min(i+batchSize, len(data))
-			batch := data[i:end]
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, schemaCols, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
-				return
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(allItems) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						results <- source.RecordBatchResult{Err: err}
+						return
+					}
+				}
+				accBytes += rowBytes
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			config.Debug("[APPSFLYER] Sent batch with %d records", len(batch))
+			allItems = append(allItems, item)
+
+			if len(allItems) >= batchSize {
+				if err := flush(); err != nil {
+					results <- source.RecordBatchResult{Err: err}
+					return
+				}
+			}
+		}
+
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
 		}
 	}()
 

@@ -187,6 +187,24 @@ func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoi
 	}
 
 	totalSent := 0
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		totalSent += len(batch)
+		config.Debug("[PADDLE] Sending batch of %d %s (total: %d)", len(batch), table, totalSent)
+		results <- source.RecordBatchResult{Batch: rec}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	requestURL := ep.path
 	useParams := true
 	for {
@@ -222,14 +240,20 @@ func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoi
 				}
 			}
 		}
-		if len(items) > 0 {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return err
+		for _, row := range items {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-			totalSent += len(items)
-			config.Debug("[PADDLE] Sending batch of %d %s (total: %d)", len(items), table, totalSent)
-			results <- source.RecordBatchResult{Batch: rec}
+			batch = append(batch, row)
+		}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if !resp.Meta.Pagination.HasMore {
