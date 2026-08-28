@@ -212,9 +212,8 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	}
 
 	targetFileBytes := snowflakeTargetFileBytes()
-	// Overlapping COPY INTO with uploads makes rows visible incrementally, so
-	// it is only safe when writing to a staging table that a later swap/merge
-	// publishes atomically. Direct writes keep the single all-or-nothing COPY.
+	// Incremental COPY makes rows visible before the write finishes, so it is
+	// only safe for staging tables published atomically by a later swap/merge.
 	overlapCopy := opts.StagingTable
 
 	config.Debug("[DEST] Starting parallel write with %d workers, target file size %d MiB, overlapped COPY=%v", parallelism, targetFileBytes>>20, overlapCopy)
@@ -282,10 +281,8 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 			for {
 				var result source.RecordBatchResult
 				var ok bool
-				// Adaptive flush: when the source has nothing ready right now,
-				// upload what's buffered instead of idling. On a fast source
-				// files grow to the size target; on a slow source or at the
-				// stream tail the pipeline keeps moving with smaller files.
+				// Adaptive flush: upload what's buffered instead of idling
+				// when the source has nothing ready.
 				select {
 				case result, ok = <-records:
 				default:
@@ -335,9 +332,8 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 		close(uploaded)
 	}()
 
-	// The copier drains uploaded file names. With overlapped COPY it issues
-	// COPY INTO for whatever accumulated while the previous COPY ran; otherwise
-	// it collects names for one final COPY after all uploads finish.
+	// With overlapCopy each iteration loads whatever accumulated while the
+	// previous COPY ran; otherwise files collect for one final COPY.
 	var copyErr error
 	var copiedFiles int
 	var pending []string
@@ -421,9 +417,8 @@ func (w *snowflakeFileUploader) append(record arrow.RecordBatch) error {
 	return nil
 }
 
-// pendingBytes is the compressed size written so far; row-group buffers not yet
-// flushed by the parquet writer are not counted, which is fine for a soft
-// file-size target.
+// pendingBytes is the compressed size written so far, excluding row-group
+// buffers the parquet writer has not flushed yet.
 func (w *snowflakeFileUploader) pendingBytes() int64 {
 	if w.buf == nil {
 		return 0
@@ -456,9 +451,8 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 		RaisePutGetError: true,
 	})
 
-	// The local file name (not the stage path, which is a directory prefix)
-	// determines the staged object's name, so COPY's FILES list can reference
-	// it as <loadID>/<fileName>.
+	// The stage path is a directory prefix; the local file name names the
+	// staged object, which COPY's FILES list references as <loadID>/<fileName>.
 	putSQL := fmt.Sprintf("PUT file://%s @%s/%s AUTO_COMPRESS=FALSE SOURCE_COMPRESSION=NONE OVERWRITE=TRUE", fileName, w.stageName, w.loadID)
 	if _, err := w.dest.db.ExecContext(uploadCtx, putSQL); err != nil {
 		config.LogFailedQuery(putSQL, err)
@@ -485,12 +479,9 @@ func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageNa
 // sub-megabyte files when the uploaders keep pace with the source.
 const minAdaptiveFlushBytes = 1 << 20
 
-// snowflakeTargetFileBytes is the compressed parquet size at which an uploader
-// closes the current file and PUTs it. Larger files amortize the per-PUT
-// overhead (about a second each); smaller files pipeline better on slow
-// uplinks. The adaptive flush already flushes early whenever the source runs
-// dry, so this is only the cap reached on fast sources. Tunable via
-// INGESTR_SNOWFLAKE_FILE_SIZE_MB; 0 flushes one file per record batch.
+// snowflakeTargetFileBytes is the compressed size at which an uploader closes
+// the current file and PUTs it, amortizing the ~1s per-PUT overhead.
+// INGESTR_SNOWFLAKE_FILE_SIZE_MB overrides; 0 flushes one file per batch.
 func snowflakeTargetFileBytes() int64 {
 	if v := os.Getenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB"); v != "" {
 		if mb, err := strconv.Atoi(v); err == nil && mb >= 0 {
@@ -500,9 +491,8 @@ func snowflakeTargetFileBytes() int64 {
 	return 32 << 20
 }
 
-// Zstd is the default codec: it produces roughly a third fewer bytes than
-// snappy on typical row data, which directly cuts PUT upload time, at an
-// encode cost that stays far from the bottleneck on the parallel write path.
+// Zstd default: roughly a third fewer bytes than snappy, directly cutting
+// upload time.
 func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.ArrowWriterProperties) {
 	codec := compress.Codecs.Zstd
 	switch strings.ToLower(os.Getenv("INGESTR_SNOWFLAKE_PARQUET_CODEC")) {
@@ -532,9 +522,8 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string) strin
 		}
 		filesClause = fmt.Sprintf(" FILES = (%s)", strings.Join(quoted, ", "))
 	}
-	// The FROM location must end with '/': Snowflake appends FILES entries to
-	// the location verbatim, so without it the prefix and file name concatenate
-	// into a nonexistent path.
+	// The FROM location must end with '/': FILES entries are appended to it
+	// verbatim.
 	return fmt.Sprintf("COPY INTO %s FROM @%s/%s/%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
 		fullTable, stageName, loadID, filesClause)
 }
