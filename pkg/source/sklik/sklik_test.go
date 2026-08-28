@@ -11,10 +11,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-// The queries report nests the entity a row belongs to. Left nested, schema
-// inference turns them into JSON blobs and `keyword_id` — part of the primary
-// key — never exists, so the merge collapses every keyword that matched a
-// query down to one arbitrary row.
 func TestFlattenReportExpandsEntityRefs(t *testing.T) {
 	raw := json.RawMessage(`{"report":[{
 		"query":"kavovar deloni",
@@ -55,9 +51,6 @@ func TestFlattenReportExpandsEntityRefs(t *testing.T) {
 	}
 }
 
-// search_queries must stay scoped to campaigns: an unrestricted
-// queries.createReport returns status 200 with an EMPTY report rather than an
-// error, which is indistinguishable from "this account has no search terms".
 func TestSearchQueriesIsCampaignScoped(t *testing.T) {
 	tc := supportedTables["search_queries"]
 	if !tc.scopeToCampaigns {
@@ -74,9 +67,6 @@ func TestSearchQueriesIsCampaignScoped(t *testing.T) {
 	}
 }
 
-// Every emitted row must carry the account it came from. Sklik's payloads have no
-// account field, so without the stamp rows from two accounts sharing a destination
-// table cannot be told apart.
 func TestEmitStampsAccountOnEveryRow(t *testing.T) {
 	s := &Source{accountID: 123456}
 	items := []map[string]any{
@@ -101,10 +91,6 @@ func TestEmitStampsAccountOnEveryRow(t *testing.T) {
 	}
 }
 
-// ⚠️ THE TRAP THIS LOCKS: each brand's CronJob passes only a token and no
-// user_id, so s.userID is 0 for all three. Resolving the account must therefore
-// consult client.get rather than echoing the configured value — echoing it would
-// stamp 0 on every brand and reproduce the original defect while looking fixed.
 func TestResolveAccountIDPrefersExplicitManagedAccount(t *testing.T) {
 	s := &Source{userID: 987}
 	if err := s.resolveAccountID(context.Background()); err != nil {
@@ -114,7 +100,6 @@ func TestResolveAccountIDPrefersExplicitManagedAccount(t *testing.T) {
 		t.Errorf("accountID = %d, want the explicitly targeted managed account 987", s.accountID)
 	}
 
-	// With no user_id configured the account must come from client.get.
 	owner := &Source{client: stubClient(map[string]string{
 		"client.loginByToken": `{"status":200,"session":"s1"}`,
 		"client.get":          `{"status":200,"session":"s2","user":{"userId":555}}`,
@@ -127,9 +112,6 @@ func TestResolveAccountIDPrefersExplicitManagedAccount(t *testing.T) {
 	}
 }
 
-// A client.get that yields no userId must fail the run. Stamping the zero value
-// instead would land rows that look attributed and are not — the exact failure
-// this column exists to prevent, made harder to spot.
 func TestResolveAccountIDRefusesZero(t *testing.T) {
 	s := &Source{client: stubClient(map[string]string{
 		"client.loginByToken": `{"status":200,"session":"s1"}`,
@@ -144,8 +126,6 @@ func TestResolveAccountIDRefusesZero(t *testing.T) {
 	}
 }
 
-// stubClient serves canned JSON per RPC method name (the last path segment),
-// so the real call/session path is exercised without touching the network.
 func stubClient(byMethod map[string]string) *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		parts := strings.Split(r.URL.Path, "/")
@@ -165,7 +145,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// Regression lock for the "v0.2.1 trap" — see the comment on searchQueryColumns.
 func TestSearchQueryColumnsExcludeCTR(t *testing.T) {
 	for _, c := range searchQueryColumns {
 		if c == "ctr" {
@@ -174,18 +153,11 @@ func TestSearchQueryColumnsExcludeCTR(t *testing.T) {
 	}
 }
 
-// The account is stamped on every row but is deliberately not in any primary key —
-// see the note on supportedTables. Primary keys become the destination's sort order
-// on several destinations, so adding it is a breaking change for existing tables
-// rather than a cleanup. This locks the choice so it is made on purpose.
 func TestAccountIsNotInPrimaryKeys(t *testing.T) {
 	for name, tc := range supportedTables {
 		for _, pk := range tc.primaryKeys {
 			if pk == accountColumn {
-				t.Errorf("%s has %s in its primary key %v — that changes the destination sort "+
-					"order and is a breaking change for existing tables. If that is intended, "+
-					"do it deliberately; if not, remove it.",
-					name, accountColumn, tc.primaryKeys)
+				t.Errorf("%s has %s in its primary key %v", name, accountColumn, tc.primaryKeys)
 			}
 		}
 	}

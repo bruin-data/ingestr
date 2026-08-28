@@ -72,9 +72,7 @@ It is deliberately **not** part of any primary key. If you load several accounts
 
 ## Notes and limitations
 
-### An empty report usually means throttled, not "no data"
-
-This is the most important thing to know about the Sklik API.
+### Empty reports and throttling
 
 Sklik rate-limits per account per minute, and when you exceed the limit **the report comes back as a successful, empty response** rather than an error:
 
@@ -82,27 +80,15 @@ Sklik rate-limits per account per minute, and when you exceed the limit **the re
 {"status":200,"statusMessage":"OK","report":[]}
 ```
 
-There is no `429` and no error message. A throttled report and a genuinely empty one are the same payload, so a job that quietly loads zero rows looks like a clean run.
-
-`createReport` returns a `totalCount` before you read the report — use it as the oracle. If `totalCount` is greater than zero but `readReport` yields no rows, you are throttled or the report has not finished materialising; that is not a successful empty run. ingestr does this for you: when a page comes back empty while `createReport` promised rows, it retries with a linear backoff of 15s, 30s, 45s … up to about seven minutes. A healthy report returns on the first read and never sleeps.
-
-Practical consequences:
-
-- Keep report calls to roughly one per account per minute. A per-day chunking strategy across a multi-year backfill will throttle everything after the first window.
-- Back off in minutes, not seconds.
-- Prefer wide windows (monthly or larger) over narrow ones, and accept the coarser request granularity.
+There is no `429` or error message, so throttling and a genuinely empty report are indistinguishable. When `createReport` returns a positive `totalCount` but `readReport` has no rows, ingestr retries with linear backoff for about seven minutes before returning an error.
 
 ### Search-term reports must be scoped to campaigns
 
-`queries.createReport` returns an empty report — again with `status: 200` — unless the restriction filter scopes it to campaigns, groups or keywords. Measured against a live account: no restriction returned 0 rows; restricting to a campaign over the same window returned 165. ingestr always scopes the `search_queries` report to the account's campaigns.
-
-`campaigns.createReport` does not behave this way, so a working campaign report tells you nothing about the search-term one.
+`queries.createReport` returns an empty report with `status: 200` unless the restriction filter scopes it to campaigns, groups or keywords. ingestr scopes `search_queries` reports to the account's campaigns.
 
 ### `displayColumns` enums are per-endpoint
 
-Each `*.readReport` method has its own enum of valid `displayColumns`, and they are asymmetric — a column name accepted by one endpoint can be rejected by another. Sklik answers with a bare `400 Bad arguments` for the whole report, with no indication of which column was at fault.
-
-The clearest example: `ctr` is valid in `campaigns.readReport` but rejected by `queries.readReport`, so `search_queries` does not request it. Compute CTR from `clicks` and `impressions` downstream instead. When adding a column, check it against that specific method's documentation page (for example [`queries.readReport`](https://api.sklik.cz/drak/queries.readReport.html)) rather than against another endpoint or the Sklik UI.
+Each `*.readReport` method has its own enum of valid `displayColumns`. Sklik returns `400 Bad arguments` if any requested column is invalid. For example, `ctr` is valid for `campaigns.readReport` but not `queries.readReport`, so calculate search-query CTR from `clicks` and `impressions` instead.
 
 ### Request size
 
