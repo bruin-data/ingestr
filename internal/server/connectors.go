@@ -411,6 +411,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("trustpilot", "Trustpilot", []string{"trustpilot"}, true, false),
 		genericURIConnector("twilio", "Twilio", []string{"twilio"}, true, false),
 		genericURIConnector("typeform", "Typeform", []string{"typeform"}, true, false),
+		genericURIConnector("vertica", "Vertica", []string{"vertica"}, false, true),
 		genericURIConnector("wise", "Wise", []string{"wise"}, true, false),
 		genericURIConnector("wistia", "Wistia", []string{"wistia"}, true, false),
 		genericURIConnector("zendesk", "Zendesk", []string{"zendesk"}, true, false),

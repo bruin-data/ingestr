@@ -23,6 +23,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
 	"github.com/bruin-data/ingestr/pkg/destination/synapse"
 	"github.com/bruin-data/ingestr/pkg/destination/trino"
+	"github.com/bruin-data/ingestr/pkg/destination/vertica"
 	"github.com/bruin-data/ingestr/pkg/destination/vitess"
 )
 
@@ -196,6 +197,7 @@ var (
 	_ destination.Destination = (*sqlite.SQLiteDestination)(nil)
 	_ destination.Destination = (*synapse.SynapseDestination)(nil)
 	_ destination.Destination = (*trino.TrinoDestination)(nil)
+	_ destination.Destination = (*vertica.VerticaDestination)(nil)
 )
 
 // Optional strategy interfaces the Iceberg destination implements natively.
