@@ -120,10 +120,13 @@ dispatcher, and `paginateAndSend`.
 - Stream one batch per response/page/fan-out unit via the `results` channel; never buffer
   the whole result set into one slice before emitting.
 - **Bound each batch by bytes** whenever you accumulate rows into a slice before emitting.
-  Every source honors `opts.MaxBatchBytes` (from `--batch-size` in MiB; `0` = unlimited):
-  before appending a row that would push the batch over the cap, flush what you have, then
-  reset the byte counter with the batch. Use the shared estimator `arrowconv.RowBytes(item)` —
-  never hand-roll a size calc:
+  Every source honors `opts.MaxBatchBytes` — the byte cap derived from `--batch-size` (MiB).
+  Only apply the cap when it is positive; guard every check with `opts.MaxBatchBytes > 0`.
+  The zero value means "no cap" and exists only as the struct default — the CLI rejects a
+  non-positive `--batch-size` and defaults to 512 MiB, so in practice the value is always
+  positive. Before appending a row that would push the batch over the cap, flush what you
+  have, then reset the byte counter with the batch. Use the shared estimator
+  `arrowconv.RowBytes(item)` — never hand-roll a size calc:
   ```go
   if opts.MaxBatchBytes > 0 {
       rowBytes := arrowconv.RowBytes(item)
@@ -217,8 +220,9 @@ sub-types, field normalization). Fix discrepancies before continuing.
 - [ ] **Cursor vs. offset**: uses the correct pagination style for the API.
 - [ ] **Batch bounded by `opts.MaxBatchBytes`**: any loop that accumulates rows into a batch
   flushes before a row would exceed the cap, summing `arrowconv.RowBytes(item)` into a
-  function-local counter reset with the batch on every flush path (`0` = unlimited). Skippable
-  only if the source emits one row per response and never grows a slice.
+  function-local counter reset with the batch on every flush path. Guard the check with
+  `opts.MaxBatchBytes > 0` (zero = no cap, but the CLI always passes a positive size).
+  Skippable only if the source emits one row per response and never grows a slice.
 
 ### Performance
 - [ ] **Parallelism considered**: if the API supports fetching independent sub-resources in
