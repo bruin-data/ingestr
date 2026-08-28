@@ -96,7 +96,7 @@ func (d *VerticaDestination) PrepareTable(ctx context.Context, opts destination.
 		return nil
 	}
 
-	createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(opts.Table, opts.Schema, opts.PrimaryKeys, true)
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
@@ -300,19 +300,29 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 	return nil
 }
 
+// maxTransientNameAttempts bounds the search for a free swap-time table name so a
+// pathological schema full of colliding names cannot loop forever.
+const maxTransientNameAttempts = 1000
+
+// transientCandidate renders the i-th candidate name derived from base.
+func transientCandidate(base string, i int) string {
+	candidate := base
+	if i > 0 {
+		candidate = fmt.Sprintf("%s_%d", base, i+1)
+	}
+	return destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("vertica"))
+}
+
 // freeTransientName returns a name in schemaName that no table currently
 // occupies, derived from base with a numeric suffix on collision. It never drops
 // an existing table, so an unrelated table sharing the base name is stepped over
 // rather than destroyed. base comes from the run-unique staging name, so
-// concurrent jobs never probe the same candidates.
+// concurrent jobs never probe the same candidates. The caller must consume the
+// name atomically (an ALTER ... RENAME fails rather than reusing a table), since
+// this only reflects existence at probe time.
 func (d *VerticaDestination) freeTransientName(ctx context.Context, schemaName, base string) (string, error) {
-	maxLen := destination.MaxIdentifierLength("vertica")
-	for i := 0; ; i++ {
-		candidate := base
-		if i > 0 {
-			candidate = fmt.Sprintf("%s_%d", base, i+1)
-		}
-		name := destination.ShortenIdentifier(candidate, candidate, maxLen)
+	for i := 0; i < maxTransientNameAttempts; i++ {
+		name := transientCandidate(base, i)
 		qualified := name
 		if schemaName != "" {
 			qualified = schemaName + "." + name
@@ -325,6 +335,33 @@ func (d *VerticaDestination) freeTransientName(ctx context.Context, schemaName, 
 			return name, nil
 		}
 	}
+	return "", fmt.Errorf("could not allocate a free transient table name for %s", base)
+}
+
+// createTransientTable strictly creates a table (no IF NOT EXISTS) under a free
+// name derived from base, advancing past names already taken. The strict create
+// makes claiming the name atomic, so the returned table is always one this call
+// created — later writes and drops can never touch an unrelated table.
+func (d *VerticaDestination) createTransientTable(ctx context.Context, schemaName, base string, tableSchema *schema.TableSchema, primaryKeys []string) (string, error) {
+	for i := 0; i < maxTransientNameAttempts; i++ {
+		name := transientCandidate(base, i)
+		qualified := name
+		if schemaName != "" {
+			qualified = schemaName + "." + name
+		}
+		createSQL := buildCreateTableSQL(qualified, tableSchema, primaryKeys, false)
+		if _, err := d.db.ExecContext(ctx, createSQL); err == nil {
+			return qualified, nil
+		}
+		exists, existsErr := d.tableExists(ctx, qualified)
+		if existsErr != nil {
+			return "", existsErr
+		}
+		if !exists {
+			return "", fmt.Errorf("failed to create transient table %s", qualified)
+		}
+	}
+	return "", fmt.Errorf("could not allocate a free transient table name for %s", base)
 }
 
 // copySwapTable handles a swap where staging lives in a different schema (Vertica
@@ -338,22 +375,12 @@ func (d *VerticaDestination) copySwapTable(ctx context.Context, opts destination
 	targetSchema, _ := splitSchemaTable(opts.TargetTable)
 	_, stagingName := splitSchemaTable(opts.StagingTable)
 
-	// Probe for a free temp name instead of dropping whatever holds the staging
-	// basename in the target schema, so an unrelated table is never destroyed.
-	tempName, err := d.freeTransientName(ctx, targetSchema, stagingName)
+	// Strictly create the temp landing table under a free name rather than probing
+	// then PrepareTable's CREATE ... IF NOT EXISTS, which would silently reuse a
+	// table that appeared after the probe. The strict create claims the name
+	// atomically, so the copy and any cleanup only ever touch a table we created.
+	tempTable, err := d.createTransientTable(ctx, targetSchema, stagingName, opts.Schema, opts.PrimaryKeys)
 	if err != nil {
-		return err
-	}
-	tempTable := tempName
-	if targetSchema != "" {
-		tempTable = targetSchema + "." + tempName
-	}
-
-	if err := d.PrepareTable(ctx, destination.PrepareOptions{
-		Table:       tempTable,
-		Schema:      opts.Schema,
-		PrimaryKeys: opts.PrimaryKeys,
-	}); err != nil {
 		return err
 	}
 
@@ -640,7 +667,7 @@ func (d *VerticaDestination) sameSchema(left, right string) bool {
 	return resolve(left) == resolve(right)
 }
 
-func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryKeys []string) string {
+func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryKeys []string, ifNotExists bool) string {
 	pkSet := make(map[string]bool, len(primaryKeys))
 	for _, k := range primaryKeys {
 		pkSet[strings.ToLower(k)] = true
@@ -659,7 +686,11 @@ func buildCreateTableSQL(table string, tableSchema *schema.TableSchema, primaryK
 		colDefs = append(colDefs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(quoteColumns(primaryKeys), ", ")))
 	}
 
-	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", quoteTable(table), strings.Join(colDefs, ",\n  "))
+	ifNotExistsClause := ""
+	if ifNotExists {
+		ifNotExistsClause = "IF NOT EXISTS "
+	}
+	return fmt.Sprintf("CREATE TABLE %s%s (\n  %s\n)", ifNotExistsClause, quoteTable(table), strings.Join(colDefs, ",\n  "))
 }
 
 func (d *VerticaDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {

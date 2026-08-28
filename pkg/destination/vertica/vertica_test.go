@@ -3,6 +3,7 @@ package vertica
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -102,7 +103,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 			{Name: "amount", DataType: schema.TypeDecimal, Precision: 10, Scale: 2},
 		},
 	}
-	got := buildCreateTableSQL("public.users", tableSchema, []string{"id"})
+	got := buildCreateTableSQL("public.users", tableSchema, []string{"id"}, true)
 
 	for _, want := range []string{
 		`CREATE TABLE IF NOT EXISTS "public"."users"`,
@@ -271,6 +272,32 @@ func TestFreeTransientNameStepsOverOccupied(t *testing.T) {
 	require.NoError(t, err)
 	if got != "stg_old_3" {
 		t.Errorf("freeTransientName() = %q, want stg_old_3", got)
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateTransientTableStrictAndAdvances(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	d := &VerticaDestination{db: db, currentSchema: "public"}
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+	existsQuery := `SELECT COUNT\(\*\) FROM v_catalog\.tables WHERE table_schema = \? AND table_name = \?`
+
+	// First strict create fails because the name is already taken; the helper
+	// confirms it exists and advances to the next candidate, which creates cleanly.
+	mock.ExpectExec(`CREATE TABLE "public"."stg" `).
+		WillReturnError(fmt.Errorf("ERROR 4155: Object \"stg\" already exists"))
+	mock.ExpectQuery(existsQuery).WithArgs("public", "stg").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`CREATE TABLE "public"."stg_2" `).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	got, err := d.createTransientTable(context.Background(), "public", "stg", tableSchema, nil)
+	require.NoError(t, err)
+	if got != "public.stg_2" {
+		t.Errorf("createTransientTable() = %q, want public.stg_2", got)
 	}
 	require.NoError(t, mock.ExpectationsWereMet())
 }
