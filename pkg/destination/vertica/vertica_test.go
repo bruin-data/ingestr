@@ -225,26 +225,26 @@ func TestDedupSourceColumnCollision(t *testing.T) {
 	}
 }
 
-func TestFreeOldName(t *testing.T) {
+func TestRenameSwapBackupNameFromStaging(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	d := &VerticaDestination{db: db, currentSchema: "public"}
 
 	existsQuery := `SELECT COUNT\(\*\) FROM v_catalog\.tables WHERE table_schema = \? AND table_name = \?`
-
-	// users_old and users_old_2 already exist, so the third candidate is chosen.
-	mock.ExpectQuery(existsQuery).WithArgs("public", "users_old").
+	mock.ExpectQuery(existsQuery).WithArgs("public", "users").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(existsQuery).WithArgs("public", "users_old_2").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(existsQuery).WithArgs("public", "users_old_3").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// The backup name is derived from the unique staging name, dropped before the
+	// swap, then the atomic rename displaces the target onto it.
+	mock.ExpectExec(`DROP TABLE IF EXISTS "public"."users_stg_run1_old" CASCADE`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER TABLE "public"."users", "public"."users_stg_run1" RENAME TO "users_stg_run1_old", "users"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`DROP TABLE IF EXISTS "public"."users_stg_run1_old" CASCADE`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	got, err := d.freeOldName(context.Background(), "public", "users")
-	require.NoError(t, err)
-	if got != "users_old_3" {
-		t.Errorf("freeOldName() = %q, want users_old_3", got)
+	if err := d.renameSwap(context.Background(), "public.users_stg_run1", "public.users"); err != nil {
+		t.Fatalf("renameSwap() error: %v", err)
 	}
 	require.NoError(t, mock.ExpectationsWereMet())
 }
