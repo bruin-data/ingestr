@@ -301,7 +301,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("bruin", "Bruin", []string{"bruin"}, true, false),
 		genericURIConnector("chargebee", "Chargebee", []string{"chargebee"}, true, false),
 		genericURIConnector("chess", "Chess.com", []string{"chess"}, true, false),
-		genericURIConnector("clevertap", "CleverTap", []string{"clevertap"}, true, false),
+		genericURIConnector("clevertap", "CleverTap", []string{"clevertap"}, true, true),
 		genericURIConnector("clickhouse", "ClickHouse", []string{"clickhouse"}, true, true),
 		genericURIConnector("clickup", "ClickUp", []string{"clickup"}, true, false),
 		genericURIConnector("couchbase", "Couchbase", []string{"couchbase"}, true, false),
