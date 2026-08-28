@@ -6,6 +6,7 @@ local_bin="$HOME/.local/bin"
 go_version="$(awk '/^go / { print $2; exit }' "$repo_root/go.mod")"
 node_version="22.14.0"
 npm_version="11.10.0"
+duckdb_version="1.5.5"
 
 mkdir -p "$local_bin" "$HOME/.local/share"
 export PATH="$local_bin:$HOME/go/bin:$PATH"
@@ -73,8 +74,29 @@ install_uv() {
     sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 }
 
+install_duckdb() {
+  if [[ -x "$local_bin/duckdb" ]] && [[ "$($local_bin/duckdb --version)" == "v${duckdb_version} "* ]]; then
+    return
+  fi
+
+  local arch
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+
+  local tmp_file
+  tmp_file="$(mktemp)"
+  curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${duckdb_version}/duckdb_cli-linux-${arch}.gz" -o "$tmp_file"
+  gzip -dc "$tmp_file" > "$local_bin/duckdb"
+  chmod +x "$local_bin/duckdb"
+  rm "$tmp_file"
+}
+
 step "Installing Go $go_version" install_go
 step "Installing Node.js $node_version and npm $npm_version" install_node
+step "Installing DuckDB CLI $duckdb_version" install_duckdb
 
 go_root="$HOME/.local/share/go/$go_version"
 node_root="$HOME/.local/share/node/$node_version"

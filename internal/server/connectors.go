@@ -386,6 +386,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("redis", "Redis Streams", []string{"redis", "rediss"}, true, false),
 		genericURIConnector("recurly", "Recurly", []string{"recurly"}, true, false),
 		genericURIConnector("redshift", "Redshift", []string{"redshift", "redshift+psycopg2"}, true, true),
+		genericURIConnector("ripestat", "RIPEstat", []string{"ripestat"}, true, false),
 		genericURIConnector("revenuecat", "RevenueCat", []string{"revenuecat"}, true, false),
 		genericURIConnector("salesforce", "Salesforce", []string{"salesforce"}, true, false),
 		genericURIConnector("sendgrid", "SendGrid", []string{"sendgrid"}, true, false),
