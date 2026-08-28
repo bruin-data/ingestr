@@ -148,7 +148,6 @@ func (d *CleverTapDestination) Close(_ context.Context) error {
 // tableParams are the record-shaping options carried on the --dest-table string,
 // e.g. "profiles?identity_column=email" or "events?identity_column=user_id&event_name=Charged".
 type tableParams struct {
-	Identity        string `mapstructure:"identity"`
 	IdentityColumn  string `mapstructure:"identity_column"`
 	IDType          string `mapstructure:"id_type"`
 	TS              string `mapstructure:"ts"`
@@ -161,7 +160,6 @@ type tableParams struct {
 type shaper struct {
 	recordType   string // "profile" or "event"
 	identityCol  string
-	idValue      string // a constant identifier applied to every row, instead of identityCol
 	idType       string
 	tsCol        string
 	eventName    string
@@ -194,11 +192,8 @@ func parseShaper(table string) (*shaper, error) {
 	}
 
 	identityCol := p.IdentityColumn
-	if identityCol != "" && p.Identity != "" {
-		return nil, fmt.Errorf("clevertap: set either identity=<constant> or identity_column=<column>, not both")
-	}
-	if identityCol == "" && p.Identity == "" {
-		return nil, fmt.Errorf("clevertap: set identity_column=<column> or identity=<constant> on the dest-table")
+	if identityCol == "" {
+		return nil, fmt.Errorf("clevertap: set identity_column=<column> on the dest-table")
 	}
 	idType := p.IDType
 	if idType == "" {
@@ -229,7 +224,6 @@ func parseShaper(table string) (*shaper, error) {
 	return &shaper{
 		recordType:   recordType,
 		identityCol:  identityCol,
-		idValue:      p.Identity,
 		idType:       idType,
 		tsCol:        p.TS,
 		eventName:    p.EventName,
@@ -249,7 +243,7 @@ func (s *shaper) validateColumns(record arrow.RecordBatch) error {
 		names = append(names, name)
 	}
 
-	if s.identityCol != "" && !present[s.identityCol] {
+	if !present[s.identityCol] {
 		return fmt.Errorf("clevertap: identity column %q not found in source (available: %s); set identity_column= on the dest-table", s.identityCol, strings.Join(names, ", "))
 	}
 	if s.eventNameCol != "" && !present[s.eventNameCol] {
@@ -264,10 +258,7 @@ func (s *shaper) validateColumns(record arrow.RecordBatch) error {
 // shape builds the upload record for one row, or returns ok=false when the row
 // has no identity value and cannot be attached to a user.
 func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row int) (map[string]interface{}, bool) {
-	var idVal interface{} = s.idValue
-	if s.identityCol != "" {
-		idVal = arrowToValue(record.Column(colIndex[s.identityCol]), row)
-	}
+	idVal := arrowToValue(record.Column(colIndex[s.identityCol]), row)
 	if idVal == nil || idVal == "" {
 		return nil, false
 	}

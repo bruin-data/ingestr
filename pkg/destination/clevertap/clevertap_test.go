@@ -128,24 +128,7 @@ func TestWriteEvents(t *testing.T) {
 	assert.Equal(t, map[string]interface{}{"amount": 49.9}, rec["evtData"])
 }
 
-func TestWriteWithLiteralIdentity(t *testing.T) {
-	server, bodies := newUploadServer(t)
-	d := connectTestDestination(t, server.URL)
-
-	records := make(chan source.RecordBatchResult, 1)
-	records <- source.RecordBatchResult{Batch: profileBatch()}
-	close(records)
-	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity=vip-user"}))
-
-	require.Len(t, *bodies, 1)
-	recs := (*bodies)[0].D
-	require.Len(t, recs, 2)
-	assert.Equal(t, "vip-user", recs[0]["identity"])
-	assert.Equal(t, "vip-user", recs[1]["identity"])
-	assert.Equal(t, map[string]interface{}{"email": "hasan@x.com", "name": "hasan", "age": float64(25)}, recs[0]["profileData"])
-}
-
-func TestLiteralIdentityWithIDType(t *testing.T) {
+func TestIdentityColumnWithIDType(t *testing.T) {
 	server, bodies := newUploadServer(t)
 	d := connectTestDestination(t, server.URL)
 
@@ -153,11 +136,11 @@ func TestLiteralIdentityWithIDType(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: eventBatch()}
 	close(records)
 	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
-		Table: "events?identity=device-1&id_type=objectId&ts=purchased_at&event_name=Charged",
+		Table: "events?identity_column=user_id&id_type=objectId&ts=purchased_at&event_name=Charged",
 	}))
 
 	rec := (*bodies)[0].D[0]
-	assert.Equal(t, "device-1", rec["objectId"])
+	assert.Equal(t, "u-42", rec["objectId"])
 	assert.NotContains(t, rec, "identity")
 }
 
@@ -168,17 +151,7 @@ func TestIdentityRequired(t *testing.T) {
 	records := make(chan source.RecordBatchResult)
 	close(records)
 	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles"})
-	require.ErrorContains(t, err, "set identity_column=<column> or identity=<constant>")
-}
-
-func TestIdentityAndIDValueMutuallyExclusive(t *testing.T) {
-	server, _ := newUploadServer(t)
-	d := connectTestDestination(t, server.URL)
-
-	records := make(chan source.RecordBatchResult)
-	close(records)
-	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email&identity=x"})
-	require.ErrorContains(t, err, "not both")
+	require.ErrorContains(t, err, "set identity_column=<column>")
 }
 
 func TestEventTSSecondUnit(t *testing.T) {

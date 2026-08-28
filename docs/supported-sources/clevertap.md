@@ -156,7 +156,7 @@ ingestr ingest \
 
 | Parameter | Required? | Description |
 | --------- | --------- | ----------- |
-| `identity` **or** `identity_column` | **Required** | A fixed identifier applied to every row (`identity`), or the source column holding each row's identifier (`identity_column`). One of the two must be set. For example, `identity_column=email` takes each row's identifier from the `email` column, while `identity=vip_user` tags every row with the same identifier. |
+| `identity_column` | **Required** | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. |
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
 | `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
 
@@ -181,7 +181,7 @@ ingestr ingest \
 | Parameter | Required? | Description |
 | --------- | --------- | ----------- |
 | `event_name` **or** `event_name_column` | **Required** | A fixed event name applied to every row (`event_name`), or a column whose value is the event name per row (`event_name_column`) for tables that mix event types. |
-| `identity` **or** `identity_column` | **Required** | A fixed identifier applied to every row (`identity`), or the source column holding each row's identifier (`identity_column`). One of the two must be set. For example, `identity_column=email` takes each row's identifier from the `email` column, while `identity=vip_user` tags every row with the same identifier. |
+| `identity_column` | **Required** | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. |
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
 | `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
 | `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
