@@ -1,10 +1,12 @@
 package postgres_cdc
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/assert"
@@ -41,6 +43,7 @@ func TestSingleReplicatorRecognizesOnlyExactBatchBarrier(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, handled)
 		assert.False(t, repl.BarrierReached())
+		assert.Zero(t, repl.BarrierLSN())
 		assert.Equal(t, pglogrepl.LSN(10), repl.CurrentLSN())
 	}
 
@@ -48,6 +51,7 @@ func TestSingleReplicatorRecognizesOnlyExactBatchBarrier(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, handled)
 	assert.True(t, repl.BarrierReached())
+	assert.Equal(t, pglogrepl.LSN(30), repl.BarrierLSN())
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 }
 
@@ -69,6 +73,7 @@ func TestMultiTableReplicatorRecognizesV2BatchBarrier(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, handled)
 	assert.True(t, repl.BarrierReached())
+	assert.Equal(t, pglogrepl.LSN(30), repl.BarrierLSN())
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 }
 
@@ -88,6 +93,7 @@ func TestMultiTableReplicatorParsesV2MessageInsideStream(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, handled)
 	assert.True(t, repl.BarrierReached())
+	assert.Equal(t, pglogrepl.LSN(30), repl.BarrierLSN())
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 }
 
@@ -99,6 +105,7 @@ func TestStreamHeartbeatAdvancesDecodedPositionWithoutCompletingBatch(t *testing
 	require.NoError(t, err)
 	assert.True(t, handled)
 	assert.False(t, single.BarrierReached())
+	assert.Zero(t, single.BarrierLSN())
 	assert.Equal(t, pglogrepl.LSN(30), single.CurrentLSN())
 
 	multi := &MultiTableReplicator{
@@ -110,7 +117,31 @@ func TestStreamHeartbeatAdvancesDecodedPositionWithoutCompletingBatch(t *testing
 	require.NoError(t, err)
 	assert.True(t, handled)
 	assert.False(t, multi.BarrierReached())
+	assert.Zero(t, multi.BarrierLSN())
 	assert.Equal(t, pglogrepl.LSN(30), multi.CurrentLSN())
+}
+
+func TestReplicatorsKeepExactBarrierLSNWhenCurrentLSNIsAhead(t *testing.T) {
+	const nonce = "expected-nonce"
+	data := logicalMessageData(false, 30, batchBarrierPrefix, nonce, nil)
+
+	single := &Replicator{barrierNonce: nonce, clientXLogPos: 40}
+	handled, err := single.handleLogicalMessage(data)
+	require.NoError(t, err)
+	require.True(t, handled)
+	assert.Equal(t, pglogrepl.LSN(30), single.BarrierLSN())
+	assert.Equal(t, pglogrepl.LSN(40), single.CurrentLSN())
+
+	multi := &MultiTableReplicator{
+		decoder:       NewMultiTableDecoder(nil),
+		barrierNonce:  nonce,
+		clientXLogPos: 40,
+	}
+	handled, err = multi.handleLogicalMessage(data)
+	require.NoError(t, err)
+	require.True(t, handled)
+	assert.Equal(t, pglogrepl.LSN(30), multi.BarrierLSN())
+	assert.Equal(t, pglogrepl.LSN(40), multi.CurrentLSN())
 }
 
 func TestBatchBarrierVersionRequirement(t *testing.T) {
@@ -118,25 +149,51 @@ func TestBatchBarrierVersionRequirement(t *testing.T) {
 	require.NoError(t, validateBatchBarrierSupport(140000))
 }
 
-// TestBatchCheckpointStaysAtEmittedBarrier is a regression test for a run that
-// persisted checkpoint 00008367/1181E504 while its slot sat around 661/...,
-// leaving the next run unable to resume and forcing a replacement snapshot.
-// The checkpoint used to be max(decoded, emitted), so a decoded position past
-// the barrier — the protocol position, which also advances on keepalives and on
-// WAL that was never handed to the destination — became the resume point. Only
-// the SQL-emitted barrier LSN is known to have everything before it decoded and
-// flushed, so it is what a completed batch persists and confirms.
-func TestBatchCheckpointStaysAtEmittedBarrier(t *testing.T) {
+func TestBatchCheckpointUsesDecodedBarrierWhenSQLReturnsAuroraVolumeLSN(t *testing.T) {
+	sqlResultLSN := parseTestLSN(t, "8368/74C209CD")
+	decodedBarrierLSN := parseTestLSN(t, "6A5/ACE93530")
+	startLSN := parseTestLSN(t, "6A5/A5E6B1F0")
+	const nonce = "expected-nonce"
+
+	repl := &Replicator{barrierNonce: nonce, clientXLogPos: startLSN}
+	handled, err := repl.handleLogicalMessage(logicalMessageData(false, decodedBarrierLSN, batchBarrierPrefix, nonce, nil))
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.True(t, repl.BarrierReached())
+	require.Equal(t, decodedBarrierLSN, repl.BarrierLSN())
+
+	src := NewPostgresCDCSource()
+	src.checkpointBatchBarrier(context.Background(), repl.BarrierLSN(), startLSN, "slot")
+
+	assert.Equal(t, decodedBarrierLSN, src.caughtUp.Committed())
+	assert.Equal(t, FormatLSN(decodedBarrierLSN), src.CDCState().Position)
+	assert.NotEqual(t, sqlResultLSN, src.caughtUp.Committed())
+
+	require.NoError(t, src.FinalizeBatch(context.Background()))
+	assert.Equal(t, FormatLSN(decodedBarrierLSN), src.CDCState().Position)
+}
+
+func TestBatchCheckpointUsesDecodedBarrierOnPostgres(t *testing.T) {
+	sqlResultLSN := parseTestLSN(t, "0/1000")
+	decodedBarrierLSN := parseTestLSN(t, "0/1040")
+
+	src := NewPostgresCDCSource()
+	src.checkpointBatchBarrier(context.Background(), decodedBarrierLSN, pglogrepl.LSN(1), "slot")
+
+	assert.Equal(t, FormatLSN(decodedBarrierLSN), src.CDCState().Position)
+	assert.NotEqual(t, FormatLSN(sqlResultLSN), src.CDCState().Position)
+}
+
+func TestBatchCheckpointStaysAtDecodedBarrierWhenCurrentLSNMovesPastIt(t *testing.T) {
 	const (
-		emitted  = pglogrepl.LSN(30)
-		startLSN = pglogrepl.LSN(20)
+		decodedBarrierLSN = pglogrepl.LSN(30)
+		currentLSN        = pglogrepl.LSN(40)
+		startLSN          = pglogrepl.LSN(20)
 	)
 
-	// The barrier marker is decoded at protocol position 40, past the LSN that
-	// pg_logical_emit_message reported for it.
 	repl := &fakeReplicator{steps: []replStep{
 		{hadActivity: true, lsn: 25, changes: makeInsertChanges(1, 1, 25)},
-		{hadActivity: true, lsn: 40, barrier: true},
+		{hadActivity: true, lsn: currentLSN, barrier: true, barrierLSN: decodedBarrierLSN},
 	}}
 	results := make(chan source.RecordBatchResult, 4)
 	require.NoError(t, streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false))
@@ -146,16 +203,50 @@ func TestBatchCheckpointStaysAtEmittedBarrier(t *testing.T) {
 			res.Batch.Release()
 		}
 	}
-	require.Greater(t, repl.CurrentLSN(), emitted, "the decoded position must run past the barrier for this test to mean anything")
+	require.Equal(t, currentLSN, repl.CurrentLSN())
+	require.Equal(t, decodedBarrierLSN, repl.BarrierLSN())
 
 	src := NewPostgresCDCSource()
-	src.checkpointBatchBarrier(context.Background(), emitted, startLSN, "slot")
+	src.checkpointBatchBarrier(context.Background(), repl.BarrierLSN(), startLSN, "slot")
 
-	assert.Equal(t, emitted, src.caughtUp.Committed())
-	assert.Equal(t, FormatLSN(emitted), src.CDCState().Position, "the persisted checkpoint must be the emitted barrier, not the decoded position")
+	assert.Equal(t, decodedBarrierLSN, src.caughtUp.Committed())
+	assert.Equal(t, FormatLSN(decodedBarrierLSN), src.CDCState().Position)
+	assert.NotEqual(t, FormatLSN(currentLSN), src.CDCState().Position)
+}
 
-	require.NoError(t, src.FinalizeBatch(context.Background()))
-	assert.Equal(t, FormatLSN(emitted), src.CDCState().Position)
+func TestLargeBarrierLSNDivergenceWarns(t *testing.T) {
+	previousStdout, previousStderr, previousMode := output.Current()
+	t.Cleanup(func() { output.Init(previousStdout, previousStderr, previousMode) })
+
+	var stdout bytes.Buffer
+	output.Init(&stdout, &bytes.Buffer{}, output.ModeText)
+	sqlResultLSN := parseTestLSN(t, "8368/74C209CD")
+	decodedBarrierLSN := parseTestLSN(t, "6A5/ACE93530")
+
+	warnIfBarrierLSNsDiverge(sqlResultLSN, decodedBarrierLSN)
+
+	assert.Contains(t, stdout.String(), sqlResultLSN.String())
+	assert.Contains(t, stdout.String(), decodedBarrierLSN.String())
+	assert.Contains(t, stdout.String(), "using the decoded LSN")
+}
+
+func TestNearbyBarrierLSNsDoNotWarn(t *testing.T) {
+	previousStdout, previousStderr, previousMode := output.Current()
+	t.Cleanup(func() { output.Init(previousStdout, previousStderr, previousMode) })
+
+	var stdout bytes.Buffer
+	output.Init(&stdout, &bytes.Buffer{}, output.ModeText)
+
+	warnIfBarrierLSNsDiverge(parseTestLSN(t, "0/1000"), parseTestLSN(t, "0/1040"))
+
+	assert.Empty(t, stdout.String())
+}
+
+func parseTestLSN(t *testing.T, raw string) pglogrepl.LSN {
+	t.Helper()
+	lsn, err := pglogrepl.ParseLSN(raw)
+	require.NoError(t, err)
+	return lsn
 }
 
 func TestReadersRejectPre14BatchBeforeSnapshot(t *testing.T) {

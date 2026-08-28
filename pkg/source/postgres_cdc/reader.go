@@ -184,16 +184,16 @@ func resumeMetadataChanged(expectedIncarnation, expectedFingerprint, currentInca
 func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) error {
 	for {
 		barrierNonce := ""
-		var barrierLSN pglogrepl.LSN
+		var sqlBarrierLSN pglogrepl.LSN
 		if !opts.Streaming {
 			var err error
-			barrierNonce, barrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
+			barrierNonce, sqlBarrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
 			if err != nil {
 				return err
 			}
-			config.Debug("[CDC] Batch mode: emitted logical-decoding barrier at %s", barrierLSN)
+			config.Debug("[CDC] Batch mode: emitted logical-decoding barrier; SQL returned %s", sqlBarrierLSN)
 		}
-		err := r.runStream(ctx, startLSN, slotName, barrierNonce, barrierLSN, results, opts, snapshotBoundary)
+		err := r.runStream(ctx, startLSN, slotName, barrierNonce, sqlBarrierLSN, results, opts, snapshotBoundary)
 		var schemaErr *SchemaChangedError
 		var reincarnationErr *TableReincarnatedError
 		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) && !errors.As(err, &reincarnationErr) {
@@ -221,7 +221,7 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 // runStream runs one replication stream until it terminates: a batch run caught
 // up, the context was cancelled, or the replicator failed.
-func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, barrierNonce string, barrierLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, barrierNonce string, sqlBarrierLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
@@ -249,12 +249,13 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 
 	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
 	if err == nil && !opts.Streaming {
-		// streamLoop only returns nil in batch mode once the barrier marker is
-		// decoded, so the emitted barrier is the position FinalizeBatch may
-		// confirm to the slot after the destination write is durable. It also
-		// keeps the walsender alive while the destination drains the results
-		// channel.
-		r.source.checkpointBatchBarrier(ctx, barrierLSN, startLSN, slotName)
+		decodedBarrierLSN := repl.BarrierLSN()
+		if decodedBarrierLSN == 0 {
+			return fmt.Errorf("batch barrier was reached without a decoded replication LSN")
+		}
+		warnIfBarrierLSNsDiverge(sqlBarrierLSN, decodedBarrierLSN)
+		// Keep the walsender alive while the destination drains the results.
+		r.source.checkpointBatchBarrier(ctx, decodedBarrierLSN, startLSN, slotName)
 	}
 	return err
 }
@@ -401,6 +402,7 @@ type batchReplicator interface {
 	NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, bool, error)
 	CurrentLSN() pglogrepl.LSN
 	BarrierReached() bool
+	BarrierLSN() pglogrepl.LSN
 	PendingLowWater() (pglogrepl.LSN, bool)
 }
 
@@ -469,7 +471,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 		if !streaming && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
-				config.Debug("[CDC] Batch mode: decoded logical barrier, stream position %s", repl.CurrentLSN())
+				config.Debug("[CDC] Batch mode: decoded logical barrier at %s, stream position %s", repl.BarrierLSN(), repl.CurrentLSN())
 				if err := accum.flushAllContext(ctx, results, token); err != nil {
 					return err
 				}
