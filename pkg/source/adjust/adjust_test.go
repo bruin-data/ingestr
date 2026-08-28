@@ -2,11 +2,19 @@ package adjust
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
@@ -311,6 +319,276 @@ func TestBuildDatePeriod(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSplitDatePeriodByDay(t *testing.T) {
+	tests := []struct {
+		name       string
+		datePeriod string
+		want       []string
+		wantErr    bool
+	}{
+		{
+			name:       "multi-day period",
+			datePeriod: "2025-01-01:2025-01-03",
+			want: []string{
+				"2025-01-01:2025-01-01",
+				"2025-01-02:2025-01-02",
+				"2025-01-03:2025-01-03",
+			},
+		},
+		{
+			name:       "single-day period",
+			datePeriod: "2025-01-01:2025-01-01",
+			want:       []string{"2025-01-01:2025-01-01"},
+		},
+		{name: "missing separator", datePeriod: "2025-01-01", wantErr: true},
+		{name: "invalid start", datePeriod: "bad:2025-01-01", wantErr: true},
+		{name: "start after end", datePeriod: "2025-01-02:2025-01-01", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := splitDatePeriodByDay(tt.datePeriod)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestHasDailyDimension(t *testing.T) {
+	assert.True(t, hasDailyDimension("campaign,day,creative"))
+	assert.True(t, hasDailyDimension("hour,campaign"))
+	assert.False(t, hasDailyDimension("campaign,week"))
+	assert.False(t, hasDailyDimension("month"))
+}
+
+func TestReportWorkerCount(t *testing.T) {
+	tests := []struct {
+		name        string
+		parallelism int
+		periodCount int
+		want        int
+	}{
+		{name: "source default", parallelism: 0, periodCount: 7, want: config.DefaultExtractParallelism},
+		{name: "global default", parallelism: config.DefaultExtractParallelism, periodCount: 7, want: config.DefaultExtractParallelism},
+		{name: "sequential", parallelism: 1, periodCount: 7, want: 1},
+		{name: "unbounded by source", parallelism: 6, periodCount: 7, want: 6},
+		{name: "bounded by periods", parallelism: 8, periodCount: 7, want: 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, reportWorkerCount(tt.parallelism, tt.periodCount))
+		})
+	}
+}
+
+func TestReadCreativesSplitsMultiDayReports(t *testing.T) {
+	requests := make(chan url.Values, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Query()
+		datePeriod := r.URL.Query().Get("date_period")
+		day, _, _ := strings.Cut(datePeriod, ":")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"rows": []map[string]interface{}{{
+				"campaign":     "campaign-1",
+				"day":          day,
+				"app":          "app-1",
+				"app_token":    "token-1",
+				"store_type":   "google_play",
+				"channel":      "channel-1",
+				"country":      "TR",
+				"adgroup":      "adgroup-1",
+				"creative":     "creative-1",
+				"installs":     "1",
+				"network_cost": "2.5",
+			}},
+		}); err != nil {
+			t.Errorf("failed to encode test response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	s := &AdjustSource{
+		lookBackDays: "0",
+		client:       ingestrhttp.New(ingestrhttp.WithBaseURL(server.URL)),
+	}
+	defer func() {
+		require.NoError(t, s.client.Close())
+	}()
+
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
+	results := make(chan source.RecordBatchResult, 3)
+	err := s.readCreatives(context.Background(), "token-1", "", source.ReadOptions{
+		IntervalStart: &start,
+		IntervalEnd:   &end,
+	}, results)
+	require.NoError(t, err)
+	close(results)
+	close(requests)
+
+	var periods []string
+	for query := range requests {
+		periods = append(periods, query.Get("date_period"))
+		assert.Equal(t, defaultAttributionTypes, query.Get("attribution_types"))
+		assert.Equal(t, "token-1", query.Get("app_token__in"))
+	}
+	assert.ElementsMatch(t, []string{
+		"2025-01-01:2025-01-01",
+		"2025-01-02:2025-01-02",
+		"2025-01-03:2025-01-03",
+	}, periods)
+
+	batchCount := 0
+	for result := range results {
+		require.NoError(t, result.Err)
+		require.NotNil(t, result.Batch)
+		assert.Equal(t, int64(1), result.Batch.NumRows())
+		result.Batch.Release()
+		batchCount++
+	}
+	assert.Equal(t, 3, batchCount)
+}
+
+func TestReadCreativesHonorsConfiguredConcurrency(t *testing.T) {
+	const parallelism = 6
+
+	started := make(chan struct{}, parallelism)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			maximum := maxActive.Load()
+			if current <= maximum || maxActive.CompareAndSwap(maximum, current) {
+				break
+			}
+		}
+
+		started <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rows":[]}`))
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+	})
+
+	s := &AdjustSource{
+		lookBackDays: "0",
+		client:       ingestrhttp.New(ingestrhttp.WithBaseURL(server.URL)),
+	}
+	t.Cleanup(func() {
+		require.NoError(t, s.client.Close())
+	})
+
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, parallelism, 0, 0, 0, 0, time.UTC)
+	results := make(chan source.RecordBatchResult, parallelism)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.readCreatives(context.Background(), "", "", source.ReadOptions{
+			IntervalStart: &start,
+			IntervalEnd:   &end,
+			Parallelism:   parallelism,
+		}, results)
+	}()
+
+	for range parallelism {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent Adjust requests")
+		}
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for concurrent Adjust requests to finish")
+	}
+	assert.Equal(t, int32(parallelism), requestCount.Load())
+	assert.Equal(t, int32(parallelism), maxActive.Load())
+}
+
+func TestReadCreativesCancelsConcurrentRequestsAfterError(t *testing.T) {
+	secondRequestStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("date_period") == "2025-01-01:2025-01-01" {
+			<-secondRequestStarted
+			http.Error(w, "invalid report", http.StatusBadRequest)
+			return
+		}
+
+		close(secondRequestStarted)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	s := &AdjustSource{
+		lookBackDays: "0",
+		client:       ingestrhttp.New(ingestrhttp.WithBaseURL(server.URL)),
+	}
+	defer func() {
+		require.NoError(t, s.client.Close())
+	}()
+
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	results := make(chan source.RecordBatchResult, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := s.readCreatives(ctx, "", "", source.ReadOptions{
+		IntervalStart: &start,
+		IntervalEnd:   &end,
+	}, results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 400")
+}
+
+func TestReadCustomDoesNotSplitCoarseTimeDimensions(t *testing.T) {
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Query().Get("date_period")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rows":[]}`))
+	}))
+	defer server.Close()
+
+	s := &AdjustSource{
+		lookBackDays: "0",
+		client:       ingestrhttp.New(ingestrhttp.WithBaseURL(server.URL)),
+	}
+	defer func() {
+		require.NoError(t, s.client.Close())
+	}()
+
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
+	results := make(chan source.RecordBatchResult)
+	err := s.readCustom(context.Background(), "custom:month,campaign:installs", "", source.ReadOptions{
+		IntervalStart: &start,
+		IntervalEnd:   &end,
+	}, results)
+	require.NoError(t, err)
+	assert.Equal(t, "2025-01-01:2025-01-03", <-requests)
 }
 
 func TestBuildTypeHintColumns(t *testing.T) {
