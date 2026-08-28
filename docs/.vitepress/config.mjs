@@ -268,6 +268,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "SFTP", link: "/supported-sources/sftp.md"},
               { text: "SharePoint", link: "/supported-sources/sharepoint.md" },
               { text: "Shopify", link: "/supported-sources/shopify.md" },
+              { text: "Sklik", link: "/supported-sources/sklik.md" },
               { text: "Slack", link: "/supported-sources/slack.md" },
               { text: "Smartsheet", link: "/supported-sources/smartsheets.md" },
               { text: "Snapchat Ads", link: "/supported-sources/snapchat-ads.md" },
