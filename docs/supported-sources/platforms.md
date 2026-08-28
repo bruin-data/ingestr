@@ -30,6 +30,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Google Analytics](/supported-sources/google_analytics.md)
 - [Mixpanel](/supported-sources/mixpanel.md)
 - [PostHog](/supported-sources/posthog.md)
+- [SatisMeter](/supported-sources/satismeter.md)
 - [SurveyMonkey](/supported-sources/surveymonkey.md)
 - [Trustpilot](/supported-sources/trustpilot.md)
 - [Wistia](/supported-sources/wistia.md)
