@@ -410,6 +410,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("trino", "Trino", []string{"trino"}, true, true),
 		genericURIConnector("trustpilot", "Trustpilot", []string{"trustpilot"}, true, false),
 		genericURIConnector("twilio", "Twilio", []string{"twilio"}, true, false),
+		genericURIConnector("twocheckout", "2Checkout", []string{"twocheckout"}, true, false),
 		genericURIConnector("typeform", "Typeform", []string{"typeform"}, true, false),
 		genericURIConnector("vertica", "Vertica", []string{"vertica"}, false, true),
 		genericURIConnector("wise", "Wise", []string{"wise"}, true, false),

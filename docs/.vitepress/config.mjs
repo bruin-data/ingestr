@@ -278,6 +278,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Trello", link: "/supported-sources/trello.md" },
               { text: "Twilio", link: "/supported-sources/twilio.md" },
+              { text: "2Checkout", link: "/supported-sources/twocheckout.md" },
               { text: "Typeform", link: "/supported-sources/typeform.md" },
               { text: "Wise", link: "/supported-sources/wise.md" },
               { text: "Wistia", link: "/supported-sources/wistia.md" },
