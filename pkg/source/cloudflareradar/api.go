@@ -44,6 +44,57 @@ var paginatedAPIEndpoints = map[string]tableConfig{
 	"traffic_anomalies":                {resultField: "trafficAnomalies", maxPageSize: 1000},
 }
 
+var nonDateAPIEndpoints = []string{
+	"agent_readiness/summary/{dimension}",
+	"bgp/ips/top/ases",
+	"bgp/routes/ases",
+	"bgp/routes/moas",
+	"bgp/routes/paths/{asn}",
+	"bgp/routes/pfx2as",
+	"bgp/routes/realtime",
+	"bgp/routes/stats",
+	"bgp/rpki/aspa/snapshot",
+	"bgp/top/ases/prefixes",
+	"bots",
+	"bots/{bot_slug}",
+	"ct/authorities",
+	"ct/authorities/{ca_slug}",
+	"ct/logs",
+	"ct/logs/{log_slug}",
+	"datasets",
+	"datasets/{alias}",
+	"entities/asns",
+	"entities/asns/botnet_threat_feed",
+	"entities/asns/ip",
+	"entities/asns/{asn}",
+	"entities/asns/{asn}/as_set",
+	"entities/asns/{asn}/rel",
+	"entities/ip",
+	"entities/locations",
+	"entities/locations/{location}",
+	"geolocations",
+	"geolocations/{geo_id}",
+	"origins",
+	"origins/{slug}",
+	"post_quantum/tls/support",
+	"ranking/domain/{domain}",
+	"ranking/internet_services/categories",
+	"ranking/internet_services/top",
+	"ranking/top",
+	"robots_txt/top/domain_categories",
+	"robots_txt/top/user_agents/directive",
+	"search/global",
+	"tlds",
+	"tlds/{tld}",
+}
+
+var dateEndOnlyAPIEndpoints = map[string]struct{}{
+	"quality/speed/histogram":     {},
+	"quality/speed/summary":       {},
+	"quality/speed/top/ases":      {},
+	"quality/speed/top/locations": {},
+}
+
 func (s *CloudflareRadarSource) getAPITable(req source.TableRequest) (source.SourceTable, error) {
 	table, err := parseAPITable(req.Name)
 	if err != nil {
@@ -112,7 +163,7 @@ func (s *CloudflareRadarSource) readAPI(ctx context.Context, name string, table 
 
 func (s *CloudflareRadarSource) fetchAPI(ctx context.Context, name string, table apiTable, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	query := cloneValues(table.query)
-	setAPIDateRange(query, opts)
+	setAPIDateRange(table.path, query, opts)
 	limiter := &rowLimiter{limit: opts.Limit}
 	if table.config == nil {
 		items, err := s.fetchAPIRows(ctx, name, table.path, query, "")
@@ -213,17 +264,42 @@ func cloneValues(values url.Values) url.Values {
 	return cloned
 }
 
-func setAPIDateRange(query url.Values, opts source.ReadOptions) {
+func setAPIDateRange(path string, query url.Values, opts source.ReadOptions) {
 	if opts.IntervalStart == nil && opts.IntervalEnd == nil {
 		return
 	}
+	for _, pattern := range nonDateAPIEndpoints {
+		if matchAPIEndpoint(pattern, path) {
+			return
+		}
+	}
 	params := make(map[string]string, 2)
 	setDateRange(params, opts, "")
+	if _, ok := dateEndOnlyAPIEndpoints[path]; ok {
+		delete(params, "dateStart")
+	}
 	for key, value := range params {
 		if !query.Has(key) {
 			query.Set(key, value)
 		}
 	}
+}
+
+func matchAPIEndpoint(pattern, path string) bool {
+	patternParts := strings.Split(pattern, "/")
+	pathParts := strings.Split(path, "/")
+	if len(patternParts) != len(pathParts) {
+		return false
+	}
+	for i, part := range patternParts {
+		if strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}") {
+			continue
+		}
+		if part != pathParts[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeAPIItems(body []byte) ([]map[string]interface{}, error) {

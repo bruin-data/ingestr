@@ -87,4 +87,4 @@ Dynamic endpoint responses are converted to relational rows as follows:
 - detail responses produce one row;
 - nested values and Radar response metadata remain JSON columns.
 
-Dynamic tables default to the `replace` strategy. To merge them, provide the endpoint's stable key with `--primary-key` and select the merge strategy. `--interval-start` and `--interval-end` are forwarded as `dateStart` and `dateEnd` unless those parameters are already present in the source-table query string.
+Dynamic tables default to the `replace` strategy. To merge them, provide the endpoint's stable key with `--primary-key` and select the merge strategy. For endpoints that support date filters, `--interval-start` and `--interval-end` are forwarded as `dateStart` and `dateEnd` unless those parameters are already present in the source-table query string. Endpoints that only support `dateEnd` receive only the interval end.

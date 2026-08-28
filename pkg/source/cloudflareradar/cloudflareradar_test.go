@@ -2,6 +2,7 @@ package cloudflareradar
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -242,5 +243,36 @@ func TestSetDateRange(t *testing.T) {
 	setDateRange(params, source.ReadOptions{}, "364d")
 	if params["dateRange"] != "364d" {
 		t.Fatalf("expected default 364d range, got %v", params)
+	}
+}
+
+func TestSetAPIDateRange(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	opts := source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}
+	tests := []struct {
+		name      string
+		path      string
+		query     string
+		wantStart string
+		wantEnd   string
+	}{
+		{name: "date range", path: "http/timeseries", wantStart: "2026-01-02T03:04:05Z", wantEnd: "2026-01-03T03:04:05Z"},
+		{name: "date end only", path: "quality/speed/summary", wantEnd: "2026-01-03T03:04:05Z"},
+		{name: "no dates", path: "entities/asns/13335"},
+		{name: "explicit dates", path: "http/timeseries", query: "dateStart=2025-01-01T00%3A00%3A00Z&dateEnd=2025-01-02T00%3A00%3A00Z", wantStart: "2025-01-01T00:00:00Z", wantEnd: "2025-01-02T00:00:00Z"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query, err := url.ParseQuery(tt.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			setAPIDateRange(tt.path, query, opts)
+			if query.Get("dateStart") != tt.wantStart || query.Get("dateEnd") != tt.wantEnd {
+				t.Fatalf("got dateStart=%q dateEnd=%q, want dateStart=%q dateEnd=%q", query.Get("dateStart"), query.Get("dateEnd"), tt.wantStart, tt.wantEnd)
+			}
+		})
 	}
 }
