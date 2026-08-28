@@ -271,7 +271,10 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 
 	// Vertica renames multiple tables atomically in one statement, so target and
 	// staging are swapped in a single step and the displaced target is dropped.
-	oldName := destination.ShortenIdentifier(targetName+"_old", targetName+"_old", destination.MaxIdentifierLength("vertica"))
+	oldName, err := d.freeOldName(ctx, targetSchema, targetName)
+	if err != nil {
+		return err
+	}
 	swapSQL := fmt.Sprintf("ALTER TABLE %s, %s RENAME TO %s, %s",
 		quoteTable(targetTable), quoteTable(stagingTable), quoteColumn(oldName), quoteColumn(targetName))
 	if _, err := d.db.ExecContext(ctx, swapSQL); err != nil {
@@ -287,6 +290,32 @@ func (d *VerticaDestination) renameSwap(ctx context.Context, stagingTable, targe
 		config.Debug("[VERTICA] Warning: failed to drop old table %s after swap: %v", oldTable, err)
 	}
 	return nil
+}
+
+// freeOldName returns a table name in targetSchema not currently occupied, used
+// as the transient landing spot for the displaced target during an atomic swap.
+// A leftover "<target>_old" from a crashed prior swap (or a real user table)
+// would otherwise make the rename collide and leave the load unpublished.
+func (d *VerticaDestination) freeOldName(ctx context.Context, targetSchema, targetName string) (string, error) {
+	maxLen := destination.MaxIdentifierLength("vertica")
+	for i := 0; ; i++ {
+		base := targetName + "_old"
+		if i > 0 {
+			base = fmt.Sprintf("%s_old_%d", targetName, i+1)
+		}
+		name := destination.ShortenIdentifier(base, base, maxLen)
+		qualified := name
+		if targetSchema != "" {
+			qualified = targetSchema + "." + name
+		}
+		exists, err := d.tableExists(ctx, qualified)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return name, nil
+		}
+	}
 }
 
 // copySwapTable handles a swap where staging lives in a different schema (Vertica

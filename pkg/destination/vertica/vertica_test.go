@@ -2,13 +2,16 @@ package vertica
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMapDataTypeToVertica(t *testing.T) {
@@ -220,6 +223,30 @@ func TestDedupSourceColumnCollision(t *testing.T) {
 	if !strings.Contains(got, `WHERE "__bruin_dedup_rn_2" = 1`) {
 		t.Errorf("expected WHERE on collision-avoiding alias in:\n%s", got)
 	}
+}
+
+func TestFreeOldName(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	d := &VerticaDestination{db: db, currentSchema: "public"}
+
+	existsQuery := `SELECT COUNT\(\*\) FROM v_catalog\.tables WHERE table_schema = \? AND table_name = \?`
+
+	// users_old and users_old_2 already exist, so the third candidate is chosen.
+	mock.ExpectQuery(existsQuery).WithArgs("public", "users_old").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(existsQuery).WithArgs("public", "users_old_2").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(existsQuery).WithArgs("public", "users_old_3").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	got, err := d.freeOldName(context.Background(), "public", "users")
+	require.NoError(t, err)
+	if got != "users_old_3" {
+		t.Errorf("freeOldName() = %q, want users_old_3", got)
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestUniqueInternalName(t *testing.T) {
