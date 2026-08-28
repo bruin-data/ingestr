@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
@@ -183,7 +185,7 @@ func (s *AdjustSource) GetTable(ctx context.Context, req source.TableRequest) (s
 }
 
 func (s *AdjustSource) read(ctx context.Context, table string, appTokens, attributionTypes string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	results := make(chan source.RecordBatchResult, 8)
+	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 1))
 
 	go func() {
 		defer close(results)
@@ -345,81 +347,17 @@ func buildDefaultMetrics() []string {
 }
 
 func (s *AdjustSource) readCampaigns(ctx context.Context, appTokens, attributionTypes string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[ADJUST] Fetching campaigns")
-
-	datePeriod, err := s.buildDatePeriod(&opts)
-	if err != nil {
-		return fmt.Errorf("failed to build date period for campaigns: %w", err)
-	}
-
-	req := s.client.R(ctx).
-		SetQueryParam("dimensions", strings.Join(defaultDimensions, ",")).
-		SetQueryParam("metrics", strings.Join(defaultMetrics, ",")).
-		SetQueryParam("date_period", datePeriod)
+	params := make(map[string]string)
 
 	if at := resolveAttributionTypes(attributionTypes); at != "" {
-		req.SetQueryParam("attribution_types", at)
+		params["attribution_types"] = at
 	}
 
 	if appTokens != "" {
-		req.SetQueryParam("app_token__in", appTokens)
+		params["app_token__in"] = appTokens
 	}
 
-	resp, err := req.Get("report")
-	if err != nil {
-		return fmt.Errorf("failed to fetch campaigns: %w", err)
-	}
-
-	if !resp.IsSuccess() {
-		return fmt.Errorf("failed to fetch campaigns: status %d: %s", resp.StatusCode(), resp.String())
-	}
-
-	var result struct {
-		Rows []map[string]interface{} `json:"rows"`
-	}
-	if err := resp.JSON(&result); err != nil {
-		return fmt.Errorf("failed to parse campaigns response: %w", err)
-	}
-
-	if len(result.Rows) == 0 {
-		config.Debug("[ADJUST] No campaigns found")
-		return nil
-	}
-
-	config.Debug("[ADJUST] Sending %d campaigns", len(result.Rows))
-
-	cols := buildTypeHintColumns(strings.Join(defaultDimensions, ","), strings.Join(defaultMetrics, ","))
-
-	var batch []map[string]interface{}
-	var accBytes int64
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert campaigns to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		batch = nil
-		accBytes = 0
-		return nil
-	}
-
-	for _, row := range result.Rows {
-		if opts.MaxBatchBytes > 0 {
-			rowBytes := arrowconv.RowBytes(row)
-			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-			accBytes += rowBytes
-		}
-		batch = append(batch, row)
-	}
-
-	return flush()
+	return s.readReport(ctx, "campaigns", strings.Join(defaultDimensions, ","), strings.Join(defaultMetrics, ","), params, opts, results)
 }
 
 var creativePrimaryKeys = []string{"campaign", "day", "app", "store_type", "channel", "country", "adgroup", "creative"}
@@ -427,164 +365,245 @@ var creativePrimaryKeys = []string{"campaign", "day", "app", "store_type", "chan
 var creativeDimensions = []string{"campaign", "day", "app", "app_token", "store_type", "channel", "country", "adgroup", "creative"}
 
 func (s *AdjustSource) readCreatives(ctx context.Context, appTokens, attributionTypes string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[ADJUST] Fetching creatives")
-
-	datePeriod, err := s.buildDatePeriod(&opts)
-	if err != nil {
-		return fmt.Errorf("failed to build date period for creatives: %w", err)
-	}
-
-	req := s.client.R(ctx).
-		SetQueryParam("dimensions", strings.Join(creativeDimensions, ",")).
-		SetQueryParam("metrics", strings.Join(defaultMetrics, ",")).
-		SetQueryParam("date_period", datePeriod)
+	params := make(map[string]string)
 
 	if at := resolveAttributionTypes(attributionTypes); at != "" {
-		req.SetQueryParam("attribution_types", at)
+		params["attribution_types"] = at
 	}
 
 	if appTokens != "" {
-		req.SetQueryParam("app_token__in", appTokens)
+		params["app_token__in"] = appTokens
 	}
 
-	resp, err := req.Get("report")
-	if err != nil {
-		return fmt.Errorf("failed to fetch creatives: %w", err)
-	}
-
-	if !resp.IsSuccess() {
-		return fmt.Errorf("failed to fetch creatives: status %d: %s", resp.StatusCode(), resp.String())
-	}
-
-	var result struct {
-		Rows []map[string]interface{} `json:"rows"`
-	}
-	if err := resp.JSON(&result); err != nil {
-		return fmt.Errorf("failed to parse creatives response: %w", err)
-	}
-
-	if len(result.Rows) == 0 {
-		config.Debug("[ADJUST] No creatives found")
-		return nil
-	}
-
-	config.Debug("[ADJUST] Sending %d creatives", len(result.Rows))
-
-	cols := buildTypeHintColumns(strings.Join(creativeDimensions, ","), strings.Join(defaultMetrics, ","))
-
-	var batch []map[string]interface{}
-	var accBytes int64
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert creatives to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		batch = nil
-		accBytes = 0
-		return nil
-	}
-
-	for _, row := range result.Rows {
-		if opts.MaxBatchBytes > 0 {
-			rowBytes := arrowconv.RowBytes(row)
-			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-			accBytes += rowBytes
-		}
-		batch = append(batch, row)
-	}
-
-	return flush()
+	return s.readReport(ctx, "creatives", strings.Join(creativeDimensions, ","), strings.Join(defaultMetrics, ","), params, opts, results)
 }
 
 func (s *AdjustSource) readCustom(ctx context.Context, table string, appTokens string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[ADJUST] Fetching custom report")
-
 	dimensions, metrics, filters, err := parseCustomTable(table)
 	if err != nil {
 		return err
 	}
 
-	datePeriod, err := s.buildDatePeriod(&opts)
-	if err != nil {
-		return fmt.Errorf("failed to build date period for custom report: %w", err)
+	if appTokens != "" {
+		if filters == nil {
+			filters = make(map[string]string)
+		}
+		filters["app_token__in"] = appTokens
 	}
 
+	return s.readReport(ctx, "custom report", dimensions, metrics, filters, opts, results)
+}
+
+func (s *AdjustSource) readReport(ctx context.Context, name, dimensions, metrics string, params map[string]string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	datePeriod, err := s.buildDatePeriod(&opts)
+	if err != nil {
+		return fmt.Errorf("failed to build date period for %s: %w", name, err)
+	}
+
+	datePeriods := []string{datePeriod}
+	if hasDailyDimension(dimensions) {
+		datePeriods, err = splitDatePeriodByDay(datePeriod)
+		if err != nil {
+			return fmt.Errorf("failed to split date period for %s: %w", name, err)
+		}
+	}
+
+	workerCount := reportWorkerCount(opts.Parallelism, len(datePeriods))
+	config.Debug("[ADJUST] Fetching %s in %d date window(s) with %d worker(s)", name, len(datePeriods), workerCount)
+	cols := buildTypeHintColumns(dimensions, metrics)
+
+	type periodResult struct {
+		period  string
+		records []arrow.RecordBatch
+		rows    int
+		err     error
+	}
+
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+
+	periods := make(chan string)
+	fetched := make(chan periodResult)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case period, ok := <-periods:
+					if !ok {
+						return
+					}
+
+					records, rowCount, err := s.fetchReportPeriod(workerCtx, name, dimensions, metrics, period, params, cols, opts.ExcludeColumns, opts.MaxBatchBytes)
+					result := periodResult{period: period, records: records, rows: rowCount, err: err}
+					select {
+					case fetched <- result:
+					case <-workerCtx.Done():
+						for _, record := range records {
+							record.Release()
+						}
+						return
+					}
+					if err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(periods)
+		for _, period := range datePeriods {
+			select {
+			case periods <- period:
+			case <-workerCtx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		workers.Wait()
+		close(fetched)
+	}()
+
+	totalRows := 0
+	var firstErr error
+	for result := range fetched {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+				cancelWorkers()
+			}
+			continue
+		}
+		if len(result.records) == 0 {
+			continue
+		}
+		if firstErr != nil {
+			for _, record := range result.records {
+				record.Release()
+			}
+			continue
+		}
+
+		totalRows += result.rows
+		config.Debug("[ADJUST] Sending %d %s rows for %s", result.rows, name, result.period)
+		for i, record := range result.records {
+			select {
+			case results <- source.RecordBatchResult{Batch: record}:
+			case <-ctx.Done():
+				record.Release()
+				for _, pending := range result.records[i+1:] {
+					pending.Release()
+				}
+				if firstErr == nil {
+					firstErr = ctx.Err()
+					cancelWorkers()
+				}
+			}
+			if firstErr != nil {
+				break
+			}
+		}
+	}
+
+	if firstErr == nil && ctx.Err() != nil {
+		firstErr = ctx.Err()
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	if totalRows == 0 {
+		config.Debug("[ADJUST] No %s data found", name)
+	}
+	return nil
+}
+
+func reportWorkerCount(parallelism, periodCount int) int {
+	if parallelism <= 0 {
+		parallelism = config.DefaultExtractParallelism
+	}
+	return min(parallelism, periodCount)
+}
+
+func (s *AdjustSource) fetchReportPeriod(ctx context.Context, name, dimensions, metrics, datePeriod string, params map[string]string, cols []schema.Column, excludeColumns []string, maxBatchBytes int64) ([]arrow.RecordBatch, int, error) {
 	req := s.client.R(ctx).
 		SetQueryParam("dimensions", dimensions).
 		SetQueryParam("metrics", metrics).
 		SetQueryParam("date_period", datePeriod)
 
-	if appTokens != "" {
-		req.SetQueryParam("app_token__in", appTokens)
-	}
-
-	for k, v := range filters {
-		req.SetQueryParam(k, v)
+	for key, value := range params {
+		req.SetQueryParam(key, value)
 	}
 
 	resp, err := req.Get("report")
 	if err != nil {
-		return fmt.Errorf("failed to fetch custom report: %w", err)
+		return nil, 0, fmt.Errorf("failed to fetch %s for %s: %w", name, datePeriod, err)
 	}
 
 	if !resp.IsSuccess() {
-		return fmt.Errorf("failed to fetch custom report: status %d: %s", resp.StatusCode(), resp.String())
+		return nil, 0, fmt.Errorf("failed to fetch %s for %s: status %d: %s", name, datePeriod, resp.StatusCode(), resp.String())
 	}
 
 	var result struct {
 		Rows []map[string]interface{} `json:"rows"`
 	}
 	if err := resp.JSON(&result); err != nil {
-		return fmt.Errorf("failed to parse custom report response: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse %s response for %s: %w", name, datePeriod, err)
 	}
 
 	if len(result.Rows) == 0 {
-		config.Debug("[ADJUST] No custom report data found")
-		return nil
+		return nil, 0, nil
 	}
 
-	config.Debug("[ADJUST] Sending %d custom report rows", len(result.Rows))
+	records, err := rowsToArrowRecords(result.Rows, cols, excludeColumns, maxBatchBytes)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to convert %s to Arrow for %s: %w", name, datePeriod, err)
+	}
+	return records, len(result.Rows), nil
+}
 
-	cols := buildTypeHintColumns(dimensions, metrics)
-
+func rowsToArrowRecords(rows []map[string]interface{}, cols []schema.Column, excludeColumns []string, maxBatchBytes int64) ([]arrow.RecordBatch, error) {
+	var records []arrow.RecordBatch
 	var batch []map[string]interface{}
-	var accBytes int64
+	var accumulatedBytes int64
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, opts.ExcludeColumns)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, cols, excludeColumns)
 		if err != nil {
-			return fmt.Errorf("failed to convert custom report to Arrow: %w", err)
+			return err
 		}
-		results <- source.RecordBatchResult{Batch: record}
+		records = append(records, record)
 		batch = nil
-		accBytes = 0
+		accumulatedBytes = 0
 		return nil
 	}
 
-	for _, row := range result.Rows {
-		if opts.MaxBatchBytes > 0 {
+	for _, row := range rows {
+		if maxBatchBytes > 0 {
 			rowBytes := arrowconv.RowBytes(row)
-			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+			if len(batch) > 0 && accumulatedBytes+rowBytes > maxBatchBytes {
 				if err := flush(); err != nil {
-					return err
+					return nil, err
 				}
 			}
-			accBytes += rowBytes
+			accumulatedBytes += rowBytes
 		}
 		batch = append(batch, row)
 	}
-
-	return flush()
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 var requiredCustomDimensions = []string{
@@ -724,6 +743,41 @@ func parseFilters(raw string) map[string]string {
 	}
 
 	return result
+}
+
+func hasDailyDimension(dimensions string) bool {
+	for _, dimension := range strings.Split(dimensions, ",") {
+		if dimension == "day" || dimension == "hour" {
+			return true
+		}
+	}
+	return false
+}
+
+func splitDatePeriodByDay(datePeriod string) ([]string, error) {
+	startText, endText, ok := strings.Cut(datePeriod, ":")
+	if !ok {
+		return nil, fmt.Errorf("invalid date period %q", datePeriod)
+	}
+
+	start, err := time.Parse("2006-01-02", startText)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date period start %q: %w", startText, err)
+	}
+	end, err := time.Parse("2006-01-02", endText)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date period end %q: %w", endText, err)
+	}
+	if start.After(end) {
+		return nil, fmt.Errorf("date period start %s must not be after end %s", startText, endText)
+	}
+
+	periods := make([]string, 0, int(end.Sub(start).Hours()/24)+1)
+	for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
+		date := day.Format("2006-01-02")
+		periods = append(periods, date+":"+date)
+	}
+	return periods, nil
 }
 
 // buildDatePeriod constructs the Adjust API date_period parameter and applies lookback_days.
