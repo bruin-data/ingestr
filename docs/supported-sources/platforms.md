@@ -45,6 +45,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Pipedrive](/supported-sources/pipedrive.md)
 - [Plus Vibe AI](/supported-sources/plusvibeai.md)
 - [Salesforce](/supported-sources/salesforce.md)
+- [Sumble](/supported-sources/sumble.md)
 - [Twenty CRM](/supported-sources/twenty.md)
 - [Zendesk](/supported-sources/zendesk.md)
 

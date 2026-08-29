@@ -406,6 +406,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("starrocks", "StarRocks", []string{"starrocks"}, true, true),
 		genericURIConnector("square", "Square", []string{"square"}, true, false),
 		genericURIConnector("stripe", "Stripe", []string{"stripe"}, true, false),
+		genericURIConnector("sumble", "Sumble", []string{"sumble"}, true, false),
 		genericURIConnector("surveymonkey", "SurveyMonkey", []string{"surveymonkey"}, true, false),
 		genericURIConnector("synapse", "Azure Synapse", []string{"synapse"}, false, true),
 		genericURIConnector("tiktok", "TikTok Ads", []string{"tiktok"}, true, false),
