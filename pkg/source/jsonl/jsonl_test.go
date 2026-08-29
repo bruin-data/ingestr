@@ -9,9 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,19 +112,11 @@ func TestJSONLSourceReadsZIPMembers(t *testing.T) {
 	require.NoError(t, err)
 
 	var totalRows int64
-	memberPaths := make(map[string]bool)
 	for result := range results {
 		require.NoError(t, result.Err)
-		memberIndex := result.Batch.Schema().FieldIndices(archiveutil.MemberPathColumn)
-		require.Len(t, memberIndex, 1)
-		memberColumn := result.Batch.Column(memberIndex[0]).(*array.String)
-		memberPaths[memberColumn.Value(0)] = true
+		require.Equal(t, int64(1), result.Batch.NumCols())
 		totalRows += result.Batch.NumRows()
 		result.Batch.Release()
 	}
 	require.Equal(t, int64(3), totalRows)
-	require.Equal(t, map[string]bool{
-		"events/day-1.jsonl": true,
-		"events/day-2.jsonl": true,
-	}, memberPaths)
 }

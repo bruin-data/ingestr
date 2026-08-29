@@ -16,7 +16,7 @@ Append `!<member-glob>` to read selected CSV files from a local ZIP archive:
 csv:///path/to/release.zip!data/**/*.csv
 ```
 
-The same syntax works with the `jsonl://`, `ndjson://`, and `parquet://` source schemes. If the member glob is omitted, all members are selected. Every output row includes the outer file path, member path, CRC32, compressed size, and uncompressed size in `_ingestr_source_file_path` and the `_ingestr_source_archive_member_*` columns.
+The same syntax works with the `jsonl://`, `ndjson://`, and `parquet://` source schemes. If the member glob is omitted, all members are selected.
 
 Archive members are processed one at a time without extracting the entire ZIP. The `archive_max_members`, `archive_max_bytes`, `archive_max_uncompressed_bytes`, and `archive_max_expansion_ratio` URI parameters configure safety limits. Their defaults are 10000 members, 10 GiB, 100 GiB, and 1000 respectively.
 

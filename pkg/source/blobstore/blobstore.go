@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/url"
 	"os"
@@ -63,13 +62,9 @@ const (
 	ProviderSFTP          Provider = "sftp"
 
 	defaultParallelism               = 5
-	defaultBlobstoreFilePathColumn   = archiveutil.SourceFilePathColumn
+	defaultBlobstoreFilePathColumn   = "_ingestr_source_file_path"
 	defaultBlobstoreModifiedAtColumn = "_ingestr_source_file_modified_at"
 	defaultBlobstoreCreatedAtColumn  = "_ingestr_source_file_created_at"
-	defaultArchiveMemberPathColumn   = archiveutil.MemberPathColumn
-	defaultArchiveMemberCRC32Column  = archiveutil.MemberCRC32Column
-	defaultArchiveCompressedColumn   = archiveutil.MemberCompressedSizeColumn
-	defaultArchiveUncompressedColumn = archiveutil.MemberUncompressedSizeColumn
 )
 
 type FileFormat string
@@ -106,18 +101,10 @@ type blobstoreFile struct {
 }
 
 type blobstoreFileMetadata struct {
-	incrementalKey           string
-	incrementalAt            *time.Time
-	filepathColumn           string
-	filepath                 string
-	archiveMemberPathColumn  string
-	archiveMemberPath        string
-	archiveMemberCRC32Column string
-	archiveMemberCRC32       string
-	archiveCompressedColumn  string
-	archiveMemberCompressed  int64
-	archiveSizeColumn        string
-	archiveMemberSize        int64
+	incrementalKey string
+	incrementalAt  *time.Time
+	filepathColumn string
+	filepath       string
 }
 
 type athenaAPI interface {
@@ -652,11 +639,6 @@ func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, a
 			config.Debug("[BLOBSTORE-SRC] Skipping ZIP member with unknown format: %s!%s", archive.key, member.Name)
 			continue
 		}
-		if member.CompressedSize64 > math.MaxInt64 || member.UncompressedSize64 > math.MaxInt64 {
-			return fmt.Errorf("ZIP member %q is too large to represent its size metadata", member.Name)
-		}
-
-		metadata := s.archiveMemberMetadata(opts, bucket, archive.key, member, baseMetadata)
 		switch format {
 		case FormatParquet:
 			spooled, spoolErr := archiveutil.SpoolMember(ctx, member)
@@ -664,7 +646,7 @@ func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, a
 				err = spoolErr
 				break
 			}
-			err = s.readParquetFile(ctx, spooled, results, &totalRows, &batchNum, opts, metadata)
+			err = s.readParquetFile(ctx, spooled, results, &totalRows, &batchNum, opts, baseMetadata)
 			name := spooled.Name()
 			closeErr := spooled.Close()
 			_ = os.Remove(name)
@@ -679,9 +661,9 @@ func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, a
 			}
 			dataReader := io.Reader(&contextReader{ctx: ctx, reader: memberReader})
 			if format == FormatJSONL {
-				err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts, metadata)
+				err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts, baseMetadata)
 			} else {
-				err = s.readCSVFile(ctx, dataReader, tableEncoding, results, &totalRows, &batchNum, batchSize, opts, metadata)
+				err = s.readCSVFile(ctx, dataReader, tableEncoding, results, &totalRows, &batchNum, batchSize, opts, baseMetadata)
 			}
 			closeErr := memberReader.Close()
 			if err == nil {
@@ -1012,30 +994,6 @@ func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key stri
 		metadata.filepath = s.filepath(bucket, key)
 	}
 
-	return metadata
-}
-
-func (s *BlobstoreSource) archiveMemberMetadata(opts source.ReadOptions, bucket, key string, member *zip.File, metadata blobstoreFileMetadata) blobstoreFileMetadata {
-	if metadata.filepathColumn == "" && !isExcludedColumn(defaultBlobstoreFilePathColumn, opts.ExcludeColumns) {
-		metadata.filepathColumn = defaultBlobstoreFilePathColumn
-		metadata.filepath = s.filepath(bucket, key)
-	}
-	if !isExcludedColumn(defaultArchiveMemberPathColumn, opts.ExcludeColumns) {
-		metadata.archiveMemberPathColumn = defaultArchiveMemberPathColumn
-		metadata.archiveMemberPath = member.Name
-	}
-	if !isExcludedColumn(defaultArchiveMemberCRC32Column, opts.ExcludeColumns) {
-		metadata.archiveMemberCRC32Column = defaultArchiveMemberCRC32Column
-		metadata.archiveMemberCRC32 = fmt.Sprintf("%08x", member.CRC32)
-	}
-	if !isExcludedColumn(defaultArchiveCompressedColumn, opts.ExcludeColumns) {
-		metadata.archiveCompressedColumn = defaultArchiveCompressedColumn
-		metadata.archiveMemberCompressed = int64(member.CompressedSize64)
-	}
-	if !isExcludedColumn(defaultArchiveUncompressedColumn, opts.ExcludeColumns) {
-		metadata.archiveSizeColumn = defaultArchiveUncompressedColumn
-		metadata.archiveMemberSize = int64(member.UncompressedSize64)
-	}
 	return metadata
 }
 
@@ -1581,29 +1539,13 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 
 	addIncrementalTimestamp := metadata.incrementalKey != "" && metadata.incrementalAt != nil
 	addFilepath := metadata.filepathColumn != "" && metadata.filepath != ""
-	addArchiveMemberPath := metadata.archiveMemberPathColumn != "" && metadata.archiveMemberPath != ""
-	addArchiveMemberCRC32 := metadata.archiveMemberCRC32Column != "" && metadata.archiveMemberCRC32 != ""
-	addArchiveCompressed := metadata.archiveCompressedColumn != ""
-	addArchiveSize := metadata.archiveSizeColumn != ""
 
-	columnNames := make([]string, 0, 6)
+	columnNames := make([]string, 0, 2)
 	if addIncrementalTimestamp {
 		columnNames = append(columnNames, metadata.incrementalKey)
 	}
 	if addFilepath {
 		columnNames = append(columnNames, metadata.filepathColumn)
-	}
-	if addArchiveMemberPath {
-		columnNames = append(columnNames, metadata.archiveMemberPathColumn)
-	}
-	if addArchiveMemberCRC32 {
-		columnNames = append(columnNames, metadata.archiveMemberCRC32Column)
-	}
-	if addArchiveCompressed {
-		columnNames = append(columnNames, metadata.archiveCompressedColumn)
-	}
-	if addArchiveSize {
-		columnNames = append(columnNames, metadata.archiveSizeColumn)
 	}
 	if len(columnNames) == 0 {
 		return record, false, nil
@@ -1662,36 +1604,8 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 		builder.Release()
 		nextCol++
 	}
-	appendInt64 := func(name string, value int64) {
-		fields[nextCol] = arrow.Field{
-			Name:     name,
-			Type:     arrow.PrimitiveTypes.Int64,
-			Nullable: false,
-		}
-
-		builder := array.NewInt64Builder(memory.DefaultAllocator)
-		for i := int64(0); i < record.NumRows(); i++ {
-			builder.Append(value)
-		}
-		columns[nextCol] = builder.NewArray()
-		builder.Release()
-		nextCol++
-	}
-
 	if addFilepath {
 		appendString(metadata.filepathColumn, metadata.filepath)
-	}
-	if addArchiveMemberPath {
-		appendString(metadata.archiveMemberPathColumn, metadata.archiveMemberPath)
-	}
-	if addArchiveMemberCRC32 {
-		appendString(metadata.archiveMemberCRC32Column, metadata.archiveMemberCRC32)
-	}
-	if addArchiveCompressed {
-		appendInt64(metadata.archiveCompressedColumn, metadata.archiveMemberCompressed)
-	}
-	if addArchiveSize {
-		appendInt64(metadata.archiveSizeColumn, metadata.archiveMemberSize)
 	}
 
 	newRecord := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, record.NumRows())

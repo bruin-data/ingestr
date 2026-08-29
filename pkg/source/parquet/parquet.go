@@ -222,12 +222,6 @@ func (s *ParquetSource) readZIP(ctx context.Context, opts source.ReadOptions) (<
 					break
 				}
 
-				metadata, err := archiveutil.Metadata(archivePath, member)
-				if err != nil {
-					_ = archive.Close()
-					results <- source.RecordBatchResult{Err: err}
-					return
-				}
 				spooled, err := archiveutil.SpoolMember(ctx, member)
 				if err != nil {
 					_ = archive.Close()
@@ -248,7 +242,7 @@ func (s *ParquetSource) readZIP(ctx context.Context, opts source.ReadOptions) (<
 					memberResults, readErr = memberSource.read(ctx, memberOpts)
 				}
 				if readErr == nil {
-					rows, forwardErr := archiveutil.ForwardBatches(ctx, results, memberResults, metadata, opts.ExcludeColumns, memberOpts.Limit)
+					rows, forwardErr := archiveutil.ForwardBatches(ctx, results, memberResults, memberOpts.Limit)
 					totalRows += rows
 					readErr = forwardErr
 				}

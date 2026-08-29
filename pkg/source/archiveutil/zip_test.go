@@ -125,7 +125,7 @@ func TestForwardBatchesIgnoresErrorsAfterLimit(t *testing.T) {
 	close(batches)
 	destination := make(chan source.RecordBatchResult, 1)
 
-	rows, err := ForwardBatches(context.Background(), destination, batches, MemberMetadata{}, nil, 1)
+	rows, err := ForwardBatches(context.Background(), destination, batches, 1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, rows)
 

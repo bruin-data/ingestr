@@ -12,24 +12,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 const (
-	DefaultMaxMembers                  = 10_000
-	DefaultMaxArchiveBytes       int64 = 10 << 30
-	DefaultMaxUncompressedBytes        = 100 << 30
-	DefaultMaxExpansionRatio           = 1_000
-	DefaultMemberPattern               = "**/*"
-	SourceFilePathColumn               = "_ingestr_source_file_path"
-	MemberPathColumn                   = "_ingestr_source_archive_member_path"
-	MemberCRC32Column                  = "_ingestr_source_archive_member_crc32"
-	MemberCompressedSizeColumn         = "_ingestr_source_archive_member_compressed_size"
-	MemberUncompressedSizeColumn       = "_ingestr_source_archive_member_uncompressed_size"
+	DefaultMaxMembers                 = 10_000
+	DefaultMaxArchiveBytes      int64 = 10 << 30
+	DefaultMaxUncompressedBytes       = 100 << 30
+	DefaultMaxExpansionRatio          = 1_000
+	DefaultMemberPattern              = "**/*"
 )
 
 type Limits struct {
@@ -37,14 +29,6 @@ type Limits struct {
 	MaxArchiveBytes      int64
 	MaxUncompressedBytes uint64
 	MaxExpansionRatio    float64
-}
-
-type MemberMetadata struct {
-	SourcePath       string
-	MemberPath       string
-	CRC32            string
-	CompressedSize   int64
-	UncompressedSize int64
 }
 
 func DefaultLimits() Limits {
@@ -190,19 +174,6 @@ func SelectZIPMembers(reader *zip.Reader, pattern string, limits Limits) ([]*zip
 	return matches, nil
 }
 
-func Metadata(sourcePath string, member *zip.File) (MemberMetadata, error) {
-	if member.CompressedSize64 > math.MaxInt64 || member.UncompressedSize64 > math.MaxInt64 {
-		return MemberMetadata{}, fmt.Errorf("ZIP member %q is too large to represent its size metadata", member.Name)
-	}
-	return MemberMetadata{
-		SourcePath:       sourcePath,
-		MemberPath:       member.Name,
-		CRC32:            fmt.Sprintf("%08x", member.CRC32),
-		CompressedSize:   int64(member.CompressedSize64),
-		UncompressedSize: int64(member.UncompressedSize64),
-	}, nil
-}
-
 func SpoolMember(ctx context.Context, member *zip.File) (*os.File, error) {
 	if member.UncompressedSize64 >= math.MaxInt64 {
 		return nil, fmt.Errorf("ZIP member %q is too large to spool", member.Name)
@@ -239,77 +210,7 @@ func SpoolMember(ctx context.Context, member *zip.File) (*os.File, error) {
 	return tempFile, nil
 }
 
-func AddMetadataColumns(record arrow.RecordBatch, metadata MemberMetadata, excludeColumns []string) (arrow.RecordBatch, bool, error) {
-	if record == nil {
-		return nil, false, nil
-	}
-
-	type metadataColumn struct {
-		name   string
-		text   string
-		number int64
-		isText bool
-	}
-	columnsToAdd := make([]metadataColumn, 0, 5)
-	for _, column := range []metadataColumn{
-		{name: SourceFilePathColumn, text: metadata.SourcePath, isText: true},
-		{name: MemberPathColumn, text: metadata.MemberPath, isText: true},
-		{name: MemberCRC32Column, text: metadata.CRC32, isText: true},
-		{name: MemberCompressedSizeColumn, number: metadata.CompressedSize},
-		{name: MemberUncompressedSizeColumn, number: metadata.UncompressedSize},
-	} {
-		if !isExcluded(column.name, excludeColumns) {
-			columnsToAdd = append(columnsToAdd, column)
-		}
-	}
-	if len(columnsToAdd) == 0 {
-		return record, false, nil
-	}
-
-	for _, column := range columnsToAdd {
-		for _, field := range record.Schema().Fields() {
-			if strings.EqualFold(field.Name, column.name) {
-				return nil, false, fmt.Errorf("archive metadata column %q already exists in file data; exclude the column to suppress the generated metadata", column.name)
-			}
-		}
-	}
-
-	fields := make([]arrow.Field, 0, int(record.NumCols())+len(columnsToAdd))
-	fields = append(fields, record.Schema().Fields()...)
-	columns := make([]arrow.Array, 0, int(record.NumCols())+len(columnsToAdd))
-	for i := 0; i < int(record.NumCols()); i++ {
-		record.Column(i).Retain()
-		columns = append(columns, record.Column(i))
-	}
-	for _, column := range columnsToAdd {
-		if column.isText {
-			fields = append(fields, arrow.Field{Name: column.name, Type: arrow.BinaryTypes.String, Nullable: false})
-			builder := array.NewStringBuilder(memory.DefaultAllocator)
-			for range record.NumRows() {
-				builder.Append(column.text)
-			}
-			columns = append(columns, builder.NewArray())
-			builder.Release()
-			continue
-		}
-
-		fields = append(fields, arrow.Field{Name: column.name, Type: arrow.PrimitiveTypes.Int64, Nullable: false})
-		builder := array.NewInt64Builder(memory.DefaultAllocator)
-		for range record.NumRows() {
-			builder.Append(column.number)
-		}
-		columns = append(columns, builder.NewArray())
-		builder.Release()
-	}
-
-	result := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, record.NumRows())
-	for _, column := range columns {
-		column.Release()
-	}
-	return result, true, nil
-}
-
-func ForwardBatches(ctx context.Context, destination chan<- source.RecordBatchResult, batches <-chan source.RecordBatchResult, metadata MemberMetadata, excludeColumns []string, limit int) (int, error) {
+func ForwardBatches(ctx context.Context, destination chan<- source.RecordBatchResult, batches <-chan source.RecordBatchResult, limit int) (int, error) {
 	rows := 0
 	var firstErr error
 	for result := range batches {
@@ -333,21 +234,12 @@ func ForwardBatches(ctx context.Context, destination chan<- source.RecordBatchRe
 			batch.Release()
 			batch = sliced
 		}
-		out, added, err := AddMetadataColumns(batch, metadata, excludeColumns)
-		if err != nil {
-			batch.Release()
-			firstErr = err
-			continue
-		}
-		if added {
-			batch.Release()
-		}
 
 		select {
-		case destination <- source.RecordBatchResult{Batch: out}:
-			rows += int(out.NumRows())
+		case destination <- source.RecordBatchResult{Batch: batch}:
+			rows += int(batch.NumRows())
 		case <-ctx.Done():
-			out.Release()
+			batch.Release()
 			firstErr = ctx.Err()
 		}
 	}
@@ -366,15 +258,6 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	default:
 		return r.reader.Read(p)
 	}
-}
-
-func isExcluded(name string, excludeColumns []string) bool {
-	for _, excluded := range excludeColumns {
-		if strings.EqualFold(name, excluded) {
-			return true
-		}
-	}
-	return false
 }
 
 func safeMemberPath(name string) (string, error) {

@@ -20,7 +20,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
-	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -212,21 +211,13 @@ func TestParquetSource_ReadsZIPMembers(t *testing.T) {
 	require.NoError(t, err)
 
 	var totalRows int64
-	memberPaths := make(map[string]bool)
 	for result := range results {
 		require.NoError(t, result.Err)
-		memberIndex := result.Batch.Schema().FieldIndices(archiveutil.MemberPathColumn)
-		require.Len(t, memberIndex, 1)
-		memberColumn := result.Batch.Column(memberIndex[0]).(*array.String)
-		memberPaths[memberColumn.Value(0)] = true
+		require.Equal(t, int64(2), result.Batch.NumCols())
 		totalRows += result.Batch.NumRows()
 		result.Batch.Release()
 	}
 	assert.Equal(t, int64(5), totalRows)
-	assert.Equal(t, map[string]bool{
-		"data/first.parquet":  true,
-		"data/second.parquet": true,
-	}, memberPaths)
 }
 
 func TestParquetSource_RichTypes(t *testing.T) {

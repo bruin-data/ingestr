@@ -157,7 +157,7 @@ ingestr ingest \
 
 To read files inside a ZIP archive, append `!<member-glob>` to the object path. For example, `my-org-bucket/releases/*.zip!**/*.csv` selects every CSV member from each matching ZIP object. CSV, JSONL/NDJSON, and parquet members are supported; a format hint can follow the member glob when names have no useful extension, such as `release.zip!data/*#jsonl`.
 
-ZIP rows include `_ingestr_source_file_path`, `_ingestr_source_archive_member_path`, `_ingestr_source_archive_member_crc32`, `_ingestr_source_archive_member_compressed_size`, and `_ingestr_source_archive_member_uncompressed_size`. ZIP objects use bounded temporary spooling. Configure the safeguards with the `archive_max_members`, `archive_max_bytes`, `archive_max_uncompressed_bytes`, and `archive_max_expansion_ratio` source URI parameters. Their defaults are 10000 members, 10 GiB, 100 GiB, and 1000 respectively.
+ZIP objects use bounded temporary spooling. Configure the safeguards with the `archive_max_members`, `archive_max_bytes`, `archive_max_uncompressed_bytes`, and `archive_max_expansion_ratio` source URI parameters. Their defaults are 10000 members, 10 GiB, 100 GiB, and 1000 respectively.
 
 ### File type hinting
 

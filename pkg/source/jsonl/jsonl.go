@@ -238,11 +238,6 @@ func (s *JSONLSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-c
 				return
 			}
 
-			metadata, err := archiveutil.Metadata(s.filePath, member)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: err}
-				return
-			}
 			spooled, err := archiveutil.SpoolMember(ctx, member)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
@@ -258,7 +253,7 @@ func (s *JSONLSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-c
 			memberSource := &JSONLSource{filePath: spooledPath}
 			memberResults, readErr := memberSource.read(ctx, memberOpts)
 			if readErr == nil {
-				rows, forwardErr := archiveutil.ForwardBatches(ctx, results, memberResults, metadata, opts.ExcludeColumns, memberOpts.Limit)
+				rows, forwardErr := archiveutil.ForwardBatches(ctx, results, memberResults, memberOpts.Limit)
 				totalRows += rows
 				readErr = forwardErr
 			}

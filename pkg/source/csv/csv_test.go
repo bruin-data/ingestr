@@ -14,7 +14,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 )
 
 func TestExtractFilePath(t *testing.T) {
@@ -282,26 +281,19 @@ func TestCSVSource_ReadsZIPMembers(t *testing.T) {
 	}
 
 	totalRows := int64(0)
-	memberPaths := make(map[string]bool)
 	for result := range results {
 		if result.Err != nil {
 			t.Fatal(result.Err)
 		}
-		memberIndex := result.Batch.Schema().FieldIndices(archiveutil.MemberPathColumn)
-		if len(memberIndex) != 1 {
-			t.Fatalf("missing %s column", archiveutil.MemberPathColumn)
+		if result.Batch.NumCols() != 2 {
+			t.Fatalf("read %d columns, want only the 2 CSV columns", result.Batch.NumCols())
 		}
-		memberColumn := result.Batch.Column(memberIndex[0]).(*array.String)
-		memberPaths[memberColumn.Value(0)] = true
 		totalRows += result.Batch.NumRows()
 		result.Batch.Release()
 	}
 
 	if totalRows != 3 {
 		t.Fatalf("read %d rows, want 3", totalRows)
-	}
-	if !memberPaths["data/day-1.csv"] || !memberPaths["data/day-2.csv"] {
-		t.Fatalf("unexpected archive members: %v", memberPaths)
 	}
 }
 
