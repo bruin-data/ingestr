@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -383,8 +384,18 @@ func buildSignalConfigsFilter(params sumbleParams) (map[string]any, error) {
 	return filter, nil
 }
 
+// readContext carries the per-read state every reader needs: the caller's
+// options, the destination channel, and the row budget shared across the
+// parallel list workers.
+type readContext struct {
+	opts    source.ReadOptions
+	limiter *rowLimiter
+	results chan<- source.RecordBatchResult
+}
+
 func (s *SumbleSource) read(ctx context.Context, spec sumbleReadSpec, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, 8)
+	rc := readContext{opts: opts, limiter: newRowLimiter(opts.Limit), results: results}
 
 	go func() {
 		defer close(results)
@@ -392,19 +403,19 @@ func (s *SumbleSource) read(ctx context.Context, spec sumbleReadSpec, opts sourc
 		var err error
 		switch spec.table {
 		case "organization_lists":
-			err = s.readOrganizationLists(ctx, opts, results)
+			err = s.readOrganizationLists(ctx, rc)
 		case "organization_list_organizations":
-			err = s.readOrganizationListOrganizations(ctx, spec, opts, results)
+			err = s.readOrganizationListOrganizations(ctx, spec, rc)
 		case "contact_lists":
-			err = s.readContactLists(ctx, opts, results)
+			err = s.readContactLists(ctx, rc)
 		case "contact_list_people":
-			err = s.readContactListPeople(ctx, spec, opts, results)
+			err = s.readContactListPeople(ctx, spec, rc)
 		case "signals":
-			err = s.readSignals(ctx, spec, opts, results)
+			err = s.readSignals(ctx, spec, rc)
 		case "priority_signals":
-			err = s.readPrioritySignals(ctx, spec, opts, results)
+			err = s.readPrioritySignals(ctx, spec, rc)
 		case "signal_configs":
-			err = s.readSignalConfigs(ctx, spec, opts, results)
+			err = s.readSignalConfigs(ctx, spec, rc)
 		default:
 			err = fmt.Errorf("unsupported table: %s", spec.table)
 		}
@@ -417,25 +428,25 @@ func (s *SumbleSource) read(ctx context.Context, spec sumbleReadSpec, opts sourc
 	return results, nil
 }
 
-func (s *SumbleSource) readOrganizationLists(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readOrganizationLists(ctx context.Context, rc readContext) error {
 	config.Debug("[SUMBLE] reading organization_lists")
 	items, err := s.fetchGETItems(ctx, "/organization-lists", "organization_lists", "organization lists", map[string]string{"include_deleted": "true"})
 	if err != nil {
 		return err
 	}
-	return sendItems(ctx, items, "organization lists", opts, results)
+	return sendItems(ctx, items, "organization lists", rc)
 }
 
-func (s *SumbleSource) readContactLists(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readContactLists(ctx context.Context, rc readContext) error {
 	config.Debug("[SUMBLE] reading contact_lists")
 	items, err := s.fetchGETItems(ctx, "/contact-lists", "contact_lists", "contact lists", nil)
 	if err != nil {
 		return err
 	}
-	return sendItems(ctx, items, "contact lists", opts, results)
+	return sendItems(ctx, items, "contact lists", rc)
 }
 
-func (s *SumbleSource) readOrganizationListOrganizations(ctx context.Context, spec sumbleReadSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readOrganizationListOrganizations(ctx context.Context, spec sumbleReadSpec, rc readContext) error {
 	config.Debug("[SUMBLE] reading organization_list_organizations")
 	listIDs := spec.listIDs
 	if len(listIDs) == 0 {
@@ -456,10 +467,10 @@ func (s *SumbleSource) readOrganizationListOrganizations(ctx context.Context, sp
 		parentIDField: "organization_list_id",
 		parentObject:  "organization_list",
 		query:         map[string]string{"include_deleted": "true"},
-	}, opts, results)
+	}, rc)
 }
 
-func (s *SumbleSource) readContactListPeople(ctx context.Context, spec sumbleReadSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readContactListPeople(ctx context.Context, spec sumbleReadSpec, rc readContext) error {
 	config.Debug("[SUMBLE] reading contact_list_people")
 	listIDs := spec.listIDs
 	if len(listIDs) == 0 {
@@ -479,7 +490,7 @@ func (s *SumbleSource) readContactListPeople(ctx context.Context, spec sumbleRea
 		label:         "contact list people",
 		parentIDField: "contact_list_id",
 		parentObject:  "contact_list",
-	}, opts, results)
+	}, rc)
 }
 
 type listMemberConfig struct {
@@ -491,8 +502,8 @@ type listMemberConfig struct {
 	query         map[string]string
 }
 
-func (s *SumbleSource) readListMembers(ctx context.Context, listIDs []int64, cfg listMemberConfig, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	workers := opts.Parallelism
+func (s *SumbleSource) readListMembers(ctx context.Context, listIDs []int64, cfg listMemberConfig, rc readContext) error {
+	workers := rc.opts.Parallelism
 	if workers <= 0 || workers > maxWorkers {
 		workers = maxWorkers
 	}
@@ -500,11 +511,14 @@ func (s *SumbleSource) readListMembers(ctx context.Context, listIDs []int64, cfg
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(workers)
 	for _, listID := range listIDs {
-		if groupCtx.Err() != nil {
+		if groupCtx.Err() != nil || rc.limiter.exhausted() {
 			break
 		}
 		listID := listID
 		group.Go(func() error {
+			if rc.limiter.exhausted() {
+				return nil
+			}
 			endpoint := fmt.Sprintf(cfg.path, listID)
 			body, err := s.fetchGET(groupCtx, endpoint, cfg.label, cfg.query)
 			if err != nil {
@@ -525,13 +539,13 @@ func (s *SumbleSource) readListMembers(ctx context.Context, listIDs []int64, cfg
 			if err := addScopedPrimaryKeys(items, listID); err != nil {
 				return fmt.Errorf("failed to key %s for list %d: %w", cfg.label, listID, err)
 			}
-			return sendItems(groupCtx, items, cfg.label, opts, results)
+			return sendItems(groupCtx, items, cfg.label, rc)
 		})
 	}
 	return group.Wait()
 }
 
-func (s *SumbleSource) readSignals(ctx context.Context, spec sumbleReadSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readSignals(ctx context.Context, spec sumbleReadSpec, rc readContext) error {
 	config.Debug("[SUMBLE] reading signals")
 	return s.paginateAndSend(ctx, paginatedRead{
 		endpoint:      "/signals",
@@ -541,10 +555,10 @@ func (s *SumbleSource) readSignals(ctx context.Context, spec sumbleReadSpec, opt
 		intervalField: "date",
 		newestFirst:   true,
 		transform:     addSignalPrimaryKeys,
-	}, opts, results)
+	}, rc)
 }
 
-func (s *SumbleSource) readPrioritySignals(ctx context.Context, spec sumbleReadSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readPrioritySignals(ctx context.Context, spec sumbleReadSpec, rc readContext) error {
 	config.Debug("[SUMBLE] reading priority_signals")
 	// Priority signals are ordered by completion time rather than by date, so
 	// pagination cannot stop early on the interval start.
@@ -554,10 +568,10 @@ func (s *SumbleSource) readPrioritySignals(ctx context.Context, spec sumbleReadS
 		label:         "priority signals",
 		filter:        spec.filter,
 		intervalField: "date",
-	}, opts, results)
+	}, rc)
 }
 
-func (s *SumbleSource) readSignalConfigs(ctx context.Context, spec sumbleReadSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *SumbleSource) readSignalConfigs(ctx context.Context, spec sumbleReadSpec, rc readContext) error {
 	config.Debug("[SUMBLE] reading signal_configs")
 	body := requestBody(spec.filter)
 	response, err := s.post(ctx, "/signals/configs", "signal configs", body)
@@ -568,7 +582,7 @@ func (s *SumbleSource) readSignalConfigs(ctx context.Context, spec sumbleReadSpe
 	if err != nil {
 		return fmt.Errorf("failed to parse signal configs response: %w", err)
 	}
-	return sendItems(ctx, items, "signal configs", opts, results)
+	return sendItems(ctx, items, "signal configs", rc)
 }
 
 type itemTransform func([]map[string]any) error
@@ -586,13 +600,8 @@ type paginatedRead struct {
 	transform   itemTransform
 }
 
-func (s *SumbleSource) paginateAndSend(
-	ctx context.Context,
-	read paginatedRead,
-	opts source.ReadOptions,
-	results chan<- source.RecordBatchResult,
-) error {
-	pageSize := opts.PageSize
+func (s *SumbleSource) paginateAndSend(ctx context.Context, read paginatedRead, rc readContext) error {
+	pageSize := rc.opts.PageSize
 	if pageSize <= 0 || pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}
@@ -619,20 +628,20 @@ func (s *SumbleSource) paginateAndSend(
 		}
 		fetched += len(page)
 
-		items := filterItemsByInterval(page, read.intervalField, opts.IntervalStart, opts.IntervalEnd)
+		items := filterItemsByInterval(page, read.intervalField, rc.opts.IntervalStart, rc.opts.IntervalEnd)
 		if read.transform != nil {
 			if err := read.transform(items); err != nil {
 				return fmt.Errorf("failed to transform %s: %w", read.label, err)
 			}
 		}
-		if err := sendItems(ctx, items, read.label, opts, results); err != nil {
+		if err := sendItems(ctx, items, read.label, rc); err != nil {
 			return err
 		}
 
-		if len(page) < pageSize {
+		if len(page) < pageSize || rc.limiter.exhausted() {
 			return nil
 		}
-		if read.newestFirst && opts.IntervalStart != nil && pageEndsBeforeStart(page, read.intervalField, *opts.IntervalStart) {
+		if read.newestFirst && rc.opts.IntervalStart != nil && pageEndsBeforeStart(page, read.intervalField, *rc.opts.IntervalStart) {
 			config.Debug("[SUMBLE] reached the interval start after %d %s", fetched, read.label)
 			return nil
 		}
@@ -780,11 +789,12 @@ func int64Value(value any) (int64, error) {
 	return 0, fmt.Errorf("invalid ID value %v", value)
 }
 
-func sendItems(ctx context.Context, items []map[string]any, label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func sendItems(ctx context.Context, items []map[string]any, label string, rc readContext) error {
+	items = items[:rc.limiter.take(len(items))]
 	if len(items) == 0 {
 		return nil
 	}
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, rc.opts.ExcludeColumns)
 	if err != nil {
 		return fmt.Errorf("failed to convert %s to Arrow: %w", label, err)
 	}
@@ -793,9 +803,41 @@ func sendItems(ctx context.Context, items []map[string]any, label string, opts s
 	case <-ctx.Done():
 		record.Release()
 		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	case rc.results <- source.RecordBatchResult{Batch: record}:
 		return nil
 	}
+}
+
+// rowLimiter enforces --sql-limit across the parallel list workers. A limit of
+// zero or less means unlimited.
+type rowLimiter struct {
+	limit int64
+	used  atomic.Int64
+}
+
+func newRowLimiter(limit int) *rowLimiter {
+	return &rowLimiter{limit: int64(limit)}
+}
+
+// take claims up to n rows and reports how many of them fit in the budget.
+func (l *rowLimiter) take(n int) int {
+	if l.limit <= 0 {
+		return n
+	}
+	for {
+		used := l.used.Load()
+		allowed := min(int64(n), l.limit-used)
+		if allowed <= 0 {
+			return 0
+		}
+		if l.used.CompareAndSwap(used, used+allowed) {
+			return int(allowed)
+		}
+	}
+}
+
+func (l *rowLimiter) exhausted() bool {
+	return l.limit > 0 && l.used.Load() >= l.limit
 }
 
 func filterItemsByInterval(items []map[string]any, field string, start, end *time.Time) []map[string]any {

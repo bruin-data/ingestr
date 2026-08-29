@@ -18,6 +18,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestParseURI(t *testing.T) {
@@ -447,4 +448,56 @@ func TestPaginationStopsAtOffsetLimit(t *testing.T) {
 
 	assert.EqualValues(t, maxOffset/maxPageSize+1, requests.Load())
 	assert.Equal(t, strconv.Itoa(maxOffset), lastOffset)
+}
+
+func TestPaginationHonorsRowLimit(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"signals":[{"signal_id":1,"date":"2026-08-01T00:00:00Z"},{"signal_id":2,"date":"2026-08-01T00:00:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	connector := NewSumbleSource()
+	connector.client = testSumbleClient(server.URL)
+
+	results, err := connector.read(context.Background(), sumbleReadSpec{table: "signals"}, source.ReadOptions{PageSize: 2, Limit: 3})
+	require.NoError(t, err)
+	batches, readErr := drain(results)
+	require.NoError(t, readErr)
+	defer func() {
+		for _, batch := range batches {
+			batch.Release()
+		}
+	}()
+
+	total := 0
+	for _, batch := range batches {
+		total += int(batch.NumRows())
+	}
+	assert.Equal(t, 3, total)
+	assert.EqualValues(t, 2, requests.Load())
+}
+
+func TestRowLimiterSharesBudgetAcrossWorkers(t *testing.T) {
+	limiter := newRowLimiter(10)
+	var group errgroup.Group
+	for i := 0; i < 8; i++ {
+		group.Go(func() error {
+			for j := 0; j < 5; j++ {
+				limiter.take(3)
+			}
+			return nil
+		})
+	}
+	require.NoError(t, group.Wait())
+
+	assert.EqualValues(t, 10, limiter.used.Load())
+	assert.True(t, limiter.exhausted())
+	assert.Equal(t, 0, limiter.take(1))
+
+	unlimited := newRowLimiter(0)
+	assert.Equal(t, 7, unlimited.take(7))
+	assert.False(t, unlimited.exhausted())
 }
