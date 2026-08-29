@@ -1,60 +1,4 @@
-// Package abra implements an ingestr source for ABRA Flexi (formerly Flexibee),
-// a Czech cloud accounting and ERP system.
-//
-// Docs:  https://www.flexibee.eu/api/   (per-account devdoc at /devdoc)
-// Base:  https://<account>.flexibee.eu/c/<company>/<evidence>.json
-// Auth:  HTTP Basic.
-//
-// ── Why this is a generic engine rather than a hand-written table list ───────
-//
-// Flexi exposes 249 "evidences" (registers) per company, and every one of them
-// publishes a machine-readable schema at /<evidence>/properties.json carrying the
-// field name, type, sortability and key flags. That is a far better starting point
-// than most vendor APIs give us: the sibling `fakturoid` source in this tree has to
-// carry hand-generated 84/49/13/8-column allow-lists because Fakturoid publishes
-// nothing comparable. Here one reader covers every evidence, and adding a table to
-// a CronJob is a string, not a code change.
-//
-// ── What Flexi gives us that makes incremental loading real ─────────────────
-//
-//	id          integer, sortable   -> primary key
-//	lastUpdate  datetime, sortable  -> incremental cursor
-//	filter      query language      -> `lastUpdate gte '<ts>'` server-side
-//	limit/start                     -> paging
-//	add-row-count                   -> total, for progress and the runaway guard
-//
-// ── The traps, all of them verified against the live API ────────────────────
-//
-// ⚠️ NOT EVERY EVIDENCE IS A TABLE. Some are derived views: `ucetni-denik` (the
-// accounting journal) reports 47,189 rows, every one with id = -1 and an EMPTY
-// lastUpdate. buildPlan REFUSES those rather than loading them, because under
-// `merge` they would append their entire result set on every single run and
-// `count() FINAL` could not see the duplication. See the fail-closed note there.
-//
-// ⚠️ `limit` MUST ALWAYS BE SENT. Flexi treats a MISSING limit as "give them the
-// default page" (~20 rows) and limit=0 as "give them EVERYTHING". Both are wrong
-// here and both fail silently — the first truncates, the second can try to
-// materialise a million-row evidence in one response. pageSize is never defaulted
-// away; see readPaged.
-//
-// ⚠️ PAGING IS ORDERED BY id, NOT BY THE CURSOR. Ordering by lastUpdate while
-// walking limit/start is unstable: any row edited mid-run moves in the sort order
-// and can be skipped or repeated across page boundaries. `id@A` is immutable, so
-// the walk is stable even while the books are being edited under us.
-//
-// ⚠️ RELATION AND SELECT FIELDS EXPLODE INTO @-SUFFIXED COLUMNS — `mena`,
-// `mena@ref`, `mena@showAs`. `@` is not usable as a bare column name on most
-// destinations and breaks downstream references, so sanitizeColumn rewrites it.
-// That is the only place this source departs from verbatim naming, and it is a
-// mechanical character substitution, not a rename.
-//
-// ⚠️ MONEY IS CARRIED AS TEXT. `numeric` maps to a string column. The reasoning is
-// long enough to live at dataTypeFor — read it before "fixing" this.
-//
-// ⚠️ ONE CREDENTIAL, TEN COMPANY DATABASES, SELECTED ONLY BY `company` IN THE DSN.
-// Exactly the shape that bit the fakturoid port: pointing the wrong company at the
-// wrong destination database produces no error at all, just the wrong company's
-// books in the wrong table. The company is required and never defaulted.
+// Package abra implements an ABRA Flexi source.
 package abra
 
 import (
@@ -74,36 +18,14 @@ import (
 )
 
 const (
-	// lastUpdateField is Flexi's own row-modification timestamp. It is the only
-	// server-side filterable cursor Flexi offers, which is what makes incremental
-	// loading possible at all.
-	lastUpdateField = "lastUpdate"
-
-	// externalIDsField rides along on most evidences without being declared in
-	// properties.json — it carries integration keys such as
-	// `ext:DATIVERY:bankDocumentsToInvoicing-30bf79:txn_...`.
+	lastUpdateField  = "lastUpdate"
 	externalIDsField = "external-ids"
-
-	// defaultPageSize is a compromise: large enough that a 14k-row evidence is ~14
-	// requests, small enough that one page of a 300-column document evidence stays
-	// a sane HTTP response. Overridable via `page_size` in the DSN.
-	defaultPageSize = 1000
-
-	// maxPages bounds the paging loop. At the default page size this allows 5M
-	// rows per evidence — a runaway guard, not a limit.
-	maxPages = 5000
-
-	// defaultRateLimit keeps us polite against a shared production accounting
-	// system that the finance team uses interactively. Flexi publishes no rate
-	// limit, so this is deliberately conservative rather than tuned.
+	defaultPageSize  = 1000
+	maxPages         = 5000
 	defaultRateLimit = 4.0
-
-	// flexiTimeLayout is what Flexi both emits and accepts in filters:
-	// 2026-02-11T15:09:06.376+01:00
-	flexiTimeLayout = "2006-01-02T15:04:05.000Z07:00"
+	flexiTimeLayout  = "2006-01-02T15:04:05.000Z07:00"
 )
 
-// Source is one authenticated view into ONE Flexi company database.
 type Source struct {
 	client           *httpclient.Client
 	company          string
@@ -115,9 +37,6 @@ func NewAbraSource() *Source { return &Source{} }
 
 func (s *Source) Schemes() []string { return []string{"abra", "flexibee"} }
 
-// HandlesIncrementality is false: this source pushes `lastUpdate gte ...` down to
-// Flexi as a read filter, but the destination still performs the merge. It keeps
-// no state of its own.
 func (s *Source) HandlesIncrementality() bool { return false }
 
 type uriConfig struct {
@@ -130,11 +49,6 @@ type uriConfig struct {
 	includeExpensive bool
 }
 
-// parseURI accepts:
-//
-//	abra://example.flexibee.eu?username=API&password=…&company=acme_s_r_o_
-//
-// Optional: page_size, rate_limit, include_expensive, scheme (http for tests).
 func parseURI(uri string) (uriConfig, error) {
 	var cfg uriConfig
 
@@ -151,15 +65,18 @@ func parseURI(uri string) (uriConfig, error) {
 	}
 	q := parsed.Query()
 
-	// `scheme` exists so the test server can be reached over plain http. Production
-	// is always https — Basic auth over http would put the shared credential on the
-	// wire in clear text.
 	transport := q.Get("scheme")
 	if transport == "" {
 		transport = "https"
 	}
 	if transport != "https" && transport != "http" {
 		return cfg, fmt.Errorf("abra: scheme must be https or http, got %q", transport)
+	}
+	if transport == "http" {
+		hostname := parsed.Hostname()
+		if hostname != "localhost" && hostname != "127.0.0.1" && hostname != "::1" {
+			return cfg, fmt.Errorf("abra: scheme=http is only allowed for loopback hosts")
+		}
 	}
 	cfg.baseURL = transport + "://" + host + strings.TrimSuffix(parsed.Path, "/")
 
@@ -172,7 +89,6 @@ func parseURI(uri string) (uriConfig, error) {
 		return cfg, fmt.Errorf("abra: password is required")
 	}
 
-	// ⚠️ Required and never defaulted — see the DSN warning in the package doc.
 	cfg.company = q.Get("company")
 	if cfg.company == "" {
 		return cfg, fmt.Errorf(
@@ -198,9 +114,6 @@ func parseURI(uri string) (uriConfig, error) {
 		cfg.rateLimit = f
 	}
 
-	// Expensive properties are INCLUDED by default: this is the raw layer, and a
-	// silently narrower table is worse than a slower read. Set include_expensive=false
-	// if a specific evidence turns out to be pathologically slow.
 	cfg.includeExpensive = true
 	if v := q.Get("include_expensive"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -241,14 +154,6 @@ func (s *Source) Close(ctx context.Context) error {
 	return nil
 }
 
-// GetTable resolves one evidence into a readable table.
-//
-// The schema round-trip happens HERE rather than lazily inside Read so that a
-// misspelled evidence, a derived view, or a permissions problem fails before any
-// destination table is created. A half-created table is materially worse than a
-// clean failure: ingestr recreates a MISSING destination as a plain,
-// NON-replicated ReplacingMergeTree, so a failure after creation can quietly
-// un-replicate a promoted table.
 func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	evidence := strings.TrimSpace(req.Name)
 	if evidence == "" {
@@ -268,9 +173,6 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 	if plan.hasLastUpdate {
 		incremental = lastUpdateField
 	} else {
-		// Not fatal — plenty of small codebooks (currencies, VAT rates) have a
-		// stable id and simply never change. They just cannot be windowed, so every
-		// run re-reads them in full and merge collapses the result.
 		config.Debug("[ABRA] evidence %s has no %s column: every run will re-read it in full",
 			evidence, lastUpdateField)
 	}
@@ -307,12 +209,6 @@ func (s *Source) read(ctx context.Context, plan *tablePlan, opts source.ReadOpti
 	return results, nil
 }
 
-// buildFilter renders the Flexi query-language predicate for the requested window.
-//
-// Only the START bound is applied. Flexi would accept an upper bound too, but
-// applying one would make a re-run of an old window silently DROP rows edited
-// since — and merge is idempotent, so a wider window costs requests, never
-// correctness. Same reasoning as the fakturoid port's `updated_since`.
 func buildFilter(plan *tablePlan, opts source.ReadOptions) string {
 	if !plan.hasLastUpdate || opts.IntervalStart == nil {
 		return ""
@@ -326,8 +222,6 @@ func (s *Source) readPaged(ctx context.Context, plan *tablePlan, opts source.Rea
 		pageSize = opts.PageSize
 	}
 
-	// The evidence path doubles as the JSON key Flexi answers with, so it is needed
-	// both in the URL and when unwrapping the envelope.
 	path := "/c/" + url.PathEscape(s.company) + "/" + url.PathEscape(plan.evidence) + ".json"
 	filter := buildFilter(plan, opts)
 
@@ -348,11 +242,9 @@ func (s *Source) readPaged(ctx context.Context, plan *tablePlan, opts source.Rea
 		start := page * pageSize
 
 		req := s.client.R(ctx).
-			// ⚠️ limit is ALWAYS explicit. See the package doc.
 			SetQueryParam("limit", strconv.Itoa(pageSize)).
 			SetQueryParam("start", strconv.Itoa(start)).
 			SetQueryParam("detail", "full").
-			// ⚠️ Stable paging key. NOT the cursor — see the package doc.
 			SetQueryParam("order", "id@A")
 		if page == 0 {
 			req = req.SetQueryParam("add-row-count", "true")
@@ -394,34 +286,21 @@ func (s *Source) readPaged(ctx context.Context, plan *tablePlan, opts source.Rea
 		config.Debug("[ABRA] %s offset %d: %d row(s) (running total %d)",
 			plan.evidence, start, len(items), total)
 
-		// A short page is the end of data. Flexi also honours @rowCount, but the
-		// short-page test is the one that stays correct when rows are being added
-		// underneath us mid-walk.
 		if len(items) < pageSize {
 			break
 		}
 	}
 
 	if len(drift) > 0 {
-		// Loud, once per run. A key Flexi returned that properties.json never
-		// declared is data we are dropping, and we would rather know.
 		config.Debug("[ABRA] ⚠️ %s: %d undeclared field(s) dropped: %s",
 			plan.evidence, len(drift), strings.Join(sortedKeys(drift), ", "))
 	}
-	// ⚠️ SILENT-ZERO GUARD. Flexi told us how many rows match; if it said "some" and we
-	// read none, something is wrong with the read, NOT with the data — and every other
-	// signal would say success (exit 0, "Ingestion completed successfully", no table
-	// created). That is exactly how the stav-ceniku envelope-key bug hid: it was caught
-	// by reconciling counts against a probe afterwards, which is not a thing anyone will
-	// remember to do every night. Fail loudly instead.
 	if rowCount > 0 && total == 0 {
 		return fmt.Errorf(
 			"abra: %s reported %d matching row(s) but the read returned none — "+
 				"this is a read bug, not an empty table", plan.evidence, rowCount)
 	}
 	if rowCount >= 0 && total != rowCount {
-		// Not an error: rows can legitimately appear or vanish during a long walk.
-		// Worth surfacing though, because a large gap usually means a paging bug.
 		config.Debug("[ABRA] %s: read %d row(s), server reported %d at start of walk",
 			plan.evidence, total, rowCount)
 	}
@@ -429,11 +308,6 @@ func (s *Source) readPaged(ctx context.Context, plan *tablePlan, opts source.Rea
 	return nil
 }
 
-// extractRecords unwraps Flexi's `winstrom` envelope:
-//
-//	{"winstrom":{"@version":"1.0","@rowCount":"14035","faktura-vydana":[ {...} ]}}
-//
-// @rowCount is a STRING, and it is absent unless add-row-count was requested.
 func extractRecords(body []byte, evidence string) ([]map[string]interface{}, int, error) {
 	var outer struct {
 		Winstrom map[string]json.RawMessage `json:"winstrom"`
@@ -457,16 +331,6 @@ func extractRecords(body []byte, evidence string) ([]map[string]interface{}, int
 		}
 	}
 
-	// ⚠️ THE ARRAY KEY IS USUALLY THE EVIDENCE PATH — BUT NOT ALWAYS, AND THE
-	// MISMATCH IS SILENT. `stav-ceniku` returns its rows under a different key, so
-	// looking the array up by evidence name alone yielded ZERO ROWS AND NO ERROR: the
-	// run reported "Ingestion completed successfully", created no table, and only a
-	// row-count reconciliation against the probe caught it (5 rows expected, table
-	// absent). Never treat "my key is missing" as "the page is empty".
-	//
-	// So: prefer the evidence-named key, then fall back to the first non-`@` key whose
-	// value is a JSON array. Only when there is NO array anywhere is the page really
-	// empty — which is how Flexi answers a read past the last row.
 	decode := func(raw json.RawMessage) ([]map[string]interface{}, bool) {
 		var items []map[string]interface{}
 		d := json.NewDecoder(strings.NewReader(string(raw)))
@@ -487,7 +351,7 @@ func extractRecords(body []byte, evidence string) ([]map[string]interface{}, int
 
 	for key, raw := range outer.Winstrom {
 		if strings.HasPrefix(key, "@") {
-			continue // @version / @rowCount metadata, never records
+			continue
 		}
 		if items, ok := decode(raw); ok {
 			config.Debug("[ABRA] %s: records arrived under key %q, not the evidence path",
@@ -498,12 +362,8 @@ func extractRecords(body []byte, evidence string) ([]map[string]interface{}, int
 	return nil, rowCount, nil
 }
 
-// projectRow maps one Flexi record onto the planned columns, coercing each value
-// to its declared type and recording anything undeclared as drift.
 func projectRow(item map[string]interface{}, plan *tablePlan, drift map[string]struct{}) map[string]interface{} {
 	row := make(map[string]interface{}, len(plan.columns))
-	// Start every declared column at NULL so a row missing a field produces a NULL
-	// rather than a ragged batch.
 	for _, c := range plan.columns {
 		row[c.Name] = nil
 	}
@@ -518,19 +378,6 @@ func projectRow(item map[string]interface{}, plan *tablePlan, drift map[string]s
 	return row
 }
 
-// coerce converts one Flexi JSON value to the declared column type.
-//
-// ⚠️ DATES AND DATETIMES ARE PARSED HERE, IN GO, ON PURPOSE. The Arrow builders
-// accept a string and fall back to AppendNull() when they cannot parse it — a
-// silent per-row data loss with no error anywhere. Parsing here means an
-// unexpected format shows up as a NULL we chose, and the layouts below are the
-// exact ones the live API emits:
-//
-//	date      2025-12-12+01:00        (a date carrying a UTC offset!)
-//	datetime  2026-02-11T15:09:06.376+01:00
-//
-// The date form is why time.Parse("2006-01-02") alone is not enough — Flexi
-// appends an offset to plain dates, which dateparse also mishandles.
 func coerce(v interface{}, dt schema.DataType) interface{} {
 	if v == nil {
 		return nil
@@ -584,12 +431,41 @@ func coerce(v interface{}, dt schema.DataType) interface{} {
 		}
 		return parseFlexiDateTime(s)
 
-	default: // schema.TypeString — including every `numeric` money column.
+	case schema.TypeFloat64:
+		switch t := v.(type) {
+		case json.Number:
+			f, err := t.Float64()
+			if err != nil {
+				return nil
+			}
+			return f
+		case string:
+			f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+			if err != nil {
+				return nil
+			}
+			return f
+		case float64:
+			return t
+		default:
+			return nil
+		}
+
+	case schema.TypeDecimal:
+		switch t := v.(type) {
+		case json.Number, string:
+			return t
+		case float64:
+			return strconv.FormatFloat(t, 'f', -1, 64)
+		default:
+			return nil
+		}
+
+	default:
 		switch t := v.(type) {
 		case string:
 			return t
 		case json.Number:
-			// The exact decimal TEXT Flexi sent. No float round-trip.
 			return t.String()
 		case bool:
 			return strconv.FormatBool(t)
@@ -605,13 +481,6 @@ func coerce(v interface{}, dt schema.DataType) interface{} {
 	}
 }
 
-// parseFlexiDate handles "2025-12-12+01:00" and plain "2025-12-12".
-//
-// The offset is deliberately DISCARDED rather than applied. Flexi's date fields
-// are calendar dates (issue date, due date) that happen to be serialised with the
-// server's offset; converting them to UTC would move an invoice issued on the 1st
-// at midnight CET back to the 30th of the previous month — a real, and in an
-// accounting period a material, off-by-one.
 func parseFlexiDate(s string) interface{} {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -625,9 +494,6 @@ func parseFlexiDate(s string) interface{} {
 	return nil
 }
 
-// parseFlexiDateTime handles "2026-02-11T15:09:06.376+01:00" and neighbouring
-// shapes, normalising to UTC — these are true instants, so the offset matters and
-// is applied.
 func parseFlexiDateTime(s string) interface{} {
 	s = strings.TrimSpace(s)
 	if s == "" {

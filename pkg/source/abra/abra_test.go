@@ -39,8 +39,6 @@ func TestParseURI(t *testing.T) {
 		assert.Equal(t, defaultRateLimit, cfg.rateLimit)
 	})
 
-	// ⚠️ The company is the ONLY thing selecting which set of books is read, and
-	// getting it wrong is silent. It must never acquire a default.
 	t.Run("company is required", func(t *testing.T) {
 		_, err := parseURI("abra://host?username=API&password=x")
 		require.Error(t, err)
@@ -52,6 +50,7 @@ func TestParseURI(t *testing.T) {
 		{"missing password", "abra://host?username=API&company=c", "password is required"},
 		{"missing host", "abra://?username=API&password=x&company=c", "host is required"},
 		{"wrong scheme", "https://host?username=API&password=x&company=c", "must start with abra://"},
+		{"http non-loopback", "abra://example.com?scheme=http&username=API&password=x&company=c", "only allowed for loopback hosts"},
 		{"bad page_size", "abra://host?username=API&password=x&company=c&page_size=0", "page_size must be a positive integer"},
 		{"bad rate_limit", "abra://host?username=API&password=x&company=c&rate_limit=-1", "rate_limit must be a positive number"},
 	} {
@@ -65,7 +64,6 @@ func TestParseURI(t *testing.T) {
 
 func TestSanitizeColumn(t *testing.T) {
 	t.Parallel()
-	// Casing is preserved on purpose — the substitution is mechanical, not a rename.
 	assert.Equal(t, "mena", sanitizeColumn("mena"))
 	assert.Equal(t, "mena_ref", sanitizeColumn("mena@ref"))
 	assert.Equal(t, "mena_showAs", sanitizeColumn("mena@showAs"))
@@ -75,22 +73,29 @@ func TestSanitizeColumn(t *testing.T) {
 
 func TestDataTypeFor(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, schema.TypeInt64, dataTypeFor("integer"))
-	assert.Equal(t, schema.TypeBoolean, dataTypeFor("logic"))
-	assert.Equal(t, schema.TypeDate, dataTypeFor("date"))
-	assert.Equal(t, schema.TypeTimestamp, dataTypeFor("datetime"))
-	assert.Equal(t, schema.TypeString, dataTypeFor("string"))
-	assert.Equal(t, schema.TypeString, dataTypeFor("relation"))
-
-	// Money is TEXT: Float64 would lose cents on an accounting ledger. See the
-	// comment on dataTypeFor.
-	assert.Equal(t, schema.TypeString, dataTypeFor("numeric"),
-		"numeric must stay a string column — see dataTypeFor for why")
+	for _, tc := range []struct {
+		prop             property
+		dataType         schema.DataType
+		precision, scale int
+	}{
+		{prop: property{Type: "integer"}, dataType: schema.TypeInt64},
+		{prop: property{Type: "logic"}, dataType: schema.TypeBoolean},
+		{prop: property{Type: "date"}, dataType: schema.TypeDate},
+		{prop: property{Type: "datetime"}, dataType: schema.TypeTimestamp},
+		{prop: property{Type: "string"}, dataType: schema.TypeString},
+		{prop: property{Type: "relation"}, dataType: schema.TypeString},
+		{prop: property{Type: "numeric", Digits: "15", Decimal: "2"}, dataType: schema.TypeDecimal, precision: 15, scale: 2},
+		{prop: property{Type: "numeric"}, dataType: schema.TypeFloat64},
+	} {
+		gotType, gotPrecision, gotScale := dataTypeFor(tc.prop)
+		assert.Equal(t, tc.dataType, gotType)
+		assert.Equal(t, tc.precision, gotPrecision)
+		assert.Equal(t, tc.scale, gotScale)
+	}
 }
 
 func TestBuildPlanRefusesEvidenceWithoutPrimaryKey(t *testing.T) {
 	t.Parallel()
-	// This is `ucetni-denik`: a derived view, 47k rows, id = -1, empty lastUpdate.
 	doc := &propertiesDoc{Property: []property{
 		{PropertyName: "ucet", Type: "string"},
 		{PropertyName: "castka", Type: "numeric"},
@@ -106,7 +111,7 @@ func TestBuildPlanExpandsRelations(t *testing.T) {
 	doc := &propertiesDoc{Property: []property{
 		{PropertyName: "id", Type: "integer", InID: "true"},
 		{PropertyName: "lastUpdate", Type: "datetime"},
-		{PropertyName: "sumCelkem", Type: "numeric"},
+		{PropertyName: "sumCelkem", Type: "numeric", Digits: "15", Decimal: "2"},
 		{PropertyName: "mena", Type: "relation"},
 		{PropertyName: "stavUhrK", Type: "select"},
 	}}
@@ -119,17 +124,19 @@ func TestBuildPlanExpandsRelations(t *testing.T) {
 	for _, c := range plan.columns {
 		names[c.Name] = c.DataType
 	}
-	// Both relation and select get the full triple: an always-NULL column is
-	// harmless, a missing one loses data.
 	for _, want := range []string{"mena", "mena_ref", "mena_showAs", "stavUhrK", "stavUhrK_ref", "stavUhrK_showAs"} {
 		assert.Contains(t, names, want)
 	}
-	assert.Equal(t, schema.TypeString, names["sumCelkem"])
+	assert.Equal(t, schema.TypeDecimal, names["sumCelkem"])
 	assert.Equal(t, schema.TypeInt64, names["id"])
 	assert.Contains(t, names, "external_ids")
+	for _, c := range plan.columns {
+		if c.Name == "sumCelkem" {
+			assert.Equal(t, 15, c.Precision)
+			assert.Equal(t, 2, c.Scale)
+		}
+	}
 
-	// ingestr's strategy layer owns the load timestamp and the promote uses it as
-	// the ReplacingMergeTree version column — we must not declare our own.
 	assert.NotContains(t, names, "_ingestr_loaded_at")
 
 	for _, c := range plan.columns {
@@ -138,6 +145,19 @@ func TestBuildPlanExpandsRelations(t *testing.T) {
 			assert.False(t, c.Nullable)
 		}
 	}
+}
+
+func TestBuildPlanRejectsSanitizedColumnCollision(t *testing.T) {
+	t.Parallel()
+	doc := &propertiesDoc{Property: []property{
+		{PropertyName: "id", Type: "integer"},
+		{PropertyName: "foo-bar", Type: "string"},
+		{PropertyName: "foo_bar", Type: "string"},
+	}}
+
+	_, err := buildPlan("e", doc, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `fields "foo-bar" and "foo_bar"`)
 }
 
 func TestBuildPlanExpensiveExclusion(t *testing.T) {
@@ -157,8 +177,6 @@ func TestBuildPlanExpensiveExclusion(t *testing.T) {
 	assert.NotContains(t, excluded.sourceToColumn, "slow")
 }
 
-// Flexi wraps its three endpoints three different ways and the wrapper name matches
-// neither the URL nor the inner key, so findArray must tolerate both depths.
 func TestFindArrayHandlesBothEnvelopes(t *testing.T) {
 	t.Parallel()
 
@@ -172,13 +190,10 @@ func TestFindArrayHandlesBothEnvelopes(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `[{"propertyName":"kod"}]`, string(got))
 
-	// evidence-list uses a third wrapper name again.
 	got, err = findArray([]byte(`{"evidences":{"evidence":[{"evidencePath":"adresar"}]}}`), "evidence")
 	require.NoError(t, err)
 	assert.JSONEq(t, `[{"evidencePath":"adresar"}]`, string(got))
 
-	// A miss must name the keys it did see — that diagnostic is what turned an
-	// opaque KeyError into a one-line fix.
 	_, err = findArray([]byte(`{"winstrom":{"something":[]}}`), "property")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "winstrom")
@@ -193,10 +208,6 @@ func TestExtractRecords(t *testing.T) {
 	assert.Len(t, items, 2)
 	assert.Equal(t, 14035, count, "@rowCount arrives as a STRING and must still parse")
 
-	// ⚠️ THE REGRESSION THAT COST A SILENT ZERO. `stav-ceniku` returns its rows under a
-	// key that is NOT the evidence path. Looking up by name alone produced 0 rows, no
-	// error, "Ingestion completed successfully" and no table — caught only by counting
-	// rows against the probe. The array must be found even when the key differs.
 	items, count, err = extractRecords(
 		[]byte(`{"winstrom":{"@version":"1.0","@rowCount":"5","cenikStav":[{"id":1},{"id":2}]}}`),
 		"stav-ceniku")
@@ -204,7 +215,6 @@ func TestExtractRecords(t *testing.T) {
 	assert.Len(t, items, 2, "records under a differently-named key must still be found")
 	assert.Equal(t, 5, count)
 
-	// Only a genuinely array-less envelope is an empty page.
 	items, count, err = extractRecords([]byte(`{"winstrom":{"@version":"1.0"}}`), "faktura-vydana")
 	require.NoError(t, err)
 	assert.Empty(t, items)
@@ -214,9 +224,6 @@ func TestExtractRecords(t *testing.T) {
 	require.Error(t, err)
 }
 
-// ⚠️ The offset on a Flexi DATE must be discarded, not applied. An invoice issued
-// 2026-01-01 in CET would move to 2025-12-31 under UTC conversion — a different
-// accounting period, and a wrong number in a VAT return.
 func TestParseFlexiDateDiscardsOffset(t *testing.T) {
 	t.Parallel()
 	got, ok := parseFlexiDate("2026-01-01+01:00").(time.Time)
@@ -233,7 +240,6 @@ func TestParseFlexiDateDiscardsOffset(t *testing.T) {
 	assert.Nil(t, parseFlexiDate("not-a-date"))
 }
 
-// A datetime IS a true instant, so here the offset is applied and normalised.
 func TestParseFlexiDateTimeNormalisesToUTC(t *testing.T) {
 	t.Parallel()
 	got, ok := parseFlexiDateTime("2026-02-11T15:09:06.376+01:00").(time.Time)
@@ -246,21 +252,19 @@ func TestParseFlexiDateTimeNormalisesToUTC(t *testing.T) {
 	assert.Nil(t, parseFlexiDateTime("garbage"))
 }
 
-// Money must survive as the exact text Flexi sent — no float round-trip anywhere.
-func TestCoerceKeepsNumericTextExact(t *testing.T) {
+func TestCoerceNumeric(t *testing.T) {
 	t.Parallel()
 	var payload map[string]interface{}
 	dec := json.NewDecoder(strings.NewReader(`{"sumCelkem": 12345678901234.57, "small": 0.1}`))
 	dec.UseNumber()
 	require.NoError(t, dec.Decode(&payload))
 
-	assert.Equal(t, "12345678901234.57", coerce(payload["sumCelkem"], schema.TypeString))
-	assert.Equal(t, "0.1", coerce(payload["small"], schema.TypeString))
+	assert.Equal(t, json.Number("12345678901234.57"), coerce(payload["sumCelkem"], schema.TypeDecimal))
+	assert.Equal(t, 0.1, coerce(payload["small"], schema.TypeFloat64))
 
 	assert.Equal(t, int64(730), coerce(json.Number("730"), schema.TypeInt64))
 	assert.Equal(t, true, coerce("true", schema.TypeBoolean))
 	assert.Nil(t, coerce(nil, schema.TypeString))
-	// A nested object becomes JSON text rather than being dropped.
 	assert.Equal(t, `{"a":1}`, coerce(map[string]interface{}{"a": json.Number("1")}, schema.TypeString))
 }
 
@@ -272,14 +276,10 @@ func TestBuildFilter(t *testing.T) {
 	assert.Equal(t, "lastUpdate gte '2026-01-15T10:30:00.000Z'",
 		buildFilter(plan, source.ReadOptions{IntervalStart: &start}))
 
-	// No cursor column -> no filter, so the evidence is re-read in full.
 	assert.Equal(t, "", buildFilter(&tablePlan{hasLastUpdate: false}, source.ReadOptions{IntervalStart: &start}))
-	// No window -> full read.
 	assert.Equal(t, "", buildFilter(plan, source.ReadOptions{}))
 }
 
-// End-to-end against a fake Flexi: schema fetch, paging, projection and the
-// short-page stop condition.
 func TestReadPagesEndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -296,14 +296,11 @@ func TestReadPagesEndToEnd(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if strings.HasSuffix(r.URL.Path, "/properties.json") {
-			// ⚠️ The REAL wire shape: wrapped in "properties". Verified against the
-			// live API on 2026-08-14 — do not "simplify" this fixture to the flat
-			// form, it is what two probe runs died on.
 			_, _ = w.Write([]byte(`{"properties":{"@version":"1.0","evidenceName":"Vydané faktury","property":[
 				{"propertyName":"id","type":"integer","inId":"true"},
 				{"propertyName":"lastUpdate","type":"datetime"},
 				{"propertyName":"datVyst","type":"date"},
-				{"propertyName":"sumCelkem","type":"numeric"},
+				{"propertyName":"sumCelkem","type":"numeric","digits":"15","decimal":"2"},
 				{"propertyName":"mena","type":"relation"}]}}`))
 			return
 		}
@@ -358,11 +355,13 @@ func TestReadPagesEndToEnd(t *testing.T) {
 	rows := 0
 	for res := range ch {
 		require.NoError(t, res.Err)
+		sumColumns := res.Batch.Schema().FieldIndices("sumCelkem")
+		require.Len(t, sumColumns, 1)
+		assert.Zero(t, res.Batch.Column(sumColumns[0]).NullN())
 		rows += int(res.Batch.NumRows())
 	}
 	assert.Equal(t, total, rows, "all rows across all pages must arrive exactly once")
 
-	// limit is ALWAYS explicit; ordering is by the immutable id, not the cursor.
 	for _, l := range gotLimits {
 		assert.Equal(t, "10", l)
 	}
