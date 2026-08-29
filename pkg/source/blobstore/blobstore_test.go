@@ -1,8 +1,12 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,10 +20,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type fakeAthenaAPI struct {
@@ -216,6 +223,91 @@ func TestParseBlobstoreURI_GCS(t *testing.T) {
 			assert.Equal(t, tt.want.credentialsFile, got.credentialsFile)
 		})
 	}
+}
+
+func TestParseBlobstoreURI_SFTPHostKeyOptions(t *testing.T) {
+	parsed, err := parseBlobstoreURI("sftp://user:password@example.com?known_hosts_file=~%2F.ssh%2Fcustom_hosts&host_key_fingerprint=SHA256%3Afirst%2CSHA256%3Asecond&host_key_fingerprint=SHA256%3Athird&insecure_skip_host_key_check=true")
+	require.NoError(t, err)
+
+	assert.Equal(t, "~/.ssh/custom_hosts", parsed.sftpKnownHostsFile)
+	assert.Equal(t, []string{"SHA256:first", "SHA256:second", "SHA256:third"}, parsed.sftpHostKeyFingerprints)
+	assert.True(t, parsed.sftpInsecureSkipHostKeyCheck)
+
+	_, err = parseBlobstoreURI("sftp://user:password@example.com?insecure_skip_host_key_check=perhaps")
+	require.EqualError(t, err, `invalid insecure_skip_host_key_check value "perhaps": expected true or false`)
+}
+
+func TestSFTPHostKeyCallbackKnownHosts(t *testing.T) {
+	trustedKey := newSSHTestPublicKey(t)
+	otherKey := newSSHTestPublicKey(t)
+	knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
+	require.NoError(t, os.WriteFile(knownHostsFile, []byte(knownhosts.Line([]string{"sftp.example.com"}, trustedKey)+"\n"), 0o600))
+
+	callback, err := createSFTPHostKeyCallback(&parsedBlobstoreURI{sftpKnownHostsFile: knownHostsFile})
+	require.NoError(t, err)
+	remote := &net.TCPAddr{}
+
+	require.NoError(t, callback("sftp.example.com:22", remote, trustedKey))
+
+	err = callback("unknown.example.com:22", remote, trustedKey)
+	require.ErrorContains(t, err, "unknown SFTP host key")
+	require.ErrorContains(t, err, ssh.FingerprintSHA256(trustedKey))
+
+	err = callback("sftp.example.com:22", remote, otherKey)
+	require.ErrorContains(t, err, "SFTP host key mismatch")
+	require.ErrorContains(t, err, ssh.FingerprintSHA256(otherKey))
+}
+
+func TestSFTPHostKeyCallbackFingerprints(t *testing.T) {
+	trustedKey := newSSHTestPublicKey(t)
+	otherKey := newSSHTestPublicKey(t)
+	trustedFingerprint := ssh.FingerprintSHA256(trustedKey)
+
+	callback, err := createSFTPHostKeyCallback(&parsedBlobstoreURI{
+		sftpHostKeyFingerprints: []string{ssh.FingerprintSHA256(otherKey), trustedFingerprint},
+	})
+	require.NoError(t, err)
+	require.NoError(t, callback("sftp.example.com:22", nil, trustedKey))
+
+	err = callback("sftp.example.com:22", nil, newSSHTestPublicKey(t))
+	require.ErrorContains(t, err, "SFTP host key mismatch")
+	require.ErrorContains(t, err, trustedFingerprint)
+
+	_, err = createSFTPHostKeyCallback(&parsedBlobstoreURI{sftpHostKeyFingerprints: []string{"MD5:invalid"}})
+	require.ErrorContains(t, err, "expected an OpenSSH SHA256 fingerprint")
+}
+
+func TestSFTPHostKeyCallbackPreservesUnconfiguredConnections(t *testing.T) {
+	stdout, stderr, mode := output.Current()
+	defer output.Init(stdout, stderr, mode)
+
+	var warning bytes.Buffer
+	output.Init(&warning, &bytes.Buffer{}, output.ModeText)
+	callback, err := createSFTPHostKeyCallback(&parsedBlobstoreURI{})
+	require.NoError(t, err)
+	require.Contains(t, warning.String(), "continuing without verification for backwards compatibility")
+	require.NoError(t, callback("sftp.example.com:22", nil, newSSHTestPublicKey(t)))
+}
+
+func TestSFTPInsecureHostKeyCallbackWarns(t *testing.T) {
+	stdout, stderr, mode := output.Current()
+	defer output.Init(stdout, stderr, mode)
+
+	var warning bytes.Buffer
+	output.Init(&warning, &bytes.Buffer{}, output.ModeText)
+	callback, err := createSFTPHostKeyCallback(&parsedBlobstoreURI{sftpInsecureSkipHostKeyCheck: true})
+	require.NoError(t, err)
+	require.Contains(t, warning.String(), "SFTP host key verification is disabled")
+	require.NoError(t, callback("sftp.example.com:22", nil, newSSHTestPublicKey(t)))
+}
+
+func newSSHTestPublicKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	key, err := ssh.NewPublicKey(publicKey)
+	require.NoError(t, err)
+	return key
 }
 
 func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
