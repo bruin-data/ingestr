@@ -534,3 +534,37 @@ func TestListMembersStopFetchingAtRowLimit(t *testing.T) {
 	assert.Equal(t, 3, total)
 	assert.EqualValues(t, 2, requests.Load())
 }
+
+// Without interval filtering every fetched row counts against the budget, so
+// the last page asks for exactly the rows that are still needed.
+func TestPaginationClampsPageToRowLimit(t *testing.T) {
+	var limits []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		decoder := json.NewDecoder(request.Body)
+		decoder.UseNumber()
+		assert.NoError(t, decoder.Decode(&body))
+		limits = append(limits, body["limit"].(json.Number).String())
+
+		rows := make([]string, 0)
+		for i := 0; i < 2; i++ {
+			rows = append(rows, `{"signal_id":1,"date":"2026-08-01T00:00:00Z"}`)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"signals":[` + strings.Join(rows, ",") + `]}`))
+	}))
+	defer server.Close()
+
+	connector := NewSumbleSource()
+	connector.client = testSumbleClient(server.URL)
+
+	results, err := connector.read(context.Background(), sumbleReadSpec{table: "signals"}, source.ReadOptions{PageSize: 2, Limit: 3})
+	require.NoError(t, err)
+	batches, readErr := drain(results)
+	require.NoError(t, readErr)
+	for _, batch := range batches {
+		batch.Release()
+	}
+
+	assert.Equal(t, []string{"2", "1"}, limits)
+}

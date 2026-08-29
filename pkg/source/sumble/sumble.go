@@ -612,17 +612,31 @@ func (s *SumbleSource) paginateAndSend(ctx context.Context, read paginatedRead, 
 		pageSize = maxPageSize
 	}
 
+	// A page can only be clamped to the row budget when every fetched row is
+	// kept. Under interval filtering a dropped row spends no budget, so clamping
+	// would just split the same work across more requests.
+	clampToBudget := read.intervalField == "" || (rc.opts.IntervalStart == nil && rc.opts.IntervalEnd == nil)
+
 	fetched := 0
-	for offset := 0; offset <= maxOffset; offset += pageSize {
+	for offset := 0; offset <= maxOffset; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
+		limit := pageSize
+		if remaining := rc.limiter.remaining(); clampToBudget && remaining >= 0 && remaining < limit {
+			limit = remaining
+		}
+		if limit <= 0 {
+			return nil
+		}
+
 		body := requestBody(read.filter)
-		body["limit"] = pageSize
+		body["limit"] = limit
 		body["offset"] = offset
+		offset += limit
 
 		response, err := s.post(ctx, read.endpoint, read.label, body)
 		if err != nil {
@@ -644,7 +658,7 @@ func (s *SumbleSource) paginateAndSend(ctx context.Context, read paginatedRead, 
 			return err
 		}
 
-		if len(page) < pageSize || rc.limiter.exhausted() {
+		if len(page) < limit || rc.limiter.exhausted() {
 			return nil
 		}
 		if read.newestFirst && rc.opts.IntervalStart != nil && pageEndsBeforeStart(page, read.intervalField, *rc.opts.IntervalStart) {
@@ -844,6 +858,14 @@ func (l *rowLimiter) take(n int) int {
 
 func (l *rowLimiter) exhausted() bool {
 	return l.limit > 0 && l.used.Load() >= l.limit
+}
+
+// remaining reports how many rows still fit in the budget, or -1 when unlimited.
+func (l *rowLimiter) remaining() int {
+	if l.limit <= 0 {
+		return -1
+	}
+	return int(max(l.limit-l.used.Load(), 0))
 }
 
 func filterItemsByInterval(items []map[string]any, field string, start, end *time.Time) []map[string]any {
