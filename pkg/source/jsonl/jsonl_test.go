@@ -1,6 +1,7 @@
 package jsonl
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"os"
@@ -8,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,4 +83,50 @@ func TestJSONLByteCap(t *testing.T) {
 	batchesOn, rowsOn := drainJSONL(t, resOn)
 	require.Greater(t, batchesOn, 1, "small cap must split into more than one batch")
 	require.Equal(t, int64(recordCount), rowsOn, "byte cap must not drop rows")
+}
+
+func TestJSONLSourceReadsZIPMembers(t *testing.T) {
+	ctx := context.Background()
+	archivePath := filepath.Join(t.TempDir(), "release.zip")
+	file, err := os.Create(archivePath)
+	require.NoError(t, err)
+	writer := zip.NewWriter(file)
+	for _, entry := range []struct {
+		name string
+		data string
+	}{
+		{name: "events/day-1.jsonl", data: "{\"id\":1}\n{\"id\":2}\n"},
+		{name: "events/day-2.jsonl", data: "{\"id\":3}\n"},
+	} {
+		member, err := writer.Create(entry.name)
+		require.NoError(t, err)
+		_, err = member.Write([]byte(entry.data))
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+	require.NoError(t, file.Close())
+
+	src := NewJSONLSource()
+	require.NoError(t, src.Connect(ctx, "jsonl://"+archivePath+"!events/*.jsonl"))
+	table, err := src.GetTable(ctx, source.TableRequest{Name: "events"})
+	require.NoError(t, err)
+	results, err := table.Read(ctx, source.ReadOptions{})
+	require.NoError(t, err)
+
+	var totalRows int64
+	memberPaths := make(map[string]bool)
+	for result := range results {
+		require.NoError(t, result.Err)
+		memberIndex := result.Batch.Schema().FieldIndices(archiveutil.MemberPathColumn)
+		require.Len(t, memberIndex, 1)
+		memberColumn := result.Batch.Column(memberIndex[0]).(*array.String)
+		memberPaths[memberColumn.Value(0)] = true
+		totalRows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	require.Equal(t, int64(3), totalRows)
+	require.Equal(t, map[string]bool{
+		"events/day-1.jsonl": true,
+		"events/day-2.jsonl": true,
+	}, memberPaths)
 }

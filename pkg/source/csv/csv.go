@@ -1,6 +1,7 @@
 package csv
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"encoding/csv"
@@ -22,6 +23,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/htmlindex"
 	"golang.org/x/text/encoding/ianaindex"
@@ -33,8 +35,10 @@ import (
 const defaultBatchSize = 10000
 
 type CSVSource struct {
-	filePath string
-	encoding string
+	filePath             string
+	archiveMemberPattern string
+	archiveLimits        archiveutil.Limits
+	encoding             string
 }
 
 func NewCSVSource() *CSVSource {
@@ -50,7 +54,12 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	if filePath == "" {
 		return fmt.Errorf("invalid CSV URI: %s", uri)
 	}
+	archiveLimits, err := archiveutil.ParseLimitsFromURI(uri)
+	if err != nil {
+		return err
+	}
 
+	filePath, archiveMemberPattern, _ := archiveutil.SplitPath(filePath)
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to access CSV file: %w", err)
@@ -58,8 +67,15 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	if info.IsDir() {
 		return fmt.Errorf("path is a directory, not a file: %s", filePath)
 	}
+	if archiveMemberPattern != "" {
+		if err := archiveutil.ValidateArchiveSize(info.Size(), archiveLimits); err != nil {
+			return err
+		}
+	}
 
 	s.filePath = filePath
+	s.archiveMemberPattern = archiveMemberPattern
+	s.archiveLimits = archiveLimits
 	s.encoding = enc
 	config.Debug("[CSV] Connected to file: %s (encoding=%q)", filePath, enc)
 	return nil
@@ -122,6 +138,9 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
+	}
+	if s.archiveMemberPattern != "" {
+		return s.readZIP(ctx, opts)
 	}
 
 	f, err := os.Open(s.filePath)
@@ -259,6 +278,63 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		}
 
 		config.Debug("[CSV] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
+	}()
+
+	return results, nil
+}
+
+func (s *CSVSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	archive, err := zip.OpenReader(s.filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open ZIP archive: %w", err)
+	}
+	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern, s.archiveLimits)
+	if err != nil {
+		_ = archive.Close()
+		return nil, err
+	}
+
+	results := make(chan source.RecordBatchResult, 8)
+	go func() {
+		defer close(results)
+		defer func() { _ = archive.Close() }()
+
+		totalRows := 0
+		for _, member := range members {
+			if opts.Limit > 0 && totalRows >= opts.Limit {
+				return
+			}
+
+			metadata, err := archiveutil.Metadata(s.filePath, member)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
+			spooled, err := archiveutil.SpoolMember(ctx, member)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
+			spooledPath := spooled.Name()
+			_ = spooled.Close()
+
+			memberOpts := opts
+			if opts.Limit > 0 {
+				memberOpts.Limit = opts.Limit - totalRows
+			}
+			memberSource := &CSVSource{filePath: spooledPath, encoding: s.encoding}
+			memberResults, readErr := memberSource.read(ctx, memberOpts)
+			if readErr == nil {
+				rows, forwardErr := archiveutil.ForwardBatches(ctx, results, memberResults, metadata, opts.ExcludeColumns, memberOpts.Limit)
+				totalRows += rows
+				readErr = forwardErr
+			}
+			_ = os.Remove(spooledPath)
+			if readErr != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read ZIP member %q: %w", member.Name, readErr)}
+				return
+			}
+		}
 	}()
 
 	return results, nil

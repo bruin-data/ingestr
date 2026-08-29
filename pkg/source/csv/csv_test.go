@@ -1,6 +1,7 @@
 package csv
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 )
 
 func TestExtractFilePath(t *testing.T) {
@@ -251,5 +253,83 @@ func TestRead_ByteCap(t *testing.T) {
 	}
 	if offR != onR || offR != rows {
 		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, rows)
+	}
+}
+
+func TestCSVSource_ReadsZIPMembers(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "release.zip")
+	writeCSVZIP(t, archivePath, []struct {
+		name string
+		data string
+	}{
+		{name: "data/day-1.csv", data: "id,name\n1,Alice\n2,Bob\n"},
+		{name: "data/day-2.csv", data: "id,name\n3,Carol\n4,Dave\n"},
+		{name: "notes.txt", data: "ignored"},
+	})
+
+	src := NewCSVSource()
+	if err := src.Connect(context.Background(), "csv://"+archivePath+"!data/*.csv"); err != nil {
+		t.Fatal(err)
+	}
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "release"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := table.Read(context.Background(), source.ReadOptions{Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	totalRows := int64(0)
+	memberPaths := make(map[string]bool)
+	for result := range results {
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+		memberIndex := result.Batch.Schema().FieldIndices(archiveutil.MemberPathColumn)
+		if len(memberIndex) != 1 {
+			t.Fatalf("missing %s column", archiveutil.MemberPathColumn)
+		}
+		memberColumn := result.Batch.Column(memberIndex[0]).(*array.String)
+		memberPaths[memberColumn.Value(0)] = true
+		totalRows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+
+	if totalRows != 3 {
+		t.Fatalf("read %d rows, want 3", totalRows)
+	}
+	if !memberPaths["data/day-1.csv"] || !memberPaths["data/day-2.csv"] {
+		t.Fatalf("unexpected archive members: %v", memberPaths)
+	}
+}
+
+func writeCSVZIP(t *testing.T, path string, files []struct {
+	name string
+	data string
+},
+) {
+	t.Helper()
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for _, entry := range files {
+		member, err := writer.Create(entry.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := member.Write([]byte(entry.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,6 +1,7 @@
 package parquet
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"net/url"
@@ -19,14 +20,17 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 )
 
 const defaultBatchSize = 10000
 
 type ParquetSource struct {
-	filePaths   []string
-	arrowSchema *arrow.Schema
-	knownSchema *schema.TableSchema
+	filePaths            []string
+	archiveMemberPattern string
+	archiveLimits        archiveutil.Limits
+	arrowSchema          *arrow.Schema
+	knownSchema          *schema.TableSchema
 }
 
 func NewParquetSource() *ParquetSource {
@@ -42,10 +46,31 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 	if path == "" {
 		return fmt.Errorf("invalid parquet URI: %s", uri)
 	}
+	archiveLimits, err := archiveutil.ParseLimitsFromURI(uri)
+	if err != nil {
+		return err
+	}
 
+	path, archiveMemberPattern, _ := archiveutil.SplitPath(path)
 	paths, err := resolveFilePaths(path)
 	if err != nil {
 		return err
+	}
+	if archiveMemberPattern != "" {
+		for _, archivePath := range paths {
+			info, err := os.Stat(archivePath)
+			if err != nil {
+				return fmt.Errorf("failed to inspect ZIP archive: %w", err)
+			}
+			if err := archiveutil.ValidateArchiveSize(info.Size(), archiveLimits); err != nil {
+				return fmt.Errorf("%s: %w", archivePath, err)
+			}
+		}
+		s.filePaths = paths
+		s.archiveMemberPattern = archiveMemberPattern
+		s.archiveLimits = archiveLimits
+		config.Debug("[PARQUET-SRC] Connected to %d ZIP archive(s), first: %s", len(paths), paths[0])
+		return nil
 	}
 
 	arrowSchema, err := readParquetSchema(paths[0])
@@ -54,6 +79,7 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.filePaths = paths
+	s.archiveLimits = archiveLimits
 	s.arrowSchema = arrowSchema
 	s.knownSchema = schemaFromArrow(arrowSchema, "")
 
@@ -63,6 +89,7 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 
 func (s *ParquetSource) Close(ctx context.Context) error {
 	s.filePaths = nil
+	s.archiveMemberPattern = ""
 	s.arrowSchema = nil
 	s.knownSchema = nil
 	return nil
@@ -110,6 +137,9 @@ func (s *ParquetSource) GetTable(ctx context.Context, req source.TableRequest) (
 func (s *ParquetSource) read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	if len(s.filePaths) == 0 {
 		return nil, fmt.Errorf("parquet source is not connected")
+	}
+	if s.archiveMemberPattern != "" {
+		return s.readZIP(ctx, opts)
 	}
 
 	startTotal := time.Now()
@@ -159,6 +189,79 @@ func (s *ParquetSource) read(ctx context.Context, opts source.ReadOptions) (<-ch
 
 		config.Debug("[PARQUET-SRC] Total: %d rows in %d batches from %d file(s), read time: %v",
 			totalRows, batchNum, len(filePaths), time.Since(startTotal))
+	}()
+
+	return results, nil
+}
+
+func (s *ParquetSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	results := make(chan source.RecordBatchResult, 8)
+	go func() {
+		defer close(results)
+
+		totalRows := 0
+		for _, archivePath := range s.filePaths {
+			if opts.Limit > 0 && totalRows >= opts.Limit {
+				return
+			}
+
+			archive, err := zip.OpenReader(archivePath)
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to open ZIP archive %s: %w", archivePath, err)}
+				return
+			}
+			members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern, s.archiveLimits)
+			if err != nil {
+				_ = archive.Close()
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to select ZIP members from %s: %w", archivePath, err)}
+				return
+			}
+
+			for _, member := range members {
+				if opts.Limit > 0 && totalRows >= opts.Limit {
+					break
+				}
+
+				metadata, err := archiveutil.Metadata(archivePath, member)
+				if err != nil {
+					_ = archive.Close()
+					results <- source.RecordBatchResult{Err: err}
+					return
+				}
+				spooled, err := archiveutil.SpoolMember(ctx, member)
+				if err != nil {
+					_ = archive.Close()
+					results <- source.RecordBatchResult{Err: err}
+					return
+				}
+				spooledPath := spooled.Name()
+				_ = spooled.Close()
+
+				memberOpts := opts
+				if opts.Limit > 0 {
+					memberOpts.Limit = opts.Limit - totalRows
+				}
+				memberSource := NewParquetSource()
+				readErr := memberSource.Connect(ctx, "parquet://"+spooledPath)
+				var memberResults <-chan source.RecordBatchResult
+				if readErr == nil {
+					memberResults, readErr = memberSource.read(ctx, memberOpts)
+				}
+				if readErr == nil {
+					rows, forwardErr := archiveutil.ForwardBatches(ctx, results, memberResults, metadata, opts.ExcludeColumns, memberOpts.Limit)
+					totalRows += rows
+					readErr = forwardErr
+				}
+				_ = memberSource.Close(ctx)
+				_ = os.Remove(spooledPath)
+				if readErr != nil {
+					_ = archive.Close()
+					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read ZIP member %q: %w", member.Name, readErr)}
+					return
+				}
+			}
+			_ = archive.Close()
+		}
 	}()
 
 	return results, nil

@@ -1,6 +1,7 @@
 package blobstore
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -24,6 +25,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -760,6 +762,62 @@ func TestReadCSVFileLimitWithByteFlush(t *testing.T) {
 	require.Equal(t, []int64{1, 1, 1}, batchRows)
 }
 
+func TestProcessZIPReaderCSV(t *testing.T) {
+	var data bytes.Buffer
+	writer := zip.NewWriter(&data)
+	for _, entry := range []struct {
+		name string
+		data string
+	}{
+		{name: "data/day-1.csv", data: "id,name\n1,Alice\n2,Bob\n"},
+		{name: "data/day-2.csv", data: "id,name\n3,Carol\n"},
+		{name: "notes.txt", data: "ignored"},
+	} {
+		member, err := writer.Create(entry.name)
+		require.NoError(t, err)
+		_, err = member.Write([]byte(entry.data))
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+	zipReader, err := zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+	require.NoError(t, err)
+
+	s := NewBlobstoreSource()
+	s.provider = ProviderS3
+	s.parsedURI = &parsedBlobstoreURI{archiveLimits: archiveutil.DefaultLimits()}
+	results := make(chan source.RecordBatchResult, 4)
+	err = s.processZIPReader(
+		context.Background(),
+		"bucket",
+		blobstoreFile{key: "releases/data.zip"},
+		zipReader,
+		"data/*.csv",
+		FormatUnknown,
+		"",
+		100,
+		source.ReadOptions{},
+		results,
+	)
+	require.NoError(t, err)
+	close(results)
+
+	var rows int64
+	members := make(map[string]bool)
+	for result := range results {
+		require.NoError(t, result.Err)
+		pathIndex := result.Batch.Schema().FieldIndices(defaultBlobstoreFilePathColumn)
+		memberIndex := result.Batch.Schema().FieldIndices(defaultArchiveMemberPathColumn)
+		require.Len(t, pathIndex, 1)
+		require.Len(t, memberIndex, 1)
+		assert.Equal(t, "s3://bucket/releases/data.zip", result.Batch.Column(pathIndex[0]).(*array.String).Value(0))
+		members[result.Batch.Column(memberIndex[0]).(*array.String).Value(0)] = true
+		rows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	assert.Equal(t, int64(3), rows)
+	assert.Equal(t, map[string]bool{"data/day-1.csv": true, "data/day-2.csv": true}, members)
+}
+
 func TestHandlesIncrementality_BlobstoreUsesFrameworkKeyHandling(t *testing.T) {
 	s := NewBlobstoreSource()
 	assert.False(t, s.HandlesIncrementality())
@@ -1095,6 +1153,44 @@ func TestAddBlobstoreMetadataColumns(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "s3://bucket/data/file.csv", pathCol.Value(0))
 	assert.Equal(t, "s3://bucket/data/file.csv", pathCol.Value(1))
+}
+
+func TestAddBlobstoreArchiveMetadataColumns(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	idBuilder := array.NewInt64Builder(mem)
+	idBuilder.Append(1)
+	idArray := idBuilder.NewArray()
+	idBuilder.Release()
+	defer idArray.Release()
+
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+	input := array.NewRecordBatch(inputSchema, []arrow.Array{idArray}, 1)
+	defer input.Release()
+
+	output, added, err := addBlobstoreMetadataColumns(input, blobstoreFileMetadata{
+		filepathColumn:           defaultBlobstoreFilePathColumn,
+		filepath:                 "s3://bucket/release.zip",
+		archiveMemberPathColumn:  defaultArchiveMemberPathColumn,
+		archiveMemberPath:        "data/users.csv",
+		archiveMemberCRC32Column: defaultArchiveMemberCRC32Column,
+		archiveMemberCRC32:       "12abcdef",
+		archiveCompressedColumn:  defaultArchiveCompressedColumn,
+		archiveMemberCompressed:  123,
+		archiveSizeColumn:        defaultArchiveUncompressedColumn,
+		archiveMemberSize:        456,
+	})
+	require.NoError(t, err)
+	require.True(t, added)
+	defer output.Release()
+
+	require.Equal(t, int64(6), output.NumCols())
+	assert.Equal(t, "s3://bucket/release.zip", output.Column(1).(*array.String).Value(0))
+	assert.Equal(t, "data/users.csv", output.Column(2).(*array.String).Value(0))
+	assert.Equal(t, "12abcdef", output.Column(3).(*array.String).Value(0))
+	assert.Equal(t, int64(123), output.Column(4).(*array.Int64).Value(0))
+	assert.Equal(t, int64(456), output.Column(5).(*array.Int64).Value(0))
 }
 
 func TestAddBlobstoreMetadataColumnsRejectsExistingColumn(t *testing.T) {
