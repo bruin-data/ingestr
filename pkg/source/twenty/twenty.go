@@ -178,7 +178,7 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 	if strings.HasPrefix(name, "custom:") {
 		objectName = strings.TrimSpace(strings.TrimPrefix(name, "custom:"))
 		if objectName == "" {
-			return nil, fmt.Errorf("twenty: custom object name is required after custom:")
+			return nil, fmt.Errorf("twenty: custom object name is required after custom prefix")
 		}
 	} else if _, ok := standardTables[name]; !ok {
 		supported := make([]string, 0, len(standardTables))
