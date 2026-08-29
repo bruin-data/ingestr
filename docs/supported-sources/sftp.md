@@ -12,23 +12,28 @@ For password authentication, use:
 sftp://<username>:<password>@<host>:<port>
 ```
 
-For private-key authentication, omit the password and provide `key_file`:
+For private-key authentication, provide `key_file`. Omit the password for an unencrypted key:
 
 ```plaintext
 sftp://<username>@<host>:<port>?key_file=/path/to/private_key
 ```
 
+For an encrypted private key, use the URI password as its passphrase:
+
+```plaintext
+sftp://<username>:<key-passphrase>@<host>:<port>?key_file=/path/to/private_key
+```
+
 ## URI components
 
 - `username`: The username for the SFTP server.
-- `password`: The password for the SFTP server. Either `password` or `key_file` is required.
+- `password`: The SFTP account password when `key_file` is absent, or the private-key passphrase when `key_file` is present. Either `password` or `key_file` is required.
 - `host`: The hostname or IP address of the SFTP server.
 - `port`: The port number of the SFTP server (defaults to 22 if not specified).
 
 The following query parameters are supported:
 
 - `key_file`: Path to an OpenSSH private key.
-- `key_passphrase`: Passphrase for an encrypted private key.
 - `known_hosts_file`: Path to an OpenSSH `known_hosts` file, commonly `~/.ssh/known_hosts`.
 - `host_key_fingerprint`: An OpenSSH SHA256 host-key fingerprint, such as `SHA256:...`. Repeat this parameter or provide a comma-separated value to allow multiple keys. When set, these fingerprints are used instead of `known_hosts_file`.
 - `insecure_skip_host_key_check`: Set to `true` only as a temporary compatibility escape hatch. This disables server identity verification and prints a warning.

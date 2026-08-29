@@ -294,7 +294,7 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 		HostKeyCallback: hostKeyCallback,
 	}
 
-	if parsed.sftpPassword != "" {
+	if parsed.sftpPassword != "" && parsed.sftpKeyFile == "" {
 		sshConfig.Auth = []ssh.AuthMethod{
 			ssh.Password(parsed.sftpPassword),
 		}
@@ -305,12 +305,11 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read SSH key file: %w", err)
 		}
-		var signer ssh.Signer
-		if parsed.sftpKeyPassphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(parsed.sftpKeyPassphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey(key)
+		keyPassword := parsed.sftpPassword
+		if keyPassword == "" {
+			keyPassword = parsed.sftpKeyPassphrase
 		}
+		signer, err := parseSFTPPrivateKey(key, keyPassword)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse SSH key: %w", err)
 		}
@@ -329,6 +328,19 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 	}
 
 	return sshConn, sftpConn, nil
+}
+
+func parseSFTPPrivateKey(key []byte, password string) (ssh.Signer, error) {
+	signer, err := ssh.ParsePrivateKey(key)
+	if err == nil {
+		return signer, nil
+	}
+
+	var passphraseMissing *ssh.PassphraseMissingError
+	if password == "" || !errors.As(err, &passphraseMissing) {
+		return nil, err
+	}
+	return ssh.ParsePrivateKeyWithPassphrase(key, []byte(password))
 }
 
 func createSFTPHostKeyCallback(parsed *parsedBlobstoreURI) (ssh.HostKeyCallback, error) {

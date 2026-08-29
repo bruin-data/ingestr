@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"net"
 	"os"
 	"path/filepath"
@@ -235,6 +236,36 @@ func TestParseBlobstoreURI_SFTPHostKeyOptions(t *testing.T) {
 
 	_, err = parseBlobstoreURI("sftp://user:password@example.com?insecure_skip_host_key_check=perhaps")
 	require.EqualError(t, err, `invalid insecure_skip_host_key_check value "perhaps": expected true or false`)
+}
+
+func TestParseBlobstoreURI_SFTPPreservesLegacyKeyPassphrase(t *testing.T) {
+	parsed, err := parseBlobstoreURI("sftp://user@example.com?key_file=%2Fkey&key_passphrase=legacy-password")
+	require.NoError(t, err)
+	require.Equal(t, "legacy-password", parsed.sftpKeyPassphrase)
+}
+
+func TestParseSFTPPrivateKey(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	unencryptedBlock, err := ssh.MarshalPrivateKey(privateKey, "")
+	require.NoError(t, err)
+	_, err = parseSFTPPrivateKey(pem.EncodeToMemory(unencryptedBlock), "unused-password")
+	require.NoError(t, err)
+
+	encryptedBlock, err := ssh.MarshalPrivateKeyWithPassphrase(privateKey, "", []byte("key-password"))
+	require.NoError(t, err)
+	encryptedKey := pem.EncodeToMemory(encryptedBlock)
+
+	_, err = parseSFTPPrivateKey(encryptedKey, "key-password")
+	require.NoError(t, err)
+
+	_, err = parseSFTPPrivateKey(encryptedKey, "wrong-password")
+	require.Error(t, err)
+
+	_, err = parseSFTPPrivateKey(encryptedKey, "")
+	var passphraseMissing *ssh.PassphraseMissingError
+	require.ErrorAs(t, err, &passphraseMissing)
 }
 
 func TestSFTPHostKeyCallbackKnownHosts(t *testing.T) {
