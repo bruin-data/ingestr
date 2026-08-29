@@ -1,60 +1,4 @@
-// Package twenty implements an ingestr source for Twenty CRM — the open-source
-// an open-source CRM, for sales and lifecycle data.
-//
-// Docs:  https://docs.twenty.com/developers/extend/api
-// Base:  https://<host>/rest/<objectPlural>          (core records)
-//
-//	https://<host>/rest/metadata/objects         (schema)
-//
-// Auth:  Authorization: Bearer <API key>, one key per workspace.
-//
-// Works against both deployment shapes we run: Twenty Cloud
-// (api.twenty.com) and self-hosted (any host running the REST API).
-//
-// ── Why this is a generic engine rather than a hand-written table list ───────
-//
-// Twenty is metadata-driven: every object, standard or custom, publishes its
-// fields with types at /rest/metadata/objects. One reader therefore covers every
-// object, and adding a table to a CronJob is a string, not a code change. That
-// is not just convenience — two workspaces of the same product genuinely diverge.
-// Measured across two live workspaces: one had a `lead` object the other lacked,
-// and their `person` objects carried 79 fields against 32.
-// A static table/column list would have been wrong for one of them immediately.
-//
-// ── The traps, all verified against the live API ─────────────────────────────
-//
-// ⚠️ depth=0 IS ALWAYS SENT. Twenty's default depth embeds related records, so a
-// person arrives carrying its whole company object. That inflates every page,
-// and worse, it makes the row shape depend on a server-side default we do not
-// control. depth=0 returns the flat record plus foreign keys, which is exactly
-// the raw layer's job. See readPass.
-//
-// ⚠️ THE CURSOR IS OPAQUE BASE64, NOT AN ID. pageInfo.endCursor decodes to
-// {"id":"…"} today, but it is a cursor and is passed back verbatim. Never
-// synthesise one from a record id.
-//
-// ⚠️ PAGING IS ORDERED BY id, NOT BY THE CURSOR FIELD, and order_by is
-// deliberately NOT sent. The default order is what endCursor is built against;
-// ordering by updatedAt while walking a cursor would be unstable, because any
-// row edited mid-run moves in the sort order and can be skipped or repeated
-// across a page boundary. id is immutable, so the walk is stable even while
-// sales is editing records underneath it.
-//
-// ⚠️ SOFT DELETES ARE INVISIBLE BY DEFAULT. Twenty excludes deletedAt IS NOT NULL
-// from every list response. Under merge that means a deleted record keeps its
-// last-known state in the warehouse FOREVER, looking live. So a second pass runs
-// with deletedAt[is]:NOT_NULL and re-reads exactly those rows, whose deletedAt
-// then lands populated for downstream to filter on. Disable with
-// include_deleted=false; do not disable it casually.
-//
-// ⚠️ MONEY IS {amountMicros, currencyCode} AND STAYS TEXT. See dataTypeFor —
-// this also keeps the source clear of destination decimal handling on any
-// table with a decimal column on its SECOND sync.
-//
-// ⚠️ ONE KEY PER WORKSPACE, AND THE WORKSPACE IS ONLY IN THE HOST. Pointing the
-// one workspace's key at another workspace's host (or either at the wrong destination)
-// produces no error, just the wrong company's CRM in the wrong table. Same shape
-// that bit the fakturoid and abra ports.
+// Package twenty implements a source for Twenty CRM.
 package twenty
 
 import (
@@ -74,57 +18,34 @@ import (
 )
 
 const (
-	// updatedAtField is Twenty's row-modification timestamp, present on every
-	// object. It is server-side filterable, which is what makes incremental
-	// loading real rather than a full re-read every night.
-	updatedAtField = "updatedAt"
-
-	// deletedAtField drives the soft-delete pass — see the package doc.
-	deletedAtField = "deletedAt"
-
-	// defaultPageSize is Twenty's documented maximum. At 100 requests/minute the
-	// page size is the only lever on wall-clock, so it is pinned to the ceiling:
-	// a 68k-person workspace is ~342 requests here, and 6,828 at the API default of
-	// 20 — over an hour of pure rate-limit wait.
-	defaultPageSize = 200
-
-	// maxPageSize is the API's hard cap; a larger value is rejected upstream.
-	maxPageSize = 200
-
-	// maxPages bounds the cursor walk. At the default page size this allows 40M
-	// rows per object — a runaway guard against a cursor that never advances,
-	// not a limit on real data.
-	maxPages = 200000
-
-	// metadataPageSize / maxMetadataPages bound the schema read. Workspaces have
-	// tens of objects, not thousands.
-	metadataPageSize = 200
-	maxMetadataPages = 50
-
-	// defaultRateLimit is 80% of Twenty's documented 100 requests/minute,
-	// expressed per second: (100 * 0.8) / 60. With burst 5 the first minute
-	// issues at most 5 + ~80 = 85 requests, inside the cap.
-	defaultRateLimit = 1.3333
-
-	// defaultRateLimitBurst per the add-source guidance.
+	updatedAtField        = "updatedAt"
+	deletedAtField        = "deletedAt"
+	defaultPageSize       = 200
+	maxPageSize           = 200
+	maxPages              = 200000
+	metadataPageSize      = 200
+	maxMetadataPages      = 50
+	defaultRateLimit      = 1.3333
 	defaultRateLimitBurst = 5
-
-	// twentyTimeLayout is what Twenty both emits and accepts in filters:
-	// 2026-08-15T01:44:03.057Z — always UTC, always milliseconds.
-	twentyTimeLayout = "2006-01-02T15:04:05.000Z"
-
-	// defaultBasePath is where both Cloud and self-hosted serve the REST API.
-	defaultBasePath = "/rest"
+	twentyTimeLayout      = "2006-01-02T15:04:05.000Z"
+	defaultBasePath       = "/rest"
 )
 
-// pageInfo is Twenty's cursor envelope, shared by core and metadata responses.
+var standardTables = map[string]struct{}{
+	"companies":        {},
+	"notes":            {},
+	"opportunities":    {},
+	"people":           {},
+	"tasks":            {},
+	"workspaceMembers": {},
+}
+
 type pageInfo struct {
 	StartCursor string `json:"startCursor"`
 	EndCursor   string `json:"endCursor"`
 	HasNextPage bool   `json:"hasNextPage"`
 }
 
-// Source is one authenticated view into ONE Twenty workspace.
 type Source struct {
 	client         *httpclient.Client
 	pageSize       int
@@ -137,9 +58,6 @@ func NewTwentySource() *Source { return &Source{} }
 
 func (s *Source) Schemes() []string { return []string{"twenty"} }
 
-// HandlesIncrementality is false: this source pushes `updatedAt[gte]:…` down to
-// Twenty as a read filter, but the destination still performs the merge. It
-// keeps no state of its own.
 func (s *Source) HandlesIncrementality() bool { return false }
 
 type uriConfig struct {
@@ -151,13 +69,6 @@ type uriConfig struct {
 	includeDeleted bool
 }
 
-// parseURI accepts:
-//
-//	twenty://api.twenty.com?api_key=…
-//	twenty://crm.example.com?api_key=…
-//
-// Optional: page_size, rate_limit, base_path, include_deleted, scheme (http for
-// tests).
 func parseURI(uri string) (uriConfig, error) {
 	var cfg uriConfig
 
@@ -174,9 +85,6 @@ func parseURI(uri string) (uriConfig, error) {
 	cfg.host = parsed.Host
 	q := parsed.Query()
 
-	// `scheme` exists so the test server can be reached over plain http.
-	// Production is always https — a bearer token over http would put the key on
-	// the wire in clear text.
 	transport := q.Get("scheme")
 	if transport == "" {
 		transport = "https"
@@ -220,8 +128,6 @@ func parseURI(uri string) (uriConfig, error) {
 		cfg.rateLimit = f
 	}
 
-	// Soft-deleted rows are INCLUDED by default. See the package doc: without the
-	// second pass a deleted record silently persists in the warehouse as live.
 	cfg.includeDeleted = true
 	if v := q.Get("include_deleted"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -262,18 +168,26 @@ func (s *Source) Close(ctx context.Context) error {
 	return nil
 }
 
-// GetTable resolves one object (by its PLURAL api name) into a readable table.
-//
-// The metadata round-trip happens HERE rather than lazily inside Read so that a
-// misspelled object or a permissions problem fails before any destination table
-// is created. A half-created table is materially worse than a clean failure:
-// ingestr recreates a MISSING destination as a plain, NON-replicated
-// ReplacingMergeTree, so a failure after creation can quietly un-replicate a
-// promoted table.
 func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		return nil, fmt.Errorf("twenty: table name is required (the object's plural api name, e.g. people)")
+		return nil, fmt.Errorf("twenty: table name is required")
+	}
+
+	objectName := name
+	if strings.HasPrefix(name, "custom:") {
+		objectName = strings.TrimSpace(strings.TrimPrefix(name, "custom:"))
+		if objectName == "" {
+			return nil, fmt.Errorf("twenty: custom object name is required after custom:")
+		}
+	} else if _, ok := standardTables[name]; !ok {
+		supported := make([]string, 0, len(standardTables))
+		for table := range standardTables {
+			supported = append(supported, table)
+		}
+		sortStrings(supported)
+		return nil, fmt.Errorf("twenty: unsupported table %q (supported: %s, or use 'custom:<object_name>' for custom objects)",
+			name, strings.Join(supported, ", "))
 	}
 
 	objects, err := s.fetchObjects(ctx)
@@ -281,7 +195,7 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 		return nil, err
 	}
 
-	obj, err := findObject(objects, name)
+	obj, err := findObject(objects, objectName)
 	if err != nil {
 		return nil, err
 	}
@@ -319,11 +233,6 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 	}, nil
 }
 
-// findObject resolves a table name to an object definition.
-//
-// Matching is on namePlural — the REST path segment — but a singular name is
-// accepted too, because "person" vs "people" is the single easiest mistake to
-// make when writing a CronJob and the API's 404 for it says nothing useful.
 func findObject(objects []objectMeta, name string) (*objectMeta, error) {
 	for i := range objects {
 		if objects[i].NamePlural == name {
@@ -364,12 +273,6 @@ func (s *Source) read(ctx context.Context, plan *tablePlan, opts source.ReadOpti
 	return results, nil
 }
 
-// buildFilter renders Twenty's filter expression for one pass.
-//
-// Only the START bound of the window is applied. Twenty would accept an upper
-// bound too, but applying one would make a re-run of an old window silently DROP
-// rows edited since — and merge is idempotent, so a wider window costs requests,
-// never correctness. Same reasoning as the abra and fakturoid ports.
 func buildFilter(plan *tablePlan, opts source.ReadOptions, deletedOnly bool) string {
 	parts := make([]string, 0, 2)
 	if plan.hasUpdatedAt && opts.IntervalStart != nil {
@@ -389,7 +292,6 @@ func buildFilter(plan *tablePlan, opts source.ReadOptions, deletedOnly bool) str
 	}
 }
 
-// readAll runs the live pass and, when enabled, the soft-delete pass.
 func (s *Source) readAll(ctx context.Context, plan *tablePlan, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	drift := map[string]struct{}{}
 
@@ -407,9 +309,7 @@ func (s *Source) readAll(ctx context.Context, plan *tablePlan, opts source.ReadO
 	}
 
 	if len(drift) > 0 {
-		// Loud, once per run. A key Twenty returned that the metadata never
-		// declared is data we are dropping, and we would rather know.
-		config.Debug("[TWENTY] ⚠️ %s: %d undeclared field(s) dropped: %s",
+		config.Debug("[TWENTY] %s: %d undeclared field(s) dropped: %s",
 			plan.object, len(drift), strings.Join(sortedKeys(drift), ", "))
 	}
 	config.Debug("[TWENTY] %s complete: %d live + %d soft-deleted row(s)",
@@ -422,7 +322,6 @@ type passResult struct {
 	serverTotal int
 }
 
-// readPass walks one filtered cursor sequence to exhaustion.
 func (s *Source) readPass(
 	ctx context.Context,
 	plan *tablePlan,
@@ -451,7 +350,6 @@ func (s *Source) readPass(
 
 		req := s.client.R(ctx).
 			SetQueryParam("limit", strconv.Itoa(pageSize)).
-			// ⚠️ Always flat. See the package doc.
 			SetQueryParam("depth", "0")
 		if filter != "" {
 			req = req.SetQueryParam("filter", filter)
@@ -493,9 +391,6 @@ func (s *Source) readPass(
 		config.Debug("[TWENTY] %s (%s) page %d: %d row(s) (running total %d)",
 			plan.object, label, page, len(items), out.rows)
 
-		// hasNextPage is authoritative; the empty-cursor and short-page checks are
-		// belt-and-braces against a server that sets it without advancing, which
-		// would otherwise spin until the page guard.
 		if !info.HasNextPage || info.EndCursor == "" || len(items) == 0 {
 			break
 		}
@@ -506,31 +401,18 @@ func (s *Source) readPass(
 		cursor = info.EndCursor
 	}
 
-	// ⚠️ SILENT-ZERO GUARD. Twenty told us how many rows match; if it said "some"
-	// and we read none, that is a read bug, NOT an empty table — and every other
-	// signal would say success (exit 0, "Ingestion completed successfully", no
-	// rows written). Fail loudly instead.
 	if out.serverTotal > 0 && out.rows == 0 {
 		return out, fmt.Errorf(
 			"twenty: %s (%s pass) reported %d matching row(s) but the read returned none — "+
 				"this is a read bug, not an empty table", plan.object, label, out.serverTotal)
 	}
 	if out.serverTotal >= 0 && out.rows != out.serverTotal {
-		// Not an error: rows can legitimately appear or vanish during a long walk.
-		// Worth surfacing though, because a large gap usually means a paging bug.
 		config.Debug("[TWENTY] %s (%s): read %d row(s), server reported %d at start of walk",
 			plan.object, label, out.rows, out.serverTotal)
 	}
 	return out, nil
 }
 
-// extractRecords unwraps Twenty's core list envelope:
-//
-//	{"data":{"people":[…]},"pageInfo":{…},"totalCount":68279}
-//
-// The array key is the object's plural name. It is looked up by name first and
-// then by "the only array under data", because treating a key mismatch as an
-// empty page is precisely how a read bug disguises itself as an empty table.
 func extractRecords(body []byte, object string) ([]map[string]interface{}, pageInfo, int, error) {
 	var env struct {
 		Data       map[string]json.RawMessage `json:"data"`
@@ -554,8 +436,6 @@ func extractRecords(body []byte, object string) ([]map[string]interface{}, pageI
 	decode := func(raw json.RawMessage) ([]map[string]interface{}, bool) {
 		var items []map[string]interface{}
 		d := json.NewDecoder(strings.NewReader(string(raw)))
-		// ⚠️ UseNumber: Twenty carries money as integer amountMicros, which passes
-		// 2^53 for large amounts and would lose its last digits through float64.
 		d.UseNumber()
 		if err := d.Decode(&items); err != nil {
 			return nil, false
@@ -579,12 +459,8 @@ func extractRecords(body []byte, object string) ([]map[string]interface{}, pageI
 	return nil, env.PageInfo, total, nil
 }
 
-// projectRow maps one Twenty record onto the planned columns, coercing each
-// value to its declared type and recording anything undeclared as drift.
 func projectRow(item map[string]interface{}, plan *tablePlan, drift map[string]struct{}) map[string]interface{} {
 	row := make(map[string]interface{}, len(plan.columns))
-	// Start every declared column at NULL so a row missing a field produces a
-	// NULL rather than a ragged batch.
 	for _, c := range plan.columns {
 		row[c.Name] = nil
 	}
@@ -602,12 +478,6 @@ func projectRow(item map[string]interface{}, plan *tablePlan, drift map[string]s
 	return row
 }
 
-// coerce converts one Twenty JSON value to the declared column type.
-//
-// ⚠️ TIMESTAMPS AND DATES ARE PARSED HERE, IN GO, ON PURPOSE. The Arrow builders
-// accept a string and fall back to AppendNull() when they cannot parse it — a
-// silent per-row data loss with no error anywhere. Parsing here means an
-// unexpected format shows up as a NULL we chose.
 func coerce(v interface{}, dt schema.DataType) interface{} {
 	if v == nil {
 		return nil
@@ -681,12 +551,14 @@ func coerce(v interface{}, dt schema.DataType) interface{} {
 		}
 		return parseTwentyTimestamp(s)
 
-	default: // schema.TypeString — including every composite, carried as JSON text.
+	case schema.TypeJSON:
+		return v
+
+	default:
 		switch t := v.(type) {
 		case string:
 			return t
 		case json.Number:
-			// The exact digits Twenty sent. No float round-trip.
 			return t.String()
 		case bool:
 			return strconv.FormatBool(t)
@@ -702,10 +574,6 @@ func coerce(v interface{}, dt schema.DataType) interface{} {
 	}
 }
 
-// parseTwentyDate handles Twenty's plain calendar dates ("2026-07-30").
-//
-// Twenty's DATE fields are calendar dates (lastLogin, renewalDate) and carry no
-// offset. An empty string is Twenty's "unset" for some custom fields.
 func parseTwentyDate(s string) interface{} {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -719,8 +587,6 @@ func parseTwentyDate(s string) interface{} {
 	return nil
 }
 
-// parseTwentyTimestamp handles "2026-08-15T01:44:03.057Z" and neighbouring
-// shapes, normalising to UTC — these are true instants.
 func parseTwentyTimestamp(s string) interface{} {
 	s = strings.TrimSpace(s)
 	if s == "" {

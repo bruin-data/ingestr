@@ -91,10 +91,8 @@ func TestDataTypeFor(t *testing.T) {
 	assert.Equal(t, schema.TypeString, str("TEXT"))
 	assert.Equal(t, schema.TypeString, str("SELECT"))
 
-	// Composites carry JSON text in a String column — TypeJSON has no mapping in
-	// several destinations.
 	for _, composite := range []string{"EMAILS", "PHONES", "LINKS", "ADDRESS", "CURRENCY", "FULL_NAME", "ACTOR", "RICH_TEXT_V2", "ARRAY", "MULTI_SELECT", "RAW_JSON"} {
-		assert.Equal(t, schema.TypeString, str(composite), composite)
+		assert.Equal(t, schema.TypeJSON, str(composite), composite)
 	}
 
 	// NUMBER honours settings.dataType: ints stay ints, anything else keeps its
@@ -153,8 +151,6 @@ func TestBuildPlan(t *testing.T) {
 		names = append(names, c.Name)
 	}
 
-	// ⚠️ The FK, not the relation name — depth=0 returns companyId, never a
-	// nested company object.
 	assert.Contains(t, names, "companyId")
 	assert.NotContains(t, names, "company")
 
@@ -182,6 +178,8 @@ func TestBuildPlan(t *testing.T) {
 	assert.True(t, id.IsPrimaryKey)
 	assert.False(t, id.Nullable)
 	assert.Equal(t, schema.TypeString, id.DataType)
+	assert.Equal(t, schema.TypeJSON, plan.typeOf["name"])
+	assert.Equal(t, schema.TypeJSON, plan.typeOf["emails"])
 }
 
 // Without `id` there is nothing to deduplicate on, and under an append-style
@@ -251,8 +249,6 @@ func TestExtractRecords(t *testing.T) {
 	assert.Equal(t, "eyJpZCI6ImEifQ==", info.EndCursor)
 	assert.Equal(t, 68279, total)
 
-	// ⚠️ A key mismatch must NOT read as an empty page — that is exactly how a
-	// read bug disguises itself as an empty table.
 	items, _, _, err = extractRecords([]byte(`{"data":{"somethingElse":[{"id":"b"}]},"pageInfo":{},"totalCount":1}`), "people")
 	require.NoError(t, err)
 	require.Len(t, items, 1)
@@ -263,16 +259,15 @@ func TestExtractRecords(t *testing.T) {
 	assert.Contains(t, err.Error(), "no data envelope")
 }
 
-// ⚠️ Twenty carries money as integer amountMicros, which passes 2^53 for large
-// amounts and would lose its last digits through a float64 round-trip.
 func TestExtractRecordsKeepsBigIntegersExact(t *testing.T) {
 	t.Parallel()
 	body := `{"data":{"opportunities":[{"id":"a","amount":{"amountMicros":9007199254740993,"currencyCode":"CZK"}}]},"pageInfo":{},"totalCount":1}`
 	items, _, _, err := extractRecords([]byte(body), "opportunities")
 	require.NoError(t, err)
 
-	got := coerce(items[0]["amount"], schema.TypeString)
-	assert.Contains(t, got, "9007199254740993", "amountMicros must survive verbatim, not as 9.007199254740992e+15")
+	got, err := json.Marshal(coerce(items[0]["amount"], schema.TypeJSON))
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "9007199254740993", "amountMicros must survive verbatim, not as 9.007199254740992e+15")
 }
 
 func TestCoerce(t *testing.T) {
@@ -283,9 +278,8 @@ func TestCoerce(t *testing.T) {
 	assert.Equal(t, true, coerce(true, schema.TypeBoolean))
 	assert.Nil(t, coerce(nil, schema.TypeString))
 
-	// Composites land as compact JSON text.
-	got := coerce(map[string]interface{}{"primaryEmail": "a@b.c", "additionalEmails": []interface{}{}}, schema.TypeString)
-	assert.JSONEq(t, `{"primaryEmail":"a@b.c","additionalEmails":[]}`, got.(string))
+	composite := map[string]interface{}{"primaryEmail": "a@b.c", "additionalEmails": []interface{}{}}
+	assert.Equal(t, composite, coerce(composite, schema.TypeJSON))
 
 	// Twenty's "unset" for several custom fields is an empty string, not null.
 	assert.Nil(t, coerce("", schema.TypeDate))
@@ -309,12 +303,9 @@ func TestParseTwentyTimestampAndDate(t *testing.T) {
 	assert.Nil(t, parseTwentyDate("nope"))
 }
 
-// ── End-to-end against a fake Twenty ─────────────────────────────────────────
-
 type fakeTwenty struct {
-	t *testing.T
-	// people is the full live set; deleted are the soft-deleted ones, which the
-	// real API hides unless deletedAt[is]:NOT_NULL is asked for.
+	t       *testing.T
+	objects []objectMeta
 	people  []map[string]interface{}
 	deleted []map[string]interface{}
 
@@ -328,11 +319,14 @@ func (f *fakeTwenty) handler() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.URL.Path == "/rest/metadata/objects" {
-			obj := personMeta()
+			objects := f.objects
+			if len(objects) == 0 {
+				objects = []objectMeta{personMeta()}
+			}
 			require.NoError(f.t, json.NewEncoder(w).Encode(map[string]interface{}{
-				"data":       map[string]interface{}{"objects": []objectMeta{obj}},
+				"data":       map[string]interface{}{"objects": objects},
 				"pageInfo":   map[string]interface{}{"hasNextPage": false},
-				"totalCount": 1,
+				"totalCount": len(objects),
 			}))
 			return
 		}
@@ -478,8 +472,6 @@ func TestReadSkipsSoftDeletePassWhenDisabled(t *testing.T) {
 	assert.NotContains(t, strings.Join(fake.filtersSeen, "|"), "deletedAt")
 }
 
-// ⚠️ THE SILENT-ZERO GUARD. Twenty said rows match; we read none. Every other
-// signal would report success — exit 0, "completed successfully", no rows.
 func TestReadFailsWhenServerReportsRowsButReturnsNone(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -538,7 +530,7 @@ func TestReadRefusesRepeatedCursor(t *testing.T) {
 	assert.Contains(t, err.Error(), "same cursor twice")
 }
 
-func TestGetTableRejectsUnknownObject(t *testing.T) {
+func TestGetTableRequiresCustomPrefix(t *testing.T) {
 	fake := &fakeTwenty{t: t}
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
@@ -546,7 +538,21 @@ func TestGetTableRejectsUnknownObject(t *testing.T) {
 	s := connectTo(t, srv, "")
 	_, err := s.GetTable(context.Background(), source.TableRequest{Name: "leads"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "has no object \"leads\"")
+	assert.Contains(t, err.Error(), "use 'custom:<object_name>'")
+}
+
+func TestGetTableResolvesCustomObject(t *testing.T) {
+	leads := personMeta()
+	leads.NameSingular = "lead"
+	leads.NamePlural = "leads"
+	fake := &fakeTwenty{t: t, objects: []objectMeta{leads}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	s := connectTo(t, srv, "")
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "custom:leads"})
+	require.NoError(t, err)
+	assert.Equal(t, "leads", table.Name())
 }
 
 func TestSchemesAndIncrementality(t *testing.T) {

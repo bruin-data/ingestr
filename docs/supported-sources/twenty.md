@@ -37,23 +37,30 @@ ingestr ingest \
 
 ## Tables
 
-The table name is an object's **plural API name** — `people`, `companies`,
-`opportunities`, `notes`, `tasks`, `leads`, `workspaceMembers`, and any custom
-object your workspace defines.
+Twenty supports the following tables:
 
-There is no fixed table list, because Twenty has no fixed object list. Every
-object, standard or custom, publishes its fields and types under
-`/rest/metadata/objects`, and ingestr reads that to build the table's schema. Two
-workspaces of the same Twenty version can therefore expose different tables and
-very different columns, and both are handled by the same connector.
+| Table | PK | Inc Key | Inc Strategy | Details |
+|-------|----|---------|--------------|---------|
+| `companies` | id | updatedAt | merge | Companies in the workspace. |
+| `notes` | id | updatedAt | merge | Notes attached to workspace records. |
+| `opportunities` | id | updatedAt | merge | Sales opportunities. |
+| `people` | id | updatedAt | merge | People in the workspace. |
+| `tasks` | id | updatedAt | merge | Tasks attached to workspace records. |
+| `workspaceMembers` | id | updatedAt | merge | Members of the workspace. |
+| `custom:<object_name>` | id | updatedAt | merge | A custom object, using its plural API name. |
 
-Passing a singular name is caught and corrected:
+Twenty exposes custom objects through the same REST API as standard objects. To
+ingest one, prefix its plural API name with `custom:`, for example
+`custom:leads`. The connector reads the object's metadata at runtime, so custom
+fields are included automatically.
 
+```sh
+ingestr ingest \
+  --source-uri 'twenty://api.twenty.com?api_key=eyJ...' \
+  --source-table 'custom:leads' \
+  --dest-uri $DEST \
+  --dest-table 'main.leads'
 ```
-twenty: "person" is the singular name; use the plural api name "people" as the table
-```
-
-An unknown object lists what the workspace actually has.
 
 ## Columns
 
@@ -62,7 +69,7 @@ Columns follow Twenty's field names verbatim.
 - **Relations become foreign keys.** A person's `company` relation lands as the
   `companyId` column, matching what the API returns. One-to-many relations
   (a person's `noteTargets`) produce no column — that key lives on the child.
-- **Composite fields land as JSON text** rather than being flattened:
+- **Composite fields use the JSON type** rather than being flattened:
   `name`, `emails`, `phones`, `address`, `domainName`, `linkedinLink`, `amount`,
   `createdBy`, `updatedBy`.
 - **Money is not a float.** Twenty stores currency as
