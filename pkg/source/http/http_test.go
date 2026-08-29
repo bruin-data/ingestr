@@ -330,6 +330,63 @@ func TestHTTPSourceResumesInterruptedResponse(t *testing.T) {
 	assert.EqualValues(t, 2, requests.Load())
 }
 
+func TestHTTPSourceRejectsChangedOrMissingResumeValidator(t *testing.T) {
+	data := []byte("id,name\n1,alpha\n2,beta\n")
+	const cut = 14
+	tests := []struct {
+		name          string
+		initialHeader http.Header
+		resumeHeader  http.Header
+		errorContains string
+	}{
+		{
+			name:          "missing ETag",
+			initialHeader: http.Header{"ETag": {`"stable"`}},
+			resumeHeader:  http.Header{},
+			errorContains: "ETag was missing or changed",
+		},
+		{
+			name:          "changed Last-Modified",
+			initialHeader: http.Header{"Last-Modified": {"Wed, 21 Oct 2015 07:28:00 GMT"}},
+			resumeHeader:  http.Header{"Last-Modified": {"Thu, 22 Oct 2015 07:28:00 GMT"}},
+			errorContains: "Last-Modified was missing or changed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				request := requests.Add(1)
+				w.Header().Set("Content-Type", "text/csv")
+				if request == 1 {
+					for name, values := range tt.initialHeader {
+						w.Header()[name] = values
+					}
+					w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(data[:cut])
+					return
+				}
+
+				for name, values := range tt.resumeHeader {
+					w.Header()[name] = values
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", cut, len(data)-1, len(data)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(data)-cut))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(data[cut:])
+			}))
+			defer srv.Close()
+
+			s := connectedSource(t, srv.URL+"/data.csv#ingestr:retries=0")
+			_, err := readRows(t, s, "data", source.ReadOptions{})
+			assert.ErrorContains(t, err, tt.errorContains)
+			assert.EqualValues(t, 2, requests.Load())
+		})
+	}
+}
+
 func TestHTTPSourceDoesNotFakeResumeWithoutValidator(t *testing.T) {
 	data := []byte("id\n1\n2\n")
 	var requests atomic.Int32

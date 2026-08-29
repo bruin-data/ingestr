@@ -161,7 +161,15 @@ func Read(ctx context.Context, reader io.Reader, opts source.ReadOptions, result
 		}
 
 		var item map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &item); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if err := decoder.Decode(&item); err != nil {
+			return totalRows, batchNum, fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			if err == nil {
+				err = fmt.Errorf("multiple JSON values")
+			}
 			return totalRows, batchNum, fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
 		}
 

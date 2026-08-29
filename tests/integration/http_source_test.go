@@ -50,7 +50,7 @@ func TestHTTPSourcePipelineFileFormatsAndAuthentication(t *testing.T) {
 		},
 		"/api/jsonl": {
 			contentType: "application/x-ndjson",
-			body:        []byte("{\"id\":1,\"name\":\"user_1\"}\n{\"id\":2,\"name\":\"user_2\"}\n"),
+			body:        []byte("{\"id\":1,\"name\":\"user_1\"}\n{\"id\":9007199254740993,\"name\":\"large_id\"}\n"),
 			authorized: func(r *http.Request) bool {
 				return r.Header.Get("Authorization") == "Bearer jsonl-token"
 			},
@@ -86,26 +86,31 @@ func TestHTTPSourcePipelineFileFormatsAndAuthentication(t *testing.T) {
 		name        string
 		sourceURI   string
 		sourceTable string
+		expected    []string
 	}{
 		{
 			name:        "CSV without authentication selected by URL extension",
 			sourceURI:   server.URL + "/public/users.csv",
 			sourceTable: "users",
+			expected:    []string{"1:user_1", "2:user_2"},
 		},
 		{
 			name:        "JSON with API key header and explicit format hint",
 			sourceURI:   server.URL + "/api/json#ingestr:header.X-API-Key=json-secret",
 			sourceTable: "users#json",
+			expected:    []string{"1:user_1", "2:user_2"},
 		},
 		{
 			name:        "JSONL with bearer authentication selected by content type",
 			sourceURI:   server.URL + "/api/jsonl#ingestr:bearer_token=jsonl-token",
 			sourceTable: "users",
+			expected:    []string{"1:user_1", "9007199254740993:large_id"},
 		},
 		{
 			name:        "Parquet with basic authentication selected by URL extension",
 			sourceURI:   server.URL + "/private/users.parquet#ingestr:basic_user=parquet-user&basic_password=parquet-password",
 			sourceTable: "users",
+			expected:    []string{"1:user_1", "2:user_2"},
 		},
 	}
 
@@ -140,7 +145,7 @@ func TestHTTPSourcePipelineFileFormatsAndAuthentication(t *testing.T) {
 				actual = append(actual, fmt.Sprintf("%d:%s", id, name))
 			}
 			require.NoError(t, rows.Err())
-			assert.Equal(t, []string{"1:user_1", "2:user_2"}, actual)
+			assert.Equal(t, tt.expected, actual)
 		})
 	}
 }

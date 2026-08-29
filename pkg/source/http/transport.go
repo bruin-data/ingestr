@@ -64,7 +64,7 @@ func parseSourceURI(raw string) (*url.URL, requestOptions, error) {
 		return parsed, opts, nil
 	}
 	if !strings.HasPrefix(fragment, "ingestr:") {
-		return nil, requestOptions{}, fmt.Errorf("HTTP source URI fragment must start with ingestr:")
+		return nil, requestOptions{}, fmt.Errorf("HTTP source URI fragment must use the ingestr: prefix")
 	}
 
 	values, err := url.ParseQuery(strings.TrimPrefix(fragment, "ingestr:"))
@@ -97,7 +97,7 @@ func parseSourceURI(raw string) (*url.URL, requestOptions, error) {
 			return nil, requestOptions{}, fmt.Errorf("HTTP header %q cannot be configured", name)
 		}
 		if name == "Authorization" && opts.headers.Get(name) != "" {
-			return nil, requestOptions{}, fmt.Errorf("Authorization cannot be configured more than once")
+			return nil, requestOptions{}, fmt.Errorf("authorization cannot be configured more than once")
 		}
 		for _, value := range entries {
 			opts.headers.Add(name, value)
@@ -353,9 +353,13 @@ func (r *responseStream) Read(p []byte) (int, error) {
 		if resumeErr != nil {
 			return 0, fmt.Errorf("HTTP response interrupted after %d bytes: %w", r.offset, resumeErr)
 		}
-		if r.etag != "" && resp.Header.Get("ETag") != "" && resp.Header.Get("ETag") != r.etag {
+		if strongETag(r.etag) && resp.Header.Get("ETag") != r.etag {
 			_ = resp.Body.Close()
-			return 0, fmt.Errorf("HTTP source ETag changed while resuming")
+			return 0, fmt.Errorf("HTTP source ETag was missing or changed while resuming")
+		}
+		if !strongETag(r.etag) && resp.Header.Get("Last-Modified") != r.modified {
+			_ = resp.Body.Close()
+			return 0, fmt.Errorf("HTTP source Last-Modified was missing or changed while resuming")
 		}
 		_, total, _ := parseContentRange(resp.Header.Get("Content-Range"))
 		if r.total >= 0 && total >= 0 && total != r.total {
