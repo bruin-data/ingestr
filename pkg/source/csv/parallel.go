@@ -150,16 +150,22 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 		totalRows := 0
 		batchNum := 0
 		failed := false
+		finished := false
 		for slot := range pending {
 			segResults := <-slot
 			for _, res := range segResults {
-				if failed {
+				if failed || finished {
 					if res.Batch != nil {
 						res.Batch.Release()
 					}
 					continue
 				}
 				if res.Err == nil && res.Batch != nil {
+					if opts.Limit > 0 && totalRows+int(res.Batch.NumRows()) > opts.Limit {
+						sliced := res.Batch.NewSlice(0, int64(opts.Limit-totalRows))
+						res.Batch.Release()
+						res.Batch = sliced
+					}
 					batchNum++
 					totalRows += int(res.Batch.NumRows())
 					config.Debug("[CSV] Batch %d: %d rows (total: %d)", batchNum, res.Batch.NumRows(), totalRows)
@@ -168,6 +174,8 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 				case results <- res:
 					if res.Err != nil {
 						failed = true
+					} else if opts.Limit > 0 && totalRows >= opts.Limit {
+						finished = true
 					}
 				case <-ctx.Done():
 					if res.Batch != nil {
@@ -176,7 +184,7 @@ func (s *CSVSource) readParallel(ctx context.Context, opts source.ReadOptions, f
 					failed = true
 				}
 			}
-			if failed {
+			if failed || finished {
 				cancel()
 			}
 		}

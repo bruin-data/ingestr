@@ -264,7 +264,7 @@ func TestCSVSource_ReadsZIPMembers(t *testing.T) {
 		data string
 	}{
 		{name: "data/day-1.csv", data: "id,name\n1,Alice\n2,Bob\n"},
-		{name: "data/day-2.csv", data: "id,name\n3,Carol\n4,Dave\n"},
+		{name: "data/day-2.csv", data: "id,name\n3,Carol\n4,\"unterminated\n"},
 		{name: "notes.txt", data: "ignored"},
 	})
 

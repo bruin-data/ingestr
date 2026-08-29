@@ -263,11 +263,15 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				accBytes += arrowconv.CellsBytes(record)
 			}
 
-			if builder.rows >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) {
+			reachedLimit := opts.Limit > 0 && totalRows+builder.rows >= opts.Limit
+			if builder.rows >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) || reachedLimit {
 				if !flush() {
 					return
 				}
 				accBytes = 0
+				if reachedLimit {
+					break
+				}
 			}
 		}
 
