@@ -264,6 +264,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "RevenueCat", link: "/supported-sources/revenuecat.md" },
               { text: "S3", link: "/supported-sources/s3.md" },
               { text: "Salesforce", link: "/supported-sources/salesforce.md" },
+              { text: "SatisMeter", link: "/supported-sources/satismeter.md" },
               { text: "SendGrid", link: "/supported-sources/sendgrid.md" },
               { text: "SFTP", link: "/supported-sources/sftp.md"},
               { text: "SharePoint", link: "/supported-sources/sharepoint.md" },

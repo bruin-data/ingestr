@@ -390,6 +390,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("ripestat", "RIPEstat", []string{"ripestat"}, true, false),
 		genericURIConnector("revenuecat", "RevenueCat", []string{"revenuecat"}, true, false),
 		genericURIConnector("salesforce", "Salesforce", []string{"salesforce"}, true, false),
+		genericURIConnector("satismeter", "SatisMeter", []string{"satismeter"}, true, false),
 		genericURIConnector("sendgrid", "SendGrid", []string{"sendgrid"}, true, false),
 		genericURIConnector("sharepoint", "SharePoint", []string{"sharepoint"}, true, false),
 		genericURIConnector("shopify", "Shopify", []string{"shopify"}, true, false),
