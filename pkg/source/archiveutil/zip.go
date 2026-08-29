@@ -314,7 +314,7 @@ func ForwardBatches(ctx context.Context, destination chan<- source.RecordBatchRe
 	var firstErr error
 	for result := range batches {
 		if result.Err != nil {
-			if firstErr == nil {
+			if firstErr == nil && (limit <= 0 || rows < limit) {
 				firstErr = result.Err
 			}
 			continue
