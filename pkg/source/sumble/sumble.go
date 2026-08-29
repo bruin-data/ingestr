@@ -507,6 +507,12 @@ func (s *SumbleSource) readListMembers(ctx context.Context, listIDs []int64, cfg
 	if workers <= 0 || workers > maxWorkers {
 		workers = maxWorkers
 	}
+	// A list's size is only known once it has been fetched, so parallel workers
+	// would each start a fetch that the row budget then discards. Serialize the
+	// fan-out to spend exactly as many requests as the budget needs.
+	if rc.opts.Limit > 0 {
+		workers = 1
+	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(workers)

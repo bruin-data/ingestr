@@ -501,3 +501,36 @@ func TestRowLimiterSharesBudgetAcrossWorkers(t *testing.T) {
 	assert.Equal(t, 7, unlimited.take(7))
 	assert.False(t, unlimited.exhausted())
 }
+
+// A row limit serializes the list fan-out so no worker spends a request the
+// budget would immediately discard.
+func TestListMembersStopFetchingAtRowLimit(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"list_info":{"id":1},"people":[{"id":1},{"id":2}]}`))
+	}))
+	defer server.Close()
+
+	connector := NewSumbleSource()
+	connector.client = testSumbleClient(server.URL)
+
+	spec := sumbleReadSpec{table: "contact_list_people", listIDs: []int64{1, 2, 3, 4, 5}}
+	results, err := connector.read(context.Background(), spec, source.ReadOptions{Limit: 3})
+	require.NoError(t, err)
+	batches, readErr := drain(results)
+	require.NoError(t, readErr)
+	defer func() {
+		for _, batch := range batches {
+			batch.Release()
+		}
+	}()
+
+	total := 0
+	for _, batch := range batches {
+		total += int(batch.NumRows())
+	}
+	assert.Equal(t, 3, total)
+	assert.EqualValues(t, 2, requests.Load())
+}
