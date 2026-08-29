@@ -5,6 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +17,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	pqgo "github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	pqfile "github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	pqschema "github.com/apache/arrow-go/v18/parquet/schema"
@@ -303,6 +308,36 @@ func TestBuildCopyIntoSQLWithFilesList(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestCopyFilesInBatchesCapsFilesClause(t *testing.T) {
+	var executed []string
+	capture := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		executed = append(executed, actualSQL)
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(capture))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	files := make([]string, maxFilesPerCopy+1)
+	for i := range files {
+		files[i] = fmt.Sprintf("batch_%d.parquet", i)
+	}
+
+	dest := &SnowflakeDestination{db: db}
+	copied, err := dest.copyFilesInBatches(t.Context(), `"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", files)
+	require.NoError(t, err)
+	assert.Equal(t, len(files), copied)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// Snowflake rejects a FILES clause with more than maxFilesPerCopy names.
+	require.Len(t, executed, 2)
+	assert.Equal(t, maxFilesPerCopy, strings.Count(executed[0], ".parquet'"))
+	assert.Equal(t, 1, strings.Count(executed[1], ".parquet'"))
+}
+
 func TestSnowflakeParquetWriterTimestampLogicalTypes(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
@@ -343,6 +378,135 @@ func TestSnowflakeParquetWriterTimestampLogicalTypes(t *testing.T) {
 	require.True(t, ok, "synced_at logical type = %T", syncedAt.LogicalType())
 	assert.Equal(t, pqschema.TimeUnitMicros, syncedAtLogical.TimeUnit())
 	assert.True(t, syncedAtLogical.IsAdjustedToUTC())
+}
+
+// The staged files are only useful if Snowflake can decode them, so assert the
+// codec that actually lands in the footer and read a value back through it.
+func TestSnowflakeParquetWriterCodec(t *testing.T) {
+	roundTrip := func(t *testing.T) compress.Compression {
+		t.Helper()
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		defer mem.AssertSize(t, 0)
+
+		builder := array.NewRecordBuilder(mem, arrow.NewSchema([]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		}, nil))
+		builder.Field(0).(*array.Int64Builder).Append(4242)
+		record := builder.NewRecordBatch()
+		builder.Release()
+		defer record.Release()
+
+		var buf bytes.Buffer
+		writerProps, arrowProps := snowflakeParquetWriterProperties()
+		writer, err := pqarrow.NewFileWriter(record.Schema(), &buf, writerProps, arrowProps)
+		require.NoError(t, err)
+		require.NoError(t, writer.Write(record))
+		require.NoError(t, writer.Close())
+
+		reader, err := pqfile.NewParquetReader(bytes.NewReader(buf.Bytes()))
+		require.NoError(t, err)
+		defer func() { _ = reader.Close() }()
+
+		chunk, err := reader.MetaData().RowGroup(0).ColumnChunk(0)
+		require.NoError(t, err)
+
+		col, err := reader.RowGroup(0).Column(0)
+		require.NoError(t, err)
+		values := make([]int64, 1)
+		read, _, err := col.(*pqfile.Int64ColumnChunkReader).ReadBatch(1, values, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), read)
+		assert.Equal(t, int64(4242), values[0], "value must survive the round trip")
+
+		return chunk.Compression()
+	}
+
+	t.Run("default is zstd", func(t *testing.T) {
+		assert.Equal(t, compress.Codecs.Zstd, roundTrip(t))
+	})
+
+	t.Run("env override", func(t *testing.T) {
+		t.Setenv("INGESTR_SNOWFLAKE_PARQUET_CODEC", "SNAPPY")
+		assert.Equal(t, compress.Codecs.Snappy, roundTrip(t))
+	})
+
+	t.Run("unrecognized override falls back to zstd", func(t *testing.T) {
+		t.Setenv("INGESTR_SNOWFLAKE_PARQUET_CODEC", "lz4")
+		assert.Equal(t, compress.Codecs.Zstd, roundTrip(t))
+	})
+}
+
+func TestSnowflakeTargetFileBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want int64
+	}{
+		{name: "unset", env: "", want: 32 << 20},
+		{name: "override", env: "8", want: 8 << 20},
+		{name: "zero flushes per batch", env: "0", want: 0},
+		{name: "negative falls back", env: "-1", want: 32 << 20},
+		{name: "unparseable falls back", env: "big", want: 32 << 20},
+		// Without the clamp the shift overflows to a negative size, which
+		// panics the buffer preallocation.
+		{name: "absurd value is clamped", env: "999999999999999", want: 1024 << 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", tt.env)
+			assert.Equal(t, tt.want, snowflakeTargetFileBytes())
+		})
+	}
+}
+
+// A multi-table write runs one WriteParallel per table concurrently, so files
+// have to close early once those uploaders collectively hold more than the
+// shared budget -- but only for uploaders actually holding something, or the
+// wide loads the budget exists for would be pushed into tiny files.
+func TestUploaderShouldFlush(t *testing.T) {
+	withBufferedBytes := func(t *testing.T, n int64) {
+		t.Helper()
+		bufferedBytes.Store(n)
+		t.Cleanup(func() { bufferedBytes.Store(0) })
+	}
+	buffered := func(n int) *bytes.Buffer { return bytes.NewBuffer(make([]byte, n)) }
+
+	t.Run("under the target and under budget", func(t *testing.T) {
+		withBufferedBytes(t, 0)
+		w := &snowflakeFileUploader{targetBytes: 32 << 20, buf: buffered(4 << 20)}
+		assert.False(t, w.shouldFlush())
+	})
+
+	t.Run("at the target", func(t *testing.T) {
+		withBufferedBytes(t, 0)
+		w := &snowflakeFileUploader{targetBytes: 32 << 20, buf: buffered(32 << 20)}
+		assert.True(t, w.shouldFlush())
+	})
+
+	t.Run("over budget closes early", func(t *testing.T) {
+		withBufferedBytes(t, uploaderBudgetBytes)
+		w := &snowflakeFileUploader{targetBytes: 32 << 20, buf: buffered(4 << 20)}
+		assert.True(t, w.shouldFlush())
+	})
+
+	t.Run("over budget still respects the adaptive floor", func(t *testing.T) {
+		withBufferedBytes(t, uploaderBudgetBytes)
+		w := &snowflakeFileUploader{targetBytes: 32 << 20, buf: buffered(minAdaptiveFlushBytes - 1)}
+		assert.False(t, w.shouldFlush(), "an idle uploader must not be pushed into sub-MiB files")
+	})
+
+	t.Run("idle uploader holds nothing", func(t *testing.T) {
+		withBufferedBytes(t, uploaderBudgetBytes)
+		w := &snowflakeFileUploader{targetBytes: 32 << 20}
+		assert.False(t, w.shouldFlush())
+	})
+
+	t.Run("zero target flushes every batch", func(t *testing.T) {
+		withBufferedBytes(t, 0)
+		w := &snowflakeFileUploader{targetBytes: 0}
+		assert.True(t, w.shouldFlush())
+	})
 }
 
 func TestGetTableSchemaPreservesSnowflakeTypeMetadata(t *testing.T) {
@@ -471,14 +635,433 @@ func TestMapDataTypeToSnowflake(t *testing.T) {
 	}
 }
 
-func newSingleRowRecordBatch() arrow.RecordBatch {
+func newSingleRowRecordBatch(mem memory.Allocator) arrow.RecordBatch {
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
 	}, nil)
-	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	builder := array.NewRecordBuilder(mem, arrowSchema)
 	defer builder.Release()
 	builder.Field(0).(*array.Int64Builder).Append(1)
 	return builder.NewRecordBatch()
+}
+
+func TestWriteParallelNonStagingCopiesByPrefix(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0")
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`COPY INTO .* FROM .*/ FILE_FORMAT =`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:       "public.events",
+		Parallelism: 1,
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func newSingleRowRecordBatchWithColumns(mem memory.Allocator, names ...string) arrow.RecordBatch {
+	fields := make([]arrow.Field, len(names))
+	for i, name := range names {
+		fields[i] = arrow.Field{Name: name, Type: arrow.PrimitiveTypes.Int64}
+	}
+	builder := array.NewRecordBuilder(mem, arrow.NewSchema(fields, nil))
+	defer builder.Release()
+	for i := range names {
+		builder.Field(i).(*array.Int64Builder).Append(int64(i))
+	}
+	return builder.NewRecordBatch()
+}
+
+// A retargeting schema aligner can change the Arrow schema mid-stream. The
+// parquet writer rejects a record whose schema differs from the one it was
+// created with, so the uploader has to roll over to a new file instead of
+// failing the whole write.
+func TestWriteParallelRollsOverFileOnSchemaChange(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatchWithColumns(mem, "id")}
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatchWithColumns(mem, "id", "extra")}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:       "public.events",
+		Parallelism: 1,
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A failed PUT has to abort the whole write: the error is returned, the
+// batches still queued behind it are drained and released rather than leaked,
+// and nothing further reaches Snowflake -- in particular no COPY, which would
+// publish a partial load. The write context is cancelled on failure, so later
+// statements are rejected before they get as far as the driver.
+func TestWriteParallelAbortsOnUploadFailure(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0") // one PUT per batch
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	var mu sync.Mutex
+	statements := map[string]bool{}
+	capture := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		statements[actualSQL] = true
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(capture))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	putErr := errors.New("stage is full")
+	mock.ExpectExec("PUT").WillReturnError(putErr)
+	// sqlmock stops consulting the matcher once every expectation is
+	// fulfilled, so leave surplus ones: without them a statement issued after
+	// the failure would never be recorded and the assertions below could not
+	// fail.
+	mock.MatchExpectationsInOrder(false)
+	for i := 0; i < 4; i++ {
+		mock.ExpectExec("").WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+
+	const batches = 8
+	records := make(chan source.RecordBatchResult, batches)
+	for i := 0; i < batches; i++ {
+		records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:        "public.events",
+		Parallelism:  1,
+		StagingTable: true,
+	})
+	require.ErrorIs(t, err, putErr)
+	assert.Contains(t, err.Error(), "snowflake parallel write failed")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for stmt := range statements {
+		assert.NotContains(t, stmt, "COPY INTO", "no COPY may run after the write failed")
+	}
+	assert.Len(t, statements, 1, "no further statements after the failing PUT: %v", statements)
+	assert.Zero(t, bufferedBytes.Load(), "a failed write must give back its buffer budget")
+}
+
+func TestWriteParallelCancelsOverlappedCopyOnUploadFailure(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0")
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.MatchExpectationsInOrder(false)
+
+	putErr := errors.New("stage is full")
+	mock.ExpectExec("PUT").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("PUT").WillDelayFor(100 * time.Millisecond).WillReturnError(putErr)
+	mock.ExpectExec("COPY INTO").WillDelayFor(5 * time.Second).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	start := time.Now()
+	err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:        "public.events",
+		Parallelism:  2,
+		StagingTable: true,
+	})
+	require.ErrorIs(t, err, putErr)
+	assert.Less(t, time.Since(start), time.Second, "upload failure should cancel the in-flight COPY")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The schema-change roll-over flushes mid-stream, so a PUT can fail while the
+// triggering record is still held. It has to be released like every other
+// batch, and the write has to abort.
+func TestWriteParallelAbortsWhenSchemaChangeFlushFails(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	putErr := errors.New("stage is full")
+	mock.ExpectExec("PUT").WillReturnError(putErr)
+
+	// Left at the default file size target so the only flush is the one the
+	// schema change forces.
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatchWithColumns(mem, "id")}
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatchWithColumns(mem, "id", "extra")}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:        "public.events",
+		Parallelism:  1,
+		StagingTable: true,
+	})
+	require.ErrorIs(t, err, putErr)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The shared budget is only meaningful if every uploader keeps bufferedBytes
+// in step with its own buffer, including when the buffer goes away.
+func TestUploaderAccountsBufferedBytes(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	require.Zero(t, bufferedBytes.Load(), "another test leaked buffered bytes")
+	t.Cleanup(func() { bufferedBytes.Store(0) })
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.ExpectExec("PUT").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	var rows atomic.Int64
+	writerProps, arrowProps := snowflakeParquetWriterProperties()
+	newUploader := func() *snowflakeFileUploader {
+		return &snowflakeFileUploader{
+			dest:        &SnowflakeDestination{db: db},
+			ctx:         t.Context(),
+			stageName:   `"PUBLIC".%"EVENTS"`,
+			loadID:      "123456789",
+			targetBytes: 32 << 20,
+			writerProps: writerProps,
+			arrowProps:  arrowProps,
+			rowsLoaded:  &rows,
+		}
+	}
+
+	appendOne := func(w *snowflakeFileUploader) {
+		t.Helper()
+		record := newSingleRowRecordBatch(mem)
+		require.NoError(t, w.append(record))
+		record.Release()
+	}
+
+	uploaded := newUploader()
+	appendOne(uploaded)
+	require.Positive(t, bufferedBytes.Load())
+	assert.Equal(t, uploaded.pendingBytes(), bufferedBytes.Load())
+
+	// A second uploader's bytes add to the same total, the way concurrent
+	// per-table writes do.
+	discarded := newUploader()
+	appendOne(discarded)
+	assert.Equal(t, uploaded.pendingBytes()+discarded.pendingBytes(), bufferedBytes.Load())
+
+	_, err = uploaded.flush()
+	require.NoError(t, err)
+	assert.Equal(t, discarded.pendingBytes(), bufferedBytes.Load(), "a flushed file releases its share")
+
+	discarded.discard()
+	assert.Zero(t, bufferedBytes.Load(), "a discarded file releases its share")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// discard drops the open file instead of uploading it, so a worker that gives
+// up after a failure cannot leave a partial file on the stage.
+func TestUploaderDiscardDropsOpenFileWithoutUploading(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	var rows atomic.Int64
+	writerProps, arrowProps := snowflakeParquetWriterProperties()
+	w := &snowflakeFileUploader{
+		dest:        &SnowflakeDestination{db: db},
+		ctx:         t.Context(),
+		stageName:   `"PUBLIC".%"EVENTS"`,
+		loadID:      "123456789",
+		targetBytes: 32 << 20,
+		writerProps: writerProps,
+		arrowProps:  arrowProps,
+		rowsLoaded:  &rows,
+	}
+
+	record := newSingleRowRecordBatch(mem)
+	require.NoError(t, w.append(record))
+	record.Release()
+	w.pendingRows = 1
+
+	w.discard()
+	assert.Zero(t, w.pendingBytes())
+	assert.Zero(t, w.pendingRows)
+
+	// No PUT expectation is registered, so any upload here fails the mock.
+	fileName, err := w.flush()
+	require.NoError(t, err)
+	assert.Empty(t, fileName)
+	assert.Zero(t, rows.Load(), "discarded rows must not be counted as loaded")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The final flush at end-of-stream is the one an uploader does not follow with
+// anything else, so a failure there is where buffered bytes are most likely to
+// stay counted against the shared budget forever.
+func TestWriteParallelReleasesBudgetWhenFinalFlushFails(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	require.Zero(t, bufferedBytes.Load(), "another test leaked buffered bytes")
+	t.Cleanup(func() { bufferedBytes.Store(0) })
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	putErr := errors.New("stage is full")
+	mock.ExpectExec("PUT").WillReturnError(putErr)
+
+	// Left at the default size target, so the batch is still buffered when the
+	// records channel closes and the only PUT is the end-of-stream flush.
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:        "public.events",
+		Parallelism:  1,
+		StagingTable: true,
+	})
+	require.ErrorIs(t, err, putErr)
+	assert.Zero(t, bufferedBytes.Load())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A source error must surface from WriteParallel rather than being swallowed
+// into a silently short write, and a batch attached to that error result has
+// to be released like any other -- see
+// pkg/destination/error_batch_release_test.go for the same contract across the
+// other destinations.
+func TestWriteParallelReturnsSourceError(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0")
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.MatchExpectationsInOrder(false)
+	mock.ExpectExec("PUT").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	sourceErr := errors.New("source read failed")
+	records := make(chan source.RecordBatchResult, 3)
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem), Err: sourceErr}
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:        "public.events",
+		Parallelism:  1,
+		StagingTable: true,
+	})
+	require.ErrorIs(t, err, sourceErr)
+}
+
+// With StagingTable set, COPY runs while uploads are still going, naming the
+// files that finished since the previous statement. How many files each COPY
+// picks up is a race, so this asserts only the invariant: every uploaded file
+// is named by exactly one COPY.
+func TestWriteParallelStagingLoadsEveryFileExactlyOnce(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0") // one file per batch
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	// sqlmock invokes the matcher once per candidate expectation, so the same
+	// statement can be offered several times; collect them as a set.
+	var mu sync.Mutex
+	puts := map[string]bool{}
+	copies := map[string]bool{}
+	capture := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasPrefix(actualSQL, "PUT "):
+			puts[actualSQL] = true
+		case strings.HasPrefix(actualSQL, "COPY INTO"):
+			copies[actualSQL] = true
+		}
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(capture))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.MatchExpectationsInOrder(false)
+
+	// One PUT per batch and at most one COPY per PUT, plus headroom so an
+	// unexpected extra statement fails on its own assertion rather than on a
+	// confusing "all expectations were already fulfilled".
+	const batches = 60
+	for i := 0; i < batches+8; i++ {
+		mock.ExpectExec("PUT").WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+
+	records := make(chan source.RecordBatchResult, batches)
+	for i := 0; i < batches; i++ {
+		records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:        "public.events",
+		Parallelism:  4,
+		StagingTable: true,
+	}))
+
+	fileRE := regexp.MustCompile(`batch_\d+_\d+\.parquet`)
+	uploaded := map[string]bool{}
+	for put := range puts {
+		name := fileRE.FindString(put)
+		require.NotEmpty(t, name)
+		uploaded[name] = true
+	}
+	require.Len(t, uploaded, batches)
+
+	loaded := map[string]int{}
+	for c := range copies {
+		require.Contains(t, c, "FILES = (", "overlapped COPY must name its files")
+		for _, name := range fileRE.FindAllString(c, -1) {
+			loaded[name]++
+		}
+	}
+	for name := range uploaded {
+		assert.Equal(t, 1, loaded[name], "file %s loaded %d times", name, loaded[name])
+	}
+	assert.Len(t, loaded, batches, "COPY named a file that was never uploaded")
 }
 
 // TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure reproduces the
@@ -534,7 +1117,7 @@ func TestMultiTableWriteDoesNotDeadlockUnderConnectionPressure(t *testing.T) {
 		defer close(records)
 		for j := 0; j < batchesPerTable; j++ {
 			for _, name := range tableNames {
-				records <- source.RecordBatchResult{TableName: name, Batch: newSingleRowRecordBatch()}
+				records <- source.RecordBatchResult{TableName: name, Batch: newSingleRowRecordBatch(memory.DefaultAllocator)}
 			}
 		}
 	}()

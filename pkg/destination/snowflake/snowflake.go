@@ -248,7 +248,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	uploaded := make(chan string, parallelism*4)
 	var totalRows atomic.Int64
-	var totalFiles atomic.Int64
+	writerProps, arrowProps := snowflakeParquetWriterProperties()
 
 	var uploadWg sync.WaitGroup
 	for i := 0; i < parallelism; i++ {
@@ -258,11 +258,14 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 			w := &snowflakeFileUploader{
 				dest:        d,
+				rowsLoaded:  &totalRows,
 				ctx:         writeCtx,
 				stageName:   stageName,
 				loadID:      loadID,
 				workerID:    workerID,
 				targetBytes: targetFileBytes,
+				writerProps: writerProps,
+				arrowProps:  arrowProps,
 			}
 
 			flush := func() bool {
@@ -272,7 +275,6 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 					return false
 				}
 				if fileName != "" {
-					totalFiles.Add(1)
 					uploaded <- fileName
 				}
 				return true
@@ -286,7 +288,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				select {
 				case result, ok = <-records:
 				default:
-					if w.pendingBytes() >= minAdaptiveFlushBytes && !flush() {
+					if !failed.Load() && w.pendingBytes() >= minAdaptiveFlushBytes && !flush() {
 						continue
 					}
 					result, ok = <-records
@@ -296,6 +298,9 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				}
 
 				if result.Err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
 					fail(result.Err)
 					continue
 				}
@@ -309,6 +314,14 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 					continue
 				}
 
+				// A mid-stream schema change (e.g. a retargeting schema
+				// aligner) ends the current file rather than the whole write;
+				// COPY matches columns by name across files.
+				if w.schemaChanged(record.Schema()) && !flush() {
+					record.Release()
+					continue
+				}
+
 				rows := record.NumRows()
 				err := w.append(record)
 				record.Release()
@@ -316,14 +329,20 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 					fail(err)
 					continue
 				}
-				totalRows.Add(rows)
+				w.pendingRows += rows
 
-				if w.pendingBytes() >= w.targetBytes {
+				if w.shouldFlush() {
 					flush()
 				}
 			}
 
-			flush()
+			if !failed.Load() {
+				flush()
+			}
+			// Unconditional: a no-op after a clean flush, but the only thing
+			// that gives back the buffer this worker still holds if that final
+			// flush failed.
+			w.discard()
 		}(i)
 	}
 
@@ -334,12 +353,11 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	// With overlapCopy each iteration loads whatever accumulated while the
 	// previous COPY ran; otherwise files collect for one final COPY.
-	var copyErr error
 	var copiedFiles int
 	var pending []string
 	for fileName := range uploaded {
 		pending = append(pending, fileName)
-		if !overlapCopy || copyErr != nil || failed.Load() {
+		if !overlapCopy || failed.Load() {
 			continue
 		}
 		// Drain whatever else is already uploaded before starting a COPY.
@@ -355,24 +373,40 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				break drain
 			}
 		}
-		if err := d.copyFiles(ctx, fullTable, stageName, loadID, pending); err != nil {
-			copyErr = err
+		copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending)
+		if err != nil {
 			fail(err)
 			continue
 		}
-		copiedFiles += len(pending)
-		pending = pending[:0]
+		copiedFiles += copied
+		pending = pending[copied:]
 	}
 
+	// firstErr is the earliest failure from either an uploader or a COPY, since
+	// the COPY loop reports through fail() too.
 	if firstErr != nil {
-		return fmt.Errorf("parallel upload failed: %w", firstErr)
+		return fmt.Errorf("snowflake parallel write failed: %w", firstErr)
 	}
 
 	if len(pending) > 0 {
-		if err := d.copyFiles(ctx, fullTable, stageName, loadID, pending); err != nil {
-			return fmt.Errorf("failed to COPY INTO: %w", err)
+		if overlapCopy {
+			// Unreachable today: the loop above truncates pending after every
+			// COPY and returns on error. Kept so a future change to that loop
+			// cannot silently drop files.
+			copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending)
+			if err != nil {
+				return fmt.Errorf("snowflake parallel write failed: %w", err)
+			}
+			copiedFiles += copied
+		} else {
+			// A FILES clause accepts at most 1,000 names. Once every upload is
+			// complete, the unique load prefix selects the same files without
+			// that limit and keeps direct writes in a single COPY statement.
+			if err := d.copyFiles(ctx, fullTable, stageName, loadID, nil); err != nil {
+				return fmt.Errorf("snowflake parallel write failed: %w", err)
+			}
+			copiedFiles += len(pending)
 		}
-		copiedFiles += len(pending)
 	}
 
 	if copiedFiles == 0 {
@@ -381,7 +415,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	}
 
 	elapsed := time.Since(startTotal)
-	config.Debug("[DEST] Total: %d rows in %d files written in %v (%.0f rows/sec)", totalRows.Load(), copiedFiles, elapsed, float64(totalRows.Load())/elapsed.Seconds())
+	config.Debug("[DEST] Total: %d rows in %d files staged and loaded in %v (%.0f rows/sec)", totalRows.Load(), copiedFiles, elapsed, float64(totalRows.Load())/elapsed.Seconds())
 	return nil
 }
 
@@ -395,26 +429,97 @@ type snowflakeFileUploader struct {
 	loadID      string
 	workerID    int
 	targetBytes int64
+	writerProps *parquet.WriterProperties
+	arrowProps  pqarrow.ArrowWriterProperties
+	rowsLoaded  *atomic.Int64
 
-	buf     *bytes.Buffer
-	writer  *pqarrow.FileWriter
-	fileNum int
+	buf            *bytes.Buffer
+	writer         *pqarrow.FileWriter
+	schema         *arrow.Schema
+	fileNum        int
+	pendingRows    int64
+	accountedBytes int64
+	lastFileBytes  int64
+}
+
+// bufferedBytes is the compressed parquet held across every uploader in the
+// process, kept current by account(). A multi-table write starts one
+// WriteParallel per table concurrently, so without a shared figure the size
+// target would apply tables * parallelism times over.
+var bufferedBytes atomic.Int64
+
+// uploaderBudgetBytes is the buffered total above which uploaders close their
+// files early. It only binds on wide multi-table loads: a single-table write
+// at the default 4-way parallelism stays well under it and keeps the full
+// size target.
+const uploaderBudgetBytes = 256 << 20
+
+// account brings bufferedBytes in step with this uploader's buffer. It has to
+// run after anything that changes the buffer, including dropping it.
+func (w *snowflakeFileUploader) account() {
+	pending := w.pendingBytes()
+	bufferedBytes.Add(pending - w.accountedBytes)
+	w.accountedBytes = pending
+}
+
+// shouldFlush reports whether the open file has served its purpose: it reached
+// the size target, or uploaders elsewhere in the process are collectively over
+// the budget and this one is holding enough to be worth closing. The budget
+// check is a soft ceiling — it can only act between record batches.
+func (w *snowflakeFileUploader) shouldFlush() bool {
+	pending := w.pendingBytes()
+	if pending >= w.targetBytes {
+		return true
+	}
+	return pending >= minAdaptiveFlushBytes && bufferedBytes.Load() >= uploaderBudgetBytes
+}
+
+// schemaChanged reports whether record can still go into the open file. A
+// pqarrow writer rejects records whose schema differs from the one it was
+// created with, so the caller has to close the file first and start a new one.
+func (w *snowflakeFileUploader) schemaChanged(schema *arrow.Schema) bool {
+	return w.writer != nil && !w.schema.Equal(schema)
 }
 
 func (w *snowflakeFileUploader) append(record arrow.RecordBatch) error {
 	if w.writer == nil {
-		w.buf = new(bytes.Buffer)
-		writerProps, arrowProps := snowflakeParquetWriterProperties()
-		writer, err := pqarrow.NewFileWriter(record.Schema(), w.buf, writerProps, arrowProps)
+		w.buf = bytes.NewBuffer(make([]byte, 0, w.initialBufBytes()))
+		writer, err := pqarrow.NewFileWriter(record.Schema(), w.buf, w.writerProps, w.arrowProps)
 		if err != nil {
 			return fmt.Errorf("failed to create parquet writer: %w", err)
 		}
 		w.writer = writer
+		w.schema = record.Schema()
 	}
 	if err := w.writer.Write(record); err != nil {
 		return fmt.Errorf("failed to write record to parquet: %w", err)
 	}
+	w.account()
 	return nil
+}
+
+// initialBufBytes sizes the new file's buffer from the previous file this
+// uploader produced, which is the only evidence available that the bytes will
+// actually be used. The first file preallocates nothing: most writes are far
+// smaller than the size target, and guessing from the target instead would
+// commit megabytes per uploader (times parallelism, times tables) before a
+// single row is known to exist.
+func (w *snowflakeFileUploader) initialBufBytes() int64 {
+	const maxPrealloc = 8 << 20
+	return min(w.lastFileBytes, maxPrealloc)
+}
+
+// discard throws away the open file without uploading it, for when the write
+// has already failed and nothing more should reach the stage.
+func (w *snowflakeFileUploader) discard() {
+	if w.writer != nil {
+		_ = w.writer.Close()
+		w.writer = nil
+	}
+	w.buf = nil
+	w.schema = nil
+	w.pendingRows = 0
+	w.account()
 }
 
 // pendingBytes is the compressed size written so far, excluding row-group
@@ -440,6 +545,7 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 	fileName := fmt.Sprintf("batch_%d_%d.parquet", w.workerID, w.fileNum)
 	startPut := time.Now()
 	sizeBytes := w.buf.Len()
+	w.lastFileBytes = int64(sizeBytes)
 
 	// Acquire a connection from the shared pool for just this PUT, so it's
 	// released back to the pool immediately afterward instead of being held
@@ -459,6 +565,11 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 		return "", fmt.Errorf("failed to PUT file to stage: %w", err)
 	}
 	w.buf = nil
+	w.account()
+	// Count rows only once they are on the stage, so the totals reported after
+	// a partial failure describe what actually got there.
+	w.rowsLoaded.Add(w.pendingRows)
+	w.pendingRows = 0
 
 	config.Debug("[DEST] Uploaded %s: %.1f MiB in %v", fileName, float64(sizeBytes)/(1<<20), time.Since(startPut))
 	return fileName, nil
@@ -471,8 +582,27 @@ func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageNa
 		config.LogFailedQuery(copySQL, err)
 		return fmt.Errorf("failed to COPY INTO: %w", err)
 	}
-	config.Debug("[DEST] COPY INTO of %d files completed in %v", len(files), time.Since(startCopy))
+	if len(files) == 0 {
+		config.Debug("[DEST] COPY INTO of the whole load prefix completed in %v", time.Since(startCopy))
+	} else {
+		config.Debug("[DEST] COPY INTO of %d files completed in %v", len(files), time.Since(startCopy))
+	}
 	return nil
+}
+
+const maxFilesPerCopy = 1000
+
+func (d *SnowflakeDestination) copyFilesInBatches(ctx context.Context, fullTable, stageName, loadID string, files []string) (int, error) {
+	copied := 0
+	for len(files) > 0 {
+		batchSize := min(len(files), maxFilesPerCopy)
+		if err := d.copyFiles(ctx, fullTable, stageName, loadID, files[:batchSize]); err != nil {
+			return copied, err
+		}
+		copied += batchSize
+		files = files[batchSize:]
+	}
+	return copied, nil
 }
 
 // minAdaptiveFlushBytes stops the adaptive flush from sharding the load into
@@ -483,12 +613,18 @@ const minAdaptiveFlushBytes = 1 << 20
 // the current file and PUTs it, amortizing the ~1s per-PUT overhead.
 // INGESTR_SNOWFLAKE_FILE_SIZE_MB overrides; 0 flushes one file per batch.
 func snowflakeTargetFileBytes() int64 {
-	if v := os.Getenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB"); v != "" {
-		if mb, err := strconv.Atoi(v); err == nil && mb >= 0 {
-			return int64(mb) << 20
-		}
+	const defaultMB, maxMB = 32, 1024
+	v := os.Getenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB")
+	if v == "" {
+		return defaultMB << 20
 	}
-	return 32 << 20
+	mb, err := strconv.Atoi(v)
+	if err != nil || mb < 0 {
+		config.Debug("[DEST] Invalid INGESTR_SNOWFLAKE_FILE_SIZE_MB %q, using %d MiB", v, defaultMB)
+		return defaultMB << 20
+	}
+	// Clamped so the shift below cannot overflow into a negative size.
+	return int64(min(mb, maxMB)) << 20
 }
 
 // Zstd default: roughly a third fewer bytes than snappy, directly cutting
@@ -501,6 +637,8 @@ func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.Arro
 	case "gzip":
 		codec = compress.Codecs.Gzip
 	case "zstd", "":
+	default:
+		config.Debug("[DEST] Unrecognized INGESTR_SNOWFLAKE_PARQUET_CODEC %q, using zstd", os.Getenv("INGESTR_SNOWFLAKE_PARQUET_CODEC"))
 	}
 	writerProps := parquet.NewWriterProperties(
 		parquet.WithCompression(codec),

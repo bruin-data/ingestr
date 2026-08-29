@@ -86,3 +86,14 @@ When Snowflake is used as a Postgres CDC destination (`postgres+cdc://` → `sno
 - `_BRUIN_STAGING.CDC_TARGETS` — ownership claims for destination tables
 
 These tables live in the connected Snowflake database (the catalog from the URI). Snowflake also supports CDC merge with unchanged-TOAST / `_cdc_unchanged_cols` preservation for Postgres `JSONB` and other TOASTed columns under `REPLICA IDENTITY DEFAULT`.
+
+## Tuning the write path
+
+When Snowflake is the destination, ingestr coalesces record batches into larger Parquet files, uploads them to the table's implicit stage, and loads them with `COPY INTO`. Two environment variables tune that path; neither is normally needed.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `INGESTR_SNOWFLAKE_FILE_SIZE_MB` | `32` | Compressed size at which a worker closes the current file and uploads it. Larger files amortize the per-upload overhead; smaller ones lower memory use. `0` uploads one file per record batch. Values above `1024` are clamped. |
+| `INGESTR_SNOWFLAKE_PARQUET_CODEC` | `zstd` | Parquet compression codec. `snappy` and `gzip` are also accepted; anything else falls back to `zstd`. |
+
+Each worker buffers up to one file in memory, so peak usage scales with `--extract-parallelism` and, for multi-table ingestions, with the number of tables. ingestr tracks the combined buffer across all concurrent workers and closes files early once it exceeds roughly 256 MiB. That is a soft limit checked between record batches, not a hard cap, and it does not cover the extra copy the Snowflake driver makes while a file is uploading, so plan for roughly twice that figure. Lower `INGESTR_SNOWFLAKE_FILE_SIZE_MB` if memory is tight.
