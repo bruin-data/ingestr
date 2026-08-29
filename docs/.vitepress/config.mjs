@@ -277,6 +277,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Solidgate", link: "/supported-sources/solidgate.md" },
               { text: "Square", link: "/supported-sources/square.md" },
               { text: "Stripe", link: "/supported-sources/stripe.md" },
+              { text: "Sumble", link: "/supported-sources/sumble.md" },
               { text: "SurveyMonkey", link: "/supported-sources/surveymonkey.md" },
               { text: "TikTok Ads", link: "/supported-sources/tiktok-ads.md" },
               { text: "Trello", link: "/supported-sources/trello.md" },
