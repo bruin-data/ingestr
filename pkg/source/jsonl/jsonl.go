@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -90,11 +91,6 @@ func (s *JSONLSource) read(ctx context.Context, opts source.ReadOptions) (<-chan
 	startTotal := time.Now()
 	config.Debug("[JSONL] Starting read from file: %s", s.filePath)
 
-	batchSize := opts.PageSize
-	if batchSize <= 0 {
-		batchSize = 10000
-	}
-
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {
@@ -106,88 +102,105 @@ func (s *JSONLSource) read(ctx context.Context, opts source.ReadOptions) (<-chan
 			return
 		}
 		defer func() { _ = file.Close() }()
-
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
-
-		batchNum := 0
-		totalRows := 0
-		items := make([]map[string]interface{}, 0, batchSize)
-		var accBytes int64
-		lineNum := 0
-
-		flush := func() error {
-			if len(items) == 0 {
-				return nil
-			}
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert to Arrow: %w", err)
-			}
-
-			batchNum++
-			totalRows += len(items)
-			config.Debug("[JSONL] Batch %d: %d items (total: %d)", batchNum, len(items), totalRows)
-
-			results <- source.RecordBatchResult{Batch: record}
-			items = make([]map[string]interface{}, 0, batchSize)
-			accBytes = 0
-			return nil
-		}
-
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			lineNum++
-
-			if line == "" {
-				continue
-			}
-
-			var item map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &item); err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)}
-				return
-			}
-
-			if opts.MaxBatchBytes > 0 {
-				rowBytes := arrowconv.RowBytes(item)
-				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
-					if err := flush(); err != nil {
-						results <- source.RecordBatchResult{Err: err}
-						return
-					}
-				}
-				accBytes += rowBytes
-			}
-			items = append(items, item)
-
-			if len(items) >= batchSize {
-				if err := flush(); err != nil {
-					results <- source.RecordBatchResult{Err: err}
-					return
-				}
-			}
-
-			if opts.Limit > 0 && totalRows+len(items) >= opts.Limit {
-				items = items[:opts.Limit-totalRows]
-				break
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("error reading JSONL file: %w", err)}
-			return
-		}
-
-		if err := flush(); err != nil {
+		totalRows, batchNum, err := Read(ctx, file, opts, results)
+		if err != nil && ctx.Err() == nil {
 			results <- source.RecordBatchResult{Err: err}
 			return
 		}
-
 		config.Debug("[JSONL] Total: %d items in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
 	}()
 
 	return results, nil
+}
+
+// Read decodes a JSONL stream with the same batching behavior as JSONLSource.
+func Read(ctx context.Context, reader io.Reader, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int, int, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+
+	batchSize := opts.PageSize
+	if batchSize <= 0 {
+		batchSize = 10000
+	}
+	batchNum := 0
+	totalRows := 0
+	items := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
+	lineNum := 0
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+
+		batchNum++
+		totalRows += len(items)
+		config.Debug("[JSONL] Batch %d: %d items (total: %d)", batchNum, len(items), totalRows)
+
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
+		items = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		lineNum++
+
+		if line == "" {
+			continue
+		}
+
+		var item map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			return totalRows, batchNum, fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
+		}
+
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return totalRows, batchNum, err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, item)
+
+		if len(items) >= batchSize {
+			if err := flush(); err != nil {
+				return totalRows, batchNum, err
+			}
+		}
+
+		if opts.Limit > 0 && totalRows+len(items) >= opts.Limit {
+			items = items[:opts.Limit-totalRows]
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return totalRows, batchNum, ctx.Err()
+		default:
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return totalRows, batchNum, fmt.Errorf("error reading JSONL file: %w", err)
+	}
+
+	if err := flush(); err != nil {
+		return totalRows, batchNum, err
+	}
+	return totalRows, batchNum, nil
 }
 
 var _ source.Source = (*JSONLSource)(nil)

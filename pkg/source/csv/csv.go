@@ -149,119 +149,125 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 	go func() {
 		defer close(results)
 		defer func() { _ = f.Close() }()
-
-		csvReader := csv.NewReader(decoded)
-		csvReader.FieldsPerRecord = -1
-		csvReader.ReuseRecord = true
-
-		headers, err := csvReader.Read()
-		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read CSV headers: %w", err)}
+		totalRows, batchNum, err := Read(ctx, decoded, opts, results)
+		if err != nil && ctx.Err() == nil {
+			results <- source.RecordBatchResult{Err: err}
 			return
 		}
-
-		if len(headers) == 0 {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to extract headers from the CSV, are you sure the given file contains a header row?")}
-			return
-		}
-		headers = append([]string(nil), headers...)
-
-		incrementalKey := opts.IncrementalKey
-		if incrementalKey != "" && !containsHeader(headers, incrementalKey) {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("incremental_key '%s' not found in the CSV file", incrementalKey)}
-			return
-		}
-
-		var startTime *time.Time
-		if opts.IntervalStart != nil {
-			t := *opts.IntervalStart
-			startTime = &t
-		}
-
-		builder := newBatchBuilder(headers, opts.ExcludeColumns, opts.Schema)
-		defer builder.rb.Release()
-		incIdx := headerIndexes(headers, incrementalKey)
-
-		batchNum := 0
-		totalRows := 0
-		lineNum := 1
-		var accBytes int64
-
-		flush := func() bool {
-			rec := builder.finish()
-			batchNum++
-			totalRows += int(rec.NumRows())
-			config.Debug("[CSV] Batch %d: %d rows (total: %d)", batchNum, rec.NumRows(), totalRows)
-
-			select {
-			case results <- source.RecordBatchResult{Batch: rec}:
-				return true
-			case <-ctx.Done():
-				rec.Release()
-				return false
-			}
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			record, err := csvReader.Read()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read CSV row %d: %w", lineNum+1, err)}
-				return
-			}
-			lineNum++
-
-			if isAllEmpty(record) {
-				continue
-			}
-
-			if incrementalKey != "" && startTime != nil {
-				incValue, ok := lastNonEmptyValue(record, incIdx)
-				if !ok {
-					output.Warnf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
-					continue
-				}
-				incTime, err := dateparse.ParseAny(incValue)
-				if err != nil {
-					output.Warnf("[CSV] Row %d: skipping row with unparseable incremental key value '%s'\n", lineNum, incValue)
-					continue
-				}
-				if incTime.Before(*startTime) {
-					continue
-				}
-			}
-
-			builder.appendRow(record)
-			if opts.MaxBatchBytes > 0 {
-				accBytes += arrowconv.CellsBytes(record)
-			}
-
-			if builder.rows >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) {
-				if !flush() {
-					return
-				}
-				accBytes = 0
-			}
-		}
-
-		if builder.rows > 0 {
-			if !flush() {
-				return
-			}
-		}
-
 		config.Debug("[CSV] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
 	}()
 
 	return results, nil
+}
+
+// Read decodes a CSV stream with the same batching and schema behavior as CSVSource.
+func Read(ctx context.Context, reader io.Reader, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int, int, error) {
+	csvReader := csv.NewReader(reader)
+	csvReader.FieldsPerRecord = -1
+	csvReader.ReuseRecord = true
+
+	headers, err := csvReader.Read()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read CSV headers: %w", err)
+	}
+
+	if len(headers) == 0 {
+		return 0, 0, fmt.Errorf("failed to extract headers from the CSV, are you sure the given file contains a header row?")
+	}
+	headers = append([]string(nil), headers...)
+
+	incrementalKey := opts.IncrementalKey
+	if incrementalKey != "" && !containsHeader(headers, incrementalKey) {
+		return 0, 0, fmt.Errorf("incremental_key '%s' not found in the CSV file", incrementalKey)
+	}
+
+	var startTime *time.Time
+	if opts.IntervalStart != nil {
+		t := *opts.IntervalStart
+		startTime = &t
+	}
+
+	batchSize := opts.PageSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+	builder := newBatchBuilder(headers, opts.ExcludeColumns, opts.Schema)
+	defer builder.rb.Release()
+	incIdx := headerIndexes(headers, incrementalKey)
+
+	batchNum := 0
+	totalRows := 0
+	lineNum := 1
+	var accBytes int64
+
+	flush := func() bool {
+		rec := builder.finish()
+		batchNum++
+		totalRows += int(rec.NumRows())
+		config.Debug("[CSV] Batch %d: %d rows (total: %d)", batchNum, rec.NumRows(), totalRows)
+
+		select {
+		case results <- source.RecordBatchResult{Batch: rec}:
+			return true
+		case <-ctx.Done():
+			rec.Release()
+			return false
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return totalRows, batchNum, ctx.Err()
+		default:
+		}
+
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return totalRows, batchNum, fmt.Errorf("failed to read CSV row %d: %w", lineNum+1, err)
+		}
+		lineNum++
+
+		if isAllEmpty(record) {
+			continue
+		}
+
+		if incrementalKey != "" && startTime != nil {
+			incValue, ok := lastNonEmptyValue(record, incIdx)
+			if !ok {
+				output.Warnf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
+				continue
+			}
+			incTime, err := dateparse.ParseAny(incValue)
+			if err != nil {
+				output.Warnf("[CSV] Row %d: skipping row with unparseable incremental key value '%s'\n", lineNum, incValue)
+				continue
+			}
+			if incTime.Before(*startTime) {
+				continue
+			}
+		}
+
+		builder.appendRow(record)
+		if opts.MaxBatchBytes > 0 {
+			accBytes += arrowconv.CellsBytes(record)
+		}
+
+		if builder.rows >= batchSize || (opts.MaxBatchBytes > 0 && accBytes >= opts.MaxBatchBytes) {
+			if !flush() {
+				return totalRows, batchNum, ctx.Err()
+			}
+			accBytes = 0
+		}
+	}
+
+	if builder.rows > 0 && !flush() {
+		return totalRows, batchNum, ctx.Err()
+	}
+	return totalRows, batchNum, nil
 }
 
 // batchBuilder builds record batches directly from CSV records, bypassing

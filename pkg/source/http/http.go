@@ -1,28 +1,29 @@
 package http
 
 import (
-	"bufio"
-	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
+	stdhttp "net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet/file"
-	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
-	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
+	csvsource "github.com/bruin-data/ingestr/pkg/source/csv"
+	jsonlsource "github.com/bruin-data/ingestr/pkg/source/jsonl"
+	parquetsource "github.com/bruin-data/ingestr/pkg/source/parquet"
 )
 
 const defaultBatchSize = 10000
@@ -39,8 +40,11 @@ const (
 )
 
 type HTTPSource struct {
-	url    string
-	client *httpclient.Client
+	target   *url.URL
+	options  requestOptions
+	client   *stdhttp.Client
+	metadata Metadata
+	mu       sync.RWMutex
 }
 
 func NewHTTPSource() *HTTPSource {
@@ -56,21 +60,38 @@ func (s *HTTPSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("HTTP source URI cannot be empty")
 	}
 
-	s.url = uri
-	s.client = httpclient.New(
-		httpclient.WithTimeout(120*time.Second),
-		httpclient.WithDebug(config.DebugMode),
-	)
+	target, options, err := parseSourceURI(uri)
+	if err != nil {
+		return err
+	}
+	s.target = target
+	s.options = options
+	s.client = newHTTPClient(options.headers)
 
-	config.Debug("[HTTP] Connected to URL: %s", s.url)
+	config.Debug("[HTTP] Connected to URL: %s", displayURL(s.target))
 	return nil
 }
 
 func (s *HTTPSource) Close(ctx context.Context) error {
 	if s.client != nil {
-		return s.client.Close()
+		if transport, ok := s.client.Transport.(*stdhttp.Transport); ok {
+			transport.CloseIdleConnections()
+		}
 	}
 	return nil
+}
+
+// Metadata returns response metadata from the most recently started read.
+func (s *HTTPSource) Metadata() Metadata {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.metadata
+}
+
+func (s *HTTPSource) setMetadata(metadata Metadata) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metadata = metadata
 }
 
 func (s *HTTPSource) HandlesIncrementality() bool {
@@ -100,14 +121,7 @@ func (s *HTTPSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 
 func (s *HTTPSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
-	config.Debug("[HTTP] Starting read from URL: %s", s.url)
-
-	format := detectFormat(s.url, table)
-	if format == formatUnknown {
-		return nil, fmt.Errorf("cannot detect file format from URL or table name; use #csv, #csv_headless, #json, #jsonl, or #parquet suffix on --source-table")
-	}
-
-	config.Debug("[HTTP] Detected format: %s", format)
+	config.Debug("[HTTP] Starting read from URL: %s", displayURL(s.target))
 
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -119,38 +133,78 @@ func (s *HTTPSource) read(ctx context.Context, table string, opts source.ReadOpt
 	go func() {
 		defer close(results)
 
-		resp, err := s.client.R(ctx).Get(s.url)
+		stream, err := s.openStream(ctx)
 		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to fetch URL: %w", err)}
+			sendError(ctx, results, fmt.Errorf("failed to fetch HTTP source: %w", err))
 			return
 		}
+		defer func() { _ = stream.Close() }()
 
-		if !resp.IsSuccess() {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("HTTP request failed with status %d: %s", resp.StatusCode(), resp.String())}
+		metadata := s.Metadata()
+		format, encoding := detectFormat(metadata.FinalURL, table, metadata.ContentType)
+		if format == formatUnknown {
+			sendError(ctx, results, fmt.Errorf("cannot detect file format from URL, Content-Type, or table name; use #csv, #csv_headless, #json, #jsonl, or #parquet on --source-table"))
 			return
 		}
+		config.Debug("[HTTP] Detected format: %s", format)
 
-		data := resp.Body()
-		config.Debug("[HTTP] Downloaded %d bytes", len(data))
+		var reader io.Reader = stream
+		contentEncoding := strings.ToLower(strings.TrimSpace(stream.encoding))
+		if contentEncoding != "" && contentEncoding != "identity" && contentEncoding != "gzip" && contentEncoding != "x-gzip" {
+			sendError(ctx, results, fmt.Errorf("unsupported HTTP Content-Encoding %q", stream.encoding))
+			return
+		}
+		if isGzipped(metadata.FinalURL) || contentEncoding == "gzip" || contentEncoding == "x-gzip" {
+			gzReader, err := gzip.NewReader(stream)
+			if err != nil {
+				sendError(ctx, results, fmt.Errorf("failed to open gzip stream: %w", err))
+				return
+			}
+			defer func() { _ = gzReader.Close() }()
+			reader = gzReader
+		}
 
 		var totalRows int64
 		var batchNum int
 
 		switch format {
 		case formatCSV:
-			err = readCSV(ctx, bytes.NewReader(data), results, &totalRows, &batchNum, batchSize, opts, true)
+			decoded, decodeErr := csvsource.Decode(reader, encoding)
+			if decodeErr != nil {
+				err = fmt.Errorf("failed to set up CSV decoder: %w", decodeErr)
+				break
+			}
+			rows, batches, readErr := csvsource.Read(ctx, decoded, opts, results)
+			totalRows += int64(rows)
+			batchNum += batches
+			err = readErr
 		case formatCSVHeadless:
-			err = readCSV(ctx, bytes.NewReader(data), results, &totalRows, &batchNum, batchSize, opts, false)
+			decoded, decodeErr := csvsource.Decode(reader, encoding)
+			if decodeErr != nil {
+				err = fmt.Errorf("failed to set up CSV decoder: %w", decodeErr)
+				break
+			}
+			err = readCSV(ctx, decoded, results, &totalRows, &batchNum, batchSize, opts, false)
 		case formatJSON:
-			err = readJSON(ctx, data, results, &totalRows, &batchNum, batchSize, opts)
+			err = readJSON(ctx, reader, results, &totalRows, &batchNum, batchSize, opts)
 		case formatJSONL:
-			err = readJSONL(ctx, bytes.NewReader(data), results, &totalRows, &batchNum, batchSize, opts)
+			rows, batches, readErr := jsonlsource.Read(ctx, reader, opts, results)
+			totalRows += int64(rows)
+			batchNum += batches
+			err = readErr
 		case formatParquet:
-			err = readParquet(ctx, data, results, &totalRows, &batchNum, opts)
+			err = readParquetStream(ctx, reader, results, &totalRows, &batchNum, opts)
 		}
 
 		if err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			sendError(ctx, results, err)
+			return
+		}
+		if len(s.options.checksum) > 0 {
+			if _, err := io.Copy(io.Discard, reader); err != nil {
+				sendError(ctx, results, fmt.Errorf("failed to validate HTTP source: %w", err))
+				return
+			}
 		}
 
 		config.Debug("[HTTP] Total: %d rows in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))
@@ -159,41 +213,70 @@ func (s *HTTPSource) read(ctx context.Context, table string, opts source.ReadOpt
 	return results, nil
 }
 
-func detectFormat(url, table string) fileFormat {
+func detectFormat(sourceURL, table, contentType string) (fileFormat, string) {
+	encoding := ""
+	hintedFormat := formatUnknown
 	if idx := strings.Index(table, "#"); idx != -1 {
-		hint := strings.ToLower(table[idx+1:])
-		switch hint {
-		case "csv":
-			return formatCSV
-		case "csv_headless":
-			return formatCSVHeadless
-		case "json":
-			return formatJSON
-		case "jsonl", "ndjson":
-			return formatJSONL
-		case "parquet":
-			return formatParquet
+		for _, rawHint := range strings.Split(table[idx+1:], ",") {
+			hint := strings.TrimSpace(strings.ToLower(rawHint))
+			if strings.HasPrefix(hint, "encoding=") {
+				encoding = strings.TrimSpace(rawHint[len("encoding="):])
+				continue
+			}
+			switch hint {
+			case "csv":
+				hintedFormat = formatCSV
+			case "csv_headless":
+				hintedFormat = formatCSVHeadless
+			case "json":
+				hintedFormat = formatJSON
+			case "jsonl", "ndjson":
+				hintedFormat = formatJSONL
+			case "parquet":
+				hintedFormat = formatParquet
+			}
 		}
 	}
+	if hintedFormat != formatUnknown {
+		return hintedFormat, encoding
+	}
 
-	lower := strings.ToLower(url)
+	lower := strings.ToLower(sourceURL)
 	qIdx := strings.Index(lower, "?")
 	if qIdx != -1 {
 		lower = lower[:qIdx]
 	}
+	lower = strings.TrimSuffix(lower, ".gz")
 
 	switch {
 	case strings.HasSuffix(lower, ".csv"):
-		return formatCSV
+		return formatCSV, encoding
 	case strings.HasSuffix(lower, ".json"):
-		return formatJSON
+		return formatJSON, encoding
 	case strings.HasSuffix(lower, ".jsonl") || strings.HasSuffix(lower, ".ndjson"):
-		return formatJSONL
+		return formatJSONL, encoding
 	case strings.HasSuffix(lower, ".parquet"):
-		return formatParquet
-	default:
-		return formatUnknown
+		return formatParquet, encoding
 	}
+
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch mediaType {
+	case "text/csv", "application/csv":
+		return formatCSV, encoding
+	case "application/json":
+		return formatJSON, encoding
+	case "application/jsonl", "application/x-jsonlines", "application/x-ndjson", "application/ndjson":
+		return formatJSONL, encoding
+	case "application/vnd.apache.parquet", "application/x-parquet":
+		return formatParquet, encoding
+	default:
+		return formatUnknown, encoding
+	}
+}
+
+func isGzipped(sourceURL string) bool {
+	parsed, err := url.Parse(sourceURL)
+	return err == nil && strings.HasSuffix(strings.ToLower(parsed.Path), ".gz")
 }
 
 func cleanTableName(table string) string {
@@ -203,7 +286,7 @@ func cleanTableName(table string) string {
 	return table
 }
 
-func readCSV(_ context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, hasHeader bool) error {
+func readCSV(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, hasHeader bool) error {
 	csvReader := csv.NewReader(reader)
 	csvReader.FieldsPerRecord = -1
 
@@ -242,7 +325,9 @@ func readCSV(_ context.Context, reader io.Reader, results chan<- source.RecordBa
 		*totalRows += int64(len(rows))
 		config.Debug("[HTTP] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
 
-		results <- source.RecordBatchResult{Batch: rec}
+		if !sendBatch(ctx, results, rec) {
+			return ctx.Err()
+		}
 		rows = make([]map[string]interface{}, 0, batchSize)
 		accBytes = 0
 		return nil
@@ -355,8 +440,8 @@ func overrideEntryReadName(pair string) string {
 	return strings.TrimSpace(parts[0])
 }
 
-func readJSON(_ context.Context, data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+func readJSON(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
+	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
 
 	token, err := decoder.Token()
@@ -366,15 +451,15 @@ func readJSON(_ context.Context, data []byte, results chan<- source.RecordBatchR
 
 	switch token {
 	case json.Delim('['):
-		return readJSONArray(decoder, results, totalRows, batchNum, batchSize, opts)
+		return readJSONArray(ctx, decoder, results, totalRows, batchNum, batchSize, opts)
 	case json.Delim('{'):
-		return readJSONObject(data, results, totalRows, batchNum, opts)
+		return readJSONObject(ctx, decoder, results, totalRows, batchNum, opts)
 	default:
 		return fmt.Errorf("unexpected JSON token: %v; expected array or object", token)
 	}
 }
 
-func readJSONArray(decoder *json.Decoder, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
+func readJSONArray(ctx context.Context, decoder *json.Decoder, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
 	items := make([]map[string]interface{}, 0, batchSize)
 	var accBytes int64
 
@@ -391,7 +476,9 @@ func readJSONArray(decoder *json.Decoder, results chan<- source.RecordBatchResul
 		*totalRows += int64(len(items))
 		config.Debug("[HTTP] JSON batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
 
-		results <- source.RecordBatchResult{Batch: rec}
+		if !sendBatch(ctx, results, rec) {
+			return ctx.Err()
+		}
 		items = make([]map[string]interface{}, 0, batchSize)
 		accBytes = 0
 		return nil
@@ -428,13 +515,21 @@ func readJSONArray(decoder *json.Decoder, results chan<- source.RecordBatchResul
 	return nil
 }
 
-func readJSONObject(data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-
-	var item map[string]interface{}
-	if err := decoder.Decode(&item); err != nil {
-		return fmt.Errorf("failed to decode JSON object: %w", err)
+func readJSONObject(ctx context.Context, decoder *json.Decoder, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions) error {
+	item := make(map[string]interface{})
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("failed to decode JSON object key: %w", err)
+		}
+		var value interface{}
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("failed to decode JSON object value: %w", err)
+		}
+		item[key.(string)] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("failed to finish JSON object: %w", err)
 	}
 
 	rec, err := arrowconv.ItemsToArrowRecordWithSchema([]map[string]interface{}{item}, nil, opts.ExcludeColumns)
@@ -446,152 +541,54 @@ func readJSONObject(data []byte, results chan<- source.RecordBatchResult, totalR
 	*totalRows++
 	config.Debug("[HTTP] JSON batch %d: 1 item (total: %d)", *batchNum, *totalRows)
 
-	results <- source.RecordBatchResult{Batch: rec}
+	if !sendBatch(ctx, results, rec) {
+		return ctx.Err()
+	}
 	return nil
 }
 
-func readJSONL(_ context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+func readParquetStream(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions) error {
+	temp, err := os.CreateTemp("", "ingestr-http-*.parquet")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary Parquet file: %w", err)
+	}
+	path := temp.Name()
+	defer func() { _ = os.Remove(path) }()
 
-	items := make([]map[string]interface{}, 0, batchSize)
-	var accBytes int64
-	lineNum := 0
-
-	flush := func() error {
-		if len(items) == 0 {
-			return nil
-		}
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert JSONL to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(items))
-		config.Debug("[HTTP] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-		results <- source.RecordBatchResult{Batch: rec}
-		items = make([]map[string]interface{}, 0, batchSize)
-		accBytes = 0
-		return nil
+	if _, err := io.Copy(temp, reader); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("failed to stream Parquet source to disk: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary Parquet file: %w", err)
 	}
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		lineNum++
-
-		if line == "" {
-			continue
-		}
-
-		var item map[string]interface{}
-		decoder := json.NewDecoder(strings.NewReader(line))
-		decoder.UseNumber()
-		if err := decoder.Decode(&item); err != nil {
-			return fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
-		}
-
-		if opts.MaxBatchBytes > 0 {
-			rowBytes := arrowconv.RowBytes(item)
-			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-			accBytes += rowBytes
-		}
-		items = append(items, item)
-
-		if len(items) >= batchSize {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading JSONL data: %w", err)
-	}
-
-	if err := flush(); err != nil {
-		return err
-	}
-
-	return nil
+	rows, batches, err := parquetsource.ReadFile(ctx, path, opts, results)
+	*totalRows += rows
+	*batchNum += batches
+	return err
 }
 
-func readParquet(ctx context.Context, data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions) error {
-	reader := bytes.NewReader(data)
-	pr, err := file.NewParquetReader(reader)
-	if err != nil {
-		return fmt.Errorf("failed to open parquet reader: %w", err)
+func sendBatch(ctx context.Context, results chan<- source.RecordBatchResult, batch arrow.RecordBatch) bool {
+	select {
+	case results <- source.RecordBatchResult{Batch: batch}:
+		return true
+	case <-ctx.Done():
+		batch.Release()
+		return false
 	}
-
-	fr, err := pqarrow.NewFileReader(pr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
-	if err != nil {
-		return fmt.Errorf("failed to create parquet arrow reader: %w", err)
-	}
-
-	tbl, err := fr.ReadTable(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to read parquet table: %w", err)
-	}
-	defer tbl.Release()
-
-	chunkSize := int64(opts.PageSize)
-	if chunkSize <= 0 {
-		chunkSize = int64(defaultBatchSize)
-	}
-
-	tr := array.NewTableReader(tbl, chunkSize)
-	defer tr.Release()
-
-	excludeSet := make(map[string]struct{}, len(opts.ExcludeColumns))
-	for _, col := range opts.ExcludeColumns {
-		excludeSet[strings.ToLower(col)] = struct{}{}
-	}
-
-	for tr.Next() {
-		rec := tr.RecordBatch()
-
-		if len(excludeSet) > 0 {
-			rec = excludeArrowColumns(rec, excludeSet)
-		} else {
-			rec.Retain()
-		}
-
-		*batchNum++
-		rows := rec.NumRows()
-		*totalRows += rows
-		config.Debug("[HTTP] Parquet batch %d: %d rows (total: %d)", *batchNum, rows, *totalRows)
-
-		results <- source.RecordBatchResult{Batch: rec}
-	}
-
-	return tr.Err()
 }
 
-func excludeArrowColumns(rec arrow.RecordBatch, exclude map[string]struct{}) arrow.RecordBatch {
-	s := rec.Schema()
-	keptCols := make([]arrow.Array, 0, s.NumFields())
-	keptFields := make([]arrow.Field, 0, s.NumFields())
-
-	for i := range int(s.NumFields()) {
-		field := s.Field(i)
-		if _, skip := exclude[strings.ToLower(field.Name)]; skip {
-			continue
-		}
-		keptCols = append(keptCols, rec.Column(i))
-		keptFields = append(keptFields, field)
+func sendError(ctx context.Context, results chan<- source.RecordBatchResult, err error) {
+	select {
+	case results <- source.RecordBatchResult{Err: err}:
+		return
+	default:
 	}
-
-	if len(keptCols) == int(s.NumFields()) {
-		rec.Retain()
-		return rec
+	select {
+	case results <- source.RecordBatchResult{Err: err}:
+	case <-ctx.Done():
 	}
-
-	return array.NewRecordBatch(arrow.NewSchema(keptFields, nil), keptCols, rec.NumRows())
 }
 
 func parseColumnNames(columns string, numCols int) []string {

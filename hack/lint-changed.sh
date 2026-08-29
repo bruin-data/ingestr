@@ -62,7 +62,7 @@ else
   packages=("${unique_packages[@]}")
 fi
 
-args=(run --timeout "$timeout" --concurrency "$concurrency")
+args=(run --timeout "$timeout" --concurrency "$concurrency" --build-tags integration)
 
 if [[ -n "$parallel_flags" ]]; then
   read -r -a parsed_parallel_flags <<< "$parallel_flags"
