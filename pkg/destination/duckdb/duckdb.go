@@ -51,6 +51,16 @@ type DuckDBDestination struct {
 	// runs don't clobber each other.
 	schemas   map[string]*schema.TableSchema
 	schemasMu sync.Mutex
+
+	// onTargetRecreated, when set, runs inside SwapTable's cross-schema branch
+	// after the target is recreated and before the staging rows are copied in.
+	// DuckLake uses it to restore the target's partition/sort layout, which the
+	// plain CREATE TABLE drops and which only applies to rows written after it.
+	onTargetRecreated func(ctx context.Context, stagingTable, targetTable string) error
+
+	// onSchemaEvolvedLocked, when set, runs inside conditional schema evolution's
+	// transaction after its DDL and before the target incarnation is rechecked.
+	onSchemaEvolvedLocked func(ctx context.Context, table string) error
 }
 
 type duckDBManagedCDCRunLease struct {
@@ -798,6 +808,12 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		createSQL := buildCreateTableSQL(destination.QuoteTableName(targetTable), sch.Columns, sch.PrimaryKeys)
 		if err := d.exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("failed to recreate target table: %w", err)
+		}
+
+		if d.onTargetRecreated != nil {
+			if err := d.onTargetRecreated(ctx, stagingTable, targetTable); err != nil {
+				return err
+			}
 		}
 
 		quotedCols := make([]string, len(sch.Columns))

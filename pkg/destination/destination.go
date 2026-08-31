@@ -21,8 +21,8 @@ type PrepareOptions struct {
 	DropFirst              bool
 	PrimaryKeys            []string
 	DeferredPrimaryKeys    []string // PK columns whose constraint is created after loading.
-	PartitionBy            string   // Column to partition by (BigQuery)
-	ClusterBy              []string // Columns to cluster by (BigQuery)
+	PartitionBy            string   // Destination partition specification.
+	ClusterBy              []string // Destination clustering or sort columns.
 	CDCMode                bool     // If true, make non-PK columns nullable for CDC delete handling.
 	CDCKeys                []string // CDC keys kept non-nullable without declaring a table constraint.
 	RequirePrimaryKeyMatch bool     // Require the physical target PK to match PrimaryKeys for CDC merge safety.
