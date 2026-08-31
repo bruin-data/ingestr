@@ -19,6 +19,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Mailchimp](/supported-sources/mailchimp.md)
 - [Pinterest](/supported-sources/pinterest.md)
 - [Reddit Ads](/supported-sources/reddit_ads.md)
+- [Sklik](/supported-sources/sklik.md)
 - [Snapchat Ads](/supported-sources/snapchat-ads.md)
 - [TikTok Ads](/supported-sources/tiktok-ads.md)
 
@@ -29,6 +30,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Google Analytics](/supported-sources/google_analytics.md)
 - [Mixpanel](/supported-sources/mixpanel.md)
 - [PostHog](/supported-sources/posthog.md)
+- [SatisMeter](/supported-sources/satismeter.md)
 - [SurveyMonkey](/supported-sources/surveymonkey.md)
 - [Trustpilot](/supported-sources/trustpilot.md)
 - [Wistia](/supported-sources/wistia.md)
@@ -43,10 +45,14 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Pipedrive](/supported-sources/pipedrive.md)
 - [Plus Vibe AI](/supported-sources/plusvibeai.md)
 - [Salesforce](/supported-sources/salesforce.md)
+- [Sumble](/supported-sources/sumble.md)
+- [Twenty CRM](/supported-sources/twenty.md)
 - [Zendesk](/supported-sources/zendesk.md)
 
 ## Commerce, payments, billing, and finance
 
+- [2Checkout](/supported-sources/twocheckout.md)
+- [ABRA Flexi](/supported-sources/abra.md)
 - [Apple App Store](/supported-sources/appstore.md)
 - [Chargebee](/supported-sources/chargebee.md)
 - [FastSpring](/supported-sources/fastspring.md)

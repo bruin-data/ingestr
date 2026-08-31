@@ -337,6 +337,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Vertica</td>
+        <td>-</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Vitess</td>
         <td>✅</td>
         <td>✅</td>
@@ -791,6 +797,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Stripe</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Sumble</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
