@@ -615,7 +615,7 @@ func (s *BlobstoreSource) processZIPFile(ctx context.Context, bucket string, arc
 }
 
 func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, archive blobstoreFile, zipReader *zip.Reader, memberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	members, err := archiveutil.SelectZIPMembers(zipReader, memberPattern, s.archiveLimits())
+	members, err := archiveutil.SelectZIPMembers(zipReader, memberPattern)
 	if err != nil {
 		return err
 	}
@@ -1232,17 +1232,13 @@ func (s *BlobstoreSource) downloadZIPFile(ctx context.Context, bucket, key strin
 		if err != nil {
 			return struct{}{}, err
 		}
-		maxBytes := s.archiveLimits().MaxArchiveBytes
-		written, copyErr := io.Copy(tempFile, io.LimitReader(&contextReader{ctx: ctx, reader: reader}, maxBytes+1))
+		_, copyErr := io.Copy(tempFile, &contextReader{ctx: ctx, reader: reader})
 		closeErr := reader.Close()
 		if copyErr != nil {
 			return struct{}{}, copyErr
 		}
 		if closeErr != nil {
 			return struct{}{}, closeErr
-		}
-		if written > maxBytes {
-			return struct{}{}, fmt.Errorf("ZIP archive exceeds the limit of %d bytes", maxBytes)
 		}
 		return struct{}{}, nil
 	})
@@ -1306,13 +1302,6 @@ func (s *BlobstoreSource) openFile(ctx context.Context, bucket, key string) (io.
 	}
 
 	return nil, fmt.Errorf("unsupported provider: %s", s.provider)
-}
-
-func (s *BlobstoreSource) archiveLimits() archiveutil.Limits {
-	if s.parsedURI == nil {
-		return archiveutil.DefaultLimits()
-	}
-	return s.parsedURI.archiveLimits
 }
 
 func (s *BlobstoreSource) readParquetFile(ctx context.Context, reader parquet.ReaderAtSeeker, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
@@ -1655,7 +1644,6 @@ func parseCSVValue(s string) interface{} {
 
 type parsedBlobstoreURI struct {
 	provider                      Provider
-	archiveLimits                 archiveutil.Limits
 	accessKeyID                   string
 	secretAccessKey               string
 	region                        string
@@ -1690,11 +1678,7 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		return nil, err
 	}
 
-	archiveLimits, err := archiveutil.ParseLimits(u.Query())
-	if err != nil {
-		return nil, err
-	}
-	parsed := &parsedBlobstoreURI{archiveLimits: archiveLimits}
+	parsed := &parsedBlobstoreURI{}
 
 	switch u.Scheme {
 	case "s3":

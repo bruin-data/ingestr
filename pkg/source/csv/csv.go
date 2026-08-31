@@ -37,7 +37,6 @@ const defaultBatchSize = 10000
 type CSVSource struct {
 	filePath             string
 	archiveMemberPattern string
-	archiveLimits        archiveutil.Limits
 	encoding             string
 }
 
@@ -54,11 +53,6 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	if filePath == "" {
 		return fmt.Errorf("invalid CSV URI: %s", uri)
 	}
-	archiveLimits, err := archiveutil.ParseLimitsFromURI(uri)
-	if err != nil {
-		return err
-	}
-
 	filePath, archiveMemberPattern, _ := archiveutil.SplitPath(filePath)
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -67,15 +61,9 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	if info.IsDir() {
 		return fmt.Errorf("path is a directory, not a file: %s", filePath)
 	}
-	if archiveMemberPattern != "" {
-		if err := archiveutil.ValidateArchiveSize(info.Size(), archiveLimits); err != nil {
-			return err
-		}
-	}
 
 	s.filePath = filePath
 	s.archiveMemberPattern = archiveMemberPattern
-	s.archiveLimits = archiveLimits
 	s.encoding = enc
 	config.Debug("[CSV] Connected to file: %s (encoding=%q)", filePath, enc)
 	return nil
@@ -292,7 +280,7 @@ func (s *CSVSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-cha
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ZIP archive: %w", err)
 	}
-	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern, s.archiveLimits)
+	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern)
 	if err != nil {
 		_ = archive.Close()
 		return nil, err

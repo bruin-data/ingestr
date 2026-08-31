@@ -18,7 +18,7 @@ csv:///path/to/release.zip!data/**/*.csv
 
 The same syntax works with the `jsonl://`, `ndjson://`, and `parquet://` source schemes. If the member glob is omitted, all members are selected.
 
-Archive members are processed one at a time without extracting the entire ZIP. The `archive_max_members`, `archive_max_bytes`, `archive_max_uncompressed_bytes`, and `archive_max_expansion_ratio` URI parameters configure safety limits. Their defaults are 10000 members, 10 GiB, 100 GiB, and 1000 respectively.
+Archive members are processed one at a time without extracting the entire ZIP.
 
 ## Character encoding
 

@@ -21,7 +21,6 @@ import (
 type JSONLSource struct {
 	filePath             string
 	archiveMemberPattern string
-	archiveLimits        archiveutil.Limits
 }
 
 func NewJSONLSource() *JSONLSource {
@@ -37,11 +36,6 @@ func (s *JSONLSource) Connect(ctx context.Context, uri string) error {
 	if filePath == "" {
 		return fmt.Errorf("invalid JSONL URI: %s", uri)
 	}
-	archiveLimits, err := archiveutil.ParseLimitsFromURI(uri)
-	if err != nil {
-		return err
-	}
-
 	filePath, archiveMemberPattern, _ := archiveutil.SplitPath(filePath)
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -50,15 +44,9 @@ func (s *JSONLSource) Connect(ctx context.Context, uri string) error {
 	if info.IsDir() {
 		return fmt.Errorf("path is a directory, not a file: %s", filePath)
 	}
-	if archiveMemberPattern != "" {
-		if err := archiveutil.ValidateArchiveSize(info.Size(), archiveLimits); err != nil {
-			return err
-		}
-	}
 
 	s.filePath = filePath
 	s.archiveMemberPattern = archiveMemberPattern
-	s.archiveLimits = archiveLimits
 	config.Debug("[JSONL] Connected to file: %s", filePath)
 	return nil
 }
@@ -221,7 +209,7 @@ func (s *JSONLSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-c
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ZIP archive: %w", err)
 	}
-	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern, s.archiveLimits)
+	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern)
 	if err != nil {
 		_ = archive.Close()
 		return nil, err

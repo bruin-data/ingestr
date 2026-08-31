@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"net/url"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -48,67 +47,13 @@ func TestSelectZIPMembers(t *testing.T) {
 		"notes.txt":      "ignored",
 	})
 
-	members, err := SelectZIPMembers(reader, "data/*.csv", DefaultLimits())
+	members, err := SelectZIPMembers(reader, "data/*.csv")
 	require.NoError(t, err)
 	require.Len(t, members, 2)
 	assert.ElementsMatch(t, []string{"data/day-1.csv", "data/day-2.csv"}, []string{members[0].Name, members[1].Name})
 
-	_, err = SelectZIPMembers(reader, "missing/*.csv", DefaultLimits())
+	_, err = SelectZIPMembers(reader, "missing/*.csv")
 	require.ErrorContains(t, err, "no ZIP members matched")
-}
-
-func TestSelectZIPMembersRejectsUnsafePath(t *testing.T) {
-	reader := makeZIPReader(t, map[string]string{"../escape.csv": "id\n1\n"})
-
-	_, err := SelectZIPMembers(reader, "**/*.csv", DefaultLimits())
-	require.ErrorContains(t, err, "unsafe ZIP member path")
-}
-
-func TestSelectZIPMembersEnforcesLimits(t *testing.T) {
-	reader := makeZIPReader(t, map[string]string{
-		"one.csv": "id\n1\n",
-		"two.csv": "id\n2\n",
-	})
-
-	limits := DefaultLimits()
-	limits.MaxMembers = 1
-	_, err := SelectZIPMembers(reader, "*.csv", limits)
-	require.ErrorContains(t, err, "exceeding the limit")
-
-	limits = DefaultLimits()
-	limits.MaxUncompressedBytes = 1
-	_, err = SelectZIPMembers(reader, "*.csv", limits)
-	require.ErrorContains(t, err, "uncompressed bytes")
-
-	limits = DefaultLimits()
-	limits.MaxExpansionRatio = 1
-	reader.File[0].CompressedSize64 = 1
-	_, err = SelectZIPMembers(reader, "*.csv", limits)
-	require.ErrorContains(t, err, "expansion ratio")
-}
-
-func TestParseLimits(t *testing.T) {
-	limits, err := ParseLimits(url.Values{
-		"archive_max_members":            []string{"12"},
-		"archive_max_bytes":              []string{"1024"},
-		"archive_max_uncompressed_bytes": []string{"4096"},
-		"archive_max_expansion_ratio":    []string{"25.5"},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 12, limits.MaxMembers)
-	assert.Equal(t, int64(1024), limits.MaxArchiveBytes)
-	assert.Equal(t, uint64(4096), limits.MaxUncompressedBytes)
-	assert.Equal(t, 25.5, limits.MaxExpansionRatio)
-
-	for _, values := range []url.Values{
-		{"archive_max_members": []string{"0"}},
-		{"archive_max_bytes": []string{"invalid"}},
-		{"archive_max_uncompressed_bytes": []string{"-1"}},
-		{"archive_max_expansion_ratio": []string{"NaN"}},
-	} {
-		_, err := ParseLimits(values)
-		require.Error(t, err)
-	}
 }
 
 func TestForwardBatchesIgnoresErrorsAfterLimit(t *testing.T) {

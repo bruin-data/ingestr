@@ -28,7 +28,6 @@ const defaultBatchSize = 10000
 type ParquetSource struct {
 	filePaths            []string
 	archiveMemberPattern string
-	archiveLimits        archiveutil.Limits
 	arrowSchema          *arrow.Schema
 	knownSchema          *schema.TableSchema
 }
@@ -46,29 +45,14 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 	if path == "" {
 		return fmt.Errorf("invalid parquet URI: %s", uri)
 	}
-	archiveLimits, err := archiveutil.ParseLimitsFromURI(uri)
-	if err != nil {
-		return err
-	}
-
 	path, archiveMemberPattern, _ := archiveutil.SplitPath(path)
 	paths, err := resolveFilePaths(path)
 	if err != nil {
 		return err
 	}
 	if archiveMemberPattern != "" {
-		for _, archivePath := range paths {
-			info, err := os.Stat(archivePath)
-			if err != nil {
-				return fmt.Errorf("failed to inspect ZIP archive: %w", err)
-			}
-			if err := archiveutil.ValidateArchiveSize(info.Size(), archiveLimits); err != nil {
-				return fmt.Errorf("%s: %w", archivePath, err)
-			}
-		}
 		s.filePaths = paths
 		s.archiveMemberPattern = archiveMemberPattern
-		s.archiveLimits = archiveLimits
 		config.Debug("[PARQUET-SRC] Connected to %d ZIP archive(s), first: %s", len(paths), paths[0])
 		return nil
 	}
@@ -79,7 +63,6 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.filePaths = paths
-	s.archiveLimits = archiveLimits
 	s.arrowSchema = arrowSchema
 	s.knownSchema = schemaFromArrow(arrowSchema, "")
 
@@ -210,7 +193,7 @@ func (s *ParquetSource) readZIP(ctx context.Context, opts source.ReadOptions) (<
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to open ZIP archive %s: %w", archivePath, err)}
 				return
 			}
-			members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern, s.archiveLimits)
+			members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern)
 			if err != nil {
 				_ = archive.Close()
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to select ZIP members from %s: %w", archivePath, err)}

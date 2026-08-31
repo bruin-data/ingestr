@@ -25,7 +25,6 @@ import (
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
-	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -784,7 +783,7 @@ func TestProcessZIPReaderCSV(t *testing.T) {
 
 	s := NewBlobstoreSource()
 	s.provider = ProviderS3
-	s.parsedURI = &parsedBlobstoreURI{archiveLimits: archiveutil.DefaultLimits()}
+	s.parsedURI = &parsedBlobstoreURI{}
 	results := make(chan source.RecordBatchResult, 4)
 	err = s.processZIPReader(
 		context.Background(),
