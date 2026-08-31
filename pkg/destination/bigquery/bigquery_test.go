@@ -1470,6 +1470,132 @@ func TestLoadJobAmbiguousStartContinuesWithDiscoveredJobAfterMaxAttempts(t *test
 	}
 }
 
+func TestCopyJobAmbiguousStartStopsAfterMaxAttempts(t *testing.T) {
+	oldDelay := loadJobStartRetryDelay
+	oldWindow := bigQueryAmbiguousJobWindow
+	loadJobStartRetryDelay = func(int) time.Duration { return 0 }
+	bigQueryAmbiguousJobWindow = time.Nanosecond
+	t.Cleanup(func() {
+		loadJobStartRetryDelay = oldDelay
+		bigQueryAmbiguousJobWindow = oldWindow
+	})
+
+	var postCalls atomic.Int32
+	const jobID = "ingestr_copy_bounded_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists: Job test-project:US.ingestr_copy_bounded_1","errors":[{"reason":"duplicate","message":"Already Exists: Job test-project:US.ingestr_copy_bounded_1"}]}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"job not found"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{
+		client:            client,
+		projectID:         "test-project",
+		location:          "US",
+		activeCDCJobs:     map[string]struct{}{jobID: {}},
+		cdcJobsReconciled: true,
+	}
+	stagingRef := client.DatasetInProject("test-project", "_bruin_staging").Table("staging_events")
+	targetRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	copier := targetRef.CopierFrom(stagingRef)
+
+	_, err = dest.startCopyJobWithRetry(t.Context(), copier, jobID, stagingRef, targetRef)
+	if err == nil || !strings.Contains(err.Error(), "after 10 attempts") {
+		t.Fatalf("error=%v, want bounded retry exhaustion", err)
+	}
+	if postCalls.Load() != loadJobStartMaxAttempts {
+		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+	_, _, active := dest.cdcJobFence()
+	if _, ok := active[jobID]; ok {
+		t.Fatalf("job %q remained active after start retry exhaustion", jobID)
+	}
+	if dest.cdcJobsReconciled {
+		t.Fatal("CDC job reconciliation remained cached after ambiguous start retry exhaustion")
+	}
+}
+
+func TestCopyJobAmbiguousStartContinuesWithDiscoveredJobAfterMaxAttempts(t *testing.T) {
+	oldStartDelay := loadJobStartRetryDelay
+	loadJobStartRetryDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { loadJobStartRetryDelay = oldStartDelay })
+
+	var postCalls atomic.Int32
+	var getCalls atomic.Int32
+	const jobID = "ingestr_copy_discovered_1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists: Job test-project:US.ingestr_copy_discovered_1","errors":[{"reason":"duplicate","message":"Already Exists: Job test-project:US.ingestr_copy_discovered_1"}]}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"+jobID):
+			if getCalls.Add(1) == loadJobStartMaxAttempts+1 {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jobReference": map[string]string{"projectId": "test-project", "jobId": jobID, "location": "US"},
+					"configuration": map[string]interface{}{"copy": map[string]interface{}{
+						"destinationTable": map[string]string{"projectId": "test-project", "datasetId": "test-dataset", "tableId": "events"},
+						"sourceTables":     []map[string]string{{"projectId": "test-project", "datasetId": "_bruin_staging", "tableId": "staging_events"}},
+					}},
+					"status": map[string]string{"state": "RUNNING"},
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"job not found"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	dest := &BigQueryDestination{
+		client:        client,
+		projectID:     "test-project",
+		location:      "US",
+		activeCDCJobs: map[string]struct{}{jobID: {}},
+	}
+	stagingRef := client.DatasetInProject("test-project", "_bruin_staging").Table("staging_events")
+	targetRef := client.DatasetInProject("test-project", "test-dataset").Table("events")
+	copier := targetRef.CopierFrom(stagingRef)
+
+	job, err := dest.startCopyJobWithRetry(t.Context(), copier, jobID, stagingRef, targetRef)
+	if err != nil {
+		t.Fatalf("startCopyJobWithRetry() error=%v, want discovered job", err)
+	}
+	if job == nil || job.ID() != jobID {
+		t.Fatalf("job=%v, want discovered job %q", job, jobID)
+	}
+	if postCalls.Load() != loadJobStartMaxAttempts {
+		t.Fatalf("job start calls=%d, want %d", postCalls.Load(), loadJobStartMaxAttempts)
+	}
+	_, _, active := dest.cdcJobFence()
+	if _, ok := active[jobID]; !ok {
+		t.Fatalf("discovered job %q was released before the caller could wait for it", jobID)
+	}
+}
+
 func TestLoadJobWaitErrorReconcilesOriginalWithoutResubmission(t *testing.T) {
 	oldDelay := bigQueryJobReconcileDelay
 	bigQueryJobReconcileDelay = time.Millisecond
