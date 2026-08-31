@@ -356,6 +356,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("klaviyo", "Klaviyo", []string{"klaviyo"}, true, false),
 		genericURIConnector("linear", "Linear", []string{"linear"}, true, false),
 		genericURIConnector("linkedinads", "LinkedIn Ads", []string{"linkedinads"}, true, false),
+		genericURIConnector("lumify", "Lumify", []string{"lumify"}, true, false),
 		genericURIConnector("mailchimp", "Mailchimp", []string{"mailchimp"}, true, false),
 		genericURIConnector("manifold", "Manifold", []string{"manifold"}, true, false),
 		genericURIConnector("maxcompute", "MaxCompute", []string{"maxcompute", "odps"}, true, true),
