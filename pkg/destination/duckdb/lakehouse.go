@@ -63,7 +63,7 @@ func (d *DuckLakeDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	d.markLayoutPending(opts.Table)
-	preparedSchema, err := d.DuckDBDestination.GetTableSchema(ctx, opts.Table)
+	preparedSchema, err := d.GetTableSchema(ctx, opts.Table)
 	if err != nil {
 		return fmt.Errorf("ducklake: inspect table before applying layout: %w", err)
 	}
