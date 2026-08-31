@@ -65,6 +65,8 @@ Two swap mechanisms:
 
 Before either path, `SwapTable` ensures the **target dataset exists** (replace only PrepareTables the staging side; CREATE OR REPLACE and copy jobs do not auto-create datasets). After a successful swap, the **staging table is deleted** (best-effort, 30s timeout).
 
+Both `startLoadJobWithRetry` and `startCopyJobWithRetry` cap ambiguous-start retries at `loadJobStartMaxAttempts` (10), so a persistent `NotFound`/duplicate (e.g. a missing dataset) can't retry forever. On exhaustion each adopts an already-submitted job of the same ID if one exists, else fails.
+
 Branch:
 
 ```
