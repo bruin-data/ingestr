@@ -55,5 +55,3 @@ ingestr ingest \
   --dest-uri duckdb:///satismeter.duckdb \
   --dest-table 'dest.responses'
 ```
-
-<img alt="satismeter" src="../media/satismeter.png" />
