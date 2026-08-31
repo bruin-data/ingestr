@@ -52,14 +52,10 @@ type DuckDBDestination struct {
 	schemas   map[string]*schema.TableSchema
 	schemasMu sync.Mutex
 
-	// onTargetRecreated, when set, runs inside SwapTable's cross-schema branch
-	// after the target is recreated and before the staging rows are copied in.
-	// DuckLake uses it to restore the target's partition/sort layout, which the
-	// plain CREATE TABLE drops and which only applies to rows written after it.
+	// onTargetRecreated preserves destination metadata during cross-schema swaps.
 	onTargetRecreated func(ctx context.Context, stagingTable, targetTable string) error
 
-	// onSchemaEvolvedLocked, when set, runs inside conditional schema evolution's
-	// transaction after its DDL and before the target incarnation is rechecked.
+	// onSchemaEvolvedLocked runs inside the conditional evolution transaction.
 	onSchemaEvolvedLocked func(ctx context.Context, table string) error
 }
 

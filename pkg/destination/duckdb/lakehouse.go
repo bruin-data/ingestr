@@ -25,9 +25,7 @@ type DuckLakeDestination struct {
 	// or targets whose names sanitize identically.
 	stageSeq atomic.Uint64
 
-	// layouts records the partition/sort spec each prepared table was given,
-	// keyed by the fully-qualified opts.Table name, so SwapTable can restore it
-	// on the target when the swap recreates the table rather than renaming it.
+	// layouts tracks prepared table layouts for swap replay.
 	layouts        map[string]duckLakeTableLayout
 	pendingLayouts map[string]struct{}
 	layoutsMu      sync.Mutex
@@ -98,18 +96,12 @@ func (d *DuckLakeDestination) ApplySchemaEvolutionIfIncarnation(
 	return warnings, resultIncarnation, nil
 }
 
-// reapplyLayoutOnSwap restores the staging table's layout on a target that
-// SwapTable recreated instead of renaming into place. DuckLake only applies a
-// partition or sort spec to files written after the ALTER, so this has to run
-// before the swap copies the rows in — hence the hook rather than a SwapTable
-// override. The rename path needs nothing: DuckLake carries both specs across
-// ALTER TABLE ... RENAME TO.
+// reapplyLayoutOnSwap configures a recreated target before rows are copied in.
 func (d *DuckLakeDestination) reapplyLayoutOnSwap(ctx context.Context, stagingTable, targetTable string) error {
 	return d.execLayoutStatements(ctx, targetTable, d.layoutForSwap(stagingTable, targetTable), false)
 }
 
-// layoutForSwap reports the DDL the swap must replay on targetTable: the layout
-// recorded for the staging table being swapped in.
+// layoutForSwap replays the staging layout against the target table.
 func (d *DuckLakeDestination) layoutForSwap(stagingTable, targetTable string) []duckLakeLayoutStatement {
 	layout, ok := d.lookupLayout(stagingTable)
 	if !ok {
@@ -121,8 +113,7 @@ func (d *DuckLakeDestination) layoutForSwap(stagingTable, targetTable string) []
 func (d *DuckLakeDestination) rememberLayout(table string, layout duckLakeTableLayout) {
 	d.layoutsMu.Lock()
 	defer d.layoutsMu.Unlock()
-	// An empty layout clears any spec recorded for the same name by an earlier
-	// run, so a run without layout flags never resurrects the previous one.
+	// An empty layout clears any spec recorded by an earlier run.
 	if layout.empty() {
 		delete(d.layouts, table)
 		delete(d.pendingLayouts, table)
