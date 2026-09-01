@@ -357,6 +357,32 @@ func TestClickHouseDestination_GetTableSchemaDecimalAndArray(t *testing.T) {
 	assert.Equal(t, schema.TypeDate, seenOn.DataType)
 }
 
+// Regression for the "missing tables look existing" concern: system.columns
+// returns zero rows (not an error) for a table that does not exist, and
+// GetTableSchema must translate that to a nil schema so first-run preparation
+// creates the table instead of treating it as existing.
+func TestClickHouseDestination_GetTableSchemaMissingTableReturnsNil(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, uri, err := startClickHouseContainer(ctx)
+	if err != nil {
+		t.Skipf("failed to start ClickHouse container: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	dest := chdest.NewClickHouseDestination()
+	require.NoError(t, dest.Connect(ctx, uri))
+	t.Cleanup(func() { _ = dest.Close(ctx) })
+
+	ts, err := dest.GetTableSchema(ctx, clickhouseDB+".does_not_exist_xyz")
+	require.NoError(t, err)
+	assert.Nil(t, ts, "missing table must return a nil schema, not an empty one")
+}
+
 func createClickHouseDecimalTable(t *testing.T, ctx context.Context, uri string, table string) {
 	t.Helper()
 
