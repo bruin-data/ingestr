@@ -218,9 +218,10 @@ func detectFormat(sourceURL, table, contentType string) (fileFormat, string) {
 	hintedFormat := formatUnknown
 	if idx := strings.Index(table, "#"); idx != -1 {
 		for _, rawHint := range strings.Split(table[idx+1:], ",") {
-			hint := strings.TrimSpace(strings.ToLower(rawHint))
+			trimmed := strings.TrimSpace(rawHint)
+			hint := strings.ToLower(trimmed)
 			if strings.HasPrefix(hint, "encoding=") {
-				encoding = strings.TrimSpace(rawHint[len("encoding="):])
+				encoding = strings.TrimSpace(trimmed[len("encoding="):])
 				continue
 			}
 			switch hint {

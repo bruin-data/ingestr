@@ -52,6 +52,30 @@ func TestDetectFormat(t *testing.T) {
 	}
 }
 
+func TestDetectFormatEncoding(t *testing.T) {
+	tests := []struct {
+		name             string
+		table            string
+		expectedFormat   fileFormat
+		expectedEncoding string
+	}{
+		{"encoding only", "my_data#encoding=windows-1252", formatUnknown, "windows-1252"},
+		{"format then encoding", "my_data#csv,encoding=windows-1252", formatCSV, "windows-1252"},
+		{"encoding then format", "my_data#encoding=windows-1252,csv", formatCSV, "windows-1252"},
+		{"space after comma", "my_data#csv, encoding=windows-1252", formatCSV, "windows-1252"},
+		{"space before format", "my_data#encoding=windows-1252, csv", formatCSV, "windows-1252"},
+		{"mixed-case encoding value preserved", "my_data#csv,encoding=Windows-1252", formatCSV, "Windows-1252"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			format, encoding := detectFormat("https://example.com/data", tt.table, "")
+			assert.Equal(t, tt.expectedFormat, format)
+			assert.Equal(t, tt.expectedEncoding, encoding)
+		})
+	}
+}
+
 func TestCleanTableName(t *testing.T) {
 	tests := []struct {
 		input    string
