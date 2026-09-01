@@ -57,6 +57,9 @@ type DuckDBDestination struct {
 
 	// onSchemaEvolvedLocked runs inside the conditional evolution transaction.
 	onSchemaEvolvedLocked func(ctx context.Context, table string) error
+
+	// onStagingConsumed releases per-staging-table state after a committed swap.
+	onStagingConsumed func(stagingTable string)
 }
 
 type duckDBManagedCDCRunLease struct {
@@ -844,6 +847,10 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		return fmt.Errorf("failed to commit swap: %w", err)
 	}
 	commit = true
+
+	if d.onStagingConsumed != nil {
+		d.onStagingConsumed(stagingTable)
+	}
 
 	config.Debug("[DUCKDB] Table swap completed in %v", time.Since(startSwap))
 	return nil

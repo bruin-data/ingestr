@@ -242,3 +242,35 @@ func TestDuckLakeSwapRestoresLayoutOnRecreatedTarget(t *testing.T) {
 	d.rememberLayout(opts.Table, cleared)
 	require.Nil(t, d.layoutForSwap("staging.events", "analytics.events"))
 }
+
+func TestDuckLakeForgetsLayoutAfterStagingConsumed(t *testing.T) {
+	t.Parallel()
+	d := NewDuckLakeDestination()
+	require.NotNil(t, d.onStagingConsumed, "committed swap must release the staging layout")
+
+	opts := destination.PrepareOptions{
+		Table: "staging.events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "tenant_id", DataType: schema.TypeInt64},
+			{Name: "created_at", DataType: schema.TypeTimestamp},
+		}},
+		PartitionBy: "created_at",
+		ClusterBy:   []string{"tenant_id"},
+	}
+	layout, err := buildDuckLakeTableLayout(opts)
+	require.NoError(t, err)
+	d.rememberLayout(opts.Table, layout)
+	d.markLayoutPending(opts.Table)
+	require.NotNil(t, d.layoutForSwap("staging.events", "analytics.events"))
+
+	// A committed swap consumes and drops the staging table, so its recorded
+	// layout must not linger and accumulate across runs.
+	d.onStagingConsumed(opts.Table)
+	require.Nil(t, d.layoutForSwap("staging.events", "analytics.events"))
+	d.layoutsMu.Lock()
+	_, layoutKept := d.layouts[opts.Table]
+	_, pendingKept := d.pendingLayouts[opts.Table]
+	d.layoutsMu.Unlock()
+	require.False(t, layoutKept)
+	require.False(t, pendingKept)
+}

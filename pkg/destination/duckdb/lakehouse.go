@@ -35,6 +35,7 @@ func NewDuckLakeDestination() *DuckLakeDestination {
 	d := &DuckLakeDestination{DuckDBDestination: NewDuckDBDestination()}
 	d.onTargetRecreated = d.reapplyLayoutOnSwap
 	d.onSchemaEvolvedLocked = d.execPendingLayoutLocked
+	d.onStagingConsumed = d.forgetLayout
 	return d
 }
 
@@ -123,6 +124,15 @@ func (d *DuckLakeDestination) rememberLayout(table string, layout duckLakeTableL
 		d.layouts = make(map[string]duckLakeTableLayout)
 	}
 	d.layouts[table] = layout
+}
+
+// forgetLayout drops a table's recorded layout once its staging table is gone,
+// so long-lived destinations don't accumulate stale per-run entries.
+func (d *DuckLakeDestination) forgetLayout(table string) {
+	d.layoutsMu.Lock()
+	defer d.layoutsMu.Unlock()
+	delete(d.layouts, table)
+	delete(d.pendingLayouts, table)
 }
 
 func (d *DuckLakeDestination) markLayoutPending(table string) {
