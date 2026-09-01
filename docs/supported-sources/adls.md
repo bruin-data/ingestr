@@ -127,5 +127,5 @@ lakehouse/
 Azure Data Lake Storage Gen2 supports `replace` and `append` strategies. It does not support `merge`, `delete+insert`, or `scd2`.
 
 ::: info NOTE
-When reading from Azure Data Lake Storage Gen2, CSV, JSONL/NDJSON, parquet, and gzip-compressed variants are supported. When writing to Azure Data Lake Storage Gen2, only parquet output is supported.
+When reading from Azure Data Lake Storage Gen2, CSV, JSONL/NDJSON, parquet, gzip-compressed variants, and ZIP archive members are supported. Select ZIP members with `<file-system>/<archive.zip>!<member-glob>`, for example `lakehouse/releases/data.zip!**/*.csv`. When writing to Azure Data Lake Storage Gen2, only parquet output is supported.
 :::

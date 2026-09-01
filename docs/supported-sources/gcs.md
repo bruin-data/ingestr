@@ -155,6 +155,10 @@ ingestr ingest \
     --dest-table "logs.events"
 ```
 
+To read files inside a ZIP archive, append `!<member-glob>` to the object path. For example, `my-org-bucket/releases/*.zip!**/*.csv` selects every CSV member from each matching ZIP object. CSV, JSONL/NDJSON, and parquet members are supported; a format hint can follow the member glob when names have no useful extension, such as `release.zip!data/*#jsonl`.
+
+ZIP objects use temporary spooling.
+
 ### File type hinting
 
 If your files are properly encoded but lack the correct file extension (CSV, JSONL, or Parquet), you can provide a file type hint to inform `ingestr` about the format of the files. This is done by appending a fragment identifier (`#format`) to the end of the path in your `--source-table` parameter.
@@ -174,7 +178,7 @@ Supported format hints include:
 - `#parquet` - For Parquet format files
 
 ::: tip
-File type hinting works with `gzip` compressed files as well.
+File type hinting works with `gzip` compressed files and ZIP archive members as well.
 :::
 
 ### Incremental loading by source file timestamps

@@ -1,6 +1,7 @@
 package blobstore
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -758,6 +759,55 @@ func TestReadCSVFileLimitWithByteFlush(t *testing.T) {
 	require.Equal(t, int64(3), emittedRows)
 	require.Equal(t, int64(3), totalRows)
 	require.Equal(t, []int64{1, 1, 1}, batchRows)
+}
+
+func TestProcessZIPReaderCSV(t *testing.T) {
+	var data bytes.Buffer
+	writer := zip.NewWriter(&data)
+	for _, entry := range []struct {
+		name string
+		data string
+	}{
+		{name: "data/day-1.csv", data: "id,name\n1,Alice\n2,Bob\n"},
+		{name: "data/day-2.csv", data: "id,name\n3,Carol\n"},
+		{name: "notes.txt", data: "ignored"},
+	} {
+		member, err := writer.Create(entry.name)
+		require.NoError(t, err)
+		_, err = member.Write([]byte(entry.data))
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+	zipReader, err := zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+	require.NoError(t, err)
+
+	s := NewBlobstoreSource()
+	s.provider = ProviderS3
+	s.parsedURI = &parsedBlobstoreURI{}
+	results := make(chan source.RecordBatchResult, 4)
+	err = s.processZIPReader(
+		context.Background(),
+		"bucket",
+		blobstoreFile{key: "releases/data.zip"},
+		zipReader,
+		"data/*.csv",
+		FormatUnknown,
+		"",
+		100,
+		source.ReadOptions{},
+		results,
+	)
+	require.NoError(t, err)
+	close(results)
+
+	var rows int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		require.Equal(t, int64(2), result.Batch.NumCols())
+		rows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	assert.Equal(t, int64(3), rows)
 }
 
 func TestHandlesIncrementality_BlobstoreUsesFrameworkKeyHandling(t *testing.T) {

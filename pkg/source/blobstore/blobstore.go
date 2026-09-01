@@ -1,6 +1,7 @@
 package blobstore
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -26,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -41,6 +43,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/archiveutil"
 	csvsource "github.com/bruin-data/ingestr/pkg/source/csv"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -449,17 +452,17 @@ func (s *BlobstoreSource) GetTable(ctx context.Context, req source.TableRequest)
 func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
 
-	var bucket, pattern string
+	var bucket, pattern, archiveMemberPattern string
 	var formatHint FileFormat
 	var tableEncoding string
 
 	if s.provider == ProviderSFTP {
 		bucket, pattern, formatHint, tableEncoding = parseSFTPTablePattern(table)
-		config.Debug("[BLOBSTORE-SRC] Reading from SFTP pattern=%s, formatHint=%s, encoding=%q", pattern, formatHint, tableEncoding)
 	} else {
 		bucket, pattern, formatHint, tableEncoding = parseTablePattern(table)
-		config.Debug("[BLOBSTORE-SRC] Reading from bucket=%s, pattern=%s, formatHint=%s, encoding=%q", bucket, pattern, formatHint, tableEncoding)
 	}
+	pattern, archiveMemberPattern, _ = archiveutil.SplitPath(pattern)
+	config.Debug("[BLOBSTORE-SRC] Reading from bucket=%s, pattern=%s, archiveMemberPattern=%s, formatHint=%s, encoding=%q", bucket, pattern, archiveMemberPattern, formatHint, tableEncoding)
 
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -487,7 +490,7 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 					return
 				default:
 				}
-				s.processFile(ctx, bucket, fileKey, formatHint, tableEncoding, batchSize, opts, results)
+				s.processFile(ctx, bucket, fileKey, archiveMemberPattern, formatHint, tableEncoding, batchSize, opts, results)
 			}
 		}()
 	}
@@ -521,9 +524,19 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	return results, nil
 }
 
-func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file blobstoreFile, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
+func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file blobstoreFile, archiveMemberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
 	startFile := time.Now()
 	fileKey := file.key
+	if archiveMemberPattern != "" || isZIP(fileKey) {
+		if archiveMemberPattern == "" {
+			archiveMemberPattern = archiveutil.DefaultMemberPattern
+		}
+		if err := s.processZIPFile(ctx, bucket, file, archiveMemberPattern, formatHint, tableEncoding, batchSize, opts, results); err != nil {
+			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read %s: %w", fileKey, err)}
+		}
+		return
+	}
+
 	format := detectFileFormat(fileKey, formatHint)
 	if format == FormatUnknown {
 		config.Debug("[BLOBSTORE-SRC] Skipping file with unknown format: %s", fileKey)
@@ -565,7 +578,7 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file b
 
 	switch format {
 	case FormatParquet:
-		err = s.readParquetFile(ctx, data, results, &totalRows, &batchNum, opts, metadata)
+		err = s.readParquetFile(ctx, bytes.NewReader(data), results, &totalRows, &batchNum, opts, metadata)
 	case FormatJSONL:
 		err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts, metadata)
 	case FormatCSV:
@@ -577,6 +590,111 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file b
 	}
 
 	config.Debug("[BLOBSTORE-SRC] File %s: %d rows in %d batches, read time: %v", fileKey, totalRows, batchNum, time.Since(startFile))
+}
+
+func (s *BlobstoreSource) processZIPFile(ctx context.Context, bucket string, archive blobstoreFile, memberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	spooled, err := s.downloadZIPFile(ctx, bucket, archive.key)
+	if err != nil {
+		return fmt.Errorf("failed to download ZIP archive after retries: %w", err)
+	}
+	defer func() {
+		name := spooled.Name()
+		_ = spooled.Close()
+		_ = os.Remove(name)
+	}()
+
+	info, err := spooled.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to inspect spooled ZIP archive: %w", err)
+	}
+	zipReader, err := zip.NewReader(spooled, info.Size())
+	if err != nil {
+		return fmt.Errorf("failed to open ZIP archive: %w", err)
+	}
+	return s.processZIPReader(ctx, bucket, archive, zipReader, memberPattern, formatHint, tableEncoding, batchSize, opts, results)
+}
+
+func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, archive blobstoreFile, zipReader *zip.Reader, memberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	members, err := archiveutil.SelectZIPMembers(zipReader, memberPattern)
+	if err != nil {
+		return err
+	}
+
+	var totalRows int64
+	var batchNum int
+	processedMembers := 0
+	baseMetadata := s.fileMetadata(opts, bucket, archive.key, archive.modifiedAt, archive.createdAt)
+	for _, member := range members {
+		if opts.Limit > 0 && totalRows >= int64(opts.Limit) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		format := detectFileFormat(member.Name, formatHint)
+		if format == FormatUnknown {
+			config.Debug("[BLOBSTORE-SRC] Skipping ZIP member with unknown format: %s!%s", archive.key, member.Name)
+			continue
+		}
+		switch format {
+		case FormatParquet:
+			spooled, spoolErr := archiveutil.SpoolMember(ctx, member)
+			if spoolErr != nil {
+				err = spoolErr
+				break
+			}
+			err = s.readParquetFile(ctx, spooled, results, &totalRows, &batchNum, opts, baseMetadata)
+			name := spooled.Name()
+			closeErr := spooled.Close()
+			_ = os.Remove(name)
+			if err == nil {
+				err = closeErr
+			}
+		case FormatJSONL, FormatCSV:
+			memberReader, openErr := member.Open()
+			if openErr != nil {
+				err = openErr
+				break
+			}
+			dataReader := io.Reader(&contextReader{ctx: ctx, reader: memberReader})
+			if format == FormatJSONL {
+				err = s.readJSONLFile(ctx, dataReader, results, &totalRows, &batchNum, batchSize, opts, baseMetadata)
+			} else {
+				err = s.readCSVFile(ctx, dataReader, tableEncoding, results, &totalRows, &batchNum, batchSize, opts, baseMetadata)
+			}
+			closeErr := memberReader.Close()
+			if err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read ZIP member %q: %w", member.Name, err)
+		}
+		processedMembers++
+	}
+
+	if processedMembers == 0 {
+		return fmt.Errorf("no supported files found in ZIP members matching pattern: %s", memberPattern)
+	}
+	config.Debug("[BLOBSTORE-SRC] ZIP archive %s: %d rows in %d batches from %d members", archive.key, totalRows, batchNum, processedMembers)
+	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
 }
 
 func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
@@ -1088,6 +1206,58 @@ func formatAthenaTimestamp(t time.Time) string {
 }
 
 func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) ([]byte, error) {
+	reader, err := s.openFile(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+	return io.ReadAll(reader)
+}
+
+func (s *BlobstoreSource) downloadZIPFile(ctx context.Context, bucket, key string) (*os.File, error) {
+	tempFile, err := os.CreateTemp("", "ingestr-*.zip")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ZIP spool file: %w", err)
+	}
+
+	_, err = retry(3, time.Second, func() (struct{}, error) {
+		if err := tempFile.Truncate(0); err != nil {
+			return struct{}{}, err
+		}
+		if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+			return struct{}{}, err
+		}
+
+		reader, err := s.openFile(ctx, bucket, key)
+		if err != nil {
+			return struct{}{}, err
+		}
+		_, copyErr := io.Copy(tempFile, &contextReader{ctx: ctx, reader: reader})
+		closeErr := reader.Close()
+		if copyErr != nil {
+			return struct{}{}, copyErr
+		}
+		if closeErr != nil {
+			return struct{}{}, closeErr
+		}
+		return struct{}{}, nil
+	})
+	if err != nil {
+		name := tempFile.Name()
+		_ = tempFile.Close()
+		_ = os.Remove(name)
+		return nil, err
+	}
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		name := tempFile.Name()
+		_ = tempFile.Close()
+		_ = os.Remove(name)
+		return nil, err
+	}
+	return tempFile, nil
+}
+
+func (s *BlobstoreSource) openFile(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
 	switch s.provider {
 	case ProviderS3:
 		resp, err := s.s3Client.GetObject(ctx, &s3.GetObjectInput{
@@ -1097,16 +1267,14 @@ func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) 
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = resp.Body.Close() }()
-		return io.ReadAll(resp.Body)
+		return resp.Body, nil
 
 	case ProviderGCS:
 		reader, err := s.gcsClient.Bucket(bucket).Object(key).NewReader(ctx)
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = reader.Close() }()
-		return io.ReadAll(reader)
+		return reader, nil
 
 	case ProviderAzureDatalake:
 		if s.adlsClient == nil {
@@ -1123,57 +1291,55 @@ func (s *BlobstoreSource) downloadFile(ctx context.Context, bucket, key string) 
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = resp.Body.Close() }()
-		return io.ReadAll(resp.Body)
+		return resp.Body, nil
 
 	case ProviderSFTP:
 		f, err := s.sftpClient.Open(key)
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = f.Close() }()
-		return io.ReadAll(f)
+		return f, nil
 	}
 
 	return nil, fmt.Errorf("unsupported provider: %s", s.provider)
 }
 
-func (s *BlobstoreSource) readParquetFile(ctx context.Context, data []byte, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
-	reader := bytes.NewReader(data)
+func (s *BlobstoreSource) readParquetFile(ctx context.Context, reader parquet.ReaderAtSeeker, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
 	pr, err := file.NewParquetReader(reader)
 	if err != nil {
 		return fmt.Errorf("failed to open parquet reader: %w", err)
 	}
-
-	fr, err := pqarrow.NewFileReader(pr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
-	if err != nil {
-		return fmt.Errorf("failed to create parquet arrow reader: %w", err)
-	}
-
-	tbl, err := fr.ReadTable(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to read parquet table: %w", err)
-	}
-	defer tbl.Release()
 
 	chunkSize := int64(opts.PageSize)
 	if chunkSize <= 0 {
 		chunkSize = 10000
 	}
 
-	tr := array.NewTableReader(tbl, chunkSize)
-	defer tr.Release()
+	fr, err := pqarrow.NewFileReader(pr, pqarrow.ArrowReadProperties{BatchSize: chunkSize}, memory.DefaultAllocator)
+	if err != nil {
+		return fmt.Errorf("failed to create parquet arrow reader: %w", err)
+	}
+	rr, err := fr.GetRecordReader(ctx, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create parquet record reader: %w", err)
+	}
+	defer rr.Release()
 
-	for tr.Next() {
-		rec := tr.RecordBatch()
+	for rr.Next() {
+		rec := rr.RecordBatch()
 		rec.Retain()
 
+		if opts.Limit > 0 && *totalRows+rec.NumRows() > int64(opts.Limit) {
+			sliced := rec.NewSlice(0, int64(opts.Limit)-*totalRows)
+			rec.Release()
+			rec = sliced
+		}
 		*batchNum++
 		rows := rec.NumRows()
 		*totalRows += rows
 		config.Debug("[BLOBSTORE-SRC] Parquet batch %d: %d rows (total: %d)", *batchNum, rows, *totalRows)
 
-		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+		if err := sendRecordBatchWithMetadata(ctx, results, rec, metadata); err != nil {
 			return err
 		}
 
@@ -1182,7 +1348,7 @@ func (s *BlobstoreSource) readParquetFile(ctx context.Context, data []byte, resu
 		}
 	}
 
-	return tr.Err()
+	return rr.Err()
 }
 
 func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
@@ -1206,7 +1372,7 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 		*totalRows += int64(len(items))
 		config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
 
-		if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+		if err := sendRecordBatchWithMetadata(ctx, results, record, metadata); err != nil {
 			return err
 		}
 		items = make([]map[string]interface{}, 0, batchSize)
@@ -1287,7 +1453,7 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 		*totalRows += int64(len(rows))
 		config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
 
-		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+		if err := sendRecordBatchWithMetadata(ctx, results, rec, metadata); err != nil {
 			return err
 		}
 		rows = make([]map[string]interface{}, 0, batchSize)
@@ -1337,7 +1503,7 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 	return flush()
 }
 
-func sendRecordBatchWithMetadata(results chan<- source.RecordBatchResult, record arrow.RecordBatch, metadata blobstoreFileMetadata) error {
+func sendRecordBatchWithMetadata(ctx context.Context, results chan<- source.RecordBatchResult, record arrow.RecordBatch, metadata blobstoreFileMetadata) error {
 	out, added, err := addBlobstoreMetadataColumns(record, metadata)
 	if err != nil {
 		record.Release()
@@ -1346,8 +1512,13 @@ func sendRecordBatchWithMetadata(results chan<- source.RecordBatchResult, record
 	if added {
 		record.Release()
 	}
-	results <- source.RecordBatchResult{Batch: out}
-	return nil
+	select {
+	case results <- source.RecordBatchResult{Batch: out}:
+		return nil
+	case <-ctx.Done():
+		out.Release()
+		return ctx.Err()
+	}
 }
 
 func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFileMetadata) (arrow.RecordBatch, bool, error) {
@@ -1357,32 +1528,32 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 
 	addIncrementalTimestamp := metadata.incrementalKey != "" && metadata.incrementalAt != nil
 	addFilepath := metadata.filepathColumn != "" && metadata.filepath != ""
-	if !addIncrementalTimestamp && !addFilepath {
+
+	columnNames := make([]string, 0, 2)
+	if addIncrementalTimestamp {
+		columnNames = append(columnNames, metadata.incrementalKey)
+	}
+	if addFilepath {
+		columnNames = append(columnNames, metadata.filepathColumn)
+	}
+	if len(columnNames) == 0 {
 		return record, false, nil
 	}
-	if addIncrementalTimestamp && addFilepath && strings.EqualFold(metadata.incrementalKey, metadata.filepathColumn) {
-		return nil, false, fmt.Errorf("blobstore metadata columns conflict on %q; choose a different --incremental-key", metadata.incrementalKey)
-	}
 
-	for _, name := range []string{metadata.incrementalKey, metadata.filepathColumn} {
-		if name == "" {
-			continue
+	seenNames := make(map[string]struct{}, len(columnNames))
+	for _, name := range columnNames {
+		key := strings.ToLower(name)
+		if _, exists := seenNames[key]; exists {
+			return nil, false, fmt.Errorf("blobstore metadata columns conflict on %q; choose a different --incremental-key", name)
 		}
+		seenNames[key] = struct{}{}
 		if recordHasColumn(record, name) {
 			return nil, false, fmt.Errorf("blobstore metadata column %q already exists in file data; choose a different --incremental-key or exclude the column", name)
 		}
 	}
 
-	addedCols := 0
-	if addIncrementalTimestamp {
-		addedCols++
-	}
-	if addFilepath {
-		addedCols++
-	}
-
-	fields := make([]arrow.Field, int(record.NumCols())+addedCols)
-	columns := make([]arrow.Array, int(record.NumCols())+addedCols)
+	fields := make([]arrow.Field, int(record.NumCols())+len(columnNames))
+	columns := make([]arrow.Array, int(record.NumCols())+len(columnNames))
 	for i := 0; i < int(record.NumCols()); i++ {
 		fields[i] = record.Schema().Field(i)
 		columns[i] = record.Column(i)
@@ -1407,19 +1578,23 @@ func addBlobstoreMetadataColumns(record arrow.RecordBatch, metadata blobstoreFil
 		nextCol++
 	}
 
-	if addFilepath {
+	appendString := func(name, value string) {
 		fields[nextCol] = arrow.Field{
-			Name:     metadata.filepathColumn,
+			Name:     name,
 			Type:     arrow.BinaryTypes.String,
 			Nullable: false,
 		}
 
 		builder := array.NewStringBuilder(memory.DefaultAllocator)
 		for i := int64(0); i < record.NumRows(); i++ {
-			builder.Append(metadata.filepath)
+			builder.Append(value)
 		}
 		columns[nextCol] = builder.NewArray()
 		builder.Release()
+		nextCol++
+	}
+	if addFilepath {
+		appendString(metadata.filepathColumn, metadata.filepath)
 	}
 
 	newRecord := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, record.NumRows())
@@ -1747,6 +1922,10 @@ func detectFileFormat(key string, hint FileFormat) FileFormat {
 
 func isGzipped(key string) bool {
 	return strings.HasSuffix(strings.ToLower(key), ".gz")
+}
+
+func isZIP(key string) bool {
+	return strings.HasSuffix(strings.ToLower(key), ".zip")
 }
 
 func retry[T any](attempts int, delay time.Duration, fn func() (T, error)) (T, error) {
