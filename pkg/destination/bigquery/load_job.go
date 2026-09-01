@@ -957,6 +957,9 @@ func isRetryableLoadJobError(err error) bool {
 	if errors.As(err, &locationErr) {
 		return false
 	}
+	if isDatasetNotFoundInLocation(err.Error()) {
+		return false
+	}
 
 	var bqErrPtr *gcbq.Error
 	if errors.As(err, &bqErrPtr) && bqErrPtr != nil {
@@ -997,6 +1000,10 @@ func isRetryableLoadJobError(err error) bool {
 }
 
 func isRetryableLoadJobReason(reason string, message string) bool {
+	if isDatasetNotFoundInLocation(message) {
+		return false
+	}
+
 	switch strings.ToLower(reason) {
 	case "ratelimitexceeded", "quotaexceeded", "backenderror", "jobbackenderror", "aborted":
 		return true
@@ -1011,6 +1018,12 @@ func isRetryableLoadJobReason(reason string, message string) bool {
 		strings.Contains(msg, "could not serialize access") ||
 		strings.Contains(msg, "concurrent update") ||
 		strings.Contains(msg, "transaction is aborted")
+}
+
+func isDatasetNotFoundInLocation(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "not found: dataset") &&
+		strings.Contains(message, "was not found in location")
 }
 
 func retryDelayForQueryJob(attempt int, err error) time.Duration {

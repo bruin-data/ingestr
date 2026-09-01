@@ -25,6 +25,7 @@ source  ->  staging table  ->  destination table
 
 - **`load_job`** (default): a BigQuery load job.
 - **`storage_write`**: the BigQuery Storage Write API.
+- A transient `Not found: Dataset` immediately after dataset creation is retryable, but BigQuery's `was not found in location` variant is permanent and fails immediately.
 
 Selected via the destination URI: `bigquery://project/dataset?load_method=storage_write`. Default is `load_job`.
 
