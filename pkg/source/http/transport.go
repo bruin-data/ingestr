@@ -172,7 +172,7 @@ type idleConn struct {
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	if err := c.Conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(b)
