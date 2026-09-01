@@ -162,6 +162,45 @@ Linux/containers, which must have `ca-certificates` installed.
 
 ---
 
+### DuckLake table layout
+
+The ingest command applies `--partition-by` and `--cluster-by` to DuckLake destination tables.
+As with the other destinations, both options apply to single-table ingests; multi-table runs
+ignore them.
+
+`--partition-by` accepts one date or timestamp column, matching the BigQuery destination's
+interface. Date columns use identity partitioning; timestamp columns are partitioned by
+`year`/`month`/`day`, giving one partition per calendar date:
+
+```bash
+ingestr ingest \
+  --source-uri="postgres://..." \
+  --source-table="public.events" \
+  --dest-uri="ducklake://?..." \
+  --dest-table="analytics.events" \
+  --partition-by="created_at"
+```
+
+For DuckLake, `--cluster-by` defines the table's physical sort order. Columns are sorted
+in the configured order, ascending:
+
+```bash
+--cluster-by="tenant_id,created_at"
+```
+
+Both options need the `ducklake` extension shipped with DuckDB 1.5 or newer. On an older
+cached DuckDB ADBC driver, `--cluster-by` fails with `Unsupported ALTER TABLE type in
+DuckLake`, and a partition specification does not survive the table rename that completes a
+replace run.
+
+An explicit layout is applied before writing, and DuckLake applies a changed partition or
+sort specification to newly written data; a replace/full-refresh writes the complete
+replacement using the requested layout. Omitting an option leaves that part of an existing
+table's layout untouched for incremental strategies, which write into the live table. A
+replace run builds a new table each time, so a layout must be passed on every run to be kept.
+
+---
+
 ### Examples
 
 #### MinIO + DuckDB catalog (local development)

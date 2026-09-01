@@ -51,6 +51,15 @@ type DuckDBDestination struct {
 	// runs don't clobber each other.
 	schemas   map[string]*schema.TableSchema
 	schemasMu sync.Mutex
+
+	// onTargetRecreated preserves destination metadata during cross-schema swaps.
+	onTargetRecreated func(ctx context.Context, stagingTable, targetTable string) error
+
+	// onSchemaEvolvedLocked runs inside the conditional evolution transaction.
+	onSchemaEvolvedLocked func(ctx context.Context, table string) error
+
+	// onStagingConsumed releases per-staging-table state after a committed swap.
+	onStagingConsumed func(stagingTable string)
 }
 
 type duckDBManagedCDCRunLease struct {
@@ -800,6 +809,12 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 			return fmt.Errorf("failed to recreate target table: %w", err)
 		}
 
+		if d.onTargetRecreated != nil {
+			if err := d.onTargetRecreated(ctx, stagingTable, targetTable); err != nil {
+				return err
+			}
+		}
+
 		quotedCols := make([]string, len(sch.Columns))
 		for i, c := range sch.Columns {
 			quotedCols[i] = destination.QuoteIdentifier(c.Name)
@@ -832,6 +847,10 @@ func (d *DuckDBDestination) SwapTable(ctx context.Context, opts destination.Swap
 		return fmt.Errorf("failed to commit swap: %w", err)
 	}
 	commit = true
+
+	if d.onStagingConsumed != nil {
+		d.onStagingConsumed(stagingTable)
+	}
 
 	config.Debug("[DUCKDB] Table swap completed in %v", time.Since(startSwap))
 	return nil
