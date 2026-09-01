@@ -203,7 +203,7 @@ func TestParquetSource_ReadsZIPMembers(t *testing.T) {
 	require.NoError(t, archiveFile.Close())
 
 	src := NewParquetSource()
-	require.NoError(t, src.Connect(ctx, "parquet://"+archivePath))
+	require.NoError(t, src.Connect(ctx, "parquet://"+archivePath+"!data/*.parquet"))
 	table, err := src.GetTable(ctx, source.TableRequest{Name: "release"})
 	require.NoError(t, err)
 	assert.False(t, table.HasKnownSchema())

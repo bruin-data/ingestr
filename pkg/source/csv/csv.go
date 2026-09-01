@@ -35,9 +35,9 @@ import (
 const defaultBatchSize = 10000
 
 type CSVSource struct {
-	filePath string
-	isZIP    bool
-	encoding string
+	filePath             string
+	archiveMemberPattern string
+	encoding             string
 }
 
 func NewCSVSource() *CSVSource {
@@ -53,6 +53,7 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	if filePath == "" {
 		return fmt.Errorf("invalid CSV URI: %s", uri)
 	}
+	filePath, archiveMemberPattern, _ := archiveutil.SplitPath(filePath)
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to access CSV file: %w", err)
@@ -62,7 +63,7 @@ func (s *CSVSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.filePath = filePath
-	s.isZIP = archiveutil.IsZIP(filePath)
+	s.archiveMemberPattern = archiveMemberPattern
 	s.encoding = enc
 	config.Debug("[CSV] Connected to file: %s (encoding=%q)", filePath, enc)
 	return nil
@@ -126,7 +127,7 @@ func (s *CSVSource) read(ctx context.Context, opts source.ReadOptions) (<-chan s
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
 	}
-	if s.isZIP {
+	if s.archiveMemberPattern != "" {
 		return s.readZIP(ctx, opts)
 	}
 
@@ -279,19 +280,21 @@ func (s *CSVSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-cha
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ZIP archive: %w", err)
 	}
+	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern)
+	if err != nil {
+		_ = archive.Close()
+		return nil, err
+	}
+
 	results := make(chan source.RecordBatchResult, 8)
 	go func() {
 		defer close(results)
 		defer func() { _ = archive.Close() }()
 
 		totalRows := 0
-		processedMembers := 0
-		for _, member := range archive.File {
+		for _, member := range members {
 			if opts.Limit > 0 && totalRows >= opts.Limit {
 				return
-			}
-			if member.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(member.Name), ".csv") {
-				continue
 			}
 
 			spooled, err := archiveutil.SpoolMember(ctx, member)
@@ -318,10 +321,6 @@ func (s *CSVSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-cha
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read ZIP member %q: %w", member.Name, readErr)}
 				return
 			}
-			processedMembers++
-		}
-		if processedMembers == 0 {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("no CSV files found in ZIP archive")}
 		}
 	}()
 

@@ -155,7 +155,7 @@ ingestr ingest \
     --dest-table "logs.events"
 ```
 
-ZIP archives are read like other compressed files. For example, `my-org-bucket/releases/*.zip` reads every supported file from each matching ZIP object. CSV, JSONL/NDJSON, and parquet files are supported; a format hint can follow the ZIP path when names have no useful extension, such as `release.zip#jsonl`.
+To read files inside a ZIP archive, append `!<member-glob>` to the object path. For example, `my-org-bucket/releases/*.zip!**/*.csv` selects every CSV member from each matching ZIP object. CSV, JSONL/NDJSON, and parquet members are supported; a format hint can follow the member glob when names have no useful extension, such as `release.zip!data/*#jsonl`.
 
 ZIP objects use temporary spooling.
 

@@ -790,6 +790,7 @@ func TestProcessZIPReaderCSV(t *testing.T) {
 		"bucket",
 		blobstoreFile{key: "releases/data.zip"},
 		zipReader,
+		"data/*.csv",
 		FormatUnknown,
 		"",
 		100,

@@ -452,7 +452,7 @@ func (s *BlobstoreSource) GetTable(ctx context.Context, req source.TableRequest)
 func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
 
-	var bucket, pattern string
+	var bucket, pattern, archiveMemberPattern string
 	var formatHint FileFormat
 	var tableEncoding string
 
@@ -461,7 +461,8 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	} else {
 		bucket, pattern, formatHint, tableEncoding = parseTablePattern(table)
 	}
-	config.Debug("[BLOBSTORE-SRC] Reading from bucket=%s, pattern=%s, formatHint=%s, encoding=%q", bucket, pattern, formatHint, tableEncoding)
+	pattern, archiveMemberPattern, _ = archiveutil.SplitPath(pattern)
+	config.Debug("[BLOBSTORE-SRC] Reading from bucket=%s, pattern=%s, archiveMemberPattern=%s, formatHint=%s, encoding=%q", bucket, pattern, archiveMemberPattern, formatHint, tableEncoding)
 
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
@@ -489,7 +490,7 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 					return
 				default:
 				}
-				s.processFile(ctx, bucket, fileKey, formatHint, tableEncoding, batchSize, opts, results)
+				s.processFile(ctx, bucket, fileKey, archiveMemberPattern, formatHint, tableEncoding, batchSize, opts, results)
 			}
 		}()
 	}
@@ -523,11 +524,14 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	return results, nil
 }
 
-func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file blobstoreFile, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
+func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file blobstoreFile, archiveMemberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) {
 	startFile := time.Now()
 	fileKey := file.key
-	if isZIP(fileKey) {
-		if err := s.processZIPFile(ctx, bucket, file, formatHint, tableEncoding, batchSize, opts, results); err != nil {
+	if archiveMemberPattern != "" || isZIP(fileKey) {
+		if archiveMemberPattern == "" {
+			archiveMemberPattern = archiveutil.DefaultMemberPattern
+		}
+		if err := s.processZIPFile(ctx, bucket, file, archiveMemberPattern, formatHint, tableEncoding, batchSize, opts, results); err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read %s: %w", fileKey, err)}
 		}
 		return
@@ -588,7 +592,7 @@ func (s *BlobstoreSource) processFile(ctx context.Context, bucket string, file b
 	config.Debug("[BLOBSTORE-SRC] File %s: %d rows in %d batches, read time: %v", fileKey, totalRows, batchNum, time.Since(startFile))
 }
 
-func (s *BlobstoreSource) processZIPFile(ctx context.Context, bucket string, archive blobstoreFile, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+func (s *BlobstoreSource) processZIPFile(ctx context.Context, bucket string, archive blobstoreFile, memberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	spooled, err := s.downloadZIPFile(ctx, bucket, archive.key)
 	if err != nil {
 		return fmt.Errorf("failed to download ZIP archive after retries: %w", err)
@@ -607,16 +611,20 @@ func (s *BlobstoreSource) processZIPFile(ctx context.Context, bucket string, arc
 	if err != nil {
 		return fmt.Errorf("failed to open ZIP archive: %w", err)
 	}
-	return s.processZIPReader(ctx, bucket, archive, zipReader, formatHint, tableEncoding, batchSize, opts, results)
+	return s.processZIPReader(ctx, bucket, archive, zipReader, memberPattern, formatHint, tableEncoding, batchSize, opts, results)
 }
 
-func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, archive blobstoreFile, zipReader *zip.Reader, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	var err error
+func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, archive blobstoreFile, zipReader *zip.Reader, memberPattern string, formatHint FileFormat, tableEncoding string, batchSize int, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	members, err := archiveutil.SelectZIPMembers(zipReader, memberPattern)
+	if err != nil {
+		return err
+	}
+
 	var totalRows int64
 	var batchNum int
 	processedMembers := 0
 	baseMetadata := s.fileMetadata(opts, bucket, archive.key, archive.modifiedAt, archive.createdAt)
-	for _, member := range zipReader.File {
+	for _, member := range members {
 		if opts.Limit > 0 && totalRows >= int64(opts.Limit) {
 			break
 		}
@@ -625,13 +633,10 @@ func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, a
 			return ctx.Err()
 		default:
 		}
-		if member.FileInfo().IsDir() {
-			continue
-		}
 
 		format := detectFileFormat(member.Name, formatHint)
 		if format == FormatUnknown {
-			config.Debug("[BLOBSTORE-SRC] Skipping ZIP member with unknown format: %s/%s", archive.key, member.Name)
+			config.Debug("[BLOBSTORE-SRC] Skipping ZIP member with unknown format: %s!%s", archive.key, member.Name)
 			continue
 		}
 		switch format {
@@ -672,7 +677,7 @@ func (s *BlobstoreSource) processZIPReader(ctx context.Context, bucket string, a
 	}
 
 	if processedMembers == 0 {
-		return fmt.Errorf("no supported files found in ZIP archive")
+		return fmt.Errorf("no supported files found in ZIP members matching pattern: %s", memberPattern)
 	}
 	config.Debug("[BLOBSTORE-SRC] ZIP archive %s: %d rows in %d batches from %d members", archive.key, totalRows, batchNum, processedMembers)
 	return nil

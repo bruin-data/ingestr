@@ -1,6 +1,8 @@
 package archiveutil
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -13,21 +15,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsZIP(t *testing.T) {
+func TestSplitPath(t *testing.T) {
 	tests := []struct {
-		path  string
-		isZIP bool
+		path   string
+		outer  string
+		member string
+		isZIP  bool
 	}{
-		{path: "release.zip", isZIP: true},
-		{path: "release.ZIP", isZIP: true},
-		{path: "regular.csv", isZIP: false},
+		{path: "release.zip!**/*.csv", outer: "release.zip", member: "**/*.csv", isZIP: true},
+		{path: "release.ZIP!data/*.jsonl", outer: "release.ZIP", member: "data/*.jsonl", isZIP: true},
+		{path: "release.zip", outer: "release.zip", member: DefaultMemberPattern, isZIP: true},
+		{path: "release.zip!", outer: "release.zip", member: DefaultMemberPattern, isZIP: true},
+		{path: "regular.csv", outer: "regular.csv"},
+		{path: "object!name.csv", outer: "object!name.csv"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			assert.Equal(t, tt.isZIP, IsZIP(tt.path))
+			outer, member, isZIP := SplitPath(tt.path)
+			assert.Equal(t, tt.outer, outer)
+			assert.Equal(t, tt.member, member)
+			assert.Equal(t, tt.isZIP, isZIP)
 		})
 	}
+}
+
+func TestSelectZIPMembers(t *testing.T) {
+	reader := makeZIPReader(t, map[string]string{
+		"data/day-1.csv": "id\n1\n",
+		"data/day-2.csv": "id\n2\n",
+		"notes.txt":      "ignored",
+	})
+
+	members, err := SelectZIPMembers(reader, "data/*.csv")
+	require.NoError(t, err)
+	require.Len(t, members, 2)
+	assert.ElementsMatch(t, []string{"data/day-1.csv", "data/day-2.csv"}, []string{members[0].Name, members[1].Name})
+
+	_, err = SelectZIPMembers(reader, "missing/*.csv")
+	require.ErrorContains(t, err, "no ZIP members matched")
 }
 
 func TestForwardBatchesIgnoresErrorsAfterLimit(t *testing.T) {
@@ -52,4 +78,22 @@ func TestForwardBatchesIgnoresErrorsAfterLimit(t *testing.T) {
 	require.NoError(t, result.Err)
 	assert.Equal(t, int64(1), result.Batch.NumRows())
 	result.Batch.Release()
+}
+
+func makeZIPReader(t *testing.T, files map[string]string) *zip.Reader {
+	t.Helper()
+
+	var data bytes.Buffer
+	writer := zip.NewWriter(&data)
+	for name, contents := range files {
+		member, err := writer.Create(name)
+		require.NoError(t, err)
+		_, err = member.Write([]byte(contents))
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+
+	reader, err := zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+	require.NoError(t, err)
+	return reader
 }
