@@ -141,7 +141,7 @@ func (s *HTTPSource) read(ctx context.Context, table string, opts source.ReadOpt
 		defer func() { _ = stream.Close() }()
 
 		metadata := s.Metadata()
-		format, encoding := detectFormat(metadata.FinalURL, table, metadata.ContentType)
+		format, encoding, gzipped := detectFormat(metadata.FinalURL, table, metadata.ContentType)
 		if format == formatUnknown {
 			sendError(ctx, results, fmt.Errorf("cannot detect file format from URL, Content-Type, or table name; use #csv, #csv_headless, #json, #jsonl, or #parquet on --source-table"))
 			return
@@ -154,7 +154,7 @@ func (s *HTTPSource) read(ctx context.Context, table string, opts source.ReadOpt
 			sendError(ctx, results, fmt.Errorf("unsupported HTTP Content-Encoding %q", stream.encoding))
 			return
 		}
-		if isGzipped(metadata.FinalURL) || contentEncoding == "gzip" || contentEncoding == "x-gzip" {
+		if gzipped || contentEncoding == "gzip" || contentEncoding == "x-gzip" {
 			gzReader, err := gzip.NewReader(stream)
 			if err != nil {
 				sendError(ctx, results, fmt.Errorf("failed to open gzip stream: %w", err))
@@ -213,7 +213,14 @@ func (s *HTTPSource) read(ctx context.Context, table string, opts source.ReadOpt
 	return results, nil
 }
 
-func detectFormat(sourceURL, table, contentType string) (fileFormat, string) {
+func detectFormat(sourceURL, table, contentType string) (fileFormat, string, bool) {
+	path := strings.ToLower(sourceURL)
+	if parsed, err := url.Parse(sourceURL); err == nil {
+		path = strings.ToLower(parsed.Path)
+	}
+	gzipped := strings.HasSuffix(path, ".gz")
+	base := strings.TrimSuffix(path, ".gz")
+
 	encoding := ""
 	hintedFormat := formatUnknown
 	if idx := strings.Index(table, "#"); idx != -1 {
@@ -239,45 +246,33 @@ func detectFormat(sourceURL, table, contentType string) (fileFormat, string) {
 		}
 	}
 	if hintedFormat != formatUnknown {
-		return hintedFormat, encoding
+		return hintedFormat, encoding, gzipped
 	}
-
-	lower := strings.ToLower(sourceURL)
-	qIdx := strings.Index(lower, "?")
-	if qIdx != -1 {
-		lower = lower[:qIdx]
-	}
-	lower = strings.TrimSuffix(lower, ".gz")
 
 	switch {
-	case strings.HasSuffix(lower, ".csv"):
-		return formatCSV, encoding
-	case strings.HasSuffix(lower, ".json"):
-		return formatJSON, encoding
-	case strings.HasSuffix(lower, ".jsonl") || strings.HasSuffix(lower, ".ndjson"):
-		return formatJSONL, encoding
-	case strings.HasSuffix(lower, ".parquet"):
-		return formatParquet, encoding
+	case strings.HasSuffix(base, ".csv"):
+		return formatCSV, encoding, gzipped
+	case strings.HasSuffix(base, ".json"):
+		return formatJSON, encoding, gzipped
+	case strings.HasSuffix(base, ".jsonl") || strings.HasSuffix(base, ".ndjson"):
+		return formatJSONL, encoding, gzipped
+	case strings.HasSuffix(base, ".parquet"):
+		return formatParquet, encoding, gzipped
 	}
 
 	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
 	switch mediaType {
 	case "text/csv", "application/csv":
-		return formatCSV, encoding
+		return formatCSV, encoding, gzipped
 	case "application/json":
-		return formatJSON, encoding
+		return formatJSON, encoding, gzipped
 	case "application/jsonl", "application/x-jsonlines", "application/x-ndjson", "application/ndjson":
-		return formatJSONL, encoding
+		return formatJSONL, encoding, gzipped
 	case "application/vnd.apache.parquet", "application/x-parquet":
-		return formatParquet, encoding
+		return formatParquet, encoding, gzipped
 	default:
-		return formatUnknown, encoding
+		return formatUnknown, encoding, gzipped
 	}
-}
-
-func isGzipped(sourceURL string) bool {
-	parsed, err := url.Parse(sourceURL)
-	return err == nil && strings.HasSuffix(strings.ToLower(parsed.Path), ".gz")
 }
 
 func cleanTableName(table string) string {

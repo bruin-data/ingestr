@@ -46,7 +46,7 @@ func TestDetectFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, _ := detectFormat(tt.url, tt.table, "")
+			result, _, _ := detectFormat(tt.url, tt.table, "")
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -69,9 +69,32 @@ func TestDetectFormatEncoding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			format, encoding := detectFormat("https://example.com/data", tt.table, "")
+			format, encoding, _ := detectFormat("https://example.com/data", tt.table, "")
 			assert.Equal(t, tt.expectedFormat, format)
 			assert.Equal(t, tt.expectedEncoding, encoding)
+		})
+	}
+}
+
+func TestDetectFormatGzip(t *testing.T) {
+	tests := []struct {
+		name           string
+		url            string
+		table          string
+		expectedFormat fileFormat
+		expectedGzip   bool
+	}{
+		{"plain csv", "https://example.com/data.csv", "my_data", formatCSV, false},
+		{"gzipped csv by extension", "https://example.com/data.csv.gz", "my_data", formatCSV, true},
+		{"gzipped csv with query", "https://example.com/data.csv.gz?token=abc", "my_data", formatCSV, true},
+		{"gzipped with format hint", "https://example.com/data.gz", "my_data#csv", formatCSV, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			format, _, gzipped := detectFormat(tt.url, tt.table, "")
+			assert.Equal(t, tt.expectedFormat, format)
+			assert.Equal(t, tt.expectedGzip, gzipped)
 		})
 	}
 }
