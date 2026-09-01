@@ -249,7 +249,9 @@ func (s *HTTPSource) doRequest(ctx context.Context, offset int64, etag, modified
 		}
 		req.Header = s.options.headers.Clone()
 		req.Header.Set("Accept-Encoding", "identity")
-		req.Header.Set("User-Agent", "ingestr/1.0 (https://github.com/bruin-data/ingestr)")
+		if req.Header.Get("User-Agent") == "" {
+			req.Header.Set("User-Agent", "ingestr/1.0 (https://github.com/bruin-data/ingestr)")
+		}
 		if offset > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 			if strongETag(etag) {

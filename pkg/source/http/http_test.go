@@ -523,6 +523,34 @@ func TestHTTPSourceStreamsGzip(t *testing.T) {
 	assert.EqualValues(t, 2, rows)
 }
 
+func TestHTTPSourceUserAgent(t *testing.T) {
+	tests := []struct {
+		name     string
+		suffix   string
+		expected string
+	}{
+		{"default user-agent", "", "ingestr/1.0 (https://github.com/bruin-data/ingestr)"},
+		{"custom user-agent", "&header.User-Agent=my-agent", "my-agent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotUA atomic.Value
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotUA.Store(r.Header.Get("User-Agent"))
+				w.Header().Set("Content-Type", "text/csv")
+				_, _ = io.WriteString(w, "id\n1\n")
+			}))
+			defer srv.Close()
+
+			s := connectedSource(t, srv.URL+"/data.csv#ingestr:retries=0"+tt.suffix)
+			_, err := readRows(t, s, "data", source.ReadOptions{})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, gotUA.Load())
+		})
+	}
+}
+
 func TestParseSourceURIAuthentication(t *testing.T) {
 	target, opts, err := parseSourceURI("https://user:password@example.com/data.csv?signature=keep#ingestr:header.X-Value=a%26b%23c&retries=0")
 	assert.NoError(t, err)
