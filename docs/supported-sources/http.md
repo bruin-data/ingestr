@@ -99,6 +99,12 @@ HTTP 408, 429, and 5xx responses and transport failures are retried with bounded
 
 `retries` accepts values from 0 through 10. Waiting and active requests stop promptly when ingestion is cancelled.
 
+A read stalls if the server sends response headers and then stops sending body bytes without closing the connection. `read_timeout` bounds the time allowed between successive reads (not the total download time, so slow but progressing streams are unaffected). It defaults to `2m`; set `0` to disable it:
+
+```sh
+--source-uri 'https://example.com/data.csv#ingestr:read_timeout=5m'
+```
+
 If a response is interrupted after bytes have been decoded, ingestr resumes only when it can preserve file identity:
 
 - the initial response supplied a strong `ETag` or `Last-Modified` validator;

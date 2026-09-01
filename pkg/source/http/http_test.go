@@ -528,6 +528,37 @@ func TestHTTPSourceRetriesTransientStatus(t *testing.T) {
 	assert.EqualValues(t, 2, requests.Load())
 }
 
+func TestHTTPSourceReadTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Length", "1000000")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "id\n1\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	done := make(chan error, 1)
+	go func() {
+		s := connectedSource(t, srv.URL+"/data.csv#ingestr:retries=0&read_timeout=200ms")
+		_, err := readRows(t, s, "data", source.ReadOptions{})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		assert.Error(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("read hung despite read_timeout")
+	}
+}
+
 func TestHTTPSourceStreamsGzip(t *testing.T) {
 	var compressed bytes.Buffer
 	writer := gzip.NewWriter(&compressed)

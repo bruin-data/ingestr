@@ -66,7 +66,7 @@ func (s *HTTPSource) Connect(ctx context.Context, uri string) error {
 	}
 	s.target = target
 	s.options = options
-	s.client = newHTTPClient(options.headers)
+	s.client = newHTTPClient(options.headers, options.readTimeout)
 
 	config.Debug("[HTTP] Connected to URL: %s", displayURL(s.target))
 	return nil

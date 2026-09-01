@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net"
 	stdhttp "net/http"
 	"net/textproto"
 	"net/url"
@@ -20,8 +21,9 @@ import (
 )
 
 const (
-	defaultRetries = 3
-	maxErrorBody   = 4096
+	defaultRetries     = 3
+	maxErrorBody       = 4096
+	defaultReadTimeout = 2 * time.Minute
 )
 
 // ErrNotModified reports a 304 response to a caller-supplied conditional request.
@@ -42,6 +44,7 @@ type requestOptions struct {
 	ifNoneMatch     string
 	ifModifiedSince string
 	checksum        []byte
+	readTimeout     time.Duration
 }
 
 func parseSourceURI(raw string) (*url.URL, requestOptions, error) {
@@ -50,7 +53,7 @@ func parseSourceURI(raw string) (*url.URL, requestOptions, error) {
 		return nil, requestOptions{}, fmt.Errorf("invalid HTTP source URI")
 	}
 
-	opts := requestOptions{headers: make(stdhttp.Header), retries: defaultRetries}
+	opts := requestOptions{headers: make(stdhttp.Header), retries: defaultRetries, readTimeout: defaultReadTimeout}
 	if parsed.User != nil {
 		password, _ := parsed.User.Password()
 		opts.headers.Set("Authorization", basicAuth(parsed.User.Username(), password))
@@ -113,6 +116,13 @@ func parseSourceURI(raw string) (*url.URL, requestOptions, error) {
 		}
 		opts.retries = retries
 	}
+	if raw := values.Get("read_timeout"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			return nil, requestOptions{}, fmt.Errorf("HTTP source read_timeout must be a non-negative duration (e.g. 120s); 0 disables it")
+		}
+		opts.readTimeout = d
+	}
 	if checksum := values.Get("checksum"); checksum != "" {
 		algorithm, encoded, ok := strings.Cut(checksum, ":")
 		if !ok || !strings.EqualFold(algorithm, "sha256") {
@@ -127,6 +137,7 @@ func parseSourceURI(raw string) (*url.URL, requestOptions, error) {
 	known := map[string]bool{
 		"basic_user": true, "basic_password": true, "bearer_token": true,
 		"if_none_match": true, "if_modified_since": true, "retries": true, "checksum": true,
+		"read_timeout": true,
 	}
 	for key := range values {
 		if !known[key] && !strings.HasPrefix(strings.ToLower(key), "header.") {
@@ -152,9 +163,34 @@ func isManagedHeader(name string) bool {
 	}
 }
 
-func newHTTPClient(headers stdhttp.Header) *stdhttp.Client {
+// idleConn resets a read deadline before every Read so a stalled body (headers
+// received, then no bytes) fails instead of hanging, without capping the total
+// duration of a slow but progressing stream.
+type idleConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *idleConn) Read(b []byte) (int, error) {
+	if err := c.Conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
+}
+
+func newHTTPClient(headers stdhttp.Header, readTimeout time.Duration) *stdhttp.Client {
 	transport := stdhttp.DefaultTransport.(*stdhttp.Transport).Clone()
 	transport.ResponseHeaderTimeout = 2 * time.Minute
+	if readTimeout > 0 {
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return &idleConn{Conn: conn, timeout: readTimeout}, nil
+		}
+	}
 	return &stdhttp.Client{
 		Transport: transport,
 		CheckRedirect: func(req *stdhttp.Request, via []*stdhttp.Request) error {
