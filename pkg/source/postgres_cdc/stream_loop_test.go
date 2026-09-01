@@ -38,6 +38,7 @@ func (r *leaseLossReplicator) NextChanges(context.Context) ([]Change, pglogrepl.
 
 func (r *leaseLossReplicator) CurrentLSN() pglogrepl.LSN { return 10 }
 func (r *leaseLossReplicator) BarrierReached() bool      { return false }
+func (r *leaseLossReplicator) BarrierLSN() pglogrepl.LSN { return 0 }
 func (r *leaseLossReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
 	return 0, false
 }
@@ -48,6 +49,7 @@ type replStep struct {
 	hadActivity bool
 	lsn         pglogrepl.LSN
 	barrier     bool
+	barrierLSN  pglogrepl.LSN
 }
 
 // fakeReplicator replays a scripted sequence of NextChanges results, mimicking
@@ -59,6 +61,7 @@ type fakeReplicator struct {
 	idx         int
 	lsn         pglogrepl.LSN
 	barrierSeen bool
+	barrierLSN  pglogrepl.LSN
 
 	// pendingLowWater, when set, scripts PendingLowWater's return value.
 	pendingLowWater func() (pglogrepl.LSN, bool)
@@ -76,6 +79,10 @@ func (f *fakeReplicator) NextChanges(_ context.Context) ([]Change, pglogrepl.LSN
 	}
 	if s.barrier {
 		f.barrierSeen = true
+		f.barrierLSN = s.barrierLSN
+		if f.barrierLSN == 0 {
+			f.barrierLSN = s.lsn
+		}
 	}
 	return s.changes, s.lsn, s.hadActivity, nil
 }
@@ -83,6 +90,8 @@ func (f *fakeReplicator) NextChanges(_ context.Context) ([]Change, pglogrepl.LSN
 func (f *fakeReplicator) CurrentLSN() pglogrepl.LSN { return f.lsn }
 
 func (f *fakeReplicator) BarrierReached() bool { return f.barrierSeen }
+
+func (f *fakeReplicator) BarrierLSN() pglogrepl.LSN { return f.barrierLSN }
 
 func (f *fakeReplicator) PendingLowWater() (pglogrepl.LSN, bool) {
 	if f.pendingLowWater != nil {

@@ -475,5 +475,6 @@ func TestPipelinedReplicatorWaitsForBarrierAfterKeepaliveAndDelayedChanges(t *te
 	require.NoError(t, err)
 	require.True(t, hadActivity)
 	assert.True(t, repl.BarrierReached())
+	assert.Equal(t, markerLSN, repl.BarrierLSN())
 	assert.Equal(t, markerLSN, repl.CurrentLSN())
 }

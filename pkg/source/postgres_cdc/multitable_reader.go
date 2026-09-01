@@ -183,17 +183,17 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 
 		for {
 			barrierNonce := ""
-			var barrierLSN pglogrepl.LSN
+			var sqlBarrierLSN pglogrepl.LSN
 			if !opts.Streaming {
 				var err error
-				barrierNonce, barrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
+				barrierNonce, sqlBarrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
 				if err != nil {
 					_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 					return
 				}
-				config.Debug("[CDC] Batch mode: emitted logical-decoding barrier at %s", barrierLSN)
+				config.Debug("[CDC] Batch mode: emitted logical-decoding barrier; SQL returned %s", sqlBarrierLSN)
 			}
-			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, barrierLSN, slotName, results, opts)
+			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, sqlBarrierLSN, slotName, results, opts)
 			if err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)})
 				return
@@ -798,7 +798,7 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 // should cover but doesn't, and watches for mid-stream schema changes surfaced
 // by the decoder. Either way it flushes what it has and returns a signal so
 // the caller can rebuild the stream; a nil signal means normal termination.
-func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrierNonce string, barrierLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
+func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrierNonce string, sqlBarrierLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
 	config.Debug("[CDC] Multi-table streaming from LSN: %s", startLSN)
 
 	cdcConfigWithSlot := r.cdcConfig
@@ -932,7 +932,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		if barrierNonce != "" && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
-				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", barrierLSN)
+				decodedBarrierLSN := repl.BarrierLSN()
+				if decodedBarrierLSN == 0 {
+					return nil, fmt.Errorf("batch barrier was reached without a decoded replication LSN")
+				}
+				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", decodedBarrierLSN)
 				if err := accum.flushAllContext(ctx, results, token); err != nil {
 					return nil, err
 				}
@@ -942,10 +946,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				if err := repl.Close(ctx); err != nil {
 					return nil, err
 				}
-				// The emitted barrier is the position FinalizeBatch may confirm
-				// to the slot after the destination write is durable; the
-				// keepalive holds the walsender open until then.
-				r.source.checkpointBatchBarrier(ctx, barrierLSN, startLSN, slotName)
+				warnIfBarrierLSNsDiverge(sqlBarrierLSN, decodedBarrierLSN)
+				// The keepalive holds the walsender open until finalization.
+				r.source.checkpointBatchBarrier(ctx, decodedBarrierLSN, startLSN, slotName)
 				return nil, nil
 			}
 		}
