@@ -261,6 +261,125 @@ func TestClickHouseDestination_DeleteInsert(t *testing.T) {
 	assert.Equal(t, 1, countClickHouseRowsByID(t, ctx, uri, targetTable, 5))
 }
 
+// Regression: before GetTableSchema read back decimal precision/scale, the
+// destination column came back as Decimal(38, 0). Widening a real Decimal(38, 9)
+// source against that asked for precision 47 and failed every sync after the first.
+func TestClickHouseDestination_MergeDecimalTwice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, uri, err := startClickHouseContainer(ctx)
+	if err != nil {
+		t.Skipf("failed to start ClickHouse container: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	sourceTable := fmt.Sprintf("source_decimal_%d", time.Now().UnixNano())
+	createClickHouseDecimalTable(t, ctx, uri, sourceTable)
+	defer cleanupClickHouseTable(ctx, uri, sourceTable)
+
+	destTable := fmt.Sprintf("%s.dest_decimal_%d", clickhouseDB, time.Now().UnixNano())
+
+	cfg := &config.IngestConfig{
+		SourceURI:           uri,
+		SourceTable:         sourceTable,
+		DestURI:             uri,
+		DestTable:           destTable,
+		IncrementalStrategy: config.StrategyMerge,
+		PrimaryKeys:         []string{"id"},
+	}
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx), "first merge should succeed")
+	require.NoError(t, pipeline.New(cfg).Run(ctx), "second merge must not fail on decimal widening")
+}
+
+func TestClickHouseDestination_GetTableSchemaDecimalAndArray(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, uri, err := startClickHouseContainer(ctx)
+	if err != nil {
+		t.Skipf("failed to start ClickHouse container: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	table := fmt.Sprintf("%s.dest_schema_%d", clickhouseDB, time.Now().UnixNano())
+	defer cleanupClickHouseTable(ctx, uri, table)
+
+	opts, err := clickhouse.ParseDSN(uri)
+	require.NoError(t, err)
+	db := clickhouse.OpenDB(opts)
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE %s (
+			id Int64,
+			amount Nullable(Decimal(38, 9)),
+			tags Array(String),
+			created_at Nullable(DateTime64(6, 'UTC')),
+			seen_on Date
+		) ENGINE = MergeTree() ORDER BY id`, table))
+	require.NoError(t, err)
+	_ = db.Close()
+
+	dest := chdest.NewClickHouseDestination()
+	require.NoError(t, dest.Connect(ctx, uri))
+	t.Cleanup(func() { _ = dest.Close(ctx) })
+
+	ts, err := dest.GetTableSchema(ctx, table)
+	require.NoError(t, err)
+	require.NotNil(t, ts)
+
+	cols := make(map[string]schema.Column, len(ts.Columns))
+	for _, c := range ts.Columns {
+		cols[c.Name] = c
+	}
+
+	amount := cols["amount"]
+	assert.Equal(t, schema.TypeDecimal, amount.DataType)
+	assert.Equal(t, 38, amount.Precision)
+	assert.Equal(t, 9, amount.Scale)
+	assert.True(t, amount.Nullable)
+
+	tags := cols["tags"]
+	assert.Equal(t, schema.TypeArray, tags.DataType)
+	assert.Equal(t, schema.TypeString, tags.ArrayType)
+
+	createdAt := cols["created_at"]
+	assert.Equal(t, schema.TypeTimestampTZ, createdAt.DataType)
+	assert.True(t, createdAt.Nullable)
+
+	seenOn := cols["seen_on"]
+	assert.Equal(t, schema.TypeDate, seenOn.DataType)
+}
+
+func createClickHouseDecimalTable(t *testing.T, ctx context.Context, uri string, table string) {
+	t.Helper()
+
+	opts, err := clickhouse.ParseDSN(uri)
+	require.NoError(t, err)
+
+	db := clickhouse.OpenDB(opts)
+	defer func() { _ = db.Close() }()
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id Int64,
+			amount Decimal(38, 9)
+		) ENGINE = MergeTree()
+		ORDER BY id
+	`, table))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(
+		"INSERT INTO %s VALUES (1, 123.456789), (2, 999.111)", table))
+	require.NoError(t, err)
+}
+
 func setupClickHouseSourceTable(t *testing.T, ctx context.Context, uri string, table string, numRows int) {
 	t.Helper()
 
