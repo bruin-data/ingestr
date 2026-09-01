@@ -268,7 +268,7 @@ func TestCSVSource_ReadsZIPMembers(t *testing.T) {
 	})
 
 	src := NewCSVSource()
-	if err := src.Connect(context.Background(), "csv://"+archivePath+"!data/*.csv"); err != nil {
+	if err := src.Connect(context.Background(), "csv://"+archivePath); err != nil {
 		t.Fatal(err)
 	}
 	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "release"})

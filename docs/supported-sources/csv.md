@@ -10,13 +10,13 @@ csv://path/to/csv/file.csv
 
 ## ZIP archives
 
-Append `!<member-glob>` to read selected CSV files from a local ZIP archive:
+Use a ZIP file path directly to read every CSV file in the archive:
 
 ```plaintext
-csv:///path/to/release.zip!data/**/*.csv
+csv:///path/to/release.zip
 ```
 
-The same syntax works with the `jsonl://`, `ndjson://`, and `parquet://` source schemes. If the member glob is omitted, all members are selected.
+The same syntax works with the `jsonl://`, `ndjson://`, and `parquet://` source schemes. Files with other extensions are skipped.
 
 Archive members are processed one at a time without extracting the entire ZIP.
 

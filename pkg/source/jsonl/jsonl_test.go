@@ -105,7 +105,7 @@ func TestJSONLSourceReadsZIPMembers(t *testing.T) {
 	require.NoError(t, file.Close())
 
 	src := NewJSONLSource()
-	require.NoError(t, src.Connect(ctx, "jsonl://"+archivePath+"!events/*.jsonl"))
+	require.NoError(t, src.Connect(ctx, "jsonl://"+archivePath))
 	table, err := src.GetTable(ctx, source.TableRequest{Name: "events"})
 	require.NoError(t, err)
 	results, err := table.Read(ctx, source.ReadOptions{})

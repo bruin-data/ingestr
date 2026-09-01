@@ -19,8 +19,8 @@ import (
 )
 
 type JSONLSource struct {
-	filePath             string
-	archiveMemberPattern string
+	filePath string
+	isZIP    bool
 }
 
 func NewJSONLSource() *JSONLSource {
@@ -36,7 +36,6 @@ func (s *JSONLSource) Connect(ctx context.Context, uri string) error {
 	if filePath == "" {
 		return fmt.Errorf("invalid JSONL URI: %s", uri)
 	}
-	filePath, archiveMemberPattern, _ := archiveutil.SplitPath(filePath)
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to access JSONL file: %w", err)
@@ -46,7 +45,7 @@ func (s *JSONLSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.filePath = filePath
-	s.archiveMemberPattern = archiveMemberPattern
+	s.isZIP = archiveutil.IsZIP(filePath)
 	config.Debug("[JSONL] Connected to file: %s", filePath)
 	return nil
 }
@@ -100,7 +99,7 @@ func (s *JSONLSource) GetTable(ctx context.Context, req source.TableRequest) (so
 func (s *JSONLSource) read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
 	config.Debug("[JSONL] Starting read from file: %s", s.filePath)
-	if s.archiveMemberPattern != "" {
+	if s.isZIP {
 		return s.readZIP(ctx, opts)
 	}
 
@@ -209,21 +208,20 @@ func (s *JSONLSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-c
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ZIP archive: %w", err)
 	}
-	members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern)
-	if err != nil {
-		_ = archive.Close()
-		return nil, err
-	}
-
 	results := make(chan source.RecordBatchResult, 8)
 	go func() {
 		defer close(results)
 		defer func() { _ = archive.Close() }()
 
 		totalRows := 0
-		for _, member := range members {
+		processedMembers := 0
+		for _, member := range archive.File {
 			if opts.Limit > 0 && totalRows >= opts.Limit {
 				return
+			}
+			memberName := strings.ToLower(member.Name)
+			if member.FileInfo().IsDir() || (!strings.HasSuffix(memberName, ".jsonl") && !strings.HasSuffix(memberName, ".ndjson")) {
+				continue
 			}
 
 			spooled, err := archiveutil.SpoolMember(ctx, member)
@@ -250,6 +248,10 @@ func (s *JSONLSource) readZIP(ctx context.Context, opts source.ReadOptions) (<-c
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read ZIP member %q: %w", member.Name, readErr)}
 				return
 			}
+			processedMembers++
+		}
+		if processedMembers == 0 {
+			results <- source.RecordBatchResult{Err: fmt.Errorf("no JSONL files found in ZIP archive")}
 		}
 	}()
 

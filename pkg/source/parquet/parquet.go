@@ -26,10 +26,10 @@ import (
 const defaultBatchSize = 10000
 
 type ParquetSource struct {
-	filePaths            []string
-	archiveMemberPattern string
-	arrowSchema          *arrow.Schema
-	knownSchema          *schema.TableSchema
+	filePaths   []string
+	isZIP       bool
+	arrowSchema *arrow.Schema
+	knownSchema *schema.TableSchema
 }
 
 func NewParquetSource() *ParquetSource {
@@ -45,14 +45,13 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 	if path == "" {
 		return fmt.Errorf("invalid parquet URI: %s", uri)
 	}
-	path, archiveMemberPattern, _ := archiveutil.SplitPath(path)
 	paths, err := resolveFilePaths(path)
 	if err != nil {
 		return err
 	}
-	if archiveMemberPattern != "" {
+	if archiveutil.IsZIP(paths[0]) {
 		s.filePaths = paths
-		s.archiveMemberPattern = archiveMemberPattern
+		s.isZIP = true
 		config.Debug("[PARQUET-SRC] Connected to %d ZIP archive(s), first: %s", len(paths), paths[0])
 		return nil
 	}
@@ -72,7 +71,7 @@ func (s *ParquetSource) Connect(ctx context.Context, uri string) error {
 
 func (s *ParquetSource) Close(ctx context.Context) error {
 	s.filePaths = nil
-	s.archiveMemberPattern = ""
+	s.isZIP = false
 	s.arrowSchema = nil
 	s.knownSchema = nil
 	return nil
@@ -121,7 +120,7 @@ func (s *ParquetSource) read(ctx context.Context, opts source.ReadOptions) (<-ch
 	if len(s.filePaths) == 0 {
 		return nil, fmt.Errorf("parquet source is not connected")
 	}
-	if s.archiveMemberPattern != "" {
+	if s.isZIP {
 		return s.readZIP(ctx, opts)
 	}
 
@@ -193,16 +192,13 @@ func (s *ParquetSource) readZIP(ctx context.Context, opts source.ReadOptions) (<
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to open ZIP archive %s: %w", archivePath, err)}
 				return
 			}
-			members, err := archiveutil.SelectZIPMembers(&archive.Reader, s.archiveMemberPattern)
-			if err != nil {
-				_ = archive.Close()
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to select ZIP members from %s: %w", archivePath, err)}
-				return
-			}
-
-			for _, member := range members {
+			processedMembers := 0
+			for _, member := range archive.File {
 				if opts.Limit > 0 && totalRows >= opts.Limit {
 					break
+				}
+				if member.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(member.Name), ".parquet") {
+					continue
 				}
 
 				spooled, err := archiveutil.SpoolMember(ctx, member)
@@ -236,6 +232,12 @@ func (s *ParquetSource) readZIP(ctx context.Context, opts source.ReadOptions) (<
 					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to read ZIP member %q: %w", member.Name, readErr)}
 					return
 				}
+				processedMembers++
+			}
+			if processedMembers == 0 {
+				_ = archive.Close()
+				results <- source.RecordBatchResult{Err: fmt.Errorf("no parquet files found in ZIP archive %s", archivePath)}
+				return
 			}
 			_ = archive.Close()
 		}

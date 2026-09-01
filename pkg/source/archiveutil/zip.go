@@ -9,61 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bmatcuk/doublestar/v4"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-const DefaultMemberPattern = "**/*"
-
-func SplitPath(filePath string) (outerPath, memberPattern string, isZIP bool) {
-	separator := strings.Index(filePath, "!")
-	if separator >= 0 {
-		outerPath = filePath[:separator]
-		if !strings.HasSuffix(strings.ToLower(outerPath), ".zip") {
-			return filePath, "", false
-		}
-		memberPattern = filePath[separator+1:]
-		if memberPattern == "" {
-			memberPattern = DefaultMemberPattern
-		}
-		return outerPath, memberPattern, true
-	}
-
-	if strings.HasSuffix(strings.ToLower(filePath), ".zip") {
-		return filePath, DefaultMemberPattern, true
-	}
-	return filePath, "", false
-}
-
-func SelectZIPMembers(reader *zip.Reader, pattern string) ([]*zip.File, error) {
-	if pattern == "" {
-		pattern = DefaultMemberPattern
-	}
-	if _, err := doublestar.Match(pattern, ""); err != nil {
-		return nil, fmt.Errorf("invalid ZIP member glob %q: %w", pattern, err)
-	}
-
-	matches := make([]*zip.File, 0)
-	for _, member := range reader.File {
-		if member.FileInfo().IsDir() {
-			continue
-		}
-
-		matched, err := doublestar.Match(pattern, member.Name)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ZIP member glob %q: %w", pattern, err)
-		}
-		if !matched {
-			continue
-		}
-
-		matches = append(matches, member)
-	}
-
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("no ZIP members matched pattern: %s", pattern)
-	}
-	return matches, nil
+func IsZIP(filePath string) bool {
+	return strings.HasSuffix(strings.ToLower(filePath), ".zip")
 }
 
 func SpoolMember(ctx context.Context, member *zip.File) (*os.File, error) {
