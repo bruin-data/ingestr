@@ -264,6 +264,25 @@ func readFile(
 	return false, nil
 }
 
+// ReadFile streams one local Parquet file through the same decoder used by
+// ParquetSource. Callers that transport remote files can spool them to disk and
+// reuse this reader without buffering the file in memory.
+func ReadFile(ctx context.Context, filePath string, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, int, error) {
+	batchSize := opts.PageSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+	limit := int64(opts.Limit)
+	if limit < 0 {
+		limit = 0
+	}
+
+	var totalRows int64
+	var batchNum int
+	_, err := readFile(ctx, filePath, buildExcludeSet(opts.ExcludeColumns), int64(batchSize), limit, &totalRows, &batchNum, results)
+	return totalRows, batchNum, err
+}
+
 func readParquetSchema(filePath string) (*arrow.Schema, error) {
 	f, err := os.Open(filePath)
 	if err != nil {

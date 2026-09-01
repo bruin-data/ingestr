@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
@@ -80,4 +82,29 @@ func TestJSONLByteCap(t *testing.T) {
 	batchesOn, rowsOn := drainJSONL(t, resOn)
 	require.Greater(t, batchesOn, 1, "small cap must split into more than one batch")
 	require.Equal(t, int64(recordCount), rowsOn, "byte cap must not drop rows")
+}
+
+func TestReadPreservesLargeIntegers(t *testing.T) {
+	results := make(chan source.RecordBatchResult, 1)
+	rows, batches, err := Read(
+		context.Background(),
+		strings.NewReader("{\"id\":9007199254740993}\n"),
+		source.ReadOptions{},
+		results,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, rows)
+	require.Equal(t, 1, batches)
+
+	result := <-results
+	require.NoError(t, result.Err)
+	require.NotNil(t, result.Batch)
+	defer result.Batch.Release()
+
+	column := result.Batch.Column(0)
+	unknown, ok := column.(*schema.UnknownArray)
+	require.True(t, ok, "expected unknown column, got %T (%s)", column, column.DataType())
+	storage, ok := unknown.Storage().(*array.String)
+	require.True(t, ok)
+	require.Equal(t, "9007199254740993", storage.Value(0))
 }
