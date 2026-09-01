@@ -218,18 +218,47 @@ func sendBatch(ctx context.Context, items []map[string]interface{}, label string
 		return 0, nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return 0, fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+	total := 0
+	var batch []map[string]interface{}
+	var accBytes int64
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		total += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	for _, item := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return total, err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, item)
 	}
 
-	return len(items), nil
+	if err := flush(); err != nil {
+		return total, err
+	}
+
+	return total, nil
 }
 
 // transformContact flattens nested objects in a contact record, matching ingestr behavior.

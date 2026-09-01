@@ -779,6 +779,11 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: github.com/elastic/go-sysinfo
+      version: v1.8.1
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/emirpasic/gods
       version: v1.18.1
       licenses:
@@ -1101,6 +1106,11 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/joeshaw/multierror
+      version: v0.0.0-20140124173710-69b34d4ec901
+      licenses:
+        - MIT
+      status: allowed
     - module: github.com/json-iterator/go
       version: v1.1.12
       licenses:
@@ -1185,7 +1195,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/moby/go-archive
-      version: v0.2.0
+      version: v0.3.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -1205,12 +1215,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/moby/sys/sequential
-      version: v0.6.0
+      version: v0.7.0
       licenses:
         - Apache-2.0
       status: allowed
     - module: github.com/moby/sys/user
-      version: v0.4.0
+      version: v0.4.1
       licenses:
         - Apache-2.0
       status: allowed
@@ -1691,6 +1701,11 @@ dependencies:
       licenses:
         - MIT
       status: allowed
+    - module: github.com/vertica/vertica-sql-go
+      version: v1.3.8
+      licenses:
+        - Apache-2.0
+      status: allowed
     - module: github.com/vmihailenco/msgpack/v5
       version: v5.4.1
       licenses:
@@ -1975,6 +1990,11 @@ dependencies:
       version: v3.0.1
       licenses:
         - MIT
+      status: allowed
+    - module: howett.net/plist
+      version: v0.0.0-20181124034731-591f970eefbb
+      licenses:
+        - BSD-2-Clause
       status: allowed
     - module: k8s.io/apimachinery
       version: v0.35.1

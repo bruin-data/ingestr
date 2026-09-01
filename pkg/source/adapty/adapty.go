@@ -478,7 +478,7 @@ func (s *AdaptySource) readMetricTable(ctx context.Context, table string, params
 				return
 			}
 			if len(rows) > 0 {
-				if err := emitRows(ctx, results, rows, metricColumns(table), opts.ExcludeColumns); err != nil {
+				if err := emitRows(ctx, results, rows, metricColumns(table), opts.ExcludeColumns, opts.MaxBatchBytes); err != nil {
 					emitError(ctx, results, fmt.Errorf("failed to emit %s rows for %s: %w", table, dateString, err))
 					return
 				}
@@ -714,7 +714,7 @@ func (s *AdaptySource) readPlacements(ctx context.Context, params tableParams, o
 		if len(payload.Data) == 0 {
 			return
 		}
-		if err := emitRows(ctx, results, payload.Data, nil, opts.ExcludeColumns); err != nil {
+		if err := emitRows(ctx, results, payload.Data, nil, opts.ExcludeColumns, opts.MaxBatchBytes); err != nil {
 			emitError(ctx, results, fmt.Errorf("failed to emit placements: %w", err))
 		}
 	}()
@@ -772,7 +772,7 @@ func (s *AdaptySource) readPaywalls(ctx context.Context, opts source.ReadOptions
 				return
 			}
 			if len(rows) > 0 {
-				if err := emitRows(ctx, results, rows, paywallColumns(), opts.ExcludeColumns); err != nil {
+				if err := emitRows(ctx, results, rows, paywallColumns(), opts.ExcludeColumns, opts.MaxBatchBytes); err != nil {
 					emitError(ctx, results, fmt.Errorf("failed to emit paywalls page %d: %w", page, err))
 					return
 				}
@@ -834,7 +834,39 @@ func decodeJSONUseNumber(data []byte, target any) error {
 	return nil
 }
 
-func emitRows(ctx context.Context, results chan<- source.RecordBatchResult, rows []map[string]any, columns []schema.Column, excludeColumns []string) error {
+func emitRows(ctx context.Context, results chan<- source.RecordBatchResult, rows []map[string]any, columns []schema.Column, excludeColumns []string, maxBatchBytes int64) error {
+	if maxBatchBytes <= 0 {
+		return emitBatch(ctx, results, rows, columns, excludeColumns)
+	}
+
+	var batch []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := emitBatch(ctx, results, batch, columns, excludeColumns); err != nil {
+			return err
+		}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
+	for _, row := range rows {
+		rowBytes := arrowconv.RowBytes(row)
+		if len(batch) > 0 && accBytes+rowBytes > maxBatchBytes {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		accBytes += rowBytes
+		batch = append(batch, row)
+	}
+	return flush()
+}
+
+func emitBatch(ctx context.Context, results chan<- source.RecordBatchResult, rows []map[string]any, columns []schema.Column, excludeColumns []string) error {
 	record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, columns, excludeColumns)
 	if err != nil {
 		return err

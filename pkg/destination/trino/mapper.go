@@ -7,11 +7,10 @@ import (
 )
 
 func MapDataTypeToTrino(col schema.Column) string {
-	baseType := mapBaseType(col)
-	return baseType
+	return mapDataTypeToTrino(col, jsonTypeVarchar)
 }
 
-func mapBaseType(col schema.Column) string {
+func mapDataTypeToTrino(col schema.Column, jsonType jsonTypeMode) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "BOOLEAN"
@@ -50,12 +49,15 @@ func mapBaseType(col schema.Column) string {
 	case schema.TypeInterval:
 		return "VARCHAR"
 	case schema.TypeJSON:
-		return "JSON"
+		if jsonType.normalized() == jsonTypeVariant {
+			return "VARIANT"
+		}
+		return "VARCHAR"
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
 		elemCol := schema.Column{DataType: col.ArrayType}
-		return fmt.Sprintf("ARRAY(%s)", mapBaseType(elemCol))
+		return fmt.Sprintf("ARRAY(%s)", mapDataTypeToTrino(elemCol, jsonType))
 	default:
 		return "VARCHAR"
 	}

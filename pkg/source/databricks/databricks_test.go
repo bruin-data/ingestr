@@ -1,11 +1,14 @@
 package databricks
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
+	dbsql "github.com/databricks/databricks-sdk-go/service/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,4 +101,53 @@ func TestBuildRecordBatchPreservesEmptyStringCells(t *testing.T) {
 	assert.True(t, values.IsNull(2))
 	assert.False(t, values.IsNull(3))
 	assert.Equal(t, "value", values.Value(3))
+}
+
+func TestProcessResultsByteCap(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+		{Name: "b", DataType: schema.TypeString, Nullable: true},
+	}
+	const rowCount = 60
+	rows := make([][]string, rowCount)
+	for i := range rows {
+		rows[i] = []string{"0123456789", "0123456789"} // 20 content bytes/row
+	}
+
+	cases := []struct {
+		name          string
+		maxBatchBytes int64
+		wantBatches   int
+	}{
+		// Disabled cap: 60 rows well under defaultBatchSize -> one batch, exactly
+		// matching the original row-count-only behavior.
+		{"cap disabled", 0, 1},
+		// 20 bytes/row, 50-byte cap: flush after the row that reaches >=50, i.e.
+		// every 3rd row -> 20 batches.
+		{"50 byte cap", 50, 20},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &dbsql.StatementResponse{Result: &dbsql.ResultData{DataArray: rows}}
+			results := make(chan source.RecordBatchResult)
+			go func() {
+				defer close(results)
+				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, tc.maxBatchBytes, results)
+			}()
+
+			batches := 0
+			total := int64(0)
+			for res := range results {
+				require.NoError(t, res.Err)
+				require.NotNil(t, res.Batch)
+				batches++
+				total += res.Batch.NumRows()
+				res.Batch.Release()
+			}
+
+			assert.Equal(t, int64(rowCount), total, "all rows must be preserved")
+			assert.Equal(t, tc.wantBatches, batches)
+		})
+	}
 }

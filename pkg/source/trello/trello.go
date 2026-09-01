@@ -249,16 +249,39 @@ func (s *TrelloSource) getArray(ctx context.Context, endpoint string, params map
 }
 
 func (s *TrelloSource) sendRecord(ctx context.Context, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert to Arrow: %w", err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-	select {
-	case results <- source.RecordBatchResult{Batch: record}:
-	case <-ctx.Done():
-		return ctx.Err()
+
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
 	}
-	return nil
+	return flush()
 }
 
 func (s *TrelloSource) getBoardIDs(ctx context.Context) ([]string, error) {

@@ -482,12 +482,14 @@ func (s *AmplitudeSource) readExportArchive(ctx context.Context, path, label str
 	defer func() { _ = zr.Close() }()
 
 	batch := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	skipped := 0
 	flush := func() error {
 		if err := emitBatch(ctx, batch, opts, results); err != nil {
 			return err
 		}
 		batch = batch[:0]
+		accBytes = 0
 		return nil
 	}
 
@@ -498,7 +500,7 @@ func (s *AmplitudeSource) readExportArchive(ctx context.Context, path, label str
 		default:
 		}
 
-		if err := s.readEventFile(ctx, f, opts, &batch, flush, &skipped, results); err != nil {
+		if err := s.readEventFile(ctx, f, opts, &batch, &accBytes, flush, &skipped, results); err != nil {
 			return fmt.Errorf("failed to read %s from export for %s: %w", f.Name, label, err)
 		}
 	}
@@ -512,7 +514,7 @@ func (s *AmplitudeSource) readExportArchive(ctx context.Context, path, label str
 	return nil
 }
 
-func (s *AmplitudeSource) readEventFile(ctx context.Context, f *zip.File, opts source.ReadOptions, batch *[]map[string]interface{}, flush func() error, skipped *int, results chan<- source.RecordBatchResult) error {
+func (s *AmplitudeSource) readEventFile(ctx context.Context, f *zip.File, opts source.ReadOptions, batch *[]map[string]interface{}, accBytes *int64, flush func() error, skipped *int, results chan<- source.RecordBatchResult) error {
 	rc, err := f.Open()
 	if err != nil {
 		return err
@@ -545,6 +547,15 @@ func (s *AmplitudeSource) readEventFile(ctx context.Context, f *zip.File, opts s
 			continue
 		}
 
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(event)
+			if len(*batch) > 0 && *accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			*accBytes += rowBytes
+		}
 		*batch = append(*batch, event)
 		if len(*batch) >= batchSize {
 			if err := flush(); err != nil {

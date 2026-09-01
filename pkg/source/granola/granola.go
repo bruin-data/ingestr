@@ -282,11 +282,36 @@ func (s *GranolaSource) paginate(
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, fields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+			var batch []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, fields, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert %s to Arrow: %w", endpoint, err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				batch = nil
+				accBytes = 0
+				return nil
 			}
-			results <- source.RecordBatchResult{Batch: record}
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
+			}
+			if err := flush(); err != nil {
+				return err
+			}
 			totalSent += len(items)
 		}
 

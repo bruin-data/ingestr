@@ -237,7 +237,7 @@ func (s *Db2Source) read(ctx context.Context, table string, tableSchema *schema.
 		defer close(results)
 
 		query := buildSelectQueryForSchema(table, schemaToUse, columns, opts)
-		accumulator := newArrowBatchAccumulator(ctx, results, arrowSchema, columns, batchSize)
+		accumulator := newArrowBatchAccumulator(ctx, results, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 		defer accumulator.Release()
 
 		err := s.client.Stream(ctx, query, db2StreamHandler{
@@ -284,7 +284,7 @@ func (s *Db2Source) ExecuteCustomQuery(ctx context.Context, query string, opts s
 					accumulator.Release()
 				}
 				columns := db2ColumnsToSchemaColumns(db2Columns)
-				accumulator = newArrowBatchAccumulator(ctx, results, buildArrowSchema(columns), columns, batchSize)
+				accumulator = newArrowBatchAccumulator(ctx, results, buildArrowSchema(columns), columns, batchSize, opts.MaxBatchBytes)
 				return nil
 			},
 			Rows: func(rows [][]any) error {
@@ -441,30 +441,33 @@ func db2ColumnsToSchemaColumns(db2Columns []db2Column) []schema.Column {
 }
 
 type arrowBatchAccumulator struct {
-	ctx         context.Context
-	results     chan<- source.RecordBatchResult
-	arrowSchema *arrow.Schema
-	columns     []schema.Column
-	builders    []array.Builder
-	batchSize   int
-	rowCount    int64
-	totalRows   int64
-	batchCount  int
+	ctx           context.Context
+	results       chan<- source.RecordBatchResult
+	arrowSchema   *arrow.Schema
+	columns       []schema.Column
+	builders      []array.Builder
+	batchSize     int
+	maxBatchBytes int64
+	rowCount      int64
+	accBytes      int64
+	totalRows     int64
+	batchCount    int
 }
 
-func newArrowBatchAccumulator(ctx context.Context, results chan<- source.RecordBatchResult, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) *arrowBatchAccumulator {
+func newArrowBatchAccumulator(ctx context.Context, results chan<- source.RecordBatchResult, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) *arrowBatchAccumulator {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 	for i, field := range arrowSchema.Fields() {
 		builders[i] = array.NewBuilder(mem, field.Type)
 	}
 	return &arrowBatchAccumulator{
-		ctx:         ctx,
-		results:     results,
-		arrowSchema: arrowSchema,
-		columns:     columns,
-		builders:    builders,
-		batchSize:   batchSize,
+		ctx:           ctx,
+		results:       results,
+		arrowSchema:   arrowSchema,
+		columns:       columns,
+		builders:      builders,
+		batchSize:     batchSize,
+		maxBatchBytes: maxBatchBytes,
 	}
 }
 
@@ -473,7 +476,7 @@ func (a *arrowBatchAccumulator) AppendRows(rows [][]any) error {
 		if err := a.appendRow(row); err != nil {
 			return err
 		}
-		if a.rowCount >= int64(a.batchSize) {
+		if a.rowCount >= int64(a.batchSize) || (a.maxBatchBytes > 0 && a.accBytes >= a.maxBatchBytes) {
 			if err := a.Flush(); err != nil {
 				return err
 			}
@@ -491,7 +494,11 @@ func (a *arrowBatchAccumulator) appendRow(row []any) error {
 			a.builders[i].AppendNull()
 			continue
 		}
-		arrowconv.AppendValue(a.builders[i], normalizeValue(row[i], a.columns[i].DataType))
+		v := normalizeValue(row[i], a.columns[i].DataType)
+		arrowconv.AppendValue(a.builders[i], v)
+		if a.maxBatchBytes > 0 {
+			a.accBytes += arrowconv.ValueBytes(v)
+		}
 	}
 	a.rowCount++
 	return nil
@@ -509,6 +516,7 @@ func (a *arrowBatchAccumulator) Flush() error {
 
 	rows := a.rowCount
 	a.rowCount = 0
+	a.accBytes = 0
 	record := array.NewRecordBatch(a.arrowSchema, arrays, rows)
 	for _, arr := range arrays {
 		arr.Release()

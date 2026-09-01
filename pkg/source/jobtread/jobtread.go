@@ -385,6 +385,26 @@ func (s *JobTreadSource) paginateAndSendWithWhere(ctx context.Context, paveKey s
 	totalProcessed := 0
 	var nextPage *string
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", paveKey, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for page := 0; page < maxPages; page++ {
 		select {
 		case <-ctx.Done():
@@ -423,18 +443,24 @@ func (s *JobTreadSource) paginateAndSendWithWhere(ctx context.Context, paveKey s
 			break
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(nodes, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to build arrow record for %s: %w", paveKey, err)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case results <- source.RecordBatchResult{Batch: record}:
+		for _, row := range nodes {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
 		}
 
 		totalProcessed += len(nodes)
+
+		if err := flush(); err != nil {
+			return err
+		}
 
 		if np == "" {
 			break

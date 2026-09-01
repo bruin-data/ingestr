@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,6 +262,114 @@ func TestRowsToSnapshotBatchesMarksOnlyFinalBatchComplete(t *testing.T) {
 	assert.Equal(t, snapshotIncompleteLSN(snapshotLSN), stamps[1])
 	assert.Equal(t, snapshotCompleteLSN(snapshotLSN), stamps[2], "only the final batch may carry the complete stamp")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRowsToSnapshotBatchesSplitsByMaxBatchBytes(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	const rowCount = 6
+	bigName := strings.Repeat("x", 200) // each row's value bytes dwarf a tiny cap
+	mockRows := sqlmock.NewRows([]string{"id", "name"})
+	for i := 1; i <= rowCount; i++ {
+		mockRows.AddRow(int64(i), bigName)
+	}
+	mock.ExpectQuery("SELECT").WillReturnRows(mockRows)
+
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, rowCount+1)
+	s := &MSSQLCDCSource{}
+
+	const snapshotLSN = "0000002F0000010D0002"
+	// PageSize huge so only the 50-byte cap can split; each 200+ byte row
+	// (source value + CDC metadata) exceeds it, so every row is its own batch.
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema,
+		source.ReadOptions{PageSize: 1_000_000, MaxBatchBytes: 50}, snapshotLSN, results, "items")
+	require.NoError(t, err)
+	close(results)
+
+	var ids []int64
+	var stamps []string
+	for res := range results {
+		require.NoError(t, res.Err)
+		require.EqualValues(t, 1, res.Batch.NumRows())
+		ids = append(ids, res.Batch.Column(0).(*array.Int64).Value(0))
+		stamps = append(stamps, res.Batch.Column(2).(*array.String).Value(0))
+		res.Batch.Release()
+	}
+
+	require.Len(t, ids, rowCount, "50-byte cap must split every row into its own batch")
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6}, ids, "byte-split batches must preserve row order and data")
+	for i := 0; i < rowCount-1; i++ {
+		assert.Equal(t, snapshotIncompleteLSN(snapshotLSN), stamps[i])
+	}
+	assert.Equal(t, snapshotCompleteLSN(snapshotLSN), stamps[rowCount-1],
+		"only the final byte-split batch may carry the complete stamp")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRowsToSnapshotBatchesCountsCDCMetadataTowardCap(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	const rowCount = 6
+	mockRows := sqlmock.NewRows([]string{"id", "name"})
+	for i := 1; i <= rowCount; i++ {
+		mockRows.AddRow(int64(i), "") // ~8 source bytes/row; only metadata can tip the cap
+	}
+	mock.ExpectQuery("SELECT").WillReturnRows(mockRows)
+
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, rowCount+1)
+	s := &MSSQLCDCSource{}
+
+	const snapshotLSN = "0000002F0000010D0002"
+	// Cap == the per-row CDC metadata size. A row's ~8 source bytes are below it,
+	// so batches split one-per-row only if metadata is counted toward the cap.
+	cap := cdcMetadataBytes(snapshotIncompleteLSN(snapshotLSN))
+	require.Greater(t, cap, int64(8), "metadata must exceed the source value bytes for this test to be meaningful")
+
+	err = s.rowsToSnapshotBatches(t.Context(), rows, tableSchema,
+		source.ReadOptions{PageSize: 1_000_000, MaxBatchBytes: cap}, snapshotLSN, results, "items")
+	require.NoError(t, err)
+	close(results)
+
+	batches := 0
+	total := int64(0)
+	for res := range results {
+		require.NoError(t, res.Err)
+		batches++
+		total += res.Batch.NumRows()
+		res.Batch.Release()
+	}
+
+	assert.Equal(t, int64(rowCount), total, "all rows preserved")
+	assert.Equal(t, rowCount, batches,
+		"metadata bytes must be counted: without them, ~8-byte rows would pack many per batch")
 }
 
 func TestRowsToSnapshotBatchesReturnsIteratorErrorForEmptyBatch(t *testing.T) {

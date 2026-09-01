@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	defaultBaseURL  = "https://us.posthog.com"
-	defaultPageSize = 100
+	defaultBaseURL       = "https://us.posthog.com"
+	defaultPageSize      = 100
+	eventsQueryPageSize  = 1000
+	hogQLTimestampLayout = "2006-01-02 15:04:05.000000"
 )
 
 type PostHogSource struct {
@@ -37,13 +39,13 @@ type posthogCredentials struct {
 }
 
 type tableConfig struct {
-	endpoint               string
-	primaryKeys            []string
-	incrementalKey         string
-	strategy               config.IncrementalStrategy
-	intervalFields         []string
-	defaultQueryParams     map[string]string
-	supportsServerInterval bool
+	endpoint           string
+	primaryKeys        []string
+	incrementalKey     string
+	strategy           config.IncrementalStrategy
+	intervalFields     []string
+	defaultQueryParams map[string]string
+	useQueryAPI        bool
 }
 
 type paginatedResponse struct {
@@ -51,6 +53,17 @@ type paginatedResponse struct {
 	Next     string                   `json:"next"`
 	Previous string                   `json:"previous"`
 	Results  []map[string]interface{} `json:"results"`
+}
+
+type hogQLResponse struct {
+	Columns []string        `json:"columns"`
+	Results [][]interface{} `json:"results"`
+	Error   string          `json:"error"`
+}
+
+type eventCursor struct {
+	timestamp time.Time
+	uuid      string
 }
 
 var baseTables = map[string]tableConfig{
@@ -76,12 +89,12 @@ var baseTables = map[string]tableConfig{
 		intervalFields: []string{"last_updated_at", "last_seen_at", "created_at"},
 	},
 	"events": {
-		endpoint:               "events",
-		primaryKeys:            []string{"id"},
-		incrementalKey:         "timestamp",
-		strategy:               config.StrategyAppend,
-		intervalFields:         []string{"timestamp"},
-		supportsServerInterval: true,
+		endpoint:       "events",
+		primaryKeys:    []string{"id"},
+		incrementalKey: "timestamp",
+		strategy:       config.StrategyAppend,
+		intervalFields: []string{"timestamp"},
+		useQueryAPI:    true,
 	},
 	"feature_flags": {
 		endpoint:       "feature_flags",
@@ -269,7 +282,13 @@ func (s *PostHogSource) readTable(ctx context.Context, cfg tableConfig, opts sou
 	go func() {
 		defer close(results)
 
-		if err := s.paginateAndSend(ctx, cfg, opts, results); err != nil {
+		var err error
+		if cfg.useQueryAPI {
+			err = s.queryEventsAndSend(ctx, opts, results)
+		} else {
+			err = s.paginateAndSend(ctx, cfg, opts, results)
+		}
+		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -290,15 +309,6 @@ func (s *PostHogSource) paginateAndSend(ctx context.Context, cfg tableConfig, op
 	initialURL := fmt.Sprintf("/api/projects/%s/%s/", url.PathEscape(s.projectID), cfg.endpoint)
 	params := cloneStringMap(cfg.defaultQueryParams)
 	params["limit"] = strconv.Itoa(pageSize)
-
-	if cfg.supportsServerInterval {
-		if opts.IntervalStart != nil {
-			params["after"] = opts.IntervalStart.UTC().Format(time.RFC3339)
-		}
-		if opts.IntervalEnd != nil {
-			params["before"] = opts.IntervalEnd.UTC().Format(time.RFC3339)
-		}
-	}
 
 	nextURL := initialURL
 	firstRequest := true
@@ -331,23 +341,43 @@ func (s *PostHogSource) paginateAndSend(ctx context.Context, cfg tableConfig, op
 			return fmt.Errorf("failed to parse %s response: %w", cfg.endpoint, err)
 		}
 
-		items := page.Results
-		if cfg.endpoint == "events" {
-			items = normalizeEventItems(items)
-		}
-		if !cfg.supportsServerInterval {
-			items = filterItemsByInterval(items, cfg.intervalFields, opts.IntervalStart, opts.IntervalEnd)
-		}
+		items := filterItemsByInterval(page.Results, cfg.intervalFields, opts.IntervalStart, opts.IntervalEnd)
 		if remaining > 0 && len(items) > remaining {
 			items = items[:remaining]
 		}
 
 		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.endpoint, err)
+			var batch []map[string]interface{}
+			var accBytes int64
+			flush := func() error {
+				if len(batch) == 0 {
+					return nil
+				}
+				record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+				if err != nil {
+					return fmt.Errorf("failed to convert %s to Arrow: %w", cfg.endpoint, err)
+				}
+				results <- source.RecordBatchResult{Batch: record}
+				batch = nil
+				accBytes = 0
+				return nil
 			}
-			results <- source.RecordBatchResult{Batch: record}
+
+			for _, row := range items {
+				if opts.MaxBatchBytes > 0 {
+					rowBytes := arrowconv.RowBytes(row)
+					if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+					accBytes += rowBytes
+				}
+				batch = append(batch, row)
+			}
+			if err := flush(); err != nil {
+				return err
+			}
 
 			if remaining > 0 {
 				remaining -= len(items)
@@ -364,6 +394,150 @@ func (s *PostHogSource) paginateAndSend(ctx context.Context, cfg tableConfig, op
 	return nil
 }
 
+// queryEventsAndSend reads the events table through PostHog's /query/ (HogQL)
+// endpoint. The REST /events/ endpoint silently truncates multi-day windows,
+// so we page through events with keyset pagination on (timestamp, uuid).
+func (s *PostHogSource) queryEventsAndSend(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if s.client == nil {
+		return fmt.Errorf("posthog source is not connected")
+	}
+
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = eventsQueryPageSize
+	}
+
+	queryURL := fmt.Sprintf("/api/projects/%s/query/", url.PathEscape(s.projectID))
+	remaining := opts.Limit
+	var cursor *eventCursor
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		limit := pageSize
+		if remaining > 0 && remaining < limit {
+			limit = remaining
+		}
+
+		page, err := s.executeHogQLQuery(ctx, queryURL, buildEventsQuery(opts.IntervalStart, opts.IntervalEnd, cursor, limit))
+		if err != nil {
+			return err
+		}
+
+		items, last := hogQLRowsToItems(page)
+		if len(items) == 0 {
+			return nil
+		}
+
+		foldEventPersonFields(normalizeEventItems(items))
+		addElementsFromChain(items)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert events to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+
+		if remaining > 0 {
+			remaining -= len(items)
+			if remaining <= 0 {
+				return nil
+			}
+		}
+
+		if len(items) < limit || last == nil {
+			return nil
+		}
+		cursor = last
+	}
+}
+
+func (s *PostHogSource) executeHogQLQuery(ctx context.Context, queryURL, query string) (hogQLResponse, error) {
+	body := map[string]interface{}{
+		"query": map[string]string{
+			"kind":  "HogQLQuery",
+			"query": query,
+		},
+	}
+
+	resp, err := s.client.R(ctx).SetHeader("Content-Type", "application/json").SetBody(body).Post(queryURL)
+	if err != nil {
+		return hogQLResponse{}, fmt.Errorf("failed to query events: %w", err)
+	}
+	if !resp.IsSuccess() {
+		return hogQLResponse{}, fmt.Errorf("posthog query API returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	page, err := decodeHogQLResponse(resp.Body())
+	if err != nil {
+		return hogQLResponse{}, fmt.Errorf("failed to parse events query response: %w", err)
+	}
+	if page.Error != "" {
+		return hogQLResponse{}, fmt.Errorf("posthog query API error: %s", page.Error)
+	}
+	return page, nil
+}
+
+func buildEventsQuery(start, end *time.Time, cursor *eventCursor, limit int) string {
+	conditions := make([]string, 0, 2)
+	switch {
+	case cursor != nil:
+		conditions = append(conditions, fmt.Sprintf(
+			"(timestamp, uuid) > (toDateTime64('%s', 6), toUUID('%s'))",
+			cursor.timestamp.UTC().Format(hogQLTimestampLayout), cursor.uuid))
+	case start != nil:
+		conditions = append(conditions, fmt.Sprintf(
+			"timestamp > toDateTime64('%s', 6)", start.UTC().Format(hogQLTimestampLayout)))
+	}
+	if end != nil {
+		conditions = append(conditions, fmt.Sprintf(
+			"timestamp < toDateTime64('%s', 6)", end.UTC().Format(hogQLTimestampLayout)))
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	return fmt.Sprintf(
+		"SELECT uuid AS id, event, distinct_id, timestamp, properties, elements_chain, person_id, person.properties AS person_properties FROM events%s ORDER BY timestamp, uuid LIMIT %d",
+		where, limit)
+}
+
+func hogQLRowsToItems(page hogQLResponse) ([]map[string]interface{}, *eventCursor) {
+	items := make([]map[string]interface{}, 0, len(page.Results))
+	var cursor *eventCursor
+	for _, row := range page.Results {
+		item := make(map[string]interface{}, len(page.Columns))
+		for i, col := range page.Columns {
+			if i < len(row) {
+				item[col] = row[i]
+			}
+		}
+		items = append(items, item)
+
+		if ts, ok := firstTimestamp(item, []string{"timestamp"}); ok {
+			if id, ok := item["id"].(string); ok && id != "" {
+				cursor = &eventCursor{timestamp: ts, uuid: id}
+			}
+		}
+	}
+	return items, cursor
+}
+
+func decodeHogQLResponse(body []byte) (hogQLResponse, error) {
+	var response hogQLResponse
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&response); err != nil {
+		return hogQLResponse{}, err
+	}
+	return response, nil
+}
+
 func decodePaginatedResponse(body []byte) (paginatedResponse, error) {
 	var response paginatedResponse
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -374,9 +548,29 @@ func decodePaginatedResponse(body []byte) (paginatedResponse, error) {
 	return response, nil
 }
 
+// foldEventPersonFields collapses the flat person_id/person_properties columns
+// returned by HogQL into a single nested person object, matching the shape the
+// REST /events/ endpoint used to return.
+func foldEventPersonFields(items []map[string]interface{}) {
+	for _, item := range items {
+		person := make(map[string]interface{}, 2)
+		if id, ok := item["person_id"]; ok {
+			person["id"] = id
+		}
+		if props, ok := item["person_properties"]; ok {
+			person["properties"] = props
+		}
+		delete(item, "person_id")
+		delete(item, "person_properties")
+		if len(person) > 0 {
+			item["person"] = person
+		}
+	}
+}
+
 func normalizeEventItems(items []map[string]interface{}) []map[string]interface{} {
 	for _, item := range items {
-		for _, field := range []string{"properties", "person", "elements", "elements_chain"} {
+		for _, field := range []string{"properties", "person", "person_properties", "elements", "elements_chain"} {
 			raw, ok := item[field]
 			if !ok {
 				continue

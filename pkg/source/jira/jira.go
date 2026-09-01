@@ -357,18 +357,39 @@ func sendBatch(ctx context.Context, rows []map[string]any, label string, opts so
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+	emit := func(batch []map[string]any) error {
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to build arrow record for %s: %w", label, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- source.RecordBatchResult{Batch: record}:
+		}
+
+		return nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case results <- source.RecordBatchResult{Batch: record}:
+	if opts.MaxBatchBytes > 0 {
+		start := 0
+		var accBytes int64
+		for i, row := range rows {
+			rowBytes := arrowconv.RowBytes(row)
+			if i > start && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := emit(rows[start:i]); err != nil {
+					return err
+				}
+				start = i
+				accBytes = 0
+			}
+			accBytes += rowBytes
+		}
+		return emit(rows[start:])
 	}
 
-	return nil
+	return emit(rows)
 }
 
 var jiraTimestampFormats = []string{

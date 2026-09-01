@@ -113,7 +113,27 @@ func (s *JSONLSource) read(ctx context.Context, opts source.ReadOptions) (<-chan
 		batchNum := 0
 		totalRows := 0
 		items := make([]map[string]interface{}, 0, batchSize)
+		var accBytes int64
 		lineNum := 0
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert to Arrow: %w", err)
+			}
+
+			batchNum++
+			totalRows += len(items)
+			config.Debug("[JSONL] Batch %d: %d items (total: %d)", batchNum, len(items), totalRows)
+
+			results <- source.RecordBatchResult{Batch: record}
+			items = make([]map[string]interface{}, 0, batchSize)
+			accBytes = 0
+			return nil
+		}
 
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -129,21 +149,23 @@ func (s *JSONLSource) read(ctx context.Context, opts source.ReadOptions) (<-chan
 				return
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						results <- source.RecordBatchResult{Err: err}
+						return
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, item)
 
 			if len(items) >= batchSize {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-				if err != nil {
-					results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
+				if err := flush(); err != nil {
+					results <- source.RecordBatchResult{Err: err}
 					return
 				}
-
-				batchNum++
-				totalRows += len(items)
-				config.Debug("[JSONL] Batch %d: %d items (total: %d)", batchNum, len(items), totalRows)
-
-				results <- source.RecordBatchResult{Batch: record}
-				items = make([]map[string]interface{}, 0, batchSize)
 			}
 
 			if opts.Limit > 0 && totalRows+len(items) >= opts.Limit {
@@ -157,18 +179,9 @@ func (s *JSONLSource) read(ctx context.Context, opts source.ReadOptions) (<-chan
 			return
 		}
 
-		if len(items) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}
-				return
-			}
-
-			batchNum++
-			totalRows += len(items)
-			config.Debug("[JSONL] Batch %d: %d items (total: %d)", batchNum, len(items), totalRows)
-
-			results <- source.RecordBatchResult{Batch: record}
+		if err := flush(); err != nil {
+			results <- source.RecordBatchResult{Err: err}
+			return
 		}
 
 		config.Debug("[JSONL] Total: %d items in %d batches, read time: %v", totalRows, batchNum, time.Since(startTotal))

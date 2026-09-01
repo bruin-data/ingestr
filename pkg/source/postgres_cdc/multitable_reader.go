@@ -932,24 +932,20 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		if barrierNonce != "" && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
-				currentLSN := batchCaughtUpLSN(repl.CurrentLSN(), barrierLSN)
-				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", currentLSN)
+				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", barrierLSN)
 				if err := accum.flushAllContext(ctx, results, token); err != nil {
 					return nil, err
 				}
-				// Record the caught-up position so FinalizeBatch can confirm it
-				// to the slot once the destination write is durable.
-				r.source.recordCaughtUpLSN(currentLSN, slotName, true)
 				// Stop the WAL receiver before the keepalive goroutine takes
 				// over the replication connection — they must never use it
 				// concurrently. Close is idempotent for the deferred call.
 				if err := repl.Close(ctx); err != nil {
 					return nil, err
 				}
-				// Keep the walsender alive while the destination drains the
-				// results channel. FinalizeBatch will stop it before sending
-				// the final WALFlush-bearing standby update.
-				r.source.startKeepalive(ctx, currentLSN, startLSN)
+				// The emitted barrier is the position FinalizeBatch may confirm
+				// to the slot after the destination write is durable; the
+				// keepalive holds the walsender open until then.
+				r.source.checkpointBatchBarrier(ctx, barrierLSN, startLSN, slotName)
 				return nil, nil
 			}
 		}

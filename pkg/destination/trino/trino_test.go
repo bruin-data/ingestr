@@ -13,6 +13,7 @@ func TestParseTrinoURI(t *testing.T) {
 		uri          string
 		wantCatalog  string
 		wantSchema   string
+		wantJSONType jsonTypeMode
 		wantInDSN    []string
 		wantNotInDSN []string
 	}{
@@ -93,28 +94,43 @@ func TestParseTrinoURI(t *testing.T) {
 			wantInDSN:    []string{"custom_client=ingestr-trino-"},
 			wantNotInDSN: []string{"verify=", "SSLCertPath="},
 		},
+		{
+			uri:          "trino://user@host:8080/iceberg/default?json_type=variant",
+			wantCatalog:  "iceberg",
+			wantSchema:   "default",
+			wantJSONType: jsonTypeVariant,
+			wantInDSN:    []string{"catalog=iceberg", "schema=default"},
+			wantNotInDSN: []string{"json_type"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.uri, func(t *testing.T) {
-			dsn, catalog, schemaName, err := parseTrinoURI(tt.uri)
+			connectionConfig, err := parseTrinoURI(tt.uri)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if catalog != tt.wantCatalog {
-				t.Errorf("catalog mismatch: got %q want %q", catalog, tt.wantCatalog)
+			if connectionConfig.catalog != tt.wantCatalog {
+				t.Errorf("catalog mismatch: got %q want %q", connectionConfig.catalog, tt.wantCatalog)
 			}
-			if schemaName != tt.wantSchema {
-				t.Errorf("schema mismatch: got %q want %q", schemaName, tt.wantSchema)
+			if connectionConfig.schema != tt.wantSchema {
+				t.Errorf("schema mismatch: got %q want %q", connectionConfig.schema, tt.wantSchema)
+			}
+			wantJSONType := tt.wantJSONType
+			if wantJSONType == "" {
+				wantJSONType = jsonTypeVarchar
+			}
+			if connectionConfig.jsonType != wantJSONType {
+				t.Errorf("json type mismatch: got %q want %q", connectionConfig.jsonType, wantJSONType)
 			}
 			for _, want := range tt.wantInDSN {
-				if !strings.Contains(dsn, want) {
-					t.Errorf("dsn %q missing %q", dsn, want)
+				if !strings.Contains(connectionConfig.dsn, want) {
+					t.Errorf("dsn %q missing %q", connectionConfig.dsn, want)
 				}
 			}
 			for _, notWant := range tt.wantNotInDSN {
-				if strings.Contains(dsn, notWant) {
-					t.Errorf("dsn %q should not contain %q", dsn, notWant)
+				if strings.Contains(connectionConfig.dsn, notWant) {
+					t.Errorf("dsn %q should not contain %q", connectionConfig.dsn, notWant)
 				}
 			}
 		})
@@ -122,16 +138,23 @@ func TestParseTrinoURI(t *testing.T) {
 }
 
 func TestParseTrinoURI_InvalidHTTPHeaders(t *testing.T) {
-	_, _, _, err := parseTrinoURI("trino://host:443/cat?http_headers=not-json")
+	_, err := parseTrinoURI("trino://host:443/cat?http_headers=not-json")
 	if err == nil {
 		t.Fatal("expected error for invalid http_headers JSON, got nil")
 	}
 }
 
 func TestParseTrinoURI_CertWithoutKey(t *testing.T) {
-	_, _, _, err := parseTrinoURI("trino://host:443/cat?cert=/etc/ssl/client.pem")
+	_, err := parseTrinoURI("trino://host:443/cat?cert=/etc/ssl/client.pem")
 	if err == nil {
 		t.Fatal("expected error when cert is provided without key, got nil")
+	}
+}
+
+func TestParseTrinoURI_InvalidJSONType(t *testing.T) {
+	_, err := parseTrinoURI("trino://host:8080/iceberg?json_type=json")
+	if err == nil || !strings.Contains(err.Error(), "expected varchar or variant") {
+		t.Fatalf("parseTrinoURI() error = %v, want invalid json_type error", err)
 	}
 }
 

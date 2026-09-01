@@ -221,25 +221,50 @@ func (s *ClickUpSource) readTeams(ctx context.Context, opts source.ReadOptions, 
 		return fmt.Errorf("clickup API /team: missing 'teams' field in response")
 	}
 
-	teams := make([]map[string]interface{}, 0, len(teamsRaw))
-	for _, t := range teamsRaw {
-		if team, ok := t.(map[string]interface{}); ok {
-			teams = append(teams, team)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
 		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert teams to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
 	}
 
-	if len(teams) == 0 {
+	total := 0
+	for _, t := range teamsRaw {
+		team, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(team)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, team)
+		total++
+	}
+
+	if total == 0 {
 		config.Debug("[ClickUp] No teams found")
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(teams, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert teams to Arrow: %w", err)
+	if err := flush(); err != nil {
+		return err
 	}
-
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[ClickUp] Sent %d team records", len(teams))
+	config.Debug("[ClickUp] Sent %d team records", total)
 	return nil
 }
 
@@ -251,7 +276,23 @@ func (s *ClickUpSource) readSpaces(ctx context.Context, opts source.ReadOptions,
 		return err
 	}
 
-	var allSpaces []map[string]interface{}
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert spaces to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
+	total := 0
 	for _, teamID := range teamIDs {
 		select {
 		case <-ctx.Done():
@@ -279,25 +320,34 @@ func (s *ClickUpSource) readSpaces(ctx context.Context, opts source.ReadOptions,
 			continue
 		}
 
-		for _, s := range spacesRaw {
-			if space, ok := s.(map[string]interface{}); ok {
-				allSpaces = append(allSpaces, space)
+		for _, sp := range spacesRaw {
+			space, ok := sp.(map[string]interface{})
+			if !ok {
+				continue
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(space)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, space)
+			total++
 		}
 	}
 
-	if len(allSpaces) == 0 {
+	if total == 0 {
 		config.Debug("[ClickUp] No spaces found")
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(allSpaces, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert spaces to Arrow: %w", err)
+	if err := flush(); err != nil {
+		return err
 	}
-
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[ClickUp] Sent %d space records", len(allSpaces))
+	config.Debug("[ClickUp] Sent %d space records", total)
 	return nil
 }
 
@@ -346,12 +396,38 @@ func (s *ClickUpSource) readLists(ctx context.Context, opts source.ReadOptions, 
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(allLists, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert lists to Arrow: %w", err)
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert lists to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
+	for _, list := range allLists {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(list)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		items = append(items, list)
+	}
+
+	if err := flush(); err != nil {
+		return err
+	}
 	config.Debug("[ClickUp] Sent %d list records", len(allLists))
 	return nil
 }
@@ -597,12 +673,38 @@ func (s *ClickUpSource) readTasks(ctx context.Context, opts source.ReadOptions, 
 			}
 
 			if len(tasks) > 0 {
-				record, err := arrowconv.ItemsToArrowRecordWithSchema(tasks, nil, opts.ExcludeColumns)
-				if err != nil {
-					return fmt.Errorf("failed to convert tasks to Arrow: %w", err)
+				var items []map[string]interface{}
+				var accBytes int64
+				flush := func() error {
+					if len(items) == 0 {
+						return nil
+					}
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+					if err != nil {
+						return fmt.Errorf("failed to convert tasks to Arrow: %w", err)
+					}
+					results <- source.RecordBatchResult{Batch: record}
+					items = nil
+					accBytes = 0
+					return nil
 				}
 
-				results <- source.RecordBatchResult{Batch: record}
+				for _, task := range tasks {
+					if opts.MaxBatchBytes > 0 {
+						rowBytes := arrowconv.RowBytes(task)
+						if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+							if err := flush(); err != nil {
+								return err
+							}
+						}
+						accBytes += rowBytes
+					}
+					items = append(items, task)
+				}
+
+				if err := flush(); err != nil {
+					return err
+				}
 				totalSent += len(tasks)
 				config.Debug("[ClickUp] List %s page %d: sent %d tasks (total: %d)", listID, page, len(tasks), totalSent)
 			}

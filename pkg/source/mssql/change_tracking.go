@@ -595,7 +595,7 @@ func (s *MSSQLChangeTrackingSource) rowsToCTBatches(rows *sql.Rows, columns []sc
 	var totalRows int64
 
 	for {
-		record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, s.guidConversion)
+		record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes, s.guidConversion)
 		if err != nil {
 			return totalRows, err
 		}

@@ -298,7 +298,7 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 
 		for {
 			startBatch := time.Now()
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -435,7 +435,7 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 		arrowSchema := buildArrowSchema(columns)
 
 		for {
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -528,7 +528,7 @@ func buildSelectQuery(table string, columns []schema.Column, opts source.ReadOpt
 	return query
 }
 
-func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int) (arrow.RecordBatch, int64, error) {
+func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64) (arrow.RecordBatch, int64, error) {
 	mem := memory.NewGoAllocator()
 	builders := make([]array.Builder, len(columns))
 
@@ -556,16 +556,26 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 	}
 
 	var rowCount int64
+	var accBytes int64
 	for rows.Next() {
-		if err := appendPostgresRawRow(appenders, builders, rows.RawValues()); err != nil {
+		raw := rows.RawValues()
+		if err := appendPostgresRawRow(appenders, builders, raw); err != nil {
 			for _, b := range builders {
 				b.Release()
 			}
 			return nil, 0, err
 		}
 		rowCount++
+		if maxBatchBytes > 0 {
+			for _, rv := range raw {
+				accBytes += int64(len(rv))
+			}
+		}
 
 		if batchSize > 0 && rowCount >= int64(batchSize) {
+			break
+		}
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
 	}

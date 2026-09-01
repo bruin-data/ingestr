@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,12 +37,14 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	csvsource "github.com/bruin-data/ingestr/pkg/source/csv"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -278,13 +284,17 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 	}
 
 	addr := fmt.Sprintf("%s:%s", parsed.sftpHost, parsed.sftpPort)
+	hostKeyCallback, err := createSFTPHostKeyCallback(parsed)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	sshConfig := &ssh.ClientConfig{
 		User:            parsed.sftpUsername,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // SFTP sources connect to user-specified hosts
+		HostKeyCallback: hostKeyCallback,
 	}
 
-	if parsed.sftpPassword != "" {
+	if parsed.sftpPassword != "" && parsed.sftpKeyFile == "" {
 		sshConfig.Auth = []ssh.AuthMethod{
 			ssh.Password(parsed.sftpPassword),
 		}
@@ -295,12 +305,11 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read SSH key file: %w", err)
 		}
-		var signer ssh.Signer
-		if parsed.sftpKeyPassphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(parsed.sftpKeyPassphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey(key)
+		keyPassword := parsed.sftpPassword
+		if keyPassword == "" {
+			keyPassword = parsed.sftpKeyPassphrase
 		}
+		signer, err := parseSFTPPrivateKey(key, keyPassword)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse SSH key: %w", err)
 		}
@@ -319,6 +328,80 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 	}
 
 	return sshConn, sftpConn, nil
+}
+
+func parseSFTPPrivateKey(key []byte, password string) (ssh.Signer, error) {
+	signer, err := ssh.ParsePrivateKey(key)
+	if err == nil {
+		return signer, nil
+	}
+
+	var passphraseMissing *ssh.PassphraseMissingError
+	if password == "" || !errors.As(err, &passphraseMissing) {
+		return nil, err
+	}
+	return ssh.ParsePrivateKeyWithPassphrase(key, []byte(password))
+}
+
+func createSFTPHostKeyCallback(parsed *parsedBlobstoreURI) (ssh.HostKeyCallback, error) {
+	if parsed.sftpInsecureSkipHostKeyCheck {
+		output.Warnf("Warning: SFTP host key verification is disabled; this connection is vulnerable to man-in-the-middle attacks\n")
+		return ssh.InsecureIgnoreHostKey(), nil //nolint:gosec // Explicit compatibility option requested by the user.
+	}
+
+	if len(parsed.sftpHostKeyFingerprints) > 0 {
+		for _, fingerprint := range parsed.sftpHostKeyFingerprints {
+			encoded, ok := strings.CutPrefix(fingerprint, "SHA256:")
+			decoded, err := base64.RawStdEncoding.DecodeString(encoded)
+			if !ok || err != nil || len(decoded) != 32 {
+				return nil, fmt.Errorf("invalid SFTP host_key_fingerprint %q: expected an OpenSSH SHA256 fingerprint", fingerprint)
+			}
+		}
+
+		return func(hostname string, _ net.Addr, key ssh.PublicKey) error {
+			actual := ssh.FingerprintSHA256(key)
+			for _, expected := range parsed.sftpHostKeyFingerprints {
+				if actual == expected {
+					return nil
+				}
+			}
+			return fmt.Errorf("SFTP host key mismatch for %s: got %s, expected one of %s", hostname, actual, strings.Join(parsed.sftpHostKeyFingerprints, ", "))
+		}, nil
+	}
+
+	knownHostsFile := parsed.sftpKnownHostsFile
+	if knownHostsFile == "" {
+		output.Warnf("Warning: SFTP host key verification is not configured; continuing without verification for backwards compatibility. Configure known_hosts_file or host_key_fingerprint to verify the server.\n")
+		return ssh.InsecureIgnoreHostKey(), nil //nolint:gosec // Preserves existing SFTP URIs while warning users to configure verification.
+	}
+	if knownHostsFile == "~" || strings.HasPrefix(knownHostsFile, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to expand SFTP known_hosts_file %q: %w", knownHostsFile, err)
+		}
+		knownHostsFile = filepath.Join(home, strings.TrimPrefix(knownHostsFile, "~/"))
+	}
+
+	callback, err := knownhosts.New(knownHostsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load SFTP known_hosts file %q: %w", knownHostsFile, err)
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := callback(hostname, remote, key)
+		if err == nil {
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if errors.As(err, &keyErr) {
+			if len(keyErr.Want) == 0 {
+				return fmt.Errorf("unknown SFTP host key for %s (%s); add it to %q: %w", hostname, ssh.FingerprintSHA256(key), knownHostsFile, err)
+			}
+			return fmt.Errorf("SFTP host key mismatch for %s (%s); the key in %q differs: %w", hostname, ssh.FingerprintSHA256(key), knownHostsFile, err)
+		}
+		return err
+	}, nil
 }
 
 func (s *BlobstoreSource) Close(ctx context.Context) error {
@@ -1107,7 +1190,29 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 	items := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	lineNum := 0
+
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+
+		*batchNum++
+		*totalRows += int64(len(items))
+		config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
+
+		if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+			return err
+		}
+		items = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1122,24 +1227,24 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 			return fmt.Errorf("failed to parse JSON at line %d: %w", lineNum, err)
 		}
 
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, item)
 
-		if len(items) >= batchSize {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert to Arrow: %w", err)
-			}
-
-			*batchNum++
-			*totalRows += int64(len(items))
-			config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-			if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
+		reachedLimit := opts.Limit > 0 && *totalRows+int64(len(items)) >= int64(opts.Limit)
+		if len(items) >= batchSize || reachedLimit {
+			if err := flush(); err != nil {
 				return err
 			}
-			items = make([]map[string]interface{}, 0, batchSize)
 
-			if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
+			if reachedLimit {
 				break
 			}
 		}
@@ -1149,22 +1254,7 @@ func (s *BlobstoreSource) readJSONLFile(ctx context.Context, reader io.Reader, r
 		return fmt.Errorf("error reading JSONL file: %w", err)
 	}
 
-	if len(items) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(items))
-		config.Debug("[BLOBSTORE-SRC] JSONL batch %d: %d items (total: %d)", *batchNum, len(items), *totalRows)
-
-		if err := sendRecordBatchWithMetadata(results, record, metadata); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return flush()
 }
 
 func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tableEncoding string, results chan<- source.RecordBatchResult, totalRows *int64, batchNum *int, batchSize int, opts source.ReadOptions, metadata blobstoreFileMetadata) error {
@@ -1181,7 +1271,29 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 	}
 
 	rows := make([]map[string]interface{}, 0, batchSize)
+	var accBytes int64
 	lineNum := 1
+
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
+		}
+
+		*batchNum++
+		*totalRows += int64(len(rows))
+		config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
+
+		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+			return err
+		}
+		rows = make([]map[string]interface{}, 0, batchSize)
+		accBytes = 0
+		return nil
+	}
 
 	for {
 		record, err := csvReader.Read()
@@ -1199,45 +1311,30 @@ func (s *BlobstoreSource) readCSVFile(ctx context.Context, reader io.Reader, tab
 				row[h] = parseCSVValue(record[i])
 			}
 		}
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(rows) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		rows = append(rows, row)
 
-		if len(rows) >= batchSize {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
-			}
-
-			*batchNum++
-			*totalRows += int64(len(rows))
-			config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
-
-			if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
+		reachedLimit := opts.Limit > 0 && *totalRows+int64(len(rows)) >= int64(opts.Limit)
+		if len(rows) >= batchSize || reachedLimit {
+			if err := flush(); err != nil {
 				return err
 			}
-			rows = make([]map[string]interface{}, 0, batchSize)
 
-			if opts.Limit > 0 && *totalRows >= int64(opts.Limit) {
+			if reachedLimit {
 				break
 			}
 		}
 	}
 
-	if len(rows) > 0 {
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert CSV to Arrow: %w", err)
-		}
-
-		*batchNum++
-		*totalRows += int64(len(rows))
-		config.Debug("[BLOBSTORE-SRC] CSV batch %d: %d rows (total: %d)", *batchNum, len(rows), *totalRows)
-
-		if err := sendRecordBatchWithMetadata(results, rec, metadata); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return flush()
 }
 
 func sendRecordBatchWithMetadata(results chan<- source.RecordBatchResult, record arrow.RecordBatch, metadata blobstoreFileMetadata) error {
@@ -1395,6 +1492,9 @@ type parsedBlobstoreURI struct {
 	sftpPassword                  string
 	sftpKeyFile                   string
 	sftpKeyPassphrase             string
+	sftpKnownHostsFile            string
+	sftpHostKeyFingerprints       []string
+	sftpInsecureSkipHostKeyCheck  bool
 }
 
 func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
@@ -1435,8 +1535,23 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		}
 		parsed.sftpUsername = u.User.Username()
 		parsed.sftpPassword, _ = u.User.Password()
-		parsed.sftpKeyFile = u.Query().Get("key_file")
-		parsed.sftpKeyPassphrase = u.Query().Get("key_passphrase")
+		query := u.Query()
+		parsed.sftpKeyFile = query.Get("key_file")
+		parsed.sftpKeyPassphrase = query.Get("key_passphrase")
+		parsed.sftpKnownHostsFile = query.Get("known_hosts_file")
+		for _, value := range query["host_key_fingerprint"] {
+			for fingerprint := range strings.SplitSeq(value, ",") {
+				if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
+					parsed.sftpHostKeyFingerprints = append(parsed.sftpHostKeyFingerprints, fingerprint)
+				}
+			}
+		}
+		if raw := query.Get("insecure_skip_host_key_check"); raw != "" {
+			parsed.sftpInsecureSkipHostKeyCheck, err = strconv.ParseBool(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid insecure_skip_host_key_check value %q: expected true or false", raw)
+			}
+		}
 	default:
 		return nil, fmt.Errorf("unsupported blobstore scheme: %s", u.Scheme)
 	}

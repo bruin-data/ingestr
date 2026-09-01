@@ -807,14 +807,36 @@ func sendBatch(table string, items []map[string]interface{}, opts source.ReadOpt
 		return nil
 	}
 
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-	if err != nil {
-		return fmt.Errorf("failed to convert sendgrid %s to Arrow: %w", table, err)
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert sendgrid %s to Arrow: %w", table, err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		config.Debug("[SENDGRID] sent %d %s records", len(batch), table)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
 
-	results <- source.RecordBatchResult{Batch: record}
-	config.Debug("[SENDGRID] sent %d %s records", len(items), table)
-	return nil
+	for _, row := range items {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	return flush()
 }
 
 func filterByTimestamp(items []map[string]interface{}, field string, start, end *time.Time) []map[string]interface{} {

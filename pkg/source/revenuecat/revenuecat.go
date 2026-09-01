@@ -408,7 +408,24 @@ func (s *RevenueCatSource) readCustomers(ctx context.Context, opts source.ReadOp
 	}()
 
 	var batch []map[string]interface{}
+	var accBytes int64
 	totalSent := 0
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert customers to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(batch)
+		config.Debug("[REVENUECAT] Sent %d customer records (total: %d)", len(batch), totalSent)
+		batch = nil
+		accBytes = 0
+		return nil
+	}
 
 	for res := range resultChan {
 		if res.err != nil {
@@ -419,29 +436,28 @@ func (s *RevenueCatSource) readCustomers(ctx context.Context, opts source.ReadOp
 			continue
 		}
 
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(res.customer)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					cancel()
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		batch = append(batch, res.customer)
 
 		if len(batch) >= maxPageSize {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-			if err != nil {
+			if err := flush(); err != nil {
 				cancel()
-				return fmt.Errorf("failed to convert customers to Arrow: %w", err)
+				return err
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(batch)
-			config.Debug("[REVENUECAT] Sent %d customer records (total: %d)", len(batch), totalSent)
-			batch = nil
 		}
 	}
 
-	if len(batch) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert customers to Arrow: %w", err)
-		}
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(batch)
-		config.Debug("[REVENUECAT] Sent %d customer records (total: %d)", len(batch), totalSent)
+	if err := flush(); err != nil {
+		return err
 	}
 
 	config.Debug("[REVENUECAT] Finished reading customers: %d total", totalSent)

@@ -154,6 +154,22 @@ func (s *TrustpilotSource) readReviews(ctx context.Context, opts source.ReadOpti
 
 	config.Debug("[TRUSTPILOT] Fetching reviews from %s to %s", startDateStr, endDateStr)
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert reviews to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	page := 1
 	for {
 		select {
@@ -183,20 +199,30 @@ func (s *TrustpilotSource) readReviews(ctx context.Context, opts source.ReadOpti
 			break
 		}
 
-		var reviews []map[string]interface{}
+		pageCount := 0
 		for _, r := range reviewsRaw {
-			if review, ok := r.(map[string]interface{}); ok {
-				reviews = append(reviews, review)
+			review, ok := r.(map[string]interface{})
+			if !ok {
+				continue
 			}
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(review)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, review)
+			pageCount++
 		}
 
-		if len(reviews) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(reviews, nil, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert reviews to Arrow: %w", err)
+		if pageCount > 0 {
+			if err := flush(); err != nil {
+				return err
 			}
-			results <- source.RecordBatchResult{Batch: record}
-			config.Debug("[TRUSTPILOT] Sent page %d with %d reviews", page, len(reviews))
+			config.Debug("[TRUSTPILOT] Sent page %d with %d reviews", page, pageCount)
 		}
 
 		if len(reviewsRaw) < pageSize {

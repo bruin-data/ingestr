@@ -740,6 +740,7 @@ func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor,
 			builder = newMongoSchemaBatchBuilderWithAllocator(mem, opts.Schema.Columns, opts.ExcludeColumns, batchSize)
 		}
 		batchRows := 0
+		var accBytes int64
 
 		for batchRows < batchSize && cursor.Next(ctx) {
 			if err := builder.AppendRawDocument(cursor.Current); err != nil {
@@ -748,6 +749,12 @@ func (s *MongoDBSource) consumeCursor(ctx context.Context, cursor *mongo.Cursor,
 				return
 			}
 			batchRows++
+			if opts.MaxBatchBytes > 0 {
+				accBytes += int64(len(cursor.Current))
+				if accBytes >= opts.MaxBatchBytes {
+					break
+				}
+			}
 		}
 
 		if err := cursor.Err(); err != nil {

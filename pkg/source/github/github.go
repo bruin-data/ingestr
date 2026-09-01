@@ -728,7 +728,33 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 
 		// Filter events by date range (incremental logic - client-side)
 		var filteredEvents []map[string]interface{}
+		var accBytes int64
 		stopPagination := false
+
+		flush := func() error {
+			if len(filteredEvents) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(filteredEvents, repoEventFields, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert events to Arrow: %w", err)
+			}
+
+			batchNum++
+			config.Debug("[GITHUB] Sending batch %d with %d events", batchNum, len(filteredEvents))
+			results <- source.RecordBatchResult{Batch: record}
+			totalSent += len(filteredEvents)
+
+			// Update rate limit info below the spinner (on a separate line)
+			if lastRemaining != "" {
+				config.Debug("[GITHUB] repo_events: %d rows | requests: %d | remaining: %s",
+					totalSent, batchNum, lastRemaining)
+			}
+
+			filteredEvents = nil
+			accBytes = 0
+			return nil
+		}
 
 		for _, event := range events {
 			var createdAtStr string
@@ -759,6 +785,16 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 			}
 
 			transformed := s.transformRepoEvent(event)
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(transformed)
+				if len(filteredEvents) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			filteredEvents = append(filteredEvents, transformed)
 
 			if opts.Limit > 0 && totalSent+len(filteredEvents) >= opts.Limit {
@@ -767,22 +803,8 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 			}
 		}
 
-		if len(filteredEvents) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(filteredEvents, repoEventFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert events to Arrow: %w", err)
-			}
-
-			batchNum++
-			config.Debug("[GITHUB] Sending batch %d with %d events", batchNum, len(filteredEvents))
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(filteredEvents)
-
-			// Update rate limit info below the spinner (on a separate line)
-			if lastRemaining != "" {
-				config.Debug("[GITHUB] repo_events: %d rows | requests: %d | remaining: %s",
-					totalSent, batchNum, lastRemaining)
-			}
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -1076,21 +1098,12 @@ func (s *GithubSource) paginateGraphQL(
 		}
 
 		var items []map[string]interface{}
-		for _, item := range rawItems {
-			itemMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
+		var accBytes int64
+
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
 			}
-
-			transformed := transform(itemMap)
-			items = append(items, transformed)
-
-			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
-				break
-			}
-		}
-
-		if len(items) > 0 {
 			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, fields, opts.ExcludeColumns)
 			if err != nil {
 				return fmt.Errorf("failed to convert %s to Arrow: %w", rootField, err)
@@ -1107,6 +1120,38 @@ func (s *GithubSource) paginateGraphQL(
 				config.Debug("[GITHUB] %s: %d rows | total cost: %d | remaining: %d",
 					rootField, totalSent, totalCost, rateLimit.Remaining)
 			}
+
+			items = nil
+			accBytes = 0
+			return nil
+		}
+
+		for _, item := range rawItems {
+			itemMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			transformed := transform(itemMap)
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(transformed)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, transformed)
+
+			if opts.Limit > 0 && totalSent+len(items) >= opts.Limit {
+				break
+			}
+		}
+
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {

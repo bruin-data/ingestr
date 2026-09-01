@@ -360,17 +360,13 @@ func (s *QuickBooksSource) paginateAndSend(ctx context.Context, tableName, objec
 			break
 		}
 
-		rows := make([]map[string]any, 0, len(rawItems))
-		for _, raw := range rawItems {
-			item, ok := raw.(map[string]any)
-			if !ok {
-				continue
+		items := make([]map[string]any, 0, len(rawItems))
+		var accBytes int64
+		flush := func() error {
+			if len(items) == 0 {
+				return nil
 			}
-			rows = append(rows, normalizeItem(item))
-		}
-
-		if len(rows) > 0 {
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(rows, nil, opts.ExcludeColumns)
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 			if err != nil {
 				return fmt.Errorf("failed to build arrow record for %s: %w", tableName, err)
 			}
@@ -381,7 +377,33 @@ func (s *QuickBooksSource) paginateAndSend(ctx context.Context, tableName, objec
 			case results <- source.RecordBatchResult{Batch: record}:
 			}
 
-			totalProcessed += len(rows)
+			totalProcessed += len(items)
+			items = nil
+			accBytes = 0
+			return nil
+		}
+
+		for _, raw := range rawItems {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			row := normalizeItem(item)
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+
+		if err := flush(); err != nil {
+			return err
 		}
 
 		if len(rawItems) < maxPageSize {

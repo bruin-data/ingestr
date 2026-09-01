@@ -358,24 +358,49 @@ func (s *AlliumSource) fetchResults(ctx context.Context, runID string, opts sour
 	}
 
 	totalSent := 0
-	for i := 0; i < len(queryResults.Data); i += batchSize {
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		config.Debug("[ALLIUM] sent batch of %d rows (total: %d/%d)", len(items), totalSent, len(queryResults.Data))
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
+	for _, row := range queryResults.Data {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		end := min(i+batchSize, len(queryResults.Data))
-
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(queryResults.Data[i:end], nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
 		}
 
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += end - i
-		config.Debug("[ALLIUM] sent batch of %d rows (total: %d/%d)", end-i, totalSent, len(queryResults.Data))
+		items = append(items, row)
+
+		if len(items) >= batchSize {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
 	}
 
-	return nil
+	return flush()
 }

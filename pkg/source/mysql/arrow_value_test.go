@@ -55,7 +55,7 @@ func TestDriverRowsToArrowRecordBatch(t *testing.T) {
 		},
 	}
 	dataCapacities := make([]int, len(columns))
-	record, count, err := driverRowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 25_000, dataCapacities)
+	record, count, err := driverRowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 25_000, 0, dataCapacities)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +90,51 @@ func TestDriverRowsToArrowRecordBatch(t *testing.T) {
 	}
 	if dataCapacities[1] == 0 || dataCapacities[6] == 0 {
 		t.Fatalf("variable-width capacities were not recorded: %v", dataCapacities)
+	}
+}
+
+func TestDriverRowsToArrowRecordBatchByteCap(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "blob", DataType: schema.TypeString},
+	}
+	// Each row carries ~1 KiB of string payload.
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = 'x'
+	}
+	values := make([][]driver.Value, 0, 10)
+	for i := 0; i < 10; i++ {
+		values = append(values, []driver.Value{int64(i), append([]byte(nil), payload...)})
+	}
+	newRows := func() *testDriverRows {
+		return &testDriverRows{columns: []string{"id", "blob"}, values: values}
+	}
+
+	// Byte cap disabled: the whole result set comes back in one batch (batchSize is large).
+	dc := make([]int, len(columns))
+	rec, count, err := driverRowsToArrowRecordBatch(newRows(), buildArrowSchema(columns), columns, 25_000, 0, dc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Release()
+	if count != 10 {
+		t.Fatalf("uncapped count = %d, want 10", count)
+	}
+
+	// Byte cap of ~2 KiB: append-then-break flushes after the accumulated payload
+	// crosses the cap, so a single call returns far fewer than 10 rows.
+	dc = make([]int, len(columns))
+	rec, capped, err := driverRowsToArrowRecordBatch(newRows(), buildArrowSchema(columns), columns, 25_000, 2048, dc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Release()
+	if capped == 0 || capped >= count {
+		t.Fatalf("capped count = %d, want a partial batch (0 < n < %d)", capped, count)
+	}
+	if capped > 3 {
+		t.Fatalf("capped count = %d, want ~2 rows for a 2 KiB cap over 1 KiB rows", capped)
 	}
 }
 

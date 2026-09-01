@@ -174,6 +174,25 @@ func (s *RecurlySource) readEndpoint(ctx context.Context, table string, ep endpo
 	totalSent := 0
 	requestURL := ep.path
 	useParams := true
+
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		totalSent += len(items)
+		config.Debug("[RECURLY] Sending batch of %d %s (total: %d)", len(items), table, totalSent)
+		results <- source.RecordBatchResult{Batch: rec}
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -194,14 +213,23 @@ func (s *RecurlySource) readEndpoint(ctx context.Context, table string, ep endpo
 			return fmt.Errorf("recurly %s request failed with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
 		}
 
+		for _, row := range resp.Data {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			items = append(items, row)
+		}
+
 		if len(resp.Data) > 0 {
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(resp.Data, nil, opts.ExcludeColumns)
-			if err != nil {
+			if err := flush(); err != nil {
 				return err
 			}
-			totalSent += len(resp.Data)
-			config.Debug("[RECURLY] Sending batch of %d %s (total: %d)", len(resp.Data), table, totalSent)
-			results <- source.RecordBatchResult{Batch: rec}
 		}
 
 		if !resp.HasMore || resp.Next == "" {

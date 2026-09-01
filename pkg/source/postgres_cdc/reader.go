@@ -249,14 +249,12 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 
 	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
 	if err == nil && !opts.Streaming {
-		// Record the caught-up position so FinalizeBatch can confirm it to the
-		// slot once the destination write is durable.
-		caughtUp := batchCaughtUpLSN(repl.CurrentLSN(), barrierLSN)
-		r.source.recordCaughtUpLSN(caughtUp, slotName, true)
-		// Keep the walsender alive while the destination drains the results
-		// channel. FinalizeBatch will stop it before sending the final
-		// WALFlush-bearing standby update.
-		r.source.startKeepalive(ctx, caughtUp, startLSN)
+		// streamLoop only returns nil in batch mode once the barrier marker is
+		// decoded, so the emitted barrier is the position FinalizeBatch may
+		// confirm to the slot after the destination write is durable. It also
+		// keeps the walsender alive while the destination drains the results
+		// channel.
+		r.source.checkpointBatchBarrier(ctx, barrierLSN, startLSN, slotName)
 	}
 	return err
 }
@@ -471,7 +469,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 		if !streaming && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
-				config.Debug("[CDC] Batch mode: decoded logical barrier at %s", repl.CurrentLSN())
+				config.Debug("[CDC] Batch mode: decoded logical barrier, stream position %s", repl.CurrentLSN())
 				if err := accum.flushAllContext(ctx, results, token); err != nil {
 					return err
 				}

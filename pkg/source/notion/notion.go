@@ -309,6 +309,24 @@ func (s *NotionSource) queryDatabase(ctx context.Context, databaseID string, opt
 	var nextCursor *string
 	totalSent := 0
 
+	var items []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(items) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert notion results to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		totalSent += len(items)
+		config.Debug("[notion] flushed %d pages from database %s (total: %d)", len(items), databaseID, totalSent)
+		items = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -348,7 +366,6 @@ func (s *NotionSource) queryDatabase(ctx context.Context, databaseID string, opt
 			break
 		}
 
-		items := make([]map[string]interface{}, 0, len(queryResult.Results))
 		for _, raw := range queryResult.Results {
 			var item map[string]interface{}
 			dec := json.NewDecoder(bytes.NewReader(raw))
@@ -356,18 +373,22 @@ func (s *NotionSource) queryDatabase(ctx context.Context, databaseID string, opt
 			if err := dec.Decode(&item); err != nil {
 				return fmt.Errorf("failed to parse notion page object: %w", err)
 			}
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			items = append(items, item)
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert notion results to Arrow: %w", err)
+		if err := flush(); err != nil {
+			return err
 		}
-
-		results <- source.RecordBatchResult{Batch: record}
-		totalSent += len(items)
-
-		config.Debug("[notion] fetched %d pages from database %s (total: %d)", len(items), databaseID, totalSent)
 
 		if !queryResult.HasMore || queryResult.NextCursor == nil {
 			break

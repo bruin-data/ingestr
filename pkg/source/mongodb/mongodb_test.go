@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
@@ -1931,5 +1932,48 @@ func TestConvertMongoShellToExtendedJSON(t *testing.T) {
 				t.Errorf("\ngot:  %s\nwant: %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConsumeCursorByteCap(t *testing.T) {
+	wide := strings.Repeat("x", 2048)
+	const rows = 40
+	docs := make([]interface{}, rows)
+	for i := range docs {
+		docs[i] = bson.D{{Key: "_id", Value: i}, {Key: "name", Value: wide}}
+	}
+
+	run := func(max int64) (batches, total int) {
+		cursor, err := mongo.NewCursorFromDocuments(docs, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		results := make(chan source.RecordBatchResult)
+		s := &MongoDBSource{}
+		go func() {
+			defer close(results)
+			s.consumeCursor(context.Background(), cursor, 100_000, source.ReadOptions{MaxBatchBytes: max}, results, time.Now())
+		}()
+		for res := range results {
+			if res.Err != nil {
+				t.Fatalf("batch error: %v", res.Err)
+			}
+			batches++
+			total += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
+		return batches, total
+	}
+
+	offB, offR := run(0)
+	if offB != 1 {
+		t.Fatalf("cap-off batches=%d, want 1", offB)
+	}
+	onB, onR := run(4096)
+	if onB <= 1 {
+		t.Fatalf("cap-on batches=%d, want >1", onB)
+	}
+	if offR != onR || offR != rows {
+		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, rows)
 	}
 }

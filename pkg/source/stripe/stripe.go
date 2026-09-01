@@ -658,6 +658,7 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 	}()
 
 	var items []map[string]interface{}
+	var accBytes int64
 	batchNum := 0
 	totalSent := 0
 	batchSize := stripePageSize(opts.PageSize)
@@ -676,6 +677,7 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 		select {
 		case results <- source.RecordBatchResult{Batch: record}:
 			items = nil
+			accBytes = 0
 			return nil
 		case <-fetchCtx.Done():
 			record.Release()
@@ -684,6 +686,16 @@ func (s *StripeSource) readTableFromEvents(ctx context.Context, tableName, event
 	}
 
 	for obj := range objects {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(obj)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					cancelFetch()
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, obj)
 		totalSent++
 
@@ -1543,6 +1555,7 @@ func (s *StripeSource) readPaymentRecords(ctx context.Context, opts source.ReadO
 	}()
 
 	var items []map[string]interface{}
+	var accBytes int64
 	batchNum := 0
 	totalSent := 0
 
@@ -1559,18 +1572,30 @@ func (s *StripeSource) readPaymentRecords(ctx context.Context, opts source.ReadO
 		config.Debug("[STRIPE] Sending batch %d with %d payment_record (total sent: %d)", batchNum, len(items), totalSent)
 		results <- source.RecordBatchResult{Batch: record}
 		items = nil
+		accBytes = 0
 		return nil
 	}
 
 	for obj := range objChan {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(obj)
+			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					cancelFetch()
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
 		items = append(items, obj)
 
-		if len(items) >= batchSize {
+		reachedLimit := opts.Limit > 0 && totalSent+len(items) >= opts.Limit
+		if len(items) >= batchSize || reachedLimit {
 			if err := flush(); err != nil {
 				cancelFetch()
 				return err
 			}
-			if opts.Limit > 0 && totalSent >= opts.Limit {
+			if reachedLimit {
 				config.Debug("[STRIPE] Reached limit of %d payment_record", opts.Limit)
 				cancelFetch()
 				return nil
@@ -2173,6 +2198,7 @@ func readSubscriptionItemsFromPages(
 	}
 
 	var pending []map[string]interface{}
+	var accBytes int64
 	totalSent := 0
 	batchNum := 0
 
@@ -2191,6 +2217,7 @@ func readSubscriptionItemsFromPages(
 		select {
 		case results <- source.RecordBatchResult{Batch: record}:
 			pending = nil
+			accBytes = 0
 			return nil
 		case <-ctx.Done():
 			record.Release()
@@ -2204,6 +2231,15 @@ func readSubscriptionItemsFromPages(
 				return true, flush()
 			}
 
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(item)
+				if len(pending) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return false, err
+					}
+				}
+				accBytes += rowBytes
+			}
 			pending = append(pending, item)
 			totalSent++
 			if len(pending) >= batchSize {

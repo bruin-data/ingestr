@@ -324,6 +324,22 @@ func (s *GoogleAdsSource) queryCustomer(ctx context.Context, customerID string, 
 		UseProtoNames:   true,
 	}
 
+	var flat []map[string]any
+	var accBytes int64
+	flush := func() error {
+		if len(flat) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(flat, cols, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		flat = nil
+		accBytes = 0
+		return nil
+	}
+
 	for {
 		resp, err := stream.Recv()
 		if err == io.EOF {
@@ -338,7 +354,6 @@ func (s *GoogleAdsSource) queryCustomer(ctx context.Context, customerID string, 
 			continue
 		}
 
-		flat := make([]map[string]any, 0, len(resp.Results))
 		for _, row := range resp.Results {
 			jsonBytes, err := marshaler.Marshal(row)
 			if err != nil {
@@ -358,14 +373,22 @@ func (s *GoogleAdsSource) queryCustomer(ctx context.Context, customerID string, 
 					r[pk] = "-"
 				}
 			}
+
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(r)
+				if len(flat) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
 			flat = append(flat, r)
 		}
 
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(flat, cols, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert to Arrow: %w", err)
+		if err := flush(); err != nil {
+			return err
 		}
-		results <- source.RecordBatchResult{Batch: record}
 	}
 
 	config.Debug("[GOOGLE_ADS] Fetched data for customer %s", customerID)

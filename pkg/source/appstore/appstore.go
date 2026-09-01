@@ -350,29 +350,52 @@ func (s *AppStoreSource) read(ctx context.Context, tableName string, appIDs []st
 					return
 				}
 
-				for i := 0; i < len(rows); i += batchSize {
-					end := i + batchSize
-					if end > len(rows) {
-						end = len(rows)
+				var items []map[string]interface{}
+				var accBytes int64
+				flush := func() bool {
+					if len(items) == 0 {
+						return true
 					}
-
-					batch := rows[i:end]
-					record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, res.columns, opts.ExcludeColumns)
+					record, err := arrowconv.ItemsToArrowRecordWithSchema(items, res.columns, opts.ExcludeColumns)
 					if err != nil {
 						select {
 						case results <- source.RecordBatchResult{Err: fmt.Errorf("failed to convert to Arrow: %w", err)}:
 						case <-ctx.Done():
 						}
 						cancel()
-						return
+						return false
 					}
 
-					config.Debug("[APPSTORE] Emitting batch of %d rows for app %s", len(batch), appID)
+					config.Debug("[APPSTORE] Emitting batch of %d rows for app %s", len(items), appID)
 					select {
 					case results <- source.RecordBatchResult{Batch: record}:
 					case <-ctx.Done():
-						return
+						return false
 					}
+					items = nil
+					accBytes = 0
+					return true
+				}
+
+				for _, row := range rows {
+					if opts.MaxBatchBytes > 0 {
+						rowBytes := arrowconv.RowBytes(row)
+						if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+							if !flush() {
+								return
+							}
+						}
+						accBytes += rowBytes
+					}
+					items = append(items, row)
+					if len(items) >= batchSize {
+						if !flush() {
+							return
+						}
+					}
+				}
+				if !flush() {
+					return
 				}
 			}(appID)
 		}

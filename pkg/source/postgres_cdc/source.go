@@ -629,6 +629,24 @@ func (s *PostgresCDCSource) recordCaughtUpLSN(lsn pglogrepl.LSN, slotName string
 	}
 }
 
+// checkpointBatchBarrier records the position a completed batch run may persist
+// and confirm to the slot: the LSN pg_logical_emit_message returned for this
+// run's barrier marker, and nothing beyond it. Once that marker is decoded,
+// every WAL record before it has been decoded and handed to the destination,
+// which is exactly what a resumable checkpoint must guarantee. The
+// replicator's decoded position is not interchangeable with it — it also
+// tracks protocol keepalives and server WAL head reports, so it can name a
+// position whose WAL was never persisted, and a checkpoint there would skip
+// that WAL on the next run.
+//
+// The keepalive that holds the walsender open during the destination write
+// uses the same barrier, so the position pinged mid-write and the position
+// FinalizeBatch confirms cannot diverge.
+func (s *PostgresCDCSource) checkpointBatchBarrier(ctx context.Context, barrierLSN, startLSN pglogrepl.LSN, slotName string) {
+	s.recordCaughtUpLSN(barrierLSN, slotName, true)
+	s.startKeepalive(ctx, barrierLSN, startLSN)
+}
+
 // FinalizeBatch sends a final standby status update confirming the LSN the batch
 // run caught up to. The pipeline calls it only after a successful, durable
 // write, so confirming the streamed position cannot discard WAL the destination

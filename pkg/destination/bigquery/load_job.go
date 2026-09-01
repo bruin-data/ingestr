@@ -449,6 +449,14 @@ func (d *BigQueryDestination) startCopyJobWithRetry(ctx context.Context, copier 
 			_ = d.resolveCDCJob(context.Background(), jobID)
 			return nil, err
 		}
+		if attempt >= loadJobStartMaxAttempts {
+			if job, recoverErr := d.recoverDuplicateCopyJob(ctx, jobID, sourceRef, targetRef); recoverErr == nil {
+				config.Debug("[DEST] Continuing with discovered copy job %s after start retry exhaustion", jobID)
+				return job, nil
+			}
+			d.deferCDCJobReconciliation(jobID)
+			return nil, fmt.Errorf("failed to start copy job %s after %d attempts: %w", jobID, attempt, err)
+		}
 		config.Debug("[DEST] Retrying ambiguous copy job start with stable job ID %s: %v", jobID, err)
 		if err := sleepWithContextForLoadJob(ctx, loadJobStartRetryDelay(min(attempt, loadJobMaxAttempts))); err != nil {
 			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
