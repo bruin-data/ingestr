@@ -79,6 +79,16 @@ func TestParseIcebergConfigFriendlyURIs(t *testing.T) {
 			},
 		},
 		{
+			name: "r2 data catalog",
+			uri:  "iceberg+r2://abc123/analytics?token=r2-secret",
+			wantProp: map[string]string{
+				"type":      "rest",
+				"uri":       "https://catalog.cloudflarestorage.com/abc123/analytics",
+				"warehouse": "abc123_analytics",
+				"token":     "r2-secret",
+			},
+		},
+		{
 			name: "hive metastore host",
 			uri:  "iceberg+hive://localhost:9083?storage=s3&bucket=warehouse&endpoint=localhost:9000&use_ssl=false",
 			wantProp: map[string]string{
@@ -175,6 +185,64 @@ func TestSqliteCatalogURIBusyTimeout(t *testing.T) {
 	cfg, err = parseIcebergConfig("iceberg+sqlite:///:memory:")
 	require.NoError(t, err)
 	require.Equal(t, ":memory:", cfg.Properties["uri"])
+}
+
+func TestParseIcebergConfigR2RequiresAccountAndBucket(t *testing.T) {
+	_, err := parseIcebergConfig("iceberg+r2://abc123?token=x")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "account id and bucket")
+
+	_, err = parseIcebergConfig("iceberg+r2://abc123/nested/bucket?token=x")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must not contain a path")
+}
+
+func TestLocalFilesystemPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		location string
+		wantPath string
+		wantOK   bool
+	}{
+		{"r2 warehouse identifier", "abc123_analytics", "", false},
+		{"glue-style identifier", "my_warehouse", "", false},
+		{"s3 warehouse", "s3://bucket/prefix/", "", false},
+		{"absolute path", "/var/warehouse", "/var/warehouse", true},
+		{"file url", "file:///var/warehouse", "/var/warehouse", true},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, ok := localFilesystemPath(tc.location)
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.wantPath, path)
+		})
+	}
+}
+
+func TestWarehouseLocalPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		location string
+		rest     bool
+		wantPath string
+		wantOK   bool
+	}{
+		{"rest r2 identifier", "abc123_analytics", true, "", false},
+		{"rest absolute warehouse", "/srv/warehouse", true, "/srv/warehouse", true},
+		{"rest s3 warehouse", "s3://bucket/w/", true, "", false},
+		{"local relative warehouse", "relative/warehouse", false, "relative/warehouse", true},
+		{"local absolute warehouse", "/var/warehouse", false, "/var/warehouse", true},
+		{"local file url", "file:///var/warehouse", false, "/var/warehouse", true},
+		{"local s3 warehouse", "s3://bucket/w/", false, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, ok := warehouseLocalPath(tc.location, tc.rest)
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.wantPath, path)
+		})
+	}
 }
 
 func TestParseIcebergConfigSQLCatalogRequiresDriverDialect(t *testing.T) {

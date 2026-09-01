@@ -17,6 +17,7 @@ Supported catalog schemes:
 - `iceberg+sqlite`
 - `iceberg+postgres`
 - `iceberg+rest`
+- `iceberg+r2` for Cloudflare R2 Data Catalog
 - `iceberg+glue`
 - `iceberg+hadoop`
 - `iceberg+hive`
@@ -114,6 +115,24 @@ docker run -d -p 8181:8181 \
   -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_REGION=us-east-1 \
   apache/iceberg-rest-fixture
 ```
+:::
+
+### Cloudflare R2 Data Catalog
+
+[R2 Data Catalog](https://developers.cloudflare.com/r2/data-catalog/) is a managed Iceberg REST catalog built into Cloudflare R2. The `iceberg+r2` scheme takes your account ID and bucket and assembles the catalog URI (`https://catalog.cloudflarestorage.com/<account_id>/<bucket>`) and warehouse (`<account_id>_<bucket>`) for you. Pass the R2 API token as `token`:
+
+```bash
+ingestr ingest \
+  --source-uri 'postgresql://user:pass@localhost:5432/app' \
+  --source-table public.orders \
+  --dest-uri 'iceberg+r2://<account_id>/<bucket>?token=<r2_api_token>' \
+  --dest-table analytics.orders \
+  --incremental-strategy replace \
+  --primary-key id
+```
+
+::: info
+The token needs **R2 Data Catalog** and **R2 Storage** read/write permissions. No S3 keys are required — R2 supplies them through the catalog. Get the account ID, bucket, and token from the catalog page after enabling it on your bucket.
 :::
 
 ### AWS Glue catalog
