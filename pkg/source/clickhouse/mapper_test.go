@@ -91,6 +91,40 @@ func TestMapClickHouseToDataType_ArrayWrappers(t *testing.T) {
 	}
 }
 
+func TestMapClickHouseToDataType_Decimal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input         string
+		wantPrecision int
+		wantScale     int
+	}{
+		{"Decimal(38, 9)", 38, 9},
+		{"Decimal(38,9)", 38, 9},
+		{"Nullable(Decimal(30, 10))", 30, 10},
+		{"LowCardinality(Decimal(18, 4))", 18, 4},
+		// Width-suffixed forms: the argument is the scale and precision is
+		// implied by the width. This is what ingestr itself emits (Decimal128(9)).
+		{"Decimal32(2)", 9, 2},
+		{"Decimal64(4)", 18, 4},
+		{"Decimal128(9)", 38, 9},
+		{"Nullable(Decimal128(9))", 38, 9},
+		{"Decimal256(20)", 76, 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+
+			gotType, gotPrecision, gotScale, _ := MapClickHouseToDataType(tt.input)
+
+			require.Equal(t, schema.TypeDecimal, gotType)
+			require.Equal(t, tt.wantPrecision, gotPrecision)
+			require.Equal(t, tt.wantScale, gotScale)
+		})
+	}
+}
+
 func TestNativeScanTarget_ArrayWrappers(t *testing.T) {
 	t.Parallel()
 
