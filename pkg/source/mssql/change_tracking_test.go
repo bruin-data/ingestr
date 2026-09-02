@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	mssqldb "github.com/microsoft/go-mssqldb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,6 +83,7 @@ func TestSnapshotCTTableDoesNotRetryAfterEmittingRows(t *testing.T) {
 		}, ctMetadataColumns...),
 	}
 
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(7)))
@@ -310,4 +312,218 @@ func TestCTVersionExpiredErrorMentionsFullRefresh(t *testing.T) {
 	assert.Contains(t, err, "version 10")
 	assert.Contains(t, err, "minimum valid version is 20")
 	assert.Contains(t, err, "--full-refresh")
+}
+
+func newCTTestSchema() *schema.TableSchema {
+	return &schema.TableSchema{
+		Columns: append([]schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+		}, ctMetadataColumns...),
+		PrimaryKeys: []string{"id"},
+	}
+}
+
+func ctVersionRows(version int64) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"version"}).AddRow(version)
+}
+
+func ctChangeRows(id, version int64) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id",
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+	}).AddRow(id, formatCTVersion(version), false, time.Now())
+}
+
+func drainCTResults(t *testing.T, results chan source.RecordBatchResult) int64 {
+	t.Helper()
+	var rows int64
+	for {
+		select {
+		case res := <-results:
+			require.NoError(t, res.Err)
+			require.NotNil(t, res.Batch)
+			rows += res.Batch.NumRows()
+			res.Batch.Release()
+		default:
+			return rows
+		}
+	}
+}
+
+func TestReadCTChangesUsesSnapshotIsolationWithoutPostReadRevalidation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(5))
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(20))
+	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(10), int64(20)).WillReturnRows(ctChangeRows(1, 20))
+	mock.ExpectCommit()
+
+	results := make(chan source.RecordBatchResult, 4)
+	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 20, through)
+	assert.EqualValues(t, 1, drainCTResults(t, results))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestReadCTChangesRevalidatesCursorAfterReadWithoutSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(0))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(5))
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(20))
+	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(10), int64(20)).WillReturnRows(ctChangeRows(1, 20))
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(15))
+	mock.ExpectRollback()
+
+	results := make(chan source.RecordBatchResult, 4)
+	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+
+	var expired *ctVersionExpiredError
+	require.ErrorAs(t, err, &expired)
+	assert.EqualValues(t, 10, expired.version)
+	assert.EqualValues(t, 15, expired.minVersion)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestReadCTChangesFallsBackToReadCommittedWhenSnapshotRejected(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnError(mssqldb.Error{Number: 3952})
+	mock.ExpectRollback()
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(5))
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(20))
+	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(10), int64(20)).WillReturnRows(ctChangeRows(1, 20))
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(5))
+	mock.ExpectCommit()
+
+	results := make(chan source.RecordBatchResult, 4)
+	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 20, through)
+	assert.EqualValues(t, 1, drainCTResults(t, results))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestReadCTChangesDoesNotRetryOtherSnapshotErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnError(errors.New("login timeout"))
+	mock.ExpectRollback()
+
+	results := make(chan source.RecordBatchResult, 4)
+	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SNAPSHOT isolation")
+	assert.Contains(t, err.Error(), "login timeout")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSnapshotCTTableUsesTableLockWhenSnapshotIsolationDisallowed(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(0))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(7))
+	mock.ExpectQuery("FROM \\[dbo\\]\\.\\[items\\] WITH \\(HOLDLOCK\\)").WillReturnRows(ctChangeRows(1, 7))
+	mock.ExpectCommit()
+
+	results := make(chan source.RecordBatchResult, 4)
+	version, err := src.snapshotCTTable(t.Context(), "dbo.items", newCTTestSchema(), source.ReadOptions{PageSize: 100}, results)
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 7, version)
+	assert.EqualValues(t, 1, drainCTResults(t, results))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSnapshotCTTableFallsBackToTableLockOnlyWhenSnapshotRejected(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnError(mssqldb.Error{Number: 3952})
+	mock.ExpectRollback()
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(7))
+	mock.ExpectQuery("FROM \\[dbo\\]\\.\\[items\\] WITH \\(HOLDLOCK\\)").WillReturnRows(ctChangeRows(1, 7))
+	mock.ExpectCommit()
+
+	results := make(chan source.RecordBatchResult, 4)
+	version, err := src.snapshotCTTable(t.Context(), "dbo.items", newCTTestSchema(), source.ReadOptions{PageSize: 100}, results)
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 7, version)
+	assert.EqualValues(t, 1, drainCTResults(t, results))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSnapshotCTTableDoesNotRetryOtherSnapshotErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnError(errors.New("permission denied"))
+	mock.ExpectRollback()
+
+	results := make(chan source.RecordBatchResult, 4)
+	_, err = src.snapshotCTTable(t.Context(), "dbo.items", newCTTestSchema(), source.ReadOptions{PageSize: 100}, results)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permission denied")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRowsToArrowRecordBatchSurfacesErrorOnEmptyResult(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"id"}).RowError(0, errors.New("late failure")).AddRow(int64(1)))
+
+	rows, err := db.QueryContext(t.Context(), "SELECT id FROM t")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	columns := []schema.Column{{Name: "id", DataType: schema.TypeInt64}}
+	record, count, err := rowsToArrowRecordBatch(rows, buildArrowSchema(columns), columns, 100, 0, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "late failure")
+	assert.Nil(t, record)
+	assert.EqualValues(t, 0, count)
 }

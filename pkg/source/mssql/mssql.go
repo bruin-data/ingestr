@@ -3,6 +3,7 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -768,18 +769,18 @@ func rowsToArrowRecordBatch(rows *sql.Rows, arrowSchema *arrow.Schema, columns [
 		}
 	}
 
-	if rowCount == 0 {
-		for _, b := range builders {
-			b.Release()
-		}
-		return nil, 0, nil
-	}
-
 	if err := rows.Err(); err != nil {
 		for _, b := range builders {
 			b.Release()
 		}
 		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	if rowCount == 0 {
+		for _, b := range builders {
+			b.Release()
+		}
+		return nil, 0, nil
 	}
 
 	arrays := make([]arrow.Array, len(builders))
@@ -853,4 +854,22 @@ func formatUUIDBytes(raw []byte, guidConversion bool) (string, error) {
 		return "", err
 	}
 	return uuid.String(), nil
+}
+
+// SnapshotIsolationAllowed reports whether the database permits SNAPSHOT
+// isolation (sys.databases.snapshot_isolation_state = 1). Shared with the CDC
+// source.
+func SnapshotIsolationAllowed(ctx context.Context, db *sql.DB) (bool, error) {
+	var state int
+	if err := db.QueryRowContext(ctx, "SELECT CONVERT(int, snapshot_isolation_state) FROM sys.databases WHERE database_id = DB_ID()").Scan(&state); err != nil {
+		return false, fmt.Errorf("failed to check snapshot isolation state: %w", err)
+	}
+	return state == 1, nil
+}
+
+// IsSnapshotIsolationUnavailableError matches error 3952: the database does
+// not allow SNAPSHOT isolation (ALLOW_SNAPSHOT_ISOLATION is OFF).
+func IsSnapshotIsolationUnavailableError(err error) bool {
+	var sqlErr mssqldb.Error
+	return errors.As(err, &sqlErr) && sqlErr.Number == 3952
 }

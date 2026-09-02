@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -339,16 +340,48 @@ func (s *MSSQLChangeTrackingSource) currentCTVersion(ctx context.Context, q ctQu
 	return version.Int64, nil
 }
 
+func (s *MSSQLChangeTrackingSource) ensureCTVersionValid(ctx context.Context, q ctQueryer, table string, version int64) error {
+	minVersion, err := s.minValidCTVersion(ctx, q, table)
+	if err != nil {
+		return err
+	}
+	if version < minVersion {
+		return &ctVersionExpiredError{table: table, version: version, minVersion: minVersion}
+	}
+	return nil
+}
+
+// ctCursorValidationHook runs after the resume cursor is validated and before
+// CHANGETABLE is queried. Only integration builds install one, to race cursor
+// invalidation against the read.
+var ctCursorValidationHook atomic.Pointer[func(ctx context.Context, sourceURI, table string) error]
+
+// snapshotCTTable probes snapshot_isolation_state instead of trying SNAPSHOT
+// and falling back on failure: when the database disallows SNAPSHOT, SQL
+// Server may raise error 3952 only after streaming rows, and a retry would
+// re-emit them. Falling back on any other error would rescan the table under
+// HOLDLOCK for no benefit.
 func (s *MSSQLChangeTrackingSource) snapshotCTTable(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, error) {
-	version, emittedRows, err := s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSnapshot)
-	if err == nil {
-		return version, nil
+	useSnapshot, err := SnapshotIsolationAllowed(ctx, s.db)
+	if err != nil {
+		return 0, err
 	}
-	if emittedRows > 0 {
-		return 0, fmt.Errorf("SNAPSHOT isolation snapshot for %s failed after emitting %d rows; not retrying with table lock to avoid duplicate records: %w", table, emittedRows, err)
+	if useSnapshot {
+		version, emittedRows, err := s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSnapshot)
+		if err == nil {
+			return version, nil
+		}
+		if emittedRows > 0 {
+			return 0, fmt.Errorf("SNAPSHOT isolation snapshot for %s failed after emitting %d rows; not retrying with table lock to avoid duplicate records: %w", table, emittedRows, err)
+		}
+		if !IsSnapshotIsolationUnavailableError(err) {
+			return 0, err
+		}
+		config.Debug("[MSSQL CT] SNAPSHOT isolation became unavailable (%v); retrying snapshot of %s with a table lock", err, table)
+	} else {
+		config.Debug("[MSSQL CT] Snapshot isolation is not allowed for this database; snapshotting %s with a table lock", table)
 	}
-	config.Debug("[MSSQL CT] SNAPSHOT isolation snapshot failed for %s: %v; retrying with table lock", table, err)
-	version, _, err = s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSerializable)
+	version, _, err := s.snapshotCTTableWithIsolation(ctx, table, tableSchema, opts, results, sql.LevelSerializable)
 	return version, err
 }
 
@@ -370,11 +403,14 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query snapshot for %s: %w", table, err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	emittedRows, err := s.rowsToCTBatches(rows, columns, opts, results)
 	if err != nil {
+		_ = rows.Close()
 		return 0, emittedRows, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, emittedRows, fmt.Errorf("failed to read snapshot for %s: %w", table, err)
 	}
 	if emittedRows == 0 && !opts.FullRefresh {
 		if err := emitSyntheticCTHeartbeat(tableSchema.Columns, tableSchema.PrimaryKeys, version, results); err != nil {
@@ -390,71 +426,109 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	return version, emittedRows, nil
 }
 
+// readCTChanges enumerates changes after fromVersion. SQL Server documents
+// that cursor validation, CHANGE_TRACKING_CURRENT_VERSION() and CHANGETABLE
+// must share one SNAPSHOT transaction: otherwise retention cleanup (or a
+// TRUNCATE, which resets the table's tracking) can invalidate the cursor
+// between validation and CHANGETABLE, and the change set comes back silently
+// incomplete. When the database disallows SNAPSHOT, the read runs under READ
+// COMMITTED and re-validates the cursor after CHANGETABLE, which is the
+// documented alternative.
 func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, emitHeartbeat bool) (int64, error) {
-	readThroughVersion, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelReadCommitted, emitHeartbeat)
-	if err == nil {
-		return readThroughVersion, nil
-	}
-	var expired *ctVersionExpiredError
-	if errors.As(err, &expired) {
+	useSnapshot, err := SnapshotIsolationAllowed(ctx, s.db)
+	if err != nil {
 		return 0, err
 	}
-	return 0, fmt.Errorf("failed to read SQL Server Change Tracking changes using READ COMMITTED isolation: %w", err)
+	if useSnapshot {
+		readThroughVersion, emittedRows, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelSnapshot, emitHeartbeat)
+		if err == nil {
+			return readThroughVersion, nil
+		}
+		if emittedRows > 0 || !IsSnapshotIsolationUnavailableError(err) {
+			return 0, wrapCTReadError(err, "SNAPSHOT")
+		}
+		config.Debug("[MSSQL CT] SNAPSHOT isolation became unavailable (%v); reading changes for %s under READ COMMITTED", err, table)
+	} else {
+		config.Debug("[MSSQL CT] Snapshot isolation is not allowed for this database; reading changes for %s under READ COMMITTED with post-read cursor validation", table)
+	}
+
+	readThroughVersion, _, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelReadCommitted, emitHeartbeat)
+	if err != nil {
+		return 0, wrapCTReadError(err, "READ COMMITTED")
+	}
+	return readThroughVersion, nil
 }
 
-func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, emitHeartbeat bool) (int64, error) {
+func wrapCTReadError(err error, isolation string) error {
+	var expired *ctVersionExpiredError
+	if errors.As(err, &expired) {
+		return err
+	}
+	return fmt.Errorf("failed to read SQL Server Change Tracking changes using %s isolation: %w", isolation, err)
+}
+
+func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, emitHeartbeat bool) (int64, int64, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
-		return 0, fmt.Errorf("failed to begin Change Tracking transaction: %w", err)
+		return 0, 0, fmt.Errorf("failed to begin Change Tracking transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	minVersion, err := s.minValidCTVersion(ctx, tx, table)
-	if err != nil {
-		return 0, err
+	if err := s.ensureCTVersionValid(ctx, tx, table, fromVersion); err != nil {
+		return 0, 0, err
 	}
-	if fromVersion < minVersion {
-		return 0, &ctVersionExpiredError{table: table, version: fromVersion, minVersion: minVersion}
+	if hook := ctCursorValidationHook.Load(); hook != nil {
+		if err := (*hook)(ctx, s.uri, table); err != nil {
+			return 0, 0, err
+		}
 	}
 
 	targetVersion, err := s.currentCTVersion(ctx, tx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if targetVersion <= fromVersion {
 		if err := tx.Commit(); err != nil {
-			return 0, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
+			return 0, 0, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
 		}
-		return fromVersion, nil
+		return fromVersion, 0, nil
 	}
 
 	columns := tableSchema.Columns
 	query := buildCTChangesQuery(table, sourceColumnsWithoutCT(tableSchema), primaryKeys)
 	rows, err := tx.QueryContext(ctx, query, fromVersion, targetVersion)
 	if err != nil {
-		return 0, fmt.Errorf("failed to query Change Tracking changes for %s: %w", table, err)
+		return 0, 0, fmt.Errorf("failed to query Change Tracking changes for %s: %w", table, err)
 	}
 
 	changeRows, err := s.rowsToCTBatches(rows, columns, opts, results)
 	if err != nil {
 		_ = rows.Close()
-		return 0, err
+		return 0, changeRows, err
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("failed to close Change Tracking rows for %s: %w", table, err)
+		return 0, changeRows, fmt.Errorf("failed to close Change Tracking rows for %s: %w", table, err)
 	}
 
+	emittedRows := changeRows
 	if shouldEmitCTHeartbeat(emitHeartbeat, changeRows) {
 		if err := s.emitCTHeartbeat(ctx, tx, table, tableSchema, primaryKeys, targetVersion, opts, results); err != nil {
-			return 0, err
+			return 0, emittedRows, err
+		}
+		emittedRows++
+	}
+
+	if isolation != sql.LevelSnapshot {
+		if err := s.ensureCTVersionValid(ctx, tx, table, fromVersion); err != nil {
+			return 0, emittedRows, err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
+		return 0, emittedRows, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
 	}
 
-	return targetVersion, nil
+	return targetVersion, emittedRows, nil
 }
 
 func (s *MSSQLChangeTrackingSource) emitCTHeartbeat(ctx context.Context, tx *sql.Tx, table string, tableSchema *schema.TableSchema, primaryKeys []string, targetVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -463,11 +537,14 @@ func (s *MSSQLChangeTrackingSource) emitCTHeartbeat(ctx context.Context, tx *sql
 	if err != nil {
 		return fmt.Errorf("failed to query Change Tracking heartbeat for %s: %w", table, err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	emittedRows, err := s.rowsToCTBatches(rows, tableSchema.Columns, opts, results)
 	if err != nil {
+		_ = rows.Close()
 		return err
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("failed to read Change Tracking heartbeat for %s: %w", table, err)
 	}
 	if emittedRows == 0 {
 		return emitSyntheticCTHeartbeat(tableSchema.Columns, primaryKeys, targetVersion, results)
