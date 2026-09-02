@@ -3,6 +3,7 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"math"
@@ -351,16 +352,10 @@ func (s *MSSQLChangeTrackingSource) ensureCTVersionValid(ctx context.Context, q 
 	return nil
 }
 
-// ctCursorValidationHook runs after the resume cursor is validated and before
-// CHANGETABLE is queried. Only integration builds install one, to race cursor
-// invalidation against the read.
+// Integration tests use this to invalidate a cursor before CHANGETABLE runs.
 var ctCursorValidationHook atomic.Pointer[func(ctx context.Context, sourceURI, table string) error]
 
-// snapshotCTTable probes snapshot_isolation_state instead of trying SNAPSHOT
-// and falling back on failure: when the database disallows SNAPSHOT, SQL
-// Server may raise error 3952 only after streaming rows, and a retry would
-// re-emit them. Falling back on any other error would rescan the table under
-// HOLDLOCK for no benefit.
+// Probe before SNAPSHOT so fallback never re-emits a partially streamed scan.
 func (s *MSSQLChangeTrackingSource) snapshotCTTable(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, error) {
 	useSnapshot, err := SnapshotIsolationAllowed(ctx, s.db)
 	if err != nil {
@@ -385,8 +380,23 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTable(ctx context.Context, table s
 	return version, err
 }
 
+func resetCTConnection(ctx context.Context, conn *sql.Conn) {
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(resetCtx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	_ = conn.Close()
+}
+
 func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel) (int64, int64, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to acquire snapshot connection: %w", err)
+	}
+	defer resetCTConnection(ctx, conn)
+
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to begin snapshot transaction: %w", err)
 	}
@@ -426,14 +436,8 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	return version, emittedRows, nil
 }
 
-// readCTChanges enumerates changes after fromVersion. SQL Server documents
-// that cursor validation, CHANGE_TRACKING_CURRENT_VERSION() and CHANGETABLE
-// must share one SNAPSHOT transaction: otherwise retention cleanup (or a
-// TRUNCATE, which resets the table's tracking) can invalidate the cursor
-// between validation and CHANGETABLE, and the change set comes back silently
-// incomplete. When the database disallows SNAPSHOT, the read runs under READ
-// COMMITTED and re-validates the cursor after CHANGETABLE, which is the
-// documented alternative.
+// Keep validation and enumeration in one SNAPSHOT transaction. The READ
+// COMMITTED fallback revalidates after enumeration to detect cleanup races.
 func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, emitHeartbeat bool) (int64, error) {
 	useSnapshot, err := SnapshotIsolationAllowed(ctx, s.db)
 	if err != nil {
@@ -468,7 +472,13 @@ func wrapCTReadError(err error, isolation string) error {
 }
 
 func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, emitHeartbeat bool) (int64, int64, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to acquire Change Tracking connection: %w", err)
+	}
+	defer resetCTConnection(ctx, conn)
+
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation})
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to begin Change Tracking transaction: %w", err)
 	}

@@ -95,6 +95,7 @@ func TestSnapshotCTTableDoesNotRetryAfterEmittingRows(t *testing.T) {
 			destination.CDCSyncedAtColumn,
 		}).AddRow(int64(1), "00000000000000000007", false, time.Now()))
 	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 2)
 	_, err = src.snapshotCTTable(t.Context(), "dbo.items", tableSchema, source.ReadOptions{PageSize: 100}, results)
@@ -352,6 +353,11 @@ func drainCTResults(t *testing.T, results chan source.RecordBatchResult) int64 {
 	}
 }
 
+func expectCTIsolationReset(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("SET TRANSACTION ISOLATION LEVEL READ COMMITTED").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
 func TestReadCTChangesUsesSnapshotIsolationWithoutPostReadRevalidation(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -364,6 +370,7 @@ func TestReadCTChangesUsesSnapshotIsolationWithoutPostReadRevalidation(t *testin
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(20))
 	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(10), int64(20)).WillReturnRows(ctChangeRows(1, 20))
 	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
@@ -387,6 +394,7 @@ func TestReadCTChangesRevalidatesCursorAfterReadWithoutSnapshot(t *testing.T) {
 	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(10), int64(20)).WillReturnRows(ctChangeRows(1, 20))
 	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(15))
 	mock.ExpectRollback()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
@@ -408,12 +416,14 @@ func TestReadCTChangesFallsBackToReadCommittedWhenSnapshotRejected(t *testing.T)
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnError(mssqldb.Error{Number: 3952})
 	mock.ExpectRollback()
+	expectCTIsolationReset(mock)
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(5))
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(20))
 	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(10), int64(20)).WillReturnRows(ctChangeRows(1, 20))
 	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(5))
 	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
@@ -434,6 +444,7 @@ func TestReadCTChangesDoesNotRetryOtherSnapshotErrors(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnError(errors.New("login timeout"))
 	mock.ExpectRollback()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
@@ -455,6 +466,7 @@ func TestSnapshotCTTableUsesTableLockWhenSnapshotIsolationDisallowed(t *testing.
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(7))
 	mock.ExpectQuery("FROM \\[dbo\\]\\.\\[items\\] WITH \\(HOLDLOCK\\)").WillReturnRows(ctChangeRows(1, 7))
 	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	version, err := src.snapshotCTTable(t.Context(), "dbo.items", newCTTestSchema(), source.ReadOptions{PageSize: 100}, results)
@@ -475,10 +487,12 @@ func TestSnapshotCTTableFallsBackToTableLockOnlyWhenSnapshotRejected(t *testing.
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnError(mssqldb.Error{Number: 3952})
 	mock.ExpectRollback()
+	expectCTIsolationReset(mock)
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(7))
 	mock.ExpectQuery("FROM \\[dbo\\]\\.\\[items\\] WITH \\(HOLDLOCK\\)").WillReturnRows(ctChangeRows(1, 7))
 	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	version, err := src.snapshotCTTable(t.Context(), "dbo.items", newCTTestSchema(), source.ReadOptions{PageSize: 100}, results)
@@ -499,6 +513,7 @@ func TestSnapshotCTTableDoesNotRetryOtherSnapshotErrors(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnError(errors.New("permission denied"))
 	mock.ExpectRollback()
+	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
 	_, err = src.snapshotCTTable(t.Context(), "dbo.items", newCTTestSchema(), source.ReadOptions{PageSize: 100}, results)
