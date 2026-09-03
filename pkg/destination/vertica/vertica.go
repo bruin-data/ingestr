@@ -574,7 +574,7 @@ func (d *VerticaDestination) GetTableSchema(ctx context.Context, table string) (
 		}
 		col := schema.Column{
 			Name:     colName,
-			DataType: mapVerticaTypeToSchema(dataType),
+			DataType: MapVerticaTypeToSchema(dataType),
 			Nullable: nullable,
 		}
 		if precision.Valid {

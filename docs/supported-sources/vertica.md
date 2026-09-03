@@ -2,7 +2,7 @@
 
 [Vertica](https://www.vertica.com/) is a columnar, massively parallel processing (MPP) analytical database built for large-scale analytics, available on-premises, in the cloud, and as a free Community Edition.
 
-ingestr supports Vertica as a destination.
+ingestr supports Vertica as both a source and a destination.
 
 ## URI format
 The URI format for Vertica is as follows:
@@ -39,6 +39,28 @@ schema.table     # fully qualified
 ```
 
 The schema is created automatically if it does not already exist.
+
+## Setting Vertica as a source
+
+Use the `--source-uri` and `--source-table` flags to read data from Vertica:
+
+```bash
+ingestr ingest \
+    --source-uri 'vertica://dbadmin:pass@localhost:5433/VMart' \
+    --source-table 'public.users' \
+    --dest-uri 'postgres://user:pass@localhost:5432/analytics' \
+    --dest-table 'public.users'
+```
+
+You can also provide a custom query with the `query:` prefix as the source table:
+
+```bash
+ingestr ingest \
+    --source-uri 'vertica://dbadmin:pass@localhost:5433/VMart' \
+    --source-table 'query:SELECT id, email FROM public.users WHERE active = true' \
+    --dest-uri 'postgres://user:pass@localhost:5432/analytics' \
+    --dest-table 'public.active_users'
+```
 
 ## Setting Vertica as a destination
 
