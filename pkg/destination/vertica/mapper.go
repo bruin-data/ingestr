@@ -73,16 +73,17 @@ func MapDataTypeToVertica(col schema.Column, isKey bool) string {
 	}
 }
 
-// mapVerticaTypeToSchema maps a Vertica catalog data type to the internal type
+// MapVerticaTypeToSchema maps a Vertica catalog data type to the internal type
 // system. The catalog reports lengths inline (e.g. "varchar(65000)"), so only
-// the leading type name is significant.
-func mapVerticaTypeToSchema(dataType string) schema.DataType {
+// the leading type name is significant. It is the single source of truth shared
+// by the Vertica destination (schema readback) and the Vertica source.
+func MapVerticaTypeToSchema(dataType string) schema.DataType {
 	base := strings.ToLower(strings.TrimSpace(dataType))
 	if idx := strings.IndexByte(base, '('); idx >= 0 {
 		base = strings.TrimSpace(base[:idx])
 	}
 	switch base {
-	case "boolean":
+	case "boolean", "bool":
 		return schema.TypeBoolean
 	case "int", "integer", "bigint", "int8", "smallint", "tinyint":
 		return schema.TypeInt64
