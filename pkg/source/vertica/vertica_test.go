@@ -91,7 +91,7 @@ func TestBuildSelectQuery(t *testing.T) {
 			IntervalStart:  &start,
 			IntervalEnd:    &end,
 		})
-		expected := `SELECT "id", "name", "updated_at" FROM "orders" WHERE "updated_at" >= '2024-01-01 00:00:00' AND "updated_at" <= '2024-02-01 12:30:00'`
+		expected := `SELECT "id", "name", "updated_at" FROM "orders" WHERE "updated_at" >= '2024-01-01 00:00:00.000000+00:00' AND "updated_at" <= '2024-02-01 12:30:00.000000+00:00'`
 		if query != expected {
 			t.Errorf("got %q, want %q", query, expected)
 		}

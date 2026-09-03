@@ -394,15 +394,9 @@ func buildSelectQuery(table string, columns []schema.Column, decimalCols map[str
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTable(table))
 
-	var conditions []string
-	if opts.IncrementalKey != "" {
-		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteIdentifier(opts.IncrementalKey), formatIntervalValue(opts.IntervalStart)))
-		}
-		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteIdentifier(opts.IncrementalKey), formatIntervalValue(opts.IntervalEnd)))
-		}
-	}
+	// DefaultSQLTimeFormat keeps the timezone offset so bounds are unambiguous
+	// regardless of the Vertica session timezone.
+	conditions := source.SQLTimeRangeConditions(opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd, "<=", quoteIdentifier, source.DefaultSQLTimeFormat)
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -412,13 +406,6 @@ func buildSelectQuery(table string, columns []schema.Column, decimalCols map[str
 	}
 
 	return query
-}
-
-func formatIntervalValue(v *time.Time) string {
-	if v == nil {
-		return ""
-	}
-	return v.Format("2006-01-02 15:04:05.999999")
 }
 
 func quoteIdentifier(name string) string {
