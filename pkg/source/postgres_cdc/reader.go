@@ -61,7 +61,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			config.Debug("[CDC] Resume metadata changed for %s; replacing its snapshot", r.tableName)
 			opts.CDCResumeLSN = ""
 			replacementSnapshot = true
-			tableSchema, err := getTableSchema(ctx, r.source.queryPool, r.tableName)
+			tableSchema, err := r.source.getTableSchema(ctx, r.tableName)
 			if err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
@@ -278,7 +278,7 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 			return 0, fmt.Errorf("failed to reconcile publication after table recreation: %w", err)
 		}
 	}
-	tableSchema, err := getTableSchema(ctx, r.source.queryPool, r.tableName)
+	tableSchema, err := r.source.getTableSchema(ctx, r.tableName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to refresh schema for table %s: %w", r.tableName, err)
 	}

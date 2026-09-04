@@ -175,3 +175,80 @@ func TestPostgresCDCReplicaIdentityKeys(t *testing.T) {
 	require.NoError(t, err, "FULL identity supports an explicitly selected unique key")
 	require.Equal(t, []string{"code"}, table.PrimaryKeys())
 }
+
+func TestPostgresCDCGeneratedColumns(t *testing.T) {
+	for _, version := range []int{16, 18} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			container, uri := setupPostgresCDCContainerImage(t, ctx, fmt.Sprintf("postgres:%d-alpine", version))
+			defer func() { _ = container.Terminate(context.Background()) }()
+			pool, err := pgxpool.New(ctx, uri)
+			require.NoError(t, err)
+			defer pool.Close()
+			_, err = pool.Exec(ctx, `CREATE TABLE items (id int PRIMARY KEY, n int, computed int GENERATED ALWAYS AS (n*2) STORED);
+    INSERT INTO items(id,n) VALUES (1,10); CREATE PUBLICATION items_pub FOR TABLE items; CREATE SCHEMA warehouse`)
+			require.NoError(t, err)
+			cdcURI := strings.Replace(uri, "postgres://", "postgres+cdc://", 1)
+			cfg := &config.IngestConfig{SourceURI: cdcURI + "&publication=items_pub&dest_schema=warehouse", DestURI: uri, IncrementalStrategy: config.StrategyMerge}
+			err = pipeline.New(cfg).Run(ctx)
+			require.ErrorContains(t, err, "generated column")
+			var absent bool
+			require.NoError(t, pool.QueryRow(ctx, `SELECT to_regclass('warehouse.items') IS NULL`).Scan(&absent))
+			require.True(t, absent, "coverage must be validated before taking a snapshot")
+			if version < 18 {
+				return
+			}
+
+			managed := postgres_cdc.NewPostgresCDCSource()
+			require.NoError(t, managed.Connect(ctx, cdcURI))
+			require.NoError(t, managed.PrepareConnector(ctx))
+			_, err = managed.GetTable(ctx, source.TableRequest{Name: "public.items"})
+			require.NoError(t, err, "managed PostgreSQL 18 publications must include stored generated columns")
+			require.NoError(t, managed.Close(ctx))
+			var mode string
+			require.NoError(t, pool.QueryRow(ctx, `SELECT pubgencols::text FROM pg_publication WHERE pubname='ingestr_publication'`).Scan(&mode))
+			require.Equal(t, "s", mode)
+
+			_, err = pool.Exec(ctx, `ALTER PUBLICATION items_pub SET (publish_generated_columns = stored)`)
+			require.NoError(t, err)
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			_, err = pool.Exec(ctx, `UPDATE items SET n=11 WHERE id=1; INSERT INTO items(id,n) VALUES (2,12)`)
+			require.NoError(t, err)
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			var mismatches int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM warehouse.items WHERE computed IS DISTINCT FROM n*2`).Scan(&mismatches))
+			require.Zero(t, mismatches)
+			var count int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM warehouse.items`).Scan(&count))
+			require.Equal(t, 2, count)
+			cfg.Stream = true
+			cfg.FlushInterval = time.Second
+			cfg.FlushRecords = 10000
+			streamCtx, stop := context.WithCancel(ctx)
+			defer stop()
+			done := make(chan error, 1)
+			go func() { done <- pipeline.New(cfg).Run(streamCtx) }()
+			require.Eventually(t, func() bool {
+				var active bool
+				return pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE active AND NOT temporary)`).Scan(&active) == nil && active
+			}, 30*time.Second, 100*time.Millisecond)
+			_, err = pool.Exec(ctx, `ALTER PUBLICATION items_pub SET (publish_generated_columns = none); UPDATE items SET n=13 WHERE id=1`)
+			require.NoError(t, err)
+			select {
+			case err := <-done:
+				require.ErrorContains(t, err, "generated column \"computed\" is missing")
+			case <-time.After(30 * time.Second):
+				t.Fatal("stream did not reject lost generated-column coverage")
+			}
+			cfg.Stream = false
+			require.ErrorContains(t, pipeline.New(cfg).Run(ctx), "does not publish generated columns")
+
+			_, err = pool.Exec(ctx, `CREATE TABLE virtual_items (id int PRIMARY KEY, n int, computed int GENERATED ALWAYS AS (n*2) VIRTUAL);
+    CREATE PUBLICATION virtual_pub FOR TABLE virtual_items WITH (publish_generated_columns = stored)`)
+			require.NoError(t, err)
+			cfg.SourceURI = cdcURI + "&publication=virtual_pub&dest_schema=warehouse"
+			require.ErrorContains(t, pipeline.New(cfg).Run(ctx), "stored generated column")
+		})
+	}
+}

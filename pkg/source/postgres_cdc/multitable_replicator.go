@@ -54,6 +54,10 @@ type MultiTableReplicator struct {
 func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater, streaming bool, barrierNonce string) (*MultiTableReplicator, error) {
 	decoderBudget := newByteBudget(defaultDecoderMemoryBytes)
 	decoder := newMultiTableDecoderWithBudget(tables, decoderBudget)
+	decoder.generatedColumns = make(map[string][]string, len(tables))
+	for _, table := range tables {
+		decoder.generatedColumns[table.Name] = src.generatedColumnsFor(table.Name)
+	}
 	if reader, ok := lsnFilter.(*MultiTableCDCReader); ok {
 		decoder.AllowUnknownRelationColumns(reader.allowedUnknown)
 		decoder.AllowHistoricalRelationIDs(reader.historicalRelIDs)

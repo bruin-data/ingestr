@@ -47,7 +47,7 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	}
 
 	// Fetch schema from database
-	tableSchema, err := getTableSchema(ctx, src.queryPool, req.Name)
+	tableSchema, err := src.getTableSchema(ctx, req.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schema: %w", err)
 	}

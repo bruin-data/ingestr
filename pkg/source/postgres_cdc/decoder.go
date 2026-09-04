@@ -51,18 +51,19 @@ type Change struct {
 }
 
 type Decoder struct {
-	tableSchema    *schema.TableSchema
-	targetSchema   string
-	targetTable    string
-	relations      map[uint32]*RelationInfo
-	targetRelID    uint32
-	expectedRelID  uint32
-	pendingChanges *changeSpool[Change]
-	committed      *changeSpool[Change]
-	currentTxLSN   pglogrepl.LSN
-	typeMap        *pgtype.Map
-	allowedUnknown map[string]struct{}
-	memoryBudget   *byteBudget
+	tableSchema      *schema.TableSchema
+	generatedColumns []string
+	targetSchema     string
+	targetTable      string
+	relations        map[uint32]*RelationInfo
+	targetRelID      uint32
+	expectedRelID    uint32
+	pendingChanges   *changeSpool[Change]
+	committed        *changeSpool[Change]
+	currentTxLSN     pglogrepl.LSN
+	typeMap          *pgtype.Map
+	allowedUnknown   map[string]struct{}
+	memoryBudget     *byteBudget
 }
 
 func NewDecoder(tableSchema *schema.TableSchema, schemaName, tableName string) *Decoder {
@@ -189,6 +190,9 @@ func (d *Decoder) handleRelation(data []byte) error {
 		if err := mapRelationToSchema(rel, prev, d.tableSchema, d.targetSchema+"."+d.targetTable, d.allowedUnknown); err != nil {
 			// Do not store rel on error: a rebuilt stream must retry against the
 			// last accepted relation so schema-change detection remains stable.
+			return err
+		}
+		if err := validateGeneratedRelation(rel, d.generatedColumns); err != nil {
 			return err
 		}
 	}

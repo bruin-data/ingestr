@@ -72,7 +72,8 @@ type PostgresCDCSource struct {
 	cdcConfig CDCConfig
 	// serverVersion is the source's server_version_num, used to gate pgoutput
 	// options added in newer PostgreSQL releases.
-	serverVersion int
+	serverVersion    int
+	generatedColumns sync.Map
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the
 	// replication goroutine (standby status updates).
@@ -263,6 +264,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
 	s.serverVersion = serverVersion
+	s.generatedColumns.Clear()
 	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, database, cdcConfig)
 
 	return nil
@@ -337,6 +339,11 @@ func (s *PostgresCDCSource) reconcileManagedPublication(ctx context.Context) err
 	}
 	if err := ensureManagedPublication(ctx, s.queryPool, s.cdcConfig.Publication, lockMigration); err != nil {
 		return fmt.Errorf("failed to ensure publication: %w", err)
+	}
+	if s.serverVersion >= 180000 {
+		if _, err := s.queryPool.Exec(ctx, "ALTER PUBLICATION "+quoteIdentifier(s.cdcConfig.Publication)+" SET (publish_generated_columns = stored)"); err != nil {
+			return fmt.Errorf("failed to enable generated columns for managed publication: %w", err)
+		}
 	}
 	return nil
 }
@@ -1302,7 +1309,7 @@ func (s *PostgresCDCSource) getTables(ctx context.Context, validateSelection boo
 		fullName, incarnation := entry.fullName, entry.incarnation
 
 		// Get schema for this table
-		tableSchema, err := getTableSchema(ctx, s.queryPool, fullName)
+		tableSchema, err := s.getTableSchema(ctx, fullName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for table %s: %w", fullName, err)
 		}

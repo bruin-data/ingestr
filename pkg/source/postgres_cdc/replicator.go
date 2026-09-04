@@ -91,6 +91,7 @@ func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema
 	schemaName, tblName := parseTableName(tableName)
 
 	decoder := NewDecoder(tableSchema, schemaName, tblName)
+	decoder.generatedColumns = src.generatedColumnsFor(tableName)
 
 	src.lag.streaming.Store(streaming)
 
