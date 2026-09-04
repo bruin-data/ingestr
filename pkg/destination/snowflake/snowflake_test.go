@@ -773,11 +773,8 @@ func TestWriteParallelAdaptiveFlushUploadsWhileSourceIsIdle(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// A failed PUT has to abort the whole write: the error is returned, the
-// batches still queued behind it are drained and released rather than leaked,
-// and nothing further reaches Snowflake -- in particular no COPY, which would
-// publish a partial load. The write context is cancelled on failure, so later
-// statements are rejected before they get as far as the driver.
+// A failed PUT aborts the write and leaves queued batches for the caller's
+// cancellation and drain path. No COPY may publish the partial load.
 func TestWriteParallelAbortsOnUploadFailure(t *testing.T) {
 	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0") // one PUT per batch
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -808,6 +805,11 @@ func TestWriteParallelAbortsOnUploadFailure(t *testing.T) {
 
 	const batches = 8
 	records := make(chan source.RecordBatchResult, batches)
+	defer func() {
+		for result := range records {
+			result.Batch.Release()
+		}
+	}()
 	for i := 0; i < batches; i++ {
 		records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
 	}
@@ -821,6 +823,7 @@ func TestWriteParallelAbortsOnUploadFailure(t *testing.T) {
 	})
 	require.ErrorIs(t, err, putErr)
 	assert.Contains(t, err.Error(), "snowflake parallel write failed")
+	assert.Len(t, records, batches-1, "failed workers must leave remaining records for the caller")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -829,6 +832,118 @@ func TestWriteParallelAbortsOnUploadFailure(t *testing.T) {
 	}
 	assert.Len(t, statements, 1, "no further statements after the failing PUT: %v", statements)
 	assert.Zero(t, bufferedBytes.Load(), "a failed write must give back its buffer budget")
+}
+
+func TestWriteParallelReturnsOnFailureWhileSourceIsOpen(t *testing.T) {
+	for _, parallelism := range []int{1, 4} {
+		for _, tc := range []struct {
+			name       string
+			query      string
+			fileSizeMB string
+			batchBytes int
+		}{
+			{name: "PUT", query: "PUT", fileSizeMB: "0"},
+			{name: "adaptive PUT", query: "PUT", fileSizeMB: "32", batchBytes: 2 * minAdaptiveFlushBytes},
+			{name: "COPY", query: "COPY INTO", fileSizeMB: "0"},
+			{name: "source", fileSizeMB: "0"},
+		} {
+			t.Run(fmt.Sprintf("%s/workers=%d", tc.name, parallelism), func(t *testing.T) {
+				t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", tc.fileSizeMB)
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+
+				db, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+
+				wantErr := errors.New("write failed")
+				if tc.query == "COPY INTO" {
+					mock.ExpectExec("PUT").WillReturnResult(sqlmock.NewResult(0, 0))
+				}
+				if tc.query != "" {
+					mock.ExpectExec(tc.query).WillReturnError(wantErr)
+				}
+
+				var batch arrow.RecordBatch
+				if tc.batchBytes > 0 {
+					batch = newIncompressibleRecordBatch(mem, tc.batchBytes)
+				} else {
+					batch = newSingleRowRecordBatch(mem)
+				}
+				result := source.RecordBatchResult{Batch: batch}
+				if tc.query == "" {
+					result.Err = wantErr
+				}
+				records := make(chan source.RecordBatchResult, 1)
+				records <- result
+
+				done := make(chan struct{})
+				var writeErr error
+				go func() {
+					dest := &SnowflakeDestination{db: db}
+					writeErr = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+						Table:        "public.events",
+						Parallelism:  parallelism,
+						StagingTable: true,
+					})
+					close(done)
+				}()
+				defer func() {
+					close(records)
+					<-done
+					for result := range records {
+						if result.Batch != nil {
+							result.Batch.Release()
+						}
+					}
+				}()
+
+				select {
+				case <-done:
+					require.ErrorIs(t, writeErr, wantErr)
+				case <-time.After(5 * time.Second):
+					t.Fatal("WriteParallel waited for source EOF after a failure")
+				}
+				assert.Zero(t, bufferedBytes.Load(), "failed workers must release their buffer budget")
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+		}
+	}
+}
+
+func TestWriteParallelReturnsOnCancellationWhileSourceIsOpen(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	records := make(chan source.RecordBatchResult)
+	done := make(chan struct{})
+	var writeErr error
+	go func() {
+		dest := &SnowflakeDestination{}
+		writeErr = dest.WriteParallel(ctx, records, destination.WriteOptions{
+			Table:       "public.events",
+			Parallelism: 4,
+		})
+		close(done)
+	}()
+	defer func() {
+		close(records)
+		<-done
+	}()
+
+	select {
+	case records <- source.RecordBatchResult{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteParallel did not start consuming records")
+	}
+	cancel()
+
+	select {
+	case <-done:
+		require.ErrorIs(t, writeErr, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteParallel waited for source EOF after cancellation")
+	}
 }
 
 func TestWriteParallelCancelsOverlappedCopyOnUploadFailure(t *testing.T) {
@@ -1040,6 +1155,11 @@ func TestWriteParallelReturnsSourceError(t *testing.T) {
 
 	sourceErr := errors.New("source read failed")
 	records := make(chan source.RecordBatchResult, 3)
+	defer func() {
+		for result := range records {
+			result.Batch.Release()
+		}
+	}()
 	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem), Err: sourceErr}
 	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
 	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
@@ -1052,6 +1172,7 @@ func TestWriteParallelReturnsSourceError(t *testing.T) {
 		StagingTable: true,
 	})
 	require.ErrorIs(t, err, sourceErr)
+	assert.Len(t, records, 2, "failed workers must leave remaining records for the caller")
 }
 
 // With StagingTable set, COPY runs while uploads are still going, naming the

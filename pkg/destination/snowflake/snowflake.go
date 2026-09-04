@@ -267,6 +267,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				writerProps: writerProps,
 				arrowProps:  arrowProps,
 			}
+			defer w.discard()
 
 			flush := func() bool {
 				fileName, err := w.flush()
@@ -275,23 +276,36 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 					return false
 				}
 				if fileName != "" {
-					uploaded <- fileName
+					select {
+					case uploaded <- fileName:
+					case <-writeCtx.Done():
+						return false
+					}
 				}
 				return true
 			}
 
 			for {
+				if writeCtx.Err() != nil {
+					return
+				}
 				var result source.RecordBatchResult
 				var ok bool
 				// Adaptive flush: upload what's buffered instead of idling
 				// when the source has nothing ready.
 				select {
+				case <-writeCtx.Done():
+					return
 				case result, ok = <-records:
 				default:
-					if !failed.Load() && w.pendingBytes() >= minAdaptiveFlushBytes && !flush() {
-						continue
+					if w.pendingBytes() >= minAdaptiveFlushBytes && !flush() {
+						return
 					}
-					result, ok = <-records
+					select {
+					case <-writeCtx.Done():
+						return
+					case result, ok = <-records:
+					}
 				}
 				if !ok {
 					break
@@ -302,14 +316,14 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 						result.Batch.Release()
 					}
 					fail(result.Err)
-					continue
+					return
 				}
 
 				record := result.Batch
 				if record == nil {
 					continue
 				}
-				if record.NumRows() == 0 || failed.Load() {
+				if record.NumRows() == 0 || writeCtx.Err() != nil {
 					record.Release()
 					continue
 				}
@@ -319,7 +333,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				// COPY matches columns by name across files.
 				if w.schemaChanged(record.Schema()) && !flush() {
 					record.Release()
-					continue
+					return
 				}
 
 				rows := record.NumRows()
@@ -327,22 +341,18 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				record.Release()
 				if err != nil {
 					fail(err)
-					continue
+					return
 				}
 				w.pendingRows += rows
 
-				if w.shouldFlush() {
-					flush()
+				if w.shouldFlush() && !flush() {
+					return
 				}
 			}
 
-			if !failed.Load() {
+			if writeCtx.Err() == nil {
 				flush()
 			}
-			// Unconditional: a no-op after a clean flush, but the only thing
-			// that gives back the buffer this worker still holds if that final
-			// flush failed.
-			w.discard()
 		}(i)
 	}
 
@@ -386,6 +396,9 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 	// the COPY loop reports through fail() too.
 	if firstErr != nil {
 		return fmt.Errorf("snowflake parallel write failed: %w", firstErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("snowflake parallel write failed: %w", err)
 	}
 
 	if len(pending) > 0 {
