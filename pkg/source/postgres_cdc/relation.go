@@ -68,10 +68,11 @@ func (e *SchemaChangedError) Columns() []string {
 }
 
 type RelationInfo struct {
-	RelationID uint32
-	Namespace  string
-	Name       string
-	Columns    []RelationColumn
+	RelationID      uint32
+	ReplicaIdentity byte
+	Namespace       string
+	Name            string
+	Columns         []RelationColumn
 	// SchemaIndex maps each relation column to its index in the connect-time
 	// schema's source columns, resolved by name (-1 when the schema has no such
 	// column). Nil means no mapping was built and tuples decode positionally.
@@ -120,10 +121,11 @@ func parseRelationMessage(data []byte) (*RelationInfo, error) {
 	name, n := readString(data)
 	data = data[n:]
 
-	// Skip replica identity
+	// Replica identity determines which old-tuple columns can identify a row.
 	if len(data) < 1 {
 		return nil, fmt.Errorf("relation message missing replica identity")
 	}
+	identity := data[0]
 	data = data[1:]
 
 	if len(data) < 2 {
@@ -164,10 +166,11 @@ func parseRelationMessage(data []byte) (*RelationInfo, error) {
 	}
 
 	return &RelationInfo{
-		RelationID: relID,
-		Namespace:  namespace,
-		Name:       name,
-		Columns:    columns,
+		RelationID:      relID,
+		ReplicaIdentity: identity,
+		Namespace:       namespace,
+		Name:            name,
+		Columns:         columns,
 	}, nil
 }
 
@@ -283,6 +286,18 @@ func mapRelationToSchema(rel, prev *RelationInfo, tableSchema *schema.TableSchem
 	for i := 0; i < nSource; i++ {
 		if !mapped[i] {
 			config.Debug("[CDC] Table %s: column %q is missing from the replicated relation; its values will be NULL", tableName, tableSchema.Columns[i].Name)
+		}
+	}
+
+	if !rel.Stale && rel.ReplicaIdentity != 0 && rel.ReplicaIdentity != 'f' {
+		var identityKeys []string
+		for _, col := range rel.Columns {
+			if col.Flags&1 != 0 {
+				identityKeys = append(identityKeys, col.Name)
+			}
+		}
+		if len(tableSchema.PrimaryKeys) > 0 && !sameKeyColumns(tableSchema.PrimaryKeys, identityKeys) {
+			return fmt.Errorf("replica identity keys %v for %s do not match merge keys %v; restart with --full-refresh using the current replica identity, or configure REPLICA IDENTITY FULL", identityKeys, tableName, tableSchema.PrimaryKeys)
 		}
 	}
 

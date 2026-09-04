@@ -67,9 +67,11 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 				return
 			}
 			tableSchema = addCDCColumns(tableSchema)
-			if len(r.tableSchema.PrimaryKeys) > 0 {
-				tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+			if err := validateConfiguredKeys(ctx, r.source.queryPool, r.tableName, tableSchema, r.tableSchema.PrimaryKeys); err != nil {
+				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
 			}
+			tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
 			r.tableSchema = tableSchema
 		}
 
@@ -284,9 +286,10 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 	// Keep the merge keys the run started with: they may carry user-provided
 	// keys that re-detection would drop, and the decoder, compaction, and
 	// unchanged-TOAST fill must keep keying off the same columns.
-	if len(r.tableSchema.PrimaryKeys) > 0 {
-		tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+	if err := validateConfiguredKeys(ctx, r.source.queryPool, r.tableName, tableSchema, r.tableSchema.PrimaryKeys); err != nil {
+		return 0, err
 	}
+	tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
 	r.tableSchema = tableSchema
 	if schemaErr != nil {
 		if r.allowedUnknown == nil {

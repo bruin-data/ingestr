@@ -393,6 +393,11 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 		prevSchemas[t.Name] = t.Schema
 		prevIncarnations[t.Name] = t.Incarnation
 	}
+	for _, table := range tables {
+		if previous, ok := prevSchemas[table.Name]; ok && !sameKeyColumns(previous.PrimaryKeys, table.PrimaryKeys) {
+			return 0, fmt.Errorf("replica identity keys changed for %s; restart with --full-refresh to rebuild using keys %v", table.Name, table.PrimaryKeys)
+		}
+	}
 	var added []source.SourceTableInfo
 	for _, t := range tables {
 		if _, ok := prevSchemas[t.Name]; !ok {

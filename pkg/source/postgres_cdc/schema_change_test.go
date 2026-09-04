@@ -41,7 +41,11 @@ func pgoRelationMsgWithTypeMods(relID uint32, namespace, table string, cols ...p
 	data = append(data, 'd')
 	data = binary.BigEndian.AppendUint16(data, uint16(len(cols)))
 	for _, c := range cols {
-		data = append(data, 0x00)
+		flags := byte(0)
+		if c.name == "id" {
+			flags = 1
+		}
+		data = append(data, flags)
 		data = append(data, []byte(c.name+"\x00")...)
 		data = binary.BigEndian.AppendUint32(data, c.oid)
 		data = binary.BigEndian.AppendUint32(data, uint32(c.typemod))

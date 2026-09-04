@@ -11,6 +11,8 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +120,58 @@ func TestPostgresCDCToastKeyMove(t *testing.T) {
 			require.Equal(t, 1, active)
 		})
 	}
+}
+
+func TestPostgresCDCReplicaIdentityKeys(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	container, uri := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = container.Terminate(context.Background()) }()
+	pool, err := pgxpool.New(ctx, uri)
+	require.NoError(t, err)
+	defer pool.Close()
+	_, err = pool.Exec(ctx, `CREATE TABLE items (id bigint PRIMARY KEY, code text NOT NULL, payload text NOT NULL);
+  CREATE UNIQUE INDEX items_identity ON items(code) INCLUDE (payload);
+  ALTER TABLE items REPLICA IDENTITY USING INDEX items_identity;
+  INSERT INTO items VALUES (1, 'a', 'payload');
+  CREATE PUBLICATION items_pub FOR TABLE items; CREATE SCHEMA warehouse`)
+	require.NoError(t, err)
+	cdcURI := strings.Replace(uri, "postgres://", "postgres+cdc://", 1) + "&publication=items_pub"
+	src := postgres_cdc.NewPostgresCDCSource()
+	require.NoError(t, src.Connect(ctx, cdcURI))
+	defer func() { _ = src.Close(ctx) }()
+	table, err := src.GetTable(ctx, source.TableRequest{Name: "public.items"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"code"}, table.PrimaryKeys(), "replica identity overrides PK and excludes INCLUDE columns")
+	tables, err := src.GetTables(ctx)
+	require.NoError(t, err)
+	require.Len(t, tables, 1)
+	require.Equal(t, []string{"code"}, tables[0].PrimaryKeys)
+	for _, keys := range [][]string{{"id"}, {"code", "payload"}} {
+		_, err = src.GetTable(ctx, source.TableRequest{Name: "public.items", PrimaryKeys: keys})
+		require.ErrorContains(t, err, "do not match its replica identity")
+	}
+	require.NoError(t, src.Close(ctx))
+	cfg := &config.IngestConfig{SourceURI: cdcURI, SourceTable: "public.items", DestURI: uri, DestTable: "warehouse.items", IncrementalStrategy: config.StrategyMerge}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	_, err = pool.Exec(ctx, `UPDATE items SET id=2 WHERE code='a'`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	var id, count int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), min(id) FROM warehouse.items WHERE NOT _cdc_deleted`).Scan(&count, &id))
+	require.Equal(t, 1, count)
+	require.Equal(t, 2, id)
+	_, err = pool.Exec(ctx, `DELETE FROM items WHERE code='a'`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM warehouse.items WHERE NOT _cdc_deleted`).Scan(&count))
+	require.Zero(t, count)
+	_, err = pool.Exec(ctx, `ALTER TABLE items REPLICA IDENTITY FULL`)
+	require.NoError(t, err)
+	src = postgres_cdc.NewPostgresCDCSource()
+	require.NoError(t, src.Connect(ctx, cdcURI))
+	defer func() { _ = src.Close(ctx) }()
+	table, err = src.GetTable(ctx, source.TableRequest{Name: "public.items", PrimaryKeys: []string{"code"}})
+	require.NoError(t, err, "FULL identity supports an explicitly selected unique key")
+	require.Equal(t, []string{"code"}, table.PrimaryKeys())
 }
