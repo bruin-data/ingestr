@@ -76,6 +76,37 @@ If you omit `--source-table`, most CDC connectors run in multi-table mode and re
 postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics
 ```
 
+#### Destination table naming
+
+When `dest_schema` is set, `--cdc-table-naming` controls how a schema-qualified source table is named at the destination. It has two options:
+
+- **`schema_table`** (default) — the source schema is flattened into the table name. Safe when several source schemas funnel into one destination schema, because names can never collide:
+
+  ```plaintext
+  sales.orders   → analytics.sales_orders
+  support.orders → analytics.support_orders
+  ```
+
+- **`table`** — only the table name is kept. Use it when you replicate a single source schema and want plain table names:
+
+  ```plaintext
+  sales.orders    → analytics.orders
+  sales.customers → analytics.customers
+  ```
+
+  If two source schemas would map a table of the same name to the same destination (`sales.orders` and `support.orders` → `analytics.orders`), the run fails with a collision error instead of mixing their rows.
+
+```bash
+ingestr ingest \
+    --source-uri "postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics" \
+    --dest-uri "snowflake://user:pass@account/db/analytics" \
+    --cdc-table-naming=table
+```
+
+The naming mode is part of the connector's identity: switching it on an existing pipeline starts a fresh replication slot, state, and snapshot, and the tables written under the old naming are left in place.
+
+#### Replicating a subset of tables
+
 To replicate only some of those tables, give `--source-table` a comma-separated list. This is still a multi-table run — `dest_schema` applies, and each table gets its own destination table — just restricted to the tables you name.
 
 ```bash

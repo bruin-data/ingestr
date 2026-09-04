@@ -114,6 +114,12 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("SCHEMA_NAMING", "INGESTR_SCHEMA_NAMING"),
 			},
 			&cli.StringFlag{
+				Name:    "cdc-table-naming",
+				Usage:   "Multi-table destination naming when dest_schema is set: schema_table (flatten the source schema into the table name, foo.A -> dest.foo_A), table (keep only the table name, foo.A -> dest.A)",
+				Value:   string(config.TableNamingSchemaTable),
+				Sources: cli.EnvVars("CDC_TABLE_NAMING", "INGESTR_CDC_TABLE_NAMING"),
+			},
+			&cli.StringFlag{
 				Name:    "progress",
 				Usage:   "The progress display type (interactive, log, json)",
 				Value:   "interactive",
@@ -295,6 +301,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.FullRefresh = c.Bool("full-refresh")
 	cfg.SchemaContract = c.String("schema-contract")
 	cfg.SchemaNaming = c.String("schema-naming")
+	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
 	switch mb := int64(c.Int("batch-size")); {

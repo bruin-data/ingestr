@@ -309,12 +309,16 @@ func (j *MultiTableIngestionJob) ApplyLoadTimestamp(records <-chan source.Record
 }
 
 func (j *MultiTableIngestionJob) applyColumnRenaming(ctx context.Context, records <-chan source.RecordBatchResult) <-chan source.RecordBatchResult {
+	tableNaming := config.TableNamingSchemaTable
+	if j.Config != nil {
+		tableNaming = j.Config.CDCTableNaming
+	}
 	out := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(out)
 		for result := range records {
 			if result.Err == nil && result.TableInfo != nil && j.NormalizeTableInfo != nil {
-				destTable := multiTableDestName(j.Destination, *result.TableInfo)
+				destTable := multiTableDestName(j.Destination, *result.TableInfo, tableNaming)
 				normalized, renamer, err := j.NormalizeTableInfo(ctx, *result.TableInfo, destTable)
 				if err != nil {
 					if result.Batch != nil {

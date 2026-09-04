@@ -1437,7 +1437,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	namer, _ := p.dest.(destination.MultiTableNamer)
-	tableDestNames, err := multiTableDestinationNames(tables, p.dest.GetScheme(), namer)
+	tableDestNames, err := multiTableDestinationNames(tables, p.dest.GetScheme(), namer, p.config.CDCTableNaming)
 	if err != nil {
 		return err
 	}
@@ -1745,16 +1745,17 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	return nil
 }
 
-func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, namer destination.MultiTableNamer) (map[string]string, error) {
+func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, namer destination.MultiTableNamer, naming config.TableNaming) (map[string]string, error) {
 	destinations := make(map[string]string, len(tables))
 	sourcesByDestination := make(map[string]string, len(tables))
 	for _, table := range tables {
 		// When funneling into a dest schema, the source-schema qualifier is
 		// flattened into the table name ("dbo.orders" -> "<dest>.dbo_orders") so
 		// the result is an unambiguous two-part name rather than something that
-		// looks like a catalog.schema.table reference. Destinations with their own
-		// naming rules (e.g. BigQuery) override via MultiTableNamer.
-		destName := destination.ResolveMultiTableName(scheme, namer, table.DestSchema, table.Name)
+		// looks like a catalog.schema.table reference; --cdc-table-naming=table drops
+		// the qualifier instead. Destinations with their own naming rules (e.g.
+		// BigQuery) override via MultiTableNamer.
+		destName := destination.ResolveMultiTableName(scheme, namer, table.DestSchema, table.Name, naming)
 		if existingSource, exists := sourcesByDestination[destName]; exists && existingSource != table.Name {
 			return nil, fmt.Errorf("multi-table destination collision: source tables %q and %q both map to destination table %q", existingSource, table.Name, destName)
 		}
@@ -2839,6 +2840,9 @@ func resolvedCDCStateConnectorID(cfg *config.IngestConfig, identity source.Conne
 	if selection := cdcSelectionIdentity(cfg); selection != "" {
 		identityParts = append(identityParts, selection)
 	}
+	if naming := cdcTableNamingIdentity(cfg); naming != "" {
+		identityParts = append(identityParts, naming)
+	}
 	connectorIdentity := strings.Join(identityParts, "\x00")
 	sum := sha256.Sum256([]byte(connectorIdentity))
 	return fmt.Sprintf("%x", sum[:8])
@@ -2900,6 +2904,9 @@ func genericCDCConnectorID(cfg *config.IngestConfig) string {
 	if selection := cdcSelectionIdentity(cfg); selection != "" {
 		parts = append(parts, selection)
 	}
+	if naming := cdcTableNamingIdentity(cfg); naming != "" {
+		parts = append(parts, naming)
+	}
 	identity := strings.Join(parts, "\x00")
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:8])
@@ -2919,6 +2926,18 @@ func cdcSelectionIdentity(cfg *config.IngestConfig) string {
 	copy(names, cfg.SourceTables)
 	sort.Strings(names)
 	return strings.Join(names, ",")
+}
+
+// cdcTableNamingIdentity gives a run using non-default multi-table naming its
+// own slot, run lease and CDC state: the mode changes every destination table
+// name, so resuming the old connector would leave its state pointing at the
+// flattened tables. The default returns "" and stays out of the identity, so
+// existing connectors keep the ID they have.
+func cdcTableNamingIdentity(cfg *config.IngestConfig) string {
+	if cfg.CDCTableNaming == config.TableNamingTable {
+		return "cdc-table-naming=" + string(config.TableNamingTable)
+	}
+	return ""
 }
 
 func canonicalCDCStateURI(rawURI string) string {

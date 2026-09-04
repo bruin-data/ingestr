@@ -14,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pgx/v5"
@@ -420,7 +421,7 @@ func TestMapPostgresColumnTypeScalarHasNoArrayElement(t *testing.T) {
 
 func TestResolvedMultiTableNameFitsPostgresClaimLimit(t *testing.T) {
 	sourceTable := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
-	resolved := destination.ResolveMultiTableName("postgres", nil, "landing", sourceTable)
+	resolved := destination.ResolveMultiTableName("postgres", nil, "landing", sourceTable, config.TableNamingSchemaTable)
 	parts, err := validatePostgresClaimTarget(resolved)
 	if err != nil {
 		t.Fatal(err)
