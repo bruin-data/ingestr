@@ -50,10 +50,15 @@ ALTER DATABASE your_database
 SET CHANGE_TRACKING = ON
 (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);
 
+ALTER DATABASE your_database
+SET ALLOW_SNAPSHOT_ISOLATION ON;
+
 ALTER TABLE dbo.users
 ENABLE CHANGE_TRACKING
 WITH (TRACK_COLUMNS_UPDATED = OFF);
 ```
+
+Enabling snapshot isolation is recommended: ingestr then reads each change window inside one SNAPSHOT transaction, which is how SQL Server guarantees a consistent change set while retention cleanup runs. Without it, the initial snapshot is taken under a `HOLDLOCK` table lock that blocks writers to the table until the snapshot finishes, and incremental reads run under READ COMMITTED with the cursor re-validated after the read; if cleanup (or a `TRUNCATE TABLE`, which resets a table's tracking) invalidated the cursor mid-read, the run fails and asks for `--full-refresh` instead of loading an incomplete change set.
 
 Change Tracking returns net row changes since the last loaded version. For inserts and updates, ingestr joins the changed primary keys back to the source table and loads the current row. For deletes, SQL Server only returns the primary key, so ingestr marks the destination row as deleted with `_cdc_deleted = true` while preserving existing destination values for other columns. If a row is updated and then deleted between two ingestr runs, Change Tracking cannot reconstruct the intermediate updated values.
 
