@@ -21,10 +21,11 @@ import (
 )
 
 type TrinoDestination struct {
-	db       *sql.DB
-	catalog  string
-	schema   string
-	jsonType jsonTypeMode
+	db           *sql.DB
+	catalog      string
+	schema       string
+	jsonType     jsonTypeMode
+	transactions *transactionRegistry
 }
 
 func NewTrinoDestination() *TrinoDestination {
@@ -55,6 +56,7 @@ func (d *TrinoDestination) Connect(ctx context.Context, uri string) error {
 	d.catalog = connectionConfig.catalog
 	d.schema = connectionConfig.schema
 	d.jsonType = connectionConfig.jsonType
+	d.transactions = connectionConfig.transactions
 	config.Debug("[TRINO] Connected to catalog: %s, schema: %s, JSON type: %s", d.catalog, d.schema, d.jsonType)
 	return nil
 }
@@ -372,7 +374,54 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 }
 
 func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
-	return errors.New("delete+insert strategy is not supported for trino destination")
+	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
+	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
+	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
+	quotedIncrementalKey := quoteIdentifier(opts.IncrementalKey)
+
+	tx, err := d.BeginTransaction(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+
+	// DATE bounds arrive as date-only strings, which trino-go-client serializes as
+	// varchar; cast them so Trino can compare against a DATE column.
+	boundPlaceholder := "?"
+	if opts.IncrementalKeyType == schema.TypeDate {
+		boundPlaceholder = "CAST(? AS DATE)"
+	}
+	deleteSQL := fmt.Sprintf(
+		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
+		targetFQN, quotedIncrementalKey, boundPlaceholder, quotedIncrementalKey, boundPlaceholder,
+	)
+	config.Debug("[TRINO DELETE+INSERT] Executing DELETE: %s", deleteSQL)
+	if err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
+		return fmt.Errorf("failed to delete records: %w", err)
+	}
+
+	columnList := strings.Join(quoteColumns(opts.Columns), ", ")
+	selectClause := destination.DedupStagingSelect(
+		columnList,
+		strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
+		stagingFQN,
+		quotedIncrementalKey,
+	)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) %s", targetFQN, columnList, selectClause)
+	config.Debug("[TRINO DELETE+INSERT] Executing INSERT: %s", insertSQL)
+	if err := tx.Exec(ctx, insertSQL); err != nil {
+		return fmt.Errorf("failed to insert records: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
 func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
@@ -489,16 +538,11 @@ func (d *TrinoDestination) Exec(ctx context.Context, sqlStr string, args ...inte
 	return err
 }
 
-func (d *TrinoDestination) BeginTransaction(ctx context.Context) (destination.Transaction, error) {
-	_ = ctx
-	return nil, errors.New("trino destination does not support transactions")
-}
-
 func (d *TrinoDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *TrinoDestination) SupportsAppendStrategy() bool       { return true }
 func (d *TrinoDestination) SupportsMergeStrategy() bool        { return true }
 func (d *TrinoDestination) SupportsIncrementalPredicate() bool { return true }
-func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return false }
+func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *TrinoDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *TrinoDestination) SupportsAtomicSwap() bool           { return false }
 
@@ -516,10 +560,11 @@ const (
 )
 
 type trinoConnectionConfig struct {
-	dsn      string
-	catalog  string
-	schema   string
-	jsonType jsonTypeMode
+	dsn          string
+	catalog      string
+	schema       string
+	jsonType     jsonTypeMode
+	transactions *transactionRegistry
 }
 
 func (m jsonTypeMode) normalized() jsonTypeMode {
@@ -578,7 +623,7 @@ func parseTrinoURI(uri string) (trinoConnectionConfig, error) {
 
 	translateAliases(query)
 
-	customClient, err := buildAndRegisterCustomClient(query)
+	customClient, transactions, err := buildAndRegisterCustomClient(query)
 	if err != nil {
 		return trinoConnectionConfig{}, err
 	}
@@ -605,10 +650,11 @@ func parseTrinoURI(uri string) (trinoConnectionConfig, error) {
 	}
 
 	return trinoConnectionConfig{
-		dsn:      dsn,
-		catalog:  catalog,
-		schema:   schemaName,
-		jsonType: jsonType,
+		dsn:          dsn,
+		catalog:      catalog,
+		schema:       schemaName,
+		jsonType:     jsonType,
+		transactions: transactions,
 	}, nil
 }
 

@@ -3,8 +3,10 @@ package trino
 import (
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -54,14 +56,16 @@ func isVerifyBool(v string) bool {
 	return false
 }
 
-// buildAndRegisterCustomClient builds an *http.Client from cert/key,
-// http_headers, and verify=false query parameters, registers it with
-// trino-go-client, and returns the registration key. Empty string means no
-// custom client is needed.
-func buildAndRegisterCustomClient(q url.Values) (string, error) {
+// buildAndRegisterCustomClient builds an *http.Client from the connection
+// options, adds transaction tracking, and registers it with trino-go-client.
+func buildAndRegisterCustomClient(q url.Values) (string, *transactionRegistry, error) {
 	certPath := q.Get("cert")
 	keyPath := q.Get("key")
 	headersRaw := q.Get("http_headers")
+	caCertPath := q.Get("SSLCertPath")
+	caCertBytes := []byte(q.Get("SSLCert"))
+	q.Del("SSLCertPath")
+	q.Del("SSLCert")
 
 	insecureSkipVerify := false
 	if vals := q["verify"]; len(vals) > 0 {
@@ -72,18 +76,15 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 		q.Del("verify")
 	}
 
-	if certPath == "" && keyPath == "" && headersRaw == "" && !insecureSkipVerify {
-		return "", nil
-	}
 	if (certPath == "") != (keyPath == "") {
-		return "", fmt.Errorf("trino uri: cert and key must be provided together")
+		return "", nil, fmt.Errorf("trino uri: cert and key must be provided together")
 	}
 
 	var headers http.Header
 	if headersRaw != "" {
 		var parsed map[string]string
 		if err := json.Unmarshal([]byte(headersRaw), &parsed); err != nil {
-			return "", fmt.Errorf("trino uri: invalid http_headers JSON: %w", err)
+			return "", nil, fmt.Errorf("trino uri: invalid http_headers JSON: %w", err)
 		}
 		headers = make(http.Header, len(parsed))
 		for k, v := range parsed {
@@ -102,16 +103,33 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 	if certPath != "" {
 		var err error
 		if certBytes, err = os.ReadFile(certPath); err != nil {
-			return "", fmt.Errorf("trino uri: failed to read client certificate: %w", err)
+			return "", nil, fmt.Errorf("trino uri: failed to read client certificate: %w", err)
 		}
 		if keyBytes, err = os.ReadFile(keyPath); err != nil {
-			return "", fmt.Errorf("trino uri: failed to read client key: %w", err)
+			return "", nil, fmt.Errorf("trino uri: failed to read client key: %w", err)
 		}
 		cert, err := tls.X509KeyPair(certBytes, keyBytes)
 		if err != nil {
-			return "", fmt.Errorf("trino uri: failed to parse client certificate: %w", err)
+			return "", nil, fmt.Errorf("trino uri: failed to parse client certificate: %w", err)
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	if caCertPath != "" {
+		var err error
+		caCertBytes, err = os.ReadFile(caCertPath)
+		if err != nil {
+			return "", nil, fmt.Errorf("trino uri: failed to read CA certificate: %w", err)
+		}
+	}
+	if len(caCertBytes) > 0 {
+		if tlsCfg == nil {
+			tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(caCertBytes) {
+			return "", nil, errors.New("trino uri: failed to parse CA certificate")
+		}
+		tlsCfg.RootCAs = certPool
 	}
 
 	// Cache key hashes contents (not paths) so rotated certs get a fresh client.
@@ -120,16 +138,19 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 	h.Write([]byte{0})
 	h.Write(keyBytes)
 	h.Write([]byte{0})
+	h.Write(caCertBytes)
+	h.Write([]byte{0})
 	h.Write([]byte(headersRaw))
 	if insecureSkipVerify {
 		h.Write([]byte("\x00insecure"))
 	}
+	h.Write([]byte("\x00transactions-v1"))
 	name := "ingestr-trino-" + hex.EncodeToString(h.Sum(nil)[:8])
 
 	clientRegistryMu.Lock()
 	defer clientRegistryMu.Unlock()
-	if _, ok := registeredClients[name]; ok {
-		return name, nil
+	if client, ok := registeredClients[name]; ok {
+		return name, client.transactions, nil
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -137,20 +158,26 @@ func buildAndRegisterCustomClient(q url.Values) (string, error) {
 		transport.TLSClientConfig = tlsCfg
 	}
 	var rt http.RoundTripper = transport
+	transactions := newTransactionRegistry()
+	rt = &transactionRoundTripper{base: rt, registry: transactions}
 	if headers != nil {
-		rt = &headerRoundTripper{base: transport, headers: headers}
+		rt = &headerRoundTripper{base: rt, headers: headers}
 	}
 
 	if err := trino.RegisterCustomClient(name, &http.Client{Transport: rt}); err != nil {
-		return "", fmt.Errorf("trino uri: failed to register custom http client: %w", err)
+		return "", nil, fmt.Errorf("trino uri: failed to register custom http client: %w", err)
 	}
-	registeredClients[name] = struct{}{}
-	return name, nil
+	registeredClients[name] = registeredClient{transactions: transactions}
+	return name, transactions, nil
+}
+
+type registeredClient struct {
+	transactions *transactionRegistry
 }
 
 var (
 	clientRegistryMu  sync.Mutex
-	registeredClients = map[string]struct{}{}
+	registeredClients = map[string]registeredClient{}
 )
 
 type headerRoundTripper struct {
