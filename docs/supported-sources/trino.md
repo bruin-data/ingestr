@@ -99,9 +99,23 @@ ingestr ingest \
 Ingestr creates new tables with `WITH (format_version = 3)` and writes JSON values as `VARIANT`. Existing tables must already use Iceberg format version 3 and their corresponding JSON columns must be `VARIANT`; ingestr does not upgrade tables or columns implicitly.
 
 ## Supported write dispositions
-When using Trino as a destination, ingestr supports `replace`, `append`, `merge`, and `scd2`.
+When using Trino as a destination, ingestr supports `replace`, `append`, `merge`, `delete+insert`, and `scd2`. For `delete+insert`, ingestr starts a Trino `READ WRITE` transaction and rolls it back if either statement fails:
 
-`delete+insert` is not supported for Trino destinations. Transaction support in Trino depends on the catalog connector, and ingestr does not expose a destination transaction for Trino. Because ingestr cannot make the delete and insert steps atomic across Trino catalogs, it fails this strategy before loading staging data.
+```bash
+ingestr ingest \
+    --source-uri 'postgresql://user:pass@localhost:5432/sourcedb' \
+    --source-table 'public.events' \
+    --dest-uri 'trino://admin@localhost:8080/hive/default' \
+    --dest-table 'default.events' \
+    --incremental-key 'partition_id' \
+    --incremental-strategy 'delete+insert'
+```
+
+Transaction and `DELETE` support depend on the Trino catalog connector and target table. ingestr enables the strategy by default and returns the error from Trino when the catalog or table does not support it. Verify compatibility for your deployment before using this strategy.
+
+The Hive connector supports multi-statement writes by default when `hive.single-statement-writes=false`. For ordinary non-transactional Hive tables, `DELETE` only works when its predicate selects complete partitions. This means the target table must already have compatible partitioning, the incremental key must be a partition column, and the interval bounds must cover complete partition values. Trino transactional Hive tables allow row-level deletes, but do not support writes in the explicit multi-statement transaction required by this strategy.
+
+The Iceberg connector does **not** support multi-statement writes in current Trino versions. Iceberg snapshot atomicity applies to each individual statement, not to a `DELETE` and `INSERT` spanning one Trino transaction. Iceberg and other unsupported connectors reject the operation with an error such as `Catalog only supports writes using autocommit`.
 
 ## Data type handling
 Trino automatically handles most SQL data type conversions. When used as a destination:

@@ -2,13 +2,23 @@ package trino
 
 import (
 	"context"
+	"encoding/pem"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
 func TestParseTrinoURI(t *testing.T) {
+	tlsServer := httptest.NewTLSServer(nil)
+	t.Cleanup(tlsServer.Close)
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsServer.Certificate().Raw})
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		uri          string
 		wantCatalog  string
@@ -72,11 +82,10 @@ func TestParseTrinoURI(t *testing.T) {
 		},
 		{
 			// verify=<path> → SSLCertPath; verify=true silently dropped
-			uri:          "trino://host:443/cat?http_scheme=https&verify=%2Fetc%2Fssl%2Fca.pem",
+			uri:          "trino://host:443/cat?http_scheme=https&verify=" + caPath,
 			wantCatalog:  "cat",
 			wantSchema:   "default",
-			wantInDSN:    []string{"SSLCertPath=%2Fetc%2Fssl%2Fca.pem"},
-			wantNotInDSN: []string{"verify="},
+			wantNotInDSN: []string{"verify=", "SSLCertPath="},
 		},
 		{
 			// http_headers triggers custom-client registration
@@ -123,6 +132,12 @@ func TestParseTrinoURI(t *testing.T) {
 			if connectionConfig.jsonType != wantJSONType {
 				t.Errorf("json type mismatch: got %q want %q", connectionConfig.jsonType, wantJSONType)
 			}
+			if connectionConfig.transactions == nil {
+				t.Error("transaction registry is nil")
+			}
+			if !strings.Contains(connectionConfig.dsn, "custom_client=ingestr-trino-") {
+				t.Errorf("dsn %q missing transaction-aware custom client", connectionConfig.dsn)
+			}
 			for _, want := range tt.wantInDSN {
 				if !strings.Contains(connectionConfig.dsn, want) {
 					t.Errorf("dsn %q missing %q", connectionConfig.dsn, want)
@@ -158,32 +173,27 @@ func TestParseTrinoURI_InvalidJSONType(t *testing.T) {
 	}
 }
 
-func TestDeleteInsertUnsupported(t *testing.T) {
+func TestDeleteInsertSupportedByDefault(t *testing.T) {
 	t.Parallel()
 
 	dest := NewTrinoDestination()
-	if dest.SupportsDeleteInsertStrategy() {
-		t.Fatal("SupportsDeleteInsertStrategy() = true, want false")
-	}
-
-	err := dest.DeleteInsertTable(context.Background(), destination.DeleteInsertOptions{})
-	if err == nil || !strings.Contains(err.Error(), "delete+insert strategy is not supported") {
-		t.Fatalf("DeleteInsertTable() error = %v, want unsupported error", err)
+	if !dest.SupportsDeleteInsertStrategy() {
+		t.Fatal("SupportsDeleteInsertStrategy() = false, want true")
 	}
 }
 
-func TestBeginTransactionUnsupported(t *testing.T) {
+func TestBeginTransactionNotConnected(t *testing.T) {
 	t.Parallel()
 
 	dest := NewTrinoDestination()
 	tx, err := dest.BeginTransaction(context.Background())
 	if err == nil {
-		t.Fatal("BeginTransaction() error = nil, want unsupported error")
+		t.Fatal("BeginTransaction() error = nil, want not connected error")
 	}
 	if tx != nil {
 		t.Fatalf("BeginTransaction() tx = %#v, want nil", tx)
 	}
-	if !strings.Contains(err.Error(), "does not support transactions") {
-		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
+	if !strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("BeginTransaction() error = %v, want not connected error", err)
 	}
 }
