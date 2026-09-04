@@ -114,6 +114,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [BallDontLie FIFA](/supported-sources/balldontlie.md)
 - [Chess.com](/supported-sources/chess.md)
 - [ESPN](/supported-sources/espn.md)
+- [Exchangerates API](/supported-sources/exchangeratesapi.md)
 - [football-data.org](/supported-sources/football-data-org.md)
 - [Frankfurter](/supported-sources/frankfurter.md)
 - [Internet Society Pulse](/supported-sources/isoc-pulse.md)
