@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 type recordedTrinoRequest struct {
@@ -24,13 +25,24 @@ type recordedTrinoRequest struct {
 
 func TestDeleteInsertTransactional(t *testing.T) {
 	tests := []struct {
-		name         string
-		failInsert   bool
-		cancelInsert bool
+		name               string
+		failInsert         bool
+		cancelInsert       bool
+		incrementalKeyType schema.DataType
+		intervalStart      interface{}
+		intervalEnd        interface{}
+		wantDeleteContains []string
 	}{
 		{name: "commit"},
 		{name: "rollback after insert failure", failInsert: true},
 		{name: "rollback after cancellation", cancelInsert: true},
+		{
+			name:               "date incremental key casts bounds",
+			incrementalKeyType: schema.TypeDate,
+			intervalStart:      "2024-01-01",
+			intervalEnd:        "2024-01-02",
+			wantDeleteContains: []string{`"updated_at" >= CAST(? AS DATE)`, `"updated_at" <= CAST(? AS DATE)`, "USING '2024-01-01', '2024-01-02'"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -109,14 +121,19 @@ func TestDeleteInsertTransactional(t *testing.T) {
 				t.Fatal("SupportsDeleteInsertStrategy() = false, want true")
 			}
 
+			intervalStart, intervalEnd := interface{}(10), interface{}(20)
+			if tt.intervalStart != nil {
+				intervalStart, intervalEnd = tt.intervalStart, tt.intervalEnd
+			}
 			err = dest.DeleteInsertTable(callCtx, destination.DeleteInsertOptions{
-				StagingTable:   "stage.events",
-				TargetTable:    "prod.events",
-				IncrementalKey: "updated_at",
-				IntervalStart:  10,
-				IntervalEnd:    20,
-				Columns:        []string{"id", "updated_at", "value"},
-				PrimaryKeys:    []string{"id"},
+				StagingTable:       "stage.events",
+				TargetTable:        "prod.events",
+				IncrementalKey:     "updated_at",
+				IncrementalKeyType: tt.incrementalKeyType,
+				IntervalStart:      intervalStart,
+				IntervalEnd:        intervalEnd,
+				Columns:            []string{"id", "updated_at", "value"},
+				PrimaryKeys:        []string{"id"},
 			})
 			if tt.cancelInsert {
 				if err == nil || !errors.Is(err, context.Canceled) {
@@ -155,10 +172,15 @@ func TestDeleteInsertTransactional(t *testing.T) {
 			if got[1].method != http.MethodGet || got[1].path != "/start/1" {
 				t.Errorf("start follow-up request = %+v", got[1])
 			}
-			if !strings.Contains(got[2].body, `DELETE FROM "hive"."prod"."events"`) ||
-				!strings.Contains(got[2].body, `"updated_at" >= ?`) ||
-				!strings.Contains(got[2].body, "USING 10, 20") {
-				t.Errorf("delete request body = %q", got[2].body)
+			wantDeleteContains := tt.wantDeleteContains
+			if wantDeleteContains == nil {
+				wantDeleteContains = []string{`"updated_at" >= ?`, "USING 10, 20"}
+			}
+			wantDeleteContains = append(wantDeleteContains, `DELETE FROM "hive"."prod"."events"`)
+			for _, want := range wantDeleteContains {
+				if !strings.Contains(got[2].body, want) {
+					t.Errorf("delete request body = %q, want substring %q", got[2].body, want)
+				}
 			}
 			if !strings.Contains(got[3].body, `INSERT INTO "hive"."prod"."events"`) ||
 				!strings.Contains(got[3].body, `PARTITION BY "id" ORDER BY "updated_at" DESC`) {

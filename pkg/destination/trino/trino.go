@@ -390,9 +390,15 @@ func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destinati
 		_ = tx.Rollback(rollbackCtx)
 	}()
 
+	// DATE bounds arrive as date-only strings, which trino-go-client serializes as
+	// varchar; cast them so Trino can compare against a DATE column.
+	boundPlaceholder := "?"
+	if opts.IncrementalKeyType == schema.TypeDate {
+		boundPlaceholder = "CAST(? AS DATE)"
+	}
 	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= ? AND %s <= ?",
-		targetFQN, quotedIncrementalKey, quotedIncrementalKey,
+		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
+		targetFQN, quotedIncrementalKey, boundPlaceholder, quotedIncrementalKey, boundPlaceholder,
 	)
 	config.Debug("[TRINO DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 	if err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
