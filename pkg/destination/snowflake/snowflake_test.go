@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"sync"
@@ -700,6 +701,69 @@ func TestWriteParallelRollsOverFileOnSchemaChange(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatchWithColumns(mem, "id")}
 	records <- source.RecordBatchResult{Batch: newSingleRowRecordBatchWithColumns(mem, "id", "extra")}
 	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:       "public.events",
+		Parallelism: 1,
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func newIncompressibleRecordBatch(mem memory.Allocator, totalBytes int) arrow.RecordBatch {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "payload", Type: arrow.BinaryTypes.Binary},
+	}, nil)
+	builder := array.NewRecordBuilder(mem, arrowSchema)
+	defer builder.Release()
+	rng := rand.New(rand.NewPCG(1, 2))
+	const rowBytes = 64 << 10
+	for written := 0; written < totalBytes; written += rowBytes {
+		payload := make([]byte, rowBytes)
+		for i := range payload {
+			payload[i] = byte(rng.Uint32())
+		}
+		builder.Field(0).(*array.BinaryBuilder).Append(payload)
+	}
+	return builder.NewRecordBatch()
+}
+
+// When the source stalls, an uploader holding at least minAdaptiveFlushBytes
+// uploads what it has instead of idling until the size target is reached. The
+// second batch is only sent after the first PUT is observed, so the test
+// deadlocks (and times out) if the adaptive flush does not fire.
+func TestWriteParallelAdaptiveFlushUploadsWhileSourceIsIdle(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	firstPut := make(chan struct{})
+	var signalOnce sync.Once
+	capture := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		if strings.HasPrefix(actualSQL, "PUT ") {
+			signalOnce.Do(func() { close(firstPut) })
+		}
+		return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(capture))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec("PUT file://batch_0_1.parquet").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("PUT file://batch_0_2.parquet").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("COPY INTO").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	records := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(records)
+		records <- source.RecordBatchResult{Batch: newIncompressibleRecordBatch(mem, 2*minAdaptiveFlushBytes)}
+		select {
+		case <-firstPut:
+		case <-time.After(10 * time.Second):
+			t.Error("uploader did not flush while the source was idle")
+			return
+		}
+		records <- source.RecordBatchResult{Batch: newSingleRowRecordBatch(mem)}
+	}()
 
 	dest := &SnowflakeDestination{db: db}
 	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
