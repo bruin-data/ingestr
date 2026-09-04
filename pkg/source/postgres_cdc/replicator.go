@@ -14,6 +14,7 @@ import (
 
 type Replicator struct {
 	source                    *PostgresCDCSource
+	publicationGuard          publicationGuard
 	tableName                 string
 	tableSchema               *schema.TableSchema
 	cdcConfig                 CDCConfig
@@ -96,18 +97,19 @@ func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema
 	src.lag.streaming.Store(streaming)
 
 	return &Replicator{
-		source:        src,
-		tableName:     tableName,
-		tableSchema:   tableSchema,
-		cdcConfig:     cdcConfig,
-		startLSN:      startLSN,
-		decoder:       decoder,
-		clientXLogPos: startLSN,
-		barrierNonce:  barrierNonce,
-		standbyTimer:  time.Now(),
-		lastMessageAt: time.Now(),
-		started:       false,
-		streaming:     streaming,
+		source:           src,
+		publicationGuard: newPublicationGuard(src),
+		tableName:        tableName,
+		tableSchema:      tableSchema,
+		cdcConfig:        cdcConfig,
+		startLSN:         startLSN,
+		decoder:          decoder,
+		clientXLogPos:    startLSN,
+		barrierNonce:     barrierNonce,
+		standbyTimer:     time.Now(),
+		lastMessageAt:    time.Now(),
+		started:          false,
+		streaming:        streaming,
 		incarnationLookup: func(ctx context.Context) (string, error) {
 			return src.TableIncarnation(ctx, tableName)
 		},
@@ -214,6 +216,9 @@ func (r *Replicator) standbyStatus() pglogrepl.StandbyStatusUpdate {
 // Begin/Insert/Update/Delete messages awaiting a Commit). Callers use it to
 // avoid flushing the batch accumulator after every transaction.
 func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, bool, error) {
+	if err := r.publicationGuard.validate(ctx, false); err != nil {
+		return nil, 0, false, err
+	}
 	if r.decoder.HasCommitted() {
 		changes, err := r.decoder.DrainCommitted(defaultCommittedDrainChanges)
 		return changes, r.decoder.CurrentTxLSN(), true, err
@@ -297,6 +302,9 @@ func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, 
 				return nil, 0, true, fmt.Errorf("failed to parse xlog data: %w", err)
 			}
 
+			if err := r.publicationGuard.validate(ctx, publicationCheckRequired(xld.WALData)); err != nil {
+				return nil, 0, true, err
+			}
 			handledLogicalMessage, err := r.handleLogicalMessage(xld.WALData)
 			if err != nil {
 				return nil, 0, true, err

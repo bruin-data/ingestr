@@ -144,11 +144,39 @@ func (s *PostgresCDCSource) ValidateConnectorPreflight(ctx context.Context, opts
 			return err
 		}
 	}
-	return s.validatePublicationShape(ctx)
+	err := s.validatePublicationShape(ctx)
+	if s.managedPublication && errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 func (s *PostgresCDCSource) validatePublicationShape(ctx context.Context) error {
-	if s.managedPublication || s.serverVersion < 150000 {
+	if s.queryPool == nil {
+		return fmt.Errorf("postgres CDC source is not connected")
+	}
+	truncateExpr := "pubtruncate"
+	if s.serverVersion < 110000 {
+		truncateExpr = "true"
+	}
+	var insert, update, deleteRows, truncate bool
+	err := s.queryPool.QueryRow(ctx, "SELECT pubinsert, pubupdate, pubdelete, "+truncateExpr+" FROM pg_publication WHERE pubname = $1", s.cdcConfig.Publication).Scan(&insert, &update, &deleteRows, &truncate)
+	if err != nil {
+		return fmt.Errorf("failed to validate PostgreSQL publication %q: %w", s.cdcConfig.Publication, err)
+	}
+	var missing []string
+	for _, operation := range []struct {
+		name    string
+		enabled bool
+	}{{"insert", insert}, {"update", update}, {"delete", deleteRows}, {"truncate", truncate}} {
+		if !operation.enabled {
+			missing = append(missing, operation.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("PostgreSQL publication %q does not publish %s; postgres+cdc requires insert, update, delete, and truncate coverage; set publish = 'insert, update, delete, truncate' and use --full-refresh if events may already have been missed", s.cdcConfig.Publication, strings.Join(missing, ", "))
+	}
+	if s.serverVersion < 150000 {
 		return nil
 	}
 	rows, err := s.queryPool.Query(ctx, `
@@ -345,7 +373,7 @@ func (s *PostgresCDCSource) reconcileManagedPublication(ctx context.Context) err
 			return fmt.Errorf("failed to enable generated columns for managed publication: %w", err)
 		}
 	}
-	return nil
+	return s.validatePublicationShape(ctx)
 }
 
 // openReplicationConn opens an additional replication connection, e.g. for a
@@ -1223,6 +1251,9 @@ func (s *PostgresCDCSource) GetTables(ctx context.Context) ([]source.SourceTable
 // false so a selected table disappearing at the source keeps its existing
 // coverage-gap handling instead of failing the stream.
 func (s *PostgresCDCSource) getTables(ctx context.Context, validateSelection bool) ([]source.SourceTableInfo, error) {
+	if err := s.validatePublicationShape(ctx); err != nil {
+		return nil, err
+	}
 	// Check if this is a "FOR ALL TABLES" publication
 	var pubAllTables bool
 	err := s.queryPool.QueryRow(ctx, "SELECT puballtables FROM pg_publication WHERE pubname = $1", s.cdcConfig.Publication).Scan(&pubAllTables)
@@ -1508,6 +1539,9 @@ func (s *PostgresCDCSource) validateTablePublished(ctx context.Context, table st
 		if err := s.reconcileManagedPublication(ctx); err != nil {
 			return fmt.Errorf("failed to reconcile managed publication before validating table %q: %w", table, err)
 		}
+	}
+	if err := s.validatePublicationShape(ctx); err != nil {
+		return err
 	}
 	names, err := s.listEligibleTableNames(ctx)
 	if err != nil {

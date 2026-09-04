@@ -59,6 +59,8 @@ For `REPLICA IDENTITY USING INDEX`, ingestr uses the selected index's key column
 
 If you update a table's merge key, use `ALTER TABLE schema.table REPLICA IDENTITY FULL` before making those updates. PostgreSQL can omit unchanged TOAST values (large text, JSON, binary, or array values) from the new row image. ingestr preserves them from the old row image or earlier pending changes. If neither contains the value, the run fails before emitting the key move. Enable `REPLICA IDENTITY FULL` and run with `--full-refresh` to recover from an already logged incomplete key move.
 
+Publications must publish `insert`, `update`, `delete`, and `truncate`. ingestr rejects missing operations before taking a snapshot and rechecks publication coverage during replication, even when table discovery is disabled. After restoring a publication that may have skipped events, use `--full-refresh` to rebuild the destination.
+
 Stored generated columns require PostgreSQL 18 or newer and a publication with `publish_generated_columns = stored`. ingestr enables this option on publications it manages. For a custom publication, run `ALTER PUBLICATION publication_name SET (publish_generated_columns = stored)` yourself. Earlier PostgreSQL versions and virtual generated columns are rejected before the snapshot because their values cannot be kept current through logical replication. See [PostgreSQL's generated-column replication documentation](https://www.postgresql.org/docs/18/logical-replication-gencols.html).
 
 ### Tutorial

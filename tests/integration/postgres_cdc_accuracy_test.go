@@ -252,3 +252,116 @@ func TestPostgresCDCGeneratedColumns(t *testing.T) {
 		})
 	}
 }
+
+func TestPostgresCDCPublicationOperations(t *testing.T) {
+	for _, version := range []int{14, 16} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			container, uri := setupPostgresCDCContainerImage(t, ctx, fmt.Sprintf("postgres:%d-alpine", version))
+			defer func() { _ = container.Terminate(context.Background()) }()
+			pool, err := pgxpool.New(ctx, uri)
+			require.NoError(t, err)
+			defer pool.Close()
+			_, err = pool.Exec(ctx, `CREATE TABLE items (id int PRIMARY KEY); INSERT INTO items VALUES (1);
+    CREATE PUBLICATION items_pub FOR TABLE items; CREATE SCHEMA warehouse`)
+			require.NoError(t, err)
+			cdcURI := strings.Replace(uri, "postgres://", "postgres+cdc://", 1)
+			src := postgres_cdc.NewPostgresCDCSource()
+			require.NoError(t, src.Connect(ctx, cdcURI+"&publication=items_pub"))
+			defer func() { _ = src.Close(ctx) }()
+			operations := []string{"insert", "update", "delete", "truncate"}
+			for _, omitted := range operations {
+				t.Run("missing_"+omitted, func(t *testing.T) {
+					var enabled []string
+					for _, op := range operations {
+						if op != omitted {
+							enabled = append(enabled, op)
+						}
+					}
+					_, err := pool.Exec(ctx, "ALTER PUBLICATION items_pub SET (publish = '"+strings.Join(enabled, ", ")+"')")
+					require.NoError(t, err)
+					for _, streaming := range []bool{false, true} {
+						require.ErrorContains(t, src.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{Streaming: streaming}), "does not publish "+omitted)
+					}
+					_, err = src.GetTable(ctx, source.TableRequest{Name: "public.items"})
+					require.ErrorContains(t, err, "does not publish "+omitted)
+					_, err = src.GetTables(ctx)
+					require.ErrorContains(t, err, "does not publish "+omitted)
+				})
+			}
+			cfg := &config.IngestConfig{SourceURI: cdcURI + "&publication=items_pub", SourceTable: "public.items", DestURI: uri, DestTable: "warehouse.items", IncrementalStrategy: config.StrategyMerge}
+			require.ErrorContains(t, pipeline.New(cfg).Run(ctx), "does not publish truncate")
+			var absent bool
+			require.NoError(t, pool.QueryRow(ctx, `SELECT to_regclass('warehouse.items') IS NULL`).Scan(&absent))
+			require.True(t, absent)
+			var slots int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_replication_slots`).Scan(&slots))
+			require.Zero(t, slots)
+			_, err = pool.Exec(ctx, `ALTER PUBLICATION items_pub SET (publish = 'insert, update, delete, truncate')`)
+			require.NoError(t, err)
+			require.NoError(t, src.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{}))
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			_, err = pool.Exec(ctx, `DELETE FROM items WHERE id=1`)
+			require.NoError(t, err)
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			var active int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM warehouse.items WHERE NOT _cdc_deleted`).Scan(&active))
+			require.Zero(t, active)
+
+			managed := postgres_cdc.NewPostgresCDCSource()
+			require.NoError(t, managed.Connect(ctx, cdcURI))
+			defer func() { _ = managed.Close(ctx) }()
+			require.NoError(t, managed.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{}), "an absent managed publication is created during preparation")
+			require.NoError(t, managed.PrepareConnector(ctx))
+			_, err = pool.Exec(ctx, `ALTER PUBLICATION ingestr_publication SET (publish = 'insert')`)
+			require.NoError(t, err)
+			require.ErrorContains(t, managed.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{}), "does not publish update, delete, truncate")
+		})
+	}
+}
+
+func TestPostgresCDCPublicationLosesDeletesWhileStreaming(t *testing.T) {
+	for _, multi := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multi=%v", multi), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			container, uri := setupPostgresCDCContainer(t, ctx)
+			defer func() { _ = container.Terminate(context.Background()) }()
+			pool, err := pgxpool.New(ctx, uri)
+			require.NoError(t, err)
+			defer pool.Close()
+			_, err = pool.Exec(ctx, `CREATE TABLE items (id int PRIMARY KEY); INSERT INTO items VALUES (1);
+    CREATE PUBLICATION items_pub FOR TABLE items; CREATE SCHEMA warehouse`)
+			require.NoError(t, err)
+			cfg := &config.IngestConfig{SourceURI: strings.Replace(uri, "postgres://", "postgres+cdc://", 1) + "&publication=items_pub&discover_interval=off", SourceTable: "public.items", DestURI: uri, DestTable: "warehouse.items", IncrementalStrategy: config.StrategyMerge}
+			if multi {
+				cfg.SourceTable = ""
+				cfg.DestTable = ""
+				cfg.SourceURI += "&dest_schema=warehouse"
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			cfg.Stream = true
+			cfg.FlushInterval = time.Second
+			cfg.FlushRecords = 10000
+			streamCtx, stop := context.WithCancel(ctx)
+			defer stop()
+			done := make(chan error, 1)
+			go func() { done <- pipeline.New(cfg).Run(streamCtx) }()
+			require.Eventually(t, func() bool {
+				var active bool
+				return pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE active AND NOT temporary)`).Scan(&active) == nil && active
+			}, 30*time.Second, 100*time.Millisecond)
+			// No row event will be sent for this delete. The coverage guard must
+			// still fail before treating an idle heartbeat as a valid checkpoint.
+			_, err = pool.Exec(ctx, `ALTER PUBLICATION items_pub SET (publish = 'insert, update, truncate'); DELETE FROM items`)
+			require.NoError(t, err)
+			select {
+			case err := <-done:
+				require.ErrorContains(t, err, "does not publish delete")
+			case <-time.After(30 * time.Second):
+				t.Fatal("stream did not reject missing delete coverage")
+			}
+		})
+	}
+}

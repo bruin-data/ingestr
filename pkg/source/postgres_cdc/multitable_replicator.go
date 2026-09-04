@@ -30,22 +30,23 @@ type LSNUpdater interface {
 // channel, so batch mode's target check and safeCommitLSN never move past WAL
 // that is received but not yet decoded.
 type MultiTableReplicator struct {
-	source        *PostgresCDCSource
-	tables        []source.SourceTableInfo
-	cdcConfig     CDCConfig
-	startLSN      pglogrepl.LSN
-	decoder       *MultiTableDecoder
-	lsnFilter     LSNUpdater
-	clientXLogPos pglogrepl.LSN
-	barrierNonce  string
-	barrierSeen   bool
-	barrierLSN    pglogrepl.LSN
-	protocolV2    bool
-	started       bool
-	streaming     bool
-	recv          *walReceiver
-	decoderBudget *byteBudget
-	walBudget     *byteBudget
+	publicationGuard publicationGuard
+	source           *PostgresCDCSource
+	tables           []source.SourceTableInfo
+	cdcConfig        CDCConfig
+	startLSN         pglogrepl.LSN
+	decoder          *MultiTableDecoder
+	lsnFilter        LSNUpdater
+	clientXLogPos    pglogrepl.LSN
+	barrierNonce     string
+	barrierSeen      bool
+	barrierLSN       pglogrepl.LSN
+	protocolV2       bool
+	started          bool
+	streaming        bool
+	recv             *walReceiver
+	decoderBudget    *byteBudget
+	walBudget        *byteBudget
 
 	filterLSN       pglogrepl.LSN
 	filterDecisions map[string]bool
@@ -66,19 +67,20 @@ func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTable
 	src.lag.streaming.Store(streaming)
 
 	return &MultiTableReplicator{
-		source:        src,
-		tables:        tables,
-		cdcConfig:     cdcConfig,
-		startLSN:      startLSN,
-		decoder:       decoder,
-		lsnFilter:     lsnFilter,
-		clientXLogPos: startLSN,
-		barrierNonce:  barrierNonce,
-		protocolV2:    streaming && src.serverVersion >= 140000,
-		started:       false,
-		streaming:     streaming,
-		decoderBudget: decoderBudget,
-		walBudget:     newByteBudget(defaultWALBufferBytes),
+		source:           src,
+		publicationGuard: newPublicationGuard(src),
+		tables:           tables,
+		cdcConfig:        cdcConfig,
+		startLSN:         startLSN,
+		decoder:          decoder,
+		lsnFilter:        lsnFilter,
+		clientXLogPos:    startLSN,
+		barrierNonce:     barrierNonce,
+		protocolV2:       streaming && src.serverVersion >= 140000,
+		started:          false,
+		streaming:        streaming,
+		decoderBudget:    decoderBudget,
+		walBudget:        newByteBudget(defaultWALBufferBytes),
 	}, nil
 }
 
@@ -208,6 +210,9 @@ func (r *MultiTableReplicator) handleLogicalMessage(data []byte) (bool, error) {
 // Returns (nil, true, nil) when WAL data was received but no commit completed
 // yet (e.g. buffering a transaction) or the commit was filtered.
 func (r *MultiTableReplicator) NextChanges(ctx context.Context) ([]DecodedChanges, bool, error) {
+	if err := r.publicationGuard.validate(ctx, false); err != nil {
+		return nil, false, err
+	}
 	if r.decoder.HasCommitted() {
 		groups, err := r.decoder.DrainCommitted(defaultCommittedDrainChanges)
 		if err != nil {
@@ -234,6 +239,9 @@ func (r *MultiTableReplicator) NextChanges(ctx context.Context) ([]DecodedChange
 
 	config.Debug("[CDC] Processing XLogData at LSN %s, data len=%d, first byte=%x", m.walStart, len(m.data), m.data[0])
 
+	if err := r.publicationGuard.validate(ctx, publicationCheckRequired(m.data)); err != nil {
+		return nil, true, err
+	}
 	handledLogicalMessage, err := r.handleLogicalMessage(m.data)
 	if err != nil {
 		return nil, true, err
