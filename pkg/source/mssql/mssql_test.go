@@ -122,6 +122,31 @@ func TestURIToConnString(t *testing.T) {
 			absentQuery: []string{"Authentication"},
 		},
 		{
+			name:         "packet size defaults to the protocol maximum",
+			uri:          "mssql://sa:pass@localhost/testdb",
+			wantDriver:   sqlServerDriverName,
+			wantHost:     "localhost:1433",
+			wantUser:     "sa",
+			wantPassword: "pass",
+			wantQuery: map[string]string{
+				"database":    "testdb",
+				"packet size": defaultPacketSize,
+			},
+		},
+		{
+			name:         "explicit packet size is preserved regardless of case",
+			uri:          "mssql://sa:pass@localhost/testdb?Packet%20Size=8000",
+			wantDriver:   sqlServerDriverName,
+			wantHost:     "localhost:1433",
+			wantUser:     "sa",
+			wantPassword: "pass",
+			wantQuery: map[string]string{
+				"database":    "testdb",
+				"packet size": "8000",
+			},
+			absentQuery: []string{"Packet Size"},
+		},
+		{
 			name:    "wrong scheme errors",
 			uri:     "postgres://user:pass@localhost/db",
 			wantErr: true,
