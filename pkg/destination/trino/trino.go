@@ -384,7 +384,11 @@ func (d *TrinoDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 
 	deleteSQL := fmt.Sprintf(
 		"DELETE FROM %s WHERE %s >= ? AND %s <= ?",

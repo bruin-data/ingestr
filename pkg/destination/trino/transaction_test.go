@@ -1,6 +1,8 @@
 package trino
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,15 +24,24 @@ type recordedTrinoRequest struct {
 
 func TestDeleteInsertTransactional(t *testing.T) {
 	tests := []struct {
-		name       string
-		failInsert bool
+		name         string
+		failInsert   bool
+		cancelInsert bool
 	}{
 		{name: "commit"},
 		{name: "rollback after insert failure", failInsert: true},
+		{name: "rollback after cancellation", cancelInsert: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			callCtx := t.Context()
+			cancelQuery := func() {}
+			if tt.cancelInsert {
+				callCtx, cancelQuery = context.WithCancel(callCtx)
+			}
+			defer cancelQuery()
+
 			var (
 				mu       sync.Mutex
 				requests []recordedTrinoRequest
@@ -58,13 +69,18 @@ func TestDeleteInsertTransactional(t *testing.T) {
 				case 2:
 					_, _ = io.WriteString(w, `{"id":"delete","stats":{"state":"FINISHED"},"updateType":"DELETE","updateCount":2}`)
 				case 3:
+					if tt.cancelInsert {
+						cancelQuery()
+						<-r.Context().Done()
+						return
+					}
 					if tt.failInsert {
 						_, _ = io.WriteString(w, `{"id":"insert","stats":{"state":"FAILED"},"error":{"message":"insert failed","errorName":"GENERIC_INTERNAL_ERROR","errorType":"INTERNAL_ERROR"}}`)
 						return
 					}
 					_, _ = io.WriteString(w, `{"id":"insert","stats":{"state":"FINISHED"},"updateType":"INSERT","updateCount":2}`)
 				case 4:
-					if tt.failInsert {
+					if tt.failInsert || tt.cancelInsert {
 						w.Header().Set(clearTransactionIDHeader, "true")
 						_, _ = io.WriteString(w, `{"id":"rollback","stats":{"state":"FINISHED"},"updateType":"ROLLBACK"}`)
 						return
@@ -93,7 +109,7 @@ func TestDeleteInsertTransactional(t *testing.T) {
 				t.Fatal("SupportsDeleteInsertStrategy() = false, want true")
 			}
 
-			err = dest.DeleteInsertTable(t.Context(), destination.DeleteInsertOptions{
+			err = dest.DeleteInsertTable(callCtx, destination.DeleteInsertOptions{
 				StagingTable:   "stage.events",
 				TargetTable:    "prod.events",
 				IncrementalKey: "updated_at",
@@ -102,7 +118,11 @@ func TestDeleteInsertTransactional(t *testing.T) {
 				Columns:        []string{"id", "updated_at", "value"},
 				PrimaryKeys:    []string{"id"},
 			})
-			if tt.failInsert {
+			if tt.cancelInsert {
+				if err == nil || !errors.Is(err, context.Canceled) {
+					t.Fatalf("DeleteInsertTable() error = %v, want context cancellation", err)
+				}
+			} else if tt.failInsert {
 				if err == nil || !strings.Contains(err.Error(), "failed to insert records") {
 					t.Fatalf("DeleteInsertTable() error = %v, want insert failure", err)
 				}
@@ -114,7 +134,7 @@ func TestDeleteInsertTransactional(t *testing.T) {
 			got := append([]recordedTrinoRequest(nil), requests...)
 			mu.Unlock()
 			wantCount := 6
-			if tt.failInsert {
+			if tt.failInsert || tt.cancelInsert {
 				wantCount = 5
 			}
 			if len(got) != wantCount {
@@ -145,7 +165,7 @@ func TestDeleteInsertTransactional(t *testing.T) {
 				t.Errorf("insert request body = %q", got[3].body)
 			}
 			wantFinish := "COMMIT"
-			if tt.failInsert {
+			if tt.failInsert || tt.cancelInsert {
 				wantFinish = "ROLLBACK"
 			}
 			if got[4].body != wantFinish {
