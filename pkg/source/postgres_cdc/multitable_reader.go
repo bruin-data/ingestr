@@ -821,6 +821,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		schemas[t.Name] = t.Schema
 	}
 	accum := newBatchAccumulator(batchSize, schemas)
+	defer func() { retErr = errors.Join(retErr, accum.toast.close()) }()
+	if opts.Streaming {
+		accum.durable = r.source.pos.Committed
+	}
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
 	// confirms the slot only after the data is durable. barrierNonce is empty in

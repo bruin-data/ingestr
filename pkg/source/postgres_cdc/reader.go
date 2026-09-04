@@ -246,6 +246,10 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 	}
 
 	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
+	defer func() { retErr = errors.Join(retErr, accum.toast.close()) }()
+	if opts.Streaming {
+		accum.durable = r.source.pos.Committed
+	}
 
 	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
 	if err == nil && !opts.Streaming {
