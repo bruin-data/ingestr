@@ -1,6 +1,7 @@
 package postgres_cdc
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -104,5 +105,41 @@ func TestToastStateDeleteTruncateAndCleanup(t *testing.T) {
 				require.True(t, os.IsNotExist(err))
 			}
 		})
+	}
+}
+
+func TestToastKeyMoveRequiresCompleteImage(t *testing.T) {
+	for _, fullOld := range []bool{false, true} {
+		for _, earlierBatch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("full_old=%v/earlier_batch=%v", fullOld, earlierBatch), func(t *testing.T) {
+				a := newBatchAccumulator(1, map[string]*schema.TableSchema{"a": fillTestSchema()})
+				t.Cleanup(func() { require.NoError(t, a.toast.close()) })
+				out := make(chan source.RecordBatchResult, 1)
+				if earlierBatch {
+					a.add("a", []Change{{Operation: "INSERT", LSN: 1, Values: []interface{}{int64(1), "payload", "first"}}}, 1)
+					require.NoError(t, a.flushAll(out, nil))
+					(<-out).Batch.Release()
+				}
+				old := []interface{}{int64(1), nil, nil}
+				if fullOld {
+					old[1] = "payload"
+				}
+				a.add("a", []Change{{Operation: "UPDATE", LSN: 2, Sequence: 2, Values: []interface{}{int64(2), tupleUnchangedMarker, "moved"}, OldValues: old}}, 2)
+				err := a.flushAll(out, nil)
+				if !fullOld && !earlierBatch {
+					require.ErrorContains(t, err, "REPLICA IDENTITY FULL")
+					require.ErrorContains(t, err, "config_data")
+					require.Empty(t, out, "neither the old-key delete nor the new-key row may escape")
+					return
+				}
+				require.NoError(t, err)
+				res := <-out
+				defer res.Batch.Release()
+				require.EqualValues(t, 2, res.Batch.NumRows())
+				require.Equal(t, int64(2), res.Batch.Column(0).(*array.Int64).Value(1))
+				require.Equal(t, "payload", res.Batch.Column(1).(*array.String).Value(1))
+				require.Equal(t, "[]", unchangedValueAt(t, res.Batch, 1))
+			})
+		}
 	}
 }

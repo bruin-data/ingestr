@@ -55,6 +55,9 @@ With a user-managed publication (`publication=` supplied), ingestr never alters 
 
 The backfill-plus-stream handoff is safe under the `merge` strategy: changes that fall in the overlap between the snapshot and the WAL stream are applied idempotently by primary key. Tables without a primary key (or replica identity) cannot be part of logical replication and are skipped with a warning.
 
+If you update a table's merge key, use `ALTER TABLE schema.table REPLICA IDENTITY FULL` before making those updates. PostgreSQL can omit unchanged TOAST values (large text, JSON, binary, or array values) from the new row image. ingestr preserves them from the old row image or earlier pending changes. If neither contains the value, the run fails before emitting the key move. Enable `REPLICA IDENTITY FULL` and run with `--full-refresh` to recover from an already logged incomplete key move.
+
+
 ### Tutorial
 
 For a step-by-step walkthrough — from enabling logical replication to streaming live inserts, updates, and deletes into DuckDB — see [Replicate PostgreSQL to DuckDB with CDC](/tutorials/cdc-postgres-duckdb.md).

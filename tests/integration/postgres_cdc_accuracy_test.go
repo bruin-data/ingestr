@@ -71,3 +71,51 @@ func TestPostgresCDCToastAcrossBatches(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresCDCToastKeyMove(t *testing.T) {
+	for _, fullIdentity := range []bool{false, true} {
+		t.Run(fmt.Sprintf("full_identity=%v", fullIdentity), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			container, uri := setupPostgresCDCContainer(t, ctx)
+			defer func() { _ = container.Terminate(context.Background()) }()
+			pool, err := pgxpool.New(ctx, uri)
+			require.NoError(t, err)
+			defer pool.Close()
+			_, err = pool.Exec(ctx, `CREATE TABLE items (id bigint PRIMARY KEY, payload text);
+     ALTER TABLE items ALTER COLUMN payload SET STORAGE EXTERNAL;
+     CREATE PUBLICATION items_pub FOR TABLE items; CREATE SCHEMA warehouse`)
+			require.NoError(t, err)
+			if fullIdentity {
+				_, err = pool.Exec(ctx, `ALTER TABLE items REPLICA IDENTITY FULL`)
+				require.NoError(t, err)
+			}
+			payload := strings.Repeat("abcdefghij", 5000)
+			_, err = pool.Exec(ctx, `INSERT INTO items VALUES (1, $1)`, payload)
+			require.NoError(t, err)
+			cfg := &config.IngestConfig{SourceURI: strings.Replace(uri, "postgres://", "postgres+cdc://", 1) + "&publication=items_pub", SourceTable: "public.items", DestURI: uri, DestTable: "warehouse.items", IncrementalStrategy: config.StrategyMerge, PageSize: 1}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			_, err = pool.Exec(ctx, `UPDATE items SET id=2 WHERE id=1`)
+			require.NoError(t, err)
+			err = pipeline.New(cfg).Run(ctx)
+			if !fullIdentity {
+				require.ErrorContains(t, err, "REPLICA IDENTITY FULL")
+				var oldPayload string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT payload FROM warehouse.items WHERE id=1 AND NOT _cdc_deleted`).Scan(&oldPayload))
+				require.Equal(t, payload, oldPayload, "an incomplete key move must leave the destination intact")
+				_, err = pool.Exec(ctx, `ALTER TABLE items REPLICA IDENTITY FULL`)
+				require.NoError(t, err)
+				cfg.FullRefresh = true
+				require.NoError(t, pipeline.New(cfg).Run(ctx))
+			} else {
+				require.NoError(t, err)
+			}
+			var actual string
+			require.NoError(t, pool.QueryRow(ctx, `SELECT payload FROM warehouse.items WHERE id=2 AND NOT _cdc_deleted`).Scan(&actual))
+			require.Equal(t, payload, actual)
+			var active int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM warehouse.items WHERE NOT _cdc_deleted`).Scan(&active))
+			require.Equal(t, 1, active)
+		})
+	}
+}

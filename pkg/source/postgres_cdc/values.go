@@ -79,6 +79,13 @@ func fillUnchangedColumns(ctx context.Context, changes []Change, tableSchema *sc
 				setColumnValue(change, colIdx, prior[colIdx])
 			}
 		}
+		if pkValueChanged(*change, pkIndices) {
+			for colIdx := 0; colIdx < nSource; colIdx++ {
+				if columnIsUnchanged(*change, colIdx) {
+					return fmt.Errorf("cannot replicate key change on %s.%s: unchanged TOAST column %q has no full row image; set REPLICA IDENTITY FULL before changing keys and use --full-refresh to rebuild from a fresh snapshot", quoteIdentifier(tableSchema.Schema), quoteIdentifier(tableSchema.Name), tableSchema.Columns[colIdx].Name)
+				}
+			}
+		}
 		if lookupKey != storeKey {
 			if err := state.delete(ctx, table, lookupKey); err != nil {
 				return err
