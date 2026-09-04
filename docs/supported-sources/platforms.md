@@ -55,6 +55,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [ABRA Flexi](/supported-sources/abra.md)
 - [Apple App Store](/supported-sources/appstore.md)
 - [Chargebee](/supported-sources/chargebee.md)
+- [Fakturoid](/supported-sources/fakturoid.md)
 - [FastSpring](/supported-sources/fastspring.md)
 - [FundraiseUp](/supported-sources/fundraiseup.md)
 - [Hostaway](/supported-sources/hostaway.md)

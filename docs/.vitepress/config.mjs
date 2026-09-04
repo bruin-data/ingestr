@@ -210,6 +210,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Deel", link: "/supported-sources/deel.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
               { text: "Dune", link: "/supported-sources/dune.md" },
+              { text: "Fakturoid", link: "/supported-sources/fakturoid.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
