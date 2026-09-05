@@ -80,6 +80,8 @@ type RelationInfo struct {
 	// Stale marks historical pre-DDL relation metadata replayed after the table
 	// was resnapshotted at a newer shape.
 	Stale bool
+	// MissingFromRelation marks schema columns with no value in this relation.
+	MissingFromRelation []bool
 }
 
 type RelationColumn struct {
@@ -274,6 +276,10 @@ func mapRelationToSchema(rel, prev *RelationInfo, tableSchema *schema.TableSchem
 		}
 		rel.SchemaIndex[i] = idx
 		mapped[idx] = true
+	}
+	rel.MissingFromRelation = make([]bool, nSource)
+	for i := 0; i < nSource; i++ {
+		rel.MissingFromRelation[i] = !mapped[i]
 	}
 	if len(mismatches) > 0 {
 		return newSchemaChangedError(tableName, mismatches)
@@ -484,6 +490,9 @@ func markMissingRelationColumnsUnchanged(values []interface{}, rel *RelationInfo
 	for i := range values {
 		if !mapped[i] {
 			values[i] = tupleUnchangedMarker
+			if i < len(rel.MissingFromRelation) && rel.MissingFromRelation[i] {
+				values[i] = tupleRelationMissingMarker
+			}
 		}
 	}
 }

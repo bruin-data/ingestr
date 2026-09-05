@@ -186,6 +186,10 @@ func (r *MultiTableReplicator) EmitStreamHeartbeat(ctx context.Context) error {
 	return emitStreamHeartbeat(ctx, r.source.queryPool)
 }
 
+func (r *MultiTableReplicator) ValidateIdleCheckpoint(ctx context.Context) error {
+	return r.publicationGuard.validate(ctx, true)
+}
+
 func (r *MultiTableReplicator) handleLogicalMessage(data []byte) (bool, error) {
 	message, err := parseLogicalDecodingMessage(data, r.protocolV2, r.decoder.InStream())
 	if err != nil || message == nil {

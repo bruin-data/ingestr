@@ -11,13 +11,23 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-type tupleUnchanged struct{}
+type tupleUnchanged struct {
+	RelationMissing bool
+}
 
-var tupleUnchangedMarker = tupleUnchanged{}
+var (
+	tupleUnchangedMarker       = tupleUnchanged{}
+	tupleRelationMissingMarker = tupleUnchanged{RelationMissing: true}
+)
 
 func isTupleUnchanged(v interface{}) bool {
 	_, ok := v.(tupleUnchanged)
 	return ok
+}
+
+func isRelationMissingMarker(v interface{}) bool {
+	marker, ok := v.(tupleUnchanged)
+	return ok && marker.RelationMissing
 }
 
 func resolveColumnValue(change Change, colIdx int) interface{} {
@@ -82,6 +92,19 @@ func fillUnchangedColumns(ctx context.Context, changes []Change, tableSchema *sc
 		if pkValueChanged(*change, pkIndices) {
 			for colIdx := 0; colIdx < nSource; colIdx++ {
 				if columnIsUnchanged(*change, colIdx) {
+					if isRelationMissingMarker(change.Values[colIdx]) {
+						tableName := table
+						if tableName == "" {
+							tableName = tableSchema.Name
+							if tableSchema.Schema != "" {
+								tableName = tableSchema.Schema + "." + tableSchema.Name
+							}
+						}
+						return newSchemaChangedError(tableName, []SchemaMismatch{{
+							Column: tableSchema.Columns[colIdx].Name,
+							Reason: "is missing from the current replication relation",
+						}})
+					}
 					return fmt.Errorf("cannot replicate key change on %s.%s: unchanged TOAST column %q has no full row image; set REPLICA IDENTITY FULL before changing keys and use --full-refresh to rebuild from a fresh snapshot", quoteIdentifier(tableSchema.Schema), quoteIdentifier(tableSchema.Name), tableSchema.Columns[colIdx].Name)
 				}
 			}

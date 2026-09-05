@@ -1,6 +1,8 @@
 package postgres_cdc
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -9,6 +11,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type guardedIdleReporter struct {
+	*fakeReplicator
+	err   error
+	calls int
+}
+
+func (r *guardedIdleReporter) ValidateIdleCheckpoint(context.Context) error {
+	r.calls++
+	return r.err
+}
 
 func TestStreamPosition_MonotonicMax(t *testing.T) {
 	p := newStreamPosition()
@@ -213,6 +226,27 @@ func TestSafeCommitLSN(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestIdleCommitTokenRequiresFreshPublicationValidation(t *testing.T) {
+	checkErr := errors.New("publication stopped publishing deletes")
+	repl := &guardedIdleReporter{fakeReplicator: &fakeReplicator{lsn: 500}, err: checkErr}
+	accum := testAccumulator(10000, "t")
+	results := make(chan source.RecordBatchResult, 1)
+
+	last, err := emitIdleCommitToken(t.Context(), repl, accum, results, 100)
+	require.ErrorIs(t, err, checkErr)
+	require.Equal(t, pglogrepl.LSN(100), last)
+	require.Empty(t, results)
+	require.Equal(t, 1, repl.calls)
+
+	repl.err = nil
+	last, err = emitIdleCommitToken(t.Context(), repl, accum, results, last)
+	require.NoError(t, err)
+	require.Equal(t, pglogrepl.LSN(500), last)
+	require.Equal(t, 2, repl.calls)
+	result := <-results
+	require.Equal(t, FormatLSN(500), result.CommitToken.(source.CDCStateCommitToken).Position)
 }
 
 // TestStreamLoopCumulativeTokens verifies that when a small transaction is

@@ -143,3 +143,21 @@ func TestToastKeyMoveRequiresCompleteImage(t *testing.T) {
 		}
 	}
 }
+
+func TestToastKeyMoveAfterRelationChangeRequestsSchemaRebuild(t *testing.T) {
+	a := newBatchAccumulator(1, map[string]*schema.TableSchema{"public.t": fillTestSchema()})
+	t.Cleanup(func() { require.NoError(t, a.toast.close()) })
+	a.add("public.t", []Change{{
+		Operation: "UPDATE",
+		LSN:       2,
+		Sequence:  2,
+		Values:    []interface{}{int64(2), tupleRelationMissingMarker, "moved"},
+		OldValues: []interface{}{int64(1), nil, nil},
+	}}, 2)
+
+	err := a.flushAll(make(chan source.RecordBatchResult, 1), nil)
+	var schemaErr *SchemaChangedError
+	require.ErrorAs(t, err, &schemaErr)
+	require.Equal(t, "public.t", schemaErr.Table)
+	require.Equal(t, "config_data", schemaErr.Column)
+}

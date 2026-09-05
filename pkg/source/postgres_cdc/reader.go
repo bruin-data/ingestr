@@ -497,7 +497,10 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if streaming {
 				lastHeartbeat = maybeEmitStreamHeartbeat(ctx, repl, lastHeartbeat)
-				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				lastIdleToken, err = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				if err != nil {
+					return err
+				}
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

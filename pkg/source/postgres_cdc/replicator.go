@@ -183,6 +183,10 @@ func (r *Replicator) EmitStreamHeartbeat(ctx context.Context) error {
 	return emitStreamHeartbeat(ctx, r.source.queryPool)
 }
 
+func (r *Replicator) ValidateIdleCheckpoint(ctx context.Context) error {
+	return r.publicationGuard.validate(ctx, true)
+}
+
 func (r *Replicator) handleLogicalMessage(data []byte) (bool, error) {
 	message, err := parseLogicalDecodingMessage(data, false, false)
 	if err != nil || message == nil {
