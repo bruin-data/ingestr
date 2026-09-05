@@ -45,12 +45,18 @@ and its embedded tool version together through reviewed updates.
 
 Only the publishing job gains `contents: write` and signing `id-token: write`;
 build jobs have read-only repository access. Existing Docker permissions are
-separate. After local verification, the publisher creates a draft, uploads
+separate. Publication also waits for both native Docker image tests. After
+local verification, the publisher creates a draft, uploads
 all eight assets without overwrite, checks the exact remote set, downloads
 and byte-compares every asset, then publishes and marks latest in one edit.
 Failures leave an unpublished draft. Existing releases, including drafts,
 are refused, not adopted, replaced, or automatically deleted. Installer/PyPI
 checks run after publication; they no longer control a second promotion.
+The public installer needs publicly downloadable release assets and cannot
+consume a private draft. Its end-to-end checks therefore remain post-publication;
+the pre-publication gate runs the actual packaged executables on all five
+native platforms instead. Adding authenticated public-installer verification
+is separate follow-up work, not an implicit gate in this producer contract.
 
 ## Future installer verification policy
 

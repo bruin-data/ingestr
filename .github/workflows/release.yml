@@ -188,7 +188,7 @@ jobs:
 
   publish-release:
     runs-on: ubuntu-latest
-    needs: [smoke-archives, integration-tests]
+    needs: [smoke-archives, integration-tests, docker-test]
     permissions:
       contents: write
       id-token: write
