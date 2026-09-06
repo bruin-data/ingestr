@@ -14,11 +14,9 @@ LICENSE_AUDIT_NEW_STATUS ?= needs-review
 LINT_MERGE_BASE ?= origin/main
 GCI_VERSION ?= v0.14.0
 GOFUMPT_VERSION ?= v0.11.0
-# Pinned, not @latest. v2.12.x made its cache checkout-independent, but cached
-# diagnostics still contain absolute paths from the checkout that produced
-# them. That makes shared-cache results unsafe across worktrees. Re-test before
-# bumping beyond the latest pre-change patch release.
-GOLANGCI_LINT_VERSION ?= v2.11.4
+# Go 1.27 support; v2.13.2 also rebases cached diagnostic paths to the current
+# checkout, fixing the cross-worktree cache issue in v2.12.x.
+GOLANGCI_LINT_VERSION ?= v2.13.2
 # Built with the toolchain this module targets, not golangci-lint's own minimum.
 # `go install` never downgrades but does pick the module's minimum when the base
 # toolchain is older, which yields a binary that refuses to lint this repo:

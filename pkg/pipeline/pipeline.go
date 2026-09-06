@@ -779,9 +779,13 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err != nil {
 			return fmt.Errorf("invalid mask configuration: %w", err)
 		}
+		defer m.Close()
 		if m.HasMasks() {
 			if err := m.ValidateColumns(ingestSchema); err != nil {
 				return fmt.Errorf("invalid mask configuration: %w", err)
+			}
+			if err := m.Prepare(ctx); err != nil {
+				return fmt.Errorf("prepare column masks: %w", err)
 			}
 			m.ApplyToSchema(ingestSchema)
 			columnMasker = m

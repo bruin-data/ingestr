@@ -629,13 +629,13 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "wrapped bigquery rate limit pointer error",
-			err:  fmt.Errorf("wrapped: %w", &gcbq.Error{Reason: "rateLimitExceeded", Message: "Exceeded rate limits"}),
+			name: "bigquery rate limit pointer error",
+			err:  &gcbq.Error{Reason: "rateLimitExceeded", Message: "Exceeded rate limits"},
 			want: true,
 		},
 		{
-			name: "wrapped bigquery multi error pointer",
-			err:  fmt.Errorf("wrapped: %w", &gcbq.MultiError{gcbq.Error{Reason: "quotaExceeded", Message: "quota"}}),
+			name: "bigquery multi error pointer",
+			err:  &gcbq.MultiError{gcbq.Error{Reason: "quotaExceeded", Message: "quota"}},
 			want: true,
 		},
 		{
@@ -664,8 +664,8 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "wrapped backend error pointer",
-			err:  fmt.Errorf("wrapped: %w", &gcbq.Error{Reason: "backendError", Message: "boom"}),
+			name: "backend error pointer",
+			err:  &gcbq.Error{Reason: "backendError", Message: "boom"},
 			want: true,
 		},
 		{
@@ -684,8 +684,8 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "wrapped dataset not found",
-			err:  fmt.Errorf("wrapped: %w", &gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging, notFound"}),
+			name: "dataset not found pointer",
+			err:  &gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging, notFound"},
 			want: true,
 		},
 		{
@@ -694,8 +694,8 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "wrapped dataset not found in job location is permanent",
-			err:  fmt.Errorf("query failed: %w", &gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging was not found in location EU"}),
+			name: "dataset not found pointer in job location is permanent",
+			err:  &gcbq.Error{Reason: "notFound", Message: "Not found: Dataset my-project:_bruin_staging was not found in location EU"},
 			want: false,
 		},
 		{
@@ -712,9 +712,12 @@ func TestIsRetryableLoadJobError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isRetryableLoadJobError(tt.err)
-			if got != tt.want {
-				t.Fatalf("isRetryableLoadJobError() = %v, want %v", got, tt.want)
+			// Include pointer-form compatibility inputs in both direct and wrapped chains.
+			for _, err := range []error{tt.err, fmt.Errorf("wrapped: %w", tt.err)} {
+				got := isRetryableLoadJobError(err)
+				if got != tt.want {
+					t.Fatalf("isRetryableLoadJobError() = %v, want %v", got, tt.want)
+				}
 			}
 		})
 	}

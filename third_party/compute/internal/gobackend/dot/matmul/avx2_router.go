@@ -1,0 +1,41 @@
+// Copyright 2023-2026 The GoMLX Authors. SPDX-License-Identifier: Apache-2.0
+
+//go:build amd64 && goexperiment.simd
+
+package matmul
+
+import (
+	"github.com/gomlx/compute/internal/gobackend"
+	"github.com/gomlx/compute/internal/gobackend/dot"
+	//alt:bf16 "github.com/gomlx/compute/dtypes/bfloat16"
+	//alt:f16 "github.com/gomlx/compute/dtypes/float16"
+)
+
+// avx2RouterFloat32 routes the matrix multiplication to the appropriate AVX2 implementation.
+func avx2RouterFloat32( //alt:f32
+	//alt:bf16 func avx2RouterBFloat16(
+	//alt:f16 func avx2RouterFloat16(
+	//alt:f64 func avx2RouterFloat64(
+	backend *gobackend.Backend,
+	layout dot.Layout,
+	lhs, rhs []float32, //alt:f32
+	//alt:bf16 lhs, rhs []bfloat16.BFloat16,
+	//alt:f16 lhs, rhs []float16.Float16,
+	//alt:f64 lhs, rhs []float64,
+	batchSize, lhsCrossSize, rhsCrossSize, contractingSize int,
+	output []float32) { //alt:f32|bf16|f16
+	//alt:f64 output []float64) {
+
+	if !ForceLargeVariant && (ForceSmallVariant || (lhsCrossSize*rhsCrossSize*contractingSize < noSIMDSmallMatMulSizeThreshold)) {
+		avx2SmallFloat32Parallel(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output) //alt:f32
+		//alt:bf16 avx2SmallBFloat16Parallel(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output)
+		//alt:f16 avx2SmallFloat16Parallel(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output)
+		//alt:f64 avx2SmallFloat64Parallel(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output)
+		return
+	}
+
+	avx2LargeFloat32(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output) //alt:f32
+	//alt:bf16 avx2LargeBFloat16(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output)
+	//alt:f16 avx2LargeFloat16(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output)
+	//alt:f64 avx2LargeFloat64(backend, layout, lhs, rhs, batchSize, lhsCrossSize, rhsCrossSize, contractingSize, output)
+}

@@ -1,6 +1,6 @@
 module github.com/bruin-data/ingestr
 
-go 1.26.5
+go 1.27.0
 
 require (
 	cloud.google.com/go/auth v0.20.0
@@ -50,6 +50,11 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/gofrs/flock v0.13.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gomlx/compute v0.1.7
+	github.com/gomlx/compute-onnx v0.1.6
+	github.com/gomlx/go-huggingface v0.4.4
+	github.com/gomlx/gomlx v0.28.9
+	github.com/gomlx/onnx-gomlx v0.5.6
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hamba/avro/v2 v2.31.0
@@ -68,7 +73,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/rabbitmq/amqp091-go v1.13.0
 	github.com/redis/go-redis/v9 v9.21.0
-	github.com/schollz/progressbar/v3 v3.18.0
+	github.com/schollz/progressbar/v3 v3.19.0
 	github.com/segmentio/kafka-go v0.4.50
 	github.com/shenzhencenter/google-ads-pb v1.23.0
 	github.com/shirou/gopsutil/v4 v4.26.5
@@ -95,7 +100,7 @@ require (
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
 	go.mongodb.org/mongo-driver v1.17.7
 	golang.org/x/crypto v0.54.0
-	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
+	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 	golang.org/x/net v0.57.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.22.0
@@ -258,6 +263,7 @@ require (
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/golang/glog v1.2.5 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
+	github.com/gomlx/exceptions v0.0.3 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
@@ -299,7 +305,7 @@ require (
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-runewidth v0.0.20 // indirect
+	github.com/mattn/go-runewidth v0.0.21 // indirect
 	github.com/mdelapenya/tlscert v0.2.0 // indirect
 	github.com/minio/simdjson-go v0.4.5 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
@@ -434,7 +440,7 @@ require (
 	howett.net/plist v0.0.0-20181124034731-591f970eefbb // indirect
 	k8s.io/apimachinery v0.35.1 // indirect
 	k8s.io/client-go v0.32.3 // indirect
-	k8s.io/klog/v2 v2.130.1 // indirect
+	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	modernc.org/libc v1.74.1 // indirect
@@ -445,3 +451,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	software.sslmate.com/src/go-pkcs12 v0.6.0 // indirect
 )
+
+replace github.com/gomlx/onnx-gomlx => ./third_party/onnx-gomlx
+
+replace github.com/gomlx/compute => ./third_party/compute

@@ -38,6 +38,98 @@ ingestr ingest \
 
 ## Masking Algorithms
 
+### Model-based PII detection: `gliner`
+
+Use GLiNER PII Edge to replace detected PII spans **inside a field**, leaving the
+surrounding text intact:
+
+```bash
+ingestr ingest \
+  --source-uri 'csv:///data/messages.csv' \
+  --source-table messages \
+  --dest-uri 'duckdb:///data/masked.db' \
+  --dest-table messages \
+  --mask 'message:gliner' \
+  --mask 'notes:gliner'
+# Contact Maya Chen at maya.chen@example.com or +1 (415) 555-0124.
+# → Contact <NAME> at <EMAIL> or <PHONE_NUMBER>.
+```
+
+`gliner` accepts no parameter. It uses eight fixed labels at threshold 0.3:
+`<NAME>`, `<ADDRESS>`, `<EMAIL>`, `<PHONE_NUMBER>`, `<URL>`, `<DATE>`,
+`<ACCOUNT_NUMBER>`, and `<SECRET>`. Overlapping detections are resolved by score.
+Output is a string; as with existing string masks, non-string values are processed
+as their string representation. Nulls remain null, and empty/whitespace-only
+strings are unchanged without inference. Unicode span offsets are UTF-8 bytes.
+Invalid UTF-8, more than 2,048 splitter tokens, or more than 7,999 model tokens
+(including label prompts) fail ingestion rather than silently truncating input.
+There is no long-document chunking. Model failures return errors, not the
+unmasked input, and inference errors do not include the field contents.
+
+**Detection is probabilistic and can miss PII or mask non-PII.** This is not a
+guarantee of anonymization or regulatory compliance. Prefer `redact` for complete
+field removal. Do not use detected-span redaction to preserve primary-key uniqueness.
+
+#### Installation and offline use
+
+Only selecting `gliner` causes model setup. After column validation, ingestion
+downloads missing assets, verifies SHA-256 checksums, and initializes the model
+before executing the write strategy. Ordinary ingestion, existing masks, help,
+and schema/configuration inspection do not download or initialize it.
+
+The first selected run downloads the publisher's **181 MB FP32** ONNX export and
+tokenizer files from [knowledgator/gliner-pii-edge-v1.0](https://huggingface.co/knowledgator/gliner-pii-edge-v1.0),
+Apache 2.0, pinned to checkpoint `9b7f39b0a2da971a5beea78d35f1539d4009c891`.
+Assets are cached under the OS user cache directory at
+`ingestr/models/gliner-pii-edge/<checkpoint>/` (on Linux, normally
+`~/.cache/ingestr/models/gliner-pii-edge/<checkpoint>/`, respecting `XDG_CACHE_HOME`).
+No input text is sent to Hugging Face or another inference service. Downloads
+use a 15-minute per-file timeout and honor ingestion cancellation.
+
+For offline runs, set `INGESTR_GLINER_MODEL_DIR` to a pre-provisioned directory
+containing `onnx/model.onnx`, `tokenizer.json`, and `tokenizer_config.json` from
+that checkpoint. You can copy the downloaded cache directory from an online
+machine. An explicit directory **never downloads**; missing or mismatched files
+fail with an error. Checksums are verified on initialization, including cached
+files. Corrupt cached files must be removed or replaced before retrying.
+
+#### Runtime and performance limits
+
+Inference uses GoMLX's pure-Go backend and `hftokenizer`: no Python subprocess,
+CGO, XLA, or ONNX Runtime is needed for this mask. Building ingestr now requires
+Go 1.27 or later. The rest of ingestr may still use native database drivers.
+The UINT8 export is not supported (`DynamicQuantizeLSTM`); do not substitute it.
+The bundled importer compatibility fork retains its license and only adds the
+Flatten boundary fix and rank-one ScatterElements support. A separate compute
+compatibility fork replaces invalid integer-address arithmetic in matrix
+kernels and packing with typed slice indexing; pointer checks remain enabled and no
+special build tags are required. The runtime raises
+graph constant retention and omits LSTM lengths in memory **only for unpadded
+batch-one inputs**.
+
+One tokenizer, parsed model, weight store, and Go backend are reused across the
+masked columns and rows of an ingestion job. Calls are serialized, including
+concurrent batches; resources are closed when the job ends. Each text gets a
+fresh specialized graph, which is released after inference. Inputs/predictions
+are not kept in a result cache. Separate ingestion jobs have separate runtimes
+but reuse the disk cache. Cancellation is checked between values; an inference
+already in progress must finish before cancellation can take effect.
+
+This is intended for low-volume, short text, not high-throughput ingestion.
+The original PoC observed about **1.1–1.3 seconds per short fresh request** and
+**707 MiB peak RAM** at four threads on a Xeon. Its 324 ms repeated-same-graph
+measurement is **not general warm latency**: new text requires graph construction.
+The integrated runtime reuses weights, but makes no latency or memory guarantee;
+longer inputs and simultaneous jobs can require substantially more memory.
+`GOMAXPROCS=4` can limit Go CPU parallelism for the process, not just this mask.
+
+Developer verification (explicitly permits model download; ordinary tests skip it):
+
+```bash
+INGESTR_TEST_GLINER=1 GOMAXPROCS=4 CGO_ENABLED=0 \
+  go test -count=1 -v ./pkg/transformer/gliner -run TestModelReferenceParity
+```
+
 ### Irreversible Masking
 
 These algorithms permanently transform data in a way that cannot be reversed.

@@ -1,6 +1,7 @@
 package transformer
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha256"
@@ -19,6 +20,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/transformer/gliner"
 	"github.com/google/uuid"
 )
 
@@ -41,6 +43,15 @@ type ColumnMasker struct {
 	uuidCache map[string]string
 	seqCache  map[string]int64
 	seqNext   int64
+	gliner    piiMasker
+	glinerCtx context.Context
+	newGLiner func(context.Context) (piiMasker, error)
+	closed    bool
+}
+
+type piiMasker interface {
+	Mask(string) (string, error)
+	Close()
 }
 
 func NewColumnMasker(configs []string) (*ColumnMasker, error) {
@@ -48,6 +59,8 @@ func NewColumnMasker(configs []string) (*ColumnMasker, error) {
 		specs:     make(map[string]maskSpec),
 		uuidCache: make(map[string]string),
 		seqCache:  make(map[string]int64),
+		glinerCtx: context.Background(),
+		newGLiner: func(ctx context.Context) (piiMasker, error) { return gliner.New(ctx) },
 	}
 	for _, cfg := range configs {
 		if cfg == "" {
@@ -63,9 +76,50 @@ func NewColumnMasker(configs []string) (*ColumnMasker, error) {
 		if spec.algorithm == "hmac" && (!spec.hasParam || spec.param == "") {
 			return nil, fmt.Errorf("hmac mask for column %q requires a key: pass it as 'column:hmac:KEY'", spec.column)
 		}
+		if spec.algorithm == "gliner" && spec.hasParam {
+			return nil, fmt.Errorf("gliner mask does not accept a parameter; use 'column:gliner'")
+		}
 		m.specs[spec.column] = spec
 	}
 	return m, nil
+}
+
+// Prepare initializes expensive masks only when selected. Schema inspection and
+// configuration validation never download or load a model.
+func (m *ColumnMasker) Prepare(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, spec := range m.specs {
+		if spec.algorithm == "gliner" {
+			m.glinerCtx = ctx
+			return m.prepareGLiner(ctx)
+		}
+	}
+	return nil
+}
+
+func (m *ColumnMasker) prepareGLiner(ctx context.Context) error {
+	if m.closed {
+		return fmt.Errorf("column masker is closed")
+	}
+	if m.gliner == nil {
+		runtime, err := m.newGLiner(ctx)
+		if err != nil {
+			return fmt.Errorf("initialize gliner mask: %w", err)
+		}
+		m.gliner = runtime
+	}
+	return nil
+}
+
+func (m *ColumnMasker) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gliner != nil {
+		m.gliner.Close()
+		m.gliner = nil
+	}
+	m.closed = true
 }
 
 func parseMaskSpec(s string) (maskSpec, error) {
@@ -351,6 +405,7 @@ func isFloatArrowType(t arrow.DataType) bool {
 // ---- algorithm registry ----
 
 var algorithms = map[string]algorithmDef{
+	"gliner":       {apply: algoGLiner, outputType: stringOutput},
 	"hash":         {apply: algoSHA256, outputType: stringOutput},
 	"sha256":       {apply: algoSHA256, outputType: stringOutput},
 	"md5":          {apply: algoMD5, outputType: stringOutput},
@@ -376,6 +431,22 @@ var algorithms = map[string]algorithmDef{
 }
 
 var nonDigitsRe = regexp.MustCompile(`\D`)
+
+func algoGLiner(m *ColumnMasker, v string, _ arrow.DataType, _ string, _ bool) (any, bool, error) {
+	if strings.TrimSpace(v) == "" {
+		return v, false, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.glinerCtx.Err(); err != nil {
+		return nil, false, err
+	}
+	if err := m.prepareGLiner(m.glinerCtx); err != nil {
+		return nil, false, err
+	}
+	result, err := m.gliner.Mask(v)
+	return result, false, err
+}
 
 // ---- hash algorithms ----
 

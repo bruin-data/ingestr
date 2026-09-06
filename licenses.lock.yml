@@ -763,11 +763,6 @@ dependencies:
       licenses:
         - MIT
       status: allowed
-    - module: github.com/ebitengine/purego
-      version: v0.10.0
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/eclipse/paho.mqtt.golang
       version: v1.5.1
       licenses:
@@ -939,6 +934,36 @@ dependencies:
       version: v1.0.0
       licenses:
         - BSD-3-Clause
+      status: allowed
+    - module: github.com/gomlx/compute
+      version: v0.1.7
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/gomlx/compute-onnx
+      version: v0.1.6
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/gomlx/exceptions
+      version: v0.0.3
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/gomlx/go-huggingface
+      version: v0.4.4
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/gomlx/gomlx
+      version: v0.28.9
+      licenses:
+        - Apache-2.0
+      status: allowed
+    - module: github.com/gomlx/onnx-gomlx
+      version: v0.5.6
+      licenses:
+        - Apache-2.0
       status: allowed
     - module: github.com/google/flatbuffers
       version: v25.12.19+incompatible
@@ -1164,7 +1189,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/mattn/go-runewidth
-      version: v0.0.20
+      version: v0.0.21
       licenses:
         - MIT
       status: allowed
@@ -1467,7 +1492,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/schollz/progressbar/v3
-      version: v3.18.0
+      version: v3.19.0
       licenses:
         - MIT
       status: allowed
@@ -1887,7 +1912,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/exp
-      version: v0.0.0-20260218203240-3dfff04db8fa
+      version: v0.0.0-20260410095643-746e56fc9e2f
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -2008,7 +2033,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: k8s.io/klog/v2
-      version: v2.130.1
+      version: v2.140.0
       licenses:
         - Apache-2.0
       status: allowed

@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 # Build arguments for version information (passed from CI)
 ARG VERSION=dev
@@ -16,6 +16,8 @@ WORKDIR /src
 
 # Copy dependency files 
 COPY go.mod go.sum ./
+COPY third_party/onnx-gomlx/ ./third_party/onnx-gomlx/
+COPY third_party/compute/ ./third_party/compute/
 
 # Download dependencies with cache mount
 RUN --mount=type=cache,target=/go/pkg/mod \

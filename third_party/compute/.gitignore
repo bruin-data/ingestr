@@ -1,0 +1,26 @@
+# IDEs and AI coders
+.idea
+.cursor
+.crush
+.Trash*
+gomlx.code-workspace
+.vscode/launch.json
+.vscode/settings.json
+codebook.toml
+
+# Python tests
+venv
+
+# Go files for development / debugging.
+go.work
+go.work.sum
+*.test
+
+# Jupyter tmp files
+.ipynb_checkpoints
+Untitled.ipynb
+
+# Agent context files (root only)
+/GEMINI.md
+/CLAUDE.md
+/conductor

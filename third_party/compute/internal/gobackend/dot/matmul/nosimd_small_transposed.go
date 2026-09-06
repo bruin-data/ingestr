@@ -1,0 +1,136 @@
+// Copyright 2023-2026 The GoMLX Authors. SPDX-License-Identifier: Apache-2.0
+
+package matmul
+
+import (
+	"github.com/gomlx/compute/dtypes/gotype"
+	"github.com/gomlx/compute/internal/gobackend"
+)
+
+// smallUnsafeNoSIMDGenericParallelNonTransposed implements a parallelized version of the non-SIMD matrix
+// multiplication for the transposed layout. (Shapes lhs=[B,N,K] x rhs=[B,M,K] -> [B,N,M]).
+//
+// Ingestr patch: typed slice indexing replaces stored uintptr addresses.
+func smallNoSIMDGenericParallelTransposed[I, O gotype.NumericNotComplex]( //alt:generic
+	//alt:half func smallNoSIMDHalfPrecisionParallelTransposed[I gotype.HalfPrecision[I], O gotype.NumericNotComplex](
+	backend *gobackend.Backend,
+	lhs, rhs []I,
+	batchSize, lhsCrossSize, rhsCrossSize, contractingSize int,
+	output []O, matricesPerTask int) {
+
+	// Crate work that needs doing in a buffered channel.
+	type chunkData struct {
+		batchIdx, batchCount int
+	}
+	numChunks := (batchSize + matricesPerTask - 1) / matricesPerTask
+	work := make(chan chunkData, numChunks)
+	for batchIdx := 0; batchIdx < batchSize; batchIdx += matricesPerTask {
+		batchCount := min(matricesPerTask, batchSize-batchIdx)
+		work <- chunkData{batchIdx, batchCount}
+	}
+	close(work)
+
+	// Execute the work in as many workers as available.
+	backend.Workers.Saturate(func() {
+		for chunk := range work {
+			smallNoSIMDGenericTransposed( //alt:generic
+				//alt:half smallNoSIMDHalfPrecisionTransposed(
+				lhs, rhs,
+				chunk.batchIdx, chunk.batchCount, lhsCrossSize, rhsCrossSize, contractingSize,
+				output)
+		}
+	})
+}
+
+// smallNoSIMDGenericTransposed implements a non-SIMD matrix multiplication for the transposed layout.
+//
+// lhs:    shape [batchSize, lhsCrossSize, contractingSize].
+// rhs:    shape [batchSize, rhsCrossSize, contractingSize]. (note: transposed)
+// output: shape [batchSize, lhsCrossSize, rhsCrossSize].
+//
+// It is used for small inputs, where packing the data is not worth the cost.
+func smallNoSIMDGenericTransposed[I, O gotype.NumericNotComplex]( //alt:generic
+	//alt:half func smallNoSIMDHalfPrecisionTransposed[I gotype.HalfPrecision[I], O gotype.NumericNotComplex](
+	lhs, rhs []I,
+	batchStart, batchCount, lhsCrossSize, rhsCrossSize, contractingSize int,
+	output []O) {
+	lhsStride := lhsCrossSize * contractingSize
+	rhsStride := contractingSize * rhsCrossSize
+	outputStride := lhsCrossSize * rhsCrossSize
+
+	// Bounds check hint for the compiler: the hope is that the compile won't need to
+	// insert bounds checks inside the loops below.
+	//
+	// This should never happen.
+	if len(lhs) < lhsStride*(batchStart+batchCount) || len(rhs) < rhsStride*(batchStart+batchCount) || len(output) < outputStride*(batchStart+batchCount) {
+		panic("out of bounds")
+	}
+
+	if batchCount == 0 || lhsCrossSize == 0 || rhsCrossSize == 0 || contractingSize == 0 {
+		return
+	}
+
+	lhsBase := batchStart * lhsStride
+	rhsBase := batchStart * rhsStride
+	outputBase := batchStart * outputStride
+
+	for range batchCount {
+		for row := range lhsCrossSize {
+			lRowBase := lhsBase + row*contractingSize
+
+			for col := range rhsCrossSize {
+				rColBase := rhsBase + col*contractingSize
+				var acc O
+
+				lIdx := lRowBase
+				rIdx := rColBase
+
+				var contractingIdx int
+				for ; contractingIdx+3 < contractingSize; contractingIdx += 4 {
+					l0 := lhs[lIdx]   //alt:generic
+					l1 := lhs[lIdx+1] //alt:generic
+					l2 := lhs[lIdx+2] //alt:generic
+					l3 := lhs[lIdx+3] //alt:generic
+					r0 := rhs[rIdx]   //alt:generic
+					r1 := rhs[rIdx+1] //alt:generic
+					r2 := rhs[rIdx+2] //alt:generic
+					r3 := rhs[rIdx+3] //alt:generic
+
+					//alt:half l0 := lhs[lIdx].Float32()
+					//alt:half l1 := lhs[lIdx+1].Float32()
+					//alt:half l2 := lhs[lIdx+2].Float32()
+					//alt:half l3 := lhs[lIdx+3].Float32()
+					//alt:half r0 := rhs[rIdx].Float32()
+					//alt:half r1 := rhs[rIdx+1].Float32()
+					//alt:half r2 := rhs[rIdx+2].Float32()
+					//alt:half r3 := rhs[rIdx+3].Float32()
+
+					v0 := O(l0 * r0)
+					v1 := O(l1 * r1)
+					v2 := O(l2 * r2)
+					v3 := O(l3 * r3)
+
+					acc += v0 + v1 + v2 + v3
+					lIdx += 4
+					rIdx += 4
+				}
+				for ; contractingIdx < contractingSize; contractingIdx++ {
+					l0 := lhs[lIdx] //alt:generic
+					r0 := rhs[rIdx] //alt:generic
+					//alt:half l0 := lhs[lIdx].Float32()
+					//alt:half r0 := rhs[rIdx].Float32()
+					acc += O(l0 * r0)
+					lIdx++
+					rIdx++
+				}
+
+				outputIdx := outputBase + row*rhsCrossSize + col
+				output[outputIdx] = acc
+			}
+		}
+
+		lhsBase += lhsStride
+		rhsBase += rhsStride
+		outputBase += outputStride
+	}
+}
