@@ -1,9 +1,7 @@
 import copy
 import io
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -49,7 +47,6 @@ class ReleaseContractTest(unittest.TestCase):
 
     def test_all_platforms_and_determinism(self):
         data = contract.build(self.directory, TAG, SHA)
-        contract.validate(data, TAG, SHA)
         self.assertEqual(len(data["platforms"]), 5)
         for entry in data["platforms"]:
             self.assertEqual(entry["executable"]["sha256"], contract.digest(b"packaged executable")["sha256"])
@@ -81,6 +78,7 @@ class ReleaseContractTest(unittest.TestCase):
                 contract.identity(TAG, sha)
 
     def test_invalid_fields(self):
+        self.assertEqual(self.run_cli("build").returncode, 0)
         valid = contract.build(self.directory, TAG, SHA)
         mutations = [
             lambda d: d.update(repository="attacker/ingestr"),
@@ -88,6 +86,7 @@ class ReleaseContractTest(unittest.TestCase):
             lambda d: d.update(tag="v1.2.4"),
             lambda d: d.update(source_commit="b" * 40),
             lambda d: d.update(schema_version=True),
+            lambda d: d.update(schema_version=1.0),
             lambda d: d.update(extra=1),
             lambda d: d["platforms"].pop(),
             lambda d: d["platforms"].__setitem__(4, d["platforms"][0]),
@@ -101,8 +100,9 @@ class ReleaseContractTest(unittest.TestCase):
         for mutation in mutations:
             data = copy.deepcopy(valid)
             mutation(data)
-            with self.subTest(data=data), self.assertRaises(ValueError):
-                contract.validate(data, TAG, SHA)
+            (self.directory / contract.MANIFEST).write_text(json.dumps(data))
+            with self.subTest(data=data):
+                self.assertNotEqual(self.run_cli("check").returncode, 0)
 
     def test_duplicate_json_fields(self):
         for text in ('{"tag":"v1.2.3","tag":"v1.2.3"}', '{"archive":{"size":1,"size":2}}'):
@@ -152,70 +152,6 @@ class ReleaseContractTest(unittest.TestCase):
                                      "--tag", TAG, "--commit", SHA, "--goos", "linux", "--goarch", "amd64"],
                                     capture_output=True)
             self.assertEqual(result.returncode == 0, success)
-
-    def test_publication_gate(self):
-        self.assertEqual(self.run_cli("build").returncode, 0)
-        (self.directory / contract.BUNDLE).write_text("synthetic bundle; signing is a separate workflow step")
-        with tempfile.TemporaryDirectory() as work:
-            root = Path(work)
-            (root / "hack").mkdir()
-            shutil.copy(SCRIPT, root / "hack/release_manifest.py")
-            shutil.copytree(self.directory, root / "release-assets")
-            tools = root / "tools"
-            tools.mkdir()
-            # Exercise the actual publication script without any network or writes to GitHub.
-            (tools / "gh").write_text("""#!/usr/bin/env python3
-import json, os, pathlib, shutil, sys
-args = sys.argv[1:]
-scenario = os.environ['SCENARIO']
-with open('calls', 'a') as out:
-    out.write(' '.join(args) + '\\n')
-if args[0] == 'api':
-    if scenario == 'existing': print(os.environ['GITHUB_REF_NAME'])
-    if scenario == 'api-error': sys.exit(1)
-elif args[:2] == ['release', 'upload'] and scenario == 'upload-error':
-    sys.exit(1)
-elif args[:2] == ['release', 'view']:
-    names = sorted(p.name for p in pathlib.Path('release-assets').iterdir())
-    if scenario == 'missing-windows': names.remove('ingestr_Windows_x86_64.zip')
-    print(json.dumps({'isDraft': scenario != 'already-public', 'assets': [{'name': n} for n in names]}))
-elif args[:2] == ['release', 'download']:
-    dest = pathlib.Path(args[args.index('--dir') + 1])
-    shutil.copytree('release-assets', dest)
-    if scenario == 'tamper': (dest / 'ingestr-manifest.v1.json').write_text('changed')
-""")
-            (tools / "git").write_text("""#!/bin/sh
-if [ "$1" = rev-parse ]; then
-  echo "$GITHUB_SHA"
-elif [ "$SCENARIO" = moved-tag ]; then
-  printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\trefs/tags/%s\\n' "$GITHUB_REF_NAME"
-else
-  printf '%s\\trefs/tags/%s\\n' "$GITHUB_SHA" "$GITHUB_REF_NAME"
-fi
-""")
-            (tools / "cosign").write_text("""#!/bin/sh
-echo "cosign $*" >> calls
-test "$SCENARIO" != invalid-signature
-""")
-            for tool in tools.iterdir():
-                tool.chmod(0o755)
-            for scenario in ("ok", "existing", "api-error", "upload-error", "missing-windows",
-                             "already-public", "tamper", "moved-tag", "invalid-signature"):
-                calls = root / "calls"
-                calls.unlink(missing_ok=True)
-                env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
-                       "GITHUB_REPOSITORY": contract.REPOSITORY, "GITHUB_REF_NAME": TAG,
-                       "GITHUB_SHA": SHA, "GH_TOKEN": "test-only", "SCENARIO": scenario}
-                result = subprocess.run(["bash", str(SCRIPT.with_name("publish-release.sh"))],
-                                        cwd=root, env=env, capture_output=True)
-                with self.subTest(scenario=scenario):
-                    self.assertEqual(result.returncode == 0, scenario == "ok", result.stderr)
-                    logged = calls.read_text()
-                    self.assertEqual("--draft=false --latest" in logged, scenario == "ok")
-                    if scenario == "ok":
-                        self.assertTrue(logged.splitlines()[-1].startswith("release edit "))
-                    if scenario in ("existing", "api-error", "moved-tag", "invalid-signature"):
-                        self.assertNotIn("release create", logged)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,6 @@ PLATFORMS = {
     ("windows", "amd64"): "ingestr_Windows_x86_64.zip",
 }
 MANIFEST = "ingestr-manifest.v1.json"
-BUNDLE = "ingestr-manifest.v1.sigstore.json"
 
 
 def require(condition, message):
@@ -97,31 +96,6 @@ def unique_object(pairs):
     return result
 
 
-def validate(data, tag, commit):
-    identity(tag, commit)
-    require(set(data) == {"schema_version", "repository", "tag", "version", "source_commit", "platforms"},
-            "unexpected manifest fields")
-    require(type(data["schema_version"]) is int and data["schema_version"] == 1, "unsupported schema")
-    require(data["repository"] == REPOSITORY and data["tag"] == tag and data["version"] == tag[1:]
-            and data["source_commit"] == commit, "release identity mismatch")
-    require(type(data["platforms"]) is list and len(data["platforms"]) == 5, "expected five platforms")
-    seen = set()
-    for entry in data["platforms"]:
-        require(set(entry) == {"goos", "goarch", "archive", "executable"}, "unexpected platform fields")
-        key = (entry["goos"], entry["goarch"])
-        require(key in PLATFORMS and key not in seen, "unknown or duplicate platform")
-        seen.add(key)
-        archive, binary = entry["archive"], entry["executable"]
-        require(set(archive) == {"name", "format", "size", "sha256"}, "unexpected archive fields")
-        require(set(binary) == {"path", "size", "sha256"}, "unexpected executable fields")
-        windows = key[0] == "windows"
-        require(archive["name"] == PLATFORMS[key] and archive["format"] == ("zip" if windows else "tar.gz")
-                and binary["path"] == ("ingestr.exe" if windows else "ingestr"), "wrong artifact names")
-        for item in (archive, binary):
-            require(type(item["size"]) is int and item["size"] > 0, "invalid size")
-            require(type(item["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "invalid hash")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["identity", "build", "check", "smoke"])
@@ -153,8 +127,9 @@ def main():
         checksum_path.write_text(checksums, encoding="utf-8")
     else:
         actual = json.loads(manifest.read_bytes(), object_pairs_hook=unique_object)
-        validate(actual, args.tag, args.commit)
-        require(actual == expected, "manifest does not match actual artifacts")
+        # Compare JSON, not Python values (where True == 1), to enforce field types too.
+        require(json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True),
+                "manifest does not match actual artifacts")
         require(checksum_path.read_text(encoding="utf-8") == checksums, "checksums do not match actual artifacts")
 
 
