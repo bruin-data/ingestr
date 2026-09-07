@@ -275,7 +275,7 @@ The `id_property` param decides what happens to each row:
 | --- | --- | --- |
 | _(unset)_ | create | every row is a new record |
 | a unique property, e.g. `email` | upsert | update if it exists, else create |
-| `hs_object_id` | update | update by record id; missing ids are rejected |
+| `hs_object_id` | update | update by record id; rows with no id are skipped (warned), ids not found in HubSpot are rejected |
 
 Create and update work for any object. **Upsert** needs a writable unique property, which only some objects have:
 

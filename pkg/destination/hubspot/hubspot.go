@@ -100,10 +100,10 @@ func (d *HubSpotDestination) Connect(_ context.Context, uri string) error {
 		httpclient.WithTimeout(2*time.Minute),
 		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		// Batch endpoints are POST but safe to retry on 429/5xx; without this
-		// resty treats them as non-idempotent and skips retries. resty's default
-		// backoff already honors HubSpot's Retry-After header on 429.
-		httpclient.WithAllowNonIdempotentRetry(),
+		// Writes are POST and not auto-retried: retrying a batch create after a
+		// lost response or 5xx could duplicate records. The rate limiter keeps us
+		// under HubSpot's limit to avoid 429s; transient failures fail the run,
+		// which is safe to re-run (upsert/update are keyed and idempotent).
 		httpclient.WithAuth(httpclient.NewBearerAuth(cfg.apiKey)),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithHeader("Content-Type", "application/json"),
@@ -769,33 +769,39 @@ func (d *HubSpotDestination) PrepareTable(ctx context.Context, opts destination.
 }
 
 // checkProperties reports which requested names exist as properties on an object
-// type, via the batch read endpoint.
+// type, via the batch read endpoint. Names are chunked by batchLimit because the
+// batch endpoint accepts at most that many inputs per request.
 func (d *HubSpotDestination) checkProperties(ctx context.Context, objectType string, names []string) (map[string]bool, error) {
-	inputs := make([]map[string]string, len(names))
-	for i, n := range names {
-		inputs[i] = map[string]string{"name": n}
-	}
 	endpoint := fmt.Sprintf("/crm/v3/properties/%s/batch/read", url.PathEscape(objectType))
-	resp, err := d.client.R(ctx).SetBody(map[string]interface{}{"inputs": inputs, "archived": false}).Post(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	// 200 = all found, 207 = some names missing; both return the resolved
-	// properties in results[], so unknown names are those absent from it.
-	if resp.StatusCode() != 200 && resp.StatusCode() != 207 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode())
-	}
-	var body struct {
-		Results []struct {
-			Name string `json:"name"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(resp.Body(), &body); err != nil {
-		return nil, err
-	}
-	existing := make(map[string]bool, len(body.Results))
-	for _, p := range body.Results {
-		existing[p.Name] = true
+	existing := make(map[string]bool, len(names))
+
+	for start := 0; start < len(names); start += batchLimit {
+		end := min(start+batchLimit, len(names))
+		inputs := make([]map[string]string, 0, end-start)
+		for _, n := range names[start:end] {
+			inputs = append(inputs, map[string]string{"name": n})
+		}
+
+		resp, err := d.client.R(ctx).SetBody(map[string]interface{}{"inputs": inputs, "archived": false}).Post(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		// 200 = all found, 207 = some names missing; both return the resolved
+		// properties in results[], so unknown names are those absent from it.
+		if resp.StatusCode() != 200 && resp.StatusCode() != 207 {
+			return nil, fmt.Errorf("status %d", resp.StatusCode())
+		}
+		var body struct {
+			Results []struct {
+				Name string `json:"name"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal(resp.Body(), &body); err != nil {
+			return nil, err
+		}
+		for _, p := range body.Results {
+			existing[p.Name] = true
+		}
 	}
 	return existing, nil
 }

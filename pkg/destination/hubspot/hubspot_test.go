@@ -463,6 +463,44 @@ func TestPrepareTableRejectsUnknownProperty(t *testing.T) {
 	require.ErrorContains(t, err, "not properties")
 }
 
+func TestPrepareTableChunksLargeSchema(t *testing.T) {
+	// >100 columns must be validated in multiple batch/read requests, not one
+	// oversized request that HubSpot would reject.
+	var calls int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		var req struct {
+			Inputs []struct {
+				Name string `json:"name"`
+			} `json:"inputs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		require.LessOrEqual(t, len(req.Inputs), 100, "each batch/read must be <= 100 inputs")
+		var results []string
+		for _, in := range req.Inputs {
+			results = append(results, fmt.Sprintf(`{"name":%q}`, in.Name))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[`+strings.Join(results, ",")+`]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	cols := make([]string, 150)
+	for i := range cols {
+		cols[i] = fmt.Sprintf("col_%d", i)
+	}
+	err := d.PrepareTable(context.Background(), destination.PrepareOptions{
+		Table:  "contacts",
+		Schema: schemaWithColumns(cols...),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls, "150 columns should be validated in 2 chunked requests")
+}
+
 func TestPrepareTablePassesForKnownProperties(t *testing.T) {
 	server := newPropertyServer(t, []string{"email", "firstname"})
 	d := connectTestDestination(t, server.URL)
