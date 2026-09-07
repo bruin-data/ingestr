@@ -25,6 +25,12 @@ import (
 const (
 	sqlServerDriverName = "sqlserver"
 	azureSQLDriverName  = "azuresql"
+
+	// go-mssqldb defaults to 4096-byte TDS packets, which bottlenecks bulk
+	// extraction on packet-processing overhead. Use the protocol maximum like
+	// the MSSQL destination does; the server negotiates down (e.g. to 16383
+	// on encrypted connections) when needed.
+	defaultPacketSize = "32767"
 )
 
 type MSSQLSource struct {
@@ -99,6 +105,10 @@ func URIToConnString(uri string) (string, string, error) {
 	database := strings.TrimPrefix(u.Path, "/")
 	query := u.Query()
 	deleteQueryParamCI(query, "driver")
+
+	if _, hasPacketSize := normalizeQueryParamCI(query, "packet size"); !hasPacketSize {
+		query.Set("packet size", defaultPacketSize)
+	}
 
 	auth, hasAuthentication := normalizeQueryParamCI(query, "authentication")
 	if hasAuthentication {
