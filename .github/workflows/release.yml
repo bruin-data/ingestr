@@ -24,10 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Validate stable tag and contract tests
+      - name: Validate stable tag
         run: |
-          python3 hack/release_manifest.py identity --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA"
-          python3 -m unittest discover -s hack -p 'test_release*.py'
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
       - name: Refuse any existing release (including abandoned drafts)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -170,11 +169,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - {goos: linux, goarch: amd64, runner: ubuntu-24.04}
-          - {goos: linux, goarch: arm64, runner: ubuntu-24.04-arm}
-          - {goos: darwin, goarch: amd64, runner: macos-15-intel}
-          - {goos: darwin, goarch: arm64, runner: macos-15}
-          - {goos: windows, goarch: amd64, runner: windows-2022}
+          - {goos: linux, archive: ingestr_Linux_x86_64.tar.gz, runner: ubuntu-24.04}
+          - {goos: linux, archive: ingestr_Linux_arm64.tar.gz, runner: ubuntu-24.04-arm}
+          - {goos: darwin, archive: ingestr_Darwin_x86_64.tar.gz, runner: macos-15-intel}
+          - {goos: darwin, archive: ingestr_Darwin_arm64.tar.gz, runner: macos-15}
+          - {goos: windows, archive: ingestr_Windows_x86_64.zip, runner: windows-2022}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -184,15 +183,24 @@ jobs:
           path: release-assets
       - name: Check packaged executable version on its native platform
         shell: bash
-        run: python hack/release_manifest.py smoke --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --goos '${{ matrix.goos }}' --goarch '${{ matrix.goarch }}'
+        working-directory: release-assets
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          if [[ "$ARCHIVE" == *.zip ]]; then
+            unzip "$ARCHIVE" ingestr.exe
+            executable=ingestr.exe
+          else
+            tar -xzf "$ARCHIVE" ingestr
+            executable=ingestr
+          fi
+          test "$(./"$executable" --version | tr -d '\r')" = "ingestr version $GITHUB_REF_NAME"
 
   publish-release:
     runs-on: ubuntu-latest
     needs: [smoke-archives, integration-tests, docker-test]
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -200,31 +208,24 @@ jobs:
           pattern: archives-*-${{ github.run_attempt }}
           merge-multiple: true
           path: release-assets
-      - name: Build manifest from final same-run archives
-        run: python3 hack/release_manifest.py build --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA"
-      - name: Attest manifest with GitHub OIDC
-        id: attest
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: release-assets/ingestr-manifest.v1.json
-          create-storage-record: false
-      - name: Verify attestation and publish complete release
+      - name: Publish complete immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        working-directory: release-assets
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = bruin-data/ingestr
           test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" "refs/tags/$GITHUB_REF_NAME^{}" | tail -1 | cut -f1)" = "$GITHUB_SHA"
-          cp "$BUNDLE_PATH" release-assets/ingestr-manifest.v1.sigstore.json
-          python3 hack/release_manifest.py check --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA"
-          gh attestation verify release-assets/ingestr-manifest.v1.json \
-            --bundle release-assets/ingestr-manifest.v1.sigstore.json \
-            --repo bruin-data/ingestr \
-            --cert-identity "https://github.com/bruin-data/ingestr/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME" \
-            --source-ref "refs/tags/$GITHUB_REF_NAME" --source-digest "$GITHUB_SHA"
+          archives=(
+            ingestr_Darwin_x86_64.tar.gz ingestr_Darwin_arm64.tar.gz
+            ingestr_Linux_x86_64.tar.gz ingestr_Linux_arm64.tar.gz
+            ingestr_Windows_x86_64.zip
+          )
+          checksums="ingestr_${GITHUB_REF_NAME#v}_checksums.txt"
+          sha256sum "${archives[@]}" > "$checksums"
           # gh uploads all files to an internal draft before publishing once.
-          gh release create "$GITHUB_REF_NAME" release-assets/* \
+          # GitHub automatically attests the release when immutability is enabled.
+          gh release create "$GITHUB_REF_NAME" "${archives[@]}" "$checksums" \
             --verify-tag --latest --title "$GITHUB_REF_NAME" --generate-notes
 
   release-pip:

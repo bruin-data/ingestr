@@ -87,7 +87,7 @@ builds:
       - -buildmode=exe
 
 release:
-  # Publication is owned by release.yml after all five archives are authenticated.
+  # Publication is owned by release.yml after all five archives are tested.
   draft: true
   make_latest: false
   prerelease: false
