@@ -78,3 +78,5 @@ ingestr ingest \
 
 
 `--source-table` specifies the file path or glob on the server that `ingestr` should read.
+
+ZIP archives can be read without a separate extraction step. Append a member glob after `!`, for example `--source-table '/releases/data.zip!**/*.csv'`. CSV, JSONL/NDJSON, and parquet members are supported, including the existing `#csv`, `#jsonl`, and `#parquet` format hints for extensionless members.

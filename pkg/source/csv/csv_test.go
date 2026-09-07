@@ -1,6 +1,7 @@
 package csv
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"io"
@@ -251,5 +252,76 @@ func TestRead_ByteCap(t *testing.T) {
 	}
 	if offR != onR || offR != rows {
 		t.Fatalf("row mismatch: off=%d on=%d want=%d", offR, onR, rows)
+	}
+}
+
+func TestCSVSource_ReadsZIPMembers(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "release.zip")
+	writeCSVZIP(t, archivePath, []struct {
+		name string
+		data string
+	}{
+		{name: "data/day-1.csv", data: "id,name\n1,Alice\n2,Bob\n"},
+		{name: "data/day-2.csv", data: "id,name\n3,Carol\n4,\"unterminated\n"},
+		{name: "notes.txt", data: "ignored"},
+	})
+
+	src := NewCSVSource()
+	if err := src.Connect(context.Background(), "csv://"+archivePath+"!data/*.csv"); err != nil {
+		t.Fatal(err)
+	}
+	table, err := src.GetTable(context.Background(), source.TableRequest{Name: "release"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := table.Read(context.Background(), source.ReadOptions{Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	totalRows := int64(0)
+	for result := range results {
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+		if result.Batch.NumCols() != 2 {
+			t.Fatalf("read %d columns, want only the 2 CSV columns", result.Batch.NumCols())
+		}
+		totalRows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+
+	if totalRows != 3 {
+		t.Fatalf("read %d rows, want 3", totalRows)
+	}
+}
+
+func writeCSVZIP(t *testing.T, path string, files []struct {
+	name string
+	data string
+},
+) {
+	t.Helper()
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for _, entry := range files {
+		member, err := writer.Create(entry.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := member.Write([]byte(entry.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
