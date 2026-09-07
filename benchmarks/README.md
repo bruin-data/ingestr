@@ -13,8 +13,8 @@ bash benchmarks/scripts/run.sh --scenarios '*kafka*' --tools gong dlt spark --ro
 bash benchmarks/scripts/run.sh --scenarios '*kafka*' --tools gong dlt --validate --rows 100000
 ```
 
-The standard setup starts the broker along with the other benchmark services and
-seeds the selected size. Seeding reuses a complete topic; an incomplete topic is
+The runner starts the broker and seeds Kafka only when a Kafka scenario is selected
+(standalone setup/seed scripts opt in with `BENCH_KAFKA=1`). Seeding reuses a complete topic; an incomplete topic is
 deleted and rebuilt. These `bench_data_json_*` topics are dedicated benchmark
 fixtures. Retention is disabled so repeated runs read the same records.
 

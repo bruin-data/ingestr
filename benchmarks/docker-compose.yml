@@ -1,5 +1,6 @@
 services:
   bench-kafka-source:
+    profiles: [kafka]
     image: apache/kafka:3.9.1
     container_name: bench-kafka-source
     ports:

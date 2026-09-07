@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb" "uv")
-OPTIONAL_TOOLS=("sling" "java")
+REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb")
+OPTIONAL_TOOLS=("uv" "sling" "java")
+if [[ "${BENCH_KAFKA:-0}" == "1" ]]; then
+    REQUIRED_TOOLS+=("uv")
+    OPTIONAL_TOOLS=("sling" "java")
+fi
 
 errors=0
 for tool in "${REQUIRED_TOOLS[@]}"; do

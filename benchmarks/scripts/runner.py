@@ -689,17 +689,19 @@ def build_prepare_command(
 # Setup & seed (delegate to existing bash scripts)
 # ---------------------------------------------------------------------------
 
-def run_setup():
+def run_setup(uses_kafka: bool = False):
     console.print("[bold]==> Running setup...[/bold]")
     subprocess.run(
         ["bash", str(BENCH_DIR / "scripts" / "setup.sh")],
+        env={**os.environ, "BENCH_KAFKA": "1" if uses_kafka else "0"},
         check=True,
     )
 
 
-def run_seed(rows: int):
+def run_seed(rows: int, uses_kafka: bool = False):
     console.print(f"[bold]==> Seeding {rows:,} rows...[/bold]")
     env = {**os.environ, "BENCH_ROWS": str(rows), "BENCH_SEED_SIZES": str(rows)}
+    env["BENCH_KAFKA"] = "1" if uses_kafka else "0"
     subprocess.run(
         ["bash", str(BENCH_DIR / "scripts" / "seed.sh")],
         env=env,
@@ -1531,8 +1533,9 @@ def main():
 
     # Setup and seed
     if not args.skip_setup:
-        run_setup()
-        run_seed(rows)
+        uses_kafka = any(sources[s["source"]]["type"] == "kafka" for s in active_scenarios)
+        run_setup(uses_kafka)
+        run_seed(rows, uses_kafka)
 
     # Determine available tools after setup so a clean build can create bin/ingestr.
     available_tools = []
