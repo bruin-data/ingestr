@@ -1554,7 +1554,7 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 					ID string `json:"id"`
 				} `json:"from"`
 				To []struct {
-					ToObjectId interface{} `json:"toObjectId"`
+					ToObjectId json.Number `json:"toObjectId"`
 				} `json:"to"`
 			} `json:"results"`
 		}
@@ -1599,8 +1599,8 @@ func (s *Hubspotsource) fetchAssociationsBatch(ctx context.Context, fromType str
 				continue
 			}
 			for _, to := range item.To {
-				if to.ToObjectId != nil {
-					result[fromID] = append(result[fromID], fmt.Sprintf("%v", to.ToObjectId))
+				if to.ToObjectId != "" {
+					result[fromID] = append(result[fromID], to.ToObjectId.String())
 				}
 			}
 		}
