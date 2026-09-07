@@ -41,7 +41,11 @@ func pgoRelationMsgWithTypeMods(relID uint32, namespace, table string, cols ...p
 	data = append(data, 'd')
 	data = binary.BigEndian.AppendUint16(data, uint16(len(cols)))
 	for _, c := range cols {
-		data = append(data, 0x00)
+		flags := byte(0)
+		if c.name == "id" {
+			flags = 1
+		}
+		data = append(data, flags)
 		data = append(data, []byte(c.name+"\x00")...)
 		data = binary.BigEndian.AppendUint32(data, c.oid)
 		data = binary.BigEndian.AppendUint32(data, uint32(c.typemod))
@@ -200,7 +204,28 @@ func TestUpdateTreatsColumnsMissingFromPublicationTupleAsUnchanged(t *testing.T)
 	changes, err := d.Decode(pgoCommitMsg(100), 100)
 	require.NoError(t, err)
 	require.Len(t, changes, 1)
-	require.Equal(t, tupleUnchangedMarker, changes[0].Values[1])
+	require.Equal(t, tupleRelationMissingMarker, changes[0].Values[1])
+	require.True(t, isTupleUnchanged(changes[0].Values[1]))
+}
+
+func TestUpdateMarksColumnRemovedFromRelationAsChanged(t *testing.T) {
+	tableSchema := schemaChangeTestSchema(
+		schema.Column{Name: "id", DataType: schema.TypeInt32},
+		schema.Column{Name: "legacy", DataType: schema.TypeString},
+	)
+	d := NewDecoder(tableSchema, "public", "t")
+	_, err := d.Decode(pgoRelationMsgWithCols(1, "public", "t", pgoCol{"id", 23}, pgoCol{"legacy", 25}), 10)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoRelationMsgWithCols(1, "public", "t", pgoCol{"id", 23}), 11)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoBeginMsg(100), 12)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoUpdateMsgWithVals(1, "7"), 13)
+	require.NoError(t, err)
+	changes, err := d.Decode(pgoCommitMsg(100), 100)
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	require.Equal(t, tupleRelationMissingMarker, changes[0].Values[1])
 }
 
 func TestDecoderRejectsColumnAddedMidStream(t *testing.T) {

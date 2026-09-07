@@ -144,17 +144,27 @@ func safeCommitLSN(repl lowWaterReporter, accum *batchAccumulator) pglogrepl.LSN
 // still pending in the replicator or accumulator, and the pipeline writes
 // buffered batches durably before committing, so confirming it cannot discard
 // un-emitted WAL. Returns the LSN to treat as the new lastEmitted; the caller
-// must only call this when streaming. The send respects ctx so a cancelled run
-// shutting down cannot wedge the reader on a channel the pipeline stopped draining.
-func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batchAccumulator, results chan<- source.RecordBatchResult, lastEmitted pglogrepl.LSN) pglogrepl.LSN {
+// must only call this when streaming. Publication coverage is revalidated
+// immediately before advancing so a cached check cannot skip unpublished
+// events. The send respects ctx so a cancelled run shutting down cannot wedge
+// the reader on a channel the pipeline stopped draining.
+func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batchAccumulator, results chan<- source.RecordBatchResult, lastEmitted pglogrepl.LSN) (pglogrepl.LSN, error) {
 	safe := safeCommitLSN(repl, accum)
 	if safe <= lastEmitted {
-		return lastEmitted
+		return lastEmitted, nil
+	}
+	if validator, ok := repl.(interface {
+		ValidateIdleCheckpoint(context.Context) error
+	}); ok {
+		if err := validator.ValidateIdleCheckpoint(ctx); err != nil {
+			return lastEmitted, err
+		}
 	}
 	if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: checkpointCommitToken(safe)}); err == nil {
-		return safe
+		return safe, nil
+	} else {
+		return lastEmitted, err
 	}
-	return lastEmitted
 }
 
 type streamHeartbeatEmitter interface {

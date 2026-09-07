@@ -195,8 +195,13 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			}
 			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, sqlBarrierLSN, slotName, results, opts)
 			if err != nil {
-				_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)})
-				return
+				var schemaErr *SchemaChangedError
+				if !opts.Streaming || !errors.As(err, &schemaErr) {
+					_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)})
+					return
+				}
+				output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+				signal = &streamSignal{changedTables: []string{schemaErr.Table}, schemaErrors: []*SchemaChangedError{schemaErr}}
 			}
 			if signal == nil {
 				return
@@ -392,6 +397,11 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 	for _, t := range r.tables {
 		prevSchemas[t.Name] = t.Schema
 		prevIncarnations[t.Name] = t.Incarnation
+	}
+	for _, table := range tables {
+		if previous, ok := prevSchemas[table.Name]; ok && !sameKeyColumns(previous.PrimaryKeys, table.PrimaryKeys) {
+			return 0, fmt.Errorf("replica identity keys changed for %s; restart with --full-refresh to rebuild using keys %v", table.Name, table.PrimaryKeys)
+		}
 	}
 	var added []source.SourceTableInfo
 	for _, t := range tables {
@@ -821,6 +831,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		schemas[t.Name] = t.Schema
 	}
 	accum := newBatchAccumulator(batchSize, schemas)
+	defer func() { retErr = errors.Join(retErr, accum.toast.close()) }()
+	if opts.Streaming {
+		accum.durable = r.source.pos.Committed
+	}
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
 	// confirms the slot only after the data is durable. barrierNonce is empty in
@@ -962,7 +976,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if opts.Streaming {
 				lastHeartbeat = maybeEmitStreamHeartbeat(ctx, repl, lastHeartbeat)
-				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				lastIdleToken, err = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				if err != nil {
+					return nil, err
+				}
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

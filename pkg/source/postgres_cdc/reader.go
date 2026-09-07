@@ -61,15 +61,17 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			config.Debug("[CDC] Resume metadata changed for %s; replacing its snapshot", r.tableName)
 			opts.CDCResumeLSN = ""
 			replacementSnapshot = true
-			tableSchema, err := getTableSchema(ctx, r.source.queryPool, r.tableName)
+			tableSchema, err := r.source.getTableSchema(ctx, r.tableName)
 			if err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 				return
 			}
 			tableSchema = addCDCColumns(tableSchema)
-			if len(r.tableSchema.PrimaryKeys) > 0 {
-				tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+			if err := validateConfiguredKeys(ctx, r.source.queryPool, r.tableName, tableSchema, r.tableSchema.PrimaryKeys); err != nil {
+				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
 			}
+			tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
 			r.tableSchema = tableSchema
 		}
 
@@ -246,6 +248,10 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 	}
 
 	accum := newBatchAccumulator(batchSize, map[string]*schema.TableSchema{"": r.tableSchema})
+	defer func() { retErr = errors.Join(retErr, accum.toast.close()) }()
+	if opts.Streaming {
+		accum.durable = r.source.pos.Committed
+	}
 
 	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
 	if err == nil && !opts.Streaming {
@@ -272,7 +278,7 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 			return 0, fmt.Errorf("failed to reconcile publication after table recreation: %w", err)
 		}
 	}
-	tableSchema, err := getTableSchema(ctx, r.source.queryPool, r.tableName)
+	tableSchema, err := r.source.getTableSchema(ctx, r.tableName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to refresh schema for table %s: %w", r.tableName, err)
 	}
@@ -280,9 +286,10 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 	// Keep the merge keys the run started with: they may carry user-provided
 	// keys that re-detection would drop, and the decoder, compaction, and
 	// unchanged-TOAST fill must keep keying off the same columns.
-	if len(r.tableSchema.PrimaryKeys) > 0 {
-		tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+	if err := validateConfiguredKeys(ctx, r.source.queryPool, r.tableName, tableSchema, r.tableSchema.PrimaryKeys); err != nil {
+		return 0, err
 	}
+	tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
 	r.tableSchema = tableSchema
 	if schemaErr != nil {
 		if r.allowedUnknown == nil {
@@ -490,7 +497,10 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if streaming {
 				lastHeartbeat = maybeEmitStreamHeartbeat(ctx, repl, lastHeartbeat)
-				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				lastIdleToken, err = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				if err != nil {
+					return err
+				}
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

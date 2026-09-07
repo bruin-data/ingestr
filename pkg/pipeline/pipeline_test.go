@@ -22,6 +22,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
+	_ "github.com/bruin-data/ingestr/pkg/source/mongodb"
+	_ "github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/stretchr/testify/require"

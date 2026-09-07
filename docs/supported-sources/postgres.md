@@ -55,6 +55,14 @@ With a user-managed publication (`publication=` supplied), ingestr never alters 
 
 The backfill-plus-stream handoff is safe under the `merge` strategy: changes that fall in the overlap between the snapshot and the WAL stream are applied idempotently by primary key. Tables without a primary key (or replica identity) cannot be part of logical replication and are skipped with a warning.
 
+For `REPLICA IDENTITY USING INDEX`, ingestr uses the selected index's key columns for merging, even when the table also has a primary key. Index `INCLUDE` columns are not merge keys. Explicit `--primary-key` columns must match that identity unless the table uses `REPLICA IDENTITY FULL`. If identity keys change during a stream, restart with `--full-refresh` so the destination and decoder use the same keys.
+
+If you update a table's merge key, use `ALTER TABLE schema.table REPLICA IDENTITY FULL` before making those updates. PostgreSQL can omit unchanged TOAST values (large text, JSON, binary, or array values) from the new row image. ingestr preserves them from the old row image or earlier pending changes. If neither contains the value, the run fails before emitting the key move. Enable `REPLICA IDENTITY FULL` and run with `--full-refresh` to recover from an already logged incomplete key move.
+
+Publications must publish `insert`, `update`, `delete`, and `truncate`. ingestr rejects missing operations before taking a snapshot and rechecks publication coverage during replication, even when table discovery is disabled. After restoring a publication that may have skipped events, use `--full-refresh` to rebuild the destination.
+
+Stored generated columns require PostgreSQL 18 or newer and a publication with `publish_generated_columns = stored`. ingestr enables this option on publications it manages. For a custom publication, run `ALTER PUBLICATION publication_name SET (publish_generated_columns = stored)` yourself. Earlier PostgreSQL versions and virtual generated columns are rejected before the snapshot because their values cannot be kept current through logical replication. See [PostgreSQL's generated-column replication documentation](https://www.postgresql.org/docs/18/logical-replication-gencols.html).
+
 ### Tutorial
 
 For a step-by-step walkthrough — from enabling logical replication to streaming live inserts, updates, and deletes into DuckDB — see [Replicate PostgreSQL to DuckDB with CDC](/tutorials/cdc-postgres-duckdb.md).

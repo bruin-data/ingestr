@@ -26,6 +26,8 @@ var (
 // builders, schema construction, or batch concatenation.
 type batchAccumulator struct {
 	schemas map[string]*schema.TableSchema
+	toast   *toastState
+	durable func() pglogrepl.LSN
 	changes map[string][]Change
 	// minLSN tracks the lowest (oldest) transaction LSN still buffered per
 	// table. Changes are added in non-decreasing LSN order, so the first group
@@ -41,6 +43,7 @@ type batchAccumulator struct {
 func newBatchAccumulator(threshold int, schemas map[string]*schema.TableSchema) *batchAccumulator {
 	return &batchAccumulator{
 		schemas:   schemas,
+		toast:     newToastState(),
 		changes:   make(map[string][]Change),
 		minLSN:    make(map[string]pglogrepl.LSN),
 		bytes:     make(map[string]int64),
@@ -231,8 +234,16 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 	}
 	delete(a.bytes, tableName)
 
+	if a.durable != nil {
+		if err := a.toast.prune(ctx, a.durable()); err != nil {
+			return fmt.Errorf("failed to prune TOAST state: %w", err)
+		}
+	}
 	truncateIndex := lastTruncateIndex(changes)
 	if truncateIndex >= 0 {
+		if err := a.toast.truncate(ctx, tableName); err != nil {
+			return fmt.Errorf("failed to reset TOAST state: %w", err)
+		}
 		changes = changes[truncateIndex+1:]
 	}
 
@@ -249,7 +260,9 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 	// omitted column (the merge falls back to a target row that doesn't exist
 	// yet).
 	if len(changes) > 0 {
-		applyIntraBatchFill(changes, tableSchema)
+		if err := fillUnchangedColumns(ctx, changes, tableSchema, tableName, a.toast); err != nil {
+			return fmt.Errorf("failed to fill unchanged TOAST columns: %w", err)
+		}
 		changes = expandUpdates(changes, tableSchema)
 	}
 

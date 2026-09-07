@@ -1,6 +1,7 @@
 package postgres_cdc
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -356,4 +357,11 @@ func TestFlushWindowCompaction(t *testing.T) {
 		assert.Equal(t, int64(1), idCol.Value(0))
 		assert.Equal(t, int64(2), idCol.Value(1))
 	})
+}
+
+// applyIntraBatchFill is also used for standalone change windows in tests.
+func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
+	state := newToastState()
+	state.limit = 1<<63 - 1
+	_ = fillUnchangedColumns(context.Background(), changes, tableSchema, "", state)
 }
