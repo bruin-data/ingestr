@@ -7,15 +7,22 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/source/mssql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func setupMSSQLCTDatabase(t *testing.T, ctx context.Context) (string, *sql.DB) {
+	t.Helper()
+	return setupMSSQLCTDatabaseWithSnapshotIsolation(t, ctx, true)
+}
+
+func setupMSSQLCTDatabaseWithSnapshotIsolation(t *testing.T, ctx context.Context, snapshotIsolation bool) (string, *sql.DB) {
 	t.Helper()
 
 	if mssqlDest.uri == "" {
@@ -33,8 +40,10 @@ func setupMSSQLCTDatabase(t *testing.T, ctx context.Context) (string, *sql.DB) {
 		_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP DATABASE [%s]", dbName))
 	})
 
-	_, err = adminDB.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET ALLOW_SNAPSHOT_ISOLATION ON", dbName))
-	require.NoError(t, err)
+	if snapshotIsolation {
+		_, err = adminDB.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET ALLOW_SNAPSHOT_ISOLATION ON", dbName))
+		require.NoError(t, err)
+	}
 	_, err = adminDB.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON)", dbName))
 	require.NoError(t, err)
 
@@ -208,4 +217,101 @@ func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
 
 	assert.EqualValues(t, 0, queryDuckCount(`SELECT COUNT(*) FROM items_empty_dest WHERE NOT "_cdc_deleted"`), "insert+delete on an empty table should not create an active destination row")
 	assert.NotEmpty(t, queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_empty_dest`), "empty-table cursor tombstone should advance resume state")
+}
+
+// A cursor validated at the start of an incremental read can stop being valid
+// before CHANGETABLE runs: retention cleanup, or a TRUNCATE, which resets the
+// table's tracking. Either isolation path must fail the run instead of
+// committing a partial change set and advancing the cursor past the hole.
+func TestMSSQLChangeTracking_CursorInvalidatedMidRead_DuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	for _, tc := range []struct {
+		name              string
+		snapshotIsolation bool
+	}{
+		{name: "read_committed", snapshotIsolation: false},
+		{name: "snapshot", snapshotIsolation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbName, db := setupMSSQLCTDatabaseWithSnapshotIsolation(t, ctx, tc.snapshotIsolation)
+			createMSSQLCTItemsTable(t, ctx, db)
+
+			tmpDir, err := os.MkdirTemp("", "mssql_ct_invalidated_*")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+			duckdbPath := tmpDir + "/test.duckdb"
+
+			cfg := &config.IngestConfig{
+				SourceURI:   mssqlURIForDatabase(t, mssqlDest.uri, "mssql+ct", dbName, nil),
+				SourceTable: "dbo.items",
+				DestURI:     "duckdb:///" + duckdbPath,
+				DestTable:   "items_dest",
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+			queryDuckCount := func(query string) int64 {
+				duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+				require.NoError(t, err)
+				defer func() { _ = duck.Close() }()
+
+				var v int64
+				require.NoError(t, duck.QueryRow(query).Scan(&v))
+				return v
+			}
+			queryDuckString := func(query string) string {
+				duck, err := sql.Open("adbc_generic", "driver=duckdb;path="+duckdbPath)
+				require.NoError(t, err)
+				defer func() { _ = duck.Close() }()
+
+				var v string
+				require.NoError(t, duck.QueryRow(query).Scan(&v))
+				return v
+			}
+
+			require.EqualValues(t, 3, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE NOT "_cdc_deleted"`))
+			cursorAfterSnapshot := queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_dest`)
+
+			_, err = db.ExecContext(ctx, `UPDATE dbo.items SET value = 150 WHERE id = 1`)
+			require.NoError(t, err)
+
+			var fired atomic.Bool
+			hookErrs := make(chan error, 1)
+			mssql.SetChangeTrackingCursorValidationHook(func(hookCtx context.Context, sourceURI, table string) error {
+				if sourceURI != cfg.SourceURI || !fired.CompareAndSwap(false, true) {
+					return nil
+				}
+				_, err := db.ExecContext(hookCtx, `TRUNCATE TABLE dbo.items`)
+				if err == nil {
+					_, err = db.ExecContext(hookCtx, `INSERT INTO dbo.items (id, name, value) VALUES (10, N'item10', 1000)`)
+				}
+				hookErrs <- err
+				return nil
+			})
+			t.Cleanup(func() { mssql.SetChangeTrackingCursorValidationHook(nil) })
+
+			err = pipeline.New(cfg).Run(ctx)
+			require.True(t, fired.Load(), "hook must run between cursor validation and CHANGETABLE")
+			require.NoError(t, <-hookErrs)
+			require.Error(t, err, "run must fail instead of committing a change set read past an invalidated cursor")
+			if !tc.snapshotIsolation {
+				assert.Contains(t, err.Error(), "no longer valid")
+			}
+
+			assert.EqualValues(t, 3, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE NOT "_cdc_deleted"`), "failed run must not touch the destination")
+			assert.Equal(t, cursorAfterSnapshot, queryDuckString(`SELECT MAX("_cdc_lsn") FROM items_dest`), "failed run must not advance the cursor")
+
+			mssql.SetChangeTrackingCursorValidationHook(nil)
+			fullRefresh := *cfg
+			fullRefresh.FullRefresh = true
+			require.NoError(t, pipeline.New(&fullRefresh).Run(ctx))
+			assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE NOT "_cdc_deleted"`))
+			assert.EqualValues(t, 1, queryDuckCount(`SELECT COUNT(*) FROM items_dest WHERE id = 10 AND value = 1000 AND NOT "_cdc_deleted"`))
+
+			require.NoError(t, pipeline.New(cfg).Run(ctx), "incremental runs resume after the rebuild")
+		})
+	}
 }

@@ -26,6 +26,10 @@ func sourceTableSummary(cfg *config.IngestConfig) string {
 }
 
 func PrintSummary(cfg *config.IngestConfig) {
+	tableNaming := ""
+	if cfg.CDCTableNaming != config.TableNamingSchemaTable && cfg.CDCTableNaming != "" {
+		tableNaming = string(cfg.CDCTableNaming)
+	}
 	if output.IsJSON() {
 		output.EventStart(output.StartInfo{
 			SourceType:     displayFromURI(cfg.SourceURI)[0],
@@ -36,6 +40,7 @@ func PrintSummary(cfg *config.IngestConfig) {
 			IncrementalKey: cfg.IncrementalKey,
 			PrimaryKey:     cfg.PrimaryKeys,
 			SchemaNaming:   cfg.SchemaNaming,
+			CDCTableNaming: tableNaming,
 		})
 		return
 	}
@@ -83,6 +88,9 @@ func PrintSummary(cfg *config.IngestConfig) {
 	output.Statusf("%s %s\n", yellow("Primary Key:"), pkValue)
 	if cfg.SchemaNaming != string(naming.Default) && cfg.SchemaNaming != "" {
 		output.Statusf("%s %s\n", yellow("Schema naming:"), cfg.SchemaNaming)
+	}
+	if tableNaming != "" {
+		output.Statusf("%s %s\n", yellow("CDC table naming:"), tableNaming)
 	}
 
 	output.Statusf("\n\n")

@@ -101,6 +101,71 @@ func TestIngestConfigValidate_RemovedTruncateInsert(t *testing.T) {
 	}
 }
 
+func TestIngestConfigValidate_TableNaming(t *testing.T) {
+	newCDCConfig := func() *IngestConfig {
+		cfg := DefaultConfig()
+		cfg.SourceURI = "postgres+cdc://localhost/db?dest_schema=foo_cdc"
+		cfg.DestURI = "duckdb://out.duckdb"
+		return cfg
+	}
+
+	t.Run("default passes", func(t *testing.T) {
+		if err := newCDCConfig().Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("empty passes", func(t *testing.T) {
+		cfg := newCDCConfig()
+		cfg.CDCTableNaming = ""
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("table mode passes for multi-table run", func(t *testing.T) {
+		cfg := newCDCConfig()
+		cfg.CDCTableNaming = TableNamingTable
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("table mode passes for a table subset", func(t *testing.T) {
+		cfg := newCDCConfig()
+		cfg.SourceTables = []string{"foo.a", "foo.b"}
+		cfg.CDCTableNaming = TableNamingTable
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("table mode rejected for single-table run", func(t *testing.T) {
+		cfg := newCDCConfig()
+		cfg.SourceTable = "foo.a"
+		cfg.CDCTableNaming = TableNamingTable
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "cdc-table-naming") || !strings.Contains(err.Error(), "multi-table") {
+			t.Fatalf("expected cdc-table-naming multi-table error, got %v", err)
+		}
+	})
+
+	t.Run("unknown value rejected", func(t *testing.T) {
+		cfg := newCDCConfig()
+		cfg.CDCTableNaming = TableNaming("unqualified")
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "cdc-table-naming") || !strings.Contains(err.Error(), "invalid value") {
+			t.Fatalf("expected invalid cdc-table-naming error, got %v", err)
+		}
+	})
+}
+
 func TestIngestConfigValidate_IncrementalPredicateDefersStrategyValidation(t *testing.T) {
 	newCfg := func() *IngestConfig {
 		cfg := DefaultConfig()

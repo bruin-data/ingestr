@@ -60,7 +60,7 @@ func NewDestination() *Destination {
 }
 
 func (d *Destination) Schemes() []string {
-	return []string{"iceberg", "iceberg+rest", "iceberg+glue", "iceberg+hive", "iceberg+hadoop", "iceberg+sql", "iceberg+sqlite", "iceberg+postgres"}
+	return []string{"iceberg", "iceberg+rest", "iceberg+r2", "iceberg+glue", "iceberg+hive", "iceberg+hadoop", "iceberg+sql", "iceberg+sqlite", "iceberg+postgres"}
 }
 
 func (d *Destination) Connect(ctx context.Context, rawURI string) error {
@@ -631,10 +631,11 @@ func (d *Destination) ensureLocalTableDirs(ident icebergtable.Identifier) error 
 }
 
 func (d *Destination) localTableLocation(ident icebergtable.Identifier) (string, bool) {
+	restCatalog := d.cfg.Properties.Get("type", "") == "rest"
 	if d.cfg.TableLocation != "" {
-		return localFilesystemPath(renderTableLocation(d.cfg.TableLocation, ident))
+		return warehouseLocalPath(renderTableLocation(d.cfg.TableLocation, ident), restCatalog)
 	}
-	warehouse, ok := localFilesystemPath(d.cfg.Properties.Get("warehouse", ""))
+	warehouse, ok := warehouseLocalPath(d.cfg.Properties.Get("warehouse", ""), restCatalog)
 	if !ok || warehouse == "" {
 		return "", false
 	}
@@ -642,18 +643,36 @@ func (d *Destination) localTableLocation(ident icebergtable.Identifier) (string,
 	return filepath.Join(parts...), true
 }
 
+// warehouseLocalPath reports whether a warehouse/table-location value points at
+// the local filesystem. For REST catalogs a scheme-less relative value is a
+// catalog warehouse identifier (e.g. R2's "<account>_<bucket>", or a Glue
+// warehouse), not a path, so only file:// URLs and absolute paths qualify. Other
+// catalog types keep treating any non-URI value as a local path.
+func warehouseLocalPath(location string, restCatalog bool) (string, bool) {
+	if restCatalog {
+		return localFilesystemPath(location)
+	}
+	if location != "" && !strings.Contains(location, "://") {
+		return location, true
+	}
+	return localFilesystemPath(location)
+}
+
 func localFilesystemPath(location string) (string, bool) {
 	if location == "" {
 		return "", false
 	}
-	if !strings.Contains(location, "://") {
-		return location, true
+	if strings.Contains(location, "://") {
+		parsed, err := url.Parse(location)
+		if err != nil || parsed.Scheme != "file" {
+			return "", false
+		}
+		return parsed.Path, parsed.Path != ""
 	}
-	parsed, err := url.Parse(location)
-	if err != nil || parsed.Scheme != "file" {
+	if !filepath.IsAbs(location) {
 		return "", false
 	}
-	return parsed.Path, parsed.Path != ""
+	return location, true
 }
 
 func prepareTableSchema(s *schema.TableSchema, primaryKeys []string) *schema.TableSchema {

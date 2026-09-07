@@ -37,6 +37,19 @@ const (
 	ProgressJSON        ProgressMode = "json"
 )
 
+// TableNaming selects how a multi-table run maps a schema-qualified source
+// table to its destination table when dest_schema funnels every table into one
+// destination schema.
+type TableNaming string
+
+const (
+	// TableNamingSchemaTable flattens the source-schema qualifier into the
+	// table name: foo.A -> <dest_schema>.foo_A. Default.
+	TableNamingSchemaTable TableNaming = "schema_table"
+	// TableNamingTable keeps only the table component: foo.A -> <dest_schema>.A.
+	TableNamingTable TableNaming = "table"
+)
+
 type IngestConfig struct {
 	SourceURI   string
 	DestURI     string
@@ -63,8 +76,9 @@ type IngestConfig struct {
 	ClusterBy   []string
 
 	FullRefresh    bool
-	SchemaContract string // Schema contract mode: evolve, freeze, discard_row, discard_value
-	SchemaNaming   string // Schema naming convention: direct, snake_case, auto
+	SchemaContract string      // Schema contract mode: evolve, freeze, discard_row, discard_value
+	SchemaNaming   string      // Schema naming convention: direct, snake_case, auto
+	CDCTableNaming TableNaming // Multi-table CDC destination naming: schema_table, table
 	Yes            bool
 	Progress       ProgressMode
 	Debug          bool
@@ -148,6 +162,7 @@ func DefaultConfig() *IngestConfig {
 		IncrementalStrategy: StrategyReplace,
 		SchemaContract:      "evolve",
 		SchemaNaming:        "",
+		CDCTableNaming:      TableNamingSchemaTable,
 		Progress:            ProgressInteractive,
 		PageSize:            25000,
 		MaxBatchBytes:       512 << 20, // 512 MiB
@@ -186,6 +201,9 @@ func (c *IngestConfig) Validate() error {
 			Field:   "incremental-strategy",
 			Message: `"truncate+insert" has been removed; use "replace"`,
 		}
+	}
+	if err := c.validateCDCTableNaming(); err != nil {
+		return err
 	}
 	if err := c.validateExtractPartitioning(); err != nil {
 		return err
@@ -306,6 +324,28 @@ func IsCDCSourceURI(sourceURI string) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(sourceURI[:schemeEnd]), "+cdc")
+}
+
+// validateCDCTableNaming rejects unknown --cdc-table-naming values and the "table"
+// mode outside multi-table ingestion, where it would silently do nothing.
+func (c *IngestConfig) validateCDCTableNaming() error {
+	switch c.CDCTableNaming {
+	case "", TableNamingSchemaTable:
+		return nil
+	case TableNamingTable:
+		if c.SourceTable != "" {
+			return &ValidationError{
+				Field:   "cdc-table-naming",
+				Message: fmt.Sprintf("%q applies to multi-table ingestion only; use --dest-table to choose a single table's destination", TableNamingTable),
+			}
+		}
+		return nil
+	default:
+		return &ValidationError{
+			Field:   "cdc-table-naming",
+			Message: fmt.Sprintf("invalid value %q (must be %q or %q)", c.CDCTableNaming, TableNamingSchemaTable, TableNamingTable),
+		}
+	}
 }
 
 // validateSourceTables checks the multi-table subset produced by a

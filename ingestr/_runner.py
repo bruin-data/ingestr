@@ -98,6 +98,7 @@ def ingest(
     full_refresh: bool = False,
     schema_contract: Optional[str] = None,
     schema_naming: Optional[str] = None,
+    cdc_table_naming: Optional[str] = None,
     progress: Optional[str] = None,
     page_size: Optional[int] = None,
     loader_file_size: Optional[int] = None,
@@ -139,6 +140,7 @@ def ingest(
         full_refresh=full_refresh,
         schema_contract=schema_contract,
         schema_naming=schema_naming,
+        cdc_table_naming=cdc_table_naming,
         progress=progress,
         page_size=page_size,
         loader_file_size=loader_file_size,
@@ -179,6 +181,7 @@ def build_ingest_args(
     full_refresh: bool = False,
     schema_contract: Optional[str] = None,
     schema_naming: Optional[str] = None,
+    cdc_table_naming: Optional[str] = None,
     progress: Optional[str] = None,
     page_size: Optional[int] = None,
     loader_file_size: Optional[int] = None,
@@ -222,6 +225,7 @@ def build_ingest_args(
     _append_bool(args, "full-refresh", full_refresh)
     _append_option(args, "schema-contract", schema_contract)
     _append_option(args, "schema-naming", schema_naming)
+    _append_option(args, "cdc-table-naming", cdc_table_naming)
     _append_option(args, "progress", progress)
     _append_option(args, "page-size", page_size)
     _append_option(args, "loader-file-size", loader_file_size)

@@ -13,6 +13,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/mssql"
 	mssqldb "github.com/microsoft/go-mssqldb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -678,9 +679,9 @@ func TestErrorClassifiers(t *testing.T) {
 	assert.False(t, isInvalidLSNRangeError(mssqldb.Error{Number: 1205}))
 	assert.False(t, isInvalidLSNRangeError(errors.New("boom")))
 
-	assert.True(t, isSnapshotIsolationUnavailableError(mssqldb.Error{Number: 3952}))
-	assert.False(t, isSnapshotIsolationUnavailableError(mssqldb.Error{Number: 1205}))
-	assert.False(t, isSnapshotIsolationUnavailableError(nil))
+	assert.True(t, mssql.IsSnapshotIsolationUnavailableError(mssqldb.Error{Number: 3952}))
+	assert.False(t, mssql.IsSnapshotIsolationUnavailableError(mssqldb.Error{Number: 1205}))
+	assert.False(t, mssql.IsSnapshotIsolationUnavailableError(nil))
 }
 
 func TestIsTransientMSSQLError(t *testing.T) {

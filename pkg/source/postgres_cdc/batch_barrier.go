@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -13,6 +14,8 @@ import (
 const (
 	batchBarrierPrefix    = "ingestr_cdc_batch_barrier"
 	streamHeartbeatPrefix = "ingestr_cdc_stream_heartbeat"
+
+	maxExpectedBarrierLSNDifference = pglogrepl.LSN(16 * 1024 * 1024)
 )
 
 func emitBatchBarrier(ctx context.Context, pool *pgxpool.Pool) (string, pglogrepl.LSN, error) {
@@ -39,11 +42,31 @@ func emitLogicalMarker(ctx context.Context, pool *pgxpool.Pool, prefix string) (
 	).Scan(&rawLSN); err != nil {
 		return "", 0, fmt.Errorf("failed to emit CDC logical marker: %w", err)
 	}
+	// This return value is diagnostic only. Aurora can return a volume/storage
+	// LSN here that is incomparable with replication-protocol LSNs. See AWS,
+	// "Migrating RDS for PostgreSQL to Aurora using seeded logical replication."
 	lsn, err := pglogrepl.ParseLSN(rawLSN)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to parse CDC logical marker LSN %q: %w", rawLSN, err)
 	}
 	return nonce, lsn, nil
+}
+
+func warnIfBarrierLSNsDiverge(sqlResultLSN, decodedLSN pglogrepl.LSN) {
+	var difference pglogrepl.LSN
+	if sqlResultLSN > decodedLSN {
+		difference = sqlResultLSN - decodedLSN
+	} else {
+		difference = decodedLSN - sqlResultLSN
+	}
+	if difference <= maxExpectedBarrierLSNDifference {
+		return
+	}
+	output.Warnf(
+		"Warning: PostgreSQL returned logical marker LSN %s, but the replication stream decoded it at %s; using the decoded LSN for the CDC checkpoint\n",
+		sqlResultLSN,
+		decodedLSN,
+	)
 }
 
 func parseLogicalDecodingMessage(data []byte, protocolV2, inStream bool) (*pglogrepl.LogicalDecodingMessage, error) {

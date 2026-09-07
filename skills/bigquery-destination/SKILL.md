@@ -25,6 +25,7 @@ source  ->  staging table  ->  destination table
 
 - **`load_job`** (default): a BigQuery load job.
 - **`storage_write`**: the BigQuery Storage Write API.
+- A transient `Not found: Dataset` immediately after dataset creation is retryable, but BigQuery's `was not found in location` variant is permanent and fails immediately.
 
 Selected via the destination URI: `bigquery://project/dataset?load_method=storage_write`. Default is `load_job`.
 
@@ -64,6 +65,8 @@ Two swap mechanisms:
 - **CTAS**: `CREATE OR REPLACE TABLE target [PARTITION BY ...] [CLUSTER BY ...] AS SELECT ... FROM staging`. Billed (scans staging). Reads the streaming buffer. *Can* dedup (`buildBigQueryDedupSelect` emits a `QUALIFY` when PKs are present at swap) — but in practice that only fires on the fast path, where the data is already unique, so it's a no-op; when CTAS reads a normalised staging the PKs have been nilled and the select is a bare `SELECT *`. The `CLUSTER BY` uses the effective clustering (configured `cluster_by`, or the default PK clustering).
 
 Before either path, `SwapTable` ensures the **target dataset exists** (replace only PrepareTables the staging side; CREATE OR REPLACE and copy jobs do not auto-create datasets). After a successful swap, the **staging table is deleted** (best-effort, 30s timeout).
+
+Both `startLoadJobWithRetry` and `startCopyJobWithRetry` cap ambiguous-start retries at `loadJobStartMaxAttempts` (10), so a persistent `NotFound`/duplicate (e.g. a missing dataset) can't retry forever. On exhaustion each adopts an already-submitted job of the same ID if one exists, else fails.
 
 Branch:
 

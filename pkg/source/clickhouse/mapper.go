@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	decimalRegex    = regexp.MustCompile(`(?i)Decimal(?:32|64|128|256)?\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)`)
+	decimalRegex    = regexp.MustCompile(`(?i)Decimal(32|64|128|256)?\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)`)
 	arrayRegex      = regexp.MustCompile(`(?i)^Array\s*\(\s*(.+)\s*\)$`)
 	nullableRegex   = regexp.MustCompile(`(?i)^Nullable\s*\(\s*(.+)\s*\)$`)
 	lowCardRegex    = regexp.MustCompile(`(?i)^LowCardinality\s*\(\s*(.+)\s*\)$`)
@@ -18,6 +18,21 @@ var (
 	datetime64Regex = regexp.MustCompile(`(?i)DateTime64\s*\(\s*(\d+)`)
 	datetimeRegex   = regexp.MustCompile(`(?i)^DateTime\s*(?:\(.+\))?$`)
 )
+
+func decimalWidthPrecision(width string) int {
+	switch width {
+	case "32":
+		return 9
+	case "64":
+		return 18
+	case "128":
+		return 38
+	case "256":
+		return 76
+	default:
+		return 0
+	}
+}
 
 func MapClickHouseToDataType(chType string) (schema.DataType, int, int, schema.DataType) {
 	chType = strings.TrimSpace(chType)
@@ -39,11 +54,18 @@ func MapClickHouseToDataType(chType string) (schema.DataType, int, int, schema.D
 	}
 
 	// Handle Decimal types with precision/scale
-	if matches := decimalRegex.FindStringSubmatch(chType); len(matches) >= 2 {
-		precision, _ := strconv.Atoi(matches[1])
+	if matches := decimalRegex.FindStringSubmatch(chType); matches != nil {
+		width, first, second := matches[1], matches[2], matches[3]
+		// Decimal32|64|128|256(S): the single argument is the scale; precision
+		// is implied by the width (9/18/38/76).
+		if width != "" && second == "" {
+			scale, _ := strconv.Atoi(first)
+			return schema.TypeDecimal, decimalWidthPrecision(width), scale, schema.TypeUnknown
+		}
+		precision, _ := strconv.Atoi(first)
 		scale := 0
-		if len(matches) >= 3 && matches[2] != "" {
-			scale, _ = strconv.Atoi(matches[2])
+		if second != "" {
+			scale, _ = strconv.Atoi(second)
 		}
 		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
 	}

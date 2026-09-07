@@ -921,6 +921,28 @@ func TestRunMultiTableRejectsDestinationCollisionBeforeClaim(t *testing.T) {
 	require.Zero(t, dest.claimCalls, "collision was detected after a durable target claim")
 }
 
+func TestRunMultiTableTableNamingRejectsBasenameCollision(t *testing.T) {
+	// These names cannot collide under the default schema_table mode
+	// (landing.foo_orders vs landing.bar_orders), so a collision here proves
+	// --cdc-table-naming=table reached the pipeline's name resolution.
+	tables := []source.SourceTableInfo{
+		{Name: "foo.orders", DestSchema: "landing", Schema: &schema.TableSchema{}},
+		{Name: "bar.orders", DestSchema: "landing", Schema: &schema.TableSchema{}},
+	}
+	dest := &claimCountingManagedDestination{}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db"
+	cfg.CDCTableNaming = config.TableNamingTable
+	cfg.NoLoadTimestamp = true
+	cfg.Progress = config.ProgressLog
+	p := &Pipeline{config: cfg, dest: dest, cdcConnectorID: "connector"}
+
+	err := p.runMultiTable(t.Context(), &staticMultiTableSource{tables: tables})
+	require.ErrorContains(t, err, "multi-table destination collision")
+	require.ErrorContains(t, err, "landing.orders")
+	require.Zero(t, dest.claimCalls, "collision was detected after a durable target claim")
+}
+
 func TestRunMultiTableStreamingPostgresCDCDoesNotExitOnEmptyInitialTableSet(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.SourceURI = "postgres+cdc://source/db"
@@ -938,9 +960,33 @@ func TestRunMultiTableStreamingPostgresCDCDoesNotExitOnEmptyInitialTableSet(t *t
 func TestMultiTableDestinationNamesChecksDestinationOverrideCollisions(t *testing.T) {
 	tables := []source.SourceTableInfo{{Name: "public.orders"}, {Name: "sales.orders"}}
 
-	_, err := multiTableDestinationNames(tables, "", constantMultiTableNamer{})
+	_, err := multiTableDestinationNames(tables, "", constantMultiTableNamer{}, config.TableNamingSchemaTable)
 	require.ErrorContains(t, err, "multi-table destination collision")
 	require.ErrorContains(t, err, "project.landing.shared")
+}
+
+func TestMultiTableDestinationNamesTableNaming(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: "foo.A", DestSchema: "foo_cdc"},
+		{Name: "foo.B", DestSchema: "foo_cdc"},
+	}
+
+	names, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingTable)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"foo.A": "foo_cdc.A", "foo.B": "foo_cdc.B"}, names)
+}
+
+func TestMultiTableDestinationNamesTableNamingRejectsBasenameCollisions(t *testing.T) {
+	tables := []source.SourceTableInfo{
+		{Name: "foo.orders", DestSchema: "landing"},
+		{Name: "bar.orders", DestSchema: "landing"},
+	}
+
+	_, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingTable)
+	require.ErrorContains(t, err, "multi-table destination collision")
+	require.ErrorContains(t, err, "foo.orders")
+	require.ErrorContains(t, err, "bar.orders")
+	require.ErrorContains(t, err, "landing.orders")
 }
 
 func TestMultiTableDestinationNamesShortensLongFinalComponents(t *testing.T) {
@@ -951,9 +997,9 @@ func TestMultiTableDestinationNamesShortensLongFinalComponents(t *testing.T) {
 		{Name: schemaPrefix + "." + tablePrefix + "_two", DestSchema: "landing"},
 	}
 
-	first, err := multiTableDestinationNames(tables, "postgres", nil)
+	first, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
-	second, err := multiTableDestinationNames(tables, "postgres", nil)
+	second, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "destination mapping changed across restart")
 	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
@@ -972,9 +1018,9 @@ func TestMultiTableDestinationNamesShortensMultibyteFinalComponents(t *testing.T
 		{Name: strings.Repeat("é", 20) + "." + strings.Repeat("界", 14) + "二", DestSchema: "landing"},
 	}
 
-	first, err := multiTableDestinationNames(tables, "postgres", nil)
+	first, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
-	second, err := multiTableDestinationNames(tables, "postgres", nil)
+	second, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "multibyte destination mapping changed across restart")
 	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
@@ -2853,6 +2899,32 @@ func TestCDCStateConnectorID(t *testing.T) {
 	implicitDestBob.DestURI = "postgres://bob@warehouse.example"
 	if resolvedCDCStateConnectorID(&implicitDestAlice, resolved, "") == resolvedCDCStateConnectorID(&implicitDestBob, resolved, "") {
 		t.Fatal("destination URIs with different implicit PostgreSQL databases share a connector ID")
+	}
+}
+
+func TestCDCConnectorIDTableNamingIdentity(t *testing.T) {
+	base := &config.IngestConfig{
+		SourceURI: "postgres+cdc://user@db.example/app?dest_schema=foo_cdc",
+		DestURI:   "postgres://loader@warehouse.example/analytics",
+	}
+	identity := source.ConnectorIdentity{Database: "source-db", Connector: "source-connector"}
+
+	explicitDefault := *base
+	explicitDefault.CDCTableNaming = config.TableNamingSchemaTable
+	if got, want := resolvedCDCStateConnectorID(&explicitDefault, identity, ""), resolvedCDCStateConnectorID(base, identity, ""); got != want {
+		t.Fatalf("explicit default table naming changed the connector ID: got %s want %s", got, want)
+	}
+	if got, want := genericCDCConnectorID(&explicitDefault), genericCDCConnectorID(base); got != want {
+		t.Fatalf("explicit default table naming changed the generic connector ID: got %s want %s", got, want)
+	}
+
+	tableMode := *base
+	tableMode.CDCTableNaming = config.TableNamingTable
+	if resolvedCDCStateConnectorID(&tableMode, identity, "") == resolvedCDCStateConnectorID(base, identity, "") {
+		t.Fatal("table naming mode must not resume the flattened connector's state")
+	}
+	if genericCDCConnectorID(&tableMode) == genericCDCConnectorID(base) {
+		t.Fatal("table naming mode must not resume the flattened generic connector's state")
 	}
 }
 

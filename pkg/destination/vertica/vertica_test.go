@@ -58,6 +58,7 @@ func TestMapVerticaTypeToSchema(t *testing.T) {
 		want schema.DataType
 	}{
 		{"boolean", schema.TypeBoolean},
+		{"bool", schema.TypeBoolean},
 		{"int", schema.TypeInt64},
 		{"bigint", schema.TypeInt64},
 		{"float", schema.TypeFloat64},
@@ -65,15 +66,18 @@ func TestMapVerticaTypeToSchema(t *testing.T) {
 		{"varchar(65000)", schema.TypeString},
 		{"long varchar", schema.TypeString},
 		{"varbinary(80)", schema.TypeBinary},
+		{"binary", schema.TypeBinary},
+		{"timetz", schema.TypeTime},
 		{"date", schema.TypeDate},
 		{"timestamp", schema.TypeTimestamp},
 		{"timestamptz", schema.TypeTimestampTZ},
+		{"interval day to second", schema.TypeString},
 		{"uuid", schema.TypeString},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
-			if got := mapVerticaTypeToSchema(tt.in); got != tt.want {
-				t.Errorf("mapVerticaTypeToSchema(%q) = %v, want %v", tt.in, got, tt.want)
+			if got := MapVerticaTypeToSchema(tt.in); got != tt.want {
+				t.Errorf("MapVerticaTypeToSchema(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}

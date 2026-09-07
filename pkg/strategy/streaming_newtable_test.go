@@ -752,14 +752,15 @@ func TestWithLoadTimestampColumn(t *testing.T) {
 
 func TestMultiTableDestName(t *testing.T) {
 	dest := &fakeDestination{}
-	assert.Equal(t, "products", multiTableDestName(dest, source.SourceTableInfo{Name: "products"}))
-	assert.Equal(t, "ds.app_orders", multiTableDestName(dest, source.SourceTableInfo{Name: "app.orders", DestSchema: "ds"}))
+	assert.Equal(t, "products", multiTableDestName(dest, source.SourceTableInfo{Name: "products"}, config.TableNamingSchemaTable))
+	assert.Equal(t, "ds.app_orders", multiTableDestName(dest, source.SourceTableInfo{Name: "app.orders", DestSchema: "ds"}, config.TableNamingSchemaTable))
+	assert.Equal(t, "ds.orders", multiTableDestName(dest, source.SourceTableInfo{Name: "app.orders", DestSchema: "ds"}, config.TableNamingTable))
 
 	longSource := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
 	longInfo := source.SourceTableInfo{Name: longSource, DestSchema: "landing"}
 	postgresDest := &postgresNamingDestination{fakeDestination: &fakeDestination{}}
-	lateName := multiTableDestName(postgresDest, longInfo)
-	require.Equal(t, lateName, multiTableDestName(postgresDest, longInfo), "late mapping changed across restart")
+	lateName := multiTableDestName(postgresDest, longInfo, config.TableNamingSchemaTable)
+	require.Equal(t, lateName, multiTableDestName(postgresDest, longInfo, config.TableNamingSchemaTable), "late mapping changed across restart")
 	parts := strings.Split(lateName, ".")
 	require.Len(t, parts, 2)
 	require.LessOrEqual(t, len(parts[1]), destination.MaxIdentifierLength("postgres"))
@@ -774,9 +775,9 @@ func TestMultiTableDestNameShortensMultibyteLateTable(t *testing.T) {
 	secondInfo := firstInfo
 	secondInfo.Name = strings.Repeat("é", 20) + "." + strings.Repeat("界", 14) + "二"
 
-	first := multiTableDestName(postgresDest, firstInfo)
-	require.Equal(t, first, multiTableDestName(postgresDest, firstInfo), "late multibyte mapping changed across restart")
-	second := multiTableDestName(postgresDest, secondInfo)
+	first := multiTableDestName(postgresDest, firstInfo, config.TableNamingSchemaTable)
+	require.Equal(t, first, multiTableDestName(postgresDest, firstInfo, config.TableNamingSchemaTable), "late multibyte mapping changed across restart")
+	second := multiTableDestName(postgresDest, secondInfo, config.TableNamingSchemaTable)
 	require.NotEqual(t, first, second)
 	for _, mapped := range []string{first, second} {
 		require.True(t, utf8.ValidString(mapped))

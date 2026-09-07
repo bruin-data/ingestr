@@ -152,6 +152,8 @@ func applyCatalogShorthand(parsed *url.URL, cfg *icebergConfig) error {
 		if parsed.Host != "" {
 			cfg.Properties["uri"] = catalogHTTPURL(parsed, "rest")
 		}
+	case "iceberg+r2":
+		return applyR2Shorthand(parsed, cfg)
 	case "iceberg+hive":
 		cfg.Properties["type"] = "hive"
 		if parsed.Host != "" {
@@ -171,6 +173,24 @@ func applyCatalogShorthand(parsed *url.URL, cfg *icebergConfig) error {
 			cfg.Properties["type"] = catalogType
 		}
 	}
+	return nil
+}
+
+// applyR2Shorthand maps iceberg+r2://<account_id>/<bucket> to Cloudflare R2 Data
+// Catalog, a managed Iceberg REST catalog. Pass the R2 API token as ?token=; R2
+// vends the S3 storage credentials through the catalog, so none are needed here.
+func applyR2Shorthand(parsed *url.URL, cfg *icebergConfig) error {
+	accountID := parsed.Host
+	bucket := strings.Trim(parsed.Path, "/")
+	if accountID == "" || bucket == "" {
+		return fmt.Errorf("iceberg uri: iceberg+r2 requires an account id and bucket, e.g. iceberg+r2://<account_id>/<bucket>?token=<r2_token>")
+	}
+	if strings.Contains(bucket, "/") {
+		return fmt.Errorf("iceberg uri: iceberg+r2 bucket %q must not contain a path", bucket)
+	}
+	cfg.Properties["type"] = "rest"
+	cfg.Properties["uri"] = fmt.Sprintf("https://catalog.cloudflarestorage.com/%s/%s", accountID, bucket)
+	cfg.Properties["warehouse"] = accountID + "_" + bucket
 	return nil
 }
 

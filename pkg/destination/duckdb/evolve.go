@@ -52,6 +52,11 @@ func (d *DuckDBDestination) ApplySchemaEvolutionIfIncarnation(
 			return warnings, "", fmt.Errorf("apply schema evolution: %s: %w", statement, err)
 		}
 	}
+	if d.onSchemaEvolvedLocked != nil {
+		if err := d.onSchemaEvolvedLocked(ctx, table); err != nil {
+			return warnings, "", err
+		}
+	}
 	result, exists, err := d.cdcTargetIncarnationLocked(ctx, table)
 	if err != nil {
 		return warnings, "", err

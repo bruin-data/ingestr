@@ -22,6 +22,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	srcclickhouse "github.com/bruin-data/ingestr/pkg/source/clickhouse"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/shopspring/decimal"
 )
@@ -617,36 +618,41 @@ func (d *ClickHouseDestination) GetScheme() string { return "clickhouse" }
 func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	database, tableName := d.parseTableName(table)
 
-	query := fmt.Sprintf("DESCRIBE TABLE %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
+	query := `
+		SELECT name, type
+		FROM system.columns
+		WHERE database = ? AND table = ?
+		ORDER BY position`
 
-	rows, err := d.conn.Query(ctx, query)
+	rows, err := d.conn.Query(ctx, query, database, tableName)
 	if err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "doesn't exist") ||
-			strings.Contains(errLower, "does not exist") ||
-			strings.Contains(errLower, "unknown_table") {
-			return nil, nil
-		}
 		config.LogFailedQuery(query, err)
-		return nil, fmt.Errorf("failed to describe table: %w", err)
+		return nil, fmt.Errorf("failed to read table schema: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
 	for rows.Next() {
-		var colName, colType, defaultType, defaultExpr, comment, codecExpr, ttlExpr string
-
-		if err := rows.Scan(&colName, &colType, &defaultType, &defaultExpr, &comment, &codecExpr, &ttlExpr); err != nil {
+		var colName, colType string
+		if err := rows.Scan(&colName, &colType); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
-		col := schema.Column{
-			Name:     colName,
-			DataType: mapClickHouseTypeToSchema(colType),
-			Nullable: strings.HasPrefix(colType, "Nullable("),
+		dataType, precision, scale, arrayType := srcclickhouse.MapClickHouseToDataType(colType)
+		// The shared mapper collapses every DateTime64 to TypeTimestamp, but the
+		// destination writes TypeTimestampTZ as DateTime64(..., 'UTC'); keep that
+		// distinction so a timezone-aware column reads back as it was written.
+		if dataType == schema.TypeTimestamp && strings.Contains(strings.ToUpper(colType), "UTC") {
+			dataType = schema.TypeTimestampTZ
 		}
-
-		columns = append(columns, col)
+		columns = append(columns, schema.Column{
+			Name:      colName,
+			DataType:  dataType,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+			Nullable:  strings.Contains(strings.ToLower(colType), "nullable"),
+		})
 	}
 
 	if err := rows.Err(); err != nil {
@@ -662,55 +668,6 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 		Schema:  database,
 		Columns: columns,
 	}, nil
-}
-
-func mapClickHouseTypeToSchema(colType string) schema.DataType {
-	if strings.HasPrefix(colType, "Nullable(") {
-		colType = strings.TrimPrefix(colType, "Nullable(")
-		colType = strings.TrimSuffix(colType, ")")
-	}
-
-	if strings.HasPrefix(colType, "Array(") {
-		return schema.TypeArray
-	}
-
-	if strings.HasPrefix(colType, "Decimal") {
-		return schema.TypeDecimal
-	}
-
-	if strings.HasPrefix(colType, "DateTime64") {
-		if strings.Contains(colType, "UTC") {
-			return schema.TypeTimestampTZ
-		}
-		return schema.TypeTimestamp
-	}
-
-	switch colType {
-	case "Bool":
-		return schema.TypeBoolean
-	case "Int8", "UInt8", "Int16":
-		return schema.TypeInt16
-	case "UInt16", "Int32":
-		return schema.TypeInt32
-	case "UInt32", "Int64":
-		return schema.TypeInt64
-	case "UInt64":
-		return schema.TypeInt64
-	case "Float32":
-		return schema.TypeFloat32
-	case "Float64":
-		return schema.TypeFloat64
-	case "String":
-		return schema.TypeString
-	case "Date", "Date32":
-		return schema.TypeDate
-	case "DateTime":
-		return schema.TypeTimestamp
-	case "UUID":
-		return schema.TypeUUID
-	default:
-		return schema.TypeString
-	}
 }
 
 func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, map[string]string, error) {

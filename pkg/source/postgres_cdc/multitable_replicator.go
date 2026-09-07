@@ -39,6 +39,7 @@ type MultiTableReplicator struct {
 	clientXLogPos pglogrepl.LSN
 	barrierNonce  string
 	barrierSeen   bool
+	barrierLSN    pglogrepl.LSN
 	protocolV2    bool
 	started       bool
 	streaming     bool
@@ -168,6 +169,10 @@ func (r *MultiTableReplicator) BarrierReached() bool {
 	return r.barrierSeen
 }
 
+func (r *MultiTableReplicator) BarrierLSN() pglogrepl.LSN {
+	return r.barrierLSN
+}
+
 func (r *MultiTableReplicator) EmitStreamHeartbeat(ctx context.Context) error {
 	if r.source.serverVersion < 140000 {
 		return nil
@@ -180,10 +185,12 @@ func (r *MultiTableReplicator) handleLogicalMessage(data []byte) (bool, error) {
 	if err != nil || message == nil {
 		return message != nil, err
 	}
-	if matchesBatchBarrier(message, r.barrierNonce) {
+	isBatchBarrier := matchesBatchBarrier(message, r.barrierNonce)
+	if isBatchBarrier {
 		r.barrierSeen = true
+		r.barrierLSN = message.LSN
 	}
-	if matchesBatchBarrier(message, r.barrierNonce) || matchesStreamHeartbeat(message) {
+	if isBatchBarrier || matchesStreamHeartbeat(message) {
 		if message.LSN > r.clientXLogPos {
 			r.clientXLogPos = message.LSN
 		}
