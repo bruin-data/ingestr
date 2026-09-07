@@ -4,16 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	kafkago "github.com/segmentio/kafka-go"
 	"golang.org/x/crypto/sha3"
@@ -603,8 +607,135 @@ func TestGetTable(t *testing.T) {
 	if table.Strategy() != config.StrategyReplace {
 		t.Errorf("Strategy = %v, want %v", table.Strategy(), config.StrategyReplace)
 	}
-	if table.HasKnownSchema() {
-		t.Error("HasKnownSchema should be false")
+	if !table.HasKnownSchema() {
+		t.Error("HasKnownSchema should be true for the fixed Kafka envelope")
+	}
+	tableSchema, err := table.GetSchema(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tableSchema.Columns) != 2 ||
+		tableSchema.Columns[0].Name != "_kafka" || tableSchema.Columns[0].DataType != schema.TypeJSON ||
+		tableSchema.Columns[1].Name != "_kafka_msg_id" || tableSchema.Columns[1].DataType != schema.TypeString {
+		t.Fatalf("unexpected envelope schema: %+v", tableSchema.Columns)
+	}
+}
+
+type snapshotReader struct {
+	messages []kafkago.Message
+	reads    int
+}
+
+func (r *snapshotReader) ReadMessage(context.Context) (kafkago.Message, error) {
+	r.reads++
+	if len(r.messages) == 0 {
+		return kafkago.Message{}, fmt.Errorf("read past snapshot")
+	}
+	msg := r.messages[0]
+	r.messages = r.messages[1:]
+	return msg, nil
+}
+
+func TestConsumePartitionStopsAtSnapshotEnd(t *testing.T) {
+	for _, batchSize := range []int{1, 3} {
+		t.Run(fmt.Sprintf("batch_size_%d", batchSize), func(t *testing.T) {
+			s := &KafkaSource{cfg: kafkaConfig{BatchSize: batchSize, BatchTimeout: time.Second}}
+			payload := `{"id":9007199254740993,"nested":{"key":"value"}}`
+			reader := &snapshotReader{messages: []kafkago.Message{
+				{Topic: "topic", Partition: 1, Offset: 4, Value: []byte(payload)},
+				{Topic: "topic", Partition: 1, Offset: 7, Value: []byte(payload)},
+			}}
+			results := make(chan source.RecordBatchResult, 16)
+			if err := s.consumePartition(context.Background(), reader, 1, 8, source.ReadOptions{}, results); err != nil {
+				t.Fatal(err)
+			}
+			close(results)
+			var rows int64
+			for result := range results {
+				record := result.Batch
+				rows += record.NumRows()
+				values := record.Column(0).(*schema.JSONArray).Storage().(*array.String)
+				for i := 0; i < values.Len(); i++ {
+					var envelope map[string]interface{}
+					if err := json.Unmarshal([]byte(values.Value(i)), &envelope); err != nil {
+						t.Fatal(err)
+					}
+					if envelope["data"] != payload || envelope["topic"] != "topic" {
+						t.Fatalf("envelope changed: %v", envelope)
+					}
+				}
+				record.Release()
+			}
+			if reader.reads != 2 || rows != 2 {
+				t.Fatalf("reads=%d rows=%d, want 2 each", reader.reads, rows)
+			}
+		})
+	}
+}
+
+func TestConsumePartitionByteLimitAndExclusion(t *testing.T) {
+	s := &KafkaSource{cfg: kafkaConfig{BatchSize: 10, BatchTimeout: time.Second}}
+	reader := &snapshotReader{messages: []kafkago.Message{
+		{Topic: "topic", Offset: 0, Value: []byte(`{"id":1}`)},
+		{Topic: "topic", Offset: 1, Value: []byte(`{"id":2}`)},
+	}}
+	results := make(chan source.RecordBatchResult, 16)
+	opts := source.ReadOptions{MaxBatchBytes: 1, ExcludeColumns: []string{"_KAFKA"}}
+	if err := s.consumePartition(context.Background(), reader, 0, 2, opts, results); err != nil {
+		t.Fatal(err)
+	}
+	close(results)
+	var batches int
+	for result := range results {
+		record := result.Batch
+		if record.NumRows() != 1 || record.NumCols() != 1 || record.Schema().Field(0).Name != "_kafka_msg_id" {
+			t.Fatalf("unexpected record: %v", record)
+		}
+		record.Release()
+		batches++
+	}
+	if batches != 2 {
+		t.Fatalf("got %d batches, want 2", batches)
+	}
+}
+
+func TestSendBatchCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	results := make(chan source.RecordBatchResult)
+	items := []map[string]interface{}{messageToItem(kafkago.Message{Topic: "topic"})}
+	if err := sendBatch(ctx, items, source.ReadOptions{}, results); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+}
+
+func TestSnapshotDialerCancelsPendingRead(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := &kafkago.Dialer{DialFunc: func(context.Context, string, string) (net.Conn, error) {
+		return client, nil
+	}}
+	dialer := snapshotDialer(ctx, base)
+	conn, err := dialer.DialFunc(context.Background(), "tcp", "broker:9092")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Read(make([]byte, 1))
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected the pending read to be interrupted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot cancellation did not interrupt the network read")
 	}
 }
 

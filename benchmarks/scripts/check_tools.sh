@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb")
-OPTIONAL_TOOLS=("uv" "sling" "java")
+REQUIRED_TOOLS=("hyperfine" "docker" "psql" "duckdb" "uv")
+OPTIONAL_TOOLS=("sling" "java")
 
 errors=0
 for tool in "${REQUIRED_TOOLS[@]}"; do

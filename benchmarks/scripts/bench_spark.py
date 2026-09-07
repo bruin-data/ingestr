@@ -79,6 +79,10 @@ def required_packages(source_type: str, dest_type: str) -> str:
         return override
 
     packages = []
+    if source_type == "kafka":
+        import pyspark
+
+        packages.append(f"org.apache.spark:spark-sql-kafka-0-10_2.12:{pyspark.__version__}")
     for db_type in (source_type, dest_type):
         package = JDBC_PACKAGES.get(db_type)
         if package and package not in packages:
@@ -235,6 +239,17 @@ def create_spark(source_type: str, dest_type: str) -> SparkSession:
 
 
 def read_source(spark: SparkSession, args) -> object:
+    if args.source_type == "kafka":
+        from pyspark.sql import functions as F
+
+        params = dict(parse_qsl(urlparse(args.source_uri).query))
+        messages = (spark.read.format("kafka")
+                    .option("kafka.bootstrap.servers", params["bootstrap_servers"])
+                    .option("subscribe", args.source_table)
+                    .option("startingOffsets", "earliest")
+                    .option("endingOffsets", "latest")
+                    .load())
+        return messages.select(F.col("value").cast("string").alias("data"))
     config = jdbc_config(args.source_type, args.source_uri)
     options = jdbc_options(config, args.source_table)
     options["fetchsize"] = os.environ.get("BENCH_SPARK_FETCH_SIZE", "10000")
@@ -267,7 +282,7 @@ def write_destination(df, args):
 
     output = df
     if args.dest_type == "duckdb":
-        options["createTableColumnTypes"] = DUCKDB_COLUMN_TYPES
+        options["createTableColumnTypes"] = "data STRING" if args.source_type == "kafka" else DUCKDB_COLUMN_TYPES
         output = df.coalesce(1)
     elif args.dest_type == "clickhouse":
         options["createTableOptions"] = "ENGINE = MergeTree ORDER BY tuple()"

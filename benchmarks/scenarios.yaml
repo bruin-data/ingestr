@@ -4,6 +4,13 @@ defaults:
   warmup: 1
 
 sources:
+  local_kafka:
+    type: kafka
+    uri: "kafka://?bootstrap_servers=localhost:9094&group_id=ingestr-benchmark"
+    table: "bench_data_json_{size}"
+    docker: bench-kafka-source
+    seed: true
+
   local_postgres:
     type: postgres
     uri: "postgres://bench_user:bench_pass@localhost:5440/bench_source?sslmode=disable"
@@ -73,6 +80,12 @@ destinations:
     table: public.bench_data
 
 scenarios:
+  - source: local_kafka
+    destination: local_postgres
+
+  - source: local_kafka
+    destination: local_duckdb
+
   # Local (self-contained, no external dependencies)
   - source: local_postgres
     destination: local_postgres
@@ -174,6 +187,7 @@ tools:
     extra_args_by_destination:
       mssql: "--columns json_val:text"
     skip:
+      - source_type: kafka
       - source_type: mongodb
         destination_type: mssql
       - source_type: mongodb
@@ -184,6 +198,7 @@ tools:
   sling:
     requires: sling
     skip:
+      - source_type: kafka
       - destination_type: mssql
         sizes: ["1m", "10m"]
       - source_type: mongodb

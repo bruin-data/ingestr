@@ -8,8 +8,10 @@
 
 import argparse
 import os
+import re
 import sys
 import tempfile
+import uuid
 from urllib.parse import parse_qs, unquote, urlparse
 
 os.environ["AIRBYTE_ANALYTICS_DISABLED"] = "1"
@@ -234,9 +236,12 @@ def main():
     parser.add_argument("--source-table", required=True)
     parser.add_argument("--dest-uri", required=True)
     parser.add_argument("--dest-table", required=True)
+    parser.add_argument("--rows", type=int, default=10000000)
     args = parser.parse_args()
 
-    if "." in args.source_table:
+    if args.source_uri.startswith("kafka://"):
+        src_table = args.source_table
+    elif "." in args.source_table:
         _, src_table = args.source_table.split(".", 1)
     else:
         src_table = args.source_table
@@ -257,7 +262,25 @@ def main():
         sys.exit(1)
 
     # Build source
-    if args.source_uri.startswith(("postgres://", "postgresql://")):
+    if args.source_uri.startswith("kafka://"):
+        brokers = parse_qs(urlparse(args.source_uri).query)["bootstrap_servers"][0]
+        if brokers == "localhost:9094":
+            brokers = f"{docker_host('localhost')}:9095"
+        source = ab.get_source("source-kafka", config={
+            "bootstrap_servers": brokers,
+            "subscription": {"subscription_type": "subscribe", "topic_pattern": f"^{re.escape(src_table)}$"},
+            "protocol": {"security_protocol": "PLAINTEXT"},
+            "MessageFormat": {"deserialization_type": "JSON"},
+            "test_topic": src_table,
+            "group_id": f"bench-airbyte-{uuid.uuid4().hex}",
+            "enable_auto_commit": False,
+            "auto_offset_reset": "earliest",
+            "client_dns_lookup": "use_all_dns_ips",
+            "polling_time": 500,
+            "repeated_calls": 10,
+            "max_records_process": args.rows,
+        })
+    elif args.source_uri.startswith(("postgres://", "postgresql://")):
         source = ab.get_source("source-postgres", config=parse_postgres_uri(args.source_uri))
     elif args.source_uri.startswith("mysql://"):
         source = ab.get_source("source-mysql", config=parse_mysql_uri(args.source_uri))
@@ -273,6 +296,12 @@ def main():
     # between source records and destination catalog in PyAirbyte).
     cache = ab.new_local_cache()
     read_result = source.read(cache, force_full_refresh=True)
+
+    # source-kafka stops after `repeated_calls` empty polls rather than at a
+    # captured end offset, so a mid-backlog stall looks like a fast success.
+    if args.source_uri.startswith("kafka://") and read_result.processed_records != args.rows:
+        print(f"FAIL: airbyte read {read_result.processed_records} of {args.rows} messages", file=sys.stderr)
+        sys.exit(1)
 
     # Build destination
     dest_uri = args.dest_uri

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -136,6 +137,16 @@ func streamingEnvelopeSchema(topic string) *schema.TableSchema {
 
 const streamOrderColumn = "_ingestr_order"
 
+func batchEnvelopeSchema(topic string) *schema.TableSchema {
+	return &schema.TableSchema{
+		Name: topic,
+		Columns: []schema.Column{
+			{Name: "_kafka", DataType: schema.TypeJSON, Nullable: true},
+			{Name: "_kafka_msg_id", DataType: schema.TypeString, Nullable: true},
+		},
+	}
+}
+
 func (s *KafkaSource) Schemes() []string {
 	return []string{"kafka"}
 }
@@ -201,9 +212,9 @@ func (s *KafkaSource) GetTable(ctx context.Context, req source.TableRequest) (so
 		TablePrimaryKeys:    req.PrimaryKeys,
 		TableIncrementalKey: req.IncrementalKey,
 		TableStrategy:       strategy,
-		KnownSchema:         false,
+		KnownSchema:         true,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
-			return nil, fmt.Errorf("kafka source does not have a predefined schema; schema inference is required")
+			return batchEnvelopeSchema(topicName), nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 			return s.read(ctx, topicName, opts)
@@ -397,7 +408,10 @@ func (s *KafkaSource) read(ctx context.Context, topic string, opts source.ReadOp
 				err := s.readPartition(pCtx, dialer, brokers, topic, a.partition, a.start, a.end, opts, results)
 				if err != nil {
 					pCancel()
-					results <- source.RecordBatchResult{Err: err}
+					select {
+					case results <- source.RecordBatchResult{Err: err}:
+					case <-ctx.Done():
+					}
 				}
 			}(a)
 		}
@@ -418,21 +432,74 @@ func (s *KafkaSource) readPartition(
 	opts source.ReadOptions,
 	results chan<- source.RecordBatchResult,
 ) error {
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
 		Brokers:   brokers,
 		Topic:     topic,
 		Partition: partition,
-		Dialer:    dialer,
+		Dialer:    snapshotDialer(readCtx, dialer),
 		MinBytes:  1,
 		MaxBytes:  10e6,
 	})
-	defer func() { _ = reader.Close() }()
+	defer func() {
+		cancel()
+		_ = reader.Close()
+	}()
 
 	if err := reader.SetOffset(startOffset); err != nil {
 		return fmt.Errorf("failed to set offset for partition %d: %w", partition, err)
 	}
+	return s.consumePartition(ctx, reader, partition, endOffset, opts, results)
+}
 
+// Reader.Close does not interrupt an in-flight fetch. Bind its sockets to the
+// snapshot lifetime so shutdown does not wait for the broker's fetch timeout.
+func snapshotDialer(ctx context.Context, base *kafkago.Dialer) *kafkago.Dialer {
+	dialer := *base
+	dial := base.DialFunc
+	if dial == nil {
+		networkDialer := &net.Dialer{
+			Timeout: base.Timeout, Deadline: base.Deadline, LocalAddr: base.LocalAddr,
+			DualStack: base.DualStack, FallbackDelay: base.FallbackDelay, KeepAlive: base.KeepAlive,
+		}
+		dial = networkDialer.DialContext
+	}
+	dialer.DialFunc = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(dialCtx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		return &snapshotConn{Conn: conn, stop: stop}, nil
+	}
+	return &dialer
+}
+
+type snapshotConn struct {
+	net.Conn
+	stop func() bool
+}
+
+func (c *snapshotConn) Close() error {
+	c.stop()
+	return c.Conn.Close()
+}
+
+type messageReader interface {
+	ReadMessage(context.Context) (kafkago.Message, error)
+}
+
+func (s *KafkaSource) consumePartition(
+	ctx context.Context,
+	reader messageReader,
+	partition int,
+	endOffset int64,
+	opts source.ReadOptions,
+	results chan<- source.RecordBatchResult,
+) error {
 	batch := make([]map[string]interface{}, 0, s.cfg.BatchSize)
+	var batchBytes int64
 	totalRead := int64(0)
 
 	for {
@@ -479,20 +546,35 @@ func (s *KafkaSource) readPartition(
 		}
 
 		item := messageToItem(msg)
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && batchBytes+rowBytes > opts.MaxBatchBytes {
+				if err := sendBatch(ctx, batch, opts, results); err != nil {
+					return err
+				}
+				batch = make([]map[string]interface{}, 0, s.cfg.BatchSize)
+				batchBytes = 0
+			}
+			batchBytes += rowBytes
+		}
 		batch = append(batch, item)
 		totalRead++
 
 		if len(batch) >= s.cfg.BatchSize {
-			if err := sendBatch(batch, opts, results); err != nil {
+			if err := sendBatch(ctx, batch, opts, results); err != nil {
 				return err
 			}
 			config.Debug("[KAFKA] Partition %d: sent %d messages (total: %d)", partition, len(batch), totalRead)
 			batch = make([]map[string]interface{}, 0, s.cfg.BatchSize)
+			batchBytes = 0
+		}
+		if msg.Offset+1 >= endOffset {
+			break
 		}
 	}
 
 	if len(batch) > 0 {
-		if err := sendBatch(batch, opts, results); err != nil {
+		if err := sendBatch(ctx, batch, opts, results); err != nil {
 			return err
 		}
 		config.Debug("[KAFKA] Partition %d: sent final %d messages (total: %d)", partition, len(batch), totalRead)
@@ -619,13 +701,18 @@ func shake128ID(input string) string {
 	return strings.TrimRight(base64.StdEncoding.EncodeToString(digest), "=")
 }
 
-func sendBatch(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+func sendBatch(ctx context.Context, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, batchEnvelopeSchema("").Columns, opts.ExcludeColumns)
 	if err != nil {
 		return fmt.Errorf("failed to convert kafka messages to Arrow: %w", err)
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	select {
+	case results <- source.RecordBatchResult{Batch: record}:
+		return nil
+	case <-ctx.Done():
+		record.Release()
+		return ctx.Err()
+	}
 }
 
 func (s *KafkaSource) buildDialer() (*kafkago.Dialer, error) {
