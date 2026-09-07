@@ -260,3 +260,97 @@ ingestr ingest \
 ```
 
 When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
+
+## HubSpot as a destination
+
+ingestr can also write data **into** HubSpot, letting you push records from any supported source into your CRM. The credential works the same way as the source — a private app access token (or service key) with **write** scopes for the objects you want to update (for example `crm.objects.contacts.write`).
+
+The destination URI is identical to the source URI:
+
+```plaintext
+hubspot://?api_key=<api-key-here>
+```
+
+The `--dest-table` selects the CRM object to write to and, optionally, how records are matched. Any writable CRM object works — standard objects such as `contacts`, `companies`, `deals`, `tickets`, `products`, `line_items`, and `quotes`, engagement and commerce objects such as `notes`, `tasks`, and `invoices`, and custom objects (referenced by their fully-qualified name, e.g. `p12345_car`, or object type id, e.g. `2-12345678`). The object is passed through to HubSpot, which validates it against your token's scopes.
+
+Each source column becomes a HubSpot property of the same name, so name your source columns to match the target property names (e.g. `email`, `firstname`, `amount`). Null values are skipped, so they don't overwrite existing data.
+
+### Create, upsert, and update
+
+What you set `id_property` to decides the operation:
+
+- **Set nothing** → **create**: every row becomes a new record.
+- **Set a unique property** (e.g. `email`) → **upsert**: update the record with that value if it exists, otherwise create it.
+- **Set `hs_object_id`** → **update**: update the record with that HubSpot record id; rows whose id doesn't exist are rejected (never created).
+
+**Create** and **update** work for any writable object. **Upsert** additionally requires a writable **unique-identifier** property, which only some objects have:
+
+- **contacts** → `email`
+- **products** → `hs_sku`
+- **line items** → `hs_external_id`
+- **tickets** → `hs_external_object_ids`
+- **companies**, **deals**, **quotes** → no usable unique property built in; upsert isn't available unless you add a custom unique property in HubSpot. Use `hs_object_id` to update these by record id.
+
+Any custom property with "unique values" enabled can also be used as the upsert `id_property`.
+
+### Destination table parameters
+
+Append parameters to `--dest-table` as a query string, e.g. `contacts?id_property=email`.
+
+- `id_property`: the HubSpot property to match records on. Omit to always create new records; use a unique property to upsert; use `hs_object_id` to update by record id.
+- `id_column`: the source column that supplies the `id_property` value, when it differs from the property name. Defaults to `id_property`.
+- `on_error`: `fail` (default) aborts the run if HubSpot rejects any record; `skip` logs the rejected records and continues.
+
+### Associating records
+
+Use the special `associations` dest-table to **link two existing records** (for example a contact to a company). Each source row is one link, identified by both records' HubSpot ids:
+
+- `from` / `to`: the two object types to link (e.g. `from=contacts&to=companies`).
+- `from_id_column`: source column with the `from` object's record id.
+- `to_id_column`: source column with the `to` object's record id.
+- `association_type`: optional numeric association type id for a labeled association. Omit it for a default (unlabeled) association.
+- `association_category`: optional, defaults to `HUBSPOT_DEFINED` (use `USER_DEFINED` for custom labels).
+
+Both records must already exist in HubSpot; rows missing either id are skipped. The `associations` table writes no properties — load the records first (create/upsert/update), then run a separate `associations` ingestion with a source table of id pairs.
+
+### Examples
+
+Upsert contacts, matching on the `email` property:
+
+```sh
+ingestr ingest \
+  --source-uri 'postgres://user:pass@localhost:5432/mydb' \
+  --source-table 'public.contacts' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'contacts?id_property=email'
+```
+
+Create new deals (no matching), skipping any records HubSpot rejects:
+
+```sh
+ingestr ingest \
+  --source-uri 'postgres://user:pass@localhost:5432/mydb' \
+  --source-table 'public.deals' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'deals?on_error=skip'
+```
+
+Update existing companies by their HubSpot record id, read from a source column named `company_id`:
+
+```sh
+ingestr ingest \
+  --source-uri 'postgres://user:pass@localhost:5432/mydb' \
+  --source-table 'public.companies' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'companies?id_property=hs_object_id&id_column=company_id'
+```
+
+Associate existing contacts with companies by their record ids:
+
+```sh
+ingestr ingest \
+  --source-uri 'postgres://user:pass@localhost:5432/mydb' \
+  --source-table 'public.contact_company_links' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=company_id'
+```

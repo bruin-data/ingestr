@@ -342,7 +342,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("granola", "Granola", []string{"granola"}, true, false),
 		genericURIConnector("hostaway", "Hostaway", []string{"hostaway"}, true, false),
 		genericURIConnector("http", "HTTP", []string{"http", "https"}, true, false),
-		genericURIConnector("hubspot", "HubSpot", []string{"hubspot"}, true, false),
+		genericURIConnector("hubspot", "HubSpot", []string{"hubspot"}, true, true),
 		genericURIConnector("indeed", "Indeed", []string{"indeed"}, true, false),
 		genericURIConnector("influxdb", "InfluxDB", []string{"influxdb"}, true, false),
 		genericURIConnector("intercom", "Intercom", []string{"intercom"}, true, false),
