@@ -253,7 +253,7 @@ func TestFetchAssociationsBatchNumericID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(fmt.Sprintf(`{"results":[{"from":{"id":"862245463262"},"to":[{"toObjectId":%s}]}]}`, tc.id)))
+				_, _ = fmt.Fprintf(w, `{"results":[{"from":{"id":"862245463262"},"to":[{"toObjectId":%s}]}]}`, tc.id)
 			}))
 			defer srv.Close()
 
