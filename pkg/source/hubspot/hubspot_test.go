@@ -240,6 +240,37 @@ func TestParseTableAssocOverride(t *testing.T) {
 	}
 }
 
+func TestFetchAssociationsBatchNumericID(t *testing.T) {
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{name: "plain numeric id", id: "446642248919"},
+		{name: "above javascript safe integer", id: "9007199254740993"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"results":[{"from":{"id":"862245463262"},"to":[{"toObjectId":%s}]}]}`, tc.id)))
+			}))
+			defer srv.Close()
+
+			s := &Hubspotsource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+			got, err := s.fetchAssociationsBatch(context.Background(), "contacts", "companies", []string{"862245463262"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ids := got["862245463262"]
+			if len(ids) != 1 || ids[0] != tc.id {
+				t.Fatalf("expected [%s], got %#v", tc.id, ids)
+			}
+		})
+	}
+}
+
 func TestHubspotByteCap(t *testing.T) {
 	wide := strings.Repeat("x", 2048)
 	calls := 0
