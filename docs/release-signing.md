@@ -13,6 +13,12 @@ an internal draft before publishing once and marking latest. Existing releases
 are refused. Rerun **all jobs** after a failed attempt; fix published binaries
 with a new version, not replacement assets.
 
+After publication, the workflow verifies the exact release attestation and all
+five local archives plus the checksum file using GitHub CLI. A verification
+failure fails the job and blocks downstream jobs, but the release is already
+public and marked latest. Investigate rather than rerunning publication for that
+tag. No propagation retries are assumed; add bounded retries only if needed.
+
 ## Verification
 
 With a trusted, current GitHub CLI, verify the requested release and downloaded

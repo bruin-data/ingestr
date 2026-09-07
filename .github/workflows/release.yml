@@ -227,6 +227,11 @@ jobs:
           # GitHub automatically attests the release when immutability is enabled.
           gh release create "$GITHUB_REF_NAME" "${archives[@]}" "$checksums" \
             --verify-tag --latest --title "$GITHUB_REF_NAME" --generate-notes
+          # Verification failures stop downstream jobs, but cannot undo publication.
+          gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          for asset in "${archives[@]}" "$checksums"; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"
+          done
 
   release-pip:
     runs-on: depot-ubuntu-latest
