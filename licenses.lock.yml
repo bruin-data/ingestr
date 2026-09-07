@@ -1432,7 +1432,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/rabbitmq/amqp091-go
-      version: v1.10.0
+      version: v1.13.0
       licenses:
         - BSD-2-Clause
       status: allowed

@@ -66,7 +66,7 @@ require (
 	github.com/pkg/sftp v1.13.10
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
-	github.com/rabbitmq/amqp091-go v1.10.0
+	github.com/rabbitmq/amqp091-go v1.13.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/schollz/progressbar/v3 v3.18.0
 	github.com/segmentio/kafka-go v0.4.50
