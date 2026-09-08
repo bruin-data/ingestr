@@ -161,7 +161,8 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 	if a.ID() == arrow.DECIMAL128 || b.ID() == arrow.DECIMAL128 ||
 		a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
 		if a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
-			return &arrow.Decimal256Type{Precision: 76, Scale: 38}, nil
+			precision, scale := mergedDecimalBounds(a, b)
+			return &arrow.Decimal256Type{Precision: precision, Scale: scale}, nil
 		}
 		return &arrow.Decimal128Type{Precision: 38, Scale: 9}, nil
 	}
@@ -183,6 +184,37 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 		return arrow.PrimitiveTypes.Int64, nil
 	default:
 		return arrow.PrimitiveTypes.Int64, nil
+	}
+}
+
+// mergedDecimalBounds picks a Decimal256 precision/scale wide enough to hold
+// both inputs: it keeps the larger integer-digit capacity and the larger scale,
+// clamped to Decimal256's 76-digit ceiling (trimming scale first so integer
+// digits — where overflow would occur — are preserved).
+func mergedDecimalBounds(a, b arrow.DataType) (int32, int32) {
+	intA, scaleA := decimalIntDigitsAndScale(a)
+	intB, scaleB := decimalIntDigitsAndScale(b)
+	intDigits := max(intA, intB)
+	scale := max(scaleA, scaleB)
+	if intDigits > 76 {
+		intDigits = 76
+	}
+	if intDigits+scale > 76 {
+		scale = 76 - intDigits
+	}
+	return intDigits + scale, scale
+}
+
+// decimalIntDigitsAndScale returns a type's integer-digit capacity and scale.
+// Non-decimal numerics are treated as 64-bit integers (up to 19 digits).
+func decimalIntDigitsAndScale(dt arrow.DataType) (int32, int32) {
+	switch t := dt.(type) {
+	case *arrow.Decimal128Type:
+		return t.Precision - t.Scale, t.Scale
+	case *arrow.Decimal256Type:
+		return t.Precision - t.Scale, t.Scale
+	default:
+		return 19, 0
 	}
 }
 
