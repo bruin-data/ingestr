@@ -225,8 +225,8 @@ func parseColumnOverride(pair string) (ColumnOverride, error) {
 			if err != nil {
 				return ColumnOverride{}, fmt.Errorf("invalid precision in '%s': %w", typeSpec, err)
 			}
-			if p < 1 || p > 38 {
-				return ColumnOverride{}, fmt.Errorf("invalid precision in '%s': must be between 1 and 38", typeSpec)
+			if p < 1 || p > 76 {
+				return ColumnOverride{}, fmt.Errorf("invalid precision in '%s': must be between 1 and 76", typeSpec)
 			}
 			override.Precision = p
 			if len(params) == 2 {
