@@ -436,31 +436,31 @@ func boundCanonical(v interface{}, keyType schema.DataType) (interface{}, bool) 
 	return canonicalValue(v, keyType)
 }
 
-// canonicalCmp compares two canonical values (both float64 or both string).
+// canonicalCmp compares two canonical values. Numeric values (float64 and
+// Decimal256's big.Rat) are compared by value even when the two sides differ;
+// non-numeric values fall back to lexical comparison.
 func canonicalCmp(a, b interface{}) int {
-	switch av := a.(type) {
+	if ar, ok := toRat(a); ok {
+		if br, ok := toRat(b); ok {
+			return ar.Cmp(br)
+		}
+	}
+	return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+}
+
+// toRat coerces the numeric canonical forms (float64, *big.Rat) to *big.Rat.
+func toRat(v interface{}) (*big.Rat, bool) {
+	switch n := v.(type) {
 	case *big.Rat:
-		if bv, ok := b.(*big.Rat); ok {
-			return av.Cmp(bv)
-		}
-		return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+		return n, true
 	case float64:
-		bv, ok := b.(float64)
-		if !ok {
-			return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+		r := new(big.Rat)
+		if r.SetFloat64(n) == nil {
+			return nil, false
 		}
-		switch {
-		case av < bv:
-			return -1
-		case av > bv:
-			return 1
-		default:
-			return 0
-		}
-	case string:
-		return strings.Compare(av, fmt.Sprintf("%v", b))
+		return r, true
 	default:
-		return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+		return nil, false
 	}
 }
 

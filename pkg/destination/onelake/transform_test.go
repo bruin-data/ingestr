@@ -627,4 +627,10 @@ func TestCanonicalDecimal256KeysCompareExactly(t *testing.T) {
 	require.Equal(t, -1, canonicalCmp(a, b))
 	require.Equal(t, 1, canonicalCmp(b, a))
 	require.Equal(t, 0, canonicalCmp(a, a))
+
+	// A big.Rat cell and a float64 interval bound must compare numerically.
+	rat, ok := canonicalValue("10.5", schema.TypeDecimal)
+	require.True(t, ok)
+	require.Equal(t, 1, canonicalCmp(rat, float64(2)))
+	require.Equal(t, -1, canonicalCmp(float64(2), rat))
 }
