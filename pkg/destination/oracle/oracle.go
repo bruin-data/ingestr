@@ -1641,6 +1641,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx).ToTime(a.DataType().(*arrow.TimestampType).Unit)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.Decimal256:
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
 	case array.ListLike:
 		return a.ValueStr(idx)
 	case *array.Struct:

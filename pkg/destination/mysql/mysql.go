@@ -2316,6 +2316,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return ts.ToTime(a.DataType().(*arrow.TimestampType).Unit).Format("2006-01-02 15:04:05.000000")
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.Decimal256:
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
 	case array.ExtensionArray:
 		storage := a.Storage()
 		return extractValue(storage, idx)

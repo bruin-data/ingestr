@@ -528,6 +528,12 @@ func arrowToValue(arr arrow.Array, idx int) interface{} {
 			return val.ToString(dt.Scale)
 		}
 		return val.ToString(0)
+	case *array.Decimal256:
+		val := a.Value(idx)
+		if dt, ok := a.DataType().(*arrow.Decimal256Type); ok {
+			return val.ToString(dt.Scale)
+		}
+		return val.ToString(0)
 	case *array.Date32:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Date64:

@@ -98,7 +98,7 @@ func TestParseColumnOverrides_DecimalValidationAndExplicitZeroScale(t *testing.T
 
 	for _, spec := range []string{
 		"amount:decimal(0,0)",
-		"amount:decimal(39,2)",
+		"amount:decimal(77,2)",
 		"amount:decimal(10,-1)",
 		"amount:decimal(10,11)",
 		"amount:decimal(10,2,1)",

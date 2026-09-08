@@ -2,6 +2,7 @@ package arrowconv
 
 import (
 	"encoding/json"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -422,6 +423,42 @@ func TestAppendValue_Decimal128_JSONNumber(t *testing.T) {
 			assert.False(t, arr.IsNull(0), "got null for input %q", string(tt.val))
 			gotBigI := decimal128.Num(arr.Value(0)).BigInt().String()
 			assert.Equal(t, tt.wantBigI, gotBigI)
+		})
+	}
+}
+
+func TestAppendValue_Decimal256(t *testing.T) {
+	dt := &arrow.Decimal256Type{Precision: 40, Scale: 25}
+
+	bigUnscaled, _ := new(big.Int).SetString("12345678901234567890123456789012345", 10)
+
+	tests := []struct {
+		name     string
+		val      any
+		wantNull bool
+		wantStr  string
+	}{
+		{name: "string", val: "123456789012345.1234567890123456789012345", wantStr: "123456789012345.1234567890123456789012345"},
+		{name: "big.Int unscaled", val: bigUnscaled, wantStr: "1234567890.1234567890123456789012345"},
+		{name: "json.Number", val: json.Number("1.5"), wantStr: "1.5000000000000000000000000"},
+		{name: "empty string", val: "", wantNull: true},
+		{name: "garbage", val: "xyz", wantNull: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := array.NewDecimal256Builder(memory.NewGoAllocator(), dt)
+			AppendValue(b, tt.val)
+			arr := b.NewArray().(*array.Decimal256)
+			defer arr.Release()
+
+			require.Equal(t, 1, arr.Len())
+			if tt.wantNull {
+				assert.True(t, arr.IsNull(0))
+				return
+			}
+			assert.False(t, arr.IsNull(0))
+			assert.Equal(t, tt.wantStr, arr.Value(0).ToString(dt.Scale))
 		})
 	}
 }

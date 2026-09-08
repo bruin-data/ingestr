@@ -40,6 +40,10 @@ func Value(arr interface {
 		v := a.Value(idx)
 		dt := a.DataType().(*arrow.Decimal128Type)
 		return v.ToFloat64(dt.Scale)
+	case *array.Decimal256:
+		v := a.Value(idx)
+		dt := a.DataType().(*arrow.Decimal256Type)
+		return v.ToString(dt.Scale)
 	case *array.Date32:
 		v := a.Value(idx)
 		return v.ToTime()

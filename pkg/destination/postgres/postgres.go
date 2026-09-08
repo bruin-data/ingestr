@@ -628,6 +628,18 @@ func postgresValueGetterForType(col arrow.Array, dataType schema.DataType) func(
 				Valid: true,
 			}
 		}
+	case *array.Decimal256:
+		dt := a.DataType().(*arrow.Decimal256Type)
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			return pgtype.Numeric{
+				Int:   a.Value(i).BigInt(),
+				Exp:   -dt.Scale,
+				Valid: true,
+			}
+		}
 	case *array.Date32:
 		return func(i int) any {
 			if a.IsNull(i) {

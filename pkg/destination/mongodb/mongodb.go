@@ -526,6 +526,17 @@ func arrowValueToBSON(arr arrow.Array, idx int) (interface{}, error) {
 			return decStr, nil
 		}
 		return val.ToString(0), nil
+	case *array.Decimal256:
+		val := a.Value(idx)
+		if dt, ok := a.DataType().(*arrow.Decimal256Type); ok {
+			decStr := val.ToString(dt.Scale)
+			dec, err := primitive.ParseDecimal128(decStr)
+			if err == nil {
+				return dec, nil
+			}
+			return decStr, nil
+		}
+		return val.ToString(0), nil
 	case *array.Date32:
 		return a.Value(idx).ToTime(), nil
 	case *array.Date64:

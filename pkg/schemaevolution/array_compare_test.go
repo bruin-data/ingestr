@@ -54,12 +54,12 @@ func TestCompareMergesDecimalArrayElementPrecision(t *testing.T) {
 	require.Equal(t, 24, comparison.Changes[0].NewColumn.Precision)
 	require.Equal(t, 8, comparison.Changes[0].NewColumn.Scale)
 
-	source.Columns[0].Precision = 38
+	source.Columns[0].Precision = 76
 	source.Columns[0].Scale = 38
-	dest.Columns[0].Precision = 38
+	dest.Columns[0].Precision = 76
 	dest.Columns[0].Scale = 0
 	_, err = Compare(source, dest, nil)
-	require.ErrorContains(t, err, "maximum supported precision is 38")
+	require.ErrorContains(t, err, "maximum supported precision is 76")
 }
 
 func TestCompareWidensStringArrayElementLength(t *testing.T) {
@@ -78,14 +78,14 @@ func TestCompareWidensStringArrayElementLength(t *testing.T) {
 
 func TestCompareRejectsUnrepresentableScalarDecimalWidening(t *testing.T) {
 	source := &schema.TableSchema{Columns: []schema.Column{{
-		Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 38,
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 76, Scale: 38,
 	}}}
 	dest := &schema.TableSchema{Columns: []schema.Column{{
-		Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 0,
+		Name: "amount", DataType: schema.TypeDecimal, Precision: 76, Scale: 0,
 	}}}
 
 	_, err := Compare(source, dest, nil)
-	require.ErrorContains(t, err, "maximum supported precision is 38")
+	require.ErrorContains(t, err, "maximum supported precision is 76")
 }
 
 func TestComparePreservesDecimalIntegerDigits(t *testing.T) {
@@ -128,8 +128,12 @@ func TestCompareTreatsUnspecifiedDecimalPrecisionAsDecimal38(t *testing.T) {
 	}}}
 
 	comparison, err := Compare(source, dest, nil)
-	require.ErrorContains(t, err, "maximum supported precision is 38")
-	require.Nil(t, comparison)
+	require.NoError(t, err)
+	require.Len(t, comparison.Changes, 1)
+	// Unspecified precision is treated as 38 integer digits, so widening with a
+	// scale-2 column yields precision 40.
+	require.Equal(t, 40, comparison.Changes[0].NewColumn.Precision)
+	require.Equal(t, 2, comparison.Changes[0].NewColumn.Scale)
 }
 
 func TestCompareUsesUnboundedStringForCrossTypeWidening(t *testing.T) {

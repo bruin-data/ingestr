@@ -163,6 +163,12 @@ func DataTypeToArrowType(col Column) arrow.DataType {
 		if precision == 0 {
 			precision = 38
 		}
+		if precision > 38 {
+			if precision > 76 {
+				precision = 76
+			}
+			return &arrow.Decimal256Type{Precision: precision, Scale: scale}
+		}
 		return &arrow.Decimal128Type{Precision: precision, Scale: scale}
 	case TypeString, TypeUUID:
 		return arrow.BinaryTypes.String

@@ -795,6 +795,10 @@ func formatValueForSQL(arr arrow.Array, idx int, jsonType jsonTypeMode) string {
 		v := a.Value(idx)
 		dt := a.DataType().(*arrow.Decimal128Type)
 		return fmt.Sprintf("DECIMAL '%s'", v.ToString(dt.Scale))
+	case *array.Decimal256:
+		v := a.Value(idx)
+		dt := a.DataType().(*arrow.Decimal256Type)
+		return fmt.Sprintf("DECIMAL '%s'", v.ToString(dt.Scale))
 	case array.ExtensionArray:
 		extType := a.ExtensionType()
 		if extType.ExtensionName() == "json" {

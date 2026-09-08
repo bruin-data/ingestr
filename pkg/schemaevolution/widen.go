@@ -144,9 +144,9 @@ func MergeDecimalPrecision(src, dest schema.Column) (precision, scale int) {
 
 func MergeDecimalPrecisionChecked(src, dest schema.Column) (precision, scale int, err error) {
 	precision, scale = MergeDecimalPrecision(src, dest)
-	if precision > 38 {
+	if precision > 76 {
 		return 0, 0, fmt.Errorf(
-			"decimal widening requires precision %d (integer digits %d + scale %d), maximum supported precision is 38",
+			"decimal widening requires precision %d (integer digits %d + scale %d), maximum supported precision is 76",
 			precision, precision-scale, scale,
 		)
 	}

@@ -1036,6 +1036,10 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		v := a.Value(idx)
 		dt := a.DataType().(*arrow.Decimal128Type)
 		return decimal.NewFromBigInt(v.BigInt(), -dt.Scale)
+	case *array.Decimal256:
+		v := a.Value(idx)
+		dt := a.DataType().(*arrow.Decimal256Type)
+		return decimal.NewFromBigInt(v.BigInt(), -dt.Scale)
 	case array.ExtensionArray:
 		storage := a.Storage()
 		return extractValue(storage, idx)
