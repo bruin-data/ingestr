@@ -221,15 +221,13 @@ jobs:
             ingestr_Linux_x86_64.tar.gz ingestr_Linux_arm64.tar.gz
             ingestr_Windows_x86_64.zip
           )
-          checksums="ingestr_${GITHUB_REF_NAME#v}_checksums.txt"
-          sha256sum "${archives[@]}" > "$checksums"
           # gh uploads all files to an internal draft before publishing once.
           # GitHub automatically attests the release when immutability is enabled.
-          gh release create "$GITHUB_REF_NAME" "${archives[@]}" "$checksums" \
+          gh release create "$GITHUB_REF_NAME" "${archives[@]}" \
             --verify-tag --latest --title "$GITHUB_REF_NAME" --generate-notes
           # Verification failures stop downstream jobs, but cannot undo publication.
           gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
-          for asset in "${archives[@]}" "$checksums"; do
+          for asset in "${archives[@]}"; do
             gh release verify-asset "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"
           done
 

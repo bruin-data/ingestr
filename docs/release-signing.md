@@ -7,14 +7,14 @@ is needed. Keep release immutability enabled and version tags protected.
 
 The release workflow builds all five platform archives using same-run artifacts,
 smoke-tests each packaged executable against the exact tag, and waits for
-integration and Docker tests. It generates compatibility checksums including
-Windows, then uses `gh release create TAG FILES...` to upload all six assets to
+integration and Docker tests. It uses `gh release create TAG FILES...` to upload
+all five archives to
 an internal draft before publishing once and marking latest. Existing releases
 are refused. Rerun **all jobs** after a failed attempt; fix published binaries
 with a new version, not replacement assets.
 
 After publication, the workflow verifies the exact release attestation and all
-five local archives plus the checksum file using GitHub CLI. A verification
+five local archives using GitHub CLI. No separate checksum file is published. A verification
 failure fails the job and blocks downstream jobs, but the release is already
 public and marked latest. Investigate rather than rerunning publication for that
 tag. No propagation retries are assumed; add bounded retries only if needed.
