@@ -3,7 +3,7 @@ package onelake
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"math/big"
 	"strings"
 	"time"
 
@@ -412,12 +412,13 @@ func canonicalValue(v interface{}, keyType schema.DataType) (interface{}, bool) 
 		case float64:
 			return n, true
 		case string:
-			// High-precision decimals (Decimal256) arrive as exact text.
-			f, err := strconv.ParseFloat(n, 64)
-			if err != nil {
+			// High-precision decimals (Decimal256) arrive as exact text; compare
+			// them exactly so close keys do not collapse to the same float64.
+			r, ok := new(big.Rat).SetString(n)
+			if !ok {
 				return nil, false
 			}
-			return f, true
+			return r, true
 		default:
 			return nil, false
 		}
@@ -438,6 +439,11 @@ func boundCanonical(v interface{}, keyType schema.DataType) (interface{}, bool) 
 // canonicalCmp compares two canonical values (both float64 or both string).
 func canonicalCmp(a, b interface{}) int {
 	switch av := a.(type) {
+	case *big.Rat:
+		if bv, ok := b.(*big.Rat); ok {
+			return av.Cmp(bv)
+		}
+		return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
 	case float64:
 		bv, ok := b.(float64)
 		if !ok {
