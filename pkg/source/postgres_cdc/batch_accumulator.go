@@ -217,9 +217,7 @@ func (a *batchAccumulator) flushAllContext(ctx context.Context, results chan<- s
 	return nil
 }
 
-// Flush unaffected tables before discarding the accumulator for a rebuild.
-// Failed tables retain their low-water marks during this flush, so these batches
-// cannot acknowledge WAL that still needs a replacement snapshot.
+// Flush unaffected tables without acknowledging WAL still needed by replacement snapshots.
 func (a *batchAccumulator) flushForSchemaRebuild(ctx context.Context, results chan<- source.RecordBatchResult, token tokenFunc, first *SchemaChangedError) ([]*SchemaChangedError, error) {
 	var schemaErrors []*SchemaChangedError
 	if first != nil {

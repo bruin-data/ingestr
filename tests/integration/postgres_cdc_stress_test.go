@@ -523,11 +523,9 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		truths[tbl.name] = tr
 		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
-	// Independent DuckDB instances do not share the writer's buffer pool, even
-	// when opened read-only. Wait for durable WAL acknowledgements and close
-	// both writers before opening the file for verification.
-	// Use the insert position to include commits with synchronous_commit=off.
+	// Wait for durable WAL acknowledgement before opening an independent DuckDB reader.
 	var finalLSN string
+	// Include commits made with synchronous_commit=off that are not yet written to WAL.
 	require.NoError(t, srcPool.QueryRow(ctx, `SELECT pg_current_wal_insert_lsn()::text`).Scan(&finalLSN))
 	deadline := time.Now().Add(stressConvergeTimeout)
 	lastProgressLog := time.Now()
