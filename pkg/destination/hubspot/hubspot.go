@@ -49,7 +49,12 @@ type hsConfig struct {
 }
 
 type HubSpotDestination struct {
+	// client is used for replay-safe operations (upsert, update, associations,
+	// property reads) and retries POST on 429/5xx.
 	client *httpclient.Client
+	// createClient is used for unkeyed batch create and does not retry POST, so a
+	// lost response or 5xx never resends and duplicates records.
+	createClient *httpclient.Client
 }
 
 func NewHubSpotDestination() *HubSpotDestination {
@@ -95,30 +100,44 @@ func (d *HubSpotDestination) Connect(_ context.Context, uri string) error {
 		base = cfg.endpoint
 	}
 
-	d.client = httpclient.New(
-		httpclient.WithBaseURL(base),
-		httpclient.WithTimeout(2*time.Minute),
-		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
-		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		// Writes are POST and not auto-retried: retrying a batch create after a
-		// lost response or 5xx could duplicate records. The rate limiter keeps us
-		// under HubSpot's limit to avoid 429s; transient failures fail the run,
-		// which is safe to re-run (upsert/update are keyed and idempotent).
-		httpclient.WithAuth(httpclient.NewBearerAuth(cfg.apiKey)),
-		httpclient.WithDebug(config.DebugMode),
-		httpclient.WithHeader("Content-Type", "application/json"),
-		httpclient.WithHeader("Accept", "application/json"),
-	)
+	// Both clients share one rate limiter so their combined traffic stays under
+	// HubSpot's per-token limit.
+	limiter := httpclient.NewRateLimiter(rateLimit, rateLimitBurst)
+	baseOpts := func() []httpclient.Option {
+		return []httpclient.Option{
+			httpclient.WithBaseURL(base),
+			httpclient.WithTimeout(2 * time.Minute),
+			httpclient.WithRateLimiterInstance(limiter),
+			httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
+			httpclient.WithAuth(httpclient.NewBearerAuth(cfg.apiKey)),
+			httpclient.WithDebug(config.DebugMode),
+			httpclient.WithHeader("Content-Type", "application/json"),
+			httpclient.WithHeader("Accept", "application/json"),
+		}
+	}
+
+	// client retries POST on 429/5xx for replay-safe operations: upsert and update
+	// are keyed, associations are idempotent, and property reads are read-only.
+	d.client = httpclient.New(append(baseOpts(), httpclient.WithAllowNonIdempotentRetry())...)
+	// createClient does NOT retry POST: resending an unkeyed batch create after a
+	// lost response or 5xx could duplicate records.
+	d.createClient = httpclient.New(baseOpts()...)
 
 	config.Debug("[HUBSPOT DEST] Connected")
 	return nil
 }
 
 func (d *HubSpotDestination) Close(_ context.Context) error {
+	var err error
 	if d.client != nil {
-		return d.client.Close()
+		err = d.client.Close()
 	}
-	return nil
+	if d.createClient != nil {
+		if cerr := d.createClient.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
 // tableParams are the record-shaping options carried on the --dest-table string,
@@ -561,15 +580,20 @@ func parseBatchResponse(resp *httpclient.Response) batchResult {
 // records any per-record errors HubSpot returns.
 func (d *HubSpotDestination) send(ctx context.Context, sh *shaper, items []batchInput, rejects *rejectionLog) error {
 	action := "create"
+	// create is unkeyed, so it must not auto-retry; upsert/update are keyed and
+	// safe on the retrying client.
+	client := d.createClient
 	switch {
 	case sh.update():
 		action = "update"
+		client = d.client
 	case sh.upsert():
 		action = "upsert"
+		client = d.client
 	}
 	endpoint := fmt.Sprintf("/crm/v3/objects/%s/batch/%s", url.PathEscape(sh.objectType), action)
 
-	resp, err := d.client.R(ctx).SetBody(map[string]interface{}{"inputs": items}).Post(endpoint)
+	resp, err := client.R(ctx).SetBody(map[string]interface{}{"inputs": items}).Post(endpoint)
 	if err != nil {
 		return fmt.Errorf("hubspot %s request failed: %w", action, err)
 	}
