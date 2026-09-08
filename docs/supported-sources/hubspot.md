@@ -302,11 +302,11 @@ Create and update work for any object. **Upsert** needs a writable unique proper
 
 Append to `--dest-table` as a query string (e.g. `contacts?id_property=email`):
 
-| param | purpose |
-| --- | --- |
-| `id_property` | property to match on (see table above); omit to always create |
-| `id_column` | source column supplying the id value, if named differently; defaults to `id_property` |
-| `on_error` | `fail` (default) aborts on rejects; `skip` logs bad rows and continues |
+| param | required | purpose |
+| --- | --- | --- |
+| `id_property` | optional | property to match on (see table above); omit to always create |
+| `id_column` | optional | source column holding the match value; defaults to `id_property`. Set it only when your source column name differs from the property name (e.g. `id_property=email` but the column is `customer_email`) |
+| `on_error` | optional | `fail` (default) aborts on rejects; `skip` logs bad rows and continues |
 
 ### Associations
 
@@ -316,12 +316,12 @@ Use the `associations` dest-table to link two existing records (one link per sou
 associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=company_id
 ```
 
-| param | purpose |
-| --- | --- |
-| `from` / `to` | the two object types to link |
-| `from_id_column` / `to_id_column` | source columns holding each record's id |
-| `association_type` | optional numeric type id for a labeled association (default is unlabeled) |
-| `association_category` | optional; `HUBSPOT_DEFINED` (default) or `USER_DEFINED`, used with `association_type` |
+| param | required | purpose |
+| --- | --- | --- |
+| `from` / `to` | required | the two object types to link |
+| `from_id_column` / `to_id_column` | required | source columns holding each record's id |
+| `association_type` | optional | numeric type id for a labeled association (default is unlabeled) |
+| `association_category` | optional | `HUBSPOT_DEFINED` (default) or `USER_DEFINED`, used with `association_type` |
 
 Both records must already exist — load them first, then run the `associations` ingestion with a source table of id pairs.
 
