@@ -384,6 +384,29 @@ func TestTimestampPreservesMicroseconds(t *testing.T) {
 	assert.Contains(t, v, ".123456", "microsecond precision should be preserved, got %q", v)
 }
 
+func TestCreateDoesNotRetryOn5xx(t *testing.T) {
+	// A batch create must not be auto-resent on a server error: retrying an
+	// unkeyed create could duplicate records.
+	var calls int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: contactBatch()}
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "contacts"})
+	require.Error(t, err)
+	assert.Equal(t, 1, calls, "create must be sent exactly once (no retry)")
+}
+
 func TestStrategySupport(t *testing.T) {
 	d := NewHubSpotDestination()
 	assert.True(t, d.SupportsAppendStrategy())
