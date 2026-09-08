@@ -155,14 +155,19 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 		return arrow.PrimitiveTypes.Float32, nil
 	}
 
-	// If either is decimal, result is decimal. A Decimal256 input must not be
-	// narrowed back to Decimal128, or replay fails its precision check on
-	// high-precision values.
+	// If either is decimal, result is decimal (Decimal256 must not narrow to Decimal128).
 	if a.ID() == arrow.DECIMAL128 || b.ID() == arrow.DECIMAL128 ||
 		a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
 		if a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
-			precision, scale := mergedDecimalBounds(a, b)
-			return &arrow.Decimal256Type{Precision: precision, Scale: scale}, nil
+			intA, scaleA := decimalIntDigitsAndScale(a)
+			intB, scaleB := decimalIntDigitsAndScale(b)
+			intDigits := max(intA, intB)
+			scale := max(scaleA, scaleB)
+			// Both integer digits and scale must fit Decimal256's 76; else carry as string.
+			if intDigits+scale > 76 {
+				return arrow.BinaryTypes.String, nil
+			}
+			return &arrow.Decimal256Type{Precision: intDigits + scale, Scale: scale}, nil
 		}
 		return &arrow.Decimal128Type{Precision: 38, Scale: 9}, nil
 	}
@@ -185,24 +190,6 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 	default:
 		return arrow.PrimitiveTypes.Int64, nil
 	}
-}
-
-// mergedDecimalBounds picks a Decimal256 precision/scale wide enough to hold
-// both inputs: it keeps the larger integer-digit capacity and the larger scale,
-// clamped to Decimal256's 76-digit ceiling (trimming scale first so integer
-// digits — where overflow would occur — are preserved).
-func mergedDecimalBounds(a, b arrow.DataType) (int32, int32) {
-	intA, scaleA := decimalIntDigitsAndScale(a)
-	intB, scaleB := decimalIntDigitsAndScale(b)
-	intDigits := max(intA, intB)
-	scale := max(scaleA, scaleB)
-	if intDigits > 76 {
-		intDigits = 76
-	}
-	if intDigits+scale > 76 {
-		scale = 76 - intDigits
-	}
-	return intDigits + scale, scale
 }
 
 // decimalIntDigitsAndScale returns a type's integer-digit capacity and scale.

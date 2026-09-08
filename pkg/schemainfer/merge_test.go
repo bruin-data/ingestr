@@ -220,8 +220,7 @@ func TestMergeArrowTypes_Decimal256NotNarrowed(t *testing.T) {
 }
 
 func TestMergeArrowTypes_Decimal256PreservesIntegerDigits(t *testing.T) {
-	// numeric(76,0) has 76 integer digits; the merged type must keep room for
-	// all of them or a low-scale value overflows during replay.
+	// The merged type must keep room for all 76 integer digits.
 	result, err := MergeArrowTypes(&arrow.Decimal256Type{Precision: 76, Scale: 0}, arrow.PrimitiveTypes.Int64)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -232,6 +231,17 @@ func TestMergeArrowTypes_Decimal256PreservesIntegerDigits(t *testing.T) {
 	}
 	if dt.Precision-dt.Scale < 76 {
 		t.Errorf("merged type must keep 76 integer digits, got precision=%d scale=%d", dt.Precision, dt.Scale)
+	}
+}
+
+func TestMergeArrowTypes_Decimal256OverflowFallsBackToString(t *testing.T) {
+	// 76 integer digits + 25 fractional exceed Decimal256's 76-digit limit.
+	result, err := MergeArrowTypes(&arrow.Decimal256Type{Precision: 76, Scale: 0}, &arrow.Decimal256Type{Precision: 40, Scale: 25})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ID() != arrow.STRING {
+		t.Errorf("expected string fallback when digits do not fit, got %v", result)
 	}
 }
 
