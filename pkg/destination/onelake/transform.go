@@ -3,6 +3,7 @@ package onelake
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -410,6 +411,13 @@ func canonicalValue(v interface{}, keyType schema.DataType) (interface{}, bool) 
 			return float64(n), true
 		case float64:
 			return n, true
+		case string:
+			// High-precision decimals (Decimal256) arrive as exact text.
+			f, err := strconv.ParseFloat(n, 64)
+			if err != nil {
+				return nil, false
+			}
+			return f, true
 		default:
 			return nil, false
 		}
