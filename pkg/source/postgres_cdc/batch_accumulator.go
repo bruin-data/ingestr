@@ -2,6 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"unsafe"
@@ -216,6 +217,29 @@ func (a *batchAccumulator) flushAllContext(ctx context.Context, results chan<- s
 	return nil
 }
 
+// Flush unaffected tables before discarding the accumulator for a rebuild.
+// Failed tables retain their low-water marks during this flush, so these batches
+// cannot acknowledge WAL that still needs a replacement snapshot.
+func (a *batchAccumulator) flushForSchemaRebuild(ctx context.Context, results chan<- source.RecordBatchResult, token tokenFunc, first *SchemaChangedError) ([]*SchemaChangedError, error) {
+	var schemaErrors []*SchemaChangedError
+	if first != nil {
+		schemaErrors = append(schemaErrors, first)
+	}
+	for tableName := range a.changes {
+		if first != nil && tableName == first.Table {
+			continue
+		}
+		if err := a.flushTableContext(ctx, tableName, results, token); err != nil {
+			var schemaErr *SchemaChangedError
+			if !errors.As(err, &schemaErr) {
+				return nil, err
+			}
+			schemaErrors = append(schemaErrors, schemaErr)
+		}
+	}
+	return schemaErrors, nil
+}
+
 func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName string, results chan<- source.RecordBatchResult, token tokenFunc) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		a.discard()
@@ -225,14 +249,6 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 	if len(changes) == 0 {
 		return nil
 	}
-
-	delete(a.changes, tableName)
-	delete(a.minLSN, tableName)
-	a.totalBytes -= a.bytes[tableName]
-	if a.totalBytes < 0 {
-		a.totalBytes = 0
-	}
-	delete(a.bytes, tableName)
 
 	if a.durable != nil {
 		if err := a.toast.prune(ctx, a.durable()); err != nil {
@@ -273,6 +289,14 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 	if len(changes) > 0 {
 		changes = compactChanges(changes, tableSchema)
 	}
+
+	delete(a.changes, tableName)
+	delete(a.minLSN, tableName)
+	a.totalBytes -= a.bytes[tableName]
+	if a.totalBytes < 0 {
+		a.totalBytes = 0
+	}
+	delete(a.bytes, tableName)
 
 	var commitToken any
 	if token != nil {

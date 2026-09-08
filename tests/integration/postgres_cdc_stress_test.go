@@ -523,15 +523,62 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		truths[tbl.name] = tr
 		t.Logf("source truth %s: count=%d sum=%s", tbl.name, tr.count, tr.sum)
 	}
-	// While the streams are writing, monitoring must open the file read-only;
-	// after shutdown the held read-write connection takes over.
-	var duckDB *sql.DB
-	withDuckDB := func(fn func(*sql.DB) error) error {
-		if duckDB != nil {
-			return fn(duckDB)
+	// Independent DuckDB instances do not share the writer's buffer pool, even
+	// when opened read-only. Wait for durable WAL acknowledgements and close
+	// both writers before opening the file for verification.
+	// Use the insert position to include commits with synchronous_commit=off.
+	var finalLSN string
+	require.NoError(t, srcPool.QueryRow(ctx, `SELECT pg_current_wal_insert_lsn()::text`).Scan(&finalLSN))
+	deadline := time.Now().Add(stressConvergeTimeout)
+	lastProgressLog := time.Now()
+	for {
+		select {
+		case exit := <-streamExits:
+			if restartStreamIfRequired(exit) {
+				continue
+			}
+			stressDumpReplicationState(t, ctx, srcPool)
+			t.Fatalf("%s stream exited during convergence: %v", exit.sink.name, exit.err)
+		default:
 		}
-		return withCDCStressDuckDBReadOnly(duckDBPath, fn)
+		var caughtUp int
+		require.NoError(t, srcPool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_replication_slots
+			WHERE NOT temporary AND active AND confirmed_flush_lsn >= $1::pg_lsn
+		`, finalLSN).Scan(&caughtUp))
+		if caughtUp == len(streamSinks) {
+			break
+		}
+		if time.Since(lastProgressLog) > 20*time.Second {
+			lastProgressLog = time.Now()
+			t.Logf("waiting for durable CDC acknowledgement through %s: %d/%d streams", finalLSN, caughtUp, len(streamSinks))
+		}
+		if time.Now().After(deadline) {
+			stressDumpReplicationState(t, ctx, srcPool)
+			stressDumpContainerLogs(t, ctx, sourceContainer, 120)
+			t.Fatalf("streams did not acknowledge %s within %v", finalLSN, stressConvergeTimeout)
+		}
+		time.Sleep(2 * time.Second)
 	}
+	for _, sink := range streamSinks {
+		require.Positive(t, sink.restarts, "%s workload should exercise the safe restart boundary", sink.name)
+	}
+
+	cancelStream()
+	stopped := make(map[string]struct{}, len(streamSinks))
+	deadline = time.Now().Add(60 * time.Second)
+	for len(stopped) < len(streamSinks) {
+		select {
+		case exit := <-streamExits:
+			if exit.err != nil {
+				require.ErrorIs(t, exit.err, context.Canceled, "%s stream shutdown", exit.sink.name)
+			}
+			stopped[exit.sink.name] = struct{}{}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("streaming pipelines did not exit within 60s of cancellation")
+		}
+	}
+	duckDB := openCDCStressDuckDB(t, duckDBPath)
 
 	type stressDestination struct {
 		name          string
@@ -563,35 +610,21 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		{
 			name: "duckdb",
 			aggregate: func(table string) (stressTruth, error) {
-				var truth stressTruth
-				err := withDuckDB(func(db *sql.DB) error {
-					var err error
-					truth, err = stressDuckDBTruth(ctx, db, table)
-					return err
-				})
-				return truth, err
+				return stressDuckDBTruth(ctx, duckDB, table)
 			},
 			compareAll: func() error {
-				return withDuckDB(func(db *sql.DB) error {
-					return stressCompareAllDuckDB(ctx, srcPool, db, finalTables)
-				})
+				return stressCompareAllDuckDB(ctx, srcPool, duckDB, finalTables)
 			},
 			validate: func() error {
-				return withDuckDB(func(db *sql.DB) error {
-					return stressValidateDuckDBSchemas(ctx, srcPool, db, finalTables)
-				})
+				return stressValidateDuckDBSchemas(ctx, srcPool, duckDB, finalTables)
 			},
 			validateState: func() error {
-				return withDuckDB(func(db *sql.DB) error {
-					return stressValidateDuckDBState(ctx, db, len(finalTables))
-				})
+				return stressValidateDuckDBState(ctx, duckDB, len(finalTables))
 			},
 			softDeleted: func(table string) (int64, error) {
 				var deleted int64
-				err := withDuckDB(func(db *sql.DB) error {
-					return db.QueryRowContext(ctx,
-						fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(table))).Scan(&deleted)
-				})
+				err := duckDB.QueryRowContext(ctx,
+					fmt.Sprintf(`SELECT count(*) FROM %s WHERE _cdc_deleted = true`, quoteStressIdentifier(table))).Scan(&deleted)
 				return deleted, err
 			},
 		},
@@ -611,77 +644,15 @@ func TestPostgresCDC_StressComplexWorkload(t *testing.T) {
 		stressDumpContainerLogs(t, ctx, sourceContainer, 120)
 	}
 
-	deadline := time.Now().Add(stressConvergeTimeout)
-	lastProgressLog := time.Now()
-	for {
-		select {
-		case exit := <-streamExits:
-			if restartStreamIfRequired(exit) {
-				continue
-			}
-			dumpDiagnostics()
-			t.Fatalf("%s stream exited during convergence: %v", exit.sink.name, exit.err)
-		default:
-		}
-		pending := ""
-		for _, destination := range destinations {
-			for _, tbl := range finalTables {
-				got, err := destination.aggregate(tbl.name)
-				if err != nil || got != truths[tbl.name] {
-					pending = fmt.Sprintf("%s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
-					break
-				}
-			}
-			if pending != "" {
-				break
-			}
-		}
-		if pending == "" {
-			break
-		}
-		if time.Since(lastProgressLog) > 20*time.Second {
-			lastProgressLog = time.Now()
-			t.Logf("convergence pending: %s", pending)
-		}
-		if time.Now().After(deadline) {
-			dumpDiagnostics()
-			t.Fatalf("destination did not converge within %v; still pending: %s", stressConvergeTimeout, pending)
-		}
-		time.Sleep(2 * time.Second)
-	}
-	t.Log("PostgreSQL and DuckDB destinations converged on count/sum aggregates for all tables")
-	for _, sink := range streamSinks {
-		require.Positive(t, sink.restarts, "%s workload should exercise the safe restart boundary", sink.name)
-	}
-
-	cancelStream()
-	stopped := make(map[string]struct{}, len(streamSinks))
-	deadline = time.Now().Add(60 * time.Second)
-	for len(stopped) < len(streamSinks) {
-		select {
-		case exit := <-streamExits:
-			if exit.err != nil {
-				require.ErrorIs(t, exit.err, context.Canceled, "%s stream shutdown", exit.sink.name)
-			}
-			stopped[exit.sink.name] = struct{}{}
-		case <-time.After(time.Until(deadline)):
-			t.Fatal("streaming pipelines did not exit within 60s of cancellation")
-		}
-	}
-	duckDB = openCDCStressDuckDB(t, duckDBPath)
-
-	// Aggregates can match while a final merge is still landing payload
-	// updates, so retry the deep comparison briefly before declaring failure.
 	for _, destination := range destinations {
-		var compareErr error
-		for attempt := 1; attempt <= 6; attempt++ {
-			if compareErr = destination.compareAll(); compareErr == nil {
-				break
+		for _, tbl := range finalTables {
+			got, err := destination.aggregate(tbl.name)
+			if err != nil || got != truths[tbl.name] {
+				dumpDiagnostics()
+				t.Fatalf("%s/%s: want %+v, got %+v (err=%v)", destination.name, tbl.name, truths[tbl.name], got, err)
 			}
-			t.Logf("%s deep comparison attempt %d: %v", destination.name, attempt, compareErr)
-			time.Sleep(5 * time.Second)
 		}
-		require.NoError(t, compareErr, "%s row-by-row content comparison failed", destination.name)
+		require.NoError(t, destination.compareAll(), "%s row-by-row content comparison failed", destination.name)
 		t.Logf("%s row-by-row content comparison passed for all tables", destination.name)
 		require.NoError(t, destination.validate(), "%s destination schema validation failed", destination.name)
 		require.NoError(t, destination.validateState(), "%s destination CDC state validation failed", destination.name)
