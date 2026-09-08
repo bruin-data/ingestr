@@ -263,7 +263,7 @@ When you include associations, the response will contain information about the r
 
 ## HubSpot as a destination
 
-ingestr can also write **into** HubSpot. Use the same URI as the source (`hubspot://?api_key=<token>`), with a private app token that has **write** scopes for the objects you're loading.
+ingestr can also write **into** HubSpot. Use the same URI as the source (`hubspot://?api_key=<token>`, or `service_key=<token>`), with a private app token that has **write** scopes for the objects you're loading.
 
 Each source column becomes a HubSpot property of the same name — name your columns to match the target properties. Null values are skipped (they won't overwrite existing data). The `--dest-table` is any writable object: standard (`contacts`, `deals`, …), engagement/commerce (`notes`, `invoices`, …), or a custom object (`p12345_car` or `2-12345678`).
 
