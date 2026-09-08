@@ -310,6 +310,7 @@ associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=c
 | `from` / `to` | the two object types to link |
 | `from_id_column` / `to_id_column` | source columns holding each record's id |
 | `association_type` | optional numeric type id for a labeled association (default is unlabeled) |
+| `association_category` | optional; `HUBSPOT_DEFINED` (default) or `USER_DEFINED`, used with `association_type` |
 
 Both records must already exist — load them first, then run the `associations` ingestion with a source table of id pairs.
 
