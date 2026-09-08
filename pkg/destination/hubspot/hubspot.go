@@ -604,7 +604,7 @@ func (d *HubSpotDestination) send(ctx context.Context, sh *shaper, items []batch
 	}
 	// on_error=skip only tolerates record-level rejections; auth/rate/server
 	// failures abort so an entire dropped batch never looks like success.
-	if !res.ok && !(sh.onErrorSkip && isRecordLevelStatus(res.status)) {
+	if !res.ok && (!sh.onErrorSkip || !isRecordLevelStatus(res.status)) {
 		hint := ""
 		if res.category == "CONFLICT" || res.status == 409 {
 			hint = "; set id_property=<property> on the dest-table to upsert existing records instead of creating them"
@@ -675,7 +675,7 @@ func (d *HubSpotDestination) sendAssociations(ctx context.Context, sh *shaper, i
 		return nil
 	}
 	pair := fmt.Sprintf("%s->%s", sh.objectType, sh.associateTo)
-	if !res.ok && !(sh.onErrorSkip && isRecordLevelStatus(res.status)) {
+	if !res.ok && (!sh.onErrorSkip || !isRecordLevelStatus(res.status)) {
 		return fmt.Errorf("hubspot %s associate returned status %d: %s", pair, res.status, res.rejections[0].message)
 	}
 
