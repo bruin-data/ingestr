@@ -295,6 +295,7 @@ Create and update work for any object. **Upsert** needs a writable unique proper
 | products | `hs_sku` |
 | line items | `hs_external_id` |
 | tickets | `hs_external_object_ids` |
+| commerce_payments | `hs_external_reference_id` |
 | companies, deals, quotes | none — use `hs_object_id` (update) or a custom unique property |
 
 ### Parameters
