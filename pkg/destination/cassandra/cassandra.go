@@ -638,6 +638,10 @@ func arrowToCassandra(arr arrow.Array, idx int) interface{} {
 		val := a.Value(idx)
 		dt := a.DataType().(*arrow.Decimal128Type)
 		return inf.NewDecBig(val.BigInt(), inf.Scale(dt.Scale))
+	case *array.Decimal256:
+		val := a.Value(idx)
+		dt := a.DataType().(*arrow.Decimal256Type)
+		return inf.NewDecBig(val.BigInt(), inf.Scale(dt.Scale))
 	case *array.Date32:
 		return a.Value(idx).ToTime()
 	case *array.Date64:

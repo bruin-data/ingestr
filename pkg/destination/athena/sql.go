@@ -208,6 +208,10 @@ func arrowLiteral(arr arrow.Array, dt arrow.DataType, idx int) (string, error) {
 		v := a.Value(idx)
 		dt := a.DataType().(*arrow.Decimal128Type)
 		return v.ToString(dt.Scale), nil
+	case *array.Decimal256:
+		v := a.Value(idx)
+		dt := a.DataType().(*arrow.Decimal256Type)
+		return v.ToString(dt.Scale), nil
 	case *array.Date32:
 		t := a.Value(idx).ToTime()
 		return "DATE " + quoteString(t.Format("2006-01-02")), nil
@@ -252,6 +256,12 @@ func arrowLiteral(arr arrow.Array, dt arrow.DataType, idx int) (string, error) {
 			if decArr, ok := arr.(*array.Decimal128); ok {
 				v := decArr.Value(idx)
 				dt := decArr.DataType().(*arrow.Decimal128Type)
+				return v.ToString(dt.Scale), nil
+			}
+		case arrow.DECIMAL256:
+			if decArr, ok := arr.(*array.Decimal256); ok {
+				v := decArr.Value(idx)
+				dt := decArr.DataType().(*arrow.Decimal256Type)
 				return v.ToString(dt.Scale), nil
 			}
 		}
