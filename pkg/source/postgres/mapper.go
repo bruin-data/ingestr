@@ -8,6 +8,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
+// maxDecimal256Precision is the largest precision Arrow's Decimal256 can hold.
+// PostgreSQL numeric allows up to 1000, so anything wider is carried as text.
+const maxDecimal256Precision = 76
+
 var (
 	numericPrecisionRegex = regexp.MustCompile(`numeric\((\d+),\s*(\d+)\)`)
 	arrayTypeRegex        = regexp.MustCompile(`^(.+)\[\]$`)

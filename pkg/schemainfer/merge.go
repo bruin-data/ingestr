@@ -155,10 +155,14 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 		return arrow.PrimitiveTypes.Float32, nil
 	}
 
-	// If either is decimal, result is decimal
+	// If either is decimal, result is decimal. A Decimal256 input must not be
+	// narrowed back to Decimal128, or replay fails its precision check on
+	// high-precision values.
 	if a.ID() == arrow.DECIMAL128 || b.ID() == arrow.DECIMAL128 ||
 		a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
-		// Use default precision/scale for merged decimals
+		if a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
+			return &arrow.Decimal256Type{Precision: 76, Scale: 38}, nil
+		}
 		return &arrow.Decimal128Type{Precision: 38, Scale: 9}, nil
 	}
 
@@ -270,7 +274,11 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		col.DataType = schema.TypeFloat64
 	case arrow.DECIMAL128, arrow.DECIMAL256:
 		col.DataType = schema.TypeDecimal
-		if decType, ok := dt.(*arrow.Decimal128Type); ok {
+		switch decType := dt.(type) {
+		case *arrow.Decimal128Type:
+			col.Precision = int(decType.Precision)
+			col.Scale = int(decType.Scale)
+		case *arrow.Decimal256Type:
 			col.Precision = int(decType.Precision)
 			col.Scale = int(decType.Scale)
 		}

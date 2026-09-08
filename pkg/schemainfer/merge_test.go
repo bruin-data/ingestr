@@ -205,6 +205,20 @@ func TestMergeArrowTypes_DecimalPromotion(t *testing.T) {
 	}
 }
 
+func TestMergeArrowTypes_Decimal256NotNarrowed(t *testing.T) {
+	dec256 := &arrow.Decimal256Type{Precision: 40, Scale: 25}
+
+	for _, other := range []arrow.DataType{arrow.PrimitiveTypes.Int64, &arrow.Decimal128Type{Precision: 18, Scale: 2}} {
+		result, err := MergeArrowTypes(dec256, other)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.ID() != arrow.DECIMAL256 {
+			t.Errorf("merging Decimal256 with %v must stay Decimal256, got %v", other, result)
+		}
+	}
+}
+
 func TestIsNumericType(t *testing.T) {
 	numericTypes := []arrow.DataType{
 		arrow.PrimitiveTypes.Int8,
