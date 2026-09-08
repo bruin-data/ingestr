@@ -93,9 +93,9 @@ jobs:
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=linux -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
 
 
-  release-unix:
+  publish-release:
     runs-on: depot-ubuntu-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests]
+    needs: [prepare-linux, prepare-darwin, prepare-windows, integration-tests]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -110,6 +110,10 @@ jobs:
         with:
           path: dist/darwin
           key: darwin-${{ env.sha_short }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: dist/windows
+          key: windows-${{ env.sha_short }}
       - uses: goreleaser/goreleaser-action@b508e2e3ef3b19d4e4146d4f8fb3ba9db644a757 # v3
         with:
           distribution: goreleaser-pro
@@ -119,9 +123,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
-  release-windows:
+  prepare-windows:
     runs-on: depot-windows-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests]
+    needs: [integration-tests]
     defaults:
       run:
         shell: msys2 {0}
@@ -145,39 +149,37 @@ jobs:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
 
-      - name: Release
+      - name: Compute short SHA
+        shell: bash
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: cache windows
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: dist/windows
+          key: windows-${{ env.sha_short }}
+
+      - name: Build Windows split
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: v2.3.2
           distribution: goreleaser-pro
           args: release --clean --split
         env:
-          # existing env
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
           VERSION: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           GGOOS: windows
 
-          # ✅ make Windows CGO use MinGW-UCRT and link runtime statically
+          # make Windows CGO use MinGW-UCRT and link runtime statically
           CGO_ENABLED: 1
           CC: x86_64-w64-mingw32-gcc
           CGO_LDFLAGS: "-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic"
 
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: dist/windows/ingestr_Windows_x86_64.zip
-          asset_name: ingestr_Windows_x86_64.zip
-          tag: ${{ github.ref }}
-          overwrite: false
-          make_latest: false
-          prerelease: false
-
   release-pip:
     runs-on: depot-ubuntu-latest
-    needs: [release-windows, release-unix]
+    needs: [publish-release]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -257,7 +259,7 @@ jobs:
   install-windows:
     runs-on: depot-windows-latest
     name: Installer Script on Windows
-    needs: [release-windows, release-unix]
+    needs: [publish-release]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Show directories
@@ -288,7 +290,7 @@ jobs:
   install-unix:
     runs-on: ubuntu-latest
     name: Installer Script on Linux
-    needs: [release-windows, release-unix]
+    needs: [publish-release]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Extract tag from ref
