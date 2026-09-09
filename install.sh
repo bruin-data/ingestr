@@ -13,6 +13,8 @@ Usage: $this [-b bindir] [-d] [-s sha256] [tag]
   -d turns on debug logging
   -s verifies the downloaded release archive against a trusted SHA-256
      (64 hexadecimal characters); requires an exact vMAJOR.MINOR.PATCH tag
+     Cancellation waits for the current command, without a fixed timeout.
+     A verified install already underway may finish; forced termination can skip cleanup.
    [tag] is a tag from
    https://github.com/bruin-data/ingestr/releases
    If tag is missing, then the latest will be used.
@@ -62,6 +64,7 @@ parse_args() {
 }
 
 cleanup_verified_install() {
+  trap '' HUP INT TERM
   if [ -n "$_install_pid" ]; then
     kill "$_install_pid" 2>/dev/null || :
     wait "$_install_pid" 2>/dev/null || :
@@ -721,4 +724,3 @@ TARBALL_URL=${GITHUB_DOWNLOAD}/${TAG}/${TARBALL}
 log_debug "Starting the download of ${TARBALL_URL}"
 
 execute
-

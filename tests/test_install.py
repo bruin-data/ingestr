@@ -120,6 +120,8 @@ echo finished > "$ROOT/install-finished"
                                     self.fail("installer did not reach destination write")
                                 time.sleep(0.01)
                             process.terminate()
+                            time.sleep(0.1)
+                            process.terminate()
                             process.communicate(timeout=15)
                             self.assertTrue((root / "install-finished").exists(),
                                             "installer exited before its child finished writing")
