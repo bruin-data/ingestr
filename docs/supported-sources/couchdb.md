@@ -1,0 +1,29 @@
+# CouchDB
+
+ingestr reads documents from a CouchDB database. Use the database name as `--source-table`.
+
+```sh
+ingestr ingest \
+  --source-uri 'couchdb://username:password@localhost:5984' \
+  --source-table orders \
+  --dest-uri 'duckdb:///warehouse.duckdb' \
+  --dest-table orders
+```
+
+Use `couchdb+https://username:password@host` for TLS (port 443 by default).
+The `couchdb://` scheme uses HTTP and defaults to port 5984. Credentials are optional
+for databases that permit anonymous reads. URL-encode special characters in credentials.
+The URI contains the server address, not the database name.
+
+Document fields become inferred columns, including `_id` and `_rev`. Nested objects
+and arrays remain JSON. `_id` is the default primary key. Attachment metadata is
+preserved, but attachment bodies are not downloaded. Design documents, local
+documents, and deleted documents are not ingested.
+
+The default strategy is `replace`, reading all current documents. An explicit
+`merge` upserts by `_id`, but does not remove destination rows deleted from CouchDB.
+There is no native timestamp filtering or `_changes`/CDC support. User-specified
+incremental keys use the pipeline's filtering; reads still scan the database.
+Pagination is sequential and is not a transactionally consistent snapshot when
+documents change during ingestion. Self-hosted CouchDB has no fixed vendor API
+quota; the client retries throttling and server errors without imposing a SaaS rate limit.
