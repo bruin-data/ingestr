@@ -930,6 +930,13 @@ func TestCDCStateDroppedTableCannotReuseOlderGeneration(t *testing.T) {
 	if position != "" {
 		t.Fatalf("recreated table resumed from stale state at %s", position)
 	}
+	position, err = recreated.ResumePositionForKeyedMerge(ctx, "public.orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if position != "" {
+		t.Fatalf("recreated keyed table resumed from stale state at %s", position)
+	}
 }
 
 func TestCDCStateLeaseLossDuringPersistSkipsPruneAndReturnsFenceError(t *testing.T) {
@@ -1155,6 +1162,169 @@ func TestCDCStateIncompleteRunMarksStateNonEmpty(t *testing.T) {
 	if stateEmpty {
 		t.Fatal("incomplete run classified the connector state as empty")
 	}
+}
+
+func TestCDCStateKeyedMergeResumesPreviousCompleteGeneration(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const connectorID = "keyed-crash-resume"
+
+	first, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:          "00000000/00000020",
+		SnapshotPositions: map[string]string{"public.orders": "00000000/00000010"},
+	}))
+
+	killed, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, killed.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.Equal(t, "00000000/00000020", mustResumePosition(t, killed, "public.orders"))
+	require.NoError(t, killed.BeginRun(ctx, false))
+
+	restarted, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.Empty(t, mustResumePosition(t, restarted, "public.orders"))
+	position, err := restarted.ResumePositionForKeyedMerge(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Equal(t, "00000000/00000020", position)
+}
+
+func TestCDCStateKeylessMergeDoesNotResumePreviousCompleteGeneration(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const connectorID = "keyless-crash-resume"
+
+	first, err := NewCDCStateManager(dest, connectorID, "raw.events", "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTable(ctx, "public.events", "raw.events"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:          "00000000/00000020",
+		SnapshotPositions: map[string]string{"public.events": "00000000/00000010"},
+	}))
+
+	killed, err := NewCDCStateManager(dest, connectorID, "raw.events", "")
+	require.NoError(t, err)
+	require.NoError(t, killed.RegisterTable(ctx, "public.events", "raw.events"))
+	require.Equal(t, "00000000/00000020", mustResumePosition(t, killed, "public.events"))
+	require.NoError(t, killed.BeginRun(ctx, false))
+
+	restarted, err := NewCDCStateManager(dest, connectorID, "raw.events", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTable(ctx, "public.events", "raw.events"))
+	require.Empty(t, mustResumePosition(t, restarted, "public.events"))
+}
+
+func TestCDCStateSnapshotInvalidationBlocksPreviousCompleteGeneration(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const connectorID = "invalidated-crash-resume"
+
+	first, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:          "00000000/00000020",
+		SnapshotPositions: map[string]string{"public.orders": "00000000/00000010"},
+	}))
+
+	killed, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, killed.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.Equal(t, "00000000/00000020", mustResumePosition(t, killed, "public.orders"))
+	require.NoError(t, killed.BeginRun(ctx, false))
+	require.NoError(t, killed.InvalidateSnapshot(ctx, "public.orders", "raw.orders", ""))
+
+	restarted, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTable(ctx, "public.orders", "raw.orders"))
+	position, err := restarted.ResumePositionForKeyedMerge(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Empty(t, position)
+}
+
+func TestCDCStateDestinationReplacementBlocksPreviousCompleteGeneration(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const connectorID = "replaced-destination-crash-resume"
+
+	first, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, first.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:          "00000000/00000020",
+		SnapshotPositions: map[string]string{"public.orders": "00000000/00000010"},
+	}))
+
+	killed, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, killed.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.Equal(t, "00000000/00000020", mustResumePosition(t, killed, "public.orders"))
+	require.NoError(t, killed.BeginRun(ctx, false))
+	dest.incarnations["raw.orders"] = "replacement"
+
+	restarted, err := NewCDCStateManager(dest, connectorID, "raw.orders", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTable(ctx, "public.orders", "raw.orders"))
+	position, err := restarted.ResumePositionForKeyedMerge(ctx, "public.orders")
+	require.NoError(t, err)
+	require.Empty(t, position)
+}
+
+func TestCDCStateBeginRunRetainsPreviousCompleteGenerationUntilPersist(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	const connectorID = "prune-crash-resume"
+	const tableCount = cdcStatePruneThreshold
+
+	first, err := NewCDCStateManager(dest, connectorID, "", "")
+	require.NoError(t, err)
+	snapshots := make(map[string]string, tableCount)
+	for i := range tableCount {
+		sourceTable := fmt.Sprintf("public.table_%03d", i)
+		destTable := fmt.Sprintf("raw.table_%03d", i)
+		require.NoError(t, first.RegisterTable(ctx, sourceTable, destTable))
+		snapshots[sourceTable] = "00000000/00000010"
+	}
+	require.NoError(t, first.BeginRun(ctx, false))
+	require.NoError(t, first.Persist(ctx, source.CDCStateCommitToken{
+		Position:          "00000000/00000020",
+		SnapshotPositions: snapshots,
+	}))
+
+	killed, err := NewCDCStateManager(dest, connectorID, "", "")
+	require.NoError(t, err)
+	for i := range tableCount {
+		sourceTable := fmt.Sprintf("public.table_%03d", i)
+		destTable := fmt.Sprintf("raw.table_%03d", i)
+		require.NoError(t, killed.RegisterTable(ctx, sourceTable, destTable))
+		require.Equal(t, "00000000/00000020", mustResumePosition(t, killed, sourceTable))
+	}
+	require.NoError(t, killed.BeginRun(ctx, false))
+
+	restarted, err := NewCDCStateManager(dest, connectorID, "", "")
+	require.NoError(t, err)
+	for i := range tableCount {
+		sourceTable := fmt.Sprintf("public.table_%03d", i)
+		destTable := fmt.Sprintf("raw.table_%03d", i)
+		require.NoError(t, restarted.RegisterTable(ctx, sourceTable, destTable))
+	}
+	position, err := restarted.ResumePositionForKeyedMerge(ctx, "public.table_000")
+	require.NoError(t, err)
+	require.Equal(t, "00000000/00000020", position)
+}
+
+func mustResumePosition(t *testing.T, manager *CDCStateManager, sourceTable string) string {
+	t.Helper()
+	position, err := manager.ResumePosition(t.Context(), sourceTable)
+	require.NoError(t, err)
+	return position
 }
 
 func TestCDCStateConcurrentRunsCannotCertifySibling(t *testing.T) {
