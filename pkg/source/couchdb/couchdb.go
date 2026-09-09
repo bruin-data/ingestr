@@ -124,7 +124,15 @@ func (s *CouchDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 		TableName: req.Name, TablePrimaryKeys: pks, TableIncrementalKey: req.IncrementalKey,
 		TableStrategy: strategy, KnownSchema: false,
 		SchemaFn: func(context.Context) (*schema.TableSchema, error) {
-			return &schema.TableSchema{Name: req.Name, Columns: []schema.Column{{Name: "_id", DataType: schema.TypeString}}, PrimaryKeys: pks}, nil
+			columns := []schema.Column{{Name: "_id", DataType: schema.TypeString}}
+			seen := map[string]bool{"_id": true}
+			for _, key := range pks {
+				if !seen[key] {
+					columns = append(columns, schema.Column{Name: key, DataType: schema.TypeString})
+					seen[key] = true
+				}
+			}
+			return &schema.TableSchema{Name: req.Name, Columns: columns, PrimaryKeys: pks}, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 			if opts.IncrementalKey != "" || opts.IntervalStart != nil || opts.IntervalEnd != nil {

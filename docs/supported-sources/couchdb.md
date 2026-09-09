@@ -25,7 +25,8 @@ The default strategy is `replace`, reading all current documents. An explicit
 There is no timestamp filtering or `_changes`/CDC support. Incremental keys and
 intervals are rejected rather than silently ignored. `--sql-limit` limits emitted documents.
 An empty replacement clears the destination using a minimal `_id` schema, since
-there are no documents from which to infer other columns.
+there are no documents from which to infer other columns. Custom primary-key
+columns are also included as strings in this empty fallback schema.
 Pagination is sequential and is not a transactionally consistent snapshot when
 documents change during ingestion. Self-hosted CouchDB has no fixed vendor API
 quota; the client retries throttling and server errors without imposing a SaaS rate limit.
