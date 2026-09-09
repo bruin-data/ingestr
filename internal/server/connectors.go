@@ -109,6 +109,7 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		genericURIConnector("postgres-cdc", "PostgreSQL CDC", []string{"postgres+cdc", "postgresql+cdc"}, true, false),
+		genericURIConnector("couchdb", "CouchDB", []string{"couchdb", "couchdb+https"}, true, false),
 		genericURIConnector("mysql-cdc", "MySQL CDC", []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}, true, false),
 		genericURIConnector("vitess-cdc", "Vitess CDC", []string{"vitess+cdc"}, true, false),
 		genericURIConnector("ps_mysql-cdc", "PlanetScale MySQL CDC", []string{"ps_mysql+cdc"}, true, false),
