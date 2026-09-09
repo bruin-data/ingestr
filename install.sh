@@ -8,9 +8,11 @@ usage() {
   cat <<EOF
 $this: download go binaries for bruin-data/ingestr
 
-Usage: $this [-b] bindir [-d] [tag]
+Usage: $this [-b bindir] [-d] [-s sha256] [tag]
   -b sets bindir or installation directory, Defaults to ./bin
   -d turns on debug logging
+  -s verifies the downloaded release archive against a trusted SHA-256
+     (64 hexadecimal characters); requires an exact vMAJOR.MINOR.PATCH tag
    [tag] is a tag from
    https://github.com/bruin-data/ingestr/releases
    If tag is missing, then the latest will be used.
@@ -27,16 +29,44 @@ parse_args() {
   # over-ridden by flag below
 
   BINDIR=${BINDIR:-~/.local/bin}
-  while getopts "b:dh?x" arg; do
+  EXPECTED_SHA256=""
+  while getopts "b:ds:h?x" arg; do
     case "$arg" in
       b) BINDIR="$OPTARG" ;;
       d) log_set_priority 10 ;;
+      s)
+        if ! valid_sha256 "$OPTARG"; then
+          log_crit "-s requires exactly 64 hexadecimal characters"
+          exit 1
+        fi
+        EXPECTED_SHA256=$(printf '%s' "$OPTARG" | tr 'A-F' 'a-f')
+        ;;
       h | \?) usage "$0" ;;
       x) set -x ;;
     esac
   done
   shift $((OPTIND - 1))
   TAG=$1
+  if [ -n "$EXPECTED_SHA256" ]; then
+    case "$TAG" in
+      *[!v0123456789.]*)
+        log_crit "-s requires an exact vMAJOR.MINOR.PATCH tag"
+        exit 1
+        ;;
+    esac
+    if [ "$#" -ne 1 ] || ! printf '%s\n' "$TAG" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+      log_crit "-s requires one exact version tag (vMAJOR.MINOR.PATCH); latest is not allowed"
+      exit 1
+    fi
+  fi
+}
+
+cleanup_verified_install() {
+  if [ -n "$_install_pid" ]; then
+    kill "$_install_pid" 2>/dev/null || :
+    wait "$_install_pid" 2>/dev/null || :
+  fi
+  rm -rf "${tmpdir}"
 }
 
 # this function wraps all the destructive operations
@@ -45,6 +75,11 @@ parse_args() {
 # out preventing half-done work
 execute() {
   tmpdir=$(mktemp -d)
+  if [ -n "$EXPECTED_SHA256" ]; then
+    _install_pid=""
+    trap cleanup_verified_install 0
+    trap 'exit 1' HUP INT TERM
+  fi
   log_debug "downloading files into ${tmpdir}"
 
   _use_fancy=false
@@ -71,6 +106,7 @@ execute() {
 
     (
       http_download "${_download_file}" "${TARBALL_URL}" > /dev/null 2>&1 || exit 1
+      verify_expected_sha256 "${_download_file}" || exit 1
       echo "extract" > "$_progress_file"
       (cd "${tmpdir}" && untar "${TARBALL}") > /dev/null 2>&1 || exit 1
       echo "install" > "$_progress_file"
@@ -84,8 +120,9 @@ execute() {
     ) &
     _install_pid=$!
     _download_progress "$_install_pid" "$_download_file" "$_total_size" "$_progress_file"
-    wait "$_install_pid"
-    _install_exit=$?
+    _install_exit=0
+    wait "$_install_pid" || _install_exit=$?
+    _install_pid=""
 
     rm -rf "${tmpdir}"
 
@@ -103,6 +140,7 @@ execute() {
     # Non-interactive or Windows: run synchronously with plain output
     log_info "downloading ingestr ${VERSION}..."
     http_download "${tmpdir}/${TARBALL}" "${TARBALL_URL}"
+    verify_expected_sha256 "${tmpdir}/${TARBALL}"
     srcdir="${tmpdir}"
     (cd "${tmpdir}" && untar "${TARBALL}")
     if [ ! -d "${BINDIR}" ]; then install -d "${BINDIR}"; fi
@@ -123,6 +161,10 @@ execute() {
       return 1
     fi
     log_info "ingestr ${VERSION} installed to ${BINDIR}"
+  fi
+
+  if [ -n "$EXPECTED_SHA256" ]; then
+    trap - 0 HUP INT TERM
   fi
 
   # Configure PATH
@@ -199,6 +241,10 @@ get_binaries() {
   esac
 }
 tag_to_version() {
+  if [ -n "$EXPECTED_SHA256" ]; then
+    VERSION=${TAG#v}
+    return 0
+  fi
   if [ -z "${TAG}" ]; then
     log_info "checking GitHub for latest tag"
   else
@@ -495,6 +541,14 @@ http_download_curl() {
   local_file=$1
   source_url=$2
   header=$3
+  if [ -n "$EXPECTED_SHA256" ]; then
+    if [ -z "$header" ]; then
+      curl -fsSL -o "$local_file" "$source_url" || return 1
+    else
+      curl -fsSL -H "$header" -o "$local_file" "$source_url" || return 1
+    fi
+    return 0
+  fi
   if [ -z "$header" ]; then
     log_debug "Executing: curl  -sL -o \"$local_file\" \"$source_url\""
     code=$(curl  -sL -o "$local_file" "$source_url")
@@ -564,10 +618,32 @@ hash_sha256() {
     hash=$(shasum -a 256 "$TARGET" 2>/dev/null) || return 1
     echo "$hash" | cut -d ' ' -f 1
   elif is_command openssl; then
-    hash=$(openssl -dst openssl dgst -sha256 "$TARGET") || return 1
-    echo "$hash" | cut -d ' ' -f a
+    hash=$(openssl dgst -sha256 "$TARGET") || return 1
+    printf '%s\n' "$hash" | sed 's/^.*= //'
   else
     log_crit "hash_sha256 unable to find command to compute sha-256 hash"
+    return 1
+  fi
+}
+valid_sha256() {
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in
+    *[!0123456789abcdefABCDEF]*) return 1 ;;
+  esac
+}
+verify_expected_sha256() {
+  [ -n "$EXPECTED_SHA256" ] || return 0
+  if ! actual_sha256=$(hash_sha256 "$1"); then
+    log_crit "unable to compute release archive SHA-256"
+    return 1
+  fi
+  if ! valid_sha256 "$actual_sha256"; then
+    log_crit "invalid output from SHA-256 tool"
+    return 1
+  fi
+  actual_sha256=$(printf '%s' "$actual_sha256" | tr 'A-F' 'a-f') || return 1
+  if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+    log_crit "release archive SHA-256 mismatch"
     return 1
   fi
 }
@@ -640,8 +716,5 @@ TARBALL_URL=${GITHUB_DOWNLOAD}/${TAG}/${TARBALL}
 log_debug "Starting the download of ${TARBALL_URL}"
 
 execute
-
-
-
 
 
