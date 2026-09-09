@@ -102,6 +102,9 @@ func (s *CouchDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 	if s.client == nil {
 		return nil, fmt.Errorf("CouchDB source is not connected")
 	}
+	if req.IncrementalKey != "" {
+		return nil, fmt.Errorf("CouchDB does not support incremental keys; use a full replace or merge")
+	}
 	if req.Name == "" || strings.HasPrefix(req.Name, "_") || req.Name == "." || req.Name == ".." {
 		return nil, fmt.Errorf("CouchDB source-table must be a user database name")
 	}
@@ -121,9 +124,12 @@ func (s *CouchDBSource) GetTable(ctx context.Context, req source.TableRequest) (
 		TableName: req.Name, TablePrimaryKeys: pks, TableIncrementalKey: req.IncrementalKey,
 		TableStrategy: strategy, KnownSchema: false,
 		SchemaFn: func(context.Context) (*schema.TableSchema, error) {
-			return nil, fmt.Errorf("CouchDB requires schema inference")
+			return &schema.TableSchema{Name: req.Name, Columns: []schema.Column{{Name: "_id", DataType: schema.TypeString}}, PrimaryKeys: pks}, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+			if opts.IncrementalKey != "" || opts.IntervalStart != nil || opts.IntervalEnd != nil {
+				return nil, fmt.Errorf("CouchDB does not support incremental filtering; use a full replace or merge")
+			}
 			results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 2))
 			go func() {
 				defer close(results)
@@ -145,6 +151,7 @@ func (s *CouchDBSource) read(ctx context.Context, path string, opts source.ReadO
 		pageSize = opts.PageSize
 	}
 	params := url.Values{"include_docs": {"true"}, "limit": {strconv.Itoa(pageSize + 1)}}
+	count := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -202,6 +209,10 @@ func (s *CouchDBSource) read(ctx context.Context, path string, opts source.ReadO
 				size += rowBytes
 			}
 			batch = append(batch, row.Doc)
+			count++
+			if opts.Limit > 0 && count >= opts.Limit {
+				return flush()
+			}
 		}
 		if err := flush(); err != nil {
 			return err

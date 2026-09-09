@@ -69,6 +69,22 @@ func TestCouchDBToDuckDBReplace(t *testing.T) {
 	table, err := src.GetTable(ctx, source.TableRequest{Name: couchDBDatabase})
 	require.NoError(t, err)
 	require.Equal(t, []string{"_id"}, table.PrimaryKeys())
+	_, err = src.GetTable(ctx, source.TableRequest{Name: couchDBDatabase, IncrementalKey: "updated_at"})
+	require.ErrorContains(t, err, "does not support incremental keys")
+	now := time.Now()
+	for _, opts := range []source.ReadOptions{{IncrementalKey: "updated_at"}, {IntervalStart: &now}, {IntervalEnd: &now}} {
+		_, err := table.Read(ctx, opts)
+		require.ErrorContains(t, err, "does not support incremental filtering")
+	}
+	limited, err := table.Read(ctx, source.ReadOptions{PageSize: 2, Limit: 2})
+	require.NoError(t, err)
+	var limitedRows int64
+	for result := range limited {
+		require.NoError(t, result.Err)
+		limitedRows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	require.Equal(t, int64(2), limitedRows)
 	for _, capBytes := range []int64{0, 1} {
 		batches, err := table.Read(ctx, source.ReadOptions{PageSize: 2, MaxBatchBytes: capBytes, ExcludeColumns: []string{"secret"}})
 		require.NoError(t, err)
@@ -151,6 +167,15 @@ func TestCouchDBToDuckDBReplace(t *testing.T) {
 	require.NoError(t, duck.QueryRowContext(ctx, `SELECT name, CAST(profile AS VARCHAR) FROM main.documents WHERE _id = 'a'`).Scan(&name, &updatedProfile))
 	require.Equal(t, "alpha-updated", name)
 	require.JSONEq(t, `{"city":"Bergen","tags":["updated"]}`, updatedProfile)
+	for _, id := range []string{"a", "c"} {
+		rev := couchDBDocumentRevision(t, ctx, httpBase, id)
+		couchDBRequest(t, ctx, httpBase, http.MethodDelete, "/"+couchDBDatabase+"/"+id+"?rev="+rev, nil, http.StatusOK)
+	}
+	require.NoError(t, duck.Close())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	duck, err = sql.Open("adbc_generic", "driver=duckdb;path="+duckPath)
+	require.NoError(t, err)
+	assertCouchDBRows(t, ctx, duck, nil)
 }
 
 func startCouchDBContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string, string) {
