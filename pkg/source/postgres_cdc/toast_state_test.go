@@ -160,4 +160,54 @@ func TestToastKeyMoveAfterRelationChangeRequestsSchemaRebuild(t *testing.T) {
 	require.ErrorAs(t, err, &schemaErr)
 	require.Equal(t, "public.t", schemaErr.Table)
 	require.Equal(t, "config_data", schemaErr.Column)
+	low, pending := a.minPendingLSN()
+	require.True(t, pending, "failed materialization must still block WAL acknowledgement")
+	require.Equal(t, pglogrepl.LSN(2), low)
+	require.Len(t, a.changes["public.t"], 1)
+}
+
+func TestSchemaRebuildFlushesUnaffectedTables(t *testing.T) {
+	for _, failedFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failed_first=%t", failedFirst), func(t *testing.T) {
+			a := newBatchAccumulator(1, map[string]*schema.TableSchema{
+				"changed_a": fillTestSchema(), "changed_b": fillTestSchema(), "unaffected": fillTestSchema(),
+			})
+			t.Cleanup(func() { require.NoError(t, a.toast.close()) })
+			for _, table := range []string{"changed_a", "changed_b"} {
+				a.add(table, []Change{{
+					Operation: "UPDATE", LSN: 20, Sequence: 2,
+					Values:    []interface{}{int64(2), tupleRelationMissingMarker, "moved"},
+					OldValues: []interface{}{int64(1), nil, nil},
+				}}, 20)
+			}
+			a.add("unaffected", []Change{{
+				Operation: "INSERT", LSN: 30,
+				Values: []interface{}{int64(3), "payload", "kept"},
+			}}, 30)
+			out := make(chan source.RecordBatchResult, 3)
+			t.Cleanup(func() { close(out); drainRecordBatchResults(out) })
+			token := func() any { return safeCommitLSN(&fakeReplicator{lsn: 100}, a) }
+			var first *SchemaChangedError
+			if failedFirst {
+				err := a.flushTableContext(t.Context(), "changed_a", out, token)
+				require.ErrorAs(t, err, &first)
+			}
+			schemaErrors, err := a.flushForSchemaRebuild(t.Context(), out, token, first)
+			require.NoError(t, err)
+			var changed []string
+			for _, schemaErr := range schemaErrors {
+				changed = append(changed, schemaErr.Table)
+			}
+			require.ElementsMatch(t, []string{"changed_a", "changed_b"}, changed)
+			require.Len(t, out, 1, "unaffected rows must not be discarded at the schema boundary")
+			res := <-out
+			defer res.Batch.Release()
+			require.Equal(t, "unaffected", res.TableName)
+			require.EqualValues(t, 1, res.Batch.NumRows())
+			require.Equal(t, int64(3), res.Batch.Column(0).(*array.Int64).Value(0))
+			require.Equal(t, pglogrepl.LSN(19), res.CommitToken, "unflushed schema changes still block acknowledgement")
+			require.NotContains(t, a.changes, "unaffected")
+			require.Len(t, a.changes, 2)
+		})
+	}
 }

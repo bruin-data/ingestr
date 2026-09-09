@@ -843,6 +843,32 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	if opts.Streaming {
 		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 	}
+	defer func() {
+		if !opts.Streaming {
+			return
+		}
+		var schemaErr *SchemaChangedError
+		if retErr != nil && !errors.As(retErr, &schemaErr) {
+			return
+		}
+		if retSignal == nil && schemaErr == nil {
+			return
+		}
+		schemaErrors, err := accum.flushForSchemaRebuild(ctx, results, token, schemaErr)
+		if err != nil {
+			retSignal, retErr = nil, err
+			return
+		}
+		if retSignal == nil {
+			retSignal = &streamSignal{}
+		}
+		for _, schemaErr := range schemaErrors {
+			output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+			retSignal.changedTables = append(retSignal.changedTables, schemaErr.Table)
+			retSignal.schemaErrors = append(retSignal.schemaErrors, schemaErr)
+		}
+		retErr = nil
+	}()
 
 	// lastIdleToken is the highest LSN already handed to the pipeline via a bare
 	// idle commit token, so we only emit one when the caught-up position has
@@ -884,9 +910,6 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// transaction still inside the decoder is dropped with the
 				// replicator; the slot cannot have confirmed past it, so the
 				// rebuilt stream re-decodes it.
-				if err := accum.flushAllContext(ctx, results, token); err != nil {
-					return nil, err
-				}
 				return &streamSignal{newTables: newNames, changedTables: changed, reincarnatedTables: reincarnated}, nil
 			}
 		}
@@ -907,16 +930,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// rebuilt stream re-decodes it in full. Batch runs skip this and
 				// surface the error instead — a restart heals them the same way.
 				output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
-				if err := accum.flushAllContext(ctx, results, token); err != nil {
-					return nil, err
-				}
 				return &streamSignal{changedTables: []string{schemaErr.Table}, schemaErrors: []*SchemaChangedError{schemaErr}}, nil
 			}
 			var reincarnationErr *TableReincarnatedError
 			if opts.Streaming && errors.As(err, &reincarnationErr) {
-				if err := accum.flushAllContext(ctx, results, token); err != nil {
-					return nil, err
-				}
 				relationID, parseErr := strconv.ParseUint(reincarnationErr.Current, 10, 32)
 				if parseErr != nil {
 					return nil, fmt.Errorf("invalid PostgreSQL relation incarnation %q: %w", reincarnationErr.Current, parseErr)
