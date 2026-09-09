@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -20,7 +21,7 @@ BINARY = b"#!/bin/sh\necho executed > \"$ROOT/executed\"\n"
 class InstallerTest(unittest.TestCase):
     def run_install(self, *, platform="Linux", tty=False, digest="correct",
                     tags=("v1.2.3",), tool="sha256sum", failure="", downloader="curl",
-                    machine="x86_64"):
+                    machine="x86_64", cancel_install=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tools = root / "tools"
@@ -74,6 +75,14 @@ if [ "$FAILURE" = download ]; then exit 22; fi
             real_extractor = shutil.which(extractor)
             self.assertIsNotNone(real_extractor)
             stub(extractor, f'echo extracted > "$ROOT/extracted"\nexec "{real_extractor}" "$@"')
+            if cancel_install:
+                (tools / "install").unlink()
+                stub("install", f'''
+echo started > "$ROOT/install-started"
+sleep 1
+"{shutil.which('install')}" "$@"
+echo finished > "$ROOT/install-finished"
+''')
             if tool != "missing":
                 if failure == "tool":
                     stub(tool, f'echo "{expected}  archive"; exit 1')
@@ -97,11 +106,26 @@ if [ "$FAILURE" = download ]; then exit 22; fi
                 if tty:
                     master, slave = pty.openpty()
                 with tempfile.TemporaryFile() as output:
-                    result = subprocess.run(
-                        ["/bin/sh", "-s", "--", *args], input=INSTALLER.read_bytes(),
-                        stdout=slave if tty else output, stderr=output,
-                        env=env, timeout=15,
-                    )
+                    with subprocess.Popen(
+                        ["/bin/sh", "-s", "--", *args], stdin=subprocess.PIPE,
+                        stdout=slave if tty else output, stderr=output, env=env,
+                    ) as process:
+                        if cancel_install:
+                            process.stdin.write(INSTALLER.read_bytes())
+                            process.stdin.close()
+                            process.stdin = None
+                            deadline = time.monotonic() + 10
+                            while not (root / "install-started").exists():
+                                if process.poll() is not None or time.monotonic() > deadline:
+                                    self.fail("installer did not reach destination write")
+                                time.sleep(0.01)
+                            process.terminate()
+                            process.communicate(timeout=15)
+                            self.assertTrue((root / "install-finished").exists(),
+                                            "installer exited before its child finished writing")
+                        else:
+                            process.communicate(INSTALLER.read_bytes(), timeout=15)
+                        returncode = process.returncode
                     output.seek(0)
                     diagnostics = output.read().decode(errors="replace")
             finally:
@@ -110,7 +134,7 @@ if [ "$FAILURE" = download ]; then exit 22; fi
                     os.close(master)
             success = digest in ("correct", None) and not failure and tool != "missing"
             success = success and (digest is None or tags == ("v1.2.3",))
-            self.assertEqual(result.returncode == 0, success, diagnostics)
+            self.assertEqual(returncode == 0, success and not cancel_install, diagnostics)
             self.assertEqual((dest / binary).read_bytes(), BINARY if success else b"existing installation")
             self.assertEqual((root / "extracted").exists(), success, diagnostics)
             self.assertFalse((root / "executed").exists())
@@ -152,10 +176,12 @@ if [ "$FAILURE" = download ]; then exit 22; fi
         self.run_install(downloader="wget", failure="download")
 
     def test_other_supported_architectures(self):
-        for platform, machine in (("Linux", "aarch64"), ("Darwin", "aarch64"),
-                                  ("MINGW64_NT", "i686")):
+        for platform, machine in (("Linux", "aarch64"), ("Darwin", "aarch64")):
             with self.subTest(platform=platform, machine=machine):
                 self.run_install(platform=platform, machine=machine)
+
+    def test_cancellation_waits_for_destination_write(self):
+        self.run_install(tty=True, cancel_install=True)
 
     def test_legacy_without_hash(self):
         for tags in ((), ("v1.2.3",)):

@@ -105,6 +105,11 @@ execute() {
     log_debug "expected download size: ${_total_size} bytes"
 
     (
+      if [ -n "$EXPECTED_SHA256" ]; then
+        # Defer cancellation until the foreground command exits, so cleanup
+        # cannot orphan a download, extraction, or destination write.
+        trap 'exit 1' HUP INT TERM
+      fi
       http_download "${_download_file}" "${TARBALL_URL}" > /dev/null 2>&1 || exit 1
       verify_expected_sha256 "${_download_file}" || exit 1
       echo "extract" > "$_progress_file"
@@ -716,5 +721,4 @@ TARBALL_URL=${GITHUB_DOWNLOAD}/${TAG}/${TARBALL}
 log_debug "Starting the download of ${TARBALL_URL}"
 
 execute
-
 
