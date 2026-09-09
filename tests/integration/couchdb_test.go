@@ -167,15 +167,23 @@ func TestCouchDBToDuckDBReplace(t *testing.T) {
 	require.NoError(t, duck.QueryRowContext(ctx, `SELECT name, CAST(profile AS VARCHAR) FROM main.documents WHERE _id = 'a'`).Scan(&name, &updatedProfile))
 	require.Equal(t, "alpha-updated", name)
 	require.JSONEq(t, `{"city":"Bergen","tags":["updated"]}`, updatedProfile)
+	customConfig := *cfg
+	customConfig.DestTable = "main.custom_documents"
+	customConfig.PrimaryKeys = []string{"_id", "name"}
+	require.NoError(t, duck.Close())
+	require.NoError(t, pipeline.New(&customConfig).Run(ctx))
 	for _, id := range []string{"a", "c"} {
 		rev := couchDBDocumentRevision(t, ctx, httpBase, id)
 		couchDBRequest(t, ctx, httpBase, http.MethodDelete, "/"+couchDBDatabase+"/"+id+"?rev="+rev, nil, http.StatusOK)
 	}
-	require.NoError(t, duck.Close())
+	require.NoError(t, pipeline.New(&customConfig).Run(ctx))
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 	duck, err = sql.Open("adbc_generic", "driver=duckdb;path="+duckPath)
 	require.NoError(t, err)
 	assertCouchDBRows(t, ctx, duck, nil)
+	var customCount int
+	require.NoError(t, duck.QueryRowContext(ctx, `SELECT COUNT(name) FROM main.custom_documents`).Scan(&customCount))
+	require.Zero(t, customCount)
 }
 
 func startCouchDBContainer(t *testing.T, ctx context.Context) (testcontainers.Container, string, string) {
