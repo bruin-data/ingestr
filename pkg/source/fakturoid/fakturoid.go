@@ -3,43 +3,21 @@
 //
 // Docs: https://www.fakturoid.cz/api/v3
 //
-// Four tables:
+// Tables: invoices, invoices_lines, invoices_vat_rates, subjects. Every field the
+// API returns is passed through and typed by schema inference (nested values become
+// JSON); the two child tables are exploded from the invoice payload and carry their
+// parent's id as invoice_id.
 //
-//	invoices             84 API fields
-//	invoices_lines       13 line fields + invoice_id
-//	invoices_vat_rates    8 rate fields + invoice_id
-//	subjects             49 API fields
+// Auth is OAuth2 client_credentials: POST /oauth/token with the client id and
+// secret as HTTP Basic returns a ~2h bearer token, refreshed lazily.
 //
-// The field lists live in fields.go — see the header there for why they are
-// allow-lists rather than "whatever the API returns".
+// The User-Agent is mandatory and must carry a contact address — Fakturoid rejects
+// a missing or generic one with a 403 on every endpoint (including /oauth/token),
+// which reads like an auth error but is not. It has no default and is required.
 //
-// AUTH: OAuth2 **client_credentials**. POST /oauth/token with the client id and
-// secret as HTTP Basic credentials returns a bearer token with a short lifetime
-// (~2 h). Tokens are refreshed lazily and shared across requests, so a backfill
-// that outlives one token does not die halfway.
-//
-// ⚠️ THE USER-AGENT IS MANDATORY AND MUST CARRY A CONTACT ADDRESS. Fakturoid
-// rejects requests with a missing or generic User-Agent — it is in their docs as a
-// hard requirement, not a courtesy. It is therefore a REQUIRED URI parameter with
-// no default: a shared default would send one user's contact address on every
-// other user's traffic. A 403 on every endpoint, including /oauth/token, is what a
-// bad UA looks like; it does NOT present as an auth error.
-//
-// ⚠️ PAGINATION IS FIXED AT 40 ROWS AND THERE IS NO TOTAL COUNT. `per_page` is not
-// a parameter — the page size is a server constant. The only end-of-data signal is
-// a page shorter than 40.
-//
-// ⚠️ invoices_lines AND invoices_vat_rates COST A FULL RE-PAGE OF /invoices.json.
-// Both are exploded out of the invoice payload, and ingestr reads each table
-// independently, so loading all three walks the invoice list three times. That is
-// accepted rather than worked around (caching across table reads would mean
-// holding the whole invoice history in memory). It is why `updated_since` matters
-// so much for the nightly: incremental runs page almost nothing.
-//
-// ⚠️ MERGE CANNOT SEE A DELETED LINE. Under `merge` on (invoice_id, id) a line
-// removed from an existing invoice simply lingers in the destination. Invoice and
-// subject deletions are equally invisible. If that matters, the fix is a
-// periodic full reload of the child tables, not a cleverer incremental key.
+// Pagination is fixed at 40 rows with no total count, so a short page is the only
+// end-of-data signal. merge cannot observe deletions: a removed line, invoice or
+// subject lingers in the destination — use a periodic full reload if that matters.
 package fakturoid
 
 import (
@@ -64,19 +42,15 @@ const (
 	baseURL  = "https://app.fakturoid.cz/api/v3"
 	tokenURL = "https://app.fakturoid.cz/api/v3/oauth/token"
 
-	// perPage is a SERVER CONSTANT, not a request parameter. Fakturoid returns 40
-	// records per page and offers no way to change it, so this exists only to
-	// recognise the last page (len < perPage).
+	// perPage is a server constant Fakturoid does not let us change; a page shorter
+	// than this marks the end of the collection.
 	perPage = 40
 
-	// maxPages bounds the page loop. At 40 rows/page this allows 20 M records —
-	// it is a runaway guard, not a limit.
+	// maxPages is a runaway guard (~20 M records), not a limit.
 	maxPages = 500000
 
-	// defaultRateLimit is SELF-IMPOSED. Fakturoid throttles but does not publish a
-	// precise number, so this is deliberately conservative (~90 req/min) rather
-	// than tuned to a documented ceiling. Override with ?rate_limit= while
-	// backfilling rather than rebuilding the image.
+	// defaultRateLimit is self-imposed (~90 req/min); Fakturoid throttles but
+	// publishes no number. Override with ?rate_limit=.
 	defaultRateLimit = 1.5
 	rateLimitBurst   = 3
 
@@ -84,17 +58,12 @@ const (
 	retryBackoff  = 5 * time.Second
 	retryMaxWait  = 90 * time.Second
 
-	// tokenSkew renews a little before real expiry so a request in flight at the
-	// boundary cannot land with a just-expired token.
+	// tokenSkew renews slightly before expiry so an in-flight request cannot land
+	// with a just-expired token.
 	tokenSkew = 2 * time.Minute
 )
 
-// supportedTables lists the four tables this source produces.
-//
-// Nothing else from the API is exposed. Fakturoid also serves estimates,
-// expenses, generators, recurring generators, todos and inventory — none of which
-// downstream models reference, so adding them here would be new surface to
-// maintain rather than parity.
+// supportedTables lists the tables this source produces.
 var supportedTables = map[string]struct{}{
 	"invoices":           {},
 	"invoices_lines":     {},
@@ -122,13 +91,9 @@ func (s *FakturoidSource) HandlesIncrementality() bool {
 	return false
 }
 
-// tokenAuth is an Authenticator that lazily fetches and refreshes an OAuth2
-// client_credentials bearer token.
-//
-// It exists because ingestr's stock authenticators are all static, and a Fakturoid
-// token lives ~2 h — shorter than a full invoice backfill. Apply() is called on
-// every request and is the only place that can notice expiry, so the refresh has
-// to happen here rather than once in Connect.
+// tokenAuth lazily fetches and refreshes an OAuth2 client_credentials bearer token.
+// ingestr's stock authenticators are static, but a Fakturoid token lives only ~2h,
+// so Apply() refreshes it on expiry.
 type tokenAuth struct {
 	mu      sync.Mutex
 	token   string
@@ -140,9 +105,8 @@ func (a *tokenAuth) Apply(req *resty.Request) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.token == "" || time.Now().After(a.expiry) {
-		// A fresh background context on purpose: the token outlives any single
-		// request, and inheriting a per-request deadline would make an unrelated
-		// slow call poison the shared token.
+		// Fresh background context: the token outlives any single request, so it must
+		// not inherit a per-request deadline.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		tok, ttl, err := a.refresh(ctx)
@@ -218,12 +182,12 @@ func (s *FakturoidSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithUserAgent(cfg.userAgent),
 		httpclient.WithRateLimiter(cfg.rateLimit, rateLimitBurst),
 		httpclient.WithRetry(retryAttempts, retryBackoff, retryMaxWait),
+		httpclient.WithRetryStrategy(fakturoidRetryStrategy),
 		httpclient.WithRetryCondition(func(resp *httpclient.Response, err error) bool {
 			if err != nil {
 				return true
 			}
-			// 429 is the throttle; 5xx is transient. 4xx otherwise is our bug and
-			// retrying just burns quota.
+			// 429 is the throttle, 5xx is transient; other 4xx are our bug.
 			return resp.StatusCode() == 429 || resp.StatusCode() >= 500
 		}),
 		httpclient.WithAuth(auth),
@@ -348,35 +312,42 @@ func (s *FakturoidSource) read(ctx context.Context, table string, opts source.Re
 	results := make(chan source.RecordBatchResult, 8)
 	go func() {
 		defer close(results)
-		var err error
-		switch table {
-		case "subjects":
-			err = s.readPaged(ctx, "subjects", opts, results)
-		case "invoices", "invoices_lines", "invoices_vat_rates":
-			err = s.readPaged(ctx, table, opts, results)
-		default:
-			err = fmt.Errorf("unsupported fakturoid table: %s", table)
-		}
-		if err != nil {
+		if err := s.readPaged(ctx, table, opts, results); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
 	return results, nil
 }
 
-// readPaged walks a Fakturoid collection endpoint and emits one batch per page.
-//
-// All three invoice-derived tables share this loop and differ only in how each
-// page is projected, so the pagination and drift accounting cannot diverge
-// between them.
+// fakturoidRetryStrategy honors the Retry-After header on a throttle and otherwise
+// backs off exponentially, capped at retryMaxWait.
+func fakturoidRetryStrategy(resp *httpclient.Response, _ error) (time.Duration, error) {
+	if resp != nil {
+		if v := resp.Header().Get("Retry-After"); v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				return time.Duration(secs) * time.Second, nil
+			}
+		}
+	}
+	attempt := 1
+	if resp != nil && resp.Attempt() > 0 {
+		attempt = resp.Attempt()
+	}
+	delay := retryBackoff << (attempt - 1)
+	if delay <= 0 || delay > retryMaxWait {
+		delay = retryMaxWait
+	}
+	return delay, nil
+}
+
+// readPaged walks a Fakturoid collection endpoint, accumulating rows into batches
+// bounded by opts.MaxBatchBytes. All four tables share this loop; only the endpoint
+// and projection differ.
 func (s *FakturoidSource) readPaged(ctx context.Context, table string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	endpoint := "/accounts/" + url.PathEscape(s.slug) + "/invoices.json"
 	if table == "subjects" {
 		endpoint = "/accounts/" + url.PathEscape(s.slug) + "/subjects.json"
 	}
-
-	// One timestamp for the whole run rather than stamping each page differently.
-	loadedAt := time.Now().UTC()
 
 	// Fakturoid's updated_since is inclusive and takes an ISO-8601 instant.
 	updatedSince := ""
@@ -384,14 +355,23 @@ func (s *FakturoidSource) readPaged(ctx context.Context, table string, opts sour
 		updatedSince = opts.IntervalStart.UTC().Format(time.RFC3339)
 	}
 
-	// Explicit schema, computed once — see the ⚠️ on columnsFor.
-	cols := columnsFor(table)
-	if len(cols) == 0 {
-		return fmt.Errorf("no column schema defined for table %s", table)
+	var (
+		batch    []map[string]interface{}
+		accBytes int64
+		total    int
+	)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := emit(batch, opts, results); err != nil {
+			return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
+		}
+		total += len(batch)
+		batch = nil
+		accBytes = 0
+		return nil
 	}
-
-	drift := map[string]struct{}{}
-	total := 0
 
 	for page := 1; ; page++ {
 		select {
@@ -415,9 +395,7 @@ func (s *FakturoidSource) readPaged(ctx context.Context, table string, opts sour
 			return fmt.Errorf("%s page %d returned status %d: %s", table, page, resp.StatusCode(), truncate(resp.String(), 400))
 		}
 
-		// UseNumber keeps ids and money exact. Fakturoid sends amounts as JSON
-		// strings today, but ids are numeric and large enough to matter, and
-		// float64 would quietly round them.
+		// UseNumber keeps large ids exact rather than rounding through float64.
 		var items []map[string]interface{}
 		dec := json.NewDecoder(strings.NewReader(resp.String()))
 		dec.UseNumber()
@@ -425,65 +403,63 @@ func (s *FakturoidSource) readPaged(ctx context.Context, table string, opts sour
 			return fmt.Errorf("failed to parse %s page %d: %w", table, page, err)
 		}
 
-		rows := projectPage(table, items, loadedAt, drift)
-		if len(rows) > 0 {
-			if err := emit(rows, cols, opts, results); err != nil {
-				return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
+		rows := projectPage(table, items)
+		for _, row := range rows {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
 			}
-			total += len(rows)
+			batch = append(batch, row)
 		}
-		config.Debug("[FAKTUROID] %s page %d: %d source records -> %d rows (running total %d)",
-			table, page, len(items), len(rows), total)
+		config.Debug("[FAKTUROID] %s page %d: %d source records -> %d rows", table, page, len(items), len(rows))
 
-		// The ONLY end-of-data signal: a short page. There is no total and no
-		// next-page link. An empty page also ends the walk.
 		if len(items) < perPage {
 			break
 		}
 	}
 
-	if len(drift) > 0 {
-		// Loud, once per run, rather than a silent drop. See fields.go.
-		config.Debug("[FAKTUROID] ⚠️ %s: %d API field(s) not in the allow-list were skipped: %s",
-			table, len(drift), strings.Join(sortedKeys(drift), ", "))
+	if err := flush(); err != nil {
+		return err
 	}
 	config.Debug("[FAKTUROID] %s complete: %d rows", table, total)
 	return nil
 }
 
-// projectPage turns one page of API objects into destination rows, applying the
-// allow-list for the requested table and recording any unexpected field in drift.
-func projectPage(table string, items []map[string]interface{}, loadedAt time.Time, drift map[string]struct{}) []map[string]interface{} {
+// projectPage turns one page of API objects into destination rows. Every field is
+// passed through as-is so the pipeline can infer types (nested objects/arrays land
+// as JSON); callers drop what they don't want with --exclude-columns. The invoices
+// parent omits `lines` and `vat_rates_summary`, which are exploded into their own
+// tables, and each child row gets its parent's id as invoice_id.
+func projectPage(table string, items []map[string]interface{}) []map[string]interface{} {
 	rows := make([]map[string]interface{}, 0, len(items))
 	switch table {
 	case "subjects":
-		for _, it := range items {
-			rows = append(rows, project(it, subjectFields, loadedAt, drift, nil))
-		}
+		rows = append(rows, items...)
 	case "invoices":
 		for _, it := range items {
-			// `lines` and `vat_rates_summary` are the exploded children and are
-			// expected to be absent from the parent projection — they must not be
-			// reported as drift.
-			rows = append(rows, project(it, invoiceFields, loadedAt, drift,
-				map[string]struct{}{"lines": {}, "vat_rates_summary": {}}))
+			delete(it, "lines")
+			delete(it, "vat_rates_summary")
+			rows = append(rows, it)
 		}
 	case "invoices_lines":
 		for _, it := range items {
 			parent := it["id"]
 			for _, child := range childArray(it, "lines") {
-				row := project(child, lineFields, loadedAt, drift, nil)
-				row["invoice_id"] = coerce(parent, true)
-				rows = append(rows, row)
+				child["invoice_id"] = parent
+				rows = append(rows, child)
 			}
 		}
 	case "invoices_vat_rates":
 		for _, it := range items {
 			parent := it["id"]
 			for _, child := range childArray(it, "vat_rates_summary") {
-				row := project(child, vatRateFields, loadedAt, drift, nil)
-				row["invoice_id"] = coerce(parent, true)
-				rows = append(rows, row)
+				child["invoice_id"] = parent
+				rows = append(rows, child)
 			}
 		}
 	}
@@ -504,164 +480,6 @@ func childArray(item map[string]interface{}, key string) []map[string]interface{
 	return out
 }
 
-// project copies exactly the allow-listed fields, stringifies anything nested and
-// appends _etl_loaded_at.
-//
-// Every allow-listed key is set even when the API omits it, so the column set is
-// identical on every page. Without that, schema inference would see a different
-// shape per batch and the destination table would gain columns over time.
-func project(src map[string]interface{}, allow []string, loadedAt time.Time, drift map[string]struct{}, expected map[string]struct{}) map[string]interface{} {
-	row := make(map[string]interface{}, len(allow)+2)
-	allowed := make(map[string]struct{}, len(allow))
-	for _, k := range allow {
-		allowed[k] = struct{}{}
-		row[k] = coerce(src[k], isIntColumn(k))
-	}
-	for k := range src {
-		if _, ok := allowed[k]; ok {
-			continue
-		}
-		if expected != nil {
-			if _, ok := expected[k]; ok {
-				continue
-			}
-		}
-		drift[k] = struct{}{}
-	}
-	row["_etl_loaded_at"] = loadedAt
-	return row
-}
-
-// intColumns are the only non-text columns. Everything else is String, mirroring
-// a wide-text projection where every column but the ids is a string.
-//
-// They are also the primary keys, which is why they must be non-nullable: a
-// ReplacingMergeTree ORDER BY over a Nullable column needs allow_nullable_key,
-// and the promote step declares `id Int64` exactly as the payments tables do.
-var intColumns = map[string]struct{}{
-	"id":         {},
-	"invoice_id": {},
-}
-
-func isIntColumn(name string) bool {
-	_, ok := intColumns[name]
-	return ok
-}
-
-// columnsFor returns the EXPLICIT destination schema for a table.
-//
-// ⚠️ THIS IS NOT OPTIONAL, AND OMITTING IT IS A SILENT DATA-SHAPE BUG. Arrow
-// schema INFERENCE drops any column that is null across every row of a batch, so
-// a first run of `subjects` produced 29 columns instead of 50: the 21 fields that
-// happen to be empty for every current subject simply vanished, and the table
-// would then gain columns later as data appeared. Passing an explicit column list
-// to arrowconv pins the shape regardless of the values in any given page.
-func columnsFor(table string) []schema.Column {
-	var (
-		fields []string
-		pks    map[string]struct{}
-	)
-	switch table {
-	case "invoices":
-		fields = invoiceFields
-		pks = map[string]struct{}{"id": {}}
-	case "subjects":
-		fields = subjectFields
-		pks = map[string]struct{}{"id": {}}
-	case "invoices_lines":
-		fields = append(append([]string{}, lineFields...), "invoice_id")
-		pks = map[string]struct{}{"id": {}, "invoice_id": {}}
-	case "invoices_vat_rates":
-		fields = append(append([]string{}, vatRateFields...), "invoice_id")
-		// `id` is deliberately NOT a key here — vat_rates_summary carries none.
-		pks = map[string]struct{}{"invoice_id": {}, "vat_rate": {}}
-	default:
-		return nil
-	}
-
-	cols := make([]schema.Column, 0, len(fields)+1)
-	for _, f := range fields {
-		col := schema.Column{Name: f, DataType: schema.TypeString, Nullable: true}
-		if isIntColumn(f) {
-			col.DataType = schema.TypeInt64
-		}
-		if _, ok := pks[f]; ok {
-			col.IsPrimaryKey = true
-			col.Nullable = false
-		}
-		cols = append(cols, col)
-	}
-	cols = append(cols, schema.Column{Name: "_etl_loaded_at", DataType: schema.TypeTimestamp, Nullable: false})
-	return cols
-}
-
-// coerce converts an API value to the declared column type.
-//
-// Text columns are stringified rather than passed through, so a value that is a
-// JSON number on one invoice and a string on another cannot flip the column type
-// between batches. Nested objects (invoice lines carry an `inventory` object)
-// become JSON text rather than a structured column.
-func coerce(v interface{}, wantInt bool) interface{} {
-	if v == nil {
-		return nil
-	}
-	if wantInt {
-		switch t := v.(type) {
-		case json.Number:
-			n, err := t.Int64()
-			if err != nil {
-				return nil
-			}
-			return n
-		case float64:
-			return int64(t)
-		case int64:
-			return t
-		case string:
-			n, err := strconv.ParseInt(t, 10, 64)
-			if err != nil {
-				return nil
-			}
-			return n
-		default:
-			return nil
-		}
-	}
-	switch t := v.(type) {
-	case string:
-		return t
-	case json.Number:
-		return t.String()
-	case bool:
-		if t {
-			return "true"
-		}
-		return "false"
-	case map[string]interface{}, []interface{}:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return fmt.Sprintf("%v", t)
-		}
-		return string(b)
-	default:
-		return fmt.Sprintf("%v", t)
-	}
-}
-
-func sortedKeys(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	// Small sets; insertion sort keeps this dependency-free and deterministic.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
-	return out
-}
-
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -669,8 +487,9 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func emit(items []map[string]interface{}, cols []schema.Column, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, cols, opts.ExcludeColumns)
+func emit(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	// nil columns: let the pipeline infer types from the raw values.
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
 	if err != nil {
 		return err
 	}

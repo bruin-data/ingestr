@@ -1,12 +1,13 @@
 package fakturoid
 
 import (
+	"context"
 	"encoding/json"
-	"strings"
+	"reflect"
 	"testing"
-	"time"
 
-	"github.com/bruin-data/ingestr/pkg/arrowconv"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 func TestParseURI(t *testing.T) {
@@ -62,101 +63,56 @@ func TestParseURI(t *testing.T) {
 	})
 }
 
-// Column counts are the contract: the projection is an allow-list, so a change here
-// is a destination schema change.
-// If these numbers move, downstream models break.
-func TestProjectionColumnCounts(t *testing.T) {
-	for _, tc := range []struct {
-		table string
-		want  int // allow-listed fields + invoice_id (children) + _etl_loaded_at
-	}{
-		{"invoices", 84 + 1},
-		{"subjects", 49 + 1},
-		{"invoices_lines", 13 + 1 + 1},
-		{"invoices_vat_rates", 8 + 1 + 1},
-	} {
-		t.Run(tc.table, func(t *testing.T) {
-			rows := projectPage(tc.table, []map[string]interface{}{sampleInvoice()}, time.Now().UTC(), map[string]struct{}{})
-			if len(rows) == 0 {
-				t.Fatalf("no rows produced for %s", tc.table)
-			}
-			if got := len(rows[0]); got != tc.want {
-				t.Errorf("%s: got %d columns, want %d", tc.table, got, tc.want)
-			}
-		})
-	}
-}
-
-// Every allow-listed column must be present even when the API omits it, otherwise
-// schema inference sees a different shape per page and the destination table grows
-// columns over time.
-func TestProjectionIsStableWhenFieldsAreMissing(t *testing.T) {
-	sparse := map[string]interface{}{"id": json.Number("7")}
-	rows := projectPage("invoices", []map[string]interface{}{sparse}, time.Now().UTC(), map[string]struct{}{})
+// Every field the API returns passes through, so a field the connector never named
+// (here `payments`/`tags`) still reaches the destination — users drop what they
+// don't want with --exclude-columns. The two exploded children are the only things
+// removed from the invoices parent.
+func TestInvoicesPassEveryFieldThrough(t *testing.T) {
+	inv := sampleInvoice()
+	inv["payments"] = []interface{}{map[string]interface{}{"id": json.Number("5")}}
+	inv["tags"] = []interface{}{"vip"}
+	rows := projectPage("invoices", []map[string]interface{}{inv})
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
-	if len(rows[0]) != len(invoiceFields)+1 {
-		t.Fatalf("sparse invoice produced %d columns, want %d", len(rows[0]), len(invoiceFields)+1)
+	r := rows[0]
+	for _, f := range []string{"id", "number", "total", "payments", "tags"} {
+		if _, ok := r[f]; !ok {
+			t.Errorf("field %q was dropped from the invoices projection", f)
+		}
 	}
-	for _, f := range invoiceFields {
-		if _, ok := rows[0][f]; !ok {
-			t.Errorf("allow-listed field %q missing from projection", f)
+	for _, child := range []string{"lines", "vat_rates_summary"} {
+		if _, ok := r[child]; ok {
+			t.Errorf("%q must be exploded into its own table, not kept on invoices", child)
 		}
 	}
 }
 
-// An API field outside the allow-list must be recorded as drift, but the two
-// exploded children must NOT be — they are expected to be absent from the parent.
-func TestDriftAccounting(t *testing.T) {
-	drift := map[string]struct{}{}
-	inv := sampleInvoice()
-	inv["brand_new_vendor_field"] = "surprise"
-	projectPage("invoices", []map[string]interface{}{inv}, time.Now().UTC(), drift)
-
-	if _, ok := drift["brand_new_vendor_field"]; !ok {
-		t.Error("unexpected API field was not recorded as drift")
+// Values pass through with their native JSON types — inference, not the source,
+// decides the destination column type.
+func TestValuesPassThroughRaw(t *testing.T) {
+	rows := projectPage("invoices", []map[string]interface{}{{
+		"id":       json.Number("9"),
+		"total":    json.Number("1210.5"),
+		"oss":      true,
+		"currency": "CZK",
+	}})
+	r := rows[0]
+	if _, ok := r["id"].(json.Number); !ok {
+		t.Errorf("id should pass through as json.Number, got %#v", r["id"])
 	}
-	for _, expected := range []string{"lines", "vat_rates_summary"} {
-		if _, ok := drift[expected]; ok {
-			t.Errorf("%q must not be reported as drift on the invoices projection", expected)
-		}
+	if _, ok := r["total"].(json.Number); !ok {
+		t.Errorf("total should pass through as json.Number, got %#v", r["total"])
 	}
-	if _, ok := drift["id"]; ok {
-		t.Error("allow-listed field reported as drift")
-	}
-}
-
-func TestChildRowsCarryInvoiceID(t *testing.T) {
-	rows := projectPage("invoices_lines", []map[string]interface{}{sampleInvoice()}, time.Now().UTC(), map[string]struct{}{})
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 line rows, got %d", len(rows))
-	}
-	for _, r := range rows {
-		if got := fmtVal(r["invoice_id"]); got != "42" {
-			t.Errorf("invoice_id not propagated: %q", got)
-		}
-	}
-
-	rates := projectPage("invoices_vat_rates", []map[string]interface{}{sampleInvoice()}, time.Now().UTC(), map[string]struct{}{})
-	if len(rates) != 1 {
-		t.Fatalf("expected 1 vat rate row, got %d", len(rates))
-	}
-	if got := fmtVal(rates[0]["invoice_id"]); got != "42" {
-		t.Errorf("invoice_id not propagated to vat rates: %q", got)
-	}
-	// vat_rates_summary has no id of its own — the column exists for
-	// parity and is expected to be nil, which is why the primary key is
-	// (invoice_id, vat_rate).
-	if rates[0]["id"] != nil {
-		t.Errorf("expected vat rate id to be nil, got %v", rates[0]["id"])
+	if v, ok := r["oss"].(bool); !ok || !v {
+		t.Errorf("oss should pass through as bool, got %#v", r["oss"])
 	}
 }
 
-// A nested object must land as JSON text, not as a struct column: the
-// original is varchar and invoice lines really do carry a nested `inventory`.
-func TestNestedValuesAreFlattenedToJSON(t *testing.T) {
-	rows := projectPage("invoices_lines", []map[string]interface{}{sampleInvoice()}, time.Now().UTC(), map[string]struct{}{})
+// A nested object passes through as a map so the pipeline can infer it as JSON,
+// rather than being stringified or flattened by the source.
+func TestNestedObjectPassesThrough(t *testing.T) {
+	rows := projectPage("invoices_lines", []map[string]interface{}{sampleInvoice()})
 	var withInventory map[string]interface{}
 	for _, r := range rows {
 		if r["inventory"] != nil {
@@ -167,21 +123,42 @@ func TestNestedValuesAreFlattenedToJSON(t *testing.T) {
 	if withInventory == nil {
 		t.Fatal("no line row carried an inventory value")
 	}
-	s, ok := withInventory["inventory"].(string)
+	inv, ok := withInventory["inventory"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("inventory should be a string, got %T", withInventory["inventory"])
+		t.Fatalf("inventory should pass through as a map, got %T", withInventory["inventory"])
 	}
-	if !strings.Contains(s, "sku") {
-		t.Errorf("inventory JSON lost its content: %q", s)
+	if inv["sku"] != "PRO-1" {
+		t.Errorf("inventory lost its content: %#v", inv)
 	}
-	var back map[string]interface{}
-	if err := json.Unmarshal([]byte(s), &back); err != nil {
-		t.Errorf("inventory is not valid JSON: %v", err)
+}
+
+func TestChildRowsCarryInvoiceID(t *testing.T) {
+	rows := projectPage("invoices_lines", []map[string]interface{}{sampleInvoice()})
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 line rows, got %d", len(rows))
+	}
+	for _, r := range rows {
+		if got := fmtVal(r["invoice_id"]); got != "42" {
+			t.Errorf("invoice_id not propagated: %q", got)
+		}
+	}
+
+	rates := projectPage("invoices_vat_rates", []map[string]interface{}{sampleInvoice()})
+	if len(rates) != 1 {
+		t.Fatalf("expected 1 vat rate row, got %d", len(rates))
+	}
+	if got := fmtVal(rates[0]["invoice_id"]); got != "42" {
+		t.Errorf("invoice_id not propagated to vat rates: %q", got)
+	}
+	// vat_rates_summary carries no id of its own, which is why the primary key is
+	// (invoice_id, vat_rate).
+	if rates[0]["id"] != nil {
+		t.Errorf("expected vat rate id to be nil, got %v", rates[0]["id"])
 	}
 }
 
 func TestUnsupportedTableProducesNoRows(t *testing.T) {
-	if rows := projectPage("estimates", []map[string]interface{}{sampleInvoice()}, time.Now().UTC(), map[string]struct{}{}); len(rows) != 0 {
+	if rows := projectPage("estimates", []map[string]interface{}{sampleInvoice()}); len(rows) != 0 {
 		t.Errorf("expected no rows for an unsupported table, got %d", len(rows))
 	}
 	if isValidTable("estimates") {
@@ -191,6 +168,40 @@ func TestUnsupportedTableProducesNoRows(t *testing.T) {
 		if !isValidTable(want) {
 			t.Errorf("%s should be supported", want)
 		}
+	}
+}
+
+// GetTable wires the right primary keys, incremental key and strategy per table.
+func TestGetTableMetadata(t *testing.T) {
+	s := NewFakturoidSource()
+	for _, tc := range []struct {
+		table  string
+		pks    []string
+		incKey string
+	}{
+		{"invoices", []string{"id"}, "updated_at"},
+		{"subjects", []string{"id"}, "updated_at"},
+		{"invoices_lines", []string{"invoice_id", "id"}, ""},
+		{"invoices_vat_rates", []string{"invoice_id", "vat_rate"}, ""},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			tbl, err := s.GetTable(context.Background(), source.TableRequest{Name: tc.table})
+			if err != nil {
+				t.Fatalf("GetTable(%s): %v", tc.table, err)
+			}
+			if got := tbl.PrimaryKeys(); !reflect.DeepEqual(got, tc.pks) {
+				t.Errorf("%s primary keys = %v, want %v", tc.table, got, tc.pks)
+			}
+			if got := tbl.IncrementalKey(); got != tc.incKey {
+				t.Errorf("%s incremental key = %q, want %q", tc.table, got, tc.incKey)
+			}
+			if got := tbl.Strategy(); got != config.StrategyMerge {
+				t.Errorf("%s strategy = %v, want merge", tc.table, got)
+			}
+		})
+	}
+	if _, err := s.GetTable(context.Background(), source.TableRequest{Name: "estimates"}); err == nil {
+		t.Error("expected an error for an unsupported table")
 	}
 }
 
@@ -235,96 +246,5 @@ func sampleInvoice() map[string]interface{} {
 				"currency": "CZK",
 			},
 		},
-	}
-}
-
-// TestArrowSchemaKeepsAllColumnsWhenValuesAreNull is the regression test for the
-// bug that shipped in r4: schema INFERENCE drops a column that is null in every
-// row of the batch, so a live `subjects` load produced 29 columns instead of 50.
-// Asserting on the projected map was not enough — the loss happened in the Arrow
-// conversion, so this test has to go through it.
-func TestArrowSchemaKeepsAllColumnsWhenValuesAreNull(t *testing.T) {
-	for _, tc := range []struct {
-		table string
-		want  int
-	}{
-		{"invoices", 85},
-		{"subjects", 50},
-		{"invoices_lines", 15},
-		{"invoices_vat_rates", 10},
-	} {
-		t.Run(tc.table, func(t *testing.T) {
-			// A row with ONLY the keys needed to exist: every other column is null,
-			// which is exactly the condition that made inference drop them.
-			minimal := map[string]interface{}{
-				"id": json.Number("42"),
-				"lines": []interface{}{
-					map[string]interface{}{"id": json.Number("1")},
-				},
-				"vat_rates_summary": []interface{}{
-					map[string]interface{}{"vat_rate": json.Number("21")},
-				},
-			}
-			rows := projectPage(tc.table, []map[string]interface{}{minimal}, time.Now().UTC(), map[string]struct{}{})
-			if len(rows) == 0 {
-				t.Fatalf("no rows for %s", tc.table)
-			}
-			cols := columnsFor(tc.table)
-			rec, err := arrowconv.ItemsToArrowRecordWithSchema(rows, cols, nil)
-			if err != nil {
-				t.Fatalf("arrow conversion failed: %v", err)
-			}
-			defer rec.Release()
-			if got := int(rec.Schema().NumFields()); got != tc.want {
-				t.Errorf("%s: arrow schema has %d fields, want %d", tc.table, got, tc.want)
-			}
-		})
-	}
-}
-
-// Primary-key columns must be non-nullable: a ReplacingMergeTree ORDER BY over a
-// Nullable column needs allow_nullable_key, which the promote step does not set.
-func TestPrimaryKeyColumnsAreNonNullable(t *testing.T) {
-	for _, table := range []string{"invoices", "subjects", "invoices_lines", "invoices_vat_rates"} {
-		pkSeen := 0
-		for _, c := range columnsFor(table) {
-			if c.IsPrimaryKey {
-				pkSeen++
-				if c.Nullable {
-					t.Errorf("%s.%s is a primary key but nullable", table, c.Name)
-				}
-			}
-		}
-		if pkSeen == 0 {
-			t.Errorf("%s declares no primary key column", table)
-		}
-	}
-	// vat_rates_summary has no id, so it must NOT be keyed on one.
-	for _, c := range columnsFor("invoices_vat_rates") {
-		if c.Name == "id" && c.IsPrimaryKey {
-			t.Error("invoices_vat_rates must not key on id — the API does not populate it")
-		}
-	}
-}
-
-// Text columns must arrive as strings so a field that is numeric on one invoice
-// and a string on another cannot flip the column type between batches.
-func TestTextColumnsAreStringified(t *testing.T) {
-	rows := projectPage("invoices", []map[string]interface{}{{
-		"id":       json.Number("9"),
-		"total":    json.Number("1210.5"),
-		"oss":      true,
-		"currency": "CZK",
-	}}, time.Now().UTC(), map[string]struct{}{})
-	r := rows[0]
-	if v, ok := r["total"].(string); !ok || v != "1210.5" {
-		t.Errorf("numeric text column not stringified: %#v", r["total"])
-	}
-	if v, ok := r["oss"].(string); !ok || v != "true" {
-		t.Errorf("bool text column not stringified: %#v", r["oss"])
-	}
-	// ids stay integral
-	if v, ok := r["id"].(int64); !ok || v != 9 {
-		t.Errorf("id should be int64, got %#v", r["id"])
 	}
 }
