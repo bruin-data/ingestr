@@ -23,7 +23,18 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-const ctVersionWidth = 20
+const (
+	ctVersionWidth = 20
+
+	defaultCTPollInterval = 1 * time.Second
+
+	// ctStreamHeartbeatInterval throttles the idle-poll heartbeat in
+	// streaming mode. The heartbeat only has to keep the destination's resume
+	// cursor ahead of CHANGE_RETENTION cleanup, so firing it once per poll --
+	// which is what a one-shot run effectively does -- would rewrite a row
+	// every cycle on a table that never changes.
+	ctStreamHeartbeatInterval = 5 * time.Minute
+)
 
 var ctMetadataColumns = []schema.Column{
 	{Name: destination.CDCLSNColumn, DataType: schema.TypeString, Nullable: false},
@@ -31,8 +42,74 @@ var ctMetadataColumns = []schema.Column{
 	{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ, Nullable: false},
 }
 
+type ctConfig struct {
+	PollInterval time.Duration
+}
+
 type MSSQLChangeTrackingSource struct {
 	MSSQLSource
+	ctConfig ctConfig
+	lag      ctLagState
+}
+
+// ctLagReading is an immutable pair of Change Tracking versions. Readings are
+// swapped in whole so a metrics scrape never observes a torn processed and
+// target pair.
+type ctLagReading struct {
+	processed int64
+	target    int64
+	at        time.Time
+}
+
+type ctLagState struct {
+	streaming atomic.Bool
+	reading   atomic.Pointer[ctLagReading]
+}
+
+// ctHeartbeatGate decides when an idle change read restamps the destination's
+// resume cursor. The cursor lives in the destination's _cdc_lsn column, so a
+// stream that never emits a row lets the recorded version age out of
+// CHANGE_RETENTION and a restart has to take a fresh snapshot. A zero interval
+// heartbeats on every idle read, which is what a one-shot run wants.
+type ctHeartbeatGate struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func newCTHeartbeatGate(interval time.Duration) *ctHeartbeatGate {
+	return &ctHeartbeatGate{interval: interval}
+}
+
+// shouldEmit reports whether an idle read must heartbeat. A nil gate never
+// heartbeats: the caller already advanced the cursor by other means.
+func (g *ctHeartbeatGate) shouldEmit(changeRows int64, now time.Time) bool {
+	if g == nil || changeRows > 0 {
+		return false
+	}
+	return !now.Before(g.next)
+}
+
+// cursorAdvanced restarts the interval after a read left a fresh version in the
+// destination, whether through real change rows or a heartbeat.
+func (g *ctHeartbeatGate) cursorAdvanced(now time.Time) {
+	if g == nil {
+		return
+	}
+	g.next = now.Add(g.interval)
+}
+
+// emitCTResult sends a result without wedging the producer goroutine when the
+// consumer has gone away: cancellation releases the batch and unblocks.
+func emitCTResult(ctx context.Context, results chan<- source.RecordBatchResult, res source.RecordBatchResult) error {
+	select {
+	case results <- res:
+		return nil
+	case <-ctx.Done():
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return ctx.Err()
+	}
 }
 
 type changeTrackingTable struct {
@@ -54,7 +131,7 @@ func (e *ctVersionExpiredError) Error() string {
 }
 
 func NewMSSQLChangeTrackingSource() *MSSQLChangeTrackingSource {
-	return &MSSQLChangeTrackingSource{}
+	return &MSSQLChangeTrackingSource{ctConfig: ctConfig{PollInterval: defaultCTPollInterval}}
 }
 
 func (s *MSSQLChangeTrackingSource) Schemes() []string {
@@ -62,10 +139,11 @@ func (s *MSSQLChangeTrackingSource) Schemes() []string {
 }
 
 func (s *MSSQLChangeTrackingSource) Connect(ctx context.Context, uri string) error {
-	normalizedURI, err := normalizeChangeTrackingURI(uri)
+	cfg, normalizedURI, err := parseChangeTrackingURI(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse SQL Server Change Tracking URI: %w", err)
 	}
+	s.ctConfig = cfg
 
 	connStr, driverName, err := URIToConnString(normalizedURI)
 	if err != nil {
@@ -101,6 +179,55 @@ func (s *MSSQLChangeTrackingSource) Connect(ctx context.Context, uri string) err
 
 func (s *MSSQLChangeTrackingSource) HandlesIncrementality() bool {
 	return true
+}
+
+// SupportsStreaming reports that Change Tracking can run in continuous mode:
+// each poll asks the server for the current version and reads the changes up
+// to it, exactly as a one-shot run does.
+func (s *MSSQLChangeTrackingSource) SupportsStreaming() bool {
+	return true
+}
+
+// DefaultStreamingStrategy returns merge, the only strategy Change Tracking
+// supports: changes are keyed by primary key and deletes are soft.
+func (s *MSSQLChangeTrackingSource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return config.StrategyMerge
+}
+
+// ReplicationLag reports how far the processed Change Tracking version trails
+// the server's current version. Change Tracking exposes neither a byte offset
+// nor a commit time for a version, so only the positions are meaningful.
+func (s *MSSQLChangeTrackingSource) ReplicationLag() (source.LagSnapshot, bool) {
+	if !s.lag.streaming.Load() {
+		return source.LagSnapshot{}, false
+	}
+	reading := s.lag.reading.Load()
+	if reading == nil {
+		return source.LagSnapshot{}, false
+	}
+	return source.LagSnapshot{
+		Source:          "mssql_ct",
+		ServerPosition:  formatCTVersion(reading.target),
+		DurablePosition: formatCTVersion(reading.processed),
+		CaughtUp:        reading.processed >= reading.target,
+		UpdatedAt:       reading.at,
+	}, true
+}
+
+func (s *MSSQLChangeTrackingSource) noteCTLag(processed, target int64) {
+	if !s.lag.streaming.Load() {
+		return
+	}
+	s.lag.reading.Store(&ctLagReading{processed: processed, target: target, at: time.Now()})
+}
+
+// noteCTReadComplete records a read that committed: the cursor now sits at
+// version, and any emitted row carried that version into the destination.
+func (s *MSSQLChangeTrackingSource) noteCTReadComplete(version, emittedRows int64, heartbeat *ctHeartbeatGate) {
+	s.noteCTLag(version, version)
+	if emittedRows > 0 {
+		heartbeat.cursorAdvanced(time.Now())
+	}
 }
 
 func (s *MSSQLChangeTrackingSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
@@ -183,44 +310,76 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 	go func() {
 		defer close(results)
 
+		t.source.lag.streaming.Store(opts.Streaming)
+
 		tableSchema := t.tableSchema
 		if opts.Schema != nil {
 			tableSchema = opts.Schema
 		}
 
-		if version, ok := parseStoredCTVersion(opts.CDCResumeLSN); ok {
-			_, err := t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, version, opts, results, true)
+		pollInterval := t.source.ctConfig.PollInterval
+		if pollInterval <= 0 {
+			pollInterval = defaultCTPollInterval
+		}
+		heartbeatInterval := time.Duration(0)
+		if opts.Streaming {
+			heartbeatInterval = ctStreamHeartbeatInterval
+		}
+
+		version, resumed := parseStoredCTVersion(opts.CDCResumeLSN)
+		// A nil gate skips the heartbeat: a fresh snapshot's rows already
+		// carry its version, so the first change read has nothing to restamp.
+		var heartbeat *ctHeartbeatGate
+		if resumed {
+			heartbeat = newCTHeartbeatGate(heartbeatInterval)
+		} else {
+			snapshotVersion, err := t.source.snapshotCTTable(ctx, t.tableName, tableSchema, opts, results)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: err}
+				_ = emitCTResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
 				return
 			}
-			return
+			// --full-refresh and --stream are mutually exclusive at the
+			// config layer, so a refresh always stops after the snapshot.
+			if opts.FullRefresh {
+				return
+			}
+			version = snapshotVersion
 		}
 
-		snapshotVersion, err := t.source.snapshotCTTable(ctx, t.tableName, tableSchema, opts, results)
-		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)}
-			return
-		}
+		for {
+			next, err := t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, version, opts, results, heartbeat)
+			if err != nil {
+				_ = emitCTResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
+			}
+			version = next
 
-		if opts.FullRefresh {
-			return
-		}
+			if !opts.Streaming {
+				return
+			}
+			// Past the first pass the snapshot version is no longer fresh, so
+			// idle polls take over keeping the cursor current.
+			if heartbeat == nil {
+				heartbeat = newCTHeartbeatGate(heartbeatInterval)
+			}
 
-		_, err = t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, snapshotVersion, opts, results, false)
-		if err != nil {
-			results <- source.RecordBatchResult{Err: err}
-			return
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pollInterval):
+			}
 		}
 	}()
 
 	return results, nil
 }
 
-func normalizeChangeTrackingURI(raw string) (string, error) {
+func parseChangeTrackingURI(raw string) (ctConfig, string, error) {
+	cfg := ctConfig{PollInterval: defaultCTPollInterval}
+
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", err
+		return cfg, "", err
 	}
 
 	switch strings.ToLower(parsed.Scheme) {
@@ -233,10 +392,24 @@ func normalizeChangeTrackingURI(raw string) (string, error) {
 	case "azure-sql+ct":
 		parsed.Scheme = "azure-sql"
 	default:
-		return "", fmt.Errorf("unsupported Change Tracking scheme: %s", parsed.Scheme)
+		return cfg, "", fmt.Errorf("unsupported Change Tracking scheme: %s", parsed.Scheme)
 	}
 
-	return parsed.String(), nil
+	query := parsed.Query()
+	if poll := query.Get("poll_interval"); poll != "" {
+		d, err := time.ParseDuration(poll)
+		if err != nil {
+			return cfg, "", fmt.Errorf("invalid poll_interval: %w", err)
+		}
+		if d <= 0 {
+			return cfg, "", fmt.Errorf("poll_interval must be positive")
+		}
+		cfg.PollInterval = d
+	}
+	query.Del("poll_interval")
+	parsed.RawQuery = query.Encode()
+
+	return cfg, parsed.String(), nil
 }
 
 func (s *MSSQLChangeTrackingSource) ensureDatabaseChangeTracking(ctx context.Context) error {
@@ -414,7 +587,7 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 		return 0, 0, fmt.Errorf("failed to query snapshot for %s: %w", table, err)
 	}
 
-	emittedRows, err := s.rowsToCTBatches(rows, columns, opts, results)
+	emittedRows, err := s.rowsToCTBatches(ctx, rows, columns, opts, results)
 	if err != nil {
 		_ = rows.Close()
 		return 0, emittedRows, err
@@ -423,7 +596,7 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 		return 0, emittedRows, fmt.Errorf("failed to read snapshot for %s: %w", table, err)
 	}
 	if emittedRows == 0 && !opts.FullRefresh {
-		if err := emitSyntheticCTHeartbeat(tableSchema.Columns, tableSchema.PrimaryKeys, version, results); err != nil {
+		if err := emitSyntheticCTHeartbeat(ctx, tableSchema.Columns, tableSchema.PrimaryKeys, version, results); err != nil {
 			return 0, 0, err
 		}
 		emittedRows = 1
@@ -438,14 +611,15 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 
 // Keep validation and enumeration in one SNAPSHOT transaction. The READ
 // COMMITTED fallback revalidates after enumeration to detect cleanup races.
-func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, emitHeartbeat bool) (int64, error) {
+func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, heartbeat *ctHeartbeatGate) (int64, error) {
 	useSnapshot, err := SnapshotIsolationAllowed(ctx, s.db)
 	if err != nil {
 		return 0, err
 	}
 	if useSnapshot {
-		readThroughVersion, emittedRows, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelSnapshot, emitHeartbeat)
+		readThroughVersion, emittedRows, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelSnapshot, heartbeat)
 		if err == nil {
+			s.noteCTReadComplete(readThroughVersion, emittedRows, heartbeat)
 			return readThroughVersion, nil
 		}
 		if emittedRows > 0 || !IsSnapshotIsolationUnavailableError(err) {
@@ -456,10 +630,11 @@ func (s *MSSQLChangeTrackingSource) readCTChanges(ctx context.Context, table str
 		config.Debug("[MSSQL CT] Snapshot isolation is not allowed for this database; reading changes for %s under READ COMMITTED with post-read cursor validation", table)
 	}
 
-	readThroughVersion, _, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelReadCommitted, emitHeartbeat)
+	readThroughVersion, emittedRows, err := s.readCTChangesWithIsolation(ctx, table, tableSchema, primaryKeys, fromVersion, opts, results, sql.LevelReadCommitted, heartbeat)
 	if err != nil {
 		return 0, wrapCTReadError(err, "READ COMMITTED")
 	}
+	s.noteCTReadComplete(readThroughVersion, emittedRows, heartbeat)
 	return readThroughVersion, nil
 }
 
@@ -471,7 +646,7 @@ func wrapCTReadError(err error, isolation string) error {
 	return fmt.Errorf("failed to read SQL Server Change Tracking changes using %s isolation: %w", isolation, err)
 }
 
-func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, emitHeartbeat bool) (int64, int64, error) {
+func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Context, table string, tableSchema *schema.TableSchema, primaryKeys []string, fromVersion int64, opts source.ReadOptions, results chan<- source.RecordBatchResult, isolation sql.IsolationLevel, heartbeat *ctHeartbeatGate) (int64, int64, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to acquire Change Tracking connection: %w", err)
@@ -497,6 +672,10 @@ func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Conte
 	if err != nil {
 		return 0, 0, err
 	}
+	// Sample before reading, while the gap to the server version is still open.
+	s.noteCTLag(fromVersion, targetVersion)
+	// A database version that has not moved cannot have aged past the cursor,
+	// so an idle read has nothing to restamp.
 	if targetVersion <= fromVersion {
 		if err := tx.Commit(); err != nil {
 			return 0, 0, fmt.Errorf("failed to commit Change Tracking transaction: %w", err)
@@ -511,7 +690,7 @@ func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Conte
 		return 0, 0, fmt.Errorf("failed to query Change Tracking changes for %s: %w", table, err)
 	}
 
-	changeRows, err := s.rowsToCTBatches(rows, columns, opts, results)
+	changeRows, err := s.rowsToCTBatches(ctx, rows, columns, opts, results)
 	if err != nil {
 		_ = rows.Close()
 		return 0, changeRows, err
@@ -521,7 +700,7 @@ func (s *MSSQLChangeTrackingSource) readCTChangesWithIsolation(ctx context.Conte
 	}
 
 	emittedRows := changeRows
-	if shouldEmitCTHeartbeat(emitHeartbeat, changeRows) {
+	if heartbeat.shouldEmit(changeRows, time.Now()) {
 		if err := s.emitCTHeartbeat(ctx, tx, table, tableSchema, primaryKeys, targetVersion, opts, results); err != nil {
 			return 0, emittedRows, err
 		}
@@ -548,7 +727,7 @@ func (s *MSSQLChangeTrackingSource) emitCTHeartbeat(ctx context.Context, tx *sql
 		return fmt.Errorf("failed to query Change Tracking heartbeat for %s: %w", table, err)
 	}
 
-	emittedRows, err := s.rowsToCTBatches(rows, tableSchema.Columns, opts, results)
+	emittedRows, err := s.rowsToCTBatches(ctx, rows, tableSchema.Columns, opts, results)
 	if err != nil {
 		_ = rows.Close()
 		return err
@@ -557,22 +736,17 @@ func (s *MSSQLChangeTrackingSource) emitCTHeartbeat(ctx context.Context, tx *sql
 		return fmt.Errorf("failed to read Change Tracking heartbeat for %s: %w", table, err)
 	}
 	if emittedRows == 0 {
-		return emitSyntheticCTHeartbeat(tableSchema.Columns, primaryKeys, targetVersion, results)
+		return emitSyntheticCTHeartbeat(ctx, tableSchema.Columns, primaryKeys, targetVersion, results)
 	}
 	return nil
 }
 
-func shouldEmitCTHeartbeat(emitHeartbeat bool, changeRows int64) bool {
-	return emitHeartbeat && changeRows == 0
-}
-
-func emitSyntheticCTHeartbeat(columns []schema.Column, primaryKeys []string, targetVersion int64, results chan<- source.RecordBatchResult) error {
+func emitSyntheticCTHeartbeat(ctx context.Context, columns []schema.Column, primaryKeys []string, targetVersion int64, results chan<- source.RecordBatchResult) error {
 	record, err := syntheticCTHeartbeatRecord(columns, primaryKeys, targetVersion)
 	if err != nil {
 		return err
 	}
-	results <- source.RecordBatchResult{Batch: record}
-	return nil
+	return emitCTResult(ctx, results, source.RecordBatchResult{Batch: record})
 }
 
 func syntheticCTHeartbeatRecord(columns []schema.Column, primaryKeys []string, targetVersion int64) (arrow.RecordBatch, error) {
@@ -673,7 +847,7 @@ func validateCTExcludeColumns(excludeColumns []string, primaryKeys []string) err
 	return nil
 }
 
-func (s *MSSQLChangeTrackingSource) rowsToCTBatches(rows *sql.Rows, columns []schema.Column, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, error) {
+func (s *MSSQLChangeTrackingSource) rowsToCTBatches(ctx context.Context, rows *sql.Rows, columns []schema.Column, opts source.ReadOptions, results chan<- source.RecordBatchResult) (int64, error) {
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
@@ -690,7 +864,9 @@ func (s *MSSQLChangeTrackingSource) rowsToCTBatches(rows *sql.Rows, columns []sc
 			return totalRows, nil
 		}
 		totalRows += count
-		results <- source.RecordBatchResult{Batch: record}
+		if err := emitCTResult(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
+			return totalRows, err
+		}
 	}
 }
 
@@ -797,3 +973,8 @@ func objectIDName(table string) string {
 	}
 	return quoteIdentifierPath(tableRef.parts)
 }
+
+var (
+	_ source.StreamingSource = (*MSSQLChangeTrackingSource)(nil)
+	_ source.LagReporter     = (*MSSQLChangeTrackingSource)(nil)
+)

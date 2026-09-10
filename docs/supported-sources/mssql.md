@@ -62,6 +62,25 @@ Enabling snapshot isolation is recommended: ingestr then reads each change windo
 
 Change Tracking returns net row changes since the last loaded version. For inserts and updates, ingestr joins the changed primary keys back to the source table and loads the current row. For deletes, SQL Server only returns the primary key, so ingestr marks the destination row as deleted with `_cdc_deleted = true` while preserving existing destination values for other columns. If a row is updated and then deleted between two ingestr runs, Change Tracking cannot reconstruct the intermediate updated values.
 
+Pass `--stream` to keep polling instead of exiting once caught up:
+
+```sh
+ingestr ingest \
+    --source-uri "mssql+ct://user:password@host:1433/dbname?encrypt=disable&poll_interval=2s" \
+    --source-table "dbo.users" \
+    --dest-uri "duckdb:///warehouse.duckdb" \
+    --dest-table "dbo.users" \
+    --stream
+```
+
+A shorter poll interval narrows the window in which several updates to the same row collapse into one, so streaming Change Tracking loses less intermediate detail than a scheduled run — but it still reports the row's current state rather than every individual change. Use [Change Data Capture](#change-data-capture) when you need the full history.
+
+Change Tracking URI parameters:
+
+- `poll_interval`: how long to wait between polls in streaming mode. Any Go duration (`500ms`, `2s`, `1m`); defaults to `1s`. Ignored outside `--stream`.
+
+While a stream sits idle, ingestr restamps the resume cursor every 5 minutes so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. Streaming is single-table: name one table with `--source-table`.
+
 ## Change Data Capture
 
 For full row-level change history — not just which rows changed — ingestr can read SQL Server's log-based **Change Data Capture** with the `mssql+cdc://`, `sqlserver+cdc://`, `azuresql+cdc://`, and `azure-sql+cdc://` URI schemes.
