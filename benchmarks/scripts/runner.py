@@ -540,6 +540,8 @@ def build_tool_command(
     if tool_name == "sling":
         src_env = sling_env_name("SRC", src_cfg_name)
         dst_env = sling_env_name("DST", dst_cfg_name)
+        if src_type == "kafka":
+            raise ValueError("Sling has no native Kafka source connector")
         env = ["SLING_DISABLE_TELEMETRY=true"]
         if src_type == "mongodb":
             env.append("SLING_SAMPLE_SIZE=3000")
@@ -581,6 +583,7 @@ def build_tool_command(
             f" --source-table '{src_table}'"
             f" --dest-uri {shell_uri_arg(dst_uri)}"
             f" --dest-table '{dst_table}'"
+            f" --rows {rows or 10000000}"
         )
 
     if tool_name == "spark":
@@ -686,17 +689,19 @@ def build_prepare_command(
 # Setup & seed (delegate to existing bash scripts)
 # ---------------------------------------------------------------------------
 
-def run_setup():
+def run_setup(uses_kafka: bool = False):
     console.print("[bold]==> Running setup...[/bold]")
     subprocess.run(
         ["bash", str(BENCH_DIR / "scripts" / "setup.sh")],
+        env={**os.environ, "BENCH_KAFKA": "1" if uses_kafka else "0"},
         check=True,
     )
 
 
-def run_seed(rows: int):
+def run_seed(rows: int, uses_kafka: bool = False):
     console.print(f"[bold]==> Seeding {rows:,} rows...[/bold]")
     env = {**os.environ, "BENCH_ROWS": str(rows), "BENCH_SEED_SIZES": str(rows)}
+    env["BENCH_KAFKA"] = "1" if uses_kafka else "0"
     subprocess.run(
         ["bash", str(BENCH_DIR / "scripts" / "seed.sh")],
         env=env,
@@ -830,7 +835,9 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
             elif query_type == "sum_id":
                 queries = [
                     f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}',
-                    f"""SELECT COALESCE(SUM((data->>'id')::bigint), 0) FROM "{schema}".{table}""",
+                    f"""SELECT COALESCE(SUM((data::jsonb->>'id')::bigint), 0) FROM "{schema}".{table}""",
+                    f"""SELECT COALESCE(SUM((value::jsonb->>'id')::bigint), 0) FROM "{schema}".{table}""",
+                    f"""SELECT COALESCE(SUM(((_kafka->>'data')::jsonb->>'id')::bigint), 0) FROM "{schema}".{table}""",
                 ]
                 for sql in queries:
                     result = subprocess.run(
@@ -851,10 +858,13 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
                 if result.returncode != 0:
                     return None
                 columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-                if "data" in columns:
+                if any(col in columns for col in ("data", "_kafka", "value")):
+                    payload = "(_kafka->>'data')::jsonb" if "_kafka" in columns else (
+                        "data::jsonb" if "data" in columns else "value::jsonb"
+                    )
                     json_sql = (
                         f"""SELECT DISTINCT key FROM "{schema}".{table}, """
-                        f"""LATERAL jsonb_object_keys(data) AS key ORDER BY key"""
+                        f"""LATERAL jsonb_object_keys({payload}) AS key ORDER BY key"""
                     )
                     json_result = subprocess.run(
                         ["psql", dst_uri, "-t", "-A", "-c", json_sql],
@@ -887,6 +897,7 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
                 queries = [
                     f'SELECT COALESCE(SUM(id), 0) FROM "{schema}".{table}',
                     f"""SELECT COALESCE(SUM(CAST(json_extract_string(data, '$.id') AS BIGINT)), 0) FROM "{schema}".{table}""",
+                    f"""SELECT COALESCE(SUM(CAST(json_extract_string(json_extract_string(_kafka, '$.data'), '$.id') AS BIGINT)), 0) FROM "{schema}".{table}""",
                 ]
                 for sql in queries:
                     result = subprocess.run(
@@ -907,8 +918,9 @@ def query_destination(dst_type: str, dst_uri: str, table: str, schema: str, quer
                 if result.returncode != 0:
                     return None
                 columns = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-                if "data" in columns:
-                    json_sql = f"""SELECT DISTINCT unnest(json_keys(data)) AS key FROM "{schema}".{table} ORDER BY key"""
+                if "data" in columns or "_kafka" in columns:
+                    payload = "json_extract_string(_kafka, '$.data')" if "_kafka" in columns else "data"
+                    json_sql = f"""SELECT DISTINCT unnest(json_keys({payload})) AS key FROM "{schema}".{table} ORDER BY key"""
                     json_result = subprocess.run(
                         ["duckdb", path, "-noheader", "-csv", "-c", json_sql],
                         capture_output=True, text=True, timeout=30,
@@ -1243,7 +1255,7 @@ def run_validation(
                 label, dst["type"], dst["uri"],
                 check_table, check_schema,
                 expected_rows, expected_id_sum,
-                [
+                ["_kafka", "_kafka_msg_id", *EXPECTED_COLS] if src["type"] == "kafka" and tool_name == "gong" else [
                     col for col in EXPECTED_COLS
                     if src["type"] != "mongodb" or col != "json_val"
                 ],
@@ -1429,7 +1441,7 @@ def parse_args():
     )
     parser.add_argument(
         "--validate", action="store_true",
-        help="Run validation (1k rows, check correctness) instead of benchmarks",
+        help="Run validation (default 1k rows, override with --rows) instead of benchmarks",
     )
     parser.add_argument(
         "--report", nargs="?", const="__latest__", default=None,
@@ -1473,7 +1485,7 @@ def main():
         else:
             warmup = defaults.get("warmup", 1)
 
-    if args.validate:
+    if args.validate and args.rows is None:
         rows = 1000
 
     size = size_suffix(rows)
@@ -1521,8 +1533,9 @@ def main():
 
     # Setup and seed
     if not args.skip_setup:
-        run_setup()
-        run_seed(rows)
+        uses_kafka = any(sources[s["source"]]["type"] == "kafka" for s in active_scenarios)
+        run_setup(uses_kafka)
+        run_seed(rows, uses_kafka)
 
     # Determine available tools after setup so a clean build can create bin/ingestr.
     available_tools = []

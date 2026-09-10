@@ -147,6 +147,29 @@ func TestReadParallel_ParseErrorSurfaces(t *testing.T) {
 	}
 }
 
+func TestReadParallel_LimitStopsBeforeParseError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limited.csv")
+
+	var sb strings.Builder
+	sb.WriteString("id,name\n")
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&sb, "%d,name-%d\n", i, i)
+	}
+	sb.WriteString("101,\"unterminated\n")
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origBlock, origMin := parallelBlockSize, parallelMinFileSize
+	parallelBlockSize, parallelMinFileSize = 256, 1
+	defer func() { parallelBlockSize, parallelMinFileSize = origBlock, origMin }()
+
+	values := readAllValues(t, path, source.ReadOptions{PageSize: 50, Limit: 17}, 0)
+	if len(values) != 17 {
+		t.Fatalf("read %d rows, want 17", len(values))
+	}
+}
+
 func TestReadParallel_CancellationClosesResults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cancel.csv")

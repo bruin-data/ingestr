@@ -26,6 +26,26 @@ func TestDataTypeToArrowType_ArrayDecimalPreservesPrecisionScale(t *testing.T) {
 	require.Equal(t, int32(5), decimalType.Scale)
 }
 
+func TestDataTypeToArrowType_HighPrecisionDecimalUsesDecimal256(t *testing.T) {
+	t.Parallel()
+
+	got := DataTypeToArrowType(Column{DataType: TypeDecimal, Precision: 40, Scale: 25})
+
+	decimalType, ok := got.(*arrow.Decimal256Type)
+	require.True(t, ok, "precision > 38 must map to Decimal256")
+	require.Equal(t, int32(40), decimalType.Precision)
+	require.Equal(t, int32(25), decimalType.Scale)
+}
+
+func TestDataTypeToArrowType_DecimalWithinDecimal128Range(t *testing.T) {
+	t.Parallel()
+
+	got := DataTypeToArrowType(Column{DataType: TypeDecimal, Precision: 38, Scale: 9})
+
+	_, ok := got.(*arrow.Decimal128Type)
+	require.True(t, ok, "precision <= 38 must stay Decimal128")
+}
+
 func TestTableSchemaSameColumnShapeIncludesMaxLength(t *testing.T) {
 	left := &TableSchema{Columns: []Column{{Name: "name", DataType: TypeString, MaxLength: 20}}}
 	right := &TableSchema{Columns: []Column{{Name: "name", DataType: TypeString, MaxLength: 40}}}

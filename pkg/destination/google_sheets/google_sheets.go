@@ -448,6 +448,8 @@ func valueToCell(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx)
 	case *array.Decimal128:
 		return a.Value(idx).ToFloat64(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.Decimal256:
+		return a.Value(idx).ToFloat64(int32(a.DataType().(*arrow.Decimal256Type).Scale))
 	case *array.String:
 		return a.Value(idx)
 	case *array.LargeString:

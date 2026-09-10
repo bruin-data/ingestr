@@ -2,6 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"unsafe"
@@ -26,6 +27,8 @@ var (
 // builders, schema construction, or batch concatenation.
 type batchAccumulator struct {
 	schemas map[string]*schema.TableSchema
+	toast   *toastState
+	durable func() pglogrepl.LSN
 	changes map[string][]Change
 	// minLSN tracks the lowest (oldest) transaction LSN still buffered per
 	// table. Changes are added in non-decreasing LSN order, so the first group
@@ -41,6 +44,7 @@ type batchAccumulator struct {
 func newBatchAccumulator(threshold int, schemas map[string]*schema.TableSchema) *batchAccumulator {
 	return &batchAccumulator{
 		schemas:   schemas,
+		toast:     newToastState(),
 		changes:   make(map[string][]Change),
 		minLSN:    make(map[string]pglogrepl.LSN),
 		bytes:     make(map[string]int64),
@@ -213,6 +217,27 @@ func (a *batchAccumulator) flushAllContext(ctx context.Context, results chan<- s
 	return nil
 }
 
+// Flush unaffected tables without acknowledging WAL still needed by replacement snapshots.
+func (a *batchAccumulator) flushForSchemaRebuild(ctx context.Context, results chan<- source.RecordBatchResult, token tokenFunc, first *SchemaChangedError) ([]*SchemaChangedError, error) {
+	var schemaErrors []*SchemaChangedError
+	if first != nil {
+		schemaErrors = append(schemaErrors, first)
+	}
+	for tableName := range a.changes {
+		if first != nil && tableName == first.Table {
+			continue
+		}
+		if err := a.flushTableContext(ctx, tableName, results, token); err != nil {
+			var schemaErr *SchemaChangedError
+			if !errors.As(err, &schemaErr) {
+				return nil, err
+			}
+			schemaErrors = append(schemaErrors, schemaErr)
+		}
+	}
+	return schemaErrors, nil
+}
+
 func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName string, results chan<- source.RecordBatchResult, token tokenFunc) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		a.discard()
@@ -223,16 +248,16 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 		return nil
 	}
 
-	delete(a.changes, tableName)
-	delete(a.minLSN, tableName)
-	a.totalBytes -= a.bytes[tableName]
-	if a.totalBytes < 0 {
-		a.totalBytes = 0
+	if a.durable != nil {
+		if err := a.toast.prune(ctx, a.durable()); err != nil {
+			return fmt.Errorf("failed to prune TOAST state: %w", err)
+		}
 	}
-	delete(a.bytes, tableName)
-
 	truncateIndex := lastTruncateIndex(changes)
 	if truncateIndex >= 0 {
+		if err := a.toast.truncate(ctx, tableName); err != nil {
+			return fmt.Errorf("failed to reset TOAST state: %w", err)
+		}
 		changes = changes[truncateIndex+1:]
 	}
 
@@ -249,7 +274,9 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 	// omitted column (the merge falls back to a target row that doesn't exist
 	// yet).
 	if len(changes) > 0 {
-		applyIntraBatchFill(changes, tableSchema)
+		if err := fillUnchangedColumns(ctx, changes, tableSchema, tableName, a.toast); err != nil {
+			return fmt.Errorf("failed to fill unchanged TOAST columns: %w", err)
+		}
 		changes = expandUpdates(changes, tableSchema)
 	}
 
@@ -260,6 +287,14 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 	if len(changes) > 0 {
 		changes = compactChanges(changes, tableSchema)
 	}
+
+	delete(a.changes, tableName)
+	delete(a.minLSN, tableName)
+	a.totalBytes -= a.bytes[tableName]
+	if a.totalBytes < 0 {
+		a.totalBytes = 0
+	}
+	delete(a.bytes, tableName)
 
 	var commitToken any
 	if token != nil {

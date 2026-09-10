@@ -7,7 +7,11 @@ bash "$BENCH_DIR/scripts/check_tools.sh"
 
 echo ""
 echo "==> Starting benchmark containers..."
-docker compose -f "$BENCH_DIR/docker-compose.yml" up -d --wait
+compose_args=()
+if [[ "${BENCH_KAFKA:-0}" == "1" ]]; then
+    compose_args+=(--profile kafka)
+fi
+docker compose -f "$BENCH_DIR/docker-compose.yml" "${compose_args[@]}" up -d --wait
 
 echo ""
 echo "==> Building gong..."

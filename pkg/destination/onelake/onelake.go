@@ -1044,6 +1044,10 @@ func arrowFieldToColumn(f arrow.Field) schema.Column {
 		col.DataType = schema.TypeDecimal
 		col.Precision = int(dt.Precision)
 		col.Scale = int(dt.Scale)
+	case *arrow.Decimal256Type:
+		col.DataType = schema.TypeDecimal
+		col.Precision = int(dt.Precision)
+		col.Scale = int(dt.Scale)
 	case *arrow.BinaryType, *arrow.LargeBinaryType:
 		col.DataType = schema.TypeBinary
 	case *arrow.Date32Type, *arrow.Date64Type:

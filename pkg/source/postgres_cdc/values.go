@@ -1,6 +1,7 @@
 package postgres_cdc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -10,13 +11,23 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-type tupleUnchanged struct{}
+type tupleUnchanged struct {
+	RelationMissing bool
+}
 
-var tupleUnchangedMarker = tupleUnchanged{}
+var (
+	tupleUnchangedMarker       = tupleUnchanged{}
+	tupleRelationMissingMarker = tupleUnchanged{RelationMissing: true}
+)
 
 func isTupleUnchanged(v interface{}) bool {
 	_, ok := v.(tupleUnchanged)
 	return ok
+}
+
+func isRelationMissingMarker(v interface{}) bool {
+	marker, ok := v.(tupleUnchanged)
+	return ok && marker.RelationMissing
 }
 
 func resolveColumnValue(change Change, colIdx int) interface{} {
@@ -40,93 +51,95 @@ func resolveColumnValueBase(change Change, colIdx int) interface{} {
 	return nil
 }
 
-// knownValue is a column value tracked during within-commit fill. known
-// distinguishes an authoritative NULL (an explicit SET col = NULL, which must be
-// propagated) from a column we have no information about (which must stay
-// unchanged so the destination uses its target value).
-type knownValue struct {
-	val   interface{}
-	known bool
-}
-
-// applyIntraBatchFill coalesces unchanged TOAST columns across a window of
-// changes: an INSERT (or full-value row) followed by a partial UPDATE of the
-// same primary key, where the UPDATE omits the unchanged TOAST value.
-// Compaction keeps only the latest row per key, so without this the earlier
-// value would be lost. State is local to the window it is called on: a single
-// commit in the single-table decoder (whose compaction runs per commit), and
-// the accumulator's whole flush window at materialization time (see
-// batchAccumulator.flushTable), which is where separate transactions merge —
-// cross-commit coalescing falls out of the same logic applied to the wider
-// window.
-//
-// A filled column's value is written directly into change.Values, replacing the
-// unchanged marker. That makes columnIsUnchanged report false for it, so it is
-// emitted with its (possibly NULL) value and excluded from _cdc_unchanged_cols —
-// which is exactly what we want, including when the known value is NULL.
-func applyIntraBatchFill(changes []Change, tableSchema *schema.TableSchema) {
+func fillUnchangedColumns(ctx context.Context, changes []Change, tableSchema *schema.TableSchema, table string, state *toastState) error {
 	if len(changes) == 0 || tableSchema == nil {
-		return
+		return nil
 	}
-
 	pkIndices := pkColumnIndices(tableSchema.Columns, tableSchema.PrimaryKeys)
 	if len(pkIndices) == 0 {
-		return
+		return nil
 	}
-
 	nSource := sourceColumnCount(tableSchema)
-	state := make(map[string][]knownValue)
-
+	toastable := make([]bool, nSource)
+	hasToast := false
+	for i, col := range tableSchema.Columns[:nSource] {
+		switch col.DataType {
+		case schema.TypeString, schema.TypeBinary, schema.TypeJSON, schema.TypeArray, schema.TypeDecimal, schema.TypeUnknown:
+			toastable[i] = true
+			hasToast = true
+		}
+	}
+	if !hasToast {
+		return nil
+	}
 	for i := range changes {
 		change := &changes[i]
 		lookupKey, storeKey := fillStateKeys(*change, pkIndices, i)
-		prior := state[lookupKey]
-
+		prior, err := state.get(ctx, table, lookupKey)
+		if err != nil {
+			return err
+		}
 		for colIdx := 0; colIdx < nSource; colIdx++ {
 			if !columnIsUnchanged(*change, colIdx) {
 				continue
 			}
 			if base := resolveColumnValueBase(*change, colIdx); base != nil {
-				// Authoritative old-tuple value (REPLICA IDENTITY FULL). Clear
-				// the marker so the column is emitted with its value and not
-				// reported as unchanged; otherwise a matched merge falls back to
-				// the target and discards a value set earlier in the same batch.
 				setColumnValue(change, colIdx, base)
-				continue
-			}
-			if prior != nil && colIdx < len(prior) && prior[colIdx].known {
-				setColumnValue(change, colIdx, prior[colIdx].val)
+			} else if colIdx < len(prior) && !isTupleUnchanged(prior[colIdx]) {
+				setColumnValue(change, colIdx, prior[colIdx])
 			}
 		}
-
-		if change.Operation == "DELETE" {
-			delete(state, storeKey)
-			if lookupKey != storeKey {
-				delete(state, lookupKey)
-			}
-			continue
-		}
-
-		// Carry forward prior known values, then overwrite with the columns this
-		// change resolves authoritatively (a real value, an explicit NULL, or a
-		// fill applied above).
-		next := make([]knownValue, nSource)
-		copy(next, prior)
-		for colIdx := 0; colIdx < nSource; colIdx++ {
-			if columnIsAuthoritative(*change, colIdx) {
-				next[colIdx] = knownValue{val: resolveColumnValue(*change, colIdx), known: true}
+		if pkValueChanged(*change, pkIndices) {
+			for colIdx := 0; colIdx < nSource; colIdx++ {
+				if columnIsUnchanged(*change, colIdx) {
+					if isRelationMissingMarker(change.Values[colIdx]) {
+						tableName := table
+						if tableName == "" {
+							tableName = tableSchema.Name
+							if tableSchema.Schema != "" {
+								tableName = tableSchema.Schema + "." + tableSchema.Name
+							}
+						}
+						return newSchemaChangedError(tableName, []SchemaMismatch{{
+							Column: tableSchema.Columns[colIdx].Name,
+							Reason: "is missing from the current replication relation",
+						}})
+					}
+					return fmt.Errorf("cannot replicate key change on %s.%s: unchanged TOAST column %q has no full row image; set REPLICA IDENTITY FULL before changing keys and use --full-refresh to rebuild from a fresh snapshot", quoteIdentifier(tableSchema.Schema), quoteIdentifier(tableSchema.Name), tableSchema.Columns[colIdx].Name)
+				}
 			}
 		}
 		if lookupKey != storeKey {
-			delete(state, lookupKey)
+			if err := state.delete(ctx, table, lookupKey); err != nil {
+				return err
+			}
 		}
-		state[storeKey] = next
+		if change.Operation == "DELETE" {
+			if err := state.delete(ctx, table, storeKey); err != nil {
+				return err
+			}
+			continue
+		}
+		next := make([]interface{}, nSource)
+		for colIdx := range next {
+			next[colIdx] = tupleUnchangedMarker
+			if colIdx < len(prior) {
+				next[colIdx] = prior[colIdx]
+			}
+			if toastable[colIdx] && columnIsAuthoritative(*change, colIdx) {
+				next[colIdx] = resolveColumnValue(*change, colIdx)
+			}
+		}
+		if err := state.put(ctx, table, storeKey, next, change.LSN); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // expandUpdates rewrites UPDATE changes whose row identity moved or is absent,
 // so the emitted stream stays applicable at the destination. It runs after
-// applyIntraBatchFill (which may still need the original UPDATE shape) and
+// fillUnchangedColumns (which may still need the original UPDATE shape) and
 // before compaction.
 //
 // Keyed tables: an UPDATE that changes a key column would merge under the new
@@ -286,7 +299,7 @@ func fillStateKeys(change Change, pkIndices []int, changeIndex int) (lookupKey, 
 }
 
 func pkValueChanged(change Change, pkIndices []int) bool {
-	if change.Operation != "UPDATE" {
+	if change.Operation != "UPDATE" || change.OldValues == nil {
 		return false
 	}
 	for _, idx := range pkIndices {
@@ -375,7 +388,7 @@ func unchangedColumnsJSON(change Change, columns []schema.Column, nSourceCols in
 	}
 	names := make([]string, 0)
 	for i := 0; i < nSourceCols && i < len(columns); i++ {
-		// applyIntraBatchFill overwrites the unchanged marker of any column it
+		// fillUnchangedColumns overwrites the unchanged marker of any column it
 		// resolves (including to NULL), so columnIsUnchanged already excludes
 		// filled columns here; a column still marked unchanged is one we have no
 		// staging value for and the destination must fall back to its target.

@@ -60,6 +60,23 @@ ingestr ingest \
 
 The result of this command will be a table in the `kafka.duckdb` database with JSON columns.
 
+Batch ingestion reads the retained backlog up to the partition end offsets captured
+at the start of the run. It stops after the last message in that snapshot without
+waiting for new messages. Each row has a JSON `_kafka` column containing the raw
+message value in `data` alongside topic, partition, offset, key, and timestamp
+metadata, plus a string `_kafka_msg_id` identifying that message's location.
+This envelope has a fixed schema, so ingestion can load batches as they arrive
+without first scanning the topic to infer column types. The message value is kept verbatim as a JSON
+string in `_kafka.data`, so nested fields are reached by parsing it in the
+destination (e.g. `(_kafka->>'data')::jsonb` in Postgres,
+`json_extract_string(_kafka, '$.data')` in DuckDB).
+
+Because the envelope schema is fixed, a run whose snapshot is empty (the topic has
+no retained messages) is still a normal run: with the default `replace` strategy it
+recreates the destination table with zero rows. Use `--incremental-strategy merge`
+with `--primary-key _kafka_msg_id` if you want each run to accumulate into the
+existing table instead.
+
 ## Streaming ingestion
 
 Add `--stream` to consume the topic continuously instead of reading the current backlog and exiting. In streaming mode each message is projected into a fixed envelope schema — a `msg_id` primary key plus a JSON `data` column holding the key, value, and metadata — and changes are merged on `msg_id` (latest record per key wins within a flush window, ordered by an `_ingestr_order` column). The consumer group's offsets are committed only after a flush succeeds, so a restart resumes where it left off. See [`ingest --stream`](../commands/ingest.md#streaming-ingestion).

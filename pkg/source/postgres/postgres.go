@@ -205,6 +205,14 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 			col.Scale = scale
 		}
 
+		// Decimals wider than Decimal256 can hold (76 digits) would overflow the
+		// Arrow builder and panic; carry them as exact text instead.
+		if col.DataType == schema.TypeDecimal && col.Precision > maxDecimal256Precision {
+			col.DataType = schema.TypeString
+			col.Precision = 0
+			col.Scale = 0
+		}
+
 		if charMaxLen != nil {
 			col.MaxLength = *charMaxLen
 		}
@@ -620,6 +628,13 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 	case pgtype.Numeric:
 		if !v.Valid || v.NaN {
 			return nil
+		}
+		if col.DataType == schema.TypeString {
+			if s, err := v.Value(); err == nil {
+				if str, ok := s.(string); ok {
+					return str
+				}
+			}
 		}
 		return numericToBigInt(v, col.Scale)
 	default:

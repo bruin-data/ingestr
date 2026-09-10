@@ -124,6 +124,7 @@ type StartInfo struct {
 	IncrementalKey string
 	PrimaryKey     []string
 	SchemaNaming   string
+	CDCTableNaming string
 }
 
 // EventStart emits the start event (JSON mode only).
@@ -147,6 +148,9 @@ func EventStart(i StartInfo) {
 	}
 	if i.SchemaNaming != "" {
 		attrs = append(attrs, slog.String("schema_naming", i.SchemaNaming))
+	}
+	if i.CDCTableNaming != "" {
+		attrs = append(attrs, slog.String("cdc_table_naming", i.CDCTableNaming))
 	}
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "ingestion started", attrs...)
 }

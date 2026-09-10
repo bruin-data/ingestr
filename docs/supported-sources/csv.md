@@ -8,6 +8,18 @@ The URI format for CSV files is as follows:
 csv://path/to/csv/file.csv
 ```
 
+## ZIP archives
+
+Append `!<member-glob>` to read selected CSV files from a local ZIP archive:
+
+```plaintext
+csv:///path/to/release.zip!data/**/*.csv
+```
+
+The same syntax works with the `jsonl://`, `ndjson://`, and `parquet://` source schemes. If the member glob is omitted, all members are selected.
+
+Archive members are processed one at a time without extracting the entire ZIP.
+
 ## Character encoding
 
 ingestr handles UTF-8 (with or without BOM) and UTF-16 LE/BE (with BOM) automatically. If your file is in a different encoding and you see garbled characters (`�` or wrong letters) in the destination, declare the encoding via the `encoding` query parameter:

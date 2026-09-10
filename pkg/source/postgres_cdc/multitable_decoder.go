@@ -35,18 +35,19 @@ func streamedChangeXID(change streamedChange) uint32 { return change.XID }
 // (Stream Start/Stop/Commit/Abort) and, when the stream runs with the
 // `binary 'true'` option, binary-format tuple data.
 type MultiTableDecoder struct {
-	tableSchemas   map[string]*schema.TableSchema // schema name.table name -> schema
-	expectedRelIDs map[string]uint32              // full table name -> connect-time relation ID
-	relations      map[uint32]*RelationInfo
-	targetRelIDs   map[uint32]string // relation ID -> full table name
-	pendingChanges *changeSpool[streamedChange]
-	committed      *changeSpool[streamedChange]
-	committedLSN   pglogrepl.LSN
-	currentTxLSN   pglogrepl.LSN
-	typeMap        *pgtype.Map
-	allowedUnknown map[string]map[string]struct{}
-	historicalIDs  map[string]map[uint32]struct{}
-	memoryBudget   *byteBudget
+	generatedColumns map[string][]string
+	tableSchemas     map[string]*schema.TableSchema // schema name.table name -> schema
+	expectedRelIDs   map[string]uint32              // full table name -> connect-time relation ID
+	relations        map[uint32]*RelationInfo
+	targetRelIDs     map[uint32]string // relation ID -> full table name
+	pendingChanges   *changeSpool[streamedChange]
+	committed        *changeSpool[streamedChange]
+	committedLSN     pglogrepl.LSN
+	currentTxLSN     pglogrepl.LSN
+	typeMap          *pgtype.Map
+	allowedUnknown   map[string]map[string]struct{}
+	historicalIDs    map[string]map[uint32]struct{}
+	memoryBudget     *byteBudget
 
 	// Protocol v2 streaming state. Between Stream Start and Stream Stop,
 	// change messages carry a subtransaction xid and are buffered per
@@ -337,6 +338,9 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 				// last accepted relation so schema-change detection remains stable.
 				return err
 			}
+		}
+		if err := validateGeneratedRelation(rel, d.generatedColumns[tableName]); err != nil {
+			return err
 		}
 	}
 

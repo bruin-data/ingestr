@@ -1,9 +1,11 @@
 package parquet
 
 import (
+	"archive/zip"
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -166,6 +168,56 @@ func TestParquetSource_Glob(t *testing.T) {
 		r.Batch.Release()
 	}
 	assert.Equal(t, int64(9), total)
+}
+
+func TestParquetSource_ReadsZIPMembers(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.parquet")
+	secondPath := filepath.Join(dir, "second.parquet")
+	writeTestParquet(t, firstPath, 3)
+	writeTestParquet(t, secondPath, 3)
+
+	archivePath := filepath.Join(dir, "release.zip")
+	archiveFile, err := os.Create(archivePath)
+	require.NoError(t, err)
+	archiveWriter := zip.NewWriter(archiveFile)
+	for _, entry := range []struct {
+		name string
+		path string
+	}{
+		{name: "data/first.parquet", path: firstPath},
+		{name: "data/second.parquet", path: secondPath},
+	} {
+		member, err := archiveWriter.Create(entry.name)
+		require.NoError(t, err)
+		input, err := os.Open(entry.path)
+		require.NoError(t, err)
+		_, err = io.Copy(member, input)
+		require.NoError(t, err)
+		require.NoError(t, input.Close())
+	}
+	require.NoError(t, archiveWriter.Close())
+	require.NoError(t, archiveFile.Close())
+
+	src := NewParquetSource()
+	require.NoError(t, src.Connect(ctx, "parquet://"+archivePath+"!data/*.parquet"))
+	table, err := src.GetTable(ctx, source.TableRequest{Name: "release"})
+	require.NoError(t, err)
+	assert.False(t, table.HasKnownSchema())
+	results, err := table.Read(ctx, source.ReadOptions{Limit: 5})
+	require.NoError(t, err)
+
+	var totalRows int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		require.Equal(t, int64(2), result.Batch.NumCols())
+		totalRows += result.Batch.NumRows()
+		result.Batch.Release()
+	}
+	assert.Equal(t, int64(5), totalRows)
 }
 
 func TestParquetSource_RichTypes(t *testing.T) {

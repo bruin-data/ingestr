@@ -3,10 +3,14 @@ name: Release
 on:
   push:
     tags:
-      - '*'
+      - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   INSTALL_URL: https://getbruin.com/install/ingestr
@@ -16,7 +20,26 @@ env:
   IMAGE_NAME: bruin-data/ingestr
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate stable tag
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+      - name: Refuse any existing release (including abandoned drafts)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' > tags.txt
+          if grep -Fxq "$GITHUB_REF_NAME" tags.txt; then
+            echo 'Release already exists; use a new version or explicitly recover the unpublished draft.' >&2
+            exit 1
+          fi
+
   integration-tests:
+    needs: [preflight]
     env:
       TEST_CONCURRENCY: "1"
     strategy:
@@ -48,6 +71,7 @@ jobs:
         run: make ${{ matrix.suite }}
 
   prepare-darwin:
+    needs: [preflight]
     runs-on: depot-ubuntu-latest-8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -57,20 +81,19 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
-      - shell: bash
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-      - name: cache darwin
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: dist/darwin
-          key: darwin-${{ env.sha_short }}
       - name: Run GoReleaser
-        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=darwin -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: archives-darwin
+          overwrite: true
+          path: dist/darwin/*.tar.gz
+          if-no-files-found: error
 
 
   prepare-linux:
+    needs: [preflight]
     runs-on: depot-ubuntu-latest-8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -80,54 +103,27 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
-      - shell: bash
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-      - name: cache linux
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: dist/linux
-          key: linux-${{ env.sha_short }}
       - name: Run GoReleaser
-        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=linux -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: archives-linux
+          overwrite: true
+          path: dist/linux/*.tar.gz
+          if-no-files-found: error
 
-
-  release-unix:
-    runs-on: depot-ubuntu-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - shell: bash
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: dist/linux
-          key: linux-${{ env.sha_short }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: dist/darwin
-          key: darwin-${{ env.sha_short }}
-      - uses: goreleaser/goreleaser-action@b508e2e3ef3b19d4e4146d4f8fb3ba9db644a757 # v3
-        with:
-          distribution: goreleaser-pro
-          version: v2.3.2
-          args: continue --merge
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
-
-  release-windows:
+  prepare-windows:
     runs-on: depot-windows-latest
-    needs: [prepare-linux, prepare-darwin, integration-tests]
+    needs: [preflight]
     defaults:
       run:
         shell: msys2 {0}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
@@ -164,20 +160,117 @@ jobs:
           CC: x86_64-w64-mingw32-gcc
           CGO_LDFLAGS: "-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic"
 
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: dist/windows/ingestr_Windows_x86_64.zip
-          asset_name: ingestr_Windows_x86_64.zip
-          tag: ${{ github.ref }}
-          overwrite: false
-          make_latest: false
-          prerelease: false
+          name: archives-windows
+          overwrite: true
+          path: dist/windows/*.zip
+          if-no-files-found: error
+
+  smoke-archives:
+    needs: [prepare-linux, prepare-darwin, prepare-windows]
+    strategy:
+      matrix:
+        include:
+          - {goos: linux, archive: ingestr_Linux_x86_64.tar.gz, runner: ubuntu-24.04}
+          - {goos: linux, archive: ingestr_Linux_arm64.tar.gz, runner: ubuntu-24.04-arm}
+          - {goos: darwin, archive: ingestr_Darwin_x86_64.tar.gz, runner: macos-15-intel}
+          - {goos: darwin, archive: ingestr_Darwin_arm64.tar.gz, runner: macos-15}
+          - {goos: windows, archive: ingestr_Windows_x86_64.zip, runner: windows-2022}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: archives-${{ matrix.goos }}
+          path: release-assets
+      - name: Check packaged executable version on its native platform
+        shell: bash
+        working-directory: release-assets
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          if [[ "$ARCHIVE" == *.zip ]]; then
+            unzip "$ARCHIVE" ingestr.exe
+            executable=ingestr.exe
+          else
+            tar -xzf "$ARCHIVE" ingestr
+            executable=ingestr
+          fi
+          test "$(./"$executable" --version | tr -d '\r')" = "ingestr version $GITHUB_REF_NAME"
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [smoke-archives, integration-tests, docker-test]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: archives-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish complete immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = bruin-data/ingestr
+          test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" "refs/tags/$GITHUB_REF_NAME^{}" | tail -1 | cut -f1)" = "$GITHUB_SHA"
+          archives=(
+            ingestr_Darwin_x86_64.tar.gz ingestr_Darwin_arm64.tar.gz
+            ingestr_Linux_x86_64.tar.gz ingestr_Linux_arm64.tar.gz
+            ingestr_Windows_x86_64.zip
+          )
+          # gh uploads all files to an internal draft before publishing once.
+          # GitHub automatically attests the release when immutability is enabled.
+          lookup_error="$RUNNER_TEMP/release-lookup-error.txt"
+          if state="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq .draft 2>"$lookup_error")"; then
+            :
+          elif grep -q '(HTTP 404)' "$lookup_error"; then
+            state=absent
+          else
+            cat "$lookup_error" >&2
+            echo "Could not determine whether $GITHUB_REF_NAME is already released." >&2
+            exit 1
+          fi
+          case "$state" in
+            absent)
+              gh release create "$GITHUB_REF_NAME" "${archives[@]}" \
+                --verify-tag --latest --title "$GITHUB_REF_NAME" --generate-notes
+              ;;
+            false)
+              echo "Release already published by an earlier attempt; verifying it."
+              ;;
+            *)
+              echo "Release exists as an unpublished draft; recover or delete it manually." >&2
+              exit 1
+              ;;
+          esac
+
+          # Attestations are generated asynchronously, so a verify right after
+          # publishing can race ahead of them.
+          for attempt in $(seq 1 12); do
+            if gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"; then
+              verified=yes
+              break
+            fi
+            echo "Attestation not available yet (attempt $attempt/12); retrying in 15s." >&2
+            sleep 15
+          done
+          test "${verified:-no}" = yes
+
+          # Verification failures stop downstream jobs, but cannot undo publication.
+          for asset in "${archives[@]}"; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"
+          done
 
   release-pip:
     runs-on: depot-ubuntu-latest
-    needs: [release-windows, release-unix]
+    needs: [publish-release]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -257,7 +350,7 @@ jobs:
   install-windows:
     runs-on: depot-windows-latest
     name: Installer Script on Windows
-    needs: [release-windows, release-unix]
+    needs: [publish-release]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Show directories
@@ -271,7 +364,7 @@ jobs:
           for attempt in $(seq 1 "${max_attempts}"); do
             echo "Installer script test attempt ${attempt}/${max_attempts} (Windows)"
             if curl -LsSf $INSTALL_URL | sh -s -- -d "${GITHUB_REF##*/}" \
-              &&  ~/.local/bin/ingestr --version; then
+              && test "$(~/.local/bin/ingestr --version)" = "ingestr version $GITHUB_REF_NAME"; then
               exit 0
             fi
 
@@ -288,7 +381,7 @@ jobs:
   install-unix:
     runs-on: ubuntu-latest
     name: Installer Script on Linux
-    needs: [release-windows, release-unix]
+    needs: [publish-release]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Extract tag from ref
@@ -303,7 +396,7 @@ jobs:
           for attempt in $(seq 1 "${max_attempts}"); do
             echo "Installer script test attempt ${attempt}/${max_attempts} (Linux)"
             if curl -LsSf $INSTALL_URL | sh -s -- -d "${{ env.tag }}" \
-              &&  ingestr --version; then
+              && test "$(ingestr --version)" = "ingestr version $GITHUB_REF_NAME"; then
               exit 0
             fi
 
@@ -391,9 +484,10 @@ jobs:
 
       - name: Test version output
         run: |
-          docker run --rm \
+          version=$(docker run --rm \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
-            ingestr --version
+            ingestr --version)
+          test "$version" = "ingestr version $GITHUB_REF_NAME"
 
       - name: Test CSV to DuckDB ingestion
         run: |
@@ -427,23 +521,3 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
             sh -c 'find /tmp/docker-test -mindepth 1 -delete' || true
           rm -rf /tmp/docker-test
-
-  release:
-    runs-on: ubuntu-latest
-    needs: [install-unix, install-windows, docker-test]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Extract tag from ref
-        id: extract_tag
-        run: |
-          ref_name="${GITHUB_REF##*/}"
-          echo "tag=${ref_name}" >> $GITHUB_ENV
-      - name: Release promote to latest
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ env.tag }}
-          prerelease: false
-          make_latest: true
-          clear_attachments: false

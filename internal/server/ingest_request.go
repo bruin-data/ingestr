@@ -24,6 +24,7 @@ type RunJobRequest struct {
 	FullRefresh      bool   `json:"fullRefresh"`
 	SchemaContract   string `json:"schemaContract"`
 	SchemaNaming     string `json:"schemaNaming"`
+	CDCTableNaming   string `json:"cdcTableNaming"`
 	Progress         string `json:"progress"`
 	PageSize         int    `json:"pageSize"`
 	LoaderFileSize   int    `json:"loaderFileSize"`
@@ -92,6 +93,7 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendBool("full-refresh", r.FullRefresh)
 	appendString("schema-contract", r.SchemaContract)
 	appendString("schema-naming", r.SchemaNaming)
+	appendString("cdc-table-naming", r.CDCTableNaming)
 	appendString("progress", r.Progress)
 	appendInt("page-size", r.PageSize)
 	appendInt("loader-file-size", r.LoaderFileSize)

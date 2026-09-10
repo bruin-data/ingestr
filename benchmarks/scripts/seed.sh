@@ -58,6 +58,11 @@ for rows in $SEED_SIZES; do
         echo "  DuckDB: done ($(duckdb "$DUCKDB_SRC_PATH" -noheader -csv -c "SELECT count(*) FROM ${table_name}") rows)"
     fi
 
+    if [[ "${BENCH_KAFKA:-0}" == "1" ]]; then
+        uv run --no-project --python 3.13 --script "$BENCH_DIR/scripts/seed_kafka.py" \
+            --database "$DUCKDB_SRC_PATH" --rows "$rows" --suffix "$suffix"
+    fi
+
     # --- Export CSV from DuckDB (used by both Postgres and MySQL) ---
     PG_CSV_PATH="$DUCKDB_DIR/seed_pg_${suffix}.csv"
     MYSQL_CSV_PATH="$DUCKDB_DIR/seed_mysql_${suffix}.csv"

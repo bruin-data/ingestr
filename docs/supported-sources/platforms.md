@@ -55,6 +55,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [ABRA Flexi](/supported-sources/abra.md)
 - [Apple App Store](/supported-sources/appstore.md)
 - [Chargebee](/supported-sources/chargebee.md)
+- [Fakturoid](/supported-sources/fakturoid.md)
 - [FastSpring](/supported-sources/fastspring.md)
 - [FundraiseUp](/supported-sources/fundraiseup.md)
 - [Hostaway](/supported-sources/hostaway.md)
@@ -71,6 +72,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 - [Airtable](/supported-sources/airtable.md)
 - [Asana](/supported-sources/asana.md)
+- [BambooHR](/supported-sources/bamboohr.md)
 - [ClickUp](/supported-sources/clickup.md)
 - [Deel](/supported-sources/deel.md)
 - [Docebo](/supported-sources/docebo.md)
@@ -119,5 +121,6 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Frankfurter](/supported-sources/frankfurter.md)
 - [Internet Society Pulse](/supported-sources/isoc-pulse.md)
 - [Kalshi](/supported-sources/kalshi.md)
+- [Lumify](/supported-sources/lumify.md)
 - [Polymarket](/supported-sources/polymarket.md)
 - [RIPEstat](/supported-sources/ripestat.md)

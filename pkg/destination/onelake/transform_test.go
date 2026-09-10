@@ -615,3 +615,22 @@ func TestSCD2IncrementalKeySkipsSoftDelete(t *testing.T) {
 	assert.Equal(t, true, byID[1][destination.SCD2IsCurrentColumn]) // untouched
 	assert.Equal(t, true, byID[2][destination.SCD2IsCurrentColumn]) // net-new
 }
+
+func TestCanonicalDecimal256KeysCompareExactly(t *testing.T) {
+	// Two Decimal256 keys differing only beyond float64's precision must not
+	// collapse; exact comparison keeps them distinct for interval membership.
+	a, ok := canonicalValue("123456789012345678901234567890.00000000000000000001", schema.TypeDecimal)
+	require.True(t, ok)
+	b, ok := canonicalValue("123456789012345678901234567890.00000000000000000002", schema.TypeDecimal)
+	require.True(t, ok)
+
+	require.Equal(t, -1, canonicalCmp(a, b))
+	require.Equal(t, 1, canonicalCmp(b, a))
+	require.Equal(t, 0, canonicalCmp(a, a))
+
+	// A big.Rat cell and a float64 interval bound must compare numerically.
+	rat, ok := canonicalValue("10.5", schema.TypeDecimal)
+	require.True(t, ok)
+	require.Equal(t, 1, canonicalCmp(rat, float64(2)))
+	require.Equal(t, -1, canonicalCmp(float64(2), rat))
+}

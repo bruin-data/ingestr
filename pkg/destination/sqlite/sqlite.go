@@ -1490,6 +1490,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.ValueStr(idx)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.Decimal256:
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
 	case array.ExtensionArray:
 		// Handle extension types by extracting the underlying storage value
 		storage := a.Storage()

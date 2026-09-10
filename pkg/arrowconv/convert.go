@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/decimal256"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -716,6 +717,72 @@ func AppendValue(builder array.Builder, val interface{}) {
 			b.Append(decimal128.FromBigInt(v))
 		case json.Number:
 			AppendValue(b, string(v))
+		default:
+			b.AppendNull()
+		}
+
+	case *array.Decimal256Builder:
+		dt, ok := builder.Type().(*arrow.Decimal256Type)
+		if !ok {
+			b.AppendNull()
+			return
+		}
+		appendDecimal256 := func(s string) {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				b.AppendNull()
+				return
+			}
+			num, err := decimal256.FromString(s, dt.Precision, dt.Scale)
+			if err != nil {
+				bf := new(big.Float)
+				if _, ok := bf.SetString(s); ok {
+					scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
+					bf.Mul(bf, scale)
+					bi, _ := bf.Int(nil)
+					b.Append(decimal256.FromBigInt(bi))
+				} else {
+					b.AppendNull()
+				}
+				return
+			}
+			b.Append(num)
+		}
+		switch v := val.(type) {
+		case decimal256.Num:
+			b.Append(v)
+		case decimal128.Num:
+			b.Append(decimal256.FromBigInt(v.BigInt()))
+		case decimal.Decimal:
+			appendDecimal256(v.String())
+		case string:
+			appendDecimal256(v)
+		case []byte:
+			appendDecimal256(string(v))
+		case json.Number:
+			appendDecimal256(string(v))
+		case float64:
+			appendDecimal256(strconv.FormatFloat(v, 'f', -1, 64))
+		case int64:
+			appendDecimal256(strconv.FormatInt(v, 10))
+		case int:
+			appendDecimal256(strconv.FormatInt(int64(v), 10))
+		case int8:
+			appendDecimal256(strconv.FormatInt(int64(v), 10))
+		case int16:
+			appendDecimal256(strconv.FormatInt(int64(v), 10))
+		case int32:
+			appendDecimal256(strconv.FormatInt(int64(v), 10))
+		case uint8:
+			appendDecimal256(strconv.FormatUint(uint64(v), 10))
+		case uint16:
+			appendDecimal256(strconv.FormatUint(uint64(v), 10))
+		case uint32:
+			appendDecimal256(strconv.FormatUint(uint64(v), 10))
+		case uint64:
+			appendDecimal256(strconv.FormatUint(v, 10))
+		case *big.Int:
+			b.Append(decimal256.FromBigInt(v))
 		default:
 			b.AppendNull()
 		}

@@ -155,10 +155,20 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 		return arrow.PrimitiveTypes.Float32, nil
 	}
 
-	// If either is decimal, result is decimal
+	// If either is decimal, result is decimal (Decimal256 must not narrow to Decimal128).
 	if a.ID() == arrow.DECIMAL128 || b.ID() == arrow.DECIMAL128 ||
 		a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
-		// Use default precision/scale for merged decimals
+		if a.ID() == arrow.DECIMAL256 || b.ID() == arrow.DECIMAL256 {
+			intA, scaleA := decimalIntDigitsAndScale(a)
+			intB, scaleB := decimalIntDigitsAndScale(b)
+			intDigits := max(intA, intB)
+			scale := max(scaleA, scaleB)
+			// Both integer digits and scale must fit Decimal256's 76; else carry as string.
+			if intDigits+scale > 76 {
+				return arrow.BinaryTypes.String, nil
+			}
+			return &arrow.Decimal256Type{Precision: intDigits + scale, Scale: scale}, nil
+		}
 		return &arrow.Decimal128Type{Precision: 38, Scale: 9}, nil
 	}
 
@@ -179,6 +189,19 @@ func promoteNumericTypes(a, b arrow.DataType) (arrow.DataType, error) {
 		return arrow.PrimitiveTypes.Int64, nil
 	default:
 		return arrow.PrimitiveTypes.Int64, nil
+	}
+}
+
+// decimalIntDigitsAndScale returns a type's integer-digit capacity and scale.
+// Non-decimal numerics are treated as 64-bit integers (up to 19 digits).
+func decimalIntDigitsAndScale(dt arrow.DataType) (int32, int32) {
+	switch t := dt.(type) {
+	case *arrow.Decimal128Type:
+		return t.Precision - t.Scale, t.Scale
+	case *arrow.Decimal256Type:
+		return t.Precision - t.Scale, t.Scale
+	default:
+		return 19, 0
 	}
 }
 
@@ -270,7 +293,11 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		col.DataType = schema.TypeFloat64
 	case arrow.DECIMAL128, arrow.DECIMAL256:
 		col.DataType = schema.TypeDecimal
-		if decType, ok := dt.(*arrow.Decimal128Type); ok {
+		switch decType := dt.(type) {
+		case *arrow.Decimal128Type:
+			col.Precision = int(decType.Precision)
+			col.Scale = int(decType.Scale)
+		case *arrow.Decimal256Type:
 			col.Precision = int(decType.Precision)
 			col.Scale = int(decType.Scale)
 		}

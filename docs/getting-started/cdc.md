@@ -50,7 +50,7 @@ On every run after the first, a CDC connector resumes from the last durable posi
 
 ### One-shot vs. streaming
 
-By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs. Continuous streaming is available for `postgres+cdc`, `mysql+cdc`, `mariadb+cdc`, `vitess+cdc`, `ps_mysql+cdc`, `mssql+cdc`, and `mongodb+cdc`: pass the `--stream` CLI flag and ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery — for keyed tables the `merge` strategy makes replays harmless, though keyless append-only change logs can end up with duplicate events after a recovery. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
+By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs. Continuous streaming is available for `postgres+cdc`, `mysql+cdc`, `mariadb+cdc`, `vitess+cdc`, `ps_mysql+cdc`, `mssql+cdc`, `mssql+ct`, and `mongodb+cdc`: pass the `--stream` CLI flag and ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery — for keyed tables the `merge` strategy makes replays harmless, though keyless append-only change logs can end up with duplicate events after a recovery. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
 
 ### PostgreSQL schema changes while streaming
 
@@ -75,6 +75,37 @@ If you omit `--source-table`, most CDC connectors run in multi-table mode and re
 ```plaintext
 postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics
 ```
+
+#### Destination table naming
+
+When `dest_schema` is set, `--cdc-table-naming` controls how a schema-qualified source table is named at the destination. It has two options:
+
+- **`schema_table`** (default) — the source schema is flattened into the table name. Safe when several source schemas funnel into one destination schema, because names can never collide:
+
+  ```plaintext
+  sales.orders   → analytics.sales_orders
+  support.orders → analytics.support_orders
+  ```
+
+- **`table`** — only the table name is kept. Use it when you replicate a single source schema and want plain table names:
+
+  ```plaintext
+  sales.orders    → analytics.orders
+  sales.customers → analytics.customers
+  ```
+
+  If two source schemas would map a table of the same name to the same destination (`sales.orders` and `support.orders` → `analytics.orders`), the run fails with a collision error instead of mixing their rows.
+
+```bash
+ingestr ingest \
+    --source-uri "postgres+cdc://user:pass@host:5432/mydb?dest_schema=analytics" \
+    --dest-uri "snowflake://user:pass@account/db/analytics" \
+    --cdc-table-naming=table
+```
+
+The naming mode is part of the connector's identity: switching it on an existing pipeline starts a fresh replication slot, state, and snapshot, and the tables written under the old naming are left in place.
+
+#### Replicating a subset of tables
 
 To replicate only some of those tables, give `--source-table` a comma-separated list. This is still a multi-table run — `dest_schema` applies, and each table gets its own destination table — just restricted to the tables you name.
 
@@ -116,7 +147,7 @@ Each platform has requirements and knobs specific to its change mechanism — fo
 
 - **PostgreSQL** reads logical replication from a publication and slot. It can manage its own `ingestr_publication` or use one you supply, and tracks progress in shared destination state tables rather than the maximum `_cdc_lsn` in a user table. A running stream absorbs column-level schema changes without restarting; picking up a newly added table takes a restart, since the stream exits and lets its supervisor bring it back up. `TRUNCATE` — or dropping and recreating a source table — is captured as a table replacement.
 - **MySQL / MariaDB** stream the binary log after a consistent snapshot, resuming from durable CDC state recorded in the destination. Pin a unique `server_id` for scheduled or overlapping runs.
-- **SQL Server** offers two paths: lightweight **Change Tracking** (net changes since the last version, primary key required) and **log-based CDC** (full row-level change history). Both resume from `_cdc_lsn`.
+- **SQL Server** offers two paths: lightweight **Change Tracking** (net changes since the last version, primary key required) and **log-based CDC** (full row-level change history). Both resume from `_cdc_lsn` and both support `--stream`, though Change Tracking streams a single table at a time.
 - **MongoDB** tails change streams from a replica set / Atlas cluster. Being schema-less, it uses schema inference, so the destination schema is derived from sampled documents.
 - **Vitess** streams through vtgate's VStream API because a sharded cluster has no single binlog to tail; the position is a VGTID covering every shard, so it works for sharded and unsharded keyspaces alike.
 - **PlanetScale** is managed Vitess but does not expose VStream externally, so ingestr uses PlanetScale's hosted `psdbconnect` API over TLS, authenticating with the database credentials already in the URI.

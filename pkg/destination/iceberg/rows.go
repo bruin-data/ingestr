@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/decimal256"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	iceberggo "github.com/apache/iceberg-go"
@@ -336,6 +337,17 @@ func appendValue(b array.Builder, v any) error {
 		}
 		dt := bldr.Type().(*arrow.Decimal128Type)
 		num, err := decimal128.FromString(val, dt.Precision, dt.Scale)
+		if err != nil {
+			return fmt.Errorf("cannot convert %q to %s: %w", val, dt, err)
+		}
+		bldr.Append(num)
+	case *array.Decimal256Builder:
+		val, ok := asString(v)
+		if !ok {
+			return typeMismatch(b, v)
+		}
+		dt := bldr.Type().(*arrow.Decimal256Type)
+		num, err := decimal256.FromString(val, dt.Precision, dt.Scale)
 		if err != nil {
 			return fmt.Errorf("cannot convert %q to %s: %w", val, dt, err)
 		}

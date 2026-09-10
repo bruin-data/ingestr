@@ -9,6 +9,7 @@
 #     "pyarrow>=17.0,<17.1",
 #     "pymongo>=4.4",
 #     "pymongoarrow==1.5.2",
+#     "confluent-kafka==2.11.1",
 #     "pymysql",
 #     "sqlalchemy>=1.4,<3",
 # ]
@@ -163,7 +164,20 @@ def main():
 
     source_uri = normalize_source_uri(args.source_uri)
 
-    if source_uri.startswith(("mongodb://", "mongodb+srv://")):
+    if source_uri.startswith("kafka://"):
+        from confluent_kafka import Consumer
+        from sources.kafka import kafka_consumer
+
+        params = dict(parse_qsl(urlparse(source_uri).query))
+        consumer = Consumer({
+            "bootstrap.servers": params["bootstrap_servers"],
+            "group.id": "bench-dlt",
+            "enable.auto.commit": False,
+            "auto.offset.reset": "earliest",
+        })
+        source = kafka_consumer(args.source_table, credentials=consumer)
+        source.apply_hints(columns={"_kafka": {"data_type": "json"}})
+    elif source_uri.startswith(("mongodb://", "mongodb+srv://")):
         source = mongodb_source(source_uri, args.source_table, args.backend)
     else:
         if args.backend == "default":

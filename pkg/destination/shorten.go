@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"golang.org/x/crypto/sha3"
@@ -43,8 +44,22 @@ func MaxIdentifierLength(scheme string) int {
 // shortens only its final table component to the destination's identifier
 // limit. Qualification and identifier delimiters from custom namers are kept
 // intact, while the full unshortened physical path seeds the collision tag.
-func ResolveMultiTableName(scheme string, namer MultiTableNamer, destSchema, sourceTable string) string {
+// TableNamingTable drops the source-schema qualifier before naming, so
+// "foo.A" lands as "<destSchema>.A" instead of the flattened "<destSchema>.foo_A".
+func ResolveMultiTableName(scheme string, namer MultiTableNamer, destSchema, sourceTable string, naming config.TableNaming) string {
 	name := DefaultMultiTableName(destSchema, sourceTable)
+	if naming == config.TableNamingTable {
+		if parts := tablename.SplitRaw(sourceTable); len(parts) > 1 {
+			sourceTable = parts[len(parts)-1]
+		}
+		// A single component needs no flattening: joining it verbatim keeps a
+		// quoted table name containing a dot intact, where
+		// DefaultMultiTableName's dot replacement would corrupt it.
+		name = sourceTable
+		if destSchema != "" {
+			name = destSchema + "." + sourceTable
+		}
+	}
 	if namer != nil {
 		name = namer.DestTableName(destSchema, sourceTable)
 	}

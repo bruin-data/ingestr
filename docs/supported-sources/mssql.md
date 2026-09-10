@@ -50,12 +50,36 @@ ALTER DATABASE your_database
 SET CHANGE_TRACKING = ON
 (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);
 
+ALTER DATABASE your_database
+SET ALLOW_SNAPSHOT_ISOLATION ON;
+
 ALTER TABLE dbo.users
 ENABLE CHANGE_TRACKING
 WITH (TRACK_COLUMNS_UPDATED = OFF);
 ```
 
+Enabling snapshot isolation is recommended: ingestr then reads each change window inside one SNAPSHOT transaction, which is how SQL Server guarantees a consistent change set while retention cleanup runs. Without it, the initial snapshot is taken under a `HOLDLOCK` table lock that blocks writers to the table until the snapshot finishes, and incremental reads run under READ COMMITTED with the cursor re-validated after the read; if cleanup (or a `TRUNCATE TABLE`, which resets a table's tracking) invalidated the cursor mid-read, the run fails and asks for `--full-refresh` instead of loading an incomplete change set.
+
 Change Tracking returns net row changes since the last loaded version. For inserts and updates, ingestr joins the changed primary keys back to the source table and loads the current row. For deletes, SQL Server only returns the primary key, so ingestr marks the destination row as deleted with `_cdc_deleted = true` while preserving existing destination values for other columns. If a row is updated and then deleted between two ingestr runs, Change Tracking cannot reconstruct the intermediate updated values.
+
+Pass `--stream` to keep polling instead of exiting once caught up:
+
+```sh
+ingestr ingest \
+    --source-uri "mssql+ct://user:password@host:1433/dbname?encrypt=disable&poll_interval=2s" \
+    --source-table "dbo.users" \
+    --dest-uri "duckdb:///warehouse.duckdb" \
+    --dest-table "dbo.users" \
+    --stream
+```
+
+A shorter poll interval narrows the window in which several updates to the same row collapse into one, so streaming Change Tracking loses less intermediate detail than a scheduled run — but it still reports the row's current state rather than every individual change. Use [Change Data Capture](#change-data-capture) when you need the full history.
+
+Change Tracking URI parameters:
+
+- `poll_interval`: how long to wait between polls in streaming mode. Any Go duration (`500ms`, `2s`, `1m`); defaults to `1s`. Ignored outside `--stream`.
+
+While a stream sits idle, ingestr periodically restamps the resume cursor so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. The interval is derived from that retention setting — a quarter of it, capped at 5 minutes and floored at 5 seconds — so a database that expires versions in minutes is restamped more often than one retaining them for days. Streaming is single-table: name one table with `--source-table`.
 
 ## Change Data Capture
 

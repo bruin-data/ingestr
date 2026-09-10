@@ -127,14 +127,20 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td colspan="4" style='text-align:center;'><strong>Databases</strong></td>
     </tr>
     <tr>
-        <td>AWS Athena</td>
-        <td>✅</td>
+        <td>Apache Iceberg</td>
+        <td>-</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
-        <td>Apache Iceberg</td>
+        <td>Apache Pulsar</td>
+        <td>✅</td>
         <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>AWS Athena</td>
+        <td>✅</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -142,6 +148,18 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>AWS Redshift</td>
         <td>✅</td>
         <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Amazon SQS</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Azure Event Hubs</td>
+        <td>✅</td>
+        <td>-</td>
         <td>-</td>
     </tr>
     <tr>
@@ -193,13 +211,25 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>GCP Spanner</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Google BigQuery</td>
         <td>✅</td>
         <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
-        <td>GCP Spanner</td>
+        <td>Google Cloud Pub/Sub</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>HTTP</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -223,7 +253,31 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Local Avro file</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Local CSV file</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Local JSON file</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Local JSONL file</td>
+        <td>✅</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Local Parquet file</td>
         <td>✅</td>
         <td>✅</td>
         <td>-</td>
@@ -265,15 +319,27 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>MQTT</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>MySQL</td>
         <td>✅</td>
         <td>✅</td>
         <td>✅</td>
     </tr>
     <tr>
-        <td>Oracle</td>
+        <td>NATS</td>
         <td>✅</td>
         <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Oracle</td>
+        <td>✅</td>
+        <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
@@ -290,6 +356,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>RabbitMQ</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Redis</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -338,7 +410,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Vertica</td>
-        <td>-</td>
+        <td>✅</td>
         <td>✅</td>
         <td>-</td>
     </tr>
@@ -350,6 +422,18 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td colspan="4" style='text-align:center;'><strong>Platforms</strong></td>
+    </tr>
+    <tr>
+        <td>2Checkout</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>ABRA Flexi</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
     </tr>
     <tr>
         <td>Adjust</td>
@@ -377,6 +461,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Amazon Kinesis</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Amplitude</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -448,6 +538,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>BambooHR</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Braze</td>
         <td>✅</td>
         <td>-</td>
@@ -460,9 +556,21 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Chargebee</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Chess.com</td>
         <td>✅</td>
         <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>CleverTap</td>
+        <td>✅</td>
+        <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
@@ -472,7 +580,25 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Cloudflare Radar</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Cursor</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Customer.io</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Deel</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -490,7 +616,19 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>ESPN</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Facebook Ads</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>FastSpring</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -568,9 +706,15 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>Google Sheets</td>
+        <td>Google Search Console</td>
         <td>✅</td>
         <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Google Sheets</td>
+        <td>✅</td>
+        <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
@@ -628,6 +772,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Kalshi</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Klaviyo</td>
         <td>✅</td>
         <td>-</td>
@@ -646,7 +796,19 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Lumify</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Mailchimp</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Manifold</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -670,7 +832,25 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Okta</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>OpenAI</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Paddle</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Payrails</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -706,6 +886,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Polymarket</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>PostHog</td>
         <td>✅</td>
         <td>-</td>
@@ -724,6 +910,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Recurly</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Reddit Ads</td>
         <td>✅</td>
         <td>-</td>
@@ -731,6 +923,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>RevenueCat</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>RIPEstat</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -748,7 +946,7 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
-        <td>SFTP</td>
+        <td>SatisMeter</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -760,7 +958,25 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>SFTP</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>SharePoint</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Shopify</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Sklik</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
@@ -832,13 +1048,31 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>Twenty</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Twilio</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>
     </tr>
     <tr>
+        <td>Typeform</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Wise</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Wistia</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>

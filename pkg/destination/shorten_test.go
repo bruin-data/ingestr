@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,13 @@ import (
 type fixedMultiTableNamer string
 
 func (n fixedMultiTableNamer) DestTableName(string, string) string { return string(n) }
+
+type recordingMultiTableNamer struct{ seen *string }
+
+func (n recordingMultiTableNamer) DestTableName(destSchema, sourceTable string) string {
+	*n.seen = sourceTable
+	return destSchema + "." + sourceTable
+}
 
 func TestShortenIdentifier(t *testing.T) {
 	t.Run("under limit unchanged", func(t *testing.T) {
@@ -124,8 +132,8 @@ func TestShortenIdentifier(t *testing.T) {
 func TestResolveMultiTableName(t *testing.T) {
 	t.Run("shortens flattened final component deterministically", func(t *testing.T) {
 		source := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
-		first := ResolveMultiTableName("postgres", nil, "landing", source)
-		second := ResolveMultiTableName("postgres", nil, "landing", source)
+		first := ResolveMultiTableName("postgres", nil, "landing", source, config.TableNamingSchemaTable)
+		second := ResolveMultiTableName("postgres", nil, "landing", source, config.TableNamingSchemaTable)
 		require.Equal(t, first, second)
 		parts := strings.Split(first, ".")
 		require.Equal(t, []string{"landing", parts[1]}, parts)
@@ -135,17 +143,46 @@ func TestResolveMultiTableName(t *testing.T) {
 
 	t.Run("full path differentiates same-prefix candidates", func(t *testing.T) {
 		prefix := strings.Repeat("same_prefix_", 8)
-		first := ResolveMultiTableName("postgres", nil, "landing", "source."+prefix+"one")
-		second := ResolveMultiTableName("postgres", nil, "landing", "source."+prefix+"two")
+		first := ResolveMultiTableName("postgres", nil, "landing", "source."+prefix+"one", config.TableNamingSchemaTable)
+		second := ResolveMultiTableName("postgres", nil, "landing", "source."+prefix+"two", config.TableNamingSchemaTable)
 		require.NotEqual(t, first, second)
 		require.LessOrEqual(t, len(strings.TrimPrefix(first, "landing.")), MaxIdentifierLength("postgres"))
 		require.LessOrEqual(t, len(strings.TrimPrefix(second, "landing.")), MaxIdentifierLength("postgres"))
 	})
 
+	t.Run("table naming drops the source qualifier", func(t *testing.T) {
+		require.Equal(t, "foo_cdc.A", ResolveMultiTableName("postgres", nil, "foo_cdc", "foo.A", config.TableNamingTable))
+		require.Equal(t, "foo_cdc.A", ResolveMultiTableName("postgres", nil, "foo_cdc", "A", config.TableNamingTable))
+		require.Equal(t, "A", ResolveMultiTableName("postgres", nil, "", "foo.A", config.TableNamingTable))
+	})
+
+	t.Run("table naming keeps a quoted table component whole", func(t *testing.T) {
+		got := ResolveMultiTableName("postgres", nil, "foo_cdc", `"sales"."Order.Items"`, config.TableNamingTable)
+		require.Equal(t, `foo_cdc."Order.Items"`, got)
+	})
+
+	t.Run("table naming reaches custom namers", func(t *testing.T) {
+		var seen string
+		namer := recordingMultiTableNamer{seen: &seen}
+		ResolveMultiTableName("bigquery", namer, "foo_cdc", "foo.A", config.TableNamingTable)
+		require.Equal(t, "A", seen)
+	})
+
+	t.Run("table naming still shortens the final component", func(t *testing.T) {
+		source := "foo." + strings.Repeat("t", 80)
+		first := ResolveMultiTableName("postgres", nil, "landing", source, config.TableNamingTable)
+		second := ResolveMultiTableName("postgres", nil, "landing", source, config.TableNamingTable)
+		require.Equal(t, first, second)
+		parts := strings.Split(first, ".")
+		require.Len(t, parts, 2)
+		require.Equal(t, "landing", parts[0])
+		require.LessOrEqual(t, len(parts[1]), MaxIdentifierLength("postgres"))
+	})
+
 	t.Run("preserves raw qualified identifier delimiters", func(t *testing.T) {
 		longTable := strings.Repeat("Table]Name", 20)
 		raw := "[Catalog].[Landing].[" + strings.ReplaceAll(longTable, "]", "]]") + "]"
-		got := ResolveMultiTableName("mssql", fixedMultiTableNamer(raw), "", "ignored")
+		got := ResolveMultiTableName("mssql", fixedMultiTableNamer(raw), "", "ignored", config.TableNamingSchemaTable)
 		require.True(t, strings.HasPrefix(got, "[Catalog].[Landing].["))
 		require.True(t, strings.HasSuffix(got, "]"))
 		parts := tablename.Split(got)

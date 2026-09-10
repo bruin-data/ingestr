@@ -47,7 +47,7 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	}
 
 	// Fetch schema from database
-	tableSchema, err := getTableSchema(ctx, src.queryPool, req.Name)
+	tableSchema, err := src.getTableSchema(ctx, req.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schema: %w", err)
 	}
@@ -59,6 +59,8 @@ func NewCDCTable(src *PostgresCDCSource, req source.TableRequest) (*CDCTable, er
 	pks := req.PrimaryKeys
 	if len(pks) == 0 {
 		pks = tableSchema.PrimaryKeys
+	} else if err := validateConfiguredKeys(ctx, src.queryPool, req.Name, tableSchema, pks); err != nil {
+		return nil, err
 	}
 	// Reconcile the effective merge keys into the schema so the decoder,
 	// compaction, and unchanged-TOAST fill all key off the same keys the
@@ -270,14 +272,14 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 		return nil, fmt.Errorf("error iterating primary key rows: %w", err)
 	}
 
-	// A table without a primary key can still declare row identity via
-	// REPLICA IDENTITY USING INDEX. Those columns are what pgoutput keys old
-	// tuples by, so they serve as merge keys exactly like a primary key would.
-	if len(primaryKeys) == 0 {
-		primaryKeys, err = replicaIdentityIndexColumns(ctx, pool, schemaName, tableName)
-		if err != nil {
-			return nil, err
-		}
+	// An explicitly selected replica identity overrides the primary key:
+	// only its key columns are guaranteed in old tuples from pgoutput.
+	identityKeys, err := replicaIdentityIndexColumns(ctx, pool, schemaName, tableName)
+	if err != nil {
+		return nil, err
+	}
+	if len(identityKeys) > 0 {
+		primaryKeys = identityKeys
 	}
 
 	for i := range columns {
@@ -309,7 +311,8 @@ func replicaIdentityIndexColumns(ctx context.Context, pool *pgxpool.Pool, schema
 		JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
 		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
 		WHERE n.nspname = $1 AND c.relname = $2
-		  AND i.indisreplident AND i.indisvalid
+		  AND c.relreplident = 'i' AND i.indisreplident AND i.indisvalid
+ AND k.ord <= COALESCE((to_jsonb(i)->>'indnkeyatts')::int, i.indnatts)
 		ORDER BY k.ord
 	`
 	rows, err := pool.Query(ctx, q, schemaName, tableName)
@@ -392,3 +395,49 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 }
 
 var _ source.SourceTable = (*CDCTable)(nil)
+
+func sameKeyColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	keys := make(map[string]bool, len(a))
+	for _, key := range a {
+		keys[key] = true
+	}
+	for _, key := range b {
+		if !keys[key] {
+			return false
+		}
+		delete(keys, key)
+	}
+	return len(keys) == 0
+}
+
+func validateConfiguredKeys(ctx context.Context, pool *pgxpool.Pool, table string, tableSchema *schema.TableSchema, keys []string) error {
+	if sameKeyColumns(keys, tableSchema.PrimaryKeys) {
+		return nil
+	}
+	schemaName, tableName := parseTableName(table)
+	var identity string
+	if err := pool.QueryRow(ctx, `SELECT c.relreplident::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2`, schemaName, tableName).Scan(&identity); err != nil {
+		return fmt.Errorf("failed to validate replica identity for %s: %w", table, err)
+	}
+	if identity != "f" {
+		return fmt.Errorf("merge keys %v for %s do not match its replica identity keys %v; use the replica identity keys or set REPLICA IDENTITY FULL and restart with --full-refresh", keys, table, tableSchema.PrimaryKeys)
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		found := false
+		for _, col := range tableSchema.Columns[:sourceColumnCount(tableSchema)] {
+			if col.Name == key {
+				found = true
+				break
+			}
+		}
+		if !found || seen[key] {
+			return fmt.Errorf("invalid merge key %q for %s: keys must be distinct source columns", key, table)
+		}
+		seen[key] = true
+	}
+	return nil
+}

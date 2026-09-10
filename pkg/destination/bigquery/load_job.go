@@ -1547,6 +1547,8 @@ func extractJSONLValue(arr arrow.Array, idx int) any {
 		return t.Format(time.RFC3339Nano)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.Decimal256:
+		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
 	case *array.List:
 		start, end := a.ValueOffsets(idx)
 		return extractJSONLListValue(a.ListValues(), start, end)

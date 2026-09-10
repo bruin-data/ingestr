@@ -266,7 +266,7 @@ A few important notes about the `delete+insert` strategy:
 - atomicity is destination-specific. Many SQL destinations wrap the delete and insert in a transaction or atomic script; ClickHouse uses an `ALTER TABLE ... DELETE` mutation followed by an insert.
 
 > [!WARNING]
-> **Breaking change:** `delete+insert` is no longer supported for **CrateDB** and **Trino** destinations. ingestr previously ran them as two non-atomic statements that could leave the table in a partially-updated state on failure or under concurrent runs. ingestr now fails this strategy up front for these destinations instead of loading data unsafely. Use `merge` or `replace` instead. See the [CrateDB](/supported-sources/cratedb) and [Trino](/supported-sources/trino) destination notes for details.
+> **Breaking change:** `delete+insert` is no longer supported for **CrateDB**. ingestr previously ran the delete and insert as two non-atomic statements that could leave the table partially updated on failure or under concurrent runs. See the [CrateDB](/supported-sources/cratedb) destination notes for details. Trino supports `delete+insert` through catalog transactions; see the [Trino](/supported-sources/trino) destination notes for connector and table restrictions.
 
 ### Example
 Let's assume you had the following source table slice:

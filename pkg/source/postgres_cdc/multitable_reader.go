@@ -195,8 +195,13 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			}
 			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, sqlBarrierLSN, slotName, results, opts)
 			if err != nil {
-				_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)})
-				return
+				var schemaErr *SchemaChangedError
+				if !opts.Streaming || !errors.As(err, &schemaErr) {
+					_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("streaming failed: %w", err)})
+					return
+				}
+				output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+				signal = &streamSignal{changedTables: []string{schemaErr.Table}, schemaErrors: []*SchemaChangedError{schemaErr}}
 			}
 			if signal == nil {
 				return
@@ -392,6 +397,11 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 	for _, t := range r.tables {
 		prevSchemas[t.Name] = t.Schema
 		prevIncarnations[t.Name] = t.Incarnation
+	}
+	for _, table := range tables {
+		if previous, ok := prevSchemas[table.Name]; ok && !sameKeyColumns(previous.PrimaryKeys, table.PrimaryKeys) {
+			return 0, fmt.Errorf("replica identity keys changed for %s; restart with --full-refresh to rebuild using keys %v", table.Name, table.PrimaryKeys)
+		}
 	}
 	var added []source.SourceTableInfo
 	for _, t := range tables {
@@ -821,6 +831,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		schemas[t.Name] = t.Schema
 	}
 	accum := newBatchAccumulator(batchSize, schemas)
+	defer func() { retErr = errors.Join(retErr, accum.toast.close()) }()
+	if opts.Streaming {
+		accum.durable = r.source.pos.Committed
+	}
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
 	// confirms the slot only after the data is durable. barrierNonce is empty in
@@ -829,6 +843,32 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	if opts.Streaming {
 		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
 	}
+	defer func() {
+		if !opts.Streaming {
+			return
+		}
+		var schemaErr *SchemaChangedError
+		if retErr != nil && !errors.As(retErr, &schemaErr) {
+			return
+		}
+		if retSignal == nil && schemaErr == nil {
+			return
+		}
+		schemaErrors, err := accum.flushForSchemaRebuild(ctx, results, token, schemaErr)
+		if err != nil {
+			retSignal, retErr = nil, err
+			return
+		}
+		if retSignal == nil {
+			retSignal = &streamSignal{}
+		}
+		for _, schemaErr := range schemaErrors {
+			output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
+			retSignal.changedTables = append(retSignal.changedTables, schemaErr.Table)
+			retSignal.schemaErrors = append(retSignal.schemaErrors, schemaErr)
+		}
+		retErr = nil
+	}()
 
 	// lastIdleToken is the highest LSN already handed to the pipeline via a bare
 	// idle commit token, so we only emit one when the caught-up position has
@@ -870,9 +910,6 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// transaction still inside the decoder is dropped with the
 				// replicator; the slot cannot have confirmed past it, so the
 				// rebuilt stream re-decodes it.
-				if err := accum.flushAllContext(ctx, results, token); err != nil {
-					return nil, err
-				}
 				return &streamSignal{newTables: newNames, changedTables: changed, reincarnatedTables: reincarnated}, nil
 			}
 		}
@@ -893,16 +930,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				// rebuilt stream re-decodes it in full. Batch runs skip this and
 				// surface the error instead — a restart heals them the same way.
 				output.Statusf("Schema change detected on table %s (column %q %s); rebuilding stream around the new schema\n", schemaErr.Table, schemaErr.Column, schemaErr.Reason)
-				if err := accum.flushAllContext(ctx, results, token); err != nil {
-					return nil, err
-				}
 				return &streamSignal{changedTables: []string{schemaErr.Table}, schemaErrors: []*SchemaChangedError{schemaErr}}, nil
 			}
 			var reincarnationErr *TableReincarnatedError
 			if opts.Streaming && errors.As(err, &reincarnationErr) {
-				if err := accum.flushAllContext(ctx, results, token); err != nil {
-					return nil, err
-				}
 				relationID, parseErr := strconv.ParseUint(reincarnationErr.Current, 10, 32)
 				if parseErr != nil {
 					return nil, fmt.Errorf("invalid PostgreSQL relation incarnation %q: %w", reincarnationErr.Current, parseErr)
@@ -962,7 +993,10 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 			// carried no rows for us; otherwise an idle stream's lag grows forever.
 			if opts.Streaming {
 				lastHeartbeat = maybeEmitStreamHeartbeat(ctx, repl, lastHeartbeat)
-				lastIdleToken = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				lastIdleToken, err = emitIdleCommitToken(ctx, repl, accum, results, lastIdleToken)
+				if err != nil {
+					return nil, err
+				}
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
