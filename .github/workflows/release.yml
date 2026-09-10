@@ -226,8 +226,17 @@ jobs:
           )
           # gh uploads all files to an internal draft before publishing once.
           # GitHub automatically attests the release when immutability is enabled.
-          state="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --json isDraft --jq .isDraft 2>/dev/null || echo absent)"
+          lookup_error="$RUNNER_TEMP/release-lookup-error.txt"
+          if state="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq .draft 2>"$lookup_error")"; then
+            :
+          elif grep -q '(HTTP 404)' "$lookup_error"; then
+            state=absent
+          else
+            cat "$lookup_error" >&2
+            echo "Could not determine whether $GITHUB_REF_NAME is already released." >&2
+            exit 1
+          fi
           case "$state" in
             absent)
               gh release create "$GITHUB_REF_NAME" "${archives[@]}" \
