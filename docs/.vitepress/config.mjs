@@ -211,11 +211,12 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Deel", link: "/supported-sources/deel.md" },
               { text: "Docebo", link: "/supported-sources/docebo.md" },
               { text: "Dune", link: "/supported-sources/dune.md" },
-              { text: "Fakturoid", link: "/supported-sources/fakturoid.md" },
+              { text: "Exchangerates API", link: "/supported-sources/exchangeratesapi.md" },
               {
                 text: "Facebook Ads",
                 link: "/supported-sources/facebook-ads.md",
               },
+              { text: "Fakturoid", link: "/supported-sources/fakturoid.md" },
               { text: "FastSpring", link: "/supported-sources/fastspring.md" },
               { text: "Fireflies", link: "/supported-sources/fireflies.md" },
               { text: "Fluxx", link: "/supported-sources/fluxx.md" },
