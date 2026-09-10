@@ -71,6 +71,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 - [Airtable](/supported-sources/airtable.md)
 - [Asana](/supported-sources/asana.md)
+- [BambooHR](/supported-sources/bamboohr.md)
 - [ClickUp](/supported-sources/clickup.md)
 - [Deel](/supported-sources/deel.md)
 - [Docebo](/supported-sources/docebo.md)
