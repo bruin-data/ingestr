@@ -1,6 +1,8 @@
 package mssql
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"net/url"
@@ -19,8 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNormalizeChangeTrackingURI(t *testing.T) {
-	normalized, err := normalizeChangeTrackingURI("sqlserver+ct://sa:pass@example:1433/app?encrypt=disable")
+func TestParseChangeTrackingURINormalizesScheme(t *testing.T) {
+	_, normalized, err := parseChangeTrackingURI("sqlserver+ct://sa:pass@example:1433/app?encrypt=disable")
 	require.NoError(t, err)
 
 	u, err := url.Parse(normalized)
@@ -240,10 +242,72 @@ func TestChangeTrackingGetTableRejectsExplicitReplaceWithoutFullRefresh(t *testi
 	assert.Contains(t, err.Error(), `"replace"`)
 }
 
-func TestShouldEmitCTHeartbeatOnlyWhenNoChangeRows(t *testing.T) {
-	assert.True(t, shouldEmitCTHeartbeat(true, 0))
-	assert.False(t, shouldEmitCTHeartbeat(true, 1))
-	assert.False(t, shouldEmitCTHeartbeat(false, 0))
+func TestCTHeartbeatGateOnlyEmitsWhenNoChangeRows(t *testing.T) {
+	now := time.Now()
+	gate := newCTHeartbeatGate(0)
+	assert.True(t, gate.shouldEmit(0, now))
+	assert.False(t, gate.shouldEmit(1, now))
+
+	var absent *ctHeartbeatGate
+	assert.False(t, absent.shouldEmit(0, now))
+	absent.cursorAdvanced(now)
+}
+
+func TestCTHeartbeatGateThrottlesStreamingIdlePolls(t *testing.T) {
+	start := time.Now()
+	gate := newCTHeartbeatGate(maxCTHeartbeatInterval)
+
+	// The first idle poll of a stream restamps the cursor immediately.
+	assert.True(t, gate.shouldEmit(0, start))
+	gate.cursorAdvanced(start)
+
+	assert.False(t, gate.shouldEmit(0, start.Add(time.Second)))
+	assert.False(t, gate.shouldEmit(0, start.Add(maxCTHeartbeatInterval-time.Second)))
+	assert.True(t, gate.shouldEmit(0, start.Add(maxCTHeartbeatInterval)))
+
+	// Real change rows carry the version themselves and restart the interval.
+	gate.cursorAdvanced(start.Add(maxCTHeartbeatInterval))
+	assert.False(t, gate.shouldEmit(0, start.Add(maxCTHeartbeatInterval+time.Second)))
+}
+
+func TestCTHeartbeatIntervalTracksChangeRetention(t *testing.T) {
+	// A retention shorter than the default cap must pull the heartbeat in.
+	assert.Equal(t, 15*time.Second, ctHeartbeatInterval(true, time.Minute))
+	assert.Equal(t, minCTHeartbeatInterval, ctHeartbeatInterval(true, 2*time.Second))
+	assert.Equal(t, maxCTHeartbeatInterval, ctHeartbeatInterval(true, 48*time.Hour))
+
+	// Nothing to outrun without cleanup, or when the period is unreadable.
+	assert.Equal(t, maxCTHeartbeatInterval, ctHeartbeatInterval(false, time.Minute))
+	assert.Equal(t, maxCTHeartbeatInterval, ctHeartbeatInterval(true, 0))
+}
+
+func TestCTRetentionPeriodUnits(t *testing.T) {
+	valid := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+	units := func(v string) sql.NullString { return sql.NullString{String: v, Valid: true} }
+
+	assert.Equal(t, 30*time.Minute, ctRetentionPeriod(valid(30), units("MINUTES")))
+	assert.Equal(t, 6*time.Hour, ctRetentionPeriod(valid(6), units("HOURS")))
+	assert.Equal(t, 48*time.Hour, ctRetentionPeriod(valid(2), units("DAYS")))
+	assert.Zero(t, ctRetentionPeriod(valid(2), units("FORTNIGHTS")))
+	assert.Zero(t, ctRetentionPeriod(sql.NullInt64{}, units("DAYS")))
+}
+
+func TestParseChangeTrackingURIPollInterval(t *testing.T) {
+	cfg, normalized, err := parseChangeTrackingURI("mssql+ct://sa:pass@example:1433/app?encrypt=disable&poll_interval=5s")
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Second, cfg.PollInterval)
+	assert.NotContains(t, normalized, "poll_interval")
+	assert.Contains(t, normalized, "encrypt=disable")
+
+	cfg, _, err = parseChangeTrackingURI("mssql+ct://sa:pass@example:1433/app")
+	require.NoError(t, err)
+	assert.Equal(t, defaultCTPollInterval, cfg.PollInterval)
+
+	_, _, err = parseChangeTrackingURI("mssql+ct://sa:pass@example:1433/app?poll_interval=nope")
+	require.Error(t, err)
+
+	_, _, err = parseChangeTrackingURI("mssql+ct://sa:pass@example:1433/app?poll_interval=0s")
+	require.Error(t, err)
 }
 
 func TestSyntheticCTHeartbeatRecord(t *testing.T) {
@@ -373,7 +437,7 @@ func TestReadCTChangesUsesSnapshotIsolationWithoutPostReadRevalidation(t *testin
 	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
-	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, newCTHeartbeatGate(0))
 
 	require.NoError(t, err)
 	assert.EqualValues(t, 20, through)
@@ -397,7 +461,7 @@ func TestReadCTChangesRevalidatesCursorAfterReadWithoutSnapshot(t *testing.T) {
 	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
-	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, newCTHeartbeatGate(0))
 
 	var expired *ctVersionExpiredError
 	require.ErrorAs(t, err, &expired)
@@ -426,7 +490,7 @@ func TestReadCTChangesFallsBackToReadCommittedWhenSnapshotRejected(t *testing.T)
 	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
-	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+	through, err := src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, newCTHeartbeatGate(0))
 
 	require.NoError(t, err)
 	assert.EqualValues(t, 20, through)
@@ -447,7 +511,7 @@ func TestReadCTChangesDoesNotRetryOtherSnapshotErrors(t *testing.T) {
 	expectCTIsolationReset(mock)
 
 	results := make(chan source.RecordBatchResult, 4)
-	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, true)
+	_, err = src.readCTChanges(t.Context(), "dbo.items", newCTTestSchema(), []string{"id"}, 10, source.ReadOptions{PageSize: 100}, results, newCTHeartbeatGate(0))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SNAPSHOT isolation")
@@ -541,4 +605,173 @@ func TestRowsToArrowRecordBatchSurfacesErrorOnEmptyResult(t *testing.T) {
 	assert.Contains(t, err.Error(), "late failure")
 	assert.Nil(t, record)
 	assert.EqualValues(t, 0, count)
+}
+
+func ctEmptyChangeRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id",
+		destination.CDCLSNColumn,
+		destination.CDCDeletedColumn,
+		destination.CDCSyncedAtColumn,
+	})
+}
+
+func newCTStreamTestTable(src *MSSQLChangeTrackingSource) *changeTrackingTable {
+	return &changeTrackingTable{
+		source:      src,
+		tableName:   "dbo.items",
+		tableSchema: newCTTestSchema(),
+		primaryKeys: []string{"id"},
+		strategy:    config.StrategyMerge,
+	}
+}
+
+func TestChangeTrackingReadStopsAfterOnePassWithoutStreaming(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(0))
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(5))
+	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
+
+	results, err := newCTStreamTestTable(src).Read(t.Context(), source.ReadOptions{
+		CDCResumeLSN: formatCTVersion(5),
+		PageSize:     100,
+	})
+	require.NoError(t, err)
+
+	for res := range results {
+		require.NoError(t, res.Err)
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChangeTrackingStreamingReadPollsAgainAfterCatchingUp(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{
+		MSSQLSource: MSSQLSource{db: db},
+		ctConfig:    ctConfig{PollInterval: time.Millisecond},
+	}
+
+	// A version bump with no rows for this table is what the heartbeat exists
+	// for: the cursor has to move or it ages out of CHANGE_RETENTION.
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(0))
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(9))
+	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(5), int64(9)).WillReturnRows(ctEmptyChangeRows())
+	mock.ExpectQuery("TOP 1").WillReturnRows(ctChangeRows(1, 9))
+	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
+
+	// A one-shot read would have returned by now; the stream polls again.
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnError(errors.New("connection reset"))
+
+	results, err := newCTStreamTestTable(src).Read(t.Context(), source.ReadOptions{
+		CDCResumeLSN: formatCTVersion(5),
+		PageSize:     100,
+		Streaming:    true,
+	})
+	require.NoError(t, err)
+
+	var heartbeats, failures int
+	var committed []int64
+	for res := range results {
+		if res.Err != nil {
+			failures++
+			assert.Contains(t, res.Err.Error(), "connection reset")
+			continue
+		}
+		if token, ok := res.CommitToken.(ctCommitToken); ok {
+			committed = append(committed, token.version)
+		}
+		if res.Batch != nil {
+			heartbeats += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
+	}
+
+	assert.Equal(t, 1, heartbeats, "the idle poll should restamp the cursor")
+	assert.Equal(t, 1, failures)
+	assert.Equal(t, []int64{9}, committed, "the read window should offer its version for commit")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChangeTrackingStreamingReadStopsOnContextCancel(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{
+		MSSQLSource: MSSQLSource{db: db},
+		ctConfig:    ctConfig{PollInterval: time.Hour},
+	}
+
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(0))
+	mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(9))
+	mock.ExpectQuery("CHANGETABLE").WithArgs(int64(5), int64(9)).WillReturnRows(ctChangeRows(1, 9))
+	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	results, err := newCTStreamTestTable(src).Read(ctx, source.ReadOptions{
+		CDCResumeLSN: formatCTVersion(5),
+		PageSize:     100,
+		Streaming:    true,
+	})
+	require.NoError(t, err)
+
+	res, ok := <-results
+	require.True(t, ok)
+	require.NoError(t, res.Err)
+	require.NotNil(t, res.Batch)
+	res.Batch.Release()
+
+	// The loop is waiting out the poll interval rather than exiting.
+	cancel()
+	for res := range results {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+}
+
+func TestChangeTrackingReplicationLagTracksDurablePosition(t *testing.T) {
+	src := NewMSSQLChangeTrackingSource()
+
+	_, ok := src.ReplicationLag()
+	assert.False(t, ok, "lag is meaningless outside a stream")
+
+	src.lag.streaming.Store(true)
+	_, ok = src.ReplicationLag()
+	assert.False(t, ok, "lag is meaningless before a version is observed")
+
+	src.noteCTDurableVersion(5)
+	src.noteCTServerVersion(9)
+	lag, ok := src.ReplicationLag()
+	require.True(t, ok)
+	assert.Equal(t, "mssql_ct", lag.Source)
+	assert.Equal(t, formatCTVersion(9), lag.ServerPosition)
+	assert.Equal(t, formatCTVersion(5), lag.DurablePosition)
+	assert.False(t, lag.CaughtUp, "reading version 9 is not the same as writing it")
+
+	// Only the destination flush closes the gap.
+	require.NoError(t, src.CommitStream(t.Context(), ctCommitToken{version: 9}))
+	lag, ok = src.ReplicationLag()
+	require.True(t, ok)
+	assert.Equal(t, formatCTVersion(9), lag.DurablePosition)
+	assert.True(t, lag.CaughtUp)
+
+	require.Error(t, src.CommitStream(t.Context(), "not-a-ct-token"))
 }
