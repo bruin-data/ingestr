@@ -24,6 +24,8 @@ const (
 	rateLimitBurst  = 3
 	maxEventSpan    = 90 * 24 * time.Hour
 	defaultLookback = 7 * 24 * time.Hour
+	// The events endpoint expects calendar dates, not RFC3339 timestamps.
+	dateFormat = "2006-01-02"
 )
 
 type tableKind string
@@ -220,10 +222,10 @@ func (s *LumifySource) streamWindow(
 			req.SetQueryParam("league", s.league)
 		}
 		if from != nil {
-			req.SetQueryParam("from", from.UTC().Format(time.RFC3339))
+			req.SetQueryParam("from", from.UTC().Format(dateFormat))
 		}
 		if to != nil {
-			req.SetQueryParam("to", to.UTC().Format(time.RFC3339))
+			req.SetQueryParam("to", to.UTC().Format(dateFormat))
 		}
 		if cfg.kind == kindEvents {
 			req.SetQueryParam("include_scores", "true")

@@ -133,8 +133,8 @@ func TestLumifyReadEventsUsesDateWindowAndIncludeScores(t *testing.T) {
 	require.NoError(t, result.Err)
 	defer result.Batch.Release()
 
-	require.Equal(t, "2026-07-20T00:00:00Z", gotFrom)
-	require.Equal(t, "2026-07-21T00:00:00Z", gotTo)
+	require.Equal(t, "2026-07-20", gotFrom)
+	require.Equal(t, "2026-07-21", gotTo)
 	require.Equal(t, "true", includeScores)
 	require.EqualValues(t, 1, result.Batch.NumRows())
 	require.Equal(t, "99", fmt.Sprint(decodeUnknown(t, result.Batch, "id", 0)))
