@@ -86,7 +86,8 @@ jobs:
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=darwin -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: archives-darwin-${{ github.run_attempt }}
+          name: archives-darwin
+          overwrite: true
           path: dist/darwin/*.tar.gz
           if-no-files-found: error
 
@@ -107,7 +108,8 @@ jobs:
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=linux -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: archives-linux-${{ github.run_attempt }}
+          name: archives-linux
+          overwrite: true
           path: dist/linux/*.tar.gz
           if-no-files-found: error
 
@@ -160,7 +162,8 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: archives-windows-${{ github.run_attempt }}
+          name: archives-windows
+          overwrite: true
           path: dist/windows/*.zip
           if-no-files-found: error
 
@@ -179,7 +182,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: archives-${{ matrix.goos }}-${{ github.run_attempt }}
+          name: archives-${{ matrix.goos }}
           path: release-assets
       - name: Check packaged executable version on its native platform
         shell: bash
@@ -205,7 +208,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: archives-*-${{ github.run_attempt }}
+          pattern: archives-*
           merge-multiple: true
           path: release-assets
       - name: Publish complete immutable release
@@ -223,10 +226,44 @@ jobs:
           )
           # gh uploads all files to an internal draft before publishing once.
           # GitHub automatically attests the release when immutability is enabled.
-          gh release create "$GITHUB_REF_NAME" "${archives[@]}" \
-            --verify-tag --latest --title "$GITHUB_REF_NAME" --generate-notes
+          lookup_error="$RUNNER_TEMP/release-lookup-error.txt"
+          if state="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq .draft 2>"$lookup_error")"; then
+            :
+          elif grep -q '(HTTP 404)' "$lookup_error"; then
+            state=absent
+          else
+            cat "$lookup_error" >&2
+            echo "Could not determine whether $GITHUB_REF_NAME is already released." >&2
+            exit 1
+          fi
+          case "$state" in
+            absent)
+              gh release create "$GITHUB_REF_NAME" "${archives[@]}" \
+                --verify-tag --latest --title "$GITHUB_REF_NAME" --generate-notes
+              ;;
+            false)
+              echo "Release already published by an earlier attempt; verifying it."
+              ;;
+            *)
+              echo "Release exists as an unpublished draft; recover or delete it manually." >&2
+              exit 1
+              ;;
+          esac
+
+          # Attestations are generated asynchronously, so a verify right after
+          # publishing can race ahead of them.
+          for attempt in $(seq 1 12); do
+            if gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"; then
+              verified=yes
+              break
+            fi
+            echo "Attestation not available yet (attempt $attempt/12); retrying in 15s." >&2
+            sleep 15
+          done
+          test "${verified:-no}" = yes
+
           # Verification failures stop downstream jobs, but cannot undo publication.
-          gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
           for asset in "${archives[@]}"; do
             gh release verify-asset "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"
           done
