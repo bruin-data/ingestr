@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -451,5 +452,55 @@ func TestAppLovinMaxByteCap(t *testing.T) {
 	}
 	if offR != onR || offR != 50 {
 		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
+	}
+}
+
+// blockingReader blocks on Read until release is closed, then returns io.EOF.
+type blockingReader struct{ release chan struct{} }
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	<-b.release
+	return 0, io.EOF
+}
+
+func TestIdleTimeoutReader_StalledReadFires(t *testing.T) {
+	var fired atomic.Bool
+	br := &blockingReader{release: make(chan struct{})}
+	onIdle := func() {
+		fired.Store(true)
+		close(br.release)
+	}
+
+	r := newIdleTimeoutReader(br, 50*time.Millisecond, onIdle)
+	defer r.stop()
+
+	_, _ = r.Read(make([]byte, 8))
+	if !fired.Load() {
+		t.Fatal("expected onIdle to fire when a read stalls past the idle timeout")
+	}
+}
+
+func TestIdleTimeoutReader_BackpressureGapDoesNotFire(t *testing.T) {
+	var fired atomic.Bool
+	src := strings.NewReader("hello world")
+	r := newIdleTimeoutReader(src, 50*time.Millisecond, func() { fired.Store(true) })
+	defer r.stop()
+
+	if _, err := r.Read(make([]byte, 5)); err != nil {
+		t.Fatalf("first read failed: %v", err)
+	}
+
+	// Simulate a flush blocked on downstream backpressure for longer than the
+	// idle timeout; no Read happens during this gap and the timer must stay off.
+	time.Sleep(200 * time.Millisecond)
+	if fired.Load() {
+		t.Fatal("onIdle fired during a between-reads gap; backpressure was treated as a stall")
+	}
+
+	if _, err := r.Read(make([]byte, 32)); err != nil && err != io.EOF {
+		t.Fatalf("read after gap failed: %v", err)
+	}
+	if fired.Load() {
+		t.Fatal("onIdle fired despite a healthy read after the gap")
 	}
 }
