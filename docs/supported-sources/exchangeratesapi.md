@@ -15,9 +15,7 @@ historical foreign exchange rates.
 > [!CAUTION]
 > **Historical rates are not reproducible, so do not use this source to rebuild history.** The
 > API answers with what it believes today; asking again later returns a different answer for the
-> same past date. Measured on 16 years of stored rates from one production pipeline, two
-> collectors overlapping on 32,089 `(date, currency)` pairs disagreed on 31,878 of them (99.3%),
-> by up to 10.1%. Stored rates are a record of what was quoted at the time — preserve them, and
+> same past date. Stored rates are a record of what was quoted at the time — preserve them, and
 > use this source to move forward.
 
 ## URI format
@@ -29,8 +27,8 @@ exchangeratesapi://?access_key=<your-access-key>&base=<currency-code>
 URI parameters:
 - `access_key` (**required**): your exchangeratesapi.io API access key.
 - `base` (optional, defaults to `EUR`): the base currency for the returned rates. Changing the
-  base requires a paid plan. It deliberately does **not** default to anything else — a silent
-  base change produces plausible, wrong money.
+  base requires a paid plan. It defaults to the API's own default (`EUR`) rather than guessing,
+  since a silent base change produces plausible but wrong conversions.
 
 ## Tables
 

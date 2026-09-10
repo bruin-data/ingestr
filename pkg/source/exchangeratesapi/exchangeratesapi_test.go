@@ -54,9 +54,9 @@ func TestParseURI(t *testing.T) {
 	}
 }
 
-// The base currency defaulting to EUR rather than CZK is deliberate — a silent base change
-// produces plausible, wrong money. Pinned so nobody "helpfully" defaults it to the brand.
-func TestParseURI_BaseIsNotDefaultedToBrandCurrency(t *testing.T) {
+// The base defaults to the API's own default (EUR) when unset; a silent base change would
+// produce plausible but wrong conversions.
+func TestParseURI_BaseDefaultsToEUR(t *testing.T) {
 	_, base, err := parseURI("exchangeratesapi://?access_key=k")
 	if err != nil {
 		t.Fatal(err)
@@ -96,9 +96,8 @@ func TestFlattenRates(t *testing.T) {
 	}
 }
 
-// ⚠️ REGRESSION GUARD. The API includes the base in its own rates map on some plans; emitting
-// it twice would produce two rows for (date, base, base) — one 1.0 and one not — which under
-// a ReplacingMergeTree resolves arbitrarily.
+// The API includes the base in its own rates map on some plans; emitting it twice would
+// produce two conflicting rows for (date, base, base) that dedup arbitrarily on merge.
 func TestFlattenRates_BaseNeverDuplicated(t *testing.T) {
 	items := flattenRates("2026-08-13", "CZK", map[string]float64{
 		"CZK": 1.0,
@@ -128,8 +127,8 @@ func TestFlattenRates_UppercasesCurrency(t *testing.T) {
 	}
 }
 
-// ⚠️ THE ERROR ENVELOPE HAS NO `success` FIELD — absence of data is the signal, not
-// success:false. Verified live: HTTP 403 for an out-of-plan endpoint, 401 for a bad key.
+// The error envelope has no `success` field — absence of data is the signal, not success:false.
+// HTTP 403 is returned for an out-of-plan endpoint, 401 for a bad key.
 func TestCheckResponse(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -190,8 +189,8 @@ func TestCheckResponse(t *testing.T) {
 	}
 }
 
-// ⚠️ THE ACCESS KEY MUST NEVER APPEAR IN AN ERROR STRING. Error bodies from APILayer can echo
-// the request, and the request carries the key as a query parameter.
+// The access key must never appear in an error string: error bodies can echo the request,
+// which carries the key as a query parameter.
 func TestCheckResponse_NeverEchoesTheRequestBody(t *testing.T) {
 	body := `{"error":{"code":"weird","message":"failed for https://api.exchangeratesapi.io/v1/latest?access_key=SUPERSECRETKEY"}}`
 	err := checkResponse(400, []byte(body))
@@ -217,7 +216,7 @@ func TestGetSchema(t *testing.T) {
 		}
 		for i, k := range want {
 			if pks[i] != k {
-				t.Errorf("%s: primary key[%d] = %q, want %q (must match the destination sorting key)", table, i, pks[i], k)
+				t.Errorf("%s: primary key[%d] = %q, want %q", table, i, pks[i], k)
 			}
 		}
 	}

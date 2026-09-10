@@ -1,31 +1,13 @@
-// Package exchangeratesapi is a source for api.exchangeratesapi.io (an APILayer product).
+// Package exchangeratesapi is a source for api.exchangeratesapi.io (an APILayer product),
+// serving current and historical foreign exchange rates.
 //
-// ══ WHY THIS EXISTS WHEN `frankfurter` ALREADY SERVES EXCHANGE RATES ════════════════════
-// frankfurter serves the ECB reference rates: free, keyless, ~30 currencies, and NO WEEKEND
-// ROWS, because the ECB does not publish on weekends. That is the right default and remains
-// the fleet's source of record.
+// On the free tier it returns the ECB reference rates with base EUR only, identical to the
+// keyless frankfurter source; it is only worth its key on a paid plan (weekend rows, ~172
+// currencies, switchable base).
 //
-// This source exists for the PAID exchangeratesapi.io plan, which does publish weekends and
-// ~172 currencies with a switchable base. Measured against a live paid account:
-//
-//	                    frankfurter (ECB)   exchangeratesapi (paid)
-//	currencies                    ~30                        172
-//	weekend rows                    0                        yes
-//	base                          EUR                switchable (CZK verified)
-//
-// The weekend rows are the point. A pipeline that joins FX on an EXACT DATE rather than
-// ASOF turns a missing Saturday into a zero rather than a carried-forward rate.
-//
-// ⚠️ ON THE FREE TIER THIS SOURCE IS POINTLESS. exchangeratesapi.io's free tier IS ECB data,
-// base EUR only — identical numbers to `frankfurter`, but with a key to rotate and leak.
-// Use frankfurter unless you specifically need the paid feed.
-//
-// ⚠️ HISTORICAL RATES ARE NOT REPRODUCIBLE, so do not use this to "rebuild" history.
-// The API answers with what it believes today; asking again later gives a different answer
-// for the same past date. Measured across 16 years of stored rates, two collectors
-// overlapping on 32,089 (date, currency) pairs DISAGREED on 31,878 of them (99.3%), by up to
-// 10.1%. Stored rates are a record of what was quoted at the time and can only be preserved,
-// never regenerated.
+// Historical rates are not reproducible: the API answers with what it believes today, so the
+// same past date can return a different rate later. Preserve stored rates rather than
+// regenerating them.
 package exchangeratesapi
 
 import (
@@ -46,16 +28,14 @@ import (
 
 const (
 	baseURL = "https://api.exchangeratesapi.io/v1/"
-	// The paid plan we run is not rate-limit documented per-second; these mirror the
-	// frankfurter source's politeness rather than a published ceiling.
+	// exchangeratesapi.io does not document a per-second ceiling; these mirror the
+	// frankfurter source's politeness rather than a published limit.
 	rateLimit      = 10
 	rateLimitBurst = 5
 
-	// maxBackfillDays caps a single run. ⚠️ THIS SOURCE COSTS ONE HTTP REQUEST PER DAY —
-	// see readExchangeRates for why there is no bulk endpoint available to us. A nightly asks for
-	// 1-2 days; a week's catch-up is 7 requests. An accidental --interval-start of 2010
-	// would otherwise fire 6,000+ requests and burn the monthly quota in one run, so it is
-	// refused loudly instead. Backfill history from the frozen table, not from here.
+	// maxBackfillDays caps a single run. This source costs one HTTP request per day (there is
+	// no bulk endpoint available on the plans it targets), so an accidental multi-year interval
+	// would fire thousands of requests; it is refused instead.
 	maxBackfillDays = 400
 )
 
@@ -65,15 +45,11 @@ var supportedTables = []string{
 	"symbols",
 }
 
-// rateFields are the emitted column names. Renaming them (for example to frankfurter's
-// currency_code/base_currency/rate) is a breaking change for any existing destination table:
-// future rows land in a different column set and silently stop deduplicating against
-// against history.
 var rateFields = []schema.Column{
 	{Name: "date", DataType: schema.TypeDate, Nullable: false},
 	{Name: "base", DataType: schema.TypeString, Nullable: false},
 	{Name: "currency", DataType: schema.TypeString, Nullable: false},
-	{Name: "exchange_rate", DataType: schema.TypeFloat64, Nullable: true},
+	{Name: "exchange_rate", DataType: schema.TypeFloat64, Nullable: false},
 }
 
 var symbolFields = []schema.Column{
@@ -95,9 +71,8 @@ func (s *Source) Schemes() []string { return []string{"exchangeratesapi"} }
 
 // parseURI extracts the access key and base currency.
 //
-// ⚠️ THE ACCESS KEY IS A SECRET AND MUST NEVER REACH A LOG. It is a query parameter on every
-// request, so anything that logs a URL leaks it — which is why no Debug call in this file
-// prints an endpoint, unlike the frankfurter source it was modelled on. Log dates, not URLs.
+// The access key is a query parameter on every request, so no Debug call in this file prints
+// an endpoint — logging a URL would leak the key.
 func parseURI(uri string) (accessKey, base string, err error) {
 	if !strings.HasPrefix(uri, "exchangeratesapi://") {
 		return "", "", fmt.Errorf("invalid exchangeratesapi URI: must start with exchangeratesapi://")
@@ -121,8 +96,8 @@ func parseURI(uri string) (accessKey, base string, err error) {
 
 	base = strings.ToUpper(values.Get("base"))
 	if base == "" {
-		// EUR is the API's own default. It is deliberately NOT defaulted to CZK: a silent
-		// base change is the kind of thing that produces plausible, wrong money.
+		// EUR is the API's own default; leaving it unset is safer than guessing a base,
+		// since a silent base change produces plausible but wrong conversions.
 		base = "EUR"
 	}
 
@@ -205,7 +180,6 @@ func getSchema(table string) (*schema.TableSchema, []string) {
 	switch table {
 	case "exchange_rates", "latest":
 		columns = rateFields
-		// Matches the destination's ReplicatedReplacingMergeTree sorting key.
 		primaryKeys = []string{"date", "base", "currency"}
 	case "symbols":
 		columns = symbolFields
@@ -250,11 +224,9 @@ func (s *Source) read(ctx context.Context, table, base string, opts source.ReadO
 	return results, nil
 }
 
-// apiError is the error envelope. ⚠️ NOTE THE SHAPE: a FAILED response carries no `success`
-// field at all — it is `{"error": {"code": ..., "message": ...}}` — while a successful one is
-// `{"success": true, ...}`. So "success is false" is the wrong test; absence is the signal.
-// Verified live 2026-08-13: a restricted endpoint returns HTTP 403 and a bad key HTTP 401,
-// both with this body, so the HTTP status is checked too rather than trusted alone.
+// apiError is the error envelope. A failed response carries no `success` field at all, only
+// `{"error": {"code", "message"}}`, so absence of data is the signal rather than success:false.
+// The HTTP status is checked too (403 for a restricted endpoint, 401 for a bad key).
 type apiError struct {
 	Error struct {
 		Code    string `json:"code"`
@@ -299,7 +271,7 @@ func (s *Source) get(ctx context.Context, path, query string) ([]byte, error) {
 	}
 	resp, err := s.client.R(ctx).Get(endpoint)
 	if err != nil {
-		// ⚠️ %w on the transport error would embed the URL, and the URL carries the key.
+		// %w would embed the URL, which carries the access key.
 		return nil, fmt.Errorf("exchangeratesapi request failed (transport error contacting %s)", path)
 	}
 	if err := checkResponse(resp.StatusCode(), resp.Body()); err != nil {
@@ -365,13 +337,9 @@ func (s *Source) readLatest(ctx context.Context, base string, opts source.ReadOp
 	return nil
 }
 
-// readExchangeRates walks the requested interval ONE DAY AT A TIME.
-//
-// ⚠️ THERE IS NO BULK ENDPOINT AVAILABLE TO US. The API does have /timeseries, and it is the
-// obvious way to do this — but it is plan-gated: it returns HTTP 403
-// `function_access_restricted` on plans where the single-date /v1/{date} endpoint works fine.
-// So this is deliberately N requests for N days, not an oversight. On a plan that includes
-// /timeseries, switching is a contained change to this one function.
+// readExchangeRates walks the requested interval one day at a time. The API's /timeseries
+// endpoint is plan-gated (HTTP 403 function_access_restricted on plans where the single-date
+// /v1/{date} endpoint works), so this issues one request per day by design.
 func (s *Source) readExchangeRates(ctx context.Context, base string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	now := time.Now().UTC()
 
@@ -391,16 +359,36 @@ func (s *Source) readExchangeRates(ctx context.Context, base string, opts source
 	days := int(end.Sub(start).Hours()/24) + 1
 	if days > maxBackfillDays {
 		return fmt.Errorf(
-			"refusing to fetch %d days: this source costs one request per day (no bulk endpoint on this plan) and the cap is %d. "+
-				"Historical rates are not reproducible from this API anyway — backfill from the frozen table and use this source going forward",
+			"refusing to fetch %d days: this source costs one request per day (no bulk endpoint on this plan) and the cap is %d days",
 			days, maxBackfillDays)
 	}
 
 	config.Debug("[EXCHANGERATESAPI] Fetching %d day(s) from %s to %s, base %s",
 		days, start.Format("2006-01-02"), end.Format("2006-01-02"), base)
 
-	var allItems []map[string]interface{}
+	var batch []map[string]interface{}
+	var accBytes int64
+	total := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, rateFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert exchange rates to Arrow: %w", err)
+		}
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		day := d.Format("2006-01-02")
 
 		body, err := s.get(ctx, day, "base="+url.QueryEscape(base))
@@ -413,29 +401,36 @@ func (s *Source) readExchangeRates(ctx context.Context, base string, opts source
 			return fmt.Errorf("failed to parse rates response for %s: %w", day, err)
 		}
 
-		// Trust the date WE asked for, not the one echoed back. The API answers a
-		// not-yet-published date with the most recent one it has, which would silently
-		// write today's rate under yesterday's key.
-		allItems = append(allItems, flattenRates(day, result.Base, result.Rates)...)
-	}
-
-	if len(allItems) > 0 {
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(allItems, rateFields, opts.ExcludeColumns)
-		if err != nil {
-			return fmt.Errorf("failed to convert exchange rates to Arrow: %w", err)
+		// Trust the date we asked for, not the one echoed back: the API answers a
+		// not-yet-published date with its most recent one, which would write today's
+		// rate under yesterday's key.
+		for _, row := range flattenRates(day, result.Base, result.Rates) {
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(row)
+				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				accBytes += rowBytes
+			}
+			batch = append(batch, row)
+			total++
 		}
-		results <- source.RecordBatchResult{Batch: record}
 	}
 
-	config.Debug("[EXCHANGERATESAPI] Fetched %d rate rows across %d day(s)", len(allItems), days)
+	if err := flush(); err != nil {
+		return err
+	}
+
+	config.Debug("[EXCHANGERATESAPI] Fetched %d rate rows across %d day(s)", total, days)
 	return nil
 }
 
 // flattenRates turns one day's map into rows, including the base->base identity row.
 //
-// The base row (rate 1.0) is deliberate and matches the frankfurter source. Without it,
-// converting an amount already in the base currency finds no row and yields NULL — which on
-// destinations that coalesce nulls in joins becomes a silent 0 rather than an error.
+// The base row (rate 1.0) is deliberate: without it, converting an amount already in the base
+// currency finds no row and yields NULL, which some destinations coalesce to a silent 0.
 func flattenRates(date, base string, rates map[string]float64) []map[string]interface{} {
 	base = strings.ToUpper(base)
 	items := make([]map[string]interface{}, 0, len(rates)+1)
