@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -35,7 +36,23 @@ const (
 	workerCount    = 5
 	maxBatchRows   = 5_000
 	maxBatchBytes  = 16 << 20
+
+	csvConnectTimeout  = 30 * time.Second
+	csvHeaderTimeout   = 60 * time.Second
+	csvIdleReadTimeout = 120 * time.Second
 )
+
+// csvHTTPClient has no overall timeout so large reports can stream freely;
+// connect/header stalls are bounded here, body stalls by downloadCSV's idle timeout.
+var csvHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: csvConnectTimeout}).DialContext,
+		TLSHandshakeTimeout:   csvConnectTimeout,
+		ResponseHeaderTimeout: csvHeaderTimeout,
+		ForceAttemptHTTP2:     true,
+	},
+}
 
 var supportedTables = []string{"user_ad_revenue"}
 
@@ -388,13 +405,15 @@ func (s *AppLovinMaxSource) downloadCSV(
 	limiter *rowLimiter,
 	results chan<- source.RecordBatchResult,
 ) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, csvURL, nil)
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, csvURL, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create CSV request: %w", err)
 	}
 
-	httpClient := &http.Client{Timeout: 120 * time.Second}
-	httpResp, err := httpClient.Do(req)
+	httpResp, err := csvHTTPClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to download CSV: %w", err)
 	}
@@ -404,7 +423,35 @@ func (s *AppLovinMaxSource) downloadCSV(
 		return 0, fmt.Errorf("CSV download returned status %d", httpResp.StatusCode)
 	}
 
-	return streamCSV(ctx, httpResp.Body, date, platform, opts, limiter, results)
+	body := newIdleTimeoutReader(httpResp.Body, csvIdleReadTimeout, cancel)
+	defer body.stop()
+
+	return streamCSV(ctx, body, date, platform, opts, limiter, results)
+}
+
+// idleTimeoutReader cancels the request when no bytes are read within the idle
+// timeout, bounding a stalled download without capping total time.
+type idleTimeoutReader struct {
+	r       io.Reader
+	timeout time.Duration
+	timer   *time.Timer
+}
+
+func newIdleTimeoutReader(r io.Reader, timeout time.Duration, onIdle func()) *idleTimeoutReader {
+	return &idleTimeoutReader{
+		r:       r,
+		timeout: timeout,
+		timer:   time.AfterFunc(timeout, onIdle),
+	}
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	r.timer.Reset(r.timeout)
+	return r.r.Read(p)
+}
+
+func (r *idleTimeoutReader) stop() {
+	r.timer.Stop()
 }
 
 type csvFieldSource struct {
