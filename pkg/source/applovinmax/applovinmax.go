@@ -429,8 +429,9 @@ func (s *AppLovinMaxSource) downloadCSV(
 	return streamCSV(ctx, body, date, platform, opts, limiter, results)
 }
 
-// idleTimeoutReader cancels the request when no bytes are read within the idle
-// timeout, bounding a stalled download without capping total time.
+// idleTimeoutReader cancels the request when a single body read stalls past the
+// idle timeout. The timer is disarmed between reads so downstream backpressure
+// (a blocked flush to the results channel) is not mistaken for a network stall.
 type idleTimeoutReader struct {
 	r       io.Reader
 	timeout time.Duration
@@ -438,16 +439,20 @@ type idleTimeoutReader struct {
 }
 
 func newIdleTimeoutReader(r io.Reader, timeout time.Duration, onIdle func()) *idleTimeoutReader {
+	timer := time.AfterFunc(timeout, onIdle)
+	timer.Stop()
 	return &idleTimeoutReader{
 		r:       r,
 		timeout: timeout,
-		timer:   time.AfterFunc(timeout, onIdle),
+		timer:   timer,
 	}
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 	r.timer.Reset(r.timeout)
-	return r.r.Read(p)
+	n, err := r.r.Read(p)
+	r.timer.Stop()
+	return n, err
 }
 
 func (r *idleTimeoutReader) stop() {
