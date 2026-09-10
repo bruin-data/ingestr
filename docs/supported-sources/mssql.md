@@ -79,7 +79,7 @@ Change Tracking URI parameters:
 
 - `poll_interval`: how long to wait between polls in streaming mode. Any Go duration (`500ms`, `2s`, `1m`); defaults to `1s`. Ignored outside `--stream`.
 
-While a stream sits idle, ingestr restamps the resume cursor every 5 minutes so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. Streaming is single-table: name one table with `--source-table`.
+While a stream sits idle, ingestr periodically restamps the resume cursor so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. The interval is derived from that retention setting — a quarter of it, capped at 5 minutes and floored at 5 seconds — so a database that expires versions in minutes is restamped more often than one retaining them for days. Streaming is single-table: name one table with `--source-table`.
 
 ## Change Data Capture
 

@@ -2,6 +2,7 @@ package mssql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"net/url"
@@ -254,19 +255,41 @@ func TestCTHeartbeatGateOnlyEmitsWhenNoChangeRows(t *testing.T) {
 
 func TestCTHeartbeatGateThrottlesStreamingIdlePolls(t *testing.T) {
 	start := time.Now()
-	gate := newCTHeartbeatGate(ctStreamHeartbeatInterval)
+	gate := newCTHeartbeatGate(maxCTHeartbeatInterval)
 
 	// The first idle poll of a stream restamps the cursor immediately.
 	assert.True(t, gate.shouldEmit(0, start))
 	gate.cursorAdvanced(start)
 
 	assert.False(t, gate.shouldEmit(0, start.Add(time.Second)))
-	assert.False(t, gate.shouldEmit(0, start.Add(ctStreamHeartbeatInterval-time.Second)))
-	assert.True(t, gate.shouldEmit(0, start.Add(ctStreamHeartbeatInterval)))
+	assert.False(t, gate.shouldEmit(0, start.Add(maxCTHeartbeatInterval-time.Second)))
+	assert.True(t, gate.shouldEmit(0, start.Add(maxCTHeartbeatInterval)))
 
 	// Real change rows carry the version themselves and restart the interval.
-	gate.cursorAdvanced(start.Add(ctStreamHeartbeatInterval))
-	assert.False(t, gate.shouldEmit(0, start.Add(ctStreamHeartbeatInterval+time.Second)))
+	gate.cursorAdvanced(start.Add(maxCTHeartbeatInterval))
+	assert.False(t, gate.shouldEmit(0, start.Add(maxCTHeartbeatInterval+time.Second)))
+}
+
+func TestCTHeartbeatIntervalTracksChangeRetention(t *testing.T) {
+	// A retention shorter than the default cap must pull the heartbeat in.
+	assert.Equal(t, 15*time.Second, ctHeartbeatInterval(true, time.Minute))
+	assert.Equal(t, minCTHeartbeatInterval, ctHeartbeatInterval(true, 2*time.Second))
+	assert.Equal(t, maxCTHeartbeatInterval, ctHeartbeatInterval(true, 48*time.Hour))
+
+	// Nothing to outrun without cleanup, or when the period is unreadable.
+	assert.Equal(t, maxCTHeartbeatInterval, ctHeartbeatInterval(false, time.Minute))
+	assert.Equal(t, maxCTHeartbeatInterval, ctHeartbeatInterval(true, 0))
+}
+
+func TestCTRetentionPeriodUnits(t *testing.T) {
+	valid := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+	units := func(v string) sql.NullString { return sql.NullString{String: v, Valid: true} }
+
+	assert.Equal(t, 30*time.Minute, ctRetentionPeriod(valid(30), units("MINUTES")))
+	assert.Equal(t, 6*time.Hour, ctRetentionPeriod(valid(6), units("HOURS")))
+	assert.Equal(t, 48*time.Hour, ctRetentionPeriod(valid(2), units("DAYS")))
+	assert.Zero(t, ctRetentionPeriod(valid(2), units("FORTNIGHTS")))
+	assert.Zero(t, ctRetentionPeriod(sql.NullInt64{}, units("DAYS")))
 }
 
 func TestParseChangeTrackingURIPollInterval(t *testing.T) {
@@ -662,18 +685,25 @@ func TestChangeTrackingStreamingReadPollsAgainAfterCatchingUp(t *testing.T) {
 	require.NoError(t, err)
 
 	var heartbeats, failures int
+	var committed []int64
 	for res := range results {
 		if res.Err != nil {
 			failures++
 			assert.Contains(t, res.Err.Error(), "connection reset")
 			continue
 		}
-		heartbeats += int(res.Batch.NumRows())
-		res.Batch.Release()
+		if token, ok := res.CommitToken.(ctCommitToken); ok {
+			committed = append(committed, token.version)
+		}
+		if res.Batch != nil {
+			heartbeats += int(res.Batch.NumRows())
+			res.Batch.Release()
+		}
 	}
 
 	assert.Equal(t, 1, heartbeats, "the idle poll should restamp the cursor")
 	assert.Equal(t, 1, failures)
+	assert.Equal(t, []int64{9}, committed, "the read window should offer its version for commit")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -705,6 +735,7 @@ func TestChangeTrackingStreamingReadStopsOnContextCancel(t *testing.T) {
 	res, ok := <-results
 	require.True(t, ok)
 	require.NoError(t, res.Err)
+	require.NotNil(t, res.Batch)
 	res.Batch.Release()
 
 	// The loop is waiting out the poll interval rather than exiting.
@@ -716,7 +747,7 @@ func TestChangeTrackingStreamingReadStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-func TestChangeTrackingReplicationLag(t *testing.T) {
+func TestChangeTrackingReplicationLagTracksDurablePosition(t *testing.T) {
 	src := NewMSSQLChangeTrackingSource()
 
 	_, ok := src.ReplicationLag()
@@ -726,16 +757,21 @@ func TestChangeTrackingReplicationLag(t *testing.T) {
 	_, ok = src.ReplicationLag()
 	assert.False(t, ok, "lag is meaningless before a version is observed")
 
-	src.noteCTLag(5, 9)
+	src.noteCTDurableVersion(5)
+	src.noteCTServerVersion(9)
 	lag, ok := src.ReplicationLag()
 	require.True(t, ok)
 	assert.Equal(t, "mssql_ct", lag.Source)
 	assert.Equal(t, formatCTVersion(9), lag.ServerPosition)
 	assert.Equal(t, formatCTVersion(5), lag.DurablePosition)
-	assert.False(t, lag.CaughtUp)
+	assert.False(t, lag.CaughtUp, "reading version 9 is not the same as writing it")
 
-	src.noteCTLag(9, 9)
+	// Only the destination flush closes the gap.
+	require.NoError(t, src.CommitStream(t.Context(), ctCommitToken{version: 9}))
 	lag, ok = src.ReplicationLag()
 	require.True(t, ok)
+	assert.Equal(t, formatCTVersion(9), lag.DurablePosition)
 	assert.True(t, lag.CaughtUp)
+
+	require.Error(t, src.CommitStream(t.Context(), "not-a-ct-token"))
 }
