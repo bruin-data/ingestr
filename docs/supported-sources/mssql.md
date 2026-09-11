@@ -81,6 +81,8 @@ Change Tracking URI parameters:
 
 While a stream sits idle, ingestr periodically restamps the resume cursor so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. The interval is derived from that retention setting — a quarter of it, capped at 5 minutes and floored at 5 seconds — so a database that expires versions in minutes is restamped more often than one retaining them for days. Streaming is single-table: name one table with `--source-table`.
 
+Into BigQuery or Snowflake, run this connector serially: neither destination enforces primary-key uniqueness, so two overlapping runs can leave permanent duplicate rows. See [Overlapping runs on BigQuery and Snowflake](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
+
 ## Change Data Capture
 
 For full row-level change history — not just which rows changed — ingestr can read SQL Server's log-based **Change Data Capture** with the `mssql+cdc://`, `sqlserver+cdc://`, `azuresql+cdc://`, and `azure-sql+cdc://` URI schemes.
@@ -106,6 +108,8 @@ CDC URI parameters:
 - `dest_schema`: optional destination schema for multi-table CDC runs. Ignored when `--source-table` names a single table; the destination is then `--dest-table`. A comma-separated `--source-table` is still a multi-table run, so `dest_schema` applies.
 
 For a full walkthrough — enabling CDC and replicating a table into DuckDB — see [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md).
+
+Into BigQuery or Snowflake, run this connector serially: neither destination enforces primary-key uniqueness, so two overlapping runs can leave permanent duplicate rows. See [Overlapping runs on BigQuery and Snowflake](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
 
 ## Tips & Tricks
 
