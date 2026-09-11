@@ -260,3 +260,86 @@ ingestr ingest \
 ```
 
 When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
+
+## HubSpot as a destination
+
+ingestr can also write **into** HubSpot. Use the same URI as the source, with a private app token that has **write** scopes for the objects you're loading:
+
+```plaintext
+hubspot://?api_key=<token>
+```
+
+or, using a service key:
+
+```plaintext
+hubspot://?service_key=<token>
+```
+
+Each source column becomes a HubSpot property of the same name — name your columns to match the target properties. Null values are skipped (they won't overwrite existing data). The `--dest-table` is any writable object: standard (`contacts`, `deals`, …), engagement/commerce (`notes`, `invoices`, …), or a custom object (`p12345_car` or `2-12345678`).
+
+### Operations
+
+The `id_property` param decides what happens to each row:
+
+| `id_property` | operation | behavior |
+| --- | --- | --- |
+| _(unset)_ | create | every row is a new record |
+| a unique property, e.g. `email` | upsert | update if it exists, else create |
+| `hs_object_id` | update | update by record id; rows with no id are skipped (warned), ids not found in HubSpot are rejected |
+
+Create and update work for any object. **Upsert** needs a writable unique property, which only some objects have:
+
+| object | upsert key |
+| --- | --- |
+| contacts | `email` |
+| products | `hs_sku` |
+| line items | `hs_external_id` |
+| tickets | `hs_external_object_ids` |
+| commerce_payments | `hs_external_reference_id` |
+| companies, deals, quotes | none — use `hs_object_id` (update) or a custom unique property |
+
+### Parameters
+
+Append to `--dest-table` as a query string (e.g. `contacts?id_property=email`):
+
+| param | required | purpose |
+| --- | --- | --- |
+| `id_property` | optional | property to match on (see table above); omit to always create |
+| `id_column` | optional | source column holding the match value; defaults to `id_property`. Set it only when your source column name differs from the property name (e.g. `id_property=email` but the column is `customer_email`) |
+| `on_error` | optional | `fail` (default) aborts on rejects; `skip` logs bad rows and continues |
+
+### Associations
+
+Use the `associations` dest-table to link two existing records (one link per source row):
+
+```
+associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=company_id
+```
+
+| param | required | purpose |
+| --- | --- | --- |
+| `from` / `to` | required | the two object types to link |
+| `from_id_column` / `to_id_column` | required | source columns holding each record's id |
+| `association_type` | optional | numeric type id for a labeled association (default is unlabeled) |
+| `association_category` | optional | `HUBSPOT_DEFINED` (default) or `USER_DEFINED`, used with `association_type` |
+
+Both records must already exist — load them first, then run the `associations` ingestion with a source table of id pairs.
+
+### Examples
+
+```sh
+# Upsert contacts on email
+ingestr ingest --source-uri '<src>' --source-table 'public.contacts' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'contacts?id_property=email'
+
+# Update companies by record id, skipping rejects
+ingestr ingest --source-uri '<src>' --source-table 'public.companies' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'companies?id_property=hs_object_id&id_column=company_id&on_error=skip'
+
+# Link contacts to companies
+ingestr ingest --source-uri '<src>' --source-table 'public.contact_company_links' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=company_id'
+```
