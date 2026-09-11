@@ -156,7 +156,9 @@ Each platform has requirements and knobs specific to its change mechanism — fo
 
 BigQuery and Snowflake cannot enforce primary-key uniqueness — BigQuery's `PRIMARY KEY` constraint is `NOT ENFORCED`, a query-optimizer hint rather than a guarantee. On every other destination that constraint is what quietly saves you when two runs of one connector overlap: both merges find a key missing, both insert it, and the unique index collapses the second insert into an update. Without it both inserts land, and the table keeps two rows for one key. Nothing later repairs this — subsequent merges match both copies and update both.
 
-PostgreSQL CDC is immune, because its replication slot is exclusive: a second run cannot attach to a slot the first one holds, so the overlap never happens in the first place. Every other change source (`mysql+cdc`, `mariadb+cdc`, `mssql+cdc`, `mssql+ct`, `mongodb+cdc`, `vitess+cdc`, `ps_mysql+cdc`) has no equivalent interlock against these two destinations, and ingestr warns at the start of a run when it sees the combination.
+PostgreSQL CDC is immune, because its replication slot is exclusive: a second run cannot attach to a slot the first one holds, so the overlap never happens in the first place. `mssql+ct`, `mssql+cdc`, `mongodb+cdc`, `vitess+cdc` and `ps_mysql+cdc` have no equivalent interlock against these two destinations, and ingestr warns at the start of a run when it sees the combination.
+
+MySQL and MariaDB CDC are a separate case: they require a destination-side run lease that neither BigQuery nor Snowflake implements, so `mysql+cdc`, `mysql+pymysql+cdc` and `mariadb+cdc` are still rejected against those two destinations and a serial schedule does not change that. Use a destination that enforces primary keys.
 
 The mitigation is operational: keep one run of a connector in flight at a time, with a non-overlapping schedule, a scheduler-level lock, or a single long-lived `--stream` process. A strictly serial schedule is safe, and `--full-refresh` runs are unaffected since they do not merge into existing data. [Issue #1190](https://github.com/bruin-data/ingestr/issues/1190) tracks removing the hazard.
 

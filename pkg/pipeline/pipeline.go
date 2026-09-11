@@ -3133,10 +3133,11 @@ func warnUnserializedCDCRuns(cfg *config.IngestConfig, dest destination.Destinat
 	if isPostgresCDCSource(cfg.SourceURI) {
 		return
 	}
+	// MySQL CDC is gated separately and more strictly: Run requires a
+	// ManagedCDCRunLeaser outright, so a destination without one fails hard
+	// rather than reaching a merge an operator could schedule around.
 	if isMySQLCDCSource(cfg.SourceURI) {
-		if _, ok := dest.(destination.ManagedCDCRunLeaser); ok {
-			return
-		}
+		return
 	}
 	sourceScheme, err := uri.ExtractScheme(cfg.SourceURI)
 	if err != nil {

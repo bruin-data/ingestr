@@ -541,7 +541,7 @@ func TestWarnUnserializedCDCRuns(t *testing.T) {
 		{name: "PostgreSQL CDC has a source lease", sourceURI: "postgres+cdc://source/db", dest: required},
 		{name: "PostgreSQL alias has a source lease", sourceURI: "postgresql+cdc://source/db", dest: required},
 		{name: "MySQL CDC can use a destination lease", sourceURI: "mysql+cdc://source/db", dest: leased},
-		{name: "MySQL CDC without a destination lease", sourceURI: "mysql+cdc://source/db", dest: required, wantWarning: true},
+		{name: "MySQL CDC without a destination lease fails hard elsewhere", sourceURI: "mysql+cdc://source/db", dest: required},
 		{name: "MongoDB CDC has no managed lease", sourceURI: "mongodb+cdc://source/db", dest: required, wantWarning: true},
 		{name: "SQL Server CDC has no managed lease", sourceURI: "mssql+cdc://source/db", dest: required, wantWarning: true},
 		{name: "SQL Server change tracking has no managed lease", sourceURI: "mssql+ct://source/db", dest: required, wantWarning: true},
