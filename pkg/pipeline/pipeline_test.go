@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	internalregistry "github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
@@ -511,7 +513,18 @@ func TestMySQLCDCDestinationWithoutIdentity(t *testing.T) {
 	}
 }
 
-func TestValidateCDCRunSerialization(t *testing.T) {
+// captureWarnings redirects user-facing output into a buffer for the duration
+// of the test and returns it.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	previousStdout, previousStderr, previousMode := output.Current()
+	t.Cleanup(func() { output.Init(previousStdout, previousStderr, previousMode) })
+	var captured bytes.Buffer
+	output.Init(&captured, &bytes.Buffer{}, output.ModeText)
+	return &captured
+}
+
+func TestWarnUnserializedCDCRuns(t *testing.T) {
 	required := &serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}
 	leased := &leasedSerializedCDCRunsDestination{
 		serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "leased-dest"}},
@@ -523,17 +536,17 @@ func TestValidateCDCRunSerialization(t *testing.T) {
 		sourceURI   string
 		dest        destination.Destination
 		fullRefresh bool
-		wantErr     bool
+		wantWarning bool
 	}{
 		{name: "PostgreSQL CDC has a source lease", sourceURI: "postgres+cdc://source/db", dest: required},
 		{name: "PostgreSQL alias has a source lease", sourceURI: "postgresql+cdc://source/db", dest: required},
 		{name: "MySQL CDC can use a destination lease", sourceURI: "mysql+cdc://source/db", dest: leased},
-		{name: "MySQL CDC without a destination lease", sourceURI: "mysql+cdc://source/db", dest: required, wantErr: true},
-		{name: "MongoDB CDC has no managed lease", sourceURI: "mongodb+cdc://source/db", dest: required, wantErr: true},
-		{name: "SQL Server CDC has no managed lease", sourceURI: "mssql+cdc://source/db", dest: required, wantErr: true},
-		{name: "SQL Server change tracking has no managed lease", sourceURI: "mssql+ct://source/db", dest: required, wantErr: true},
-		{name: "Vitess CDC has no managed lease", sourceURI: "vitess+cdc://source/db", dest: required, wantErr: true},
-		{name: "PlanetScale CDC has no managed lease", sourceURI: "ps_mysql+cdc://source/db", dest: required, wantErr: true},
+		{name: "MySQL CDC without a destination lease", sourceURI: "mysql+cdc://source/db", dest: required, wantWarning: true},
+		{name: "MongoDB CDC has no managed lease", sourceURI: "mongodb+cdc://source/db", dest: required, wantWarning: true},
+		{name: "SQL Server CDC has no managed lease", sourceURI: "mssql+cdc://source/db", dest: required, wantWarning: true},
+		{name: "SQL Server change tracking has no managed lease", sourceURI: "mssql+ct://source/db", dest: required, wantWarning: true},
+		{name: "Vitess CDC has no managed lease", sourceURI: "vitess+cdc://source/db", dest: required, wantWarning: true},
+		{name: "PlanetScale CDC has no managed lease", sourceURI: "ps_mysql+cdc://source/db", dest: required, wantWarning: true},
 		{name: "full refresh does not merge concurrent CDC changes", sourceURI: "mongodb+cdc://source/db", dest: required, fullRefresh: true},
 		{name: "ordinary source is unaffected", sourceURI: "postgres://source/db", dest: required},
 		{name: "destination with enforced keys is unaffected", sourceURI: "mongodb+cdc://source/db", dest: ordinary},
@@ -541,21 +554,25 @@ func TestValidateCDCRunSerialization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			warnings := captureWarnings(t)
+
 			cfg := config.DefaultConfig()
 			cfg.SourceURI = tt.sourceURI
 			cfg.FullRefresh = tt.fullRefresh
-			err := validateCDCRunSerialization(cfg, tt.dest)
-			if tt.wantErr {
-				require.ErrorContains(t, err, "requires serialized CDC runs")
-				require.ErrorContains(t, err, "no pipeline-managed run lease")
+			warnUnserializedCDCRuns(cfg, tt.dest)
+
+			if tt.wantWarning {
+				require.Contains(t, warnings.String(), "does not enforce primary-key uniqueness")
+				require.Contains(t, warnings.String(), "no pipeline-managed run lease")
+				require.Contains(t, warnings.String(), "https://github.com/bruin-data/ingestr/issues/1190")
 				return
 			}
-			require.NoError(t, err)
+			require.Empty(t, warnings.String())
 		})
 	}
 }
 
-func TestUnserializedCDCIsRejectedBeforeTableOrDestinationPreparation(t *testing.T) {
+func TestUnserializedCDCWarnsAndProceeds(t *testing.T) {
 	oldSource, err := internalregistry.Default.GetSourceConstructor("mongodb+cdc")
 	require.NoError(t, err)
 	defer internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, oldSource)
@@ -567,6 +584,8 @@ func TestUnserializedCDCIsRejectedBeforeTableOrDestinationPreparation(t *testing
 	internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, func() interface{} { return src })
 	internalregistry.Default.RegisterDestination([]string{"unenforced-key-dest"}, func() interface{} { return dest })
 
+	warnings := captureWarnings(t)
+
 	cfg := config.DefaultConfig()
 	cfg.SourceURI = "mongodb+cdc://source/db"
 	cfg.DestURI = "unenforced-key-dest://destination/db"
@@ -574,12 +593,14 @@ func TestUnserializedCDCIsRejectedBeforeTableOrDestinationPreparation(t *testing
 	cfg.DestTable = "raw.items"
 
 	err = New(cfg).Run(t.Context())
-	require.ErrorContains(t, err, "requires serialized CDC runs")
+	require.ErrorContains(t, err, "halted after CDC serialization admission")
+	require.Contains(t, warnings.String(), "does not enforce primary-key uniqueness")
+	require.Contains(t, warnings.String(), "https://github.com/bruin-data/ingestr/issues/1190")
 	require.True(t, src.connected)
 	require.True(t, src.closed)
 	require.True(t, dest.connected)
 	require.True(t, dest.closed)
-	require.Zero(t, src.getTableCalls)
+	require.Equal(t, 1, src.getTableCalls)
 	require.Zero(t, dest.prepareCalls)
 }
 
@@ -754,7 +775,7 @@ func (s *unserializedCDCAdmissionSource) Close(context.Context) error {
 
 func (s *unserializedCDCAdmissionSource) GetTable(context.Context, source.TableRequest) (source.SourceTable, error) {
 	s.getTableCalls++
-	return nil, errors.New("GetTable must not run after CDC serialization admission fails")
+	return nil, errors.New("halted after CDC serialization admission")
 }
 func (s *unserializedCDCAdmissionSource) HandlesIncrementality() bool { return true }
 

@@ -152,6 +152,14 @@ Each platform has requirements and knobs specific to its change mechanism — fo
 - **Vitess** streams through vtgate's VStream API because a sharded cluster has no single binlog to tail; the position is a VGTID covering every shard, so it works for sharded and unsharded keyspaces alike.
 - **PlanetScale** is managed Vitess but does not expose VStream externally, so ingestr uses PlanetScale's hosted `psdbconnect` API over TLS, authenticating with the database credentials already in the URI.
 
+### Overlapping runs on BigQuery and Snowflake
+
+BigQuery and Snowflake cannot enforce primary-key uniqueness — BigQuery's `PRIMARY KEY` constraint is `NOT ENFORCED`, a query-optimizer hint rather than a guarantee. On every other destination that constraint is what quietly saves you when two runs of one connector overlap: both merges find a key missing, both insert it, and the unique index collapses the second insert into an update. Without it both inserts land, and the table keeps two rows for one key. Nothing later repairs this — subsequent merges match both copies and update both.
+
+PostgreSQL CDC is immune, because its replication slot is exclusive: a second run cannot attach to a slot the first one holds, so the overlap never happens in the first place. Every other change source (`mysql+cdc`, `mariadb+cdc`, `mssql+cdc`, `mssql+ct`, `mongodb+cdc`, `vitess+cdc`, `ps_mysql+cdc`) has no equivalent interlock against these two destinations, and ingestr warns at the start of a run when it sees the combination.
+
+The mitigation is operational: keep one run of a connector in flight at a time, with a non-overlapping schedule, a scheduler-level lock, or a single long-lived `--stream` process. A strictly serial schedule is safe, and `--full-refresh` runs are unaffected since they do not merge into existing data. [Issue #1190](https://github.com/bruin-data/ingestr/issues/1190) tracks removing the hazard.
+
 ## CDC vs. regular incremental loading
 
 CDC is powerful, but it is not always the right tool. Prefer CDC when:
