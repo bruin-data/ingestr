@@ -154,11 +154,8 @@ type tableParams struct {
 // to the batch update endpoint, as it is not a unique-value property upsert accepts.
 const recordIDProperty = "hs_object_id"
 
-// defaultUpsertProperty maps object types that ship with a built-in writable
-// unique property to that property, so they upsert by default when the caller
-// does not set id_property. Verified against a live HubSpot account; objects
-// without a built-in unique key (companies, deals, quotes) are absent and create
-// by default. An explicit id_property always overrides this.
+// defaultUpsertProperty maps object types with a built-in writable unique
+// property to it, so they upsert by default unless id_property overrides it.
 var defaultUpsertProperty = map[string]string{
 	"contacts":          "email",
 	"products":          "hs_sku",
