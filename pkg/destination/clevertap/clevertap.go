@@ -146,9 +146,9 @@ func (d *CleverTapDestination) Close(_ context.Context) error {
 }
 
 // tableParams are the record-shaping options carried on the --dest-table string,
-// e.g. "profiles?identity_column=email" or "events?identity_column=user_id&event_name=Charged".
+// e.g. "profiles" or "events?event_name=Charged". The identity column comes from
+// --primary-key, not the dest-table.
 type tableParams struct {
-	IdentityColumn  string `mapstructure:"identity_column"`
 	IDType          string `mapstructure:"id_type"`
 	TS              string `mapstructure:"ts"`
 	EventName       string `mapstructure:"event_name"`
@@ -191,18 +191,16 @@ func parseShaper(table string, primaryKeys []string) (*shaper, error) {
 		return nil, fmt.Errorf("clevertap dest-table must be \"profiles\" or \"events\", got %q", path)
 	}
 
-	// Precedence for the identity column: an explicit identity_column on the
-	// dest-table, then a single --primary-key.
-	identityCol := p.IdentityColumn
-	if identityCol == "" {
-		switch {
-		case len(primaryKeys) == 1:
-			identityCol = primaryKeys[0]
-		case len(primaryKeys) > 1:
-			return nil, fmt.Errorf("clevertap: cannot resolve identity from a composite primary key [%s]; CleverTap resolves a user by a single field — set identity_column=<column> or use a single --primary-key", strings.Join(primaryKeys, ", "))
-		default:
-			return nil, fmt.Errorf("clevertap: set identity_column=<column> on the dest-table or pass a single --primary-key")
-		}
+	// The identity column comes from a single --primary-key; CleverTap resolves a
+	// user by one field, so a composite key is rejected.
+	var identityCol string
+	switch {
+	case len(primaryKeys) == 1:
+		identityCol = primaryKeys[0]
+	case len(primaryKeys) > 1:
+		return nil, fmt.Errorf("clevertap: cannot resolve identity from a composite primary key [%s]; CleverTap resolves a user by a single field — pass a single --primary-key", strings.Join(primaryKeys, ", "))
+	default:
+		return nil, fmt.Errorf("clevertap: pass a single --primary-key to use as the identity column")
 	}
 	idType := p.IDType
 	if idType == "" {
@@ -253,7 +251,7 @@ func (s *shaper) validateColumns(record arrow.RecordBatch) error {
 	}
 
 	if !present[s.identityCol] {
-		return fmt.Errorf("clevertap: identity column %q not found in source (available: %s); set identity_column= on the dest-table", s.identityCol, strings.Join(names, ", "))
+		return fmt.Errorf("clevertap: identity column %q (from --primary-key) not found in source (available: %s)", s.identityCol, strings.Join(names, ", "))
 	}
 	if s.eventNameCol != "" && !present[s.eventNameCol] {
 		return fmt.Errorf("clevertap: event_name_column %q not found in source (available: %s)", s.eventNameCol, strings.Join(names, ", "))
