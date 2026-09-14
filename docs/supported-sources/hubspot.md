@@ -397,9 +397,3 @@ ingestr ingest --source-uri '<src>' --source-table 'public.contact_company_links
   --dest-uri 'hubspot://?api_key=pat_test_12345' \
   --dest-table 'associations?from=contacts&to=companies&from_id_column=contact_email&from_id_property=email&to_id_column=company_domain&to_id_property=domain'
 ```
-
-
-hepsini upsert yapmaya calis
-associations?from=contacts&to=companies verildiginde otomatik singleini bulup id ile matchle
-default property yoksa bile biz hubspottan cekelim hangisi pk oalrak verilmis ve onu otomatik kullanalim yani kullanicin id_property girmesine gerek kalmasin
-giricekse de --primary key ile verebilsin
