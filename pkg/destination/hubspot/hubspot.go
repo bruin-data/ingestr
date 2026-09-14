@@ -106,9 +106,7 @@ func (d *HubSpotDestination) Connect(_ context.Context, uri string) error {
 		httpclient.WithTimeout(2*time.Minute),
 		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
 		httpclient.WithRetry(retryCount, retryWait, retryMaxWait),
-		// Batch endpoints are POST but safe to retry on 429/5xx; without this
-		// resty treats them as non-idempotent and skips retries. resty's default
-		// backoff already honors HubSpot's Retry-After header on 429.
+		// Retry the POST batch endpoints on 429/5xx; resty honors Retry-After.
 		httpclient.WithAllowNonIdempotentRetry(),
 		httpclient.WithAuth(httpclient.NewBearerAuth(cfg.apiKey)),
 		httpclient.WithDebug(config.DebugMode),
@@ -295,10 +293,8 @@ func parseOperation(op string) (bool, error) {
 	}
 }
 
-// parseArchiveShaper builds a shaper that soft-deletes records. It matches by the
-// id column (record ids by default, or a unique property resolved to record ids
-// when id_property is set). The built-in upsert defaults are not applied, so a
-// wrong key never archives by, say, every contact's email.
+// parseArchiveShaper builds a shaper that soft-deletes records, matched by the id
+// column (record ids, or a unique property resolved to ids when id_property is set).
 func parseArchiveShaper(objectType string, p tableParams, primaryKeys []string, onErrorSkip bool) (*shaper, error) {
 	idProperty := p.IDProperty
 	if idProperty == "" {
@@ -325,10 +321,8 @@ func parseArchiveShaper(objectType string, p tableParams, primaryKeys []string, 
 	}, nil
 }
 
-// defaultAssociationIDColumn derives an id column from an object type by
-// singularizing it and appending "_id" (e.g. "companies" -> "company_id"). It
-// returns "" for custom object ids (an objectTypeId like "2-123" or a
-// fully-qualified "p123_car"), which have no meaningful singular form.
+// defaultAssociationIDColumn singularizes an object type and appends "_id"
+// (e.g. "companies" -> "company_id"), or returns "" for custom object ids.
 func defaultAssociationIDColumn(objectType string) string {
 	ot := strings.ToLower(strings.TrimSpace(objectType))
 	if ot == "" || strings.ContainsAny(ot, "-") || (strings.HasPrefix(ot, "p") && strings.Contains(ot, "_")) {
@@ -887,10 +881,8 @@ func (d *HubSpotDestination) associationColumnFromSchema(ctx context.Context, na
 	return "", false
 }
 
-// resolveAssociationColumns fills any from/to id column that could not be derived
-// from the object name string, by looking up the object's singular label via the
-// schemas API. It runs once before writing, so the shaper is not mutated from the
-// parallel write goroutines.
+// resolveAssociationColumns fills any from/to id column not derivable from the
+// object name via its schema label. Runs once before the parallel writes start.
 func (d *HubSpotDestination) resolveAssociationColumns(ctx context.Context, sh *shaper) error {
 	if sh.fromColumn == "" {
 		if col, ok := d.associationColumnFromSchema(ctx, sh.objectType); ok {
@@ -969,10 +961,8 @@ func (d *HubSpotDestination) handleBatchResult(ctx context.Context, sh *shaper, 
 	return nil
 }
 
-// sendUpdate posts an update chunk and, when HubSpot reports that some record
-// ids do not exist, re-routes those rows to create. Because batch update fails
-// atomically, the whole chunk is re-partitioned: existing ids are updated,
-// missing ids are created.
+// sendUpdate posts an update chunk; since batch update fails atomically on any
+// missing id, it re-partitions into existing ids (update) and missing ids (create).
 func (d *HubSpotDestination) sendUpdate(ctx context.Context, sh *shaper, items []batchInput, rejects *rejectionLog) error {
 	res, err := d.postBatch(ctx, sh, items, "update")
 	if err != nil {
