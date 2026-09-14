@@ -260,6 +260,8 @@ func (d *Dialect) getNativeDB() (*sql.DB, error) {
 			return
 		}
 
+		sfauth.ConfigureDriverLogging()
+
 		db, err := sql.Open("snowflake", dsn)
 		if err != nil {
 			d.nativeErr = fmt.Errorf("failed to open snowflake connection: %w", err)
