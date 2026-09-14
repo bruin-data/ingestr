@@ -146,6 +146,19 @@ func TestIdentityColumnWithIDType(t *testing.T) {
 	assert.NotContains(t, rec, "identity")
 }
 
+func TestDeprecatedIdentityColumnStillWorks(t *testing.T) {
+	server, bodies := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email"}))
+
+	require.Len(t, *bodies, 1)
+	assert.Equal(t, "hasan@x.com", (*bodies)[0].D[0]["identity"])
+}
+
 func TestCompositePrimaryKeyRejected(t *testing.T) {
 	server, _ := newUploadServer(t)
 	d := connectTestDestination(t, server.URL)

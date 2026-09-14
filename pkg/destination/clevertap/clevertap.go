@@ -149,6 +149,9 @@ func (d *CleverTapDestination) Close(_ context.Context) error {
 // e.g. "profiles" or "events?event_name=Charged". The identity column comes from
 // --primary-key, not the dest-table.
 type tableParams struct {
+	// IdentityColumn is a deprecated, undocumented alias kept for backward
+	// compatibility; --primary-key is the supported way to set the identity.
+	IdentityColumn  string `mapstructure:"identity_column"`
 	IDType          string `mapstructure:"id_type"`
 	TS              string `mapstructure:"ts"`
 	EventName       string `mapstructure:"event_name"`
@@ -192,15 +195,18 @@ func parseShaper(table string, primaryKeys []string) (*shaper, error) {
 	}
 
 	// The identity column comes from a single --primary-key; CleverTap resolves a
-	// user by one field, so a composite key is rejected.
-	var identityCol string
-	switch {
-	case len(primaryKeys) == 1:
-		identityCol = primaryKeys[0]
-	case len(primaryKeys) > 1:
-		return nil, fmt.Errorf("clevertap: cannot resolve identity from a composite primary key [%s]; CleverTap resolves a user by a single field — pass a single --primary-key", strings.Join(primaryKeys, ", "))
-	default:
-		return nil, fmt.Errorf("clevertap: pass a single --primary-key to use as the identity column")
+	// user by one field, so a composite key is rejected. The deprecated
+	// identity_column dest-table param is still honored for backward compatibility.
+	identityCol := p.IdentityColumn
+	if identityCol == "" {
+		switch {
+		case len(primaryKeys) == 1:
+			identityCol = primaryKeys[0]
+		case len(primaryKeys) > 1:
+			return nil, fmt.Errorf("clevertap: cannot resolve identity from a composite primary key [%s]; CleverTap resolves a user by a single field — pass a single --primary-key", strings.Join(primaryKeys, ", "))
+		default:
+			return nil, fmt.Errorf("clevertap: pass a single --primary-key to use as the identity column")
+		}
 	}
 	idType := p.IDType
 	if idType == "" {
