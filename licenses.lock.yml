@@ -275,11 +275,6 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: github.com/DataDog/zstd
-      version: v1.5.7
-      licenses:
-        - BSD-3-Clause
-      status: allowed
     - module: github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp
       version: v1.6.0
       licenses:
@@ -762,11 +757,6 @@ dependencies:
       version: v1.0.1
       licenses:
         - MIT
-      status: allowed
-    - module: github.com/ebitengine/purego
-      version: v0.10.0
-      licenses:
-        - Apache-2.0
       status: allowed
     - module: github.com/eclipse/paho.mqtt.golang
       version: v1.5.1
@@ -1882,7 +1872,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: golang.org/x/crypto
-      version: v0.54.0
+      version: v0.55.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1897,7 +1887,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/net
-      version: v0.57.0
+      version: v0.58.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1922,7 +1912,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: golang.org/x/text
-      version: v0.40.0
+      version: v0.41.0
       licenses:
         - BSD-3-Clause
       status: allowed
@@ -1957,7 +1947,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: google.golang.org/grpc
-      version: v1.83.1
+      version: v1.83.2
       licenses:
         - Apache-2.0
       status: allowed
