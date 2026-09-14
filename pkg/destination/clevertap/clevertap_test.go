@@ -269,7 +269,21 @@ func TestRejectedRecordsFailByDefault(t *testing.T) {
 	require.ErrorContains(t, err, "ali@x.com")
 }
 
-func TestRejectedRecordsSkippedWithOnErrorSkip(t *testing.T) {
+func TestRejectedRecordsSkippedWithErrorModeSkip(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"success","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity"}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?error_mode=skip", PrimaryKeys: []string{"email"}}))
+}
+
+// on_error is a deprecated alias for error_mode.
+func TestOnErrorAliasStillWorks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"success","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity"}]}`)
 	}))
@@ -280,6 +294,31 @@ func TestRejectedRecordsSkippedWithOnErrorSkip(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: profileBatch()}
 	close(records)
 	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?on_error=skip", PrimaryKeys: []string{"email"}}))
+}
+
+func TestErrorModeFailFastAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"partial","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity","record":{"identity":"ali@x.com","type":"profile"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?error_mode=fail_fast", PrimaryKeys: []string{"email"}})
+	require.ErrorContains(t, err, "code 513")
+	require.ErrorContains(t, err, "ali@x.com")
+}
+
+func TestInvalidErrorMode(t *testing.T) {
+	server, _ := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?error_mode=bogus", PrimaryKeys: []string{"email"}})
+	require.ErrorContains(t, err, "invalid error_mode")
 }
 
 func TestNullIdentityRowsSkipped(t *testing.T) {

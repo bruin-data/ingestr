@@ -161,7 +161,7 @@ ingestr ingest \
 | --------- | --------- | ----------- |
 | `--primary-key` | **Required** | The source column holding each row's identifier (passed as a CLI flag, not a dest-table param). For example, `--primary-key email` takes each row's identifier from the `email` column. Must be a single column. |
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `id_type=objectId` sends each identifier value as an `objectId`. |
-| `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
+| `error_mode` | Optional | How CleverTap record rejections are handled: `fail` (default) prints every rejected record and fails the run; `fail_fast` aborts on the first rejected record; `skip` prints the rejected records but the run still succeeds. In every mode each rejection is printed as it happens. |
 
 Strategy:
 - **Always merged on CleverTap's side** — profiles are upserted by identity, so whichever strategy you run, re-sending a user updates their attributes instead of creating a duplicate.
@@ -188,7 +188,7 @@ ingestr ingest \
 | `--primary-key` | **Required** | The source column holding each row's identifier (passed as a CLI flag, not a dest-table param). For example, `--primary-key user_id` takes each row's identifier from the `user_id` column. Must be a single column. |
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `id_type=objectId` sends each identifier value as an `objectId`. |
 | `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
-| `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
+| `error_mode` | Optional | How CleverTap record rejections are handled: `fail` (default) prints every rejected record and fails the run; `fail_fast` aborts on the first rejected record; `skip` prints the rejected records but the run still succeeds. In every mode each rejection is printed as it happens. |
 
 Strategy:
 - **Always appended on CleverTap's side** — whichever strategy you run, each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate.

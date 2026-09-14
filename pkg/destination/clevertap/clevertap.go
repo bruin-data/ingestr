@@ -156,8 +156,20 @@ type tableParams struct {
 	TS              string `mapstructure:"ts"`
 	EventName       string `mapstructure:"event_name"`
 	EventNameColumn string `mapstructure:"event_name_column"`
-	OnError         string `mapstructure:"on_error"`
+	ErrorMode       string `mapstructure:"error_mode"`
+	// OnError is a deprecated, undocumented alias for ErrorMode.
+	OnError string `mapstructure:"on_error"`
 }
+
+// Error-handling modes for records CleverTap rejects.
+const (
+	// errorModeFail collects every rejected record, prints them, and fails the run.
+	errorModeFail = "fail"
+	// errorModeFailFast aborts on the first rejected record.
+	errorModeFailFast = "fail_fast"
+	// errorModeSkip collects and prints rejected records but the run succeeds.
+	errorModeSkip = "skip"
+)
 
 // shaper turns a source row into a CleverTap upload record for one dest-table mode.
 type shaper struct {
@@ -168,7 +180,7 @@ type shaper struct {
 	eventName    string
 	eventNameCol string
 	exclude      map[string]bool
-	onErrorSkip  bool
+	errorMode    string
 }
 
 func parseShaper(table string, primaryKeys []string) (*shaper, error) {
@@ -230,8 +242,18 @@ func parseShaper(table string, primaryKeys []string) (*shaper, error) {
 		naming.IngestrRunIDColumn:    true,
 	}
 
-	if p.OnError != "" && p.OnError != "skip" && p.OnError != "fail" {
-		return nil, fmt.Errorf("invalid on_error %q: must be \"fail\" (default) or \"skip\"", p.OnError)
+	// error_mode is the supported param; on_error is a deprecated alias.
+	errorMode := p.ErrorMode
+	if errorMode == "" {
+		errorMode = p.OnError
+	}
+	if errorMode == "" {
+		errorMode = errorModeFail
+	}
+	switch errorMode {
+	case errorModeFail, errorModeFailFast, errorModeSkip:
+	default:
+		return nil, fmt.Errorf("invalid error_mode %q: must be \"fail\" (default), \"fail_fast\", or \"skip\"", errorMode)
 	}
 
 	return &shaper{
@@ -242,7 +264,7 @@ func parseShaper(table string, primaryKeys []string) (*shaper, error) {
 		eventName:    p.EventName,
 		eventNameCol: p.EventNameColumn,
 		exclude:      exclude,
-		onErrorSkip:  p.OnError == "skip",
+		errorMode:    errorMode,
 	}, nil
 }
 
@@ -462,7 +484,7 @@ func (l *rejectionLog) add(items []rejection) {
 	l.mu.Unlock()
 }
 
-// reportRejections fails the run (or warns, under on_error=skip) with each
+// reportRejections fails the run (or warns, under error_mode=skip) with each
 // rejected record and its error once all batches have been uploaded.
 func reportRejections(sh *shaper, l *rejectionLog) error {
 	l.mu.Lock()
@@ -482,7 +504,7 @@ func reportRejections(sh *shaper, l *rejectionLog) error {
 		fmt.Fprintf(&b, "\n  ... and %d more", len(items)-shown)
 	}
 
-	if sh.onErrorSkip {
+	if sh.errorMode == errorModeSkip {
 		output.Warnf("Warning: %s\n", b.String())
 		return nil
 	}
@@ -560,6 +582,9 @@ func (d *CleverTapDestination) upload(ctx context.Context, sh *shaper, items []m
 
 	if len(body.Unprocessed) > 0 {
 		first := body.Unprocessed[0]
+		if sh.errorMode == errorModeFailFast {
+			return fmt.Errorf("clevertap rejected a %s record (code %d): %s: %s", sh.recordType, first.Code, first.Error, string(first.Record))
+		}
 		output.Warnf("Warning: clevertap rejected %d of %d record(s) in this batch; first error (code %d): %s\n", len(body.Unprocessed), len(items), first.Code, first.Error)
 		batch := make([]rejection, 0, len(body.Unprocessed))
 		for _, u := range body.Unprocessed {
