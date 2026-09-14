@@ -10,9 +10,7 @@ import (
 	sf "github.com/snowflakedb/gosnowflake"
 )
 
-// The driver logs failed queries through logger.WithContext(ctx).Errorf, which
-// bypasses the enabled flag that SetLogLevel("OFF") toggles, so only a level
-// above error actually silences them.
+// Mirrors the driver's own call in connection.go queryContextInternal.
 func TestConfigureDriverLoggingSilencesQueryErrors(t *testing.T) {
 	var buf bytes.Buffer
 	sf.GetLogger().SetOutput(&buf)

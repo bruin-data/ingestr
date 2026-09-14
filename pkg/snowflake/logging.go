@@ -10,15 +10,11 @@ import (
 var driverLogOnce sync.Once
 
 // ConfigureDriverLogging raises the gosnowflake logger above error level so the
-// driver stops writing every failed query to stderr.
+// driver stops writing to stderr the failed queries ingestr issues speculatively
+// and handles itself. --debug lowers it to debug instead.
 //
-// The driver logs the error before returning it, so queries ingestr issues
-// speculatively — probing a destination table that does not exist yet, for
-// instance — surface as level=error lines even though ingestr handles them.
-// ingestr reports the failures it cares about itself.
-//
-// A Snowflake client config file still wins: the driver applies easy logging
-// when it builds a connection, which happens after this runs.
+// "OFF" would not work: the driver logs through WithContext().Errorf, a logrus
+// Entry gated only by the inner level, not by the flag "OFF" clears.
 func ConfigureDriverLogging() {
 	driverLogOnce.Do(func() {
 		level := "fatal"
