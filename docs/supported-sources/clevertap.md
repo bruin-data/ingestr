@@ -156,7 +156,7 @@ ingestr ingest \
 
 | Parameter | Required? | Description |
 | --------- | --------- | ----------- |
-| `identity_column` | **Required** (or `--primary-key`) | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. If omitted, a single `--primary-key` is used as the identity column instead. |
+| `identity_column` | **Required** (or a single primary key) | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. If omitted, the single primary key of the run is used as the identity column instead — either one you pass with `--primary-key`, or one the source table declares. A composite primary key is rejected; set `identity_column` explicitly in that case. |
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
 | `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
 
@@ -181,7 +181,7 @@ ingestr ingest \
 | Parameter | Required? | Description |
 | --------- | --------- | ----------- |
 | `event_name` **or** `event_name_column` | **Required** | A fixed event name applied to every row (`event_name`), or a column whose value is the event name per row (`event_name_column`) for tables that mix event types. |
-| `identity_column` | **Required** (or `--primary-key`) | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. If omitted, a single `--primary-key` is used as the identity column instead. |
+| `identity_column` | **Required** (or a single primary key) | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. If omitted, the single primary key of the run is used as the identity column instead — either one you pass with `--primary-key`, or one the source table declares. A composite primary key is rejected; set `identity_column` explicitly in that case. |
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
 | `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
 | `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
