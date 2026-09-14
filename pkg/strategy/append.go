@@ -109,6 +109,10 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		PreStaged:        job.PreStaged,
 	}
+	if destination.WantsLogicalPrimaryKeys(job.Destination) {
+		// Destinations like HubSpot route upserts by the logical primary key.
+		writeOpts.PrimaryKeys = job.Config.PrimaryKeys
+	}
 	var writeErr error
 	if isCDC {
 		_, writeErr = destination.WriteWithTruncateBoundaries(ctx, job.Destination, records, writeOpts)
