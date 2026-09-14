@@ -168,7 +168,7 @@ type shaper struct {
 	onErrorSkip  bool
 }
 
-func parseShaper(table string) (*shaper, error) {
+func parseShaper(table string, primaryKeys []string) (*shaper, error) {
 	var p tableParams
 	path, _, err := tablespec.Parse(table, &p, tablespec.WithListSeparator(","))
 	if err != nil {
@@ -191,9 +191,18 @@ func parseShaper(table string) (*shaper, error) {
 		return nil, fmt.Errorf("clevertap dest-table must be \"profiles\" or \"events\", got %q", path)
 	}
 
+	// Precedence for the identity column: an explicit identity_column on the
+	// dest-table, then a single --primary-key.
 	identityCol := p.IdentityColumn
 	if identityCol == "" {
-		return nil, fmt.Errorf("clevertap: set identity_column=<column> on the dest-table")
+		switch {
+		case len(primaryKeys) == 1:
+			identityCol = primaryKeys[0]
+		case len(primaryKeys) > 1:
+			return nil, fmt.Errorf("clevertap: cannot resolve identity from a composite primary key [%s]; CleverTap resolves a user by a single field — set identity_column=<column> or use a single --primary-key", strings.Join(primaryKeys, ", "))
+		default:
+			return nil, fmt.Errorf("clevertap: set identity_column=<column> on the dest-table or pass a single --primary-key")
+		}
 	}
 	idType := p.IDType
 	if idType == "" {
@@ -301,8 +310,21 @@ func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row in
 	return item, true
 }
 
+// primaryKeysFor resolves the primary keys a run carries. The replace/append
+// strategies only put them on WriteOptions.PrimaryKeys when deduplicating, so
+// the schema's PrimaryKeys (always populated) is the reliable fallback.
+func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
+	if len(explicit) > 0 {
+		return explicit
+	}
+	if sch != nil {
+		return sch.PrimaryKeys
+	}
+	return nil
+}
+
 func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	sh, err := parseShaper(opts.Table)
+	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema))
 	if err != nil {
 		return err
 	}
@@ -337,7 +359,7 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	sh, err := parseShaper(opts.Table)
+	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema))
 	if err != nil {
 		return err
 	}
@@ -583,6 +605,10 @@ func (d *CleverTapDestination) GetTableSchema(_ context.Context, _ string) (*sch
 
 func (d *CleverTapDestination) GetScheme() string { return "clevertap" }
 
+// WantsLogicalPrimaryKeys makes the strategies forward the run's primary keys so
+// a single --primary-key can supply the identity column.
+func (d *CleverTapDestination) WantsLogicalPrimaryKeys() bool { return true }
+
 // SupportsReplaceStrategy is true because CleverTap has no destructive delete;
 // replace degrades to a full upload, which upserts profiles by identity.
 func (d *CleverTapDestination) SupportsReplaceStrategy() bool      { return true }
@@ -672,12 +698,6 @@ func arrowToValue(arr arrow.Array, idx int) interface{} {
 	case *array.Decimal128:
 		val := a.Value(idx)
 		if dt, ok := a.DataType().(*arrow.Decimal128Type); ok {
-			return val.ToString(dt.Scale)
-		}
-		return val.ToString(0)
-	case *array.Decimal256:
-		val := a.Value(idx)
-		if dt, ok := a.DataType().(*arrow.Decimal256Type); ok {
 			return val.ToString(dt.Scale)
 		}
 		return val.ToString(0)
