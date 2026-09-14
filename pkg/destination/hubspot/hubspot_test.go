@@ -1023,8 +1023,7 @@ func TestHardFailureStatus(t *testing.T) {
 
 func TestAuthFailureAbortsEvenWithOnErrorSkip(t *testing.T) {
 	// Auth failures are not record-level; on_error=skip must not swallow them.
-	// (429/5xx are also non-record-level but get retried by the client, so this
-	// test uses the non-retried auth codes.)
+	// (429/5xx are retried by the client, so this test uses non-retried auth codes.)
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(status)
@@ -1082,8 +1081,7 @@ func TestIDColumnRequiresIDProperty(t *testing.T) {
 }
 
 // newPropertyServer answers the property batch-read endpoint, echoing back only
-// the requested names that exist in props, so PrepareTable validation can be
-// exercised offline.
+// the requested names that exist in props, so PrepareTable can be tested offline.
 func newPropertyServer(t *testing.T, props []string) *httptest.Server {
 	t.Helper()
 	known := make(map[string]bool, len(props))
@@ -1214,9 +1212,8 @@ func TestPrepareTableIgnoresIDColumnAndDecorations(t *testing.T) {
 }
 
 func TestPrepareTableAllowsNonUniqueIDProperty(t *testing.T) {
-	// domain exists on companies but is not a unique-value identifier. Because the
-	// hasUniqueValue flag is unreliable, PrepareTable warns rather than blocking;
-	// HubSpot rejects at write time if it truly isn't upsertable.
+	// domain is not a unique-value identifier, but hasUniqueValue is unreliable, so
+	// PrepareTable warns rather than blocking; HubSpot rejects at write time if so.
 	server := newPropertyServer(t, []string{"domain", "name"})
 	d := connectTestDestination(t, server.URL)
 

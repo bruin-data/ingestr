@@ -181,9 +181,8 @@ type shaper struct {
 	associateTo string
 	fromColumn  string
 	toColumn    string
-	// fromProperty/toProperty name the HubSpot property the from/to column values
-	// match on. Empty means the column already holds record ids (hs_object_id);
-	// set means the values are a business key resolved to record ids first.
+	// fromProperty/toProperty name the HubSpot property the values match on;
+	// empty means the column already holds record ids (hs_object_id).
 	fromProperty        string
 	toProperty          string
 	associationType     int
@@ -242,9 +241,8 @@ func parseShaper(table string, primaryKeys []string) (*shaper, error) {
 		return parseArchiveShaper(objectType, p, primaryKeys, onErrorSkip)
 	}
 
-	// Precedence for the match property: an explicit id_property on the dest-table,
-	// then a single --primary-key, then the object's built-in unique property.
-	// Nothing found means create. A single primary key also supplies the id column.
+	// Precedence for the match property: id_property, then a single --primary-key
+	// (which also supplies the id column), then the object's built-in unique property.
 	idProperty := p.IDProperty
 	if idProperty == "" {
 		switch {
@@ -337,9 +335,8 @@ func parseAssociationShaper(p tableParams, archive bool) (*shaper, error) {
 	if p.From == "" || p.To == "" {
 		return nil, fmt.Errorf("hubspot: associations dest-table requires from= and to= object types")
 	}
-	// Default the id columns from the object names when not given, e.g.
-	// from=contacts -> contact_id. Custom objects have no singular, so their
-	// column must be set explicitly.
+	// Default the id columns from the object names (from=contacts -> contact_id);
+	// custom objects have no singular, so their column must be set explicitly.
 	fromColumn := p.FromIDColumn
 	if fromColumn == "" {
 		fromColumn = defaultAssociationIDColumn(p.From)
@@ -348,9 +345,8 @@ func parseAssociationShaper(p tableParams, archive bool) (*shaper, error) {
 	if toColumn == "" {
 		toColumn = defaultAssociationIDColumn(p.To)
 	}
-	// Columns that can't be derived from the object name (custom objects
-	// addressed by an objectTypeId or fully-qualified name) stay empty here and
-	// are resolved from the object's singular label later, once a client exists.
+	// Columns not derivable from the object name (custom objects) stay empty here
+	// and are resolved from the object's singular label later, once a client exists.
 	if fromColumn != "" && fromColumn == toColumn {
 		return nil, fmt.Errorf("hubspot: from and to resolve to the same id column %q; set from_id_column and to_id_column explicitly", fromColumn)
 	}
@@ -428,8 +424,7 @@ type associationTypeSpec struct {
 }
 
 // shapeAssociation builds one association link, or ok=false when either id is
-// missing. When fromResolve/toResolve are non-nil the column values are business
-// keys looked up in the map for their record id; an unresolved key skips the row.
+// missing. Non-nil fromResolve/toResolve resolve business keys to record ids.
 func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve map[string]string) (associationInput, bool) {
 	fromVal, okFrom := propertyValue(record.Column(colIndex[s.fromColumn]), row)
 	toVal, okTo := propertyValue(record.Column(colIndex[s.toColumn]), row)
@@ -464,9 +459,8 @@ type batchInput struct {
 	Properties map[string]string `json:"properties"`
 }
 
-// shapeRow builds the batch input and the endpoint action for one row. A row
-// whose match value is missing cannot be matched to an existing record, so it is
-// created rather than skipped (create-on-missing), for both upsert and update.
+// shapeRow builds the batch input and endpoint action for one row. A row with a
+// missing match value is created rather than skipped (create-on-missing).
 func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row int) (batchInput, string, bool) {
 	props := make(map[string]string)
 	for i := 0; i < int(record.NumCols()); i++ {
@@ -504,9 +498,8 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 	return in, "update", true
 }
 
-// primaryKeysFor resolves the primary keys a run carries. The replace/append
-// strategies only put them on WriteOptions.PrimaryKeys when deduplicating, so
-// the schema's PrimaryKeys (always populated) is the reliable fallback.
+// primaryKeysFor resolves the run's primary keys, falling back to the schema's
+// (always populated) when WriteOptions carries none.
 func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
 	if len(explicit) > 0 {
 		return explicit
@@ -720,8 +713,7 @@ type batchResult struct {
 }
 
 // isRecordLevelStatus reports whether a failed status is a per-record data problem
-// (validation or conflict) that on_error=skip may tolerate. Auth, rate-limit, and
-// server failures are not record-level and must always abort the run.
+// (validation/conflict) that on_error=skip may tolerate; others abort the run.
 func isRecordLevelStatus(status int) bool {
 	return status == 400 || status == 409
 }
@@ -903,9 +895,8 @@ func (d *HubSpotDestination) resolveAssociationColumns(ctx context.Context, sh *
 	return nil
 }
 
-// postBatch posts one chunk to the given batch action endpoint. If HubSpot can't
-// infer the object type from a custom object name, it resolves the name to an
-// objectTypeId once and retries.
+// postBatch posts one chunk to the batch action endpoint, resolving a custom
+// object name to its objectTypeId and retrying once on an infer error.
 func (d *HubSpotDestination) postBatch(ctx context.Context, sh *shaper, items []batchInput, action string) (batchResult, error) {
 	res, err := d.doPostBatch(ctx, sh.objectType, items, action)
 	if err != nil {
@@ -1005,8 +996,7 @@ func (d *HubSpotDestination) sendUpdate(ctx context.Context, sh *shaper, items [
 }
 
 // partitionExisting returns which ids exist in HubSpot. Batch read fails
-// atomically when any id is missing, so the set is bisected to isolate the
-// missing ids without a per-record read on the common all-present path.
+// atomically on any missing id, so the set is bisected to isolate the missing ones.
 func (d *HubSpotDestination) partitionExisting(ctx context.Context, objectType string, ids []string) (map[string]bool, error) {
 	existing := make(map[string]bool, len(ids))
 	var recurse func(sub []string) error
@@ -1039,9 +1029,8 @@ func (d *HubSpotDestination) partitionExisting(ctx context.Context, objectType s
 	return existing, nil
 }
 
-// batchReadFound reports how many of the given ids exist, via the batch read
-// endpoint. HubSpot returns every requested record when all exist, or an empty
-// result set with an OBJECT_NOT_FOUND error when any id is missing.
+// batchReadFound reports how many of the given ids exist via batch read, which
+// returns all records when they exist or OBJECT_NOT_FOUND when any is missing.
 func (d *HubSpotDestination) batchReadFound(ctx context.Context, objectType string, ids []string) (int, error) {
 	inputs := make([]map[string]string, len(ids))
 	for i, id := range ids {
@@ -1076,9 +1065,8 @@ func columnValues(arr arrow.Array) []string {
 	return values
 }
 
-// resolveKeysToIDs maps business-key values to HubSpot record ids via batch read.
-// Batch read fails atomically when any key is missing, so the set is bisected to
-// resolve the present keys and drop the missing ones without a per-record read.
+// resolveKeysToIDs maps business-key values to record ids via batch read, which
+// fails atomically on any missing key, so the set is bisected to drop missing ones.
 func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, idProperty string, keys []string) (map[string]string, error) {
 	seen := make(map[string]bool, len(keys))
 	uniq := make([]string, 0, len(keys))
@@ -1529,9 +1517,8 @@ func (d *HubSpotDestination) checkProperties(ctx context.Context, objectType str
 	return existing, nil
 }
 
-// listUniqueProperties returns the object's upsertable unique property names.
-// It is best-effort: an empty result (lookup failed or the scope is missing)
-// just means no hint is shown.
+// listUniqueProperties returns the object's upsertable unique property names,
+// best-effort: an empty result just means no hint is shown.
 func (d *HubSpotDestination) listUniqueProperties(ctx context.Context, objectType string) []string {
 	resp, err := d.client.R(ctx).Get(fmt.Sprintf("/crm/v3/properties/%s", url.PathEscape(d.effectiveObjectType(objectType))))
 	if err != nil || (resp.StatusCode() != 200 && resp.StatusCode() != 207) {

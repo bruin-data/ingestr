@@ -198,11 +198,8 @@ type IncrementalPredicateSupport interface {
 	SupportsIncrementalPredicate() bool
 }
 
-// LogicalPrimaryKeyWriter marks a destination that needs the run's logical
+// LogicalPrimaryKeyWriter marks a destination that wants the run's logical
 // primary keys on WriteOptions even when the strategy is not deduplicating.
-// HubSpot uses them to route upserts by the primary key. Non-dedup strategies
-// only populate WriteOptions.PrimaryKeys for destinations that opt in here, so
-// other destinations keep their existing behavior.
 type LogicalPrimaryKeyWriter interface {
 	WantsLogicalPrimaryKeys() bool
 }
