@@ -82,7 +82,7 @@ func TestWriteProfiles(t *testing.T) {
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Batch: profileBatch()}
 	close(records)
-	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email"}))
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"email"}}))
 
 	require.Len(t, *bodies, 1)
 	recs := (*bodies)[0].D
@@ -116,7 +116,8 @@ func TestWriteEvents(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: eventBatch()}
 	close(records)
 	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
-		Table: "events?identity_column=user_id&ts=purchased_at&event_name=Charged",
+		Table:       "events?ts=purchased_at&event_name=Charged",
+		PrimaryKeys: []string{"user_id"},
 	}))
 
 	require.Len(t, *bodies, 1)
@@ -136,12 +137,39 @@ func TestIdentityColumnWithIDType(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: eventBatch()}
 	close(records)
 	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
-		Table: "events?identity_column=user_id&id_type=objectId&ts=purchased_at&event_name=Charged",
+		Table:       "events?id_type=objectId&ts=purchased_at&event_name=Charged",
+		PrimaryKeys: []string{"user_id"},
 	}))
 
 	rec := (*bodies)[0].D[0]
 	assert.Equal(t, "u-42", rec["objectId"])
 	assert.NotContains(t, rec, "identity")
+}
+
+func TestDeprecatedIdentityColumnStillWorks(t *testing.T) {
+	server, bodies := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email"}))
+
+	require.Len(t, *bodies, 1)
+	assert.Equal(t, "hasan@x.com", (*bodies)[0].D[0]["identity"])
+}
+
+func TestCompositePrimaryKeyRejected(t *testing.T) {
+	server, _ := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email", "name"},
+	})
+	require.ErrorContains(t, err, "composite primary key")
 }
 
 func TestIdentityRequired(t *testing.T) {
@@ -151,7 +179,7 @@ func TestIdentityRequired(t *testing.T) {
 	records := make(chan source.RecordBatchResult)
 	close(records)
 	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles"})
-	require.ErrorContains(t, err, "set identity_column=<column>")
+	require.ErrorContains(t, err, "pass a single --primary-key")
 }
 
 func TestEventTSSecondUnit(t *testing.T) {
@@ -172,7 +200,8 @@ func TestEventTSSecondUnit(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: b.NewRecordBatch()}
 	close(records)
 	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
-		Table: "events?identity_column=user_id&ts=purchased_at&event_name=Charged",
+		Table:       "events?ts=purchased_at&event_name=Charged",
+		PrimaryKeys: []string{"user_id"},
 	}))
 
 	rec := (*bodies)[0].D[0]
@@ -186,8 +215,8 @@ func TestMissingIdentityColumnFailsFast(t *testing.T) {
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Batch: profileBatch()}
 	close(records)
-	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=missing_col"})
-	require.ErrorContains(t, err, "identity column \"missing_col\" not found")
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"missing_col"}})
+	require.ErrorContains(t, err, "identity column \"missing_col\" (from --primary-key) not found")
 }
 
 func TestMissingTSColumnFailsFast(t *testing.T) {
@@ -198,7 +227,8 @@ func TestMissingTSColumnFailsFast(t *testing.T) {
 	records <- source.RecordBatchResult{Batch: eventBatch()}
 	close(records)
 	err := d.Write(context.Background(), records, destination.WriteOptions{
-		Table: "events?identity_column=user_id&ts=purchsed_at&event_name=Charged",
+		Table:       "events?ts=purchsed_at&event_name=Charged",
+		PrimaryKeys: []string{"user_id"},
 	})
 	require.ErrorContains(t, err, "ts column \"purchsed_at\" not found")
 }
@@ -209,7 +239,7 @@ func TestEventsRequireEventName(t *testing.T) {
 
 	records := make(chan source.RecordBatchResult)
 	close(records)
-	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "events?identity_column=user_id"})
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "events", PrimaryKeys: []string{"user_id"}})
 	require.ErrorContains(t, err, "event_name")
 }
 
@@ -219,7 +249,7 @@ func TestProfilesRejectTS(t *testing.T) {
 
 	records := make(chan source.RecordBatchResult)
 	close(records)
-	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email&ts=updated_at"})
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?ts=updated_at", PrimaryKeys: []string{"email"}})
 	require.ErrorContains(t, err, "ts is only supported for events")
 }
 
@@ -233,13 +263,13 @@ func TestRejectedRecordsFailByDefault(t *testing.T) {
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Batch: profileBatch()}
 	close(records)
-	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email"})
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"email"}})
 	require.ErrorContains(t, err, "clevertap rejected 1 profile record(s)")
 	require.ErrorContains(t, err, "code 513")
 	require.ErrorContains(t, err, "ali@x.com")
 }
 
-func TestRejectedRecordsSkippedWithOnErrorSkip(t *testing.T) {
+func TestRejectedRecordsSkippedWithErrorModeSkip(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"success","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity"}]}`)
 	}))
@@ -249,7 +279,46 @@ func TestRejectedRecordsSkippedWithOnErrorSkip(t *testing.T) {
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Batch: profileBatch()}
 	close(records)
-	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email&on_error=skip"}))
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?error_mode=skip", PrimaryKeys: []string{"email"}}))
+}
+
+// on_error is a deprecated alias for error_mode.
+func TestOnErrorAliasStillWorks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"success","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity"}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?on_error=skip", PrimaryKeys: []string{"email"}}))
+}
+
+func TestErrorModeFailFastAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"partial","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity","record":{"identity":"ali@x.com","type":"profile"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?error_mode=fail_fast", PrimaryKeys: []string{"email"}})
+	require.ErrorContains(t, err, "code 513")
+	require.ErrorContains(t, err, "ali@x.com")
+}
+
+func TestInvalidErrorMode(t *testing.T) {
+	server, _ := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?error_mode=bogus", PrimaryKeys: []string{"email"}})
+	require.ErrorContains(t, err, "invalid error_mode")
 }
 
 func TestNullIdentityRowsSkipped(t *testing.T) {
@@ -269,7 +338,7 @@ func TestNullIdentityRowsSkipped(t *testing.T) {
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Batch: batch}
 	close(records)
-	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email"}))
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"email"}}))
 
 	require.Len(t, *bodies, 1)
 	assert.Len(t, (*bodies)[0].D, 1)
