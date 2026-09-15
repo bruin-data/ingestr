@@ -166,6 +166,8 @@ func OpenDB(uri string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	ConfigureDriverLogging()
+
 	return sql.Open("snowflake", dsn)
 }
 

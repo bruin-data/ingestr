@@ -66,6 +66,8 @@ func (d *SnowflakeDestination) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to create Snowflake DSN: %w", err)
 	}
 
+	sfauth.ConfigureDriverLogging()
+
 	db, err := sql.Open("snowflake", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to open Snowflake connection: %w", err)
