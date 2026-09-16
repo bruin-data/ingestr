@@ -161,7 +161,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/BurntSushi/toml
-      version: v1.4.0
+      version: v1.6.0
       licenses:
         - MIT
       status: allowed
@@ -614,7 +614,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/cilium/ebpf
-      version: v0.19.0
+      version: v0.22.0
       licenses:
         - MIT
       status: allowed
