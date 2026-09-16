@@ -2,7 +2,7 @@
 
 [HubSpot](https://www.hubspot.com/) is a customer relationship management software that helps businesses attract visitors, connect with customers, and close deals.
 
-ingestr supports HubSpot as a source.
+ingestr supports HubSpot as both a source and a destination.
 
 ## URI format
 
@@ -260,3 +260,140 @@ ingestr ingest \
 ```
 
 When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
+
+## HubSpot as a destination
+
+ingestr can also write **into** HubSpot. Use the same URI as the source, with a private app token that has **write** scopes for the objects you're loading:
+
+```plaintext
+hubspot://?api_key=<token>
+```
+
+or, using a service key:
+
+```plaintext
+hubspot://?service_key=<token>
+```
+
+Each source column becomes a HubSpot property of the same name — name your columns to match the target properties. Null values are skipped (they won't overwrite existing data). The `--dest-table` is any writable object: standard (`contacts`, `deals`, …), engagement/commerce (`notes`, `invoices`, …), or a custom object. A custom object can be given by its id (`2-12345678`), fully-qualified name (`p12345_car`), or its label/name (`cars`) — a label is resolved to its id automatically (needs the `crm.schemas.custom.read` scope).
+
+### Operations
+
+Each row becomes a **create**, an **upsert**, or an **update-or-create**, decided by which property is used to match records.
+
+**How the match property is chosen** (first that applies):
+
+1. an explicit `id_property` on the dest-table
+2. a single `--primary-key` (also supplies the source column)
+3. the object's built-in unique property (the five objects below)
+4. nothing → **create**
+
+A single `--primary-key` supplies both the property and the source column, so `--primary-key external_id` upserts on `external_id` with no dest-table params. `--primary-key` also picks up a primary key declared by the source table. A composite primary key (more than one column) can't map to a single HubSpot property, so it is an error unless you set an explicit `id_property` — pick one column with `--primary-key`/`id_property`, or remove the key to create records.
+
+**The three operations:**
+
+| match property | operation | row with a match value | row with no match value |
+| --- | --- | --- | --- |
+| a writable unique property (e.g. `email`, or a custom one) | **upsert** | update if it exists, else create | created |
+| `hs_object_id` | **update or create** | update if the id exists, else create it | created |
+| none | **create** | new record | new record |
+
+A row whose match value is null can't target an existing record, so it is **created** (not skipped) in every mode.
+
+**Objects that upsert by default.** These ship with a writable unique property, so they upsert with no `id_property` — the source just needs a column of that name (or set `id_column`):
+
+| object | default upsert key |
+| --- | --- |
+| contacts | `email` |
+| products | `hs_sku` |
+| line items | `hs_external_id` |
+| tickets | `hs_external_object_ids` |
+| commerce_payments | `hs_external_reference_id` |
+
+Objects without a built-in unique key (**companies, deals, quotes**, custom objects) **create by default**. To match existing records, either set `id_property=hs_object_id` (update-or-create by record id), or add a custom unique property in HubSpot and point `id_property`/`--primary-key` at it.
+
+**The source must contain the matched column.** Whatever the match property resolves to, a column of that name (or the one named by `id_column`) must exist in the source, or the run fails fast. `hs_object_id` is only needed when you explicitly match on it — never for plain create or property-based upsert. Note that a stale `hs_object_id` (its record was deleted in HubSpot) is treated as not-found and **creates a new record**.
+
+### Parameters
+
+Append to `--dest-table` as a query string (e.g. `contacts?id_property=email`):
+
+| param | required | purpose |
+| --- | --- | --- |
+| `id_property` | optional | property to match on (see table above); omit to use the object's default (upsert where it has a built-in unique key, otherwise create) |
+| `id_column` | optional | source column holding the match value; defaults to `id_property`. Set it only when your source column name differs from the property name (e.g. `id_property=email` but the column is `customer_email`) |
+| `operation` | optional | `upsert` (default) writes records; `archive` soft-deletes them (see below) |
+| `clear_nulls` | optional | `false` (default) omits null source cells, leaving the existing HubSpot value untouched; `true` sends an empty value to **clear** the field |
+| `on_error` | optional | `fail` (default) aborts and lists the rejected rows; `skip` logs record-level rejects (validation/conflict) and continues. Auth, rate-limit, and server errors always abort regardless |
+
+### Deleting records (archive)
+
+`operation=archive` soft-deletes the records named by the source, via HubSpot's batch archive endpoint. Archived records go to the recycle bin and can be restored from the HubSpot UI (there is no hard delete — deletion is always recoverable).
+
+```
+# archive by record id (id_column holds hs_object_id values)
+companies?operation=archive&id_column=company_id
+
+# archive by a unique property (values are resolved to record ids first)
+contacts?operation=archive&id_property=email&id_column=email
+```
+
+`id_column` is required (it names the source column of ids or key values). With `id_property` set, the column's values are treated as that unique property and resolved to record ids before archiving; unresolvable values are skipped (warned). Archiving is always soft (recoverable), not permanent deletion.
+
+For associations, `operation=archive` **removes** the link instead of creating it (all association labels between the pair are removed):
+
+```
+associations?from=contacts&to=companies&operation=archive
+```
+
+### Associations
+
+Use the `associations` dest-table to link two existing records (one link per source row):
+
+```
+associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=company_id
+```
+
+| param | required | purpose |
+| --- | --- | --- |
+| `from` / `to` | required | the two object types to link |
+| `from_id_column` / `to_id_column` | optional | source columns holding each record's id; default to the singularized object name + `_id` (e.g. `from=contacts` → `contact_id`). For a custom object addressed by objectTypeId or fully-qualified name, the column is derived from its singular label (e.g. `2-123` → `building_id`). Set explicitly when your column is named differently or when both sides are the same object type |
+| `from_id_property` / `to_id_property` | optional | match a side on a business key instead of the record id. When set, the values in that side's column are treated as this property (e.g. `email`, `domain`, a custom unique property) and resolved to the record id before linking |
+| `association_type` | optional | numeric type id for a labeled association (default is unlabeled) |
+| `association_category` | optional | `HUBSPOT_DEFINED` (default) or `USER_DEFINED`, used with `association_type` |
+
+Both records must already exist — load them first, then run the `associations` ingestion with a source table of id pairs. By default the id columns hold HubSpot record ids (`hs_object_id`); set `from_id_property`/`to_id_property` to match on a business key instead, which is resolved to the record id via a lookup (unresolvable keys are skipped). Rows missing a from or to id are skipped (warned). `id_property`, `id_column`, and `--primary-key` don't apply to associations and are ignored (with a warning).
+
+### Examples
+
+```sh
+# Contacts upsert on email by default (no id_property needed)
+ingestr ingest --source-uri '<src>' --source-table 'public.contacts' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'contacts'
+
+# Companies create by default (no built-in unique key)
+ingestr ingest --source-uri '<src>' --source-table 'public.companies' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'companies'
+
+# Companies by record id: rows whose id exists are updated, the rest are created
+ingestr ingest --source-uri '<src>' --source-table 'public.companies' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'companies?id_property=hs_object_id&id_column=company_id'
+
+# Link contacts to companies (id columns derived: contact_id, company_id)
+ingestr ingest --source-uri '<src>' --source-table 'public.contact_company_links' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'associations?from=contacts&to=companies'
+
+# Link contacts to companies with explicit id columns
+ingestr ingest --source-uri '<src>' --source-table 'public.contact_company_links' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'associations?from=contacts&to=companies&from_id_column=contact_id&to_id_column=company_id'
+
+# Link on business keys (email/domain) instead of record ids
+ingestr ingest --source-uri '<src>' --source-table 'public.contact_company_links' \
+  --dest-uri 'hubspot://?api_key=pat_test_12345' \
+  --dest-table 'associations?from=contacts&to=companies&from_id_column=contact_email&from_id_property=email&to_id_column=company_domain&to_id_property=domain'
+```

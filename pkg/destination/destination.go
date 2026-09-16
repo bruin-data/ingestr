@@ -198,6 +198,19 @@ type IncrementalPredicateSupport interface {
 	SupportsIncrementalPredicate() bool
 }
 
+// LogicalPrimaryKeyWriter marks a destination that wants the run's logical
+// primary keys on WriteOptions even when the strategy is not deduplicating.
+type LogicalPrimaryKeyWriter interface {
+	WantsLogicalPrimaryKeys() bool
+}
+
+// WantsLogicalPrimaryKeys reports whether the destination opts into receiving
+// the run's logical primary keys on WriteOptions.
+func WantsLogicalPrimaryKeys(dest interface{}) bool {
+	w, ok := dest.(LogicalPrimaryKeyWriter)
+	return ok && w.WantsLogicalPrimaryKeys()
+}
+
 func MergeJoinCondition(condition, incrementalPredicate string) string {
 	predicate := strings.TrimSpace(incrementalPredicate)
 	if predicate == "" {
