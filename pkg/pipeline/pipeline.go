@@ -348,21 +348,6 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			p.config.CDCResumeIncarnation = sourceIncarnation
 			p.config.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
 			config.Debug("[PIPELINE] Found destination-managed CDC state, resuming from: %s", resumeLSN)
-		} else {
-			// Once any state exists, replacement snapshots are authorized: this
-			// connector already owns the target. With no state at all, a target
-			// that contains CDC data belongs to an unmanaged (pre-state) run or
-			// to a lost state table, so fail closed.
-			stateEmpty, err := cdcStateManager.StateEmpty(ctx)
-			if err != nil {
-				return err
-			}
-			if stateEmpty {
-				if err := rejectUnprovenLegacyCDCTarget(ctx, dest, p.config.SourceTable, p.config.DestTable); err != nil {
-					return err
-				}
-			}
-			config.Debug("[PIPELINE] No completed CDC snapshot state found, will perform full snapshot")
 		}
 	} else if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
 		resumeProvider, ok := dest.(destination.CDCResumeProvider)
@@ -430,6 +415,26 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	if shouldWarnCDCStrategy(p.config, preFetchStrategy) {
 		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
+	}
+	if cdcStateManager != nil && !p.config.FullRefresh && p.config.CDCResumeLSN == "" {
+		if preFetchStrategy == config.StrategyMerge && len(preFetchConfig.PrimaryKeys) > 0 {
+			resumeLSN, err := cdcStateManager.ResumePositionForKeyedMerge(ctx, p.config.SourceTable)
+			if err != nil {
+				return err
+			}
+			if resumeLSN != "" {
+				p.config.CDCResumeLSN = resumeLSN
+				p.config.CDCResumeIncarnation = sourceIncarnation
+				p.config.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
+				config.Debug("[PIPELINE] Found previous completed CDC state, resuming keyed merge from: %s", resumeLSN)
+			}
+		}
+		if p.config.CDCResumeLSN == "" {
+			if err := rejectUnprovenLegacyCDCTarget(ctx, dest, p.config.SourceTable, p.config.DestTable); err != nil {
+				return err
+			}
+			config.Debug("[PIPELINE] No completed CDC snapshot state found, will perform full snapshot")
+		}
 	}
 
 	tracker, err := p.createTracker(ctx)
@@ -1554,12 +1559,14 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	var cdcResumeLSNs map[string]string
 	if cdcStateManager != nil && !p.config.FullRefresh {
 		cdcResumeLSNs = make(map[string]string)
-		stateEmpty, err := cdcStateManager.StateEmpty(ctx)
-		if err != nil {
-			return err
-		}
 		for _, table := range tables {
-			resumeLSN, err := cdcStateManager.ResumePosition(ctx, table.Name)
+			var resumeLSN string
+			var err error
+			if resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
+				resumeLSN, err = cdcStateManager.ResumePositionForKeyedMerge(ctx, table.Name)
+			} else {
+				resumeLSN, err = cdcStateManager.ResumePosition(ctx, table.Name)
+			}
 			if err != nil {
 				return err
 			}
@@ -1567,10 +1574,8 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				cdcResumeLSNs[table.Name] = resumeLSN
 				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
 			} else {
-				if stateEmpty {
-					if err := rejectUnprovenLegacyCDCTarget(ctx, p.dest, table.Name, tableDestNames[table.Name]); err != nil {
-						return err
-					}
+				if err := rejectUnprovenLegacyCDCTarget(ctx, p.dest, table.Name, tableDestNames[table.Name]); err != nil {
+					return err
 				}
 				config.Debug("[PIPELINE] No completed CDC snapshot state for %s, will snapshot", table.Name)
 			}
