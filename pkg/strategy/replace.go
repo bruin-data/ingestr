@@ -386,6 +386,9 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		writeOpts.PrimaryKeys = job.Config.PrimaryKeys
 		writeOpts.DeduplicatePrimaryKeys = true
 		writeOpts.IncrementalKey = job.Config.IncrementalKey
+	} else if destination.WantsLogicalPrimaryKeys(job.Destination) {
+		// Destinations like HubSpot route upserts by the logical primary key.
+		writeOpts.PrimaryKeys = job.Config.PrimaryKeys
 	}
 	if useStaging {
 		if atomicWriter, ok := job.Destination.(destination.AtomicCommitWriter); ok && atomicWriter.SupportsAtomicCommitWrites() {

@@ -144,6 +144,8 @@ The parameters are the same as the source (`account_id`, `passcode`, `region`). 
 
 Every row you send becomes one CleverTap record. The base of the `--dest-table` value (before the `?`) selects the record type — `profiles` or `events` — and the parameters after it tell ingestr which columns carry the special fields. Every other column is uploaded as an attribute under its own name. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never uploaded.
 
+The CleverTap identity for each row comes from `--primary-key` — pass a single column whose value identifies the user. A composite (multi-column) primary key is rejected, since CleverTap resolves a user by one field. If the source table declares a single primary key, that column is used automatically.
+
 ### Profiles
 
 ```sh
@@ -151,14 +153,15 @@ ingestr ingest \
   --source-uri "postgres://user:pass@host:5432/db" \
   --source-table "public.marketing_users" \
   --dest-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123&region=eu1" \
-  --dest-table "profiles?identity_column=email"
+  --dest-table "profiles" \
+  --primary-key email
 ```
 
 | Parameter | Required? | Description |
 | --------- | --------- | ----------- |
-| `identity_column` | **Required** | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. |
-| `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
-| `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
+| `--primary-key` | **Required** | The source column holding each row's identifier (passed as a CLI flag, not a dest-table param). For example, `--primary-key email` takes each row's identifier from the `email` column. Must be a single column. |
+| `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `id_type=objectId` sends each identifier value as an `objectId`. |
+| `error_mode` | Optional | How CleverTap record rejections are handled: `fail` (default) prints every rejected record and fails the run; `fail_fast` aborts on the first rejected record; `skip` prints the rejected records but the run still succeeds. In every mode each rejection is printed as it happens. |
 
 Strategy:
 - **Always merged on CleverTap's side** — profiles are upserted by identity, so whichever strategy you run, re-sending a user updates their attributes instead of creating a duplicate.
@@ -172,7 +175,8 @@ ingestr ingest \
   --source-uri "bigquery://my-project/analytics?credentials_path=/creds.json" \
   --source-table "analytics.purchases" \
   --dest-uri "clevertap://?account_id=TEST-ABC-123&passcode=pass_123&region=eu1" \
-  --dest-table "events?identity_column=user_id&ts=purchased_at&event_name=Charged" \
+  --dest-table "events?ts=purchased_at&event_name=Charged" \
+  --primary-key user_id \
   --incremental-key purchased_at \
   --interval-start 2024-01-01 \
   --interval-end 2024-01-02
@@ -181,10 +185,10 @@ ingestr ingest \
 | Parameter | Required? | Description |
 | --------- | --------- | ----------- |
 | `event_name` **or** `event_name_column` | **Required** | A fixed event name applied to every row (`event_name`), or a column whose value is the event name per row (`event_name_column`) for tables that mix event types. |
-| `identity_column` | **Required** | The source column holding each row's identifier. For example, `identity_column=email` takes each row's identifier from the `email` column. |
-| `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `identity_column=device_id&id_type=objectId` sends each `device_id` value as an `objectId`. |
+| `--primary-key` | **Required** | The source column holding each row's identifier (passed as a CLI flag, not a dest-table param). For example, `--primary-key user_id` takes each row's identifier from the `user_id` column. Must be a single column. |
+| `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `id_type=objectId` sends each identifier value as an `objectId`. |
 | `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
-| `on_error` | Optional | `fail` (default) fails the run if CleverTap rejects any record; `skip` warns and continues. Either way each rejected record is printed as it happens and listed with its error at the end. |
+| `error_mode` | Optional | How CleverTap record rejections are handled: `fail` (default) prints every rejected record and fails the run; `fail_fast` aborts on the first rejected record; `skip` prints the rejected records but the run still succeeds. In every mode each rejection is printed as it happens. |
 
 Strategy:
 - **Always appended on CleverTap's side** — whichever strategy you run, each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate.
