@@ -100,8 +100,7 @@ type BigQueryDestination struct {
 	datasetCaseMu       sync.Mutex
 	datasetCase         map[string]bigQueryDatasetCase
 
-	// Effective location resolved once from the target table's dataset when the
-	// URI configures none, so staging datasets and jobs match the target.
+	// Target dataset's location, resolved once when the URI configures none.
 	resolvedLocationMu   sync.Mutex
 	resolvedLocation     string
 	resolvedLocationDone bool
@@ -373,10 +372,8 @@ func (d *BigQueryDestination) effectiveLocation() string {
 	return d.resolvedLocation
 }
 
-// resolveLocation caches the target table's dataset location once, so a run
-// without a configured location places staging datasets and jobs there. A real
-// metadata error (not a missing dataset) is returned rather than silently
-// defaulting staging to US, which would strand it in the wrong location.
+// resolveLocation caches the target dataset's location once. A real (non-404)
+// metadata error is returned rather than defaulting staging to the wrong region.
 func (d *BigQueryDestination) resolveLocation(ctx context.Context, targetTable string) error {
 	if d.location != "" || targetTable == "" {
 		return nil
