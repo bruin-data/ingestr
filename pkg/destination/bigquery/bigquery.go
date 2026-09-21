@@ -304,7 +304,7 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	if loc := d.effectiveLocation(); loc != "" {
 		metadata.Location = loc
 	} else {
-		metadata.Location = "US" // Default location
+		metadata.Location = defaultDatasetLocation
 	}
 
 	if err := ds.Create(ctx, metadata); err != nil {
@@ -330,6 +330,10 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	return nil
 }
 
+// defaultDatasetLocation is the location a dataset is created in when no
+// location is configured and none could be resolved from the target dataset.
+const defaultDatasetLocation = "US"
+
 type datasetLocationMismatchError struct {
 	project         string
 	dataset         string
@@ -339,7 +343,7 @@ type datasetLocationMismatchError struct {
 
 func (e *datasetLocationMismatchError) Error() string {
 	return fmt.Sprintf(
-		"BigQuery dataset %s:%s is in location %s, but destination jobs are configured for %s; configure the destination for %s or use a dataset in %s (for staging, select it with --staging-dataset)",
+		"BigQuery dataset %s:%s is in location %s, but destination jobs will run in %s; configure the destination for %s or use a dataset in %s (for staging, select it with --staging-dataset)",
 		e.project,
 		e.dataset,
 		e.datasetLocation,
@@ -350,14 +354,23 @@ func (e *datasetLocationMismatchError) Error() string {
 }
 
 func (d *BigQueryDestination) validateDatasetLocation(project, dataset, location string) error {
-	if d.location == "" || location == "" || strings.EqualFold(d.location, location) {
+	if location == "" {
+		return nil
+	}
+	// Unresolved location means new datasets default to defaultDatasetLocation,
+	// so an existing dataset elsewhere is a guaranteed cross-location mismatch.
+	effective := d.effectiveLocation()
+	if effective == "" {
+		effective = defaultDatasetLocation
+	}
+	if strings.EqualFold(effective, location) {
 		return nil
 	}
 	return &datasetLocationMismatchError{
 		project:         project,
 		dataset:         dataset,
 		datasetLocation: location,
-		jobLocation:     d.location,
+		jobLocation:     effective,
 	}
 }
 

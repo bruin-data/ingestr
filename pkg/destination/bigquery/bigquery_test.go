@@ -2202,6 +2202,109 @@ func TestResolveLocationErrors(t *testing.T) {
 	}
 }
 
+// With no configured location, a staging dataset in a different location than
+// the target's dataset must fail instead of proceeding to a cross-location job.
+func TestStagingDatasetLocationMismatchWithoutConfiguredLocation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/target-dataset"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{"projectId": "test-project", "datasetId": "target-dataset"},
+				"location":         "US",
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/_bruin_staging"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{"projectId": "test-project", "datasetId": "_bruin_staging"},
+				"location":         "EU",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{client: client, projectID: "test-project"}
+	require.NoError(t, dest.resolveLocation(t.Context(), "target-dataset.events"))
+	err = dest.ensureDatasetExists(t.Context(), "test-project", "_bruin_staging")
+
+	var locationErr *datasetLocationMismatchError
+	require.ErrorAs(t, err, &locationErr)
+	require.Equal(t, "EU", locationErr.datasetLocation)
+	require.Equal(t, "US", locationErr.jobLocation)
+}
+
+// No configured location + absent target dataset means a new target defaults to
+// US, so a pre-existing staging dataset elsewhere must fail before any load.
+func TestStagingDatasetMismatchAgainstDefaultWhenTargetAbsent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/target-dataset"):
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found"},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/_bruin_staging"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{"projectId": "test-project", "datasetId": "_bruin_staging"},
+				"location":         "EU",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{client: client, projectID: "test-project"}
+	require.NoError(t, dest.resolveLocation(t.Context(), "target-dataset.events"))
+	err = dest.ensureDatasetExists(t.Context(), "test-project", "_bruin_staging")
+
+	var locationErr *datasetLocationMismatchError
+	require.ErrorAs(t, err, &locationErr)
+	require.Equal(t, "EU", locationErr.datasetLocation)
+	require.Equal(t, "US", locationErr.jobLocation)
+}
+
+// The default-location check must not fire when the pre-existing staging dataset
+// already sits in the default US location (target absent, no location configured).
+func TestStagingDatasetInDefaultLocationPassesWhenTargetAbsent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/target-dataset"):
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found"},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/_bruin_staging"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{"projectId": "test-project", "datasetId": "_bruin_staging"},
+				"location":         "US",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{client: client, projectID: "test-project"}
+	require.NoError(t, dest.resolveLocation(t.Context(), "target-dataset.events"))
+	require.NoError(t, dest.ensureDatasetExists(t.Context(), "test-project", "_bruin_staging"))
+}
+
 func TestEnsureDatasetExistsValidatesConcurrentCreateWinnerLocation(t *testing.T) {
 	var metadataCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
