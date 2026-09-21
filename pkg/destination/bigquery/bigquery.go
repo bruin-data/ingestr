@@ -99,6 +99,11 @@ type BigQueryDestination struct {
 	nextCDCStatePrune   time.Time
 	datasetCaseMu       sync.Mutex
 	datasetCase         map[string]bigQueryDatasetCase
+
+	// Target dataset's location, resolved once when the URI configures none.
+	resolvedLocationMu   sync.Mutex
+	resolvedLocation     string
+	resolvedLocationDone bool
 }
 
 type bigQueryDatasetCase struct {
@@ -296,8 +301,8 @@ func (d *BigQueryDestination) ensureDatasetExists(ctx context.Context, project, 
 	config.Debug("[DEST] Creating dataset: %s", datasetKey)
 
 	metadata = &bigquery.DatasetMetadata{}
-	if d.location != "" {
-		metadata.Location = d.location
+	if loc := d.effectiveLocation(); loc != "" {
+		metadata.Location = loc
 	} else {
 		metadata.Location = "US" // Default location
 	}
@@ -354,6 +359,50 @@ func (d *BigQueryDestination) validateDatasetLocation(project, dataset, location
 		datasetLocation: location,
 		jobLocation:     d.location,
 	}
+}
+
+// effectiveLocation is the configured location, or the one resolved from the
+// target table's dataset when none was configured.
+func (d *BigQueryDestination) effectiveLocation() string {
+	if d.location != "" {
+		return d.location
+	}
+	d.resolvedLocationMu.Lock()
+	defer d.resolvedLocationMu.Unlock()
+	return d.resolvedLocation
+}
+
+// resolveLocation caches the target dataset's location once. A real (non-404)
+// metadata error is returned rather than defaulting staging to the wrong region.
+func (d *BigQueryDestination) resolveLocation(ctx context.Context, targetTable string) error {
+	if d.location != "" || targetTable == "" {
+		return nil
+	}
+	d.resolvedLocationMu.Lock()
+	done := d.resolvedLocationDone
+	d.resolvedLocationMu.Unlock()
+	if done {
+		return nil
+	}
+
+	location := ""
+	if project, dataset, _, _, err := d.resolveTable(targetTable); err == nil && dataset != "" {
+		meta, err := d.client.DatasetInProject(project, dataset).Metadata(ctx)
+		switch {
+		case err == nil:
+			location = meta.Location
+		case !isNotFoundError(err):
+			return fmt.Errorf("failed to resolve target dataset location for %s: %w", targetTable, err)
+		}
+	}
+
+	d.resolvedLocationMu.Lock()
+	if !d.resolvedLocationDone {
+		d.resolvedLocation = location
+		d.resolvedLocationDone = true
+	}
+	d.resolvedLocationMu.Unlock()
+	return nil
 }
 
 func (d *BigQueryDestination) cacheDatasetCase(key string, caseInsensitive, provisional bool) {
@@ -539,7 +588,7 @@ func (d *BigQueryDestination) reconcileAmbiguousBigQueryJob(ctx context.Context,
 	deadline := time.Now().Add(bigQueryAmbiguousJobWindow)
 	for {
 		callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		job, err := d.client.JobFromProject(callCtx, d.projectID, jobID, d.location)
+		job, err := d.client.JobFromProject(callCtx, d.projectID, jobID, d.effectiveLocation())
 		cancel()
 		if err == nil {
 			status, terminalErr := reconcileCanceledBigQueryJob(ctx, job)
@@ -826,6 +875,14 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		return err
 	}
 
+	resolveTarget := opts.TargetTable
+	if resolveTarget == "" {
+		resolveTarget = opts.Table
+	}
+	if err := d.resolveLocation(ctx, resolveTarget); err != nil {
+		return err
+	}
+
 	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
 		return fmt.Errorf("failed to ensure dataset exists: %w", err)
 	}
@@ -853,7 +910,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 			tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 		}
 		tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
-		metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.location, opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
+		metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.effectiveLocation(), opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
 		errCh := make(chan error, 1)
 		d.setPendingTableErr(tableKey, errCh)
 		go func() {
@@ -917,7 +974,7 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 	}
 	tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
-	metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.location, opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
+	metadata := BuildTableMetadata(tableSchema, opts.PrimaryKeys, d.effectiveLocation(), opts.PartitionBy, opts.ClusterBy, opts.ExpiresAfter)
 
 	config.Debug("[DEST] Creating table: %s", opts.Table)
 	if err := tableRef.Create(ctx, metadata); err != nil {
@@ -1752,8 +1809,8 @@ func (d *BigQueryDestination) startQueryJobWithRetry(ctx context.Context, sql st
 		query.JobID = jobID
 		query.ProjectID = d.projectID
 		query.Parameters = parameters
-		if d.location != "" {
-			query.Location = d.location
+		if loc := d.effectiveLocation(); loc != "" {
+			query.Location = loc
 		}
 		job, err := query.Run(ctx)
 		if err == nil {
@@ -1795,7 +1852,7 @@ func (d *BigQueryDestination) startQueryJobWithRetry(ctx context.Context, sql st
 }
 
 func (d *BigQueryDestination) recoverDuplicateQueryJob(ctx context.Context, jobID, sql string) (*bigquery.Job, error) {
-	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.location)
+	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.effectiveLocation())
 	if err != nil {
 		return nil, err
 	}
@@ -3001,8 +3058,8 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	ctx = annotation.WithStep(ctx, annotation.StepCDCResume)
 	sql := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	query := d.client.Query(annotation.Prepend(ctx, sql))
-	if d.location != "" {
-		query.Location = d.location
+	if loc := d.effectiveLocation(); loc != "" {
+		query.Location = loc
 	}
 
 	it, err := query.Read(ctx)
@@ -3409,7 +3466,7 @@ func (d *BigQueryDestination) loadCDCJobMarkers(ctx context.Context, table, conn
 	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	query := d.client.Query(fmt.Sprintf("SELECT `state_status`, `_cdc_lsn`, `recorded_at` FROM %s WHERE `connector_id` = @connector_id AND `state_kind` = 'job'", quotedTable))
 	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
-	query.Location = d.location
+	query.Location = d.effectiveLocation()
 	it, err := query.Read(ctx)
 	if err != nil {
 		if isNotFoundError(err) {
@@ -3457,7 +3514,7 @@ func (d *BigQueryDestination) deleteCDCJobMarkersUntracked(ctx context.Context, 
 	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	query := d.client.Query(fmt.Sprintf("DELETE FROM %s WHERE `connector_id` = @connector_id AND `event_id` IN UNNEST(@event_ids)", quotedTable))
 	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}, {Name: "event_ids", Value: eventIDs}}
-	query.Location = d.location
+	query.Location = d.effectiveLocation()
 	job, err := query.Run(ctx)
 	if err != nil {
 		return err
@@ -3486,8 +3543,8 @@ func (d *BigQueryDestination) LoadCDCState(ctx context.Context, table, connector
 		quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	query := d.client.Query(annotation.Prepend(ctx, sql))
 	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
-	if d.location != "" {
-		query.Location = d.location
+	if loc := d.effectiveLocation(); loc != "" {
+		query.Location = loc
 	}
 	it, err := query.Read(ctx)
 	if err != nil {
@@ -3567,8 +3624,8 @@ func (d *BigQueryDestination) EnsureCDCStatePositionColumn(ctx context.Context, 
 	quotedTable := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
 	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN `_cdc_lsn` SET DATA TYPE STRING", quotedTable)
 	query := d.client.Query(sql)
-	if d.location != "" {
-		query.Location = d.location
+	if loc := d.effectiveLocation(); loc != "" {
+		query.Location = loc
 	}
 	job, err := query.Run(ctx)
 	if err != nil {
@@ -3601,8 +3658,8 @@ func (d *BigQueryDestination) LoadCDCStateFence(ctx context.Context, table, conn
 	sql := buildCDCStateFenceQuery(quotedTable)
 	query := d.client.Query(annotation.Prepend(ctx, sql))
 	query.Parameters = []bigquery.QueryParameter{{Name: "connector_id", Value: connectorID}}
-	if d.location != "" {
-		query.Location = d.location
+	if loc := d.effectiveLocation(); loc != "" {
+		query.Location = loc
 	}
 	it, err := query.Read(ctx)
 	if err != nil {
@@ -3667,7 +3724,7 @@ func (d *BigQueryDestination) DeleteCDCStateEvents(ctx context.Context, table, c
 	}
 	ageQuery := d.client.Query(fmt.Sprintf("SELECT COUNTIF(`recorded_at` > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 45 MINUTE)) FROM %s WHERE `connector_id` = @connector_id AND `event_id` IN UNNEST(@event_ids)", quotedTable))
 	ageQuery.Parameters = parameters
-	ageQuery.Location = d.location
+	ageQuery.Location = d.effectiveLocation()
 	it, err := ageQuery.Read(ctx)
 	if err != nil {
 		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)
@@ -3691,7 +3748,7 @@ func (d *BigQueryDestination) DeleteCDCStateEvents(ctx context.Context, table, c
 	}
 	deleteQuery := d.client.Query(annotation.Prepend(ctx, fmt.Sprintf("DELETE FROM %s WHERE `connector_id` = @connector_id AND `event_id` IN UNNEST(@event_ids)", quotedTable)))
 	deleteQuery.Parameters = parameters
-	deleteQuery.Location = d.location
+	deleteQuery.Location = d.effectiveLocation()
 	job, err := deleteQuery.Run(ctx)
 	if err != nil {
 		d.nextCDCStatePrune = time.Now().Add(bigQueryCDCStateRetryDelay)

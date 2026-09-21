@@ -428,8 +428,8 @@ func (d *BigQueryDestination) startCopyJobWithRetry(ctx context.Context, copier 
 	for attempt := 1; ; attempt++ {
 		copier.JobID = jobID
 		copier.ProjectID = d.projectID
-		if d.location != "" {
-			copier.Location = d.location
+		if loc := d.effectiveLocation(); loc != "" {
+			copier.Location = loc
 		}
 		job, err := copier.Run(ctx)
 		if err == nil {
@@ -465,7 +465,7 @@ func (d *BigQueryDestination) startCopyJobWithRetry(ctx context.Context, copier 
 }
 
 func (d *BigQueryDestination) recoverDuplicateCopyJob(ctx context.Context, jobID string, sourceRef, targetRef *gcbq.Table) (*gcbq.Job, error) {
-	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.location)
+	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.effectiveLocation())
 	if err != nil {
 		return nil, err
 	}
@@ -858,8 +858,8 @@ func (d *BigQueryDestination) startLoadJobWithRetry(ctx context.Context, jobID s
 		}
 		loader.JobID = jobID
 		loader.ProjectID = d.projectID
-		if d.location != "" {
-			loader.Location = d.location
+		if loc := d.effectiveLocation(); loc != "" {
+			loader.Location = loc
 		}
 		job, err := loader.Run(ctx)
 		cleanup()
@@ -896,7 +896,7 @@ func (d *BigQueryDestination) startLoadJobWithRetry(ctx context.Context, jobID s
 }
 
 func (d *BigQueryDestination) recoverDuplicateLoadJob(ctx context.Context, jobID string, tableRef *gcbq.Table) (*gcbq.Job, error) {
-	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.location)
+	job, err := d.client.JobFromProject(ctx, d.projectID, jobID, d.effectiveLocation())
 	if err != nil {
 		return nil, err
 	}
