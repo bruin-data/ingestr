@@ -473,4 +473,6 @@ func init() {
 	Register(&MergeStrategy{})
 	Register(&DeleteInsertStrategy{})
 	Register(&SCD2Strategy{})
+	Register(&UpdateStrategy{})
+	Register(&DeleteStrategy{})
 }

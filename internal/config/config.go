@@ -27,6 +27,24 @@ const (
 	StrategyMerge        IncrementalStrategy = "merge"
 	StrategySCD2         IncrementalStrategy = "scd2"
 	StrategyNone         IncrementalStrategy = "none"
+	// Reverse-ETL-only strategies. Gated to destinations that implement
+	// destination.ReverseETLDestination.
+	StrategyUpdate IncrementalStrategy = "update"
+	StrategyDelete IncrementalStrategy = "delete"
+)
+
+// RejectMode governs how a reverse-ETL write handles a row that cannot be
+// applied (not found, or rejected by the API). Writes are not transactional,
+// so valid rows already sent stay written in every mode.
+type RejectMode string
+
+const (
+	// RejectFailFast stops at the first bad row; rows already sent stay written.
+	RejectFailFast RejectMode = "fail_fast"
+	// RejectFail sends everything (valid rows land), then fails with the reject list.
+	RejectFail RejectMode = "fail"
+	// RejectSkip sends everything, succeeds, and reports the rejects at the end.
+	RejectSkip RejectMode = "skip"
 )
 
 type ProgressMode string
@@ -66,9 +84,22 @@ type IngestConfig struct {
 	IncrementalStrategy         IncrementalStrategy
 	IncrementalStrategyExplicit bool
 	IncrementalKey              string
-	IncrementalPredicate        string
-	IntervalStart               *time.Time
-	IntervalEnd                 *time.Time
+
+	// RejectMode and WriteNulls apply only to reverse-ETL destinations.
+	RejectMode RejectMode // fail_fast | fail | skip (default fail)
+	// WriteNulls writes source NULLs through to clear the field. Default (unset) is
+	// clear for reverse-ETL destinations; --write-nulls=false opts into omitting.
+	WriteNulls bool
+	// WriteNullsSet reports whether --write-nulls was passed explicitly, so the
+	// clear-by-default can be applied only when the user left it unset.
+	WriteNullsSet bool
+	// ReverseETLDestination is set by the pipeline (not a flag) when the
+	// destination is reverse-ETL, so strategy validation can relax rules the API
+	// path handles itself (e.g. merge matching on id_property without a PK).
+	ReverseETLDestination bool
+	IncrementalPredicate  string
+	IntervalStart         *time.Time
+	IntervalEnd           *time.Time
 
 	PrimaryKeys []string
 

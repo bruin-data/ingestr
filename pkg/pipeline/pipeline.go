@@ -172,6 +172,13 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}()
 
+	if err := validateReverseETLColumnOverrides(dest, p.config.Columns); err != nil {
+		return err
+	}
+	if err := validateReverseETLFlags(dest, p.config); err != nil {
+		return err
+	}
+
 	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
 	managedMySQLCDC := isMySQLCDCSource(p.config.SourceURI)
 	// SQL Server CDC joins destination-managed state only when the
@@ -565,12 +572,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	// Ensure table-level keys are on the schema before naming convention runs
-	// Resolve PKs: user always wins, then table, then schema
-	if len(p.config.PrimaryKeys) > 0 {
-		tableSchema.PrimaryKeys = p.config.PrimaryKeys
-	} else if len(tableSchema.PrimaryKeys) == 0 {
-		tableSchema.PrimaryKeys = table.PrimaryKeys()
-	}
+	// Resolve PKs: user always wins, then table, then schema.
+	tableSchema.PrimaryKeys = resolveTablePrimaryKeys(
+		p.config.PrimaryKeys, tableSchema.PrimaryKeys, table.PrimaryKeys(), destination.IsReverseETL(p.dest))
 
 	tableSchema.PrimaryKeys = p.filterDroppedPKs(tableSchema.PrimaryKeys)
 
@@ -642,6 +646,18 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	// For inferred schemas this was already done during inference (for data casting),
 	// but destSchema may be a fresh copy from setupIngestrColumns that lacks overrides.
 	if p.config.Columns != "" {
+		// On a reverse-ETL destination a --columns override can't create a target
+		// property (unlike SQL, where the dest column is created); if its source
+		// side is absent it would silently no-op, so reject it up front.
+		if destination.IsReverseETL(p.dest) {
+			// The inference path renames columns before this point, so a rename
+			// override is matched on its RenameTo side there; known-schema and
+			// --no-inference schemas still carry source names (strict match).
+			schemaRenamed := !table.HasKnownSchema() && !p.config.NoInference
+			if err := validateReverseETLOverrideColumns(p.config.Columns, tableSchema, p.config.SchemaNaming, schemaRenamed); err != nil {
+				return err
+			}
+		}
 		if destSchema == tableSchema {
 			copied := *tableSchema
 			copied.Columns = make([]schema.Column, len(tableSchema.Columns))
@@ -743,6 +759,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.IncrementalKey = tableSchema.IncrementalKey
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
 	resolvedConfig.RunID = runID
+	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
+	// Reverse-ETL clears NULLs by default; only an explicit --write-nulls=false omits.
+	if resolvedConfig.ReverseETLDestination && !resolvedConfig.WriteNullsSet {
+		resolvedConfig.WriteNulls = true
+	}
 
 	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
 
@@ -3012,6 +3033,110 @@ func isManagedChangeSource(uri string) bool {
 	}
 	scheme := strings.ToLower(uri[:schemeEnd])
 	return strings.Contains(scheme, "+cdc") || strings.Contains(scheme, "+ct")
+}
+
+// validateReverseETLFlags gates the reverse-ETL-only run flags. On a SQL
+// destination --reject-mode / --write-nulls are meaningless, so they fail fast
+// instead of being silently ignored. On a reverse-ETL destination the
+// --reject-mode value is validated for every strategy.
+func validateReverseETLFlags(dest destination.Destination, cfg *config.IngestConfig) error {
+	if !destination.IsReverseETL(dest) {
+		if cfg.RejectMode != "" {
+			return &config.ValidationError{Field: "reject-mode", Message: fmt.Sprintf("--reject-mode is only valid for reverse-ETL destinations, not %s", dest.GetScheme())}
+		}
+		if cfg.WriteNullsSet {
+			return &config.ValidationError{Field: "write-nulls", Message: fmt.Sprintf("--write-nulls is only valid for reverse-ETL destinations, not %s", dest.GetScheme())}
+		}
+		return nil
+	}
+	// A destination whose default strategy would be destructive (HubSpot's
+	// framework-default "replace" mirrors the object, archiving records not in the
+	// source) must not inherit that default silently. Destinations with a safe
+	// default (most reverse-ETL targets) are unaffected.
+	if destination.RequiresExplicitStrategy(dest) && !cfg.IncrementalStrategyExplicit {
+		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%s has no default write strategy; pass --incremental-strategy explicitly (merge, append, update, delete, or replace — note replace mirrors and archives records not in the source)", dest.GetScheme())}
+	}
+	switch cfg.RejectMode {
+	case "", config.RejectFailFast, config.RejectFail, config.RejectSkip:
+		return nil
+	default:
+		return &config.ValidationError{Field: "reject-mode", Message: fmt.Sprintf("invalid --reject-mode %q: use fail_fast, fail, or skip", cfg.RejectMode)}
+	}
+}
+
+// validateReverseETLColumnOverrides enforces that --columns is rename-only on a
+// reverse-ETL destination (the API owns types); a typed override is rejected up front.
+func validateReverseETLColumnOverrides(dest destination.Destination, columnsSpec string) error {
+	if columnsSpec == "" || !destination.IsReverseETL(dest) {
+		return nil
+	}
+	overrides, err := schemaevolution.ParseColumnOverrides(columnsSpec)
+	if err != nil {
+		return err
+	}
+	var typed []string
+	for _, o := range overrides {
+		if o.DataType != schema.TypeUnknown {
+			typed = append(typed, o.Name)
+		}
+	}
+	if len(typed) == 0 {
+		return nil
+	}
+	sort.Strings(typed)
+	return &config.ValidationError{
+		Field:   "columns",
+		Message: fmt.Sprintf("reverse-ETL destinations own their property types, so --columns is rename-only here; drop the type from: %s (use 'dest::source')", strings.Join(typed, ", ")),
+	}
+}
+
+// resolveTablePrimaryKeys picks the effective primary keys: an explicit
+// --primary-key always wins; otherwise a reverse-ETL destination takes none (its
+// match column comes only from --primary-key, so a source-detected PK must not
+// leak in and override the strategy default like hs_object_id); otherwise a
+// table-level PK is kept, falling back to the source-detected one.
+func resolveTablePrimaryKeys(explicit, existing, sourceDetected []string, isReverseETL bool) []string {
+	if len(explicit) > 0 {
+		return explicit
+	}
+	if isReverseETL {
+		return nil
+	}
+	if len(existing) == 0 {
+		return sourceDetected
+	}
+	return existing
+}
+
+// validateReverseETLOverrideColumns rejects a --columns override whose source
+// column is absent from the source schema. On SQL destinations such an override
+// creates the target column; on a reverse-ETL destination it can't (the API owns
+// the properties), so it would silently no-op — a confusing footgun.
+//
+// schemaRenamed reports that the schema was built by the inference path, which
+// applies renames before this runs; the column then carries the RenameTo name, so
+// a valid rename is matched on that side instead of the (now-gone) source name.
+func validateReverseETLOverrideColumns(columnsSpec string, sourceSchema *schema.TableSchema, schemaNaming string, schemaRenamed bool) error {
+	if columnsSpec == "" || sourceSchema == nil {
+		return nil
+	}
+	overrides, err := schemaevolution.ParseColumnOverrides(columnsSpec)
+	if err != nil {
+		return err
+	}
+	names := make([]string, len(sourceSchema.Columns))
+	for i, c := range sourceSchema.Columns {
+		names[i] = c.Name
+	}
+	unmatched := overrides.UnmatchedColumns(names, schemaNaming, schemaRenamed)
+	if len(unmatched) == 0 {
+		return nil
+	}
+	sort.Strings(unmatched)
+	return &config.ValidationError{
+		Field:   "columns",
+		Message: fmt.Sprintf("--columns names source column(s) not in the source [%s]; on a reverse-ETL destination the source column must exist (use 'dest_property::source_column', available source columns: %s)", strings.Join(unmatched, ", "), strings.Join(names, ", ")),
+	}
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {

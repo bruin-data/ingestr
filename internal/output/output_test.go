@@ -75,6 +75,33 @@ func TestTextModeVerbatim(t *testing.T) {
 	assert.Empty(t, errb.String())
 }
 
+func TestDeferfHeldUntilFlushText(t *testing.T) {
+	var out, errb bytes.Buffer
+	Init(&out, &errb, ModeText)
+
+	Deferf("Warning: skipped 2 rows\n")
+	Warnf("live warning\n")
+	assert.Equal(t, "live warning\n", out.String(), "deferred warning must not print before flush")
+
+	FlushDeferred()
+	assert.Equal(t, "live warning\nWarning: skipped 2 rows\n", out.String(), "flush appends deferred warnings after live output")
+
+	// Buffer is cleared: a second flush prints nothing more.
+	FlushDeferred()
+	assert.Equal(t, "live warning\nWarning: skipped 2 rows\n", out.String())
+}
+
+func TestDeferfImmediateInJSON(t *testing.T) {
+	out, _ := initJSON(t)
+	Deferf("skipped 2 rows\n")
+	recs := parseLines(t, out)
+	require.Len(t, recs, 1, "JSON mode emits deferred warnings immediately")
+	assert.Equal(t, "WARN", recs[0]["level"])
+
+	FlushDeferred() // no-op in JSON mode
+	assert.Len(t, parseLines(t, out), 1)
+}
+
 func TestWriteDebugRouting(t *testing.T) {
 	// JSON mode: debug goes to stderr so stdout stays pure JSON.
 	out, errb := initJSON(t)
