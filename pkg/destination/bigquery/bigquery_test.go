@@ -2159,9 +2159,47 @@ func TestStagingDatasetInheritsTargetLocationWhenUnset(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	dest := &BigQueryDestination{client: client, projectID: "test-project"}
-	dest.resolveLocation(t.Context(), "target-dataset.events")
+	require.NoError(t, dest.resolveLocation(t.Context(), "target-dataset.events"))
 	require.NoError(t, dest.ensureDatasetExists(t.Context(), "test-project", "_bruin_staging"))
 	require.Equal(t, "EU", createdLocation.Load())
+}
+
+// A real (non-404) error resolving the target dataset's location must fail
+// rather than silently defaulting staging to US; a 404 target resolves to empty.
+func TestResolveLocationErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{name: "permission denied", status: http.StatusForbidden, wantErr: true},
+		{name: "missing target dataset", status: http.StatusNotFound, wantErr: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": tc.status, "message": "error"},
+				})
+			}))
+			defer server.Close()
+
+			client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			dest := &BigQueryDestination{client: client, projectID: "test-project"}
+			err = dest.resolveLocation(t.Context(), "target-dataset.events")
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestEnsureDatasetExistsValidatesConcurrentCreateWinnerLocation(t *testing.T) {

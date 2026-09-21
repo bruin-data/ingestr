@@ -374,33 +374,29 @@ func (d *BigQueryDestination) effectiveLocation() string {
 }
 
 // resolveLocation caches the target table's dataset location once, so a run
-// without a configured location places staging datasets and jobs there.
-func (d *BigQueryDestination) resolveLocation(ctx context.Context, targetTable string) {
+// without a configured location places staging datasets and jobs there. A real
+// metadata error (not a missing dataset) is returned rather than silently
+// defaulting staging to US, which would strand it in the wrong location.
+func (d *BigQueryDestination) resolveLocation(ctx context.Context, targetTable string) error {
 	if d.location != "" || targetTable == "" {
-		return
+		return nil
 	}
 	d.resolvedLocationMu.Lock()
 	done := d.resolvedLocationDone
 	d.resolvedLocationMu.Unlock()
 	if done {
-		return
+		return nil
 	}
 
 	location := ""
-	resolved := true
 	if project, dataset, _, _, err := d.resolveTable(targetTable); err == nil && dataset != "" {
 		meta, err := d.client.DatasetInProject(project, dataset).Metadata(ctx)
 		switch {
 		case err == nil:
 			location = meta.Location
 		case !isNotFoundError(err):
-			// Transient error: leave unresolved so a later call retries rather
-			// than permanently defaulting to US.
-			resolved = false
+			return fmt.Errorf("failed to resolve target dataset location for %s: %w", targetTable, err)
 		}
-	}
-	if !resolved {
-		return
 	}
 
 	d.resolvedLocationMu.Lock()
@@ -409,6 +405,7 @@ func (d *BigQueryDestination) resolveLocation(ctx context.Context, targetTable s
 		d.resolvedLocationDone = true
 	}
 	d.resolvedLocationMu.Unlock()
+	return nil
 }
 
 func (d *BigQueryDestination) cacheDatasetCase(key string, caseInsensitive, provisional bool) {
@@ -885,7 +882,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	if resolveTarget == "" {
 		resolveTarget = opts.Table
 	}
-	d.resolveLocation(ctx, resolveTarget)
+	if err := d.resolveLocation(ctx, resolveTarget); err != nil {
+		return err
+	}
 
 	if err := d.ensureDatasetExists(ctx, project, dataset); err != nil {
 		return fmt.Errorf("failed to ensure dataset exists: %w", err)
