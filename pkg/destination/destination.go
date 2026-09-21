@@ -17,6 +17,7 @@ const ManagedStagingTTL = 24 * time.Hour
 
 type PrepareOptions struct {
 	Table                  string
+	TargetTable            string // Final destination table when Table is a staging table; used to resolve the target's location.
 	Schema                 *schema.TableSchema
 	DropFirst              bool
 	PrimaryKeys            []string

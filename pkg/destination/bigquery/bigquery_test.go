@@ -2126,6 +2126,44 @@ func TestPrepareTableRejectsDatasetLocationMismatchBeforeTableWork(t *testing.T)
 	}
 }
 
+// When no location is configured, the staging dataset must be created in the
+// same location as the target table's dataset (not the hardcoded "US" default).
+func TestStagingDatasetInheritsTargetLocationWhenUnset(t *testing.T) {
+	var createdLocation atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/target-dataset"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"datasetReference": map[string]string{"projectId": "test-project", "datasetId": "target-dataset"},
+				"location":         "EU",
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/_bruin_staging"):
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": http.StatusNotFound, "message": "Not found"},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets"):
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdLocation.Store(body["location"])
+			_ = json.NewEncoder(w).Encode(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	dest := &BigQueryDestination{client: client, projectID: "test-project"}
+	dest.resolveLocation(t.Context(), "target-dataset.events")
+	require.NoError(t, dest.ensureDatasetExists(t.Context(), "test-project", "_bruin_staging"))
+	require.Equal(t, "EU", createdLocation.Load())
+}
+
 func TestEnsureDatasetExistsValidatesConcurrentCreateWinnerLocation(t *testing.T) {
 	var metadataCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

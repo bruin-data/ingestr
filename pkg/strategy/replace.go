@@ -176,6 +176,7 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        normalised,
+		TargetTable:  targetTable,
 		Schema:       tableSchema,
 		DropFirst:    true,
 		PrimaryKeys:  primaryKeys,
@@ -317,6 +318,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 
 	prepareOpts := destination.PrepareOptions{
 		Table:               writeTable,
+		TargetTable:         targetTable,
 		Schema:              job.Schema,
 		DropFirst:           true,
 		PrimaryKeys:         stagingPrimaryKeys,
@@ -507,7 +509,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			}
 
 			dedup := directDedup && replaceShouldDedup(job.Destination, ti.PrimaryKeys)
-			prepareOpts := destination.PrepareOptions{Table: writeTable, Schema: ti.Schema, DropFirst: true}
+			prepareOpts := destination.PrepareOptions{Table: writeTable, TargetTable: destTable, Schema: ti.Schema, DropFirst: true}
 			if dedup {
 				prepareOpts.PrimaryKeys = ti.PrimaryKeys
 			}
