@@ -766,11 +766,15 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 		return err
 	}
 
+	// HubSpot caps effective write concurrency at defaultParallelism to respect API
+	// rate limits. opts.Parallelism carries the framework default (extract
+	// parallelism) when the user set no --destination-parallelism, so capping it is
+	// routine and logged at debug level rather than warned about on every run.
 	parallelism := opts.Parallelism
-	if parallelism > defaultParallelism {
-		output.Warnf("Warning: hubspot caps --destination-parallelism at %d to respect API rate limits; ignoring the requested %d\n", defaultParallelism, parallelism)
-	}
 	if parallelism <= 0 || parallelism > defaultParallelism {
+		if parallelism > defaultParallelism {
+			config.Debug("[HUBSPOT DEST] capping write parallelism from %d to %d for API rate limits", parallelism, defaultParallelism)
+		}
 		parallelism = defaultParallelism
 	}
 
