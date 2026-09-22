@@ -2071,6 +2071,45 @@ func TestMergeByRecordIDRejectedAtParse(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestAnnotateIdentifies names which record each rejection belongs to across the
+// three mappings: one-per-item, single-item (bisected) chunk, and a partial-batch
+// (207) where only the error context's ids reveal the offender.
+func TestAnnotateIdentifies(t *testing.T) {
+	t.Run("record one-per-item", func(t *testing.T) {
+		items := []batchInput{{ID: "1", IDProperty: "email"}, {ID: "2", IDProperty: "email"}}
+		rejs := annotate([]rejection{{message: "a"}, {message: "b"}}, items)
+		assert.Equal(t, "email=1", rejs[0].identifier)
+		assert.Equal(t, "email=2", rejs[1].identifier)
+	})
+
+	t.Run("record single bisected chunk", func(t *testing.T) {
+		items := []batchInput{{ID: "999", IDProperty: "email"}}
+		rejs := annotate([]rejection{{message: "bad"}}, items)
+		assert.Equal(t, "email=999", rejs[0].identifier)
+	})
+
+	t.Run("record partial 207 mapped by context ids", func(t *testing.T) {
+		items := []batchInput{{ID: "1"}, {ID: "2"}, {ID: "999"}}
+		rejs := annotate([]rejection{{message: "not found", context: json.RawMessage(`{"ids":["999"]}`)}}, items)
+		assert.Equal(t, "id=999", rejs[0].identifier, "the one rejection names the missing record, not a blank tag")
+	})
+
+	t.Run("association single bisected chunk", func(t *testing.T) {
+		items := []associationInput{{From: associationRef{ID: "111"}, To: associationRef{ID: "888"}}}
+		rejs := annotateAssociations([]rejection{{message: "bad link"}}, items)
+		assert.Equal(t, "111->888", rejs[0].identifier)
+	})
+
+	t.Run("association partial 207 mapped by context ids", func(t *testing.T) {
+		items := []associationInput{
+			{From: associationRef{ID: "111"}, To: associationRef{ID: "888"}},
+			{From: associationRef{ID: "111"}, To: associationRef{ID: "999"}},
+		}
+		rejs := annotateAssociations([]rejection{{message: "missing", context: json.RawMessage(`{"ids":["999"]}`)}}, items)
+		assert.Equal(t, "111->999", rejs[0].identifier)
+	})
+}
+
 // TestUpdateByRecordIDMissingIsReject: update on hs_object_id updates the ids that
 // exist and rejects the ones that don't — HubSpot can't create a record at a
 // caller-supplied id, so a missing id is a not-found reject, never a create.

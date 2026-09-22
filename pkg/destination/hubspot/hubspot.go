@@ -1075,7 +1075,7 @@ func (d *HubSpotDestination) finalizeAssociationMirror(ctx context.Context, sh *
 					return false
 				}
 				output.Warnf("Warning: hubspot rejected %d %s->%s unlink(s) during mirror; first error: %s\n", len(res.rejections), sh.objectType, sh.associateTo, res.rejections[0].message)
-				rejects.add(res.rejections)
+				rejects.add(annotateAssociations(res.rejections, stale[start:end]))
 			}
 		}
 		return true
@@ -2313,7 +2313,7 @@ func (d *HubSpotDestination) sendAssociations(ctx context.Context, sh *shaper, i
 	}
 
 	output.Warnf("Warning: hubspot rejected %d of %d %s association(s) in this batch; first error: %s\n", len(res.rejections), len(items), pair, res.rejections[0].message)
-	rejects.add(res.rejections)
+	rejects.add(annotateAssociations(res.rejections, items))
 	return nil
 }
 
@@ -2366,9 +2366,31 @@ func (in batchInput) key() string {
 	return prop + "=" + in.ID
 }
 
-// annotate attaches the offending record's key to each rejection when the
-// mapping is unambiguous: one rejection per item, or a single-item (bisected)
-// chunk where every rejection belongs to that one record.
+// key names an association link for a reject line, e.g. "111->888".
+func (in associationInput) key() string {
+	return in.From.ID + "->" + in.To.ID
+}
+
+// rejectionContextIDs pulls the record ids HubSpot names in a batch error's
+// context (e.g. {"ids":["999"]} on OBJECT_NOT_FOUND), used to map a partial-batch
+// (207) rejection back to the offending input.
+func rejectionContextIDs(ctx json.RawMessage) []string {
+	if len(ctx) == 0 {
+		return nil
+	}
+	var c struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.Unmarshal(ctx, &c); err != nil {
+		return nil
+	}
+	return c.IDs
+}
+
+// annotate attaches the offending record's key to each rejection. When the
+// mapping is unambiguous it uses position (one rejection per item, or a
+// single-item bisected chunk); otherwise — a partial-batch 207 — it maps each
+// rejection to the input whose id HubSpot named in the error context.
 func annotate(rejs []rejection, items []batchInput) []rejection {
 	switch {
 	case len(rejs) == len(items):
@@ -2378,6 +2400,54 @@ func annotate(rejs []rejection, items []batchInput) []rejection {
 	case len(items) == 1:
 		for i := range rejs {
 			rejs[i].identifier = items[0].key()
+		}
+	default:
+		byID := make(map[string]string, len(items))
+		for _, it := range items {
+			if it.ID != "" {
+				byID[it.ID] = it.key()
+			}
+		}
+		for i := range rejs {
+			for _, id := range rejectionContextIDs(rejs[i].context) {
+				if k, ok := byID[id]; ok {
+					rejs[i].identifier = k
+					break
+				}
+			}
+		}
+	}
+	return rejs
+}
+
+// annotateAssociations is annotate for association links: position when
+// unambiguous, else map by the From/To ids HubSpot names in the error context.
+func annotateAssociations(rejs []rejection, items []associationInput) []rejection {
+	switch {
+	case len(rejs) == len(items):
+		for i := range rejs {
+			rejs[i].identifier = items[i].key()
+		}
+	case len(items) == 1:
+		for i := range rejs {
+			rejs[i].identifier = items[0].key()
+		}
+	default:
+		for i := range rejs {
+			ids := rejectionContextIDs(rejs[i].context)
+			if len(ids) == 0 {
+				continue
+			}
+			named := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				named[id] = true
+			}
+			for _, it := range items {
+				if named[it.From.ID] || named[it.To.ID] {
+					rejs[i].identifier = it.key()
+					break
+				}
+			}
 		}
 	}
 	return rejs
