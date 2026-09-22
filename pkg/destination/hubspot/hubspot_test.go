@@ -340,9 +340,7 @@ func TestBatchReadByPropertyMisconfig404IsHardError(t *testing.T) {
 	assert.Contains(t, err.Error(), "404")
 }
 
-// TestBatchReadByProperty404MatchesCategoryNotBody: OBJECT_NOT_FOUND appearing in
-// a non-category field (here the message) must NOT be read as "none found" — only
-// the structured `category` counts, so a stray mention can't mask a real 404.
+// OBJECT_NOT_FOUND only in a non-category field must not be read as "none found".
 func TestBatchReadByProperty404MatchesCategoryNotBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

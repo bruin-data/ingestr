@@ -1756,12 +1756,9 @@ func (d *HubSpotDestination) partitionExisting(ctx context.Context, objectType s
 	return existing, nil
 }
 
-// isRecordsAbsent404 reports whether a batch/read 404 body is HubSpot's
-// "requested records don't exist" response (category OBJECT_NOT_FOUND) rather than
-// a 404 from a misconfigured object type or endpoint. Only the former may be
-// treated as "none found"; the latter must surface as a hard error. The structured
-// `category` field is matched exactly — a substring scan of the raw body would
-// also fire if OBJECT_NOT_FOUND appeared in some other field (e.g. a context blob).
+// isRecordsAbsent404 reports whether a 404 is HubSpot's OBJECT_NOT_FOUND (records
+// don't exist), safe to treat as "none found". Matches the category field exactly
+// so an OBJECT_NOT_FOUND mention elsewhere in the body can't trigger it.
 func isRecordsAbsent404(bodyText string) bool {
 	var body struct {
 		Category string `json:"category"`

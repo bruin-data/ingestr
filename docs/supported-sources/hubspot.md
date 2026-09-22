@@ -329,7 +329,7 @@ ingestr ingest \
 > [!WARNING]
 > `replace` (mirror) archives **every** record of the object type that is not in your source — including records that have no value for the match property. It is a full object-wide mirror. Point it at a source that represents the **complete** desired state of that object, or you will archive records you meant to keep (including ones created via the UI or other integrations). Use `replace` only when the source is the sole system of record for that object.
 >
-> As a safety guard, a run whose source produces **0 rows** skips the archive sweep entirely and warns — a transient empty extract (an upstream hiccup, an over-restrictive filter) can't wipe the whole object. To intentionally remove records, use `delete`.
+> As a safety guard, a run whose source produces **0 rows** archives nothing — a transient empty extract (an upstream hiccup, an over-restrictive filter) can't wipe the whole object. To intentionally remove records, use `delete`.
 >
 > Prefer a match property whose stored value equals the source value. ingestr folds case and whitespace when comparing (so mixed-case `email` is safe), but if HubSpot **reformats** the value more aggressively (e.g. normalizing a phone number), the just-upserted record may not correlate on the mirror pass and could be archived. Mirror on a stable key like `email` or `hs_object_id`.
 
