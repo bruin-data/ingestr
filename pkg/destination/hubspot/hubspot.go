@@ -170,6 +170,10 @@ type shaper struct {
 	// records whose idProperty value was not in the source (seen; concurrency-safe).
 	mirror bool
 	seen   *sync.Map
+	// created holds the record ids this run inserted via create (keyless mirror
+	// rows have no match value to record in `seen`), so the finalize sweep does not
+	// archive a record the same run just wrote. Concurrency-safe.
+	created *sync.Map
 	// seenLinks (association mirror) maps a From record id to its source To ids,
 	// so finalize can remove links the source did not declare.
 	seenLinks *sync.Map
@@ -292,6 +296,7 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 	}
 	if mirror {
 		sh.seen = &sync.Map{}
+		sh.created = &sync.Map{}
 	}
 	return sh, nil
 }
@@ -643,13 +648,9 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 			// Update-only can't create; a row without a match value is skipped.
 			return batchInput{}, "", false
 		}
-		if s.mirror {
-			// A mirror reconciles by match value, and a keyless row can't be recorded
-			// in `seen`. Creating it would only get it archived in the same run's
-			// finalize pass (create+archive churn, orphan every run), so skip it.
-			return batchInput{}, "", false
-		}
 		// No match value: the row can't target an existing record, so create it.
+		// In a mirror the created record's id is tracked (writeBatch) so the
+		// finalize sweep does not archive what this run just wrote.
 		return in, "create", true
 	}
 
@@ -949,6 +950,13 @@ func (d *HubSpotDestination) listStaleIDs(ctx context.Context, sh *shaper) ([]st
 		}
 
 		for _, r := range parsed.Results {
+			// A record this run just created (e.g. a keyless source row that has no
+			// match value to appear in `seen`) must survive its own run's sweep.
+			if sh.created != nil {
+				if _, ok := sh.created.Load(r.ID); ok {
+					continue
+				}
+			}
 			key := r.Properties[sh.idProperty]
 			if sh.idProperty == recordIDProperty {
 				key = r.ID
@@ -1201,6 +1209,9 @@ type batchResult struct {
 	status     int
 	category   string
 	rejections []rejection
+	// createdIDs are the record ids HubSpot returned for the batch (create/upsert),
+	// used by a mirror to protect just-written records from its archive sweep.
+	createdIDs []string
 }
 
 // isRecordLevelStatus reports whether a failed status is a per-record data problem
@@ -1220,6 +1231,9 @@ func parseBatchResponse(resp *httpclient.Response) batchResult {
 			Message  string          `json:"message"`
 			Context  json.RawMessage `json:"context"`
 		} `json:"errors"`
+		Results []struct {
+			ID string `json:"id"`
+		} `json:"results"`
 	}
 	_ = json.Unmarshal(resp.Body(), &body)
 
@@ -1237,7 +1251,13 @@ func parseBatchResponse(resp *httpclient.Response) batchResult {
 		}
 		rejections = append(rejections, rejection{category: body.Category, message: msg})
 	}
-	return batchResult{ok: ok, status: status, category: body.Category, rejections: rejections}
+	var createdIDs []string
+	for _, r := range body.Results {
+		if r.ID != "" {
+			createdIDs = append(createdIDs, r.ID)
+		}
+	}
+	return batchResult{ok: ok, status: status, category: body.Category, rejections: rejections, createdIDs: createdIDs}
 }
 
 // objectNotFoundCategory is the error category HubSpot returns from batch update
@@ -1547,6 +1567,13 @@ func (d *HubSpotDestination) send(ctx context.Context, sh *shaper, items []batch
 	res, err := d.postBatch(ctx, sh, items, action)
 	if err != nil {
 		return err
+	}
+	// A mirror must not archive records it just created (keyless rows have no match
+	// value to record in `seen`), so remember the ids HubSpot assigned this run.
+	if sh.created != nil && action == "create" {
+		for _, id := range res.createdIDs {
+			sh.created.Store(id, struct{}{})
+		}
 	}
 	// A structural failure (e.g. upsert on a non-unique id_property) fails every
 	// row identically — abort instead of bisecting into per-record rejects that

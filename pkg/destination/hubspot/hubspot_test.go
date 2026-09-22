@@ -1061,17 +1061,23 @@ func TestMirrorKeylessRecords(t *testing.T) {
 	assert.ElementsMatch(t, []string{"2", "3"}, archived, "stale and keyless records are both archived")
 }
 
-// TestMirrorSkipsKeylessSourceRow: a source row whose match value is empty can't
-// be tracked in `seen`, so a mirror must skip it — not create a keyless record
-// that its own finalize pass would then archive (create+archive churn).
-func TestMirrorSkipsKeylessSourceRow(t *testing.T) {
+// TestMirrorKeepsKeylessRowItCreated: a mirror source row with an empty match
+// value is created, and its new record id is protected from the same run's
+// finalize sweep — it must not be archived just because its empty key can't
+// appear in `seen`. A genuinely stale record is still archived.
+func TestMirrorKeepsKeylessRowItCreated(t *testing.T) {
 	var mu sync.Mutex
-	var created, archived []string
+	var createCalls, archived []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/objects/contacts":
-			// Only the keyed source row (a@x.com -> id 1) should survive; nothing stale.
-			_, _ = io.WriteString(w, `{"results":[{"id":"1","properties":{"email":"a@x.com"}}]}`)
+			// id 1 keyed (kept via seen), id 42 the keyless record created this run
+			// (must survive), id 99 stale (archived).
+			_, _ = io.WriteString(w, `{"results":[
+				{"id":"1","properties":{"email":"a@x.com"}},
+				{"id":"42","properties":{"email":""}},
+				{"id":"99","properties":{"email":"stale@x.com"}}
+			]}`)
 		case r.URL.Path == "/crm/v3/objects/contacts/batch/create":
 			raw, _ := io.ReadAll(r.Body)
 			var body struct {
@@ -1079,10 +1085,10 @@ func TestMirrorSkipsKeylessSourceRow(t *testing.T) {
 			}
 			_ = json.Unmarshal(raw, &body)
 			mu.Lock()
-			created = append(created, fmt.Sprintf("%d", len(body.Inputs)))
+			createCalls = append(createCalls, fmt.Sprintf("%d", len(body.Inputs)))
 			mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[{"id":"42"}]}`)
 		case r.URL.Path == "/crm/v3/objects/contacts/batch/archive":
 			raw, _ := io.ReadAll(r.Body)
 			var body struct {
@@ -1105,7 +1111,7 @@ func TestMirrorSkipsKeylessSourceRow(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := connectTest(t, srv.URL)
-	// Second row has an empty email (match value) — it must be skipped, not created.
+	// Second row has an empty email (match value) — it is created (record id 42).
 	rec := stringBatch(map[string][]string{"email": {"a@x.com", ""}, "name": {"A", "B"}}, []string{"email", "name"})
 	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
 		Table: "contacts?id_property=email", Strategy: "replace", PrimaryKeys: []string{"email"},
@@ -1113,8 +1119,9 @@ func TestMirrorSkipsKeylessSourceRow(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Empty(t, created, "the keyless source row is skipped, not created")
-	assert.Empty(t, archived, "nothing is stale, so no create+archive churn")
+	assert.Equal(t, []string{"1"}, createCalls, "the keyless source row is created")
+	assert.Equal(t, []string{"99"}, archived,
+		"only the genuinely stale record is archived; the just-created keyless record (42) survives")
 }
 
 // TestPlanUseCases walks the plan's "Use Cases" page and pins the shaper parseShaper
