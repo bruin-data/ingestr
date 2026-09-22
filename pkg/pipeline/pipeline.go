@@ -760,10 +760,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.IncrementalStrategy = resolvedStrategy
 	resolvedConfig.RunID = runID
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
-	// Reverse-ETL clears NULLs by default; only an explicit --write-nulls=false omits.
-	if resolvedConfig.ReverseETLDestination && !resolvedConfig.WriteNullsSet {
-		resolvedConfig.WriteNulls = true
-	}
+	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
 
 	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
 

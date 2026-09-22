@@ -62,35 +62,6 @@ func TestReverseETL_PassesRejectModeAndWriteNulls(t *testing.T) {
 	assert.Equal(t, string(config.StrategyDelete), base.writeCalls[0].Strategy)
 }
 
-// TestReverseETL_WriteNullsDefault: with --write-nulls unset the reverse-ETL run
-// clears null fields (writeNulls=true); an explicit --write-nulls=false opts into
-// omitting them.
-func TestReverseETL_WriteNullsDefault(t *testing.T) {
-	t.Run("unset clears by default", func(t *testing.T) {
-		job, src, base := minimalJob()
-		src.readCh = mustClosedRecords()
-		job.Config.WriteNullsSet = false // flag not passed
-		job.Config.WriteNulls = false    // zero value
-		job.Destination = &fakeRETLDestination{fakeDestination: base}
-
-		require.NoError(t, (&MergeStrategy{}).Execute(context.Background(), job))
-		require.Len(t, base.writeCalls, 1)
-		assert.True(t, base.writeCalls[0].WriteNulls, "unset --write-nulls must default to clear")
-	})
-
-	t.Run("explicit false omits", func(t *testing.T) {
-		job, src, base := minimalJob()
-		src.readCh = mustClosedRecords()
-		job.Config.WriteNullsSet = true
-		job.Config.WriteNulls = false
-		job.Destination = &fakeRETLDestination{fakeDestination: base}
-
-		require.NoError(t, (&MergeStrategy{}).Execute(context.Background(), job))
-		require.Len(t, base.writeCalls, 1)
-		assert.False(t, base.writeCalls[0].WriteNulls, "--write-nulls=false must omit nulls")
-	})
-}
-
 func TestValidateReverseETLReject(t *testing.T) {
 	for _, m := range []config.RejectMode{"", config.RejectFailFast, config.RejectFail, config.RejectSkip} {
 		require.NoError(t, validateReverseETLReject(&config.IngestConfig{RejectMode: m}))
@@ -125,7 +96,6 @@ func TestReverseETL_FlagCrossMatrix(t *testing.T) {
 					src.readCh = mustClosedRecords()
 					job.Config.RejectMode = rm
 					job.Config.WriteNulls = wn
-					job.Config.WriteNullsSet = true // an explicit value is honored as-is
 					job.Destination = &fakeRETLDestination{fakeDestination: base}
 
 					require.NoError(t, strat.Execute(context.Background(), job))

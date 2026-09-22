@@ -460,6 +460,16 @@ func (c *IngestConfig) IsChangeTrackingSource() bool {
 	return strings.Contains(strings.ToLower(c.SourceURI[:schemeEnd]), "+ct")
 }
 
+// ResolveWriteNulls decides whether a reverse-ETL run writes source NULLs through
+// to clear the field. Reverse-ETL clears by default; only an explicit --write-nulls
+// (writeNullsSet) keeps the caller's value. Non-reverse-ETL passes the value as-is.
+func ResolveWriteNulls(reverseETL, writeNullsSet, writeNulls bool) bool {
+	if reverseETL && !writeNullsSet {
+		return true
+	}
+	return writeNulls
+}
+
 type ValidationError struct {
 	Field   string
 	Message string
