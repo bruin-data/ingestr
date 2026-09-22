@@ -174,6 +174,11 @@ type shaper struct {
 	// rows have no match value to record in `seen`), so the finalize sweep does not
 	// archive a record the same run just wrote. Concurrency-safe.
 	created *sync.Map
+	// sawSource records whether the source delivered any (non-empty) batch. A mirror
+	// whose source produced 0 rows (a transient empty extract, an over-restrictive
+	// filter) must not archive every record — that would turn a hiccup into a full
+	// wipe. Set once per run, read at finalize.
+	sawSource atomic.Bool
 	// seenLinks (association mirror) maps a From record id to its source To ids,
 	// so finalize can remove links the source did not declare.
 	seenLinks *sync.Map
@@ -884,6 +889,14 @@ func (d *HubSpotDestination) finalizeMirror(ctx context.Context, sh *shaper, rej
 	if sh.seen == nil {
 		return nil
 	}
+	// A source that produced 0 rows must not archive the entire object — that turns
+	// a transient empty extract (upstream hiccup, over-restrictive filter) into an
+	// irreversible full wipe. Skip the sweep and warn; an intentional clear-out is
+	// what --incremental-strategy delete is for.
+	if !sh.sawSource.Load() {
+		output.Warnf("Warning: hubspot replace (mirror) of %s: source produced 0 rows; skipping the archive sweep so an empty extract does not delete every record. Use --incremental-strategy delete to remove records intentionally.\n", sh.objectType)
+		return nil
+	}
 
 	stale, err := d.listStaleIDs(ctx, sh)
 	if err != nil {
@@ -1117,6 +1130,10 @@ func warnSkipped(skipped *atomic.Int64, sh *shaper) {
 
 // writeBatch shapes a record batch and sends it in chunks of batchLimit.
 func (d *HubSpotDestination) writeBatch(ctx context.Context, sh *shaper, record arrow.RecordBatch, skipped *atomic.Int64, rejects *rejectionLog) (int64, error) {
+	// Reached only with a non-empty batch (0-row batches are filtered by the
+	// caller), so this marks that the source actually produced data — the mirror
+	// finalize sweep relies on it to tell an empty extract from a full mirror.
+	sh.sawSource.Store(true)
 	colIndex := make(map[string]int, record.NumCols())
 	for i := 0; i < int(record.NumCols()); i++ {
 		colIndex[record.ColumnName(i)] = i

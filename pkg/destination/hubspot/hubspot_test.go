@@ -1061,6 +1061,37 @@ func TestMirrorKeylessRecords(t *testing.T) {
 	assert.ElementsMatch(t, []string{"2", "3"}, archived, "stale and keyless records are both archived")
 }
 
+// TestMirrorEmptySourceSkipsArchiveSweep: a replace whose source produced 0 rows
+// must not archive the whole object — a transient empty extract can't be allowed
+// to wipe every record. The sweep is skipped entirely (no listing, no archive).
+func TestMirrorEmptySourceSkipsArchiveSweep(t *testing.T) {
+	var mu sync.Mutex
+	var hits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	// An empty source channel: no batches at all.
+	empty := make(chan source.RecordBatchResult)
+	close(empty)
+	require.NoError(t, d.Write(context.Background(), empty, destination.WriteOptions{
+		Table: "contacts?id_property=email", Strategy: "replace", PrimaryKeys: []string{"email"},
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, h := range hits {
+		assert.NotContains(t, h, "/batch/archive", "an empty source must not archive anything")
+		assert.NotEqual(t, "GET /crm/v3/objects/contacts", h, "the archive sweep listing must be skipped entirely")
+	}
+}
+
 // TestMirrorKeepsKeylessRowItCreated: a mirror source row with an empty match
 // value is created, and its new record id is protected from the same run's
 // finalize sweep — it must not be archived just because its empty key can't
