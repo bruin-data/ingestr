@@ -767,6 +767,9 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 	}
 
 	parallelism := opts.Parallelism
+	if parallelism > defaultParallelism {
+		output.Warnf("Warning: hubspot caps --destination-parallelism at %d to respect API rate limits; ignoring the requested %d\n", defaultParallelism, parallelism)
+	}
 	if parallelism <= 0 || parallelism > defaultParallelism {
 		parallelism = defaultParallelism
 	}
@@ -976,10 +979,20 @@ func (d *HubSpotDestination) finalizeAssociationMirror(ctx context.Context, sh *
 			return false
 		}
 
+		// A labeled mirror removes only the managed label via labels/archive (which
+		// carries the types); an unlabeled one removes every type via archive.
+		verb := "archive"
+		if sh.associationType != 0 {
+			verb = "labels/archive"
+		}
 		var stale []associationInput
 		for _, toID := range live {
 			if _, ok := want.Load(toID); !ok {
-				stale = append(stale, associationInput{From: associationRef{ID: fromID}, To: associationRef{ID: toID}})
+				in := associationInput{From: associationRef{ID: fromID}, To: associationRef{ID: toID}}
+				if sh.associationType != 0 {
+					in.Types = []associationTypeSpec{{AssociationCategory: sh.associationCategory, AssociationTypeID: sh.associationType}}
+				}
+				stale = append(stale, in)
 			}
 		}
 		if len(stale) == 0 {
@@ -988,7 +1001,7 @@ func (d *HubSpotDestination) finalizeAssociationMirror(ctx context.Context, sh *
 		config.Debug("[HUBSPOT DEST] mirror unlinking %d stale %s->%s association(s) for %s", len(stale), sh.objectType, sh.associateTo, fromID)
 		for start := 0; start < len(stale); start += batchLimit {
 			end := min(start+batchLimit, len(stale))
-			res, err := d.postAssociations(ctx, sh.objectType, sh.associateTo, "archive", stale[start:end])
+			res, err := d.postAssociations(ctx, sh.objectType, sh.associateTo, verb, stale[start:end])
 			if err != nil {
 				rangeErr = err
 				return false
@@ -1028,7 +1041,10 @@ func (d *HubSpotDestination) listAssociationsFor(ctx context.Context, sh *shaper
 		}
 		var parsed struct {
 			Results []struct {
-				ToObjectID json.Number `json:"toObjectId"`
+				ToObjectID       json.Number `json:"toObjectId"`
+				AssociationTypes []struct {
+					TypeID int `json:"typeId"`
+				} `json:"associationTypes"`
 			} `json:"results"`
 			Paging struct {
 				Next struct {
@@ -1040,9 +1056,26 @@ func (d *HubSpotDestination) listAssociationsFor(ctx context.Context, sh *shaper
 			return nil, err
 		}
 		for _, r := range parsed.Results {
-			if s := r.ToObjectID.String(); s != "" {
-				ids = append(ids, s)
+			s := r.ToObjectID.String()
+			if s == "" {
+				continue
 			}
+			// A labeled mirror manages only its own label: a link that does not carry
+			// the managed type is left untouched (never treated as stale), so other
+			// labels between the same pair survive reconciliation.
+			if sh.associationType != 0 {
+				managed := false
+				for _, t := range r.AssociationTypes {
+					if t.TypeID == sh.associationType {
+						managed = true
+						break
+					}
+				}
+				if !managed {
+					continue
+				}
+			}
+			ids = append(ids, s)
 		}
 		after = parsed.Paging.Next.After
 		if after == "" {

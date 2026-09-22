@@ -1694,6 +1694,79 @@ func TestAssociationMirrorEmptyToClearsFrom(t *testing.T) {
 		"stale link on From 1 and every link on the empty-To From 2 are unlinked")
 }
 
+// TestLabeledAssociationMirrorUnlinksOnlyManagedLabel: a labeled replace (mirror)
+// reconciles only its own label — a stale link carrying the managed label is
+// removed via labels/archive (with the type), while a link carrying a different
+// label on the same pair is left untouched (not treated as stale).
+func TestLabeledAssociationMirrorUnlinksOnlyManagedLabel(t *testing.T) {
+	var mu sync.Mutex
+	var created []string
+	var unlinkPath string
+	var unlinked []associationInput
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels"):
+			_, _ = io.WriteString(w, `{"results":[{"typeId":42,"category":"USER_DEFINED","label":"Partner"}]}`)
+		case r.URL.Path == "/crm/v4/associations/contacts/companies/batch/create":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []associationInput `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			for _, in := range body.Inputs {
+				created = append(created, in.From.ID+"->"+in.To.ID)
+			}
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		case r.URL.Path == "/crm/v4/objects/contacts/1/associations/companies":
+			// 10 carries the managed label (kept), 11 the managed label (stale),
+			// 99 a different label (unmanaged — must survive).
+			_, _ = io.WriteString(w, `{"results":[
+				{"toObjectId":"10","associationTypes":[{"typeId":42}]},
+				{"toObjectId":"11","associationTypes":[{"typeId":42}]},
+				{"toObjectId":"99","associationTypes":[{"typeId":7}]}
+			]}`)
+		case r.URL.Path == "/crm/v4/associations/contacts/companies/batch/labels/archive":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []associationInput `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			unlinkPath = r.URL.Path
+			unlinked = append(unlinked, body.Inputs...)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"contact_id": {"1"}, "company_id": {"10"}}, []string{"contact_id", "company_id"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table:       "contacts+companies?association_type=42",
+		Strategy:    "replace",
+		PrimaryKeys: []string{"contact_id", "company_id"},
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"1->10"}, created)
+	assert.Equal(t, "/crm/v4/associations/contacts/companies/batch/labels/archive", unlinkPath,
+		"a labeled mirror must unlink via labels/archive, not the unlabeled archive endpoint")
+	require.Len(t, unlinked, 1, "only the stale managed-label link is removed; the unmanaged label survives")
+	assert.Equal(t, "1", unlinked[0].From.ID)
+	assert.Equal(t, "11", unlinked[0].To.ID)
+	require.Len(t, unlinked[0].Types, 1, "the unlink carries the managed type")
+	assert.Equal(t, 42, unlinked[0].Types[0].AssociationTypeID)
+}
+
 // TestCreate5xxAbortsWithoutRetry: a create (non-idempotent) must not retry on a
 // 5xx — a retry could duplicate a batch HubSpot already committed. The run aborts
 // with the error instead of silently dropping the batch or retrying it.
