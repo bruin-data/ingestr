@@ -340,6 +340,22 @@ func TestBatchReadByPropertyMisconfig404IsHardError(t *testing.T) {
 	assert.Contains(t, err.Error(), "404")
 }
 
+// TestBatchReadByProperty404MatchesCategoryNotBody: OBJECT_NOT_FOUND appearing in
+// a non-category field (here the message) must NOT be read as "none found" — only
+// the structured `category` counts, so a stray mention can't mask a real 404.
+func TestBatchReadByProperty404MatchesCategoryNotBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"error","category":"FORBIDDEN","message":"not OBJECT_NOT_FOUND, actually a scope error"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	_, err := d.resolveKeysToIDs(context.Background(), "contacts", "email", []string{"missing@x.com"})
+	require.Error(t, err, "OBJECT_NOT_FOUND only in the message must not be treated as none-found")
+	assert.Contains(t, err.Error(), "404")
+}
+
 // TestSystemicUpdateErrorAbortsEvenUnderSkip mirrors the upsert case for the
 // batch/update path: a structural "non-unique" failure aborts without bisecting.
 func TestSystemicUpdateErrorAbortsEvenUnderSkip(t *testing.T) {
