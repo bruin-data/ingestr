@@ -1408,6 +1408,11 @@ func (d *HubSpotDestination) associationTypes(ctx context.Context, from, to stri
 	if err != nil {
 		return nil, fmt.Errorf("hubspot: failed to fetch association labels for %s->%s: %w", from, to, err)
 	}
+	// A non-2xx carries a JSON error body that would otherwise parse as an empty
+	// (successful) result, silently dropping the label/category lookup — surface it.
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, fmt.Errorf("hubspot: failed to fetch association labels for %s->%s: status %d: %s", from, to, resp.StatusCode(), resp.String())
+	}
 	var body struct {
 		Results []associationTypeDef `json:"results"`
 	}

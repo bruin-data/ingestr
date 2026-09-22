@@ -2424,6 +2424,30 @@ func TestAssociationLabelNotFound(t *testing.T) {
 	require.ErrorContains(t, err, "Partner", "the error lists the labels that do exist")
 }
 
+// TestAssociationLabelsEndpointErrorSurfaces: a non-2xx from the labels endpoint
+// must abort, not parse as an empty result that silently falls back to a wrong
+// category (which would create/remove nothing while the run reports success).
+func TestAssociationLabelsEndpointErrorSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/labels") {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"status":"error","message":"forbidden","category":"FORBIDDEN"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"contact_id": {"111"}, "company_id": {"222"}}, []string{"contact_id", "company_id"})
+	err := d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts+companies?association_type=280", Strategy: "delete", PrimaryKeys: []string{"contact_id", "company_id"},
+	})
+	require.ErrorContains(t, err, "association labels")
+	require.ErrorContains(t, err, "403")
+}
+
 func TestFatalStatusPropagates(t *testing.T) {
 	// A non-record-level failure (here 403, e.g. a bad token) must abort the write
 	// rather than be swallowed as if the batch succeeded. 5xx is left out on
