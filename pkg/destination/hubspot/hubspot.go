@@ -2421,8 +2421,10 @@ func annotate(rejs []rejection, items []batchInput) []rejection {
 	return rejs
 }
 
-// annotateAssociations is annotate for association links: position when
-// unambiguous, else map by the From/To ids HubSpot names in the error context.
+// annotateAssociations is annotate for association links. HubSpot rejects a bad
+// link as a whole-batch 400 (no per-record errors), which bisects down to a single
+// link, so position is what identifies it — one rejection per item, or a bisected
+// single-link chunk.
 func annotateAssociations(rejs []rejection, items []associationInput) []rejection {
 	switch {
 	case len(rejs) == len(items):
@@ -2432,23 +2434,6 @@ func annotateAssociations(rejs []rejection, items []associationInput) []rejectio
 	case len(items) == 1:
 		for i := range rejs {
 			rejs[i].identifier = items[0].key()
-		}
-	default:
-		for i := range rejs {
-			ids := rejectionContextIDs(rejs[i].context)
-			if len(ids) == 0 {
-				continue
-			}
-			named := make(map[string]bool, len(ids))
-			for _, id := range ids {
-				named[id] = true
-			}
-			for _, it := range items {
-				if named[it.From.ID] || named[it.To.ID] {
-					rejs[i].identifier = it.key()
-					break
-				}
-			}
 		}
 	}
 	return rejs

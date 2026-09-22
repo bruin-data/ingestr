@@ -1551,6 +1551,50 @@ func deleteNotFoundServer(t *testing.T, archived *[]string) *httptest.Server {
 
 // TestDeleteNotFoundRejectModes: a delete whose match value resolves to no record
 // is a not-found reject handled per --reject-mode, not a silent skip.
+// TestAssociationRejectNamesTheLink: a bad association link is isolated by
+// bisection and its reject line names which from->to pair failed (finding 5). The
+// live HubSpot error is a whole-batch 400 with no per-record errors array, so the
+// identifier can only come from position after bisecting to a single link.
+func TestAssociationRejectNamesTheLink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/crm/v4/associations/contacts/companies/batch/associate/default" {
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []associationInput `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			for _, in := range body.Inputs {
+				if in.To.ID == "999" {
+					// Whole-batch 400, matching HubSpot's real shape (no errors array).
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"category":"VALIDATION_ERROR","message":"One or more associations are invalid"}`)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{
+		"contact_id": {"1", "1"},
+		"company_id": {"10", "999"},
+	}, []string{"contact_id", "company_id"})
+	err := d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts+companies", Strategy: "merge", RejectMode: "fail",
+		PrimaryKeys: []string{"contact_id", "company_id"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "[1->999]", "the reject line names the failed link, not a blank tag")
+	assert.NotContains(t, err.Error(), "[1->10]", "the valid link is not reported")
+}
+
 func TestDeleteNotFoundRejectModes(t *testing.T) {
 	rows := func() arrow.RecordBatch {
 		return stringBatch(map[string][]string{"email": {"exists@x.com", "missing@x.com"}}, []string{"email"})
@@ -2097,13 +2141,14 @@ func TestAnnotateIdentifies(t *testing.T) {
 		assert.Equal(t, "111->888", rejs[0].identifier)
 	})
 
-	t.Run("association partial 207 mapped by context ids", func(t *testing.T) {
+	t.Run("association one-per-item", func(t *testing.T) {
 		items := []associationInput{
 			{From: associationRef{ID: "111"}, To: associationRef{ID: "888"}},
 			{From: associationRef{ID: "111"}, To: associationRef{ID: "999"}},
 		}
-		rejs := annotateAssociations([]rejection{{message: "missing", context: json.RawMessage(`{"ids":["999"]}`)}}, items)
-		assert.Equal(t, "111->999", rejs[0].identifier)
+		rejs := annotateAssociations([]rejection{{message: "a"}, {message: "b"}}, items)
+		assert.Equal(t, "111->888", rejs[0].identifier)
+		assert.Equal(t, "111->999", rejs[1].identifier)
 	})
 }
 
