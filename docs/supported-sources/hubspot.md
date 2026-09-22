@@ -294,7 +294,7 @@ The **write behaviour is chosen with `--incremental-strategy`**, which is **requ
 Upsert/update/delete match existing records on two independent things — **which HubSpot property** to match on, and **which source column** carries the value:
 
 **Match property (HubSpot side)** — set with `id_property=<property>` on the dest-table:
-- **`merge`** and **`replace`** require it explicitly. There is no built-in default, because the right unique key differs per object (contacts have `email`, products `hs_sku`, companies none). If it's missing, the run fails fast.
+- **`merge`** and **`replace`** require it explicitly, and it must be a **unique property** — not `hs_object_id`, since HubSpot has no upsert-by-record-id (use `update` to match existing records by id). There is no built-in default, because the right unique key differs per object (contacts have `email`, products `hs_sku`, companies none). If it's missing, the run fails fast.
 - **`update`** and **`delete`** default it to **`hs_object_id`** (HubSpot's record id) when you don't set one.
 - `id_property` must be the property's **internal name**, not its display label (e.g. `numberofemployees`, not "Number of Employees").
 

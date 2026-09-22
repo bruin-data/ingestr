@@ -2056,12 +2056,28 @@ func TestCreate5xxAbortsWithoutRetry(t *testing.T) {
 	assert.Equal(t, 1, createHits, "create must be sent exactly once — no 5xx retry")
 }
 
-// TestMergeByRecordIDPartitionsExistingAndMissing (finding 5): merge on
-// hs_object_id splits a mixed batch — existing ids update, missing ids create.
-func TestMergeByRecordIDPartitionsExistingAndMissing(t *testing.T) {
+// TestMergeByRecordIDRejectedAtParse: merge cannot match on id_property=hs_object_id
+// — HubSpot has no upsert-by-record-id, so the config is rejected before the run
+// starts. The restriction is on id_property (the HubSpot match property), not on
+// --primary-key (the source column).
+func TestMergeByRecordIDRejectedAtParse(t *testing.T) {
+	// id_property=hs_object_id is rejected regardless of which source column is named.
+	_, err := parseShaper("contacts?id_property=hs_object_id", "merge", []string{"record_col"}, "", false)
+	require.ErrorContains(t, err, "merge cannot match on id_property=hs_object_id")
+
+	// A --primary-key named hs_object_id is fine when id_property is a unique property:
+	// the source column name is irrelevant to the restriction.
+	_, err = parseShaper("contacts?id_property=email", "merge", []string{"hs_object_id"}, "", false)
+	require.NoError(t, err)
+}
+
+// TestUpdateByRecordIDMissingIsReject: update on hs_object_id updates the ids that
+// exist and rejects the ones that don't — HubSpot can't create a record at a
+// caller-supplied id, so a missing id is a not-found reject, never a create.
+func TestUpdateByRecordIDMissingIsReject(t *testing.T) {
 	var mu sync.Mutex
-	var updated, created []string
-	readStatus := http.StatusMultiStatus
+	var updated []string
+	createHit := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var body struct {
@@ -2079,7 +2095,8 @@ func TestMergeByRecordIDPartitionsExistingAndMissing(t *testing.T) {
 		switch r.URL.Path {
 		case "/crm/v3/objects/contacts/batch/update":
 			if hasMissing {
-				// Whole-batch not-found triggers the partition re-route.
+				// A batch containing a missing id is rejected atomically; the caller
+				// bisects to isolate it.
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = io.WriteString(w, `{"category":"OBJECT_NOT_FOUND","message":"not found"}`)
 				return
@@ -2091,19 +2108,9 @@ func TestMergeByRecordIDPartitionsExistingAndMissing(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
-		case "/crm/v3/objects/contacts/batch/read":
-			// "1" exists, "999" does not.
-			var res []string
-			for _, in := range body.Inputs {
-				if in.ID == "1" {
-					res = append(res, `{"id":"1"}`)
-				}
-			}
-			w.WriteHeader(readStatus)
-			_, _ = io.WriteString(w, `{"results":[`+strings.Join(res, ",")+`]}`)
 		case "/crm/v3/objects/contacts/batch/create":
 			mu.Lock()
-			created = append(created, "created")
+			createHit = true
 			mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
@@ -2118,49 +2125,30 @@ func TestMergeByRecordIDPartitionsExistingAndMissing(t *testing.T) {
 	d := connectTest(t, srv.URL)
 	rec := stringBatch(map[string][]string{"hs_object_id": {"1", "999"}, "name": {"A", "B"}}, []string{"hs_object_id", "name"})
 	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
-		Table: "contacts?id_property=hs_object_id", Strategy: "merge", PrimaryKeys: []string{"hs_object_id"},
+		Table: "contacts?id_property=hs_object_id", Strategy: "update", PrimaryKeys: []string{"hs_object_id"}, RejectMode: "skip",
 	}))
 
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []string{"1"}, updated, "existing id updated")
-	assert.Len(t, created, 1, "missing id routed to create")
+	assert.False(t, createHit, "a missing record id must be rejected, never created")
 }
 
-// TestMergeReSendUpdate404ToleratedUnderSkip: in the merge re-route, an id that
-// exists at the existence read but is archived by another actor before the
-// re-sent update (TOCTOU) comes back 404. Under --reject-mode=skip that must be a
-// per-record reject, not a fatal abort — and the missing id still routes to create.
-func TestMergeReSendUpdate404ToleratedUnderSkip(t *testing.T) {
+// TestUpdateByRecordIDMissingRejectMode: a missing record id under update honors
+// --reject-mode — tolerated as a per-record reject under skip, fatal under fail —
+// and is never re-routed to create.
+func TestUpdateByRecordIDMissingRejectMode(t *testing.T) {
 	var mu sync.Mutex
-	var created int
+	createHit := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var body struct {
-			Inputs []struct {
-				ID string `json:"id"`
-			} `json:"inputs"`
-		}
-		_ = json.Unmarshal(raw, &body)
 		switch r.URL.Path {
 		case "/crm/v3/objects/contacts/batch/update":
-			// The initial mixed batch and the re-sent update of the now-archived id
-			// both come back not-found (the latter is the race being simulated).
+			// Every id in this test is missing, so update always 404s.
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"category":"OBJECT_NOT_FOUND","message":"not found"}`)
-		case "/crm/v3/objects/contacts/batch/read":
-			// "1" exists at partition time; "999" is missing.
-			var res []string
-			for _, in := range body.Inputs {
-				if in.ID == "1" {
-					res = append(res, `{"id":"1"}`)
-				}
-			}
-			w.WriteHeader(http.StatusMultiStatus)
-			_, _ = io.WriteString(w, `{"results":[`+strings.Join(res, ",")+`]}`)
 		case "/crm/v3/objects/contacts/batch/create":
 			mu.Lock()
-			created++
+			createHit = true
 			mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
@@ -2174,61 +2162,25 @@ func TestMergeReSendUpdate404ToleratedUnderSkip(t *testing.T) {
 
 	d := connectTest(t, srv.URL)
 	opts := destination.WriteOptions{
-		Table: "contacts?id_property=hs_object_id", Strategy: "merge", PrimaryKeys: []string{"hs_object_id"},
+		Table: "contacts?id_property=hs_object_id", Strategy: "update", PrimaryKeys: []string{"hs_object_id"},
 	}
 
-	t.Run("skip tolerates the re-send 404", func(t *testing.T) {
-		rec := stringBatch(map[string][]string{"hs_object_id": {"1", "999"}, "name": {"A", "B"}}, []string{"hs_object_id", "name"})
+	t.Run("skip tolerates the missing id", func(t *testing.T) {
+		rec := stringBatch(map[string][]string{"hs_object_id": {"999"}, "name": {"B"}}, []string{"hs_object_id", "name"})
 		o := opts
 		o.RejectMode = "skip"
 		require.NoError(t, d.Write(context.Background(), feed(rec), o),
-			"a re-send 404 must be a per-record reject under skip, not a fatal abort")
-		mu.Lock()
-		defer mu.Unlock()
-		assert.GreaterOrEqual(t, created, 1, "the genuinely-missing id still routes to create")
+			"a missing id must be a per-record reject under skip, not a fatal abort")
 	})
 
-	t.Run("fail aborts on the re-send 404", func(t *testing.T) {
-		rec := stringBatch(map[string][]string{"hs_object_id": {"1", "999"}, "name": {"A", "B"}}, []string{"hs_object_id", "name"})
+	t.Run("fail aborts on the missing id", func(t *testing.T) {
+		rec := stringBatch(map[string][]string{"hs_object_id": {"999"}, "name": {"B"}}, []string{"hs_object_id", "name"})
 		require.Error(t, d.Write(context.Background(), feed(rec), opts))
 	})
-}
-
-// TestMergeByRecordIDAllMissing404 (finding 5 hardening): when batch-read returns
-// 404 for an all-missing set, every id routes to create rather than erroring.
-func TestMergeByRecordIDAllMissing404(t *testing.T) {
-	var mu sync.Mutex
-	created := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/crm/v3/objects/contacts/batch/update":
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = io.WriteString(w, `{"category":"OBJECT_NOT_FOUND","message":"not found"}`)
-		case "/crm/v3/objects/contacts/batch/read":
-			w.WriteHeader(http.StatusNotFound) // all missing -> 404
-			_, _ = io.WriteString(w, `{"category":"OBJECT_NOT_FOUND"}`)
-		case "/crm/v3/objects/contacts/batch/create":
-			mu.Lock()
-			created++
-			mu.Unlock()
-			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
-		default:
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{}`)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	d := connectTest(t, srv.URL)
-	rec := stringBatch(map[string][]string{"hs_object_id": {"111", "222"}, "name": {"A", "B"}}, []string{"hs_object_id", "name"})
-	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
-		Table: "contacts?id_property=hs_object_id", Strategy: "merge", PrimaryKeys: []string{"hs_object_id"},
-	}))
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.GreaterOrEqual(t, created, 1, "all-missing batch must route to create, not error")
+	assert.False(t, createHit, "a missing record id must never be re-routed to create")
 }
 
 // TestRejectModeWriteNullsCross exercises the two RETL run flags together: for
@@ -2427,18 +2379,6 @@ func TestUpdateValidationBisectsBatch(t *testing.T) {
 		d := connectTest(t, srv.URL)
 		err := d.Write(context.Background(), feed(rows()), destination.WriteOptions{
 			Table: "contacts?id_property=hs_object_id", Strategy: "update", RejectMode: "skip",
-			PrimaryKeys: []string{"hs_object_id"},
-		})
-		require.NoError(t, err)
-		assert.Equal(t, []string{"1"}, updated)
-	})
-
-	t.Run("merge skip lands the valid row", func(t *testing.T) {
-		var updated []string
-		srv := updateValidationServer(t, &updated)
-		d := connectTest(t, srv.URL)
-		err := d.Write(context.Background(), feed(rows()), destination.WriteOptions{
-			Table: "contacts?id_property=hs_object_id", Strategy: "merge", RejectMode: "skip",
 			PrimaryKeys: []string{"hs_object_id"},
 		})
 		require.NoError(t, err)

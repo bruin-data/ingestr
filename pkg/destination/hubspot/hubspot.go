@@ -284,6 +284,12 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 	if idProperty == "" {
 		return nil, fmt.Errorf("hubspot: %s needs a match property — set id_property=<property> on the dest-table", strategy)
 	}
+	// HubSpot assigns record ids and has no upsert-by-id, so merge (create-or-update)
+	// can't match on hs_object_id: an unmatched id could never be created. Match on a
+	// unique property to upsert, or use --incremental-strategy update to update by id.
+	if !updateOnly && !mirror && idProperty == recordIDProperty {
+		return nil, fmt.Errorf("hubspot: merge cannot match on id_property=%s — HubSpot cannot create a record at a supplied id; use --incremental-strategy update to update existing records by id, or set id_property=<unique property> to upsert", recordIDProperty)
+	}
 	// Source column supplying the match value: a single --primary-key. update
 	// defaults it to the hs_object_id column (record-id match); merge/replace
 	// require it explicitly, since their match key differs per object.
@@ -1202,18 +1208,14 @@ func (d *HubSpotDestination) writeBatch(ctx context.Context, sh *shaper, record 
 		if len(batch) == 0 {
 			return nil
 		}
-		// Update-by-record-id (merge) re-routes ids that don't exist to create;
-		// update-only records them as rejects instead; other actions post directly.
+		// An "update" action only comes from the update strategy (merge upserts via a
+		// unique property, and merge-by-id is rejected at parse time). A row with no
+		// matching record — id absent or archived — is a not-found reject honoring
+		// --reject-mode, never re-routed to create. Other actions post directly.
 		send := d.send
 		if action == "update" {
-			if sh.updateOnly {
-				send = func(ctx context.Context, sh *shaper, items []batchInput, _ string, rejects *rejectionLog) error {
-					return d.sendUpdateOnly(ctx, sh, items, rejects)
-				}
-			} else {
-				send = func(ctx context.Context, sh *shaper, items []batchInput, _ string, rejects *rejectionLog) error {
-					return d.sendUpdate(ctx, sh, items, rejects)
-				}
+			send = func(ctx context.Context, sh *shaper, items []batchInput, _ string, rejects *rejectionLog) error {
+				return d.sendUpdateOnly(ctx, sh, items, rejects)
 			}
 		}
 		if err := send(ctx, sh, batch, action, rejects); err != nil {
@@ -1658,66 +1660,6 @@ func (d *HubSpotDestination) handleBatchResult(ctx context.Context, sh *shaper, 
 	return nil
 }
 
-// sendUpdate posts an update chunk; since batch update fails atomically on any
-// missing id, it re-partitions into existing ids (update) and missing ids (create).
-func (d *HubSpotDestination) sendUpdate(ctx context.Context, sh *shaper, items []batchInput, rejects *rejectionLog) error {
-	res, err := d.postBatch(ctx, sh, items, "update")
-	if err != nil {
-		return err
-	}
-	if err := systemicBatchError("update", sh.objectType, res); err != nil {
-		return err
-	}
-	if !res.hasNotFound() {
-		// A validation 400 rejects the whole batch, so bisect to isolate the bad
-		// row(s) and land the valid remainder (HubSpot batches aren't atomic).
-		if !res.ok && isRecordLevelStatus(res.status) && len(items) > 1 {
-			mid := len(items) / 2
-			if err := d.sendUpdate(ctx, sh, items[:mid], rejects); err != nil {
-				return err
-			}
-			return d.sendUpdate(ctx, sh, items[mid:], rejects)
-		}
-		return d.handleBatchResult(ctx, sh, res, items, "update", rejects)
-	}
-
-	ids := make([]string, len(items))
-	for i, it := range items {
-		ids[i] = it.ID
-	}
-	existing, err := d.partitionExisting(ctx, sh.objectType, ids)
-	if err != nil {
-		// Fall back to the original not-found rejection if existence can't be resolved.
-		return d.handleBatchResult(ctx, sh, res, items, "update", rejects)
-	}
-
-	var updates, creates []batchInput
-	for _, it := range items {
-		if existing[it.ID] {
-			updates = append(updates, it)
-			continue
-		}
-		it.ID = ""
-		creates = append(creates, it)
-	}
-	if len(updates) > 0 {
-		// Route confirmed-existing ids through the not-found-tolerant update path:
-		// if one is archived by another actor between the existence read and this
-		// re-send (TOCTOU), the resulting 404 must become a per-record reject under
-		// --reject-mode=skip, not a fatal abort (a generic send treats 404 as
-		// systemic since it is not a record-level 400/409).
-		if err := d.sendUpdateOnly(ctx, sh, updates, rejects); err != nil {
-			return err
-		}
-	}
-	if len(creates) > 0 {
-		if err := d.send(ctx, sh, creates, "create", rejects); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // sendUpdateOnly posts an update chunk for the update-only strategy. Batch update
 // fails atomically on any missing id, so the chunk is bisected to land valid rows
 // while missing ids become rejections honoring reject-mode (never re-routed to create).
@@ -1749,40 +1691,6 @@ func (d *HubSpotDestination) sendUpdateOnly(ctx context.Context, sh *shaper, ite
 	return nil
 }
 
-// partitionExisting returns which ids exist in HubSpot. Batch read fails
-// atomically on any missing id, so the set is bisected to isolate the missing ones.
-func (d *HubSpotDestination) partitionExisting(ctx context.Context, objectType string, ids []string) (map[string]bool, error) {
-	existing := make(map[string]bool, len(ids))
-	var recurse func(sub []string) error
-	recurse = func(sub []string) error {
-		if len(sub) == 0 {
-			return nil
-		}
-		found, err := d.batchReadFound(ctx, objectType, sub)
-		if err != nil {
-			return err
-		}
-		if found == len(sub) {
-			for _, id := range sub {
-				existing[id] = true
-			}
-			return nil
-		}
-		if len(sub) == 1 {
-			return nil // the single id is missing
-		}
-		mid := len(sub) / 2
-		if err := recurse(sub[:mid]); err != nil {
-			return err
-		}
-		return recurse(sub[mid:])
-	}
-	if err := recurse(ids); err != nil {
-		return nil, err
-	}
-	return existing, nil
-}
-
 // isRecordsAbsent404 reports whether a 404 is HubSpot's OBJECT_NOT_FOUND (records
 // don't exist), safe to treat as "none found". Matches the category field exactly
 // so an OBJECT_NOT_FOUND mention elsewhere in the body can't trigger it.
@@ -1794,40 +1702,6 @@ func isRecordsAbsent404(bodyText string) bool {
 		return false
 	}
 	return body.Category == objectNotFoundCategory
-}
-
-// batchReadFound reports how many of the given ids exist via batch read, which
-// returns all records when they exist or OBJECT_NOT_FOUND when any is missing.
-func (d *HubSpotDestination) batchReadFound(ctx context.Context, objectType string, ids []string) (int, error) {
-	inputs := make([]map[string]string, len(ids))
-	for i, id := range ids {
-		inputs[i] = map[string]string{"id": id}
-	}
-	endpoint := fmt.Sprintf("/crm/v3/objects/%s/batch/read", url.PathEscape(d.effectiveObjectType(objectType)))
-	resp, err := d.client.R(ctx).SetBody(map[string]interface{}{"inputs": inputs, "properties": []string{recordIDProperty}, "archived": false}).Post(endpoint)
-	if err != nil {
-		return 0, err
-	}
-	// A batch where every id is missing can come back 404 with category
-	// OBJECT_NOT_FOUND (or 207 with an empty results set); both mean "none found",
-	// not a hard error — so the merge re-route can still create them. A 404 for any
-	// other reason (unknown object type, wrong endpoint) must still surface.
-	if resp.StatusCode() == 404 {
-		if !isRecordsAbsent404(resp.String()) {
-			return 0, fmt.Errorf("status 404: %s", resp.String())
-		}
-		return 0, nil
-	}
-	if resp.StatusCode() != 200 && resp.StatusCode() != 207 {
-		return 0, fmt.Errorf("status %d", resp.StatusCode())
-	}
-	var body struct {
-		Results []json.RawMessage `json:"results"`
-	}
-	if err := json.Unmarshal(resp.Body(), &body); err != nil {
-		return 0, err
-	}
-	return len(body.Results), nil
 }
 
 // columnValues collects the non-null string values of a column for business-key
