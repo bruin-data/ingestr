@@ -1873,6 +1873,73 @@ func TestMergeByRecordIDPartitionsExistingAndMissing(t *testing.T) {
 	assert.Len(t, created, 1, "missing id routed to create")
 }
 
+// TestMergeReSendUpdate404ToleratedUnderSkip: in the merge re-route, an id that
+// exists at the existence read but is archived by another actor before the
+// re-sent update (TOCTOU) comes back 404. Under --reject-mode=skip that must be a
+// per-record reject, not a fatal abort — and the missing id still routes to create.
+func TestMergeReSendUpdate404ToleratedUnderSkip(t *testing.T) {
+	var mu sync.Mutex
+	var created int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			Inputs []struct {
+				ID string `json:"id"`
+			} `json:"inputs"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		switch r.URL.Path {
+		case "/crm/v3/objects/contacts/batch/update":
+			// The initial mixed batch and the re-sent update of the now-archived id
+			// both come back not-found (the latter is the race being simulated).
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"category":"OBJECT_NOT_FOUND","message":"not found"}`)
+		case "/crm/v3/objects/contacts/batch/read":
+			// "1" exists at partition time; "999" is missing.
+			var res []string
+			for _, in := range body.Inputs {
+				if in.ID == "1" {
+					res = append(res, `{"id":"1"}`)
+				}
+			}
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = io.WriteString(w, `{"results":[`+strings.Join(res, ",")+`]}`)
+		case "/crm/v3/objects/contacts/batch/create":
+			mu.Lock()
+			created++
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	opts := destination.WriteOptions{
+		Table: "contacts?id_property=hs_object_id", Strategy: "merge", PrimaryKeys: []string{"hs_object_id"},
+	}
+
+	t.Run("skip tolerates the re-send 404", func(t *testing.T) {
+		rec := stringBatch(map[string][]string{"hs_object_id": {"1", "999"}, "name": {"A", "B"}}, []string{"hs_object_id", "name"})
+		o := opts
+		o.RejectMode = "skip"
+		require.NoError(t, d.Write(context.Background(), feed(rec), o),
+			"a re-send 404 must be a per-record reject under skip, not a fatal abort")
+		mu.Lock()
+		defer mu.Unlock()
+		assert.GreaterOrEqual(t, created, 1, "the genuinely-missing id still routes to create")
+	})
+
+	t.Run("fail aborts on the re-send 404", func(t *testing.T) {
+		rec := stringBatch(map[string][]string{"hs_object_id": {"1", "999"}, "name": {"A", "B"}}, []string{"hs_object_id", "name"})
+		require.Error(t, d.Write(context.Background(), feed(rec), opts))
+	})
+}
+
 // TestMergeByRecordIDAllMissing404 (finding 5 hardening): when batch-read returns
 // 404 for an all-missing set, every id routes to create rather than erroring.
 func TestMergeByRecordIDAllMissing404(t *testing.T) {

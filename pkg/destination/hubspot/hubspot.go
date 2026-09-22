@@ -1620,7 +1620,12 @@ func (d *HubSpotDestination) sendUpdate(ctx context.Context, sh *shaper, items [
 		creates = append(creates, it)
 	}
 	if len(updates) > 0 {
-		if err := d.send(ctx, sh, updates, "update", rejects); err != nil {
+		// Route confirmed-existing ids through the not-found-tolerant update path:
+		// if one is archived by another actor between the existence read and this
+		// re-send (TOCTOU), the resulting 404 must become a per-record reject under
+		// --reject-mode=skip, not a fatal abort (a generic send treats 404 as
+		// systemic since it is not a record-level 400/409).
+		if err := d.sendUpdateOnly(ctx, sh, updates, rejects); err != nil {
 			return err
 		}
 	}
