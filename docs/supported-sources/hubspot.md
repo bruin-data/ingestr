@@ -327,11 +327,7 @@ ingestr ingest \
 ```
 
 > [!WARNING]
-> `replace` (mirror) archives **every** record of the object type that is not in your source — including records that have no value for the match property. It is a full object-wide mirror. Point it at a source that represents the **complete** desired state of that object, or you will archive records you meant to keep (including ones created via the UI or other integrations). Use `replace` only when the source is the sole system of record for that object.
->
-> As a safety guard, a run whose source produces **0 rows** archives nothing — a transient empty extract (an upstream hiccup, an over-restrictive filter) can't wipe the whole object. To intentionally remove records, use `delete`.
->
-> Prefer a match property whose stored value equals the source value. ingestr folds case and whitespace when comparing (so mixed-case `email` is safe), but if HubSpot **reformats** the value more aggressively (e.g. normalizing a phone number), the just-upserted record may not correlate on the mirror pass and could be archived. Mirror on a stable key like `email` or `hs_object_id`.
+> `replace` is a full object-wide mirror: it archives **every** record of the object type that is not in your source (including records with no match value, and ones created via the UI or other integrations). Use it only when the source is the complete, sole system of record for that object. A run with **0 source rows** archives nothing; to remove records intentionally, use `delete`.
 
 ## Reverse-ETL options
 
@@ -349,15 +345,15 @@ Under `fail` and `skip` every valid row is written — they differ only in wheth
 
 Only **per-record** problems count as rejects that `skip` tolerates: a row with no matching record (`update`/`delete`/associations) and a row HubSpot rejects on its own value (a validation error or a unique-property conflict). **Systemic failures always abort the run regardless of `--reject-mode`.**
 
+> [!NOTE]
+> HubSpot's batch writes aren't transactional, so `fail`/`fail_fast` may have written some records before the run stops.
+
 ### `--write-nulls`
 
 - **`true`** *(default)* — a null source cell is written through as empty, clearing the field in HubSpot.
 - **`false`** (`--write-nulls=false`) — a null source cell is omitted, leaving the existing HubSpot value untouched.
 
 Only affects strategies that write property values — `merge`, `update`, `replace`, `append`. It has no effect on `delete` (archives by id) or associations (link records), which send no properties.
-
-> [!NOTE]
-> HubSpot's batch writes are not transactional: `fail` and `fail_fast` may have already written some records before the run stops. When a whole batch is rejected because of one bad row, ingestr retries it in halves so the good rows still land.
 
 ## Column mapping
 
@@ -395,9 +391,18 @@ ingestr ingest \
   --incremental-strategy merge
 ```
 
-- `id_property=fromProp,toProp` names the property each side matches on (empty = the value is already a HubSpot record id). Values are resolved to record ids before linking. A non-empty key that matches no record is a not-found reject handled per `--reject-mode`. An empty cell is skipped for `merge`/`delete` (nothing to target); under `replace` an empty `obj2` cell for a present `obj1` clears that record's links (see below).
-- A key column holding a list/array links the row to every element (e.g. one contact to many companies in a single row); repeated pairs **within a row** are de-duplicated. HubSpot's link creation is idempotent, so the same pair repeated across rows is harmless (it just re-links).
-- `label=<name>` applies a named association label, resolved to its type id (or pass a numeric `association_type=<id>` directly). For `delete` and `replace`, a label also **scopes the unlink to that one association type** — only that label is removed and other labels between the pair survive. Without a label, the unlink removes **every** association type between the two records.
+The dest-table (`obj1+obj2?...`) accepts these optional parameters:
+
+- `id_property=fromProp,toProp` — the property each side matches on (empty = the value is already a HubSpot record id).
+- `label=<name>` — apply a named association label, resolved to its type id.
+- `association_type=<id>` — the numeric association type id, as an alternative to `label`.
+- `association_category=<cat>` — the category for a numeric `association_type` (e.g. `HUBSPOT_DEFINED`, `USER_DEFINED`); resolved automatically when omitted.
+
+Behaviour:
+
+- Match values are resolved to record ids before linking. A non-empty key that matches no record is a not-found reject handled per `--reject-mode`. An empty cell is skipped for `merge`/`delete`; under `replace` an empty `obj2` cell for a present `obj1` clears that record's links.
+- A key column holding a list/array links the row to every element (one contact to many companies in a single row); repeated pairs **within a row** are de-duplicated. HubSpot's link creation is idempotent, so the same pair across rows is harmless.
+- For `delete` and `replace`, a `label`/`association_type` **scopes the unlink to that one type** — other labels between the pair survive. Without one, the unlink removes **every** type between the two records.
 
 Association strategies:
 
