@@ -1106,6 +1106,55 @@ func TestMirrorEmptySourceSkipsArchiveSweep(t *testing.T) {
 	}
 }
 
+// TestMirrorKeepsUpsertedRowWithReformattedValue: when HubSpot stores a match
+// value differently than the source sent it (reformatting/case-folding beyond what
+// matchKey folds), the mirror must still keep the record it just upserted — it is
+// protected by the returned record id, not by correlating the stored value.
+func TestMirrorKeepsUpsertedRowWithReformattedValue(t *testing.T) {
+	var mu sync.Mutex
+	var archived []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/upsert":
+			// The upsert returns the record id HubSpot assigned/matched.
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[{"id":"500"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/objects/contacts":
+			// The live record's stored phone is reformatted, so it does NOT correlate
+			// to the source value through matchKey — only the id match can save it.
+			_, _ = io.WriteString(w, `{"results":[{"id":"500","properties":{"phone":"+15550000001"}}]}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/archive":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []struct {
+					ID string `json:"id"`
+				} `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			for _, in := range body.Inputs {
+				archived = append(archived, in.ID)
+			}
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"phone": {"+1 (555) 000-0001"}}, []string{"phone"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts?id_property=phone", Strategy: "replace", PrimaryKeys: []string{"phone"},
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, archived, "the just-upserted record (id 500) must not be archived despite its reformatted stored value")
+}
+
 // TestMirrorKeepsKeylessRowItCreated: a mirror source row with an empty match
 // value is created, and its new record id is protected from the same run's
 // finalize sweep — it must not be archived just because its empty key can't

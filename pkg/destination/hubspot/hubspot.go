@@ -170,10 +170,12 @@ type shaper struct {
 	// records whose idProperty value was not in the source (seen; concurrency-safe).
 	mirror bool
 	seen   *sync.Map
-	// created holds the record ids this run inserted via create (keyless mirror
-	// rows have no match value to record in `seen`), so the finalize sweep does not
-	// archive a record the same run just wrote. Concurrency-safe.
-	created *sync.Map
+	// writtenIDs holds the record ids HubSpot returned for every row this run wrote
+	// (create + upsert). The mirror finalize sweep keeps these by id, so a record
+	// the run just wrote is never archived even when its stored match value can't be
+	// correlated back through `seen` — a keyless row (no match value), or one whose
+	// value HubSpot case-folds or reformats (email lowercasing, phone). Concurrency-safe.
+	writtenIDs *sync.Map
 	// sawSource records whether the source delivered any (non-empty) batch. A mirror
 	// whose source produced 0 rows (a transient empty extract, an over-restrictive
 	// filter) must not archive every record — that would turn a hiccup into a full
@@ -301,7 +303,7 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 	}
 	if mirror {
 		sh.seen = &sync.Map{}
-		sh.created = &sync.Map{}
+		sh.writtenIDs = &sync.Map{}
 	}
 	return sh, nil
 }
@@ -654,7 +656,7 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 			return batchInput{}, "", false
 		}
 		// No match value: the row can't target an existing record, so create it.
-		// In a mirror the created record's id is tracked (writeBatch) so the
+		// In a mirror the created record's id is tracked (writtenIDs) so the
 		// finalize sweep does not archive what this run just wrote.
 		return in, "create", true
 	}
@@ -965,8 +967,8 @@ func (d *HubSpotDestination) listStaleIDs(ctx context.Context, sh *shaper) ([]st
 		for _, r := range parsed.Results {
 			// A record this run just created (e.g. a keyless source row that has no
 			// match value to appear in `seen`) must survive its own run's sweep.
-			if sh.created != nil {
-				if _, ok := sh.created.Load(r.ID); ok {
+			if sh.writtenIDs != nil {
+				if _, ok := sh.writtenIDs.Load(r.ID); ok {
 					continue
 				}
 			}
@@ -1585,11 +1587,12 @@ func (d *HubSpotDestination) send(ctx context.Context, sh *shaper, items []batch
 	if err != nil {
 		return err
 	}
-	// A mirror must not archive records it just created (keyless rows have no match
-	// value to record in `seen`), so remember the ids HubSpot assigned this run.
-	if sh.created != nil && action == "create" {
+	// A mirror must not archive records it just wrote. Remember every id HubSpot
+	// returned this run (create and upsert both return them), so finalize keeps them
+	// by id regardless of whether their stored match value correlates through `seen`.
+	if sh.writtenIDs != nil {
 		for _, id := range res.createdIDs {
-			sh.created.Store(id, struct{}{})
+			sh.writtenIDs.Store(id, struct{}{})
 		}
 	}
 	// A structural failure (e.g. upsert on a non-unique id_property) fails every
