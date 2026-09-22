@@ -302,8 +302,6 @@ Upsert/update/delete match existing records on two independent things — **whic
 - **`merge`** and **`replace`** require it explicitly (associations need two: `--primary-key k1,k2`).
 - **`update`** and **`delete`** default it to the **`hs_object_id`** column when you don't pass one, so a source keyed by HubSpot record id needs no flag; pass `--primary-key <col>` to match on a different column (e.g. `email`).
 
-`--primary-key` only ever names the source column — it does **not** set the match property. Matching on `hs_object_id` targets records by their HubSpot record id.
-
 For **`update`** and **`delete`**, the match property does not have to be unique. If the property is non-unique (e.g. `company_name`), ingestr finds **every** record with that value via the Search API and updates/archives all of them — so you can, for example, flag every contact at a company in one row. ingestr detects uniqueness automatically from the property definition, so no extra flag is needed. (`merge`/`replace` still require a unique property, since upsert/mirror match one record.)
 
 ```sh
