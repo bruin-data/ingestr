@@ -376,16 +376,16 @@ func parseAssociationShaper(objectType string, p tableParams, strategy string, p
 	}
 
 	assocType := 0
-	category := ""
+	// An explicit association_category is honored as-is; an empty one is resolved
+	// from the type id at connect time (a numeric type may name a user- or
+	// integration-defined label, not a HUBSPOT_DEFINED one).
+	category := p.AssociationCategory
 	if p.AssociationType != "" {
 		n, err := strconv.Atoi(p.AssociationType)
 		if err != nil {
 			return nil, fmt.Errorf("hubspot: association_type must be a numeric association type id, got %q", p.AssociationType)
 		}
 		assocType = n
-		if category = p.AssociationCategory; category == "" {
-			category = "HUBSPOT_DEFINED"
-		}
 	}
 	sh := &shaper{
 		objectType:          strings.ToLower(from),
@@ -1375,42 +1375,63 @@ func (d *HubSpotDestination) resolveObjectTypeID(ctx context.Context, name strin
 	return "", false
 }
 
-// resolveAssociationType resolves a label name to its associationTypeId once,
-// before the writes start (unless a numeric association_type was given).
+// resolveAssociationType pins down the association type and category once, before
+// the writes start: a label name is resolved to its type id and category; a
+// numeric type id given without a category has its real category looked up (a
+// custom label is USER_/INTEGRATOR_DEFINED, so defaulting to HUBSPOT_DEFINED would
+// make create/labels-archive match the wrong type).
 func (d *HubSpotDestination) resolveAssociationType(ctx context.Context, sh *shaper) error {
-	if sh.associationLabel == "" || sh.associationType != 0 {
-		return nil
+	switch {
+	case sh.associationLabel != "" && sh.associationType == 0:
+		typeID, category, err := d.resolveAssociationLabel(ctx, sh.objectType, sh.associateTo, sh.associationLabel)
+		if err != nil {
+			return err
+		}
+		sh.associationType = typeID
+		sh.associationCategory = category
+	case sh.associationType != 0 && sh.associationCategory == "":
+		category, err := d.resolveAssociationCategory(ctx, sh.objectType, sh.associateTo, sh.associationType)
+		if err != nil {
+			return err
+		}
+		sh.associationCategory = category
 	}
-	typeID, category, err := d.resolveAssociationLabel(ctx, sh.objectType, sh.associateTo, sh.associationLabel)
-	if err != nil {
-		return err
-	}
-	sh.associationType = typeID
-	sh.associationCategory = category
 	return nil
+}
+
+// associationTypes fetches the association type definitions (type id, category,
+// label) for the from->to object pair via the v4 labels endpoint.
+func (d *HubSpotDestination) associationTypes(ctx context.Context, from, to string) ([]associationTypeDef, error) {
+	endpoint := fmt.Sprintf("/crm/v4/associations/%s/%s/labels",
+		url.PathEscape(d.effectiveObjectType(from)), url.PathEscape(d.effectiveObjectType(to)))
+	resp, err := d.client.R(ctx).Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("hubspot: failed to fetch association labels for %s->%s: %w", from, to, err)
+	}
+	var body struct {
+		Results []associationTypeDef `json:"results"`
+	}
+	if err := json.Unmarshal(resp.Body(), &body); err != nil {
+		return nil, fmt.Errorf("hubspot: failed to parse association labels for %s->%s: %w", from, to, err)
+	}
+	return body.Results, nil
+}
+
+type associationTypeDef struct {
+	Category string `json:"category"`
+	TypeID   int    `json:"typeId"`
+	Label    string `json:"label"`
 }
 
 // resolveAssociationLabel looks up a label name's associationTypeId for the
 // from->to object pair via the v4 labels endpoint.
 func (d *HubSpotDestination) resolveAssociationLabel(ctx context.Context, from, to, label string) (int, string, error) {
-	endpoint := fmt.Sprintf("/crm/v4/associations/%s/%s/labels",
-		url.PathEscape(d.effectiveObjectType(from)), url.PathEscape(d.effectiveObjectType(to)))
-	resp, err := d.client.R(ctx).Get(endpoint)
+	types, err := d.associationTypes(ctx, from, to)
 	if err != nil {
-		return 0, "", fmt.Errorf("hubspot: failed to fetch association labels for %s->%s: %w", from, to, err)
-	}
-	var body struct {
-		Results []struct {
-			Category string `json:"category"`
-			TypeID   int    `json:"typeId"`
-			Label    string `json:"label"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(resp.Body(), &body); err != nil {
-		return 0, "", fmt.Errorf("hubspot: failed to parse association labels for %s->%s: %w", from, to, err)
+		return 0, "", err
 	}
 	var available []string
-	for _, r := range body.Results {
+	for _, r := range types {
 		if strings.EqualFold(strings.TrimSpace(r.Label), strings.TrimSpace(label)) {
 			category := r.Category
 			if category == "" {
@@ -1423,6 +1444,22 @@ func (d *HubSpotDestination) resolveAssociationLabel(ctx context.Context, from, 
 		}
 	}
 	return 0, "", fmt.Errorf("hubspot: association label %q not found for %s->%s (available: %s)", label, from, to, strings.Join(available, ", "))
+}
+
+// resolveAssociationCategory finds the category for a numeric association type id.
+// The type list may omit the built-in unlabeled types, so an unmatched id falls
+// back to HUBSPOT_DEFINED (the category those built-ins use).
+func (d *HubSpotDestination) resolveAssociationCategory(ctx context.Context, from, to string, typeID int) (string, error) {
+	types, err := d.associationTypes(ctx, from, to)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range types {
+		if r.TypeID == typeID && r.Category != "" {
+			return r.Category, nil
+		}
+	}
+	return "HUBSPOT_DEFINED", nil
 }
 
 // postBatch posts one chunk to the batch action endpoint, resolving a custom
@@ -1622,6 +1659,14 @@ func (d *HubSpotDestination) partitionExisting(ctx context.Context, objectType s
 	return existing, nil
 }
 
+// isRecordsAbsent404 reports whether a batch/read 404 body is HubSpot's
+// "requested records don't exist" response (category OBJECT_NOT_FOUND) rather than
+// a 404 from a misconfigured object type or endpoint. Only the former may be
+// treated as "none found"; the latter must surface as a hard error.
+func isRecordsAbsent404(bodyText string) bool {
+	return strings.Contains(strings.ToUpper(bodyText), "OBJECT_NOT_FOUND")
+}
+
 // batchReadFound reports how many of the given ids exist via batch read, which
 // returns all records when they exist or OBJECT_NOT_FOUND when any is missing.
 func (d *HubSpotDestination) batchReadFound(ctx context.Context, objectType string, ids []string) (int, error) {
@@ -1634,10 +1679,14 @@ func (d *HubSpotDestination) batchReadFound(ctx context.Context, objectType stri
 	if err != nil {
 		return 0, err
 	}
-	// A batch where every id is missing can come back 404 (or 207 with an empty
-	// results set); both mean "none found", not a hard error — so the merge
-	// re-route can still create them instead of rejecting the whole batch.
+	// A batch where every id is missing can come back 404 with category
+	// OBJECT_NOT_FOUND (or 207 with an empty results set); both mean "none found",
+	// not a hard error — so the merge re-route can still create them. A 404 for any
+	// other reason (unknown object type, wrong endpoint) must still surface.
 	if resp.StatusCode() == 404 {
+		if !isRecordsAbsent404(resp.String()) {
+			return 0, fmt.Errorf("status 404: %s", resp.String())
+		}
 		return 0, nil
 	}
 	if resp.StatusCode() != 200 && resp.StatusCode() != 207 {
@@ -1775,10 +1824,16 @@ func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType
 			}
 		}
 	}
-	// A chunk whose keys are all absent from HubSpot comes back 404 — that means
-	// "none found", not a hard error, so callers can reject the missing keys per
-	// --reject-mode instead of aborting the whole run (matches batchReadFound).
+	// A chunk whose keys are all absent from HubSpot comes back 404 with category
+	// OBJECT_NOT_FOUND — that means "none found", not a hard error, so callers can
+	// reject the missing keys per --reject-mode instead of aborting the whole run.
+	// A 404 for any other reason (unknown object type, wrong endpoint) is a real
+	// misconfiguration and must surface, or --reject-mode=skip would report a
+	// hollow success having written nothing (matches batchReadFound).
 	if resp.StatusCode() == 404 {
+		if !isRecordsAbsent404(resp.String()) {
+			return nil, fmt.Errorf("status 404: %s", resp.String())
+		}
 		return map[string]string{}, nil
 	}
 	if resp.StatusCode() != 200 && resp.StatusCode() != 207 {

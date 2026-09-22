@@ -313,14 +313,31 @@ func TestSystemicUpsertErrorAbortsEvenUnderSkip(t *testing.T) {
 func TestBatchReadByPropertyTreats404AsNoneFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"status":"error","message":"Not found"}`)
+		_, _ = io.WriteString(w, `{"status":"error","message":"Some objects were not found","category":"OBJECT_NOT_FOUND"}`)
 	}))
 	t.Cleanup(srv.Close)
 
 	d := connectTest(t, srv.URL)
 	got, err := d.resolveKeysToIDs(context.Background(), "contacts", "email", []string{"missing@x.com"})
-	require.NoError(t, err, "a 404 (no keys found) must not be a hard error")
+	require.NoError(t, err, "an OBJECT_NOT_FOUND 404 (no keys found) must not be a hard error")
 	assert.Empty(t, got)
+}
+
+// TestBatchReadByPropertyMisconfig404IsHardError: a 404 that is not
+// OBJECT_NOT_FOUND (e.g. an unknown object type) is a real misconfiguration and
+// must surface, not be masked as "none found" (which --reject-mode=skip would
+// otherwise report as a hollow success).
+func TestBatchReadByPropertyMisconfig404IsHardError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"error","message":"The requested URL was not found"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	_, err := d.resolveKeysToIDs(context.Background(), "contacts", "email", []string{"missing@x.com"})
+	require.Error(t, err, "a non-OBJECT_NOT_FOUND 404 must surface as a hard error")
+	assert.Contains(t, err.Error(), "404")
 }
 
 // TestSystemicUpdateErrorAbortsEvenUnderSkip mirrors the upsert case for the
@@ -429,6 +446,12 @@ func TestLabeledAssociationDeleteUsesLabelsArchive(t *testing.T) {
 	var path string
 	var captured map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The numeric type's category is resolved from the labels endpoint (280 is
+		// a user-defined label here, so its category is USER_DEFINED).
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels") {
+			_, _ = io.WriteString(w, `{"results":[{"typeId":280,"category":"USER_DEFINED","label":"Partner"}]}`)
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		path = r.URL.Path
@@ -459,7 +482,11 @@ func TestLabeledAssociationDeleteUsesLabelsArchive(t *testing.T) {
 	types, ok := first["types"].([]interface{})
 	require.True(t, ok, "a labeled delete must carry the association type")
 	require.Len(t, types, 1)
-	assert.Equal(t, float64(280), types[0].(map[string]interface{})["associationTypeId"])
+	spec := types[0].(map[string]interface{})
+	assert.Equal(t, float64(280), spec["associationTypeId"])
+	// The resolved category (not a hard-coded HUBSPOT_DEFINED) reaches the request,
+	// so a custom label is actually matched and removed.
+	assert.Equal(t, "USER_DEFINED", spec["associationCategory"])
 }
 
 // TestNonUniqueAssociationKeyLinksAll: when an association side matches on a
