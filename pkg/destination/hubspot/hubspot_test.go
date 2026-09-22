@@ -817,7 +817,7 @@ func TestShapeAssociationCartesian(t *testing.T) {
 	defer rec.Release()
 
 	// fromProperty/toProperty empty => values are treated as record ids directly.
-	items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, resolveMap{}, resolveMap{})
+	items, _, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, resolveMap{}, resolveMap{})
 	require.Empty(t, unresolved)
 	require.Len(t, items, 2)
 	assert.Equal(t, "c1", items[0].From.ID)
@@ -844,7 +844,7 @@ func TestShapeAssociationDedups(t *testing.T) {
 	rec := b.NewRecordBatch()
 	defer rec.Release()
 
-	items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, resolveMap{}, resolveMap{})
+	items, _, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, resolveMap{}, resolveMap{})
 	require.Empty(t, unresolved)
 	require.Len(t, items, 2)
 	assert.Equal(t, "co1", items[0].To.ID)
@@ -862,7 +862,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "company_id": {"999"}}, []string{"email", "company_id"})
 		defer rec.Release()
 		// email resolves to a contact id; company 999 does not exist.
-		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
+		items, _, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
 			mkResolve(map[string][]string{"a@x.com": {"111"}}), mkResolve(map[string][]string{}))
 		require.Empty(t, items)
 		require.Len(t, unresolved, 1)
@@ -874,7 +874,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 	t.Run("both sides resolve => a link and no reject", func(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "company_id": {"222"}}, []string{"email", "company_id"})
 		defer rec.Release()
-		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
+		items, _, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
 			mkResolve(map[string][]string{"a@x.com": {"111"}}), mkResolve(map[string][]string{"222": {"888"}}))
 		require.Empty(t, unresolved)
 		require.Len(t, items, 1)
@@ -885,7 +885,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 	t.Run("empty cell is a skip, not a reject", func(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {""}, "company_id": {"222"}}, []string{"email", "company_id"})
 		defer rec.Release()
-		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
+		items, _, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
 			mkResolve(map[string][]string{}), mkResolve(map[string][]string{"222": {"888"}}))
 		require.Empty(t, items)
 		require.Empty(t, unresolved)
@@ -1950,6 +1950,75 @@ func TestLabeledAssociationMirrorUnlinksOnlyManagedLabel(t *testing.T) {
 	assert.Equal(t, "11", unlinked[0].To.ID)
 	require.Len(t, unlinked[0].Types, 1, "the unlink carries the managed type")
 	assert.Equal(t, 42, unlinked[0].Types[0].AssociationTypeID)
+}
+
+// TestMirrorUnresolvedToKeyDoesNotUnlink: under --reject-mode=skip, a From whose
+// desired To set is only partially resolved (one To key doesn't exist) must be
+// excluded from the mirror sweep. Reconciling it against the partial set would
+// unlink a live association the source actually meant to keep.
+func TestMirrorUnresolvedToKeyDoesNotUnlink(t *testing.T) {
+	var mu sync.Mutex
+	var created [][2]string
+	archiveHit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/properties/contacts/email":
+			_, _ = io.WriteString(w, `{"hasUniqueValue":true}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/properties/companies/domain":
+			_, _ = io.WriteString(w, `{"hasUniqueValue":false}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/read":
+			_, _ = io.WriteString(w, `{"results":[{"id":"111","properties":{"email":"a@x.com"}}]}`)
+		case r.URL.Path == "/crm/v3/objects/companies/search":
+			// acme.com resolves to 888; ghost.com is absent (unresolved).
+			_, _ = io.WriteString(w, `{"results":[{"id":"888","properties":{"domain":"acme.com"}}]}`)
+		case r.URL.Path == "/crm/v4/objects/contacts/111/associations/companies":
+			// 111 is live-linked to 888 (kept) and 777 (would look stale against
+			// the partial {888} set, but must survive the unresolved key).
+			_, _ = io.WriteString(w, `{"results":[{"toObjectId":"888"},{"toObjectId":"777"}]}`)
+		case r.URL.Path == "/crm/v4/associations/contacts/companies/batch/associate/default":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []map[string]interface{} `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			for _, in := range body.Inputs {
+				from := in["from"].(map[string]interface{})["id"].(string)
+				to := in["to"].(map[string]interface{})["id"].(string)
+				created = append(created, [2]string{from, to})
+			}
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/archive"):
+			mu.Lock()
+			archiveHit = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{
+		"email":  {"a@x.com", "a@x.com"},
+		"domain": {"acme.com", "ghost.com"},
+	}, []string{"email", "domain"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table:       "contacts+companies?id_property=email,domain",
+		Strategy:    "replace",
+		PrimaryKeys: []string{"email", "domain"},
+		RejectMode:  "skip",
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, [][2]string{{"111", "888"}}, created, "the resolved link is still created")
+	assert.False(t, archiveHit, "an unresolved To key must not unlink the From's live associations")
 }
 
 // TestCreate5xxAbortsWithoutRetry: a create (non-idempotent) must not retry on a

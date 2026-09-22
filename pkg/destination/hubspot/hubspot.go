@@ -201,6 +201,11 @@ type shaper struct {
 	associationType     int
 	associationCategory string
 	associationLabel    string
+	// incompleteFroms (association mirror) holds From record ids whose desired To
+	// set couldn't be fully resolved this run (a To key didn't match any record).
+	// finalize skips reconciling them so an unresolved key never unlinks a live
+	// association the source actually meant to keep. Concurrency-safe.
+	incompleteFroms *sync.Map
 }
 
 // associate reports whether the shaper links records instead of writing properties.
@@ -415,6 +420,7 @@ func parseAssociationShaper(objectType string, p tableParams, strategy string, p
 	}
 	if mirror {
 		sh.seenLinks = &sync.Map{}
+		sh.incompleteFroms = &sync.Map{}
 	}
 	return sh, nil
 }
@@ -554,21 +560,20 @@ func allCellValues(arr arrow.Array) []string {
 // them, not just one). A side that matches on a business key but whose (non-empty)
 // value resolves to no record is a reject handled per --reject-mode, not a silent
 // skip. An empty cell yields neither a link nor a reject (the caller skips it).
-func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve resolveMap) ([]associationInput, []string, []rejection) {
+func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve resolveMap) (items []associationInput, mirrorFroms, incompleteFroms []string, unresolved []rejection) {
 	fromVals := cellValues(record.Column(colIndex[s.fromColumn]), row)
 	toVals := cellValues(record.Column(colIndex[s.toColumn]), row)
 	if len(fromVals) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	// Outside a mirror an empty To cell is a plain skip: there is nothing to link
 	// and no existing links to reconcile away.
 	if len(toVals) == 0 && !s.mirror {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Resolve each side's values to record ids once, collecting not-founds so a
 	// bad key surfaces as a reject rather than vanishing.
-	var unresolved []rejection
 	resolveSide := func(vals []string, resolve resolveMap, objectType, property string) []string {
 		ids := make([]string, 0, len(vals))
 		for _, v := range vals {
@@ -593,9 +598,18 @@ func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]
 	// Mirror + empty To cell: the From is present but wants no links, so report it
 	// for the mirror finalizer to unlink everything it currently has.
 	if len(toVals) == 0 {
-		return nil, fromIDs, unresolved
+		return nil, fromIDs, nil, unresolved
 	}
+	unresolvedBefore := len(unresolved)
 	toIDs := resolveSide(toVals, toResolve, s.associateTo, s.toProperty)
+
+	// A To key that failed to resolve means we only saw part of this From's
+	// desired link set. Under mirror, flag the From as incomplete so the
+	// finalizer skips reconciling it — an unresolved key must never unlink a
+	// live association the source actually meant to keep.
+	if s.mirror && len(unresolved) > unresolvedBefore {
+		incompleteFroms = append([]string(nil), fromIDs...)
+	}
 
 	var out []associationInput
 	seen := make(map[string]bool, len(fromIDs)*len(toIDs))
@@ -616,7 +630,7 @@ func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]
 			out = append(out, in)
 		}
 	}
-	return out, nil, unresolved
+	return out, nil, incompleteFroms, unresolved
 }
 
 // batchInput is one record in a HubSpot batch create/upsert/update request.
@@ -1005,6 +1019,16 @@ func (d *HubSpotDestination) finalizeAssociationMirror(ctx context.Context, sh *
 	sh.seenLinks.Range(func(key, val interface{}) bool {
 		fromID := key.(string)
 		want := val.(*sync.Map)
+
+		// Skip Froms whose desired To set was only partially resolved this run:
+		// reconciling against an incomplete set would unlink live associations the
+		// source actually meant to keep.
+		if sh.incompleteFroms != nil {
+			if _, bad := sh.incompleteFroms.Load(fromID); bad {
+				config.Debug("[HUBSPOT DEST] mirror skipping reconciliation for %s %s: desired links partially unresolved", sh.objectType, fromID)
+				return true
+			}
+		}
 
 		live, err := d.listAssociationsFor(ctx, sh, fromID)
 		if err != nil {
@@ -2316,12 +2340,19 @@ func (d *HubSpotDestination) writeAssociationBatch(ctx context.Context, sh *shap
 	}
 
 	for row := 0; row < rows; row++ {
-		items, mirrorFroms, unresolved := sh.shapeAssociation(record, colIndex, row, fromResolve, toResolve)
+		items, mirrorFroms, incompleteFroms, unresolved := sh.shapeAssociation(record, colIndex, row, fromResolve, toResolve)
 		if len(unresolved) > 0 {
 			if sh.failFast() {
 				return written, fmt.Errorf("hubspot: %s", unresolved[0].message)
 			}
 			rejects.add(unresolved)
+		}
+		// A From whose desired To set couldn't be fully resolved is excluded from
+		// the mirror sweep so a rejected key never unlinks a live association.
+		if sh.mirror && sh.incompleteFroms != nil {
+			for _, from := range incompleteFroms {
+				sh.incompleteFroms.Store(from, struct{}{})
+			}
 		}
 		// Mirror rows whose From resolved but whose To cell was empty register the
 		// From with an empty desired set so finalization unlinks all its links.
