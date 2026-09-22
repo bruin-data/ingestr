@@ -554,7 +554,7 @@ func allCellValues(arr arrow.Array) []string {
 // them, not just one). A side that matches on a business key but whose (non-empty)
 // value resolves to no record is a reject handled per --reject-mode, not a silent
 // skip. An empty cell yields neither a link nor a reject (the caller skips it).
-func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve map[string][]string) ([]associationInput, []string, []rejection) {
+func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve resolveMap) ([]associationInput, []string, []rejection) {
 	fromVals := cellValues(record.Column(colIndex[s.fromColumn]), row)
 	toVals := cellValues(record.Column(colIndex[s.toColumn]), row)
 	if len(fromVals) == 0 {
@@ -569,14 +569,14 @@ func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]
 	// Resolve each side's values to record ids once, collecting not-founds so a
 	// bad key surfaces as a reject rather than vanishing.
 	var unresolved []rejection
-	resolveSide := func(vals []string, resolve map[string][]string, objectType, property string) []string {
+	resolveSide := func(vals []string, resolve resolveMap, objectType, property string) []string {
 		ids := make([]string, 0, len(vals))
 		for _, v := range vals {
-			if resolve == nil {
+			if !resolve.initialized() {
 				ids = append(ids, v)
 				continue
 			}
-			if matched, ok := resolve[matchKey(v)]; ok && len(matched) > 0 {
+			if matched := resolve.lookup(v); len(matched) > 0 {
 				ids = append(ids, matched...)
 			} else {
 				unresolved = append(unresolved, rejection{
@@ -1823,7 +1823,7 @@ func columnValues(arr arrow.Array) []string {
 // a shared key links all its records); a unique one via batch read (one id). When
 // uniqueness can't be determined, it assumes unique — the same fallback as the
 // update/delete match path.
-func (d *HubSpotDestination) resolveAssociationSide(ctx context.Context, objectType, property string, values []string) (map[string][]string, error) {
+func (d *HubSpotDestination) resolveAssociationSide(ctx context.Context, objectType, property string, values []string) (resolveMap, error) {
 	unique, err := d.propertyIsUnique(ctx, objectType, property)
 	if err != nil {
 		config.Debug("[HUBSPOT DEST] could not determine uniqueness of %s.%s (%v); assuming unique", objectType, property, err)
@@ -1832,20 +1832,12 @@ func (d *HubSpotDestination) resolveAssociationSide(ctx context.Context, objectT
 	if !unique {
 		return d.searchIDsByProperty(ctx, objectType, property, values)
 	}
-	single, err := d.resolveKeysToIDs(ctx, objectType, property, values)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string][]string, len(single))
-	for k, v := range single {
-		out[k] = []string{v}
-	}
-	return out, nil
+	return d.resolveKeysToIDs(ctx, objectType, property, values)
 }
 
 // resolveKeysToIDs maps business-key values to record ids via batch read, which
 // fails atomically on any missing key, so the set is bisected to drop missing ones.
-func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, idProperty string, keys []string) (map[string]string, error) {
+func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, idProperty string, keys []string) (resolveMap, error) {
 	seen := make(map[string]bool, len(keys))
 	uniq := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -1854,7 +1846,7 @@ func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, i
 			uniq = append(uniq, k)
 		}
 	}
-	out := make(map[string]string, len(uniq))
+	out := newResolveMap()
 	var recurse func(sub []string) error
 	recurse = func(sub []string) error {
 		if len(sub) == 0 {
@@ -1864,15 +1856,13 @@ func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, i
 		if err != nil {
 			return err
 		}
-		for k, v := range found {
-			out[k] = v
-		}
-		// found is keyed by matchKey (HubSpot may normalize the stored value), so
-		// compare each source key through matchKey — otherwise a mixed-case key that
-		// did resolve looks unresolved and triggers needless bisected re-reads.
+		out.merge(found)
+		// found matches through exact-or-folded, so check each source key that way —
+		// otherwise a mixed-case key that did resolve looks unresolved and triggers
+		// needless bisected re-reads.
 		var remaining []string
 		for _, k := range sub {
-			if _, ok := found[matchKey(k)]; !ok {
+			if !found.has(k) {
 				remaining = append(remaining, k)
 			}
 		}
@@ -1891,7 +1881,7 @@ func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, i
 	for start := 0; start < len(uniq); start += readValueChunk {
 		end := min(start+readValueChunk, len(uniq))
 		if err := recurse(uniq[start:end]); err != nil {
-			return nil, err
+			return resolveMap{}, err
 		}
 	}
 	return out, nil
@@ -1907,9 +1897,61 @@ func matchKey(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// resolveMap maps a business-key value to the record id(s) it resolved to. Each
+// entry is stored twice — under the exact value and under its folded (matchKey)
+// form. lookup prefers the exact match, so two distinct case-sensitive values
+// (e.g. ABC and abc, which HubSpot keeps as separate records) resolve to their own
+// records instead of colliding; it falls back to the folded key so a value HubSpot
+// normalized on its side (lowercased email) still correlates to the record it
+// returned. The zero value is "no resolution needed" (the column already holds
+// record ids) — use initialized to tell that apart from an empty result.
+type resolveMap struct {
+	exact  map[string][]string
+	folded map[string][]string
+}
+
+func newResolveMap() resolveMap {
+	return resolveMap{exact: map[string][]string{}, folded: map[string][]string{}}
+}
+
+func (m resolveMap) initialized() bool { return m.exact != nil }
+
+// add records that value resolved to id, de-duplicating repeated ids (Search
+// pagination and case-variant collisions can surface the same record twice).
+func (m resolveMap) add(value, id string) {
+	if !slices.Contains(m.exact[value], id) {
+		m.exact[value] = append(m.exact[value], id)
+	}
+	fk := matchKey(value)
+	if !slices.Contains(m.folded[fk], id) {
+		m.folded[fk] = append(m.folded[fk], id)
+	}
+}
+
+func (m resolveMap) merge(other resolveMap) {
+	for v, ids := range other.exact {
+		for _, id := range ids {
+			m.add(v, id)
+		}
+	}
+}
+
+// lookup returns the ids value resolved to: an exact hit first, else the folded key.
+func (m resolveMap) lookup(value string) []string {
+	if ids, ok := m.exact[value]; ok {
+		return ids
+	}
+	return m.folded[matchKey(value)]
+}
+
+// has reports whether value resolved to at least one record.
+func (m resolveMap) has(value string) bool {
+	return len(m.lookup(value)) > 0
+}
+
 // batchReadByProperty reads records matched on a non-id property and returns a
-// map of the property value to the record id for those that exist.
-func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType, idProperty string, keys []string) (map[string]string, error) {
+// resolveMap from each property value to the record id(s) that exist for it.
+func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType, idProperty string, keys []string) (resolveMap, error) {
 	inputs := make([]map[string]string, len(keys))
 	for i, k := range keys {
 		inputs[i] = map[string]string{"id": k}
@@ -1918,14 +1960,14 @@ func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType
 	endpoint := fmt.Sprintf("/crm/v3/objects/%s/batch/read", url.PathEscape(d.effectiveObjectType(objectType)))
 	resp, err := d.client.R(ctx).SetBody(body).Post(endpoint)
 	if err != nil {
-		return nil, err
+		return resolveMap{}, err
 	}
 	if resp.StatusCode() != 200 && resp.StatusCode() != 207 && strings.Contains(strings.ToLower(resp.String()), "infer object type") {
 		if _, ok := d.resolveObjectTypeID(ctx, objectType); ok {
 			endpoint = fmt.Sprintf("/crm/v3/objects/%s/batch/read", url.PathEscape(d.effectiveObjectType(objectType)))
 			resp, err = d.client.R(ctx).SetBody(body).Post(endpoint)
 			if err != nil {
-				return nil, err
+				return resolveMap{}, err
 			}
 		}
 	}
@@ -1937,12 +1979,12 @@ func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType
 	// hollow success having written nothing (matches batchReadFound).
 	if resp.StatusCode() == 404 {
 		if !isRecordsAbsent404(resp.String()) {
-			return nil, fmt.Errorf("status 404: %s", resp.String())
+			return resolveMap{}, fmt.Errorf("status 404: %s", resp.String())
 		}
-		return map[string]string{}, nil
+		return newResolveMap(), nil
 	}
 	if resp.StatusCode() != 200 && resp.StatusCode() != 207 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode())
+		return resolveMap{}, fmt.Errorf("status %d", resp.StatusCode())
 	}
 	var parsed struct {
 		Results []struct {
@@ -1951,12 +1993,12 @@ func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(resp.Body(), &parsed); err != nil {
-		return nil, err
+		return resolveMap{}, err
 	}
-	out := make(map[string]string, len(parsed.Results))
+	out := newResolveMap()
 	for _, r := range parsed.Results {
 		if v, ok := r.Properties[idProperty]; ok {
-			out[matchKey(v)] = r.ID
+			out.add(v, r.ID)
 		}
 	}
 	return out, nil
@@ -1964,7 +2006,7 @@ func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType
 
 // searchIDsByProperty maps each value to ALL record ids whose property equals it
 // (CRM Search, chunked IN filter, paginated) — for non-unique matches.
-func (d *HubSpotDestination) searchIDsByProperty(ctx context.Context, objectType, property string, values []string) (map[string][]string, error) {
+func (d *HubSpotDestination) searchIDsByProperty(ctx context.Context, objectType, property string, values []string) (resolveMap, error) {
 	seen := make(map[string]bool, len(values))
 	uniq := make([]string, 0, len(values))
 	for _, v := range values {
@@ -1974,12 +2016,12 @@ func (d *HubSpotDestination) searchIDsByProperty(ctx context.Context, objectType
 		}
 	}
 
-	out := make(map[string][]string, len(uniq))
+	out := newResolveMap()
 	const searchValueChunk = 100
 	for start := 0; start < len(uniq); start += searchValueChunk {
 		end := min(start+searchValueChunk, len(uniq))
 		if err := d.searchChunk(ctx, objectType, property, uniq[start:end], out); err != nil {
-			return nil, err
+			return resolveMap{}, err
 		}
 	}
 	return out, nil
@@ -1987,7 +2029,7 @@ func (d *HubSpotDestination) searchIDsByProperty(ctx context.Context, objectType
 
 // searchChunk runs one paginated Search request for a chunk of values, appending
 // each hit's record id to out under its property value.
-func (d *HubSpotDestination) searchChunk(ctx context.Context, objectType, property string, values []string, out map[string][]string) error {
+func (d *HubSpotDestination) searchChunk(ctx context.Context, objectType, property string, values []string, out resolveMap) error {
 	after := ""
 	for {
 		filter := map[string]interface{}{"propertyName": property, "operator": "IN", "values": values}
@@ -2033,13 +2075,9 @@ func (d *HubSpotDestination) searchChunk(ctx context.Context, objectType, proper
 		}
 		for _, r := range parsed.Results {
 			if v, ok := r.Properties[property]; ok && r.ID != "" {
-				k := matchKey(v)
-				// Case-variant source values collapse to one bucket, and pagination
-				// can repeat a hit; don't queue the same record id twice.
-				if slices.Contains(out[k], r.ID) {
-					continue
-				}
-				out[k] = append(out[k], r.ID)
+				// add de-duplicates, so a repeated hit (pagination) or a value that
+				// folds together with another isn't queued twice.
+				out.add(v, r.ID)
 			}
 		}
 
@@ -2085,7 +2123,7 @@ func (d *HubSpotDestination) writeSearchUpdateBatch(ctx context.Context, sh *sha
 			continue
 		}
 		val, _ := propertyValue(record.Column(idIdx), row)
-		ids := resolve[matchKey(val)]
+		ids := resolve.lookup(val)
 		if len(ids) == 0 {
 			if sh.failFast() {
 				return written, fmt.Errorf("hubspot: no %s found with %s=%q", sh.objectType, sh.idProperty, val)
@@ -2118,7 +2156,7 @@ func (d *HubSpotDestination) writeArchiveBatch(ctx context.Context, sh *shaper, 
 
 	// Resolve match values to record ids: non-unique (searchMatch) via Search
 	// (many per value), unique via batch read (one); hs_object_id/empty needs none.
-	var resolve map[string][]string
+	var resolve resolveMap
 	if sh.searchMatch {
 		var err error
 		resolve, err = d.searchIDsByProperty(ctx, sh.objectType, sh.idProperty, columnValues(record.Column(idIdx)))
@@ -2126,13 +2164,10 @@ func (d *HubSpotDestination) writeArchiveBatch(ctx context.Context, sh *shaper, 
 			return 0, err
 		}
 	} else if sh.idProperty != "" && sh.idProperty != recordIDProperty {
-		single, err := d.resolveKeysToIDs(ctx, sh.objectType, sh.idProperty, columnValues(record.Column(idIdx)))
+		var err error
+		resolve, err = d.resolveKeysToIDs(ctx, sh.objectType, sh.idProperty, columnValues(record.Column(idIdx)))
 		if err != nil {
 			return 0, err
-		}
-		resolve = make(map[string][]string, len(single))
-		for k, v := range single {
-			resolve[k] = []string{v}
 		}
 	}
 
@@ -2158,9 +2193,9 @@ func (d *HubSpotDestination) writeArchiveBatch(ctx context.Context, sh *shaper, 
 			continue
 		}
 		ids := []string{val}
-		if resolve != nil {
-			found, ok := resolve[matchKey(val)]
-			if !ok || len(found) == 0 {
+		if resolve.initialized() {
+			found := resolve.lookup(val)
+			if len(found) == 0 {
 				// Value present but no record matched: a not-found reject, per --reject-mode.
 				if sh.failFast() {
 					return written, fmt.Errorf("hubspot: no %s found with %s=%q to archive", sh.objectType, sh.idProperty, val)
@@ -2249,7 +2284,7 @@ func (d *HubSpotDestination) writeAssociationBatch(ctx context.Context, sh *shap
 	// When a side matches on a business key, resolve that column's values to record
 	// ids once per batch before linking. A non-unique property resolves via Search
 	// (every matching id, so the row links all of them); a unique one via batch read.
-	var fromResolve, toResolve map[string][]string
+	var fromResolve, toResolve resolveMap
 	if sh.fromProperty != "" {
 		var err error
 		fromResolve, err = d.resolveAssociationSide(ctx, sh.objectType, sh.fromProperty, allCellValues(record.Column(colIndex[sh.fromColumn])))

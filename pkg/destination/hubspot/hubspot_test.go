@@ -31,6 +31,17 @@ func colIndexOf(record arrow.RecordBatch) map[string]int {
 	return idx
 }
 
+// mkResolve builds an initialized resolveMap from value->ids for tests.
+func mkResolve(m map[string][]string) resolveMap {
+	r := newResolveMap()
+	for v, ids := range m {
+		for _, id := range ids {
+			r.add(v, id)
+		}
+	}
+	return r
+}
+
 func stringBatch(cols map[string][]string, order []string) arrow.RecordBatch {
 	fields := make([]arrow.Field, len(order))
 	for i, name := range order {
@@ -269,7 +280,23 @@ func TestSearchDedupsRepeatedIDs(t *testing.T) {
 	d := connectTest(t, srv.URL)
 	out, err := d.searchIDsByProperty(context.Background(), "contacts", "jobtitle", []string{"Eng", "eng"})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"1"}, out["eng"], "the same record id must not be queued twice")
+	assert.Equal(t, []string{"1"}, out.lookup("eng"), "the same record id must not be queued twice")
+}
+
+// TestResolveMapExactBeatsFolded: two distinct case-sensitive values (ABC/abc, kept
+// as separate records by HubSpot) must resolve to their own ids via the exact map,
+// while a value HubSpot normalized (mixed-case source vs lowercased return) still
+// resolves through the folded fallback.
+func TestResolveMapExactBeatsFolded(t *testing.T) {
+	m := newResolveMap()
+	m.add("ABC", "1") // case-sensitive external id, returned verbatim
+	m.add("abc", "2")
+	assert.Equal(t, []string{"1"}, m.lookup("ABC"), "exact match wins, no collision")
+	assert.Equal(t, []string{"2"}, m.lookup("abc"), "exact match wins, no collision")
+
+	e := newResolveMap()
+	e.add("foo@x.com", "9") // HubSpot returned the lowercased email
+	assert.Equal(t, []string{"9"}, e.lookup("Foo@X.com"), "mixed-case source falls back to the folded key")
 }
 
 // TestSystemicUpsertErrorAbortsEvenUnderSkip: an upsert against a non-unique
@@ -320,7 +347,8 @@ func TestBatchReadByPropertyTreats404AsNoneFound(t *testing.T) {
 	d := connectTest(t, srv.URL)
 	got, err := d.resolveKeysToIDs(context.Background(), "contacts", "email", []string{"missing@x.com"})
 	require.NoError(t, err, "an OBJECT_NOT_FOUND 404 (no keys found) must not be a hard error")
-	assert.Empty(t, got)
+	assert.Empty(t, got.exact, "nothing resolved")
+	assert.False(t, got.has("missing@x.com"))
 }
 
 // TestBatchReadByPropertyMisconfig404IsHardError: a 404 that is not
@@ -789,7 +817,7 @@ func TestShapeAssociationCartesian(t *testing.T) {
 	defer rec.Release()
 
 	// fromProperty/toProperty empty => values are treated as record ids directly.
-	items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, nil, nil)
+	items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, resolveMap{}, resolveMap{})
 	require.Empty(t, unresolved)
 	require.Len(t, items, 2)
 	assert.Equal(t, "c1", items[0].From.ID)
@@ -816,7 +844,7 @@ func TestShapeAssociationDedups(t *testing.T) {
 	rec := b.NewRecordBatch()
 	defer rec.Release()
 
-	items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, nil, nil)
+	items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0, resolveMap{}, resolveMap{})
 	require.Empty(t, unresolved)
 	require.Len(t, items, 2)
 	assert.Equal(t, "co1", items[0].To.ID)
@@ -835,7 +863,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		defer rec.Release()
 		// email resolves to a contact id; company 999 does not exist.
 		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
-			map[string][]string{"a@x.com": {"111"}}, map[string][]string{})
+			mkResolve(map[string][]string{"a@x.com": {"111"}}), mkResolve(map[string][]string{}))
 		require.Empty(t, items)
 		require.Len(t, unresolved, 1)
 		assert.Equal(t, objectNotFoundCategory, unresolved[0].category)
@@ -847,7 +875,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "company_id": {"222"}}, []string{"email", "company_id"})
 		defer rec.Release()
 		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
-			map[string][]string{"a@x.com": {"111"}}, map[string][]string{"222": {"888"}})
+			mkResolve(map[string][]string{"a@x.com": {"111"}}), mkResolve(map[string][]string{"222": {"888"}}))
 		require.Empty(t, unresolved)
 		require.Len(t, items, 1)
 		assert.Equal(t, "111", items[0].From.ID)
@@ -858,7 +886,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {""}, "company_id": {"222"}}, []string{"email", "company_id"})
 		defer rec.Release()
 		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
-			map[string][]string{}, map[string][]string{"222": {"888"}})
+			mkResolve(map[string][]string{}), mkResolve(map[string][]string{"222": {"888"}}))
 		require.Empty(t, items)
 		require.Empty(t, unresolved)
 	})
