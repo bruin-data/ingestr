@@ -2056,18 +2056,15 @@ func TestCreate5xxAbortsWithoutRetry(t *testing.T) {
 	assert.Equal(t, 1, createHits, "create must be sent exactly once — no 5xx retry")
 }
 
-// TestMergeByRecordIDRejectedAtParse: merge cannot match on id_property=hs_object_id
-// — HubSpot has no upsert-by-record-id, so the config is rejected before the run
-// starts. The restriction is on id_property (the HubSpot match property), not on
-// --primary-key (the source column).
+// TestMergeByRecordIDRejectedAtParse: merge/replace can't match on
+// id_property=hs_object_id (the restriction is on id_property, not --primary-key).
 func TestMergeByRecordIDRejectedAtParse(t *testing.T) {
-	// id_property=hs_object_id is rejected regardless of which source column is named.
-	_, err := parseShaper("contacts?id_property=hs_object_id", "merge", []string{"record_col"}, "", false)
-	require.ErrorContains(t, err, "merge cannot match on id_property=hs_object_id")
-
-	// A --primary-key named hs_object_id is fine when id_property is a unique property:
-	// the source column name is irrelevant to the restriction.
-	_, err = parseShaper("contacts?id_property=email", "merge", []string{"hs_object_id"}, "", false)
+	for _, strat := range []string{"merge", "replace"} {
+		_, err := parseShaper("contacts?id_property=hs_object_id", strat, []string{"record_col"}, "", false)
+		require.ErrorContains(t, err, strat+" cannot match on id_property=hs_object_id", strat)
+	}
+	// A --primary-key named hs_object_id is fine when id_property is a unique property.
+	_, err := parseShaper("contacts?id_property=email", "merge", []string{"hs_object_id"}, "", false)
 	require.NoError(t, err)
 }
 
@@ -2110,9 +2107,8 @@ func TestAnnotateIdentifies(t *testing.T) {
 	})
 }
 
-// TestUpdateByRecordIDMissingIsReject: update on hs_object_id updates the ids that
-// exist and rejects the ones that don't — HubSpot can't create a record at a
-// caller-supplied id, so a missing id is a not-found reject, never a create.
+// TestUpdateByRecordIDMissingIsReject: existing ids update, missing ids reject —
+// never re-routed to create.
 func TestUpdateByRecordIDMissingIsReject(t *testing.T) {
 	var mu sync.Mutex
 	var updated []string
@@ -2173,9 +2169,8 @@ func TestUpdateByRecordIDMissingIsReject(t *testing.T) {
 	assert.False(t, createHit, "a missing record id must be rejected, never created")
 }
 
-// TestUpdateByRecordIDMissingRejectMode: a missing record id under update honors
-// --reject-mode — tolerated as a per-record reject under skip, fatal under fail —
-// and is never re-routed to create.
+// TestUpdateByRecordIDMissingRejectMode: a missing id honors --reject-mode (skip
+// tolerates, fail aborts) and is never re-routed to create.
 func TestUpdateByRecordIDMissingRejectMode(t *testing.T) {
 	var mu sync.Mutex
 	createHit := false

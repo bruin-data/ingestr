@@ -284,11 +284,12 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 	if idProperty == "" {
 		return nil, fmt.Errorf("hubspot: %s needs a match property — set id_property=<property> on the dest-table", strategy)
 	}
-	// HubSpot assigns record ids and has no upsert-by-id, so merge (create-or-update)
-	// can't match on hs_object_id: an unmatched id could never be created. Match on a
-	// unique property to upsert, or use --incremental-strategy update to update by id.
-	if !updateOnly && !mirror && idProperty == recordIDProperty {
-		return nil, fmt.Errorf("hubspot: merge cannot match on id_property=%s — HubSpot cannot create a record at a supplied id; use --incremental-strategy update to update existing records by id, or set id_property=<unique property> to upsert", recordIDProperty)
+	// HubSpot assigns record ids and has no upsert-by-id, so merge and replace (both
+	// create unmatched source rows) can't match on hs_object_id: an unmatched id
+	// could never be created, leaving an incomplete write that --reject-mode=skip
+	// would report as success. Match on a unique property, or use update to match by id.
+	if !updateOnly && idProperty == recordIDProperty {
+		return nil, fmt.Errorf("hubspot: %s cannot match on id_property=%s — HubSpot cannot create a record at a supplied id; use --incremental-strategy update to update existing records by id, or set id_property=<unique property> to upsert", strategy, recordIDProperty)
 	}
 	// Source column supplying the match value: a single --primary-key. update
 	// defaults it to the hs_object_id column (record-id match); merge/replace
