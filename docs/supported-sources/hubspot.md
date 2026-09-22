@@ -279,7 +279,7 @@ The parameters are the same as the source — provide either `api_key` or `servi
 
 The base of `--dest-table` (before the `?`) names the object type: a built-in object (`contacts`, `companies`, `deals`, `products`, `line_items`, …) or a custom object by its name. By default every source column is written as a HubSpot property whose **internal name** matches the column name — rename a column to a different property with [`--columns`](#column-mapping). Properties are always addressed by internal name (e.g. `numberofemployees`), never by display label; the column name (after any rename) must equal the target property's internal name. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never sent.
 
-The **write behaviour is chosen with `--incremental-strategy`**, which is **required** — HubSpot has no default strategy (the framework default `replace` would mirror and archive records, so it is never applied implicitly):
+The **write behaviour is chosen with `--incremental-strategy`**, which is **required** — HubSpot has no default strategy:
 
 | Strategy | Behaviour |
 | -------- | --------- |
