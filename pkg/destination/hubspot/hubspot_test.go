@@ -1061,6 +1061,62 @@ func TestMirrorKeylessRecords(t *testing.T) {
 	assert.ElementsMatch(t, []string{"2", "3"}, archived, "stale and keyless records are both archived")
 }
 
+// TestMirrorSkipsKeylessSourceRow: a source row whose match value is empty can't
+// be tracked in `seen`, so a mirror must skip it — not create a keyless record
+// that its own finalize pass would then archive (create+archive churn).
+func TestMirrorSkipsKeylessSourceRow(t *testing.T) {
+	var mu sync.Mutex
+	var created, archived []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/objects/contacts":
+			// Only the keyed source row (a@x.com -> id 1) should survive; nothing stale.
+			_, _ = io.WriteString(w, `{"results":[{"id":"1","properties":{"email":"a@x.com"}}]}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/create":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []map[string]interface{} `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			created = append(created, fmt.Sprintf("%d", len(body.Inputs)))
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/archive":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []struct {
+					ID string `json:"id"`
+				} `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			for _, in := range body.Inputs {
+				archived = append(archived, in.ID)
+			}
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	// Second row has an empty email (match value) — it must be skipped, not created.
+	rec := stringBatch(map[string][]string{"email": {"a@x.com", ""}, "name": {"A", "B"}}, []string{"email", "name"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts?id_property=email", Strategy: "replace", PrimaryKeys: []string{"email"},
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, created, "the keyless source row is skipped, not created")
+	assert.Empty(t, archived, "nothing is stale, so no create+archive churn")
+}
+
 // TestPlanUseCases walks the plan's "Use Cases" page and pins the shaper parseShaper
 // produces per case; out-of-scope cases are noted in comments, not exercised.
 func TestPlanUseCases(t *testing.T) {

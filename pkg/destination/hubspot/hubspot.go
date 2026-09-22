@@ -643,6 +643,12 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 			// Update-only can't create; a row without a match value is skipped.
 			return batchInput{}, "", false
 		}
+		if s.mirror {
+			// A mirror reconciles by match value, and a keyless row can't be recorded
+			// in `seen`. Creating it would only get it archived in the same run's
+			// finalize pass (create+archive churn, orphan every run), so skip it.
+			return batchInput{}, "", false
+		}
 		// No match value: the row can't target an existing record, so create it.
 		return in, "create", true
 	}
