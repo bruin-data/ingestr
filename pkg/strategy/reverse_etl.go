@@ -52,6 +52,10 @@ func executeReverseETL(ctx context.Context, job *IngestionJob, strategyName conf
 		rejectMode = string(config.RejectFail)
 	}
 
+	// Reverse-ETL defaults to clearing the field when a source cell is null; only an
+	// explicit --write-nulls=false opts into omitting nulls (leaving the value as-is).
+	writeNulls := job.Config.WriteNulls || !job.Config.WriteNullsSet
+
 	writeOpts := destination.WriteOptions{
 		Table:       job.Config.DestTable,
 		Schema:      job.Schema,
@@ -59,7 +63,7 @@ func executeReverseETL(ctx context.Context, job *IngestionJob, strategyName conf
 		Parallelism: job.Config.EffectiveDestinationParallelism(),
 		Strategy:    string(strategyName),
 		RejectMode:  rejectMode,
-		WriteNulls:  job.Config.WriteNulls,
+		WriteNulls:  writeNulls,
 	}
 	// WriteParallel dispatches up to Parallelism batches concurrently; the
 	// destination's own rate limiter still bounds the actual request rate.
