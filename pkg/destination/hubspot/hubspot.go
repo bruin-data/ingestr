@@ -536,13 +536,13 @@ func allCellValues(arr arrow.Array) []string {
 	return out
 }
 
-// shapeAssociation builds the link(s) for one row: array keys explode to the
-// cartesian product (deduped); fromResolve/toResolve map business keys to ids.
-// shapeAssociation builds the links for one row plus any not-found rejections: a
-// side that matches on a business key but whose (non-empty) value resolves to no
-// record is a reject handled per --reject-mode, not a silent skip. An empty cell
-// yields neither a link nor a reject (the caller treats that as a skip).
-func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve map[string]string) ([]associationInput, []string, []rejection) {
+// shapeAssociation builds the link(s) for one row plus any not-found rejections:
+// array keys explode to the cartesian product (deduped), and fromResolve/toResolve
+// map each business key to every matching record id (a non-unique key links all of
+// them, not just one). A side that matches on a business key but whose (non-empty)
+// value resolves to no record is a reject handled per --reject-mode, not a silent
+// skip. An empty cell yields neither a link nor a reject (the caller skips it).
+func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]int, row int, fromResolve, toResolve map[string][]string) ([]associationInput, []string, []rejection) {
 	fromVals := cellValues(record.Column(colIndex[s.fromColumn]), row)
 	toVals := cellValues(record.Column(colIndex[s.toColumn]), row)
 	if len(fromVals) == 0 {
@@ -557,15 +557,15 @@ func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]
 	// Resolve each side's values to record ids once, collecting not-founds so a
 	// bad key surfaces as a reject rather than vanishing.
 	var unresolved []rejection
-	resolveSide := func(vals []string, resolve map[string]string, objectType, property string) []string {
+	resolveSide := func(vals []string, resolve map[string][]string, objectType, property string) []string {
 		ids := make([]string, 0, len(vals))
 		for _, v := range vals {
 			if resolve == nil {
 				ids = append(ids, v)
 				continue
 			}
-			if id, ok := resolve[matchKey(v)]; ok {
-				ids = append(ids, id)
+			if matched, ok := resolve[matchKey(v)]; ok && len(matched) > 0 {
+				ids = append(ids, matched...)
 			} else {
 				unresolved = append(unresolved, rejection{
 					category:   objectNotFoundCategory,
@@ -595,7 +595,10 @@ func (s *shaper) shapeAssociation(record arrow.RecordBatch, colIndex map[string]
 				seen[key] = true
 			}
 			in := associationInput{From: associationRef{ID: f}, To: associationRef{ID: t}}
-			if s.associationType != 0 && !s.archive {
+			if s.associationType != 0 {
+				// Types drive both create (which label to add) and a labeled delete
+				// (which label to remove via labels/archive) — an unlabeled archive
+				// omits them and removes every association type between the pair.
 				in.Types = []associationTypeSpec{{AssociationCategory: s.associationCategory, AssociationTypeID: s.associationType}}
 			}
 			out = append(out, in)
@@ -1210,6 +1213,16 @@ func (r batchResult) isSystemic() bool {
 	return strings.Contains(strings.ToLower(r.rejections[0].message), "non-unique")
 }
 
+// systemicBatchError returns a fatal error when a whole-batch failure is
+// structural (see isSystemic) — such a batch must abort rather than be bisected
+// into per-record rejects that would look tolerable under --reject-mode=skip.
+func systemicBatchError(action, objectType string, res batchResult) error {
+	if !res.isSystemic() {
+		return nil
+	}
+	return fmt.Errorf("hubspot %s %s failed for the whole batch (not a per-record error): %s", action, objectType, res.rejections[0].message)
+}
+
 // hasNotFound reports whether the batch failed because some ids do not exist.
 func (r batchResult) hasNotFound() bool {
 	for _, rj := range r.rejections {
@@ -1453,8 +1466,8 @@ func (d *HubSpotDestination) send(ctx context.Context, sh *shaper, items []batch
 	// A structural failure (e.g. upsert on a non-unique id_property) fails every
 	// row identically — abort instead of bisecting into per-record rejects that
 	// would look like success under --reject-mode=skip.
-	if res.isSystemic() {
-		return fmt.Errorf("hubspot %s %s failed for the whole batch (not a per-record error): %s", action, sh.objectType, res.rejections[0].message)
+	if err := systemicBatchError(action, sh.objectType, res); err != nil {
+		return err
 	}
 	if !res.ok && isRecordLevelStatus(res.status) && len(items) > 1 {
 		mid := len(items) / 2
@@ -1494,6 +1507,9 @@ func (d *HubSpotDestination) handleBatchResult(ctx context.Context, sh *shaper, 
 func (d *HubSpotDestination) sendUpdate(ctx context.Context, sh *shaper, items []batchInput, rejects *rejectionLog) error {
 	res, err := d.postBatch(ctx, sh, items, "update")
 	if err != nil {
+		return err
+	}
+	if err := systemicBatchError("update", sh.objectType, res); err != nil {
 		return err
 	}
 	if !res.hasNotFound() {
@@ -1547,6 +1563,9 @@ func (d *HubSpotDestination) sendUpdate(ctx context.Context, sh *shaper, items [
 func (d *HubSpotDestination) sendUpdateOnly(ctx context.Context, sh *shaper, items []batchInput, rejects *rejectionLog) error {
 	res, err := d.postBatch(ctx, sh, items, "update")
 	if err != nil {
+		return err
+	}
+	if err := systemicBatchError("update", sh.objectType, res); err != nil {
 		return err
 	}
 	// A missing id or a validation error rejects the whole batch atomically, so
@@ -1645,6 +1664,31 @@ func columnValues(arr arrow.Array) []string {
 	return values
 }
 
+// resolveAssociationSide maps each business-key value to every matching record id
+// for one side of an association. A non-unique property is resolved via Search (so
+// a shared key links all its records); a unique one via batch read (one id). When
+// uniqueness can't be determined, it assumes unique — the same fallback as the
+// update/delete match path.
+func (d *HubSpotDestination) resolveAssociationSide(ctx context.Context, objectType, property string, values []string) (map[string][]string, error) {
+	unique, err := d.propertyIsUnique(ctx, objectType, property)
+	if err != nil {
+		config.Debug("[HUBSPOT DEST] could not determine uniqueness of %s.%s (%v); assuming unique", objectType, property, err)
+		unique = true
+	}
+	if !unique {
+		return d.searchIDsByProperty(ctx, objectType, property, values)
+	}
+	single, err := d.resolveKeysToIDs(ctx, objectType, property, values)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(single))
+	for k, v := range single {
+		out[k] = []string{v}
+	}
+	return out, nil
+}
+
 // resolveKeysToIDs maps business-key values to record ids via batch read, which
 // fails atomically on any missing key, so the set is bisected to drop missing ones.
 func (d *HubSpotDestination) resolveKeysToIDs(ctx context.Context, objectType, idProperty string, keys []string) (map[string]string, error) {
@@ -1730,6 +1774,12 @@ func (d *HubSpotDestination) batchReadByProperty(ctx context.Context, objectType
 				return nil, err
 			}
 		}
+	}
+	// A chunk whose keys are all absent from HubSpot comes back 404 — that means
+	// "none found", not a hard error, so callers can reject the missing keys per
+	// --reject-mode instead of aborting the whole run (matches batchReadFound).
+	if resp.StatusCode() == 404 {
+		return map[string]string{}, nil
 	}
 	if resp.StatusCode() != 200 && resp.StatusCode() != 207 {
 		return nil, fmt.Errorf("status %d", resp.StatusCode())
@@ -1990,6 +2040,9 @@ func (d *HubSpotDestination) sendArchive(ctx context.Context, sh *shaper, ids []
 			}
 		}
 	}
+	if err := systemicBatchError("archive", sh.objectType, res); err != nil {
+		return err
+	}
 	// A whole-batch 400 rejects every id atomically, so bisect to isolate the bad
 	// id(s) and land the valid remainder (HubSpot batches aren't atomic).
 	if !res.ok && isRecordLevelStatus(res.status) && len(ids) > 1 {
@@ -2033,19 +2086,20 @@ func (d *HubSpotDestination) writeAssociationBatch(ctx context.Context, sh *shap
 		return 0, err
 	}
 
-	// When a side matches on a business key, resolve that column's values to
-	// record ids once per batch before linking.
-	var fromResolve, toResolve map[string]string
+	// When a side matches on a business key, resolve that column's values to record
+	// ids once per batch before linking. A non-unique property resolves via Search
+	// (every matching id, so the row links all of them); a unique one via batch read.
+	var fromResolve, toResolve map[string][]string
 	if sh.fromProperty != "" {
 		var err error
-		fromResolve, err = d.resolveKeysToIDs(ctx, sh.objectType, sh.fromProperty, allCellValues(record.Column(colIndex[sh.fromColumn])))
+		fromResolve, err = d.resolveAssociationSide(ctx, sh.objectType, sh.fromProperty, allCellValues(record.Column(colIndex[sh.fromColumn])))
 		if err != nil {
 			return 0, err
 		}
 	}
 	if sh.toProperty != "" {
 		var err error
-		toResolve, err = d.resolveKeysToIDs(ctx, sh.associateTo, sh.toProperty, allCellValues(record.Column(colIndex[sh.toColumn])))
+		toResolve, err = d.resolveAssociationSide(ctx, sh.associateTo, sh.toProperty, allCellValues(record.Column(colIndex[sh.toColumn])))
 		if err != nil {
 			return 0, err
 		}
@@ -2112,6 +2166,10 @@ func (d *HubSpotDestination) writeAssociationBatch(ctx context.Context, sh *shap
 func (d *HubSpotDestination) sendAssociations(ctx context.Context, sh *shaper, items []associationInput, rejects *rejectionLog) error {
 	verb := "associate/default"
 	switch {
+	case sh.archive && sh.associationType != 0:
+		// Remove only the specified label, not every association type between the
+		// pair — labels/archive takes the same {from,to,types} shape as create.
+		verb = "labels/archive"
 	case sh.archive:
 		verb = "archive"
 	case sh.associationType != 0:
@@ -2133,6 +2191,9 @@ func (d *HubSpotDestination) sendAssociations(ctx context.Context, sh *shaper, i
 				return err
 			}
 		}
+	}
+	if err := systemicBatchError(verb, sh.objectType+"->"+sh.associateTo, res); err != nil {
+		return err
 	}
 	// A whole-batch 400 rejects every link atomically, so bisect to isolate the bad
 	// row(s) and land the valid remainder (HubSpot batches aren't atomic).
@@ -2162,6 +2223,9 @@ func (d *HubSpotDestination) postAssociations(ctx context.Context, from, to, ver
 	endpoint := fmt.Sprintf("/crm/v4/associations/%s/%s/batch/%s", url.PathEscape(d.effectiveObjectType(from)), url.PathEscape(d.effectiveObjectType(to)), verb)
 	var body interface{}
 	if verb == "archive" {
+		// Unlabeled archive removes every association type between the pair and takes
+		// "to" as an array. Labeled removal (labels/archive) and create both take the
+		// {from,to,types} associationInput shape directly, handled by the else branch.
 		inputs := make([]associationArchiveInput, len(items))
 		for i, it := range items {
 			inputs[i] = associationArchiveInput{From: it.From, To: []associationRef{it.To}}

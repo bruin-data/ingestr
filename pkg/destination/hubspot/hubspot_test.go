@@ -306,6 +306,214 @@ func TestSystemicUpsertErrorAbortsEvenUnderSkip(t *testing.T) {
 	assert.Equal(t, 1, upsertCalls, "systemic error must not bisect into per-row requests")
 }
 
+// TestBatchReadByPropertyTreats404AsNoneFound: HubSpot returns 404 for a batch
+// read whose keys are all absent. That means "none found", not a hard error, so
+// resolveKeysToIDs must return an empty map (callers then reject the missing keys
+// per --reject-mode) rather than aborting the whole run.
+func TestBatchReadByPropertyTreats404AsNoneFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"error","message":"Not found"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	got, err := d.resolveKeysToIDs(context.Background(), "contacts", "email", []string{"missing@x.com"})
+	require.NoError(t, err, "a 404 (no keys found) must not be a hard error")
+	assert.Empty(t, got)
+}
+
+// TestSystemicUpdateErrorAbortsEvenUnderSkip mirrors the upsert case for the
+// batch/update path: a structural "non-unique" failure aborts without bisecting.
+func TestSystemicUpdateErrorAbortsEvenUnderSkip(t *testing.T) {
+	var mu sync.Mutex
+	var updateCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/properties/contacts/email":
+			_, _ = io.WriteString(w, `{"hasUniqueValue":true}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/update":
+			mu.Lock()
+			updateCalls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"category":"VALIDATION_ERROR","message":"Unable to perform update by non-unique property email"}`)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"email": {"a@x.com", "b@x.com"}}, []string{"email"})
+	err := d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts?id_property=email", Strategy: "update", PrimaryKeys: []string{"email"}, RejectMode: "skip",
+	})
+	require.Error(t, err, "a systemic update error must abort even under --reject-mode skip")
+	assert.Contains(t, err.Error(), "non-unique")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, updateCalls, "systemic error must not bisect into per-row requests")
+}
+
+// TestSystemicArchiveErrorAborts: a structural failure on the batch/archive path
+// aborts rather than bisecting into per-record rejects that look tolerable.
+func TestSystemicArchiveErrorAborts(t *testing.T) {
+	var mu sync.Mutex
+	var archiveCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/crm/v3/objects/contacts/batch/archive" {
+			mu.Lock()
+			archiveCalls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"category":"VALIDATION_ERROR","message":"non-unique object reference"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"hs_object_id": {"1", "2"}}, []string{"hs_object_id"})
+	err := d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts", Strategy: "delete", PrimaryKeys: []string{"hs_object_id"}, RejectMode: "skip",
+	})
+	require.Error(t, err, "a systemic archive error must abort even under --reject-mode skip")
+	assert.Contains(t, err.Error(), "non-unique")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, archiveCalls, "systemic error must not bisect into per-row requests")
+}
+
+// TestSystemicAssociationErrorAborts: a structural failure on the association
+// batch aborts rather than bisecting.
+func TestSystemicAssociationErrorAborts(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/batch/associate/default") {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"category":"VALIDATION_ERROR","message":"non-unique association spec"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"contact_id": {"1", "2"}, "company_id": {"9", "8"}}, []string{"contact_id", "company_id"})
+	err := d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts+companies", Strategy: "merge", PrimaryKeys: []string{"contact_id", "company_id"}, RejectMode: "skip",
+	})
+	require.Error(t, err, "a systemic association error must abort even under --reject-mode skip")
+	assert.Contains(t, err.Error(), "non-unique")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, calls, "systemic association error must not bisect into per-row requests")
+}
+
+// TestLabeledAssociationDeleteUsesLabelsArchive: a delete with a label must remove
+// only that association type via labels/archive (which carries {from,to,types}),
+// not every type between the pair via the unlabeled archive endpoint.
+func TestLabeledAssociationDeleteUsesLabelsArchive(t *testing.T) {
+	var mu sync.Mutex
+	var path string
+	var captured map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		path = r.URL.Path
+		_ = json.Unmarshal(raw, &captured)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"contact_id": {"111"}, "company_id": {"222"}}, []string{"contact_id", "company_id"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table:       "contacts+companies?association_type=280",
+		Strategy:    "delete",
+		PrimaryKeys: []string{"contact_id", "company_id"},
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "/crm/v4/associations/contacts/companies/batch/labels/archive", path)
+	inputs, ok := captured["inputs"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, inputs, 1)
+	first := inputs[0].(map[string]interface{})
+	// labels/archive takes a single "to" object plus the label in "types".
+	assert.Equal(t, "222", first["to"].(map[string]interface{})["id"])
+	assert.Equal(t, "111", first["from"].(map[string]interface{})["id"])
+	types, ok := first["types"].([]interface{})
+	require.True(t, ok, "a labeled delete must carry the association type")
+	require.Len(t, types, 1)
+	assert.Equal(t, float64(280), types[0].(map[string]interface{})["associationTypeId"])
+}
+
+// TestNonUniqueAssociationKeyLinksAll: when an association side matches on a
+// non-unique property, the row links every record sharing that key (via Search),
+// not just one (last-wins batch read).
+func TestNonUniqueAssociationKeyLinksAll(t *testing.T) {
+	var mu sync.Mutex
+	var links [][2]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/properties/contacts/email":
+			_, _ = io.WriteString(w, `{"hasUniqueValue":true}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/crm/v3/properties/companies/domain":
+			_, _ = io.WriteString(w, `{"hasUniqueValue":false}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/read":
+			_, _ = io.WriteString(w, `{"results":[{"id":"111","properties":{"email":"a@x.com"}}]}`)
+		case r.URL.Path == "/crm/v3/objects/companies/search":
+			_, _ = io.WriteString(w, `{"results":[{"id":"888","properties":{"domain":"acme.com"}},{"id":"999","properties":{"domain":"acme.com"}}]}`)
+		case r.URL.Path == "/crm/v4/associations/contacts/companies/batch/associate/default":
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Inputs []map[string]interface{} `json:"inputs"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			for _, in := range body.Inputs {
+				from := in["from"].(map[string]interface{})["id"].(string)
+				to := in["to"].(map[string]interface{})["id"].(string)
+				links = append(links, [2]string{from, to})
+			}
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "domain": {"acme.com"}}, []string{"email", "domain"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table:       "contacts+companies?id_property=email,domain",
+		Strategy:    "merge",
+		PrimaryKeys: []string{"email", "domain"},
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.ElementsMatch(t, [][2]string{{"111", "888"}, {"111", "999"}}, links)
+}
+
 func TestParseShaperStrategies(t *testing.T) {
 	t.Run("merge upserts on the given match property", func(t *testing.T) {
 		sh, err := parseShaper("contacts?id_property=email", "merge", []string{"email"}, "", false)
@@ -586,7 +794,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		defer rec.Release()
 		// email resolves to a contact id; company 999 does not exist.
 		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
-			map[string]string{"a@x.com": "111"}, map[string]string{})
+			map[string][]string{"a@x.com": {"111"}}, map[string][]string{})
 		require.Empty(t, items)
 		require.Len(t, unresolved, 1)
 		assert.Equal(t, objectNotFoundCategory, unresolved[0].category)
@@ -598,7 +806,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "company_id": {"222"}}, []string{"email", "company_id"})
 		defer rec.Release()
 		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
-			map[string]string{"a@x.com": "111"}, map[string]string{"222": "888"})
+			map[string][]string{"a@x.com": {"111"}}, map[string][]string{"222": {"888"}})
 		require.Empty(t, unresolved)
 		require.Len(t, items, 1)
 		assert.Equal(t, "111", items[0].From.ID)
@@ -609,7 +817,7 @@ func TestShapeAssociationUnresolvedKeyIsReject(t *testing.T) {
 		rec := stringBatch(map[string][]string{"email": {""}, "company_id": {"222"}}, []string{"email", "company_id"})
 		defer rec.Release()
 		items, _, unresolved := sh.shapeAssociation(rec, colIndexOf(rec), 0,
-			map[string]string{}, map[string]string{"222": "888"})
+			map[string][]string{}, map[string][]string{"222": {"888"}})
 		require.Empty(t, items)
 		require.Empty(t, unresolved)
 	})
