@@ -275,6 +275,9 @@ func (s *ReplaceStrategy) Name() config.IncrementalStrategy {
 }
 
 func (s *ReplaceStrategy) Validate(cfg *config.IngestConfig) error {
+	if cfg.ReverseETLDestination {
+		return validateReverseETLReject(cfg)
+	}
 	return nil
 }
 
@@ -287,6 +290,9 @@ func (s *ReplaceStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if destination.IsReverseETL(job.Destination) {
+		return executeReverseETL(ctx, job, config.StrategyReplace)
+	}
 	// Check if destination supports atomic swap (staging pattern)
 	// File-based destinations like CSV, Parquet, and Blobstore write directly to target
 	useStaging := job.Destination.SupportsAtomicSwap()

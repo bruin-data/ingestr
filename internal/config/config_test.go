@@ -6,6 +6,29 @@ import (
 	"time"
 )
 
+func TestResolveWriteNulls(t *testing.T) {
+	cases := []struct {
+		name          string
+		reverseETL    bool
+		writeNullsSet bool
+		writeNulls    bool
+		want          bool
+	}{
+		{"reverse-etl unset clears by default", true, false, false, true},
+		{"reverse-etl explicit false omits", true, true, false, false},
+		{"reverse-etl explicit true clears", true, true, true, true},
+		{"non-reverse-etl unset passes through", false, false, false, false},
+		{"non-reverse-etl value passes through", false, true, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ResolveWriteNulls(c.reverseETL, c.writeNullsSet, c.writeNulls); got != c.want {
+				t.Fatalf("ResolveWriteNulls(%v,%v,%v) = %v, want %v", c.reverseETL, c.writeNullsSet, c.writeNulls, got, c.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveDestinationParallelism(t *testing.T) {
 	tests := []struct {
 		name string

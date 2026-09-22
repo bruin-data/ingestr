@@ -207,6 +207,16 @@ func IngestCommand() *cli.Command {
 				Usage:   "Trim leading and trailing whitespace from all string column values",
 				Sources: cli.EnvVars("TRIM_WHITESPACE", "INGESTR_TRIM_WHITESPACE"),
 			},
+			&cli.StringFlag{
+				Name:    "reject-mode",
+				Usage:   "Reverse-ETL only: how to handle rows the destination can't apply — fail_fast (stop on first), fail (write valid rows, then error with the reject list), skip (write valid rows, succeed, report rejects). Default: fail",
+				Sources: cli.EnvVars("REJECT_MODE", "INGESTR_REJECT_MODE"),
+			},
+			&cli.BoolFlag{
+				Name:    "write-nulls",
+				Usage:   "Reverse-ETL only: write source NULLs through to the destination to clear the field. Default: clear; pass --write-nulls=false to omit NULLs and leave the existing value unchanged",
+				Sources: cli.EnvVars("WRITE_NULLS", "INGESTR_WRITE_NULLS"),
+			},
 			&cli.BoolFlag{
 				Name:    "no-load-timestamp",
 				Usage:   "Disable adding the _ingestr_loaded_at load timestamp column",
@@ -273,6 +283,9 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	startedAt := time.Now()
 	var cfg *config.IngestConfig
 	defer func() {
+		// Flush end-of-run warnings (e.g. --reject-mode=skip rejects) on every exit
+		// path, including errors that return before the success-path flush below.
+		output.FlushDeferred()
 		output.EnsureTerminal(err)
 		trackCommandFinished(ctx, "ingest", startedAt, err, ingestTelemetryProperties(cfg))
 	}()
@@ -326,6 +339,9 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.NoInference = c.Bool("no-inference")
 	cfg.Mask = c.StringSlice("mask")
 	cfg.TrimWhitespace = c.Bool("trim-whitespace")
+	cfg.RejectMode = config.RejectMode(c.String("reject-mode"))
+	cfg.WriteNulls = c.Bool("write-nulls")
+	cfg.WriteNullsSet = c.IsSet("write-nulls")
 	cfg.NoLoadTimestamp = c.Bool("no-load-timestamp")
 	cfg.NoRunID = c.Bool("no-run-id")
 	cfg.PipelinesDir = c.String("pipelines-dir")
@@ -414,6 +430,7 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		if cfg.Stream {
 			if !output.IsJSON() {
 				color.Green("Streaming ingestion stopped.")
+				output.FlushDeferred()
 			}
 			return nil
 		}
@@ -422,6 +439,9 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 
 	if !output.IsJSON() {
 		color.Green("Ingestion completed successfully!")
+		// End-of-run warnings (e.g. --reject-mode=skip rejects) print last, after
+		// the progress summary, so they are not buried mid-run.
+		output.FlushDeferred()
 	}
 	return nil
 }

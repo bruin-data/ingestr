@@ -31,13 +31,25 @@ type PrepareOptions struct {
 	PreserveExistingLayout bool // Leave an existing table's properties, partition spec, and sort order unchanged.
 	TableProperties        map[string]string
 	OwnershipToken         string
+	// Strategy names the write behavior for reverse-ETL destinations so they can
+	// validate the dest-table up front. Ignored by SQL destinations.
+	Strategy string
 }
 
 type WriteOptions struct {
-	Table            string
-	Schema           *schema.TableSchema
-	PrimaryKeys      []string
-	Parallelism      int
+	Table       string
+	Schema      *schema.TableSchema
+	PrimaryKeys []string
+	Parallelism int
+
+	// Reverse-ETL fields. Strategy names the write behavior (merge/update/
+	// delete/append/replace) so an API destination can pick the right endpoint;
+	// RejectMode and WriteNulls carry the RETL write policies. Ignored by SQL
+	// destinations. Strings to keep this package free of an internal/config
+	// dependency.
+	Strategy         string
+	RejectMode       string
+	WriteNulls       bool
 	AtomicCommit     bool
 	StagingTable     bool
 	StagingBucket    string
@@ -190,6 +202,38 @@ type Destination interface {
 	// SupportsAtomicSwap returns true if the destination supports atomic table swaps.
 	// If false, the replace strategy will skip staging and write directly to the target.
 	SupportsAtomicSwap() bool
+}
+
+// ReverseETLDestination marks a destination that writes into an external API
+// rather than a SQL store. Implementing it enables the reverse-ETL write
+// policies (WriteOptions.RejectMode, WriteOptions.WriteNulls), rename-only
+// --columns, and the update/delete strategies. SQL destinations don't
+// implement it, so those features fail fast there.
+type ReverseETLDestination interface {
+	Destination
+	IsReverseETL()
+}
+
+// IsReverseETL reports whether a destination is a reverse-ETL target.
+func IsReverseETL(d Destination) bool {
+	_, ok := d.(ReverseETLDestination)
+	return ok
+}
+
+// ExplicitStrategyDestination is implemented by a destination whose default
+// write strategy would be destructive (e.g. HubSpot's replace mirrors and
+// archives records not in the source). Such a destination must not inherit the
+// framework's default strategy silently; the run requires an explicit
+// --incremental-strategy. Destinations with a safe default do not implement it.
+type ExplicitStrategyDestination interface {
+	RequiresExplicitStrategy()
+}
+
+// RequiresExplicitStrategy reports whether the destination demands an explicit
+// --incremental-strategy rather than inheriting the framework default.
+func RequiresExplicitStrategy(d Destination) bool {
+	_, ok := d.(ExplicitStrategyDestination)
+	return ok
 }
 
 // IncrementalPredicateSupport is implemented by destinations whose MergeTable

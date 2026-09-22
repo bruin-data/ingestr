@@ -18,6 +18,9 @@ func (s *AppendStrategy) Name() config.IncrementalStrategy {
 }
 
 func (s *AppendStrategy) Validate(cfg *config.IngestConfig) error {
+	if cfg.ReverseETLDestination {
+		return validateReverseETLReject(cfg)
+	}
 	return nil
 }
 
@@ -30,6 +33,9 @@ func (s *AppendStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if destination.IsReverseETL(job.Destination) {
+		return executeReverseETL(ctx, job, config.StrategyAppend)
+	}
 	config.Debug("[APPEND] Writing to table: %s", job.Config.DestTable)
 
 	// CDC change batches carry the otherwise staging-only _cdc_unchanged_cols

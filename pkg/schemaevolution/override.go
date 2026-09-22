@@ -32,6 +32,36 @@ func (c ColumnOverrides) Names() []string {
 	return names
 }
 
+// UnmatchedColumns returns the override source columns that do not correspond to
+// any of the given source columns (matched with the same naming convention as
+// GetForColumn). It lets callers reject overrides that silently no-op — e.g. a
+// reverse-ETL rename whose source side is absent from the source.
+//
+// When matchRenameTo is set, an override also counts as matched if its RenameTo is
+// present: inferred-schema sources apply renames before this check runs, so the
+// column already carries the RenameTo name while the original source name is gone.
+func (c ColumnOverrides) UnmatchedColumns(sourceColumns []string, schemaNaming string, matchRenameTo bool) []string {
+	if len(c) == 0 {
+		return nil
+	}
+	conv := overrideMatchConvention(schemaNaming)
+	present := make(map[string]bool, len(sourceColumns))
+	for _, name := range sourceColumns {
+		present[strings.ToLower(conv.Normalize(name))] = true
+	}
+	var unmatched []string
+	for _, ov := range c {
+		if present[strings.ToLower(conv.Normalize(ov.Name))] {
+			continue
+		}
+		if matchRenameTo && ov.RenameTo != "" && present[strings.ToLower(conv.Normalize(ov.RenameTo))] {
+			continue
+		}
+		unmatched = append(unmatched, ov.Name)
+	}
+	return unmatched
+}
+
 // StandardTypeNames maps user-friendly type names to internal DataType.
 // These are the canonical names users can specify in --columns flag.
 var StandardTypeNames = map[string]schema.DataType{

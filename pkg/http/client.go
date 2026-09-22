@@ -143,6 +143,20 @@ func (r *Request) SetFormData(data map[string]string) *Request {
 	return r
 }
 
+// SetRetryOnRateLimitOnly restricts this request to retry only on HTTP 429 (the
+// request was throttled and never processed), never on 5xx or transport errors.
+// Use it for non-idempotent writes (e.g. record create) where a retry after a
+// server-side commit could duplicate data. Idempotent requests should keep the
+// default 429+5xx retry.
+func (r *Request) SetRetryOnRateLimitOnly() *Request {
+	r.resty.SetAllowNonIdempotentRetry(true)
+	r.resty.SetRetryDefaultConditions(false)
+	r.resty.SetRetryConditions(func(res *resty.Response, _ error) bool {
+		return res != nil && res.StatusCode() == http.StatusTooManyRequests
+	})
+	return r
+}
+
 func (r *Request) Get(url string) (*Response, error) {
 	return r.execute(http.MethodGet, url)
 }

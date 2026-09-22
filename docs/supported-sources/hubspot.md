@@ -2,7 +2,7 @@
 
 [HubSpot](https://www.hubspot.com/) is a customer relationship management software that helps businesses attract visitors, connect with customers, and close deals.
 
-ingestr supports HubSpot as a source.
+ingestr supports HubSpot as both a source and a destination.
 
 ## URI format
 
@@ -260,3 +260,189 @@ ingestr ingest \
 ```
 
 When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
+
+# HubSpot as a destination
+
+ingestr can write CRM records and record-to-record associations back into HubSpot (reverse ETL). Each source row becomes one HubSpot record (or one association link), sent in bulk through HubSpot's batch APIs.
+
+The private app token you write with needs **write** scopes on the objects you target (e.g. `crm.objects.contacts.write`). For custom objects, add the schema read scope so ingestr can resolve the object by name.
+
+## URI format
+
+```
+hubspot://?api_key=<private-app-token>
+```
+
+The parameters are the same as the source — provide either `api_key` or `service_key`.
+
+## What gets written
+
+The base of `--dest-table` (before the `?`) names the object type: a built-in object (`contacts`, `companies`, `deals`, `products`, `line_items`, …) or a custom object by its name. By default every source column is written as a HubSpot property whose **internal name** matches the column name — rename a column to a different property with [`--columns`](#column-mapping). Properties are always addressed by internal name (e.g. `numberofemployees`), never by display label; the column name (after any rename) must equal the target property's internal name. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never sent.
+
+The **write behaviour is chosen with `--incremental-strategy`**, which is **required** — HubSpot has no default strategy:
+
+| Strategy | Behaviour |
+| -------- | --------- |
+| `merge` | Upsert — update the matching record, or create it if none matches. This is the usual choice. |
+| `update` | Update matching records only; rows with no match are rejected (never created). Unmatched rows follow [`--reject-mode`](#reverse-etl-options) — use `--reject-mode skip` to report them but still succeed. |
+| `append` | Always create a new record, never match. Re-running over the same rows creates duplicates — scope each run to new rows with `--interval-start`/`--interval-end`, or use `merge` to stay idempotent. On a unique-property collision HubSpot returns a conflict, handled per [`--reject-mode`](#reverse-etl-options). |
+| `delete` | Archive (soft-delete) the matching records. Rows with no match follow [`--reject-mode`](#reverse-etl-options) — use `--reject-mode skip` to report them but still succeed. |
+| `replace` | Mirror — upsert every source row, then archive any record whose match value is **not** in the source. Costly: it scans every record of the object type on each run, so it is slow and expensive on large objects. |
+
+### Matching records
+
+Upsert/update/delete match existing records on two independent things — **which HubSpot property** to match on, and **which source column** carries the value:
+
+**Match property (HubSpot side)** — set with `id_property=<property>` on the dest-table:
+- **`merge`** and **`replace`** require it explicitly, and it must be a **unique property** — not `hs_object_id`, since HubSpot has no upsert-by-record-id (use `update` to match existing records by id). There is no built-in default, because the right unique key differs per object (contacts have `email`, products `hs_sku`, companies none). If it's missing, the run fails fast.
+- **`update`** and **`delete`** default it to **`hs_object_id`** (HubSpot's record id) when you don't set one.
+- `id_property` must be the property's **internal name**, not its display label (e.g. `numberofemployees`, not "Number of Employees").
+
+**Source column (value side)** — the column supplying the match value, named with `--primary-key`:
+- **`merge`** and **`replace`** require it explicitly (associations need two: `--primary-key k1,k2`).
+- **`update`** and **`delete`** default it to the **`hs_object_id`** column when you don't pass one, so a source keyed by HubSpot record id needs no flag; pass `--primary-key <col>` to match on a different column (e.g. `email`).
+
+For **`update`** and **`delete`**, the match property does not have to be unique. If the property is non-unique (e.g. `company_name`), ingestr finds **every** record with that value via the Search API and updates/archives all of them — so you can, for example, flag every contact at a company in one row. ingestr detects uniqueness automatically from the property definition, so no extra flag is needed. (`merge`/`replace` still require a unique property, since upsert/mirror match one record.)
+
+```sh
+# Upsert contacts, matching on email
+ingestr ingest \
+  --source-uri "postgres://user:pass@host:5432/db" \
+  --source-table "public.customers" \
+  --dest-uri "hubspot://?api_key=pat-xxxx" \
+  --dest-table "contacts?id_property=email" \
+  --primary-key email \
+  --incremental-strategy merge
+```
+
+```sh
+# Archive the contacts listed in the source, matched by email
+ingestr ingest \
+  --source-uri "csv://churned.csv" \
+  --source-table "churned" \
+  --dest-uri "hubspot://?api_key=pat-xxxx" \
+  --dest-table "contacts?id_property=email" \
+  --primary-key email \
+  --incremental-strategy delete
+```
+
+> [!WARNING]
+> `replace` is a full object-wide mirror: it archives **every** record of the object type that is not in your source (including records with no match value, and ones created via the UI or other integrations). Use it only when the source is the complete, sole system of record for that object. A run with **0 source rows** archives nothing; to remove records intentionally, use `delete`.
+
+## Reverse-ETL options
+
+These flags apply only when HubSpot is the **destination** (reverse ETL); on any other destination they are rejected with an error.
+
+### `--reject-mode`
+
+Controls how a row HubSpot can't apply (no match, or rejected) is handled. One of:
+
+- **`fail`** *(default)* — send every valid row, then fail the run listing the rejects.
+- **`fail_fast`** — stop at the first bad row.
+- **`skip`** — send every valid row, report the rejects, and still succeed (exit 0).
+
+Under `fail` and `skip` every valid row is written — they differ only in whether the run reports failure at the end. `fail_fast` is the exception: it stops at the first bad row, so rows not yet processed are not written.
+
+Only **per-record** problems count as rejects that `skip` tolerates: a row with no matching record (`update`/`delete`/associations) and a row HubSpot rejects on its own value (a validation error or a unique-property conflict). **Systemic failures always abort the run regardless of `--reject-mode`.**
+
+> [!NOTE]
+> HubSpot's batch writes aren't transactional, so `fail`/`fail_fast` may have written some records before the run stops.
+
+### `--write-nulls`
+
+- **`true`** *(default)* — a null source cell is written through as empty, clearing the field in HubSpot.
+- **`false`** (`--write-nulls=false`) — a null source cell is omitted, leaving the existing HubSpot value untouched.
+
+Only affects strategies that write property values — `merge`, `update`, `replace`, `append`. It has no effect on `delete` (archives by id) or associations (link records), which send no properties.
+
+## Column mapping
+
+When a source column name differs from the HubSpot property name, rename it with `--columns` using `dest_property::source_column` (comma-separated for several). `dest_property` is the property's **internal name** (not its display label):
+
+```sh
+--columns 'firstname::first_name,hs_lead_status::status'
+```
+
+Only **renaming** is allowed for HubSpot — the property type is fixed on HubSpot's side, so a `--columns` entry that includes a type (e.g. `lead_score:int:score`) is rejected before the run starts. The right-hand side is the **source column** and must exist in the source: unlike SQL destinations (where an override creates the target column), HubSpot can't create a property from an override, so naming a source column that isn't there — e.g. writing the pair backwards as `first_name::firstname` — fails fast instead of silently doing nothing.
+
+## Properties must already exist
+
+HubSpot does **not** create properties on the fly. Every column you write must map to a property that already exists on the object (built-in or one you created in HubSpot beforehand). A row referencing an unknown property is rejected by HubSpot and handled per `--reject-mode`.
+
+## Multi-select properties
+
+For multi-select (checkbox) properties, HubSpot uses a semicolon-separated list of option values, and ingestr sends your source value through **verbatim** — it adds no special handling:
+
+- `"CHAMPION;DECISION_MAKER"` sets the property to exactly those two options (replacing any current selection).
+- A **leading** semicolon appends instead of replacing: `";BLOCKER"` adds `BLOCKER` to whatever is already selected.
+
+## Associations
+
+Link two objects by naming both sides of the dest-table as `obj1+obj2` and giving the two source key columns as `--primary-key k1,k2` (obj1 first, obj2 second):
+
+```sh
+# Link contacts to companies
+ingestr ingest \
+  --source-uri "postgres://user:pass@host:5432/db" \
+  --source-table "public.contact_company" \
+  --dest-uri "hubspot://?api_key=pat-xxxx" \
+  --dest-table "contacts+companies?id_property=email,hs_object_id" \
+  --primary-key email,company_id \
+  --incremental-strategy merge
+```
+
+The dest-table (`obj1+obj2?...`) accepts these optional parameters:
+
+- `id_property=fromProp,toProp` — the property each side matches on (empty = the value is already a HubSpot record id).
+- `label=<name>` — apply a named association label, resolved to its type id.
+- `association_type=<id>` — the numeric association type id, as an alternative to `label`.
+- `association_category=<cat>` — the category for a numeric `association_type` (e.g. `HUBSPOT_DEFINED`, `USER_DEFINED`); resolved automatically when omitted.
+
+Behaviour:
+
+- Match values are resolved to record ids before linking. A non-empty key that matches no record is a not-found reject handled per `--reject-mode`. An empty cell is skipped for `merge`/`delete`; under `replace` an empty `obj2` cell for a present `obj1` clears that record's links.
+- A key column holding a list/array links the row to every element (one contact to many companies in a single row); repeated pairs **within a row** are de-duplicated. HubSpot's link creation is idempotent, so the same pair across rows is harmless.
+- For `delete` and `replace`, a `label`/`association_type` **scopes the unlink to that one type** — other labels between the pair survive. Without one, the unlink removes **every** type between the two records.
+
+Association strategies:
+
+| Strategy | Behaviour |
+| -------- | --------- |
+| `merge` | Add the links in the source. |
+| `delete` | Remove (unlink) the links in the source. |
+| `replace` | Mirror — for every source `obj1` record, make its links exactly match the source, removing any others. An `obj1` row with an **empty `obj2` cell** means "this record should have no links": all of its existing associations are removed. |
+
+Only `merge`, `delete`, and `replace` are supported for associations. `update` and `append` fail fast with an error.
+
+Either side can be a [custom object](#writing-to-custom-objects). This example links contacts to a custom `licenses` object with a named label:
+
+```sh
+ingestr ingest \
+  --source-uri "postgres://user:pass@host:5432/db" \
+  --source-table "public.contact_licenses" \
+  --dest-uri "hubspot://?api_key=pat-xxxx" \
+  --dest-table "contacts+licenses?id_property=email,license_key&label=Primary License" \
+  --primary-key email,license_id \
+  --incremental-strategy merge
+```
+
+## Writing to custom objects
+
+Use a custom object anywhere a built-in object is accepted (records and associations). ingestr resolves the name to its `objectTypeId` via HubSpot's schemas API and caches it, so you can address it by any of:
+
+- internal name — `license`
+- fully-qualified name — `p123_license`
+- the `objectTypeId` itself — `2-123`
+
+Address custom objects only by these identifiers, which HubSpot keeps unique. Display labels (singular/plural) are **not** accepted: HubSpot allows two schemas to share a label, so a label could resolve to the wrong object.
+
+Everything else — strategies, matching (`id_property`), `--reject-mode`, associations — works exactly as for built-in objects. For example, upsert a custom object whose internal name is `license` on a unique `sku`:
+
+```sh
+ingestr ingest \
+  --source-uri "postgres://user:pass@host:5432/db" \
+  --source-table "public.licenses" \
+  --dest-uri "hubspot://?api_key=pat-xxxx" \
+  --dest-table "license?id_property=sku" \
+  --incremental-strategy merge
+```

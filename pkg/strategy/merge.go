@@ -162,6 +162,11 @@ func (s *MergeStrategy) Name() config.IncrementalStrategy {
 }
 
 func (s *MergeStrategy) Validate(cfg *config.IngestConfig) error {
+	// Reverse-ETL destinations match via the dest-table (id_property), so a
+	// source primary key is not required; validate the RETL reject-mode instead.
+	if cfg.ReverseETLDestination {
+		return validateReverseETLReject(cfg)
+	}
 	if len(cfg.PrimaryKeys) == 0 {
 		return fmt.Errorf("merge strategy requires at least one primary_key")
 	}
@@ -177,6 +182,9 @@ func (s *MergeStrategy) RequiresIncrementalKey() bool {
 }
 
 func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+	if destination.IsReverseETL(job.Destination) {
+		return executeReverseETL(ctx, job, config.StrategyMerge)
+	}
 	// Generate staging table name
 	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "merge", job.Config.StagingDataset, job.Config.RunID)
 	output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)

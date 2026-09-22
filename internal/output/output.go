@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -49,6 +50,11 @@ var (
 
 	// terminalEmitted guards the "exactly one terminal end event" invariant.
 	terminalEmitted atomic.Bool
+
+	// deferredMu guards deferred, the buffer of end-of-run warnings held back so
+	// they print after the progress summary instead of mid-run (text mode only).
+	deferredMu sync.Mutex
+	deferred   []string
 )
 
 // newJSONLogger builds a slog logger that writes JSON lines to w, renaming the
@@ -75,6 +81,9 @@ func Init(stdout, stderr io.Writer, m Mode) {
 	mode = m
 	logger = newJSONLogger(stdout)
 	terminalEmitted.Store(false)
+	deferredMu.Lock()
+	deferred = nil
+	deferredMu.Unlock()
 }
 
 // IsJSON reports whether output is in JSON mode.
@@ -87,6 +96,35 @@ func Current() (io.Writer, io.Writer, Mode) { return stdoutW, stderrW, mode }
 // Warnf reports a warning. Text mode: written verbatim to stdout. JSON mode: a
 // {"event":"log","level":"WARN",...} record.
 func Warnf(format string, args ...any) { emitLog(slog.LevelWarn, fmt.Sprintf(format, args...)) }
+
+// Deferf holds a warning back until FlushDeferred runs, so it prints after the
+// progress summary rather than mid-run. In JSON mode ordering is irrelevant, so
+// it is emitted immediately as a WARN log.
+func Deferf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if mode == ModeJSON {
+		emitLog(slog.LevelWarn, msg)
+		return
+	}
+	deferredMu.Lock()
+	deferred = append(deferred, msg)
+	deferredMu.Unlock()
+}
+
+// FlushDeferred prints and clears any warnings held by Deferf. It is a no-op in
+// JSON mode (those were emitted immediately) and safe to call when empty.
+func FlushDeferred() {
+	deferredMu.Lock()
+	msgs := deferred
+	deferred = nil
+	deferredMu.Unlock()
+	if mode == ModeJSON {
+		return
+	}
+	for _, m := range msgs {
+		_, _ = fmt.Fprint(stdoutW, m)
+	}
+}
 
 // Infof reports an informational line (e.g. a schema-change notice).
 func Infof(format string, args ...any) { emitLog(slog.LevelInfo, fmt.Sprintf(format, args...)) }
