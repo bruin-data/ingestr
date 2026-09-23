@@ -70,6 +70,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             text: "Change Data Capture (CDC)",
             link: "/getting-started/cdc.md",
           },
+          { text: "Reverse ETL", link: "/getting-started/reverse-etl.md" },
           { text: "Data Masking", link: "/getting-started/data-masking.md" },
           { text: "Migration Guide", link: "/getting-started/migration-to-v1.md" },
           { text: "Telemetry", link: "/getting-started/telemetry.md" },
