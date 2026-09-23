@@ -105,6 +105,102 @@ func TestColumnOverrides_CSVToDuckDB_AppliesTypes(t *testing.T) {
 	assert.Equal(t, 3, readDuckDBRowCount(t, duckDBPath, "main.users"))
 }
 
+func TestColumnOverrides_CSVToDuckDB_RenameCollisionMergesValues(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// Rename source column `a` onto `b`, which already exists in the source.
+	// Both raw columns must reach replay so the renamer can coalesce them.
+	csv := "a,b\n,X\n1,Y\n"
+	csvPath := filepath.Join(tmpDir, "coll.csv")
+	require.NoError(t, os.WriteFile(csvPath, []byte(csv), 0o644))
+
+	duckDBPath := filepath.Join(tmpDir, "out.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:           fmt.Sprintf("csv://%s", csvPath),
+		SourceTable:         "t",
+		DestURI:             fmt.Sprintf("duckdb:///%s", duckDBPath),
+		DestTable:           "main.t",
+		IncrementalStrategy: config.StrategyReplace,
+		Columns:             "b::a",
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	db := openDuckDBForTest(t, duckDBPath)
+	defer func() { _ = db.Close() }()
+	rows, err := db.Query("SELECT b FROM main.t ORDER BY b")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	var got []string
+	for rows.Next() {
+		var b sql.NullString
+		require.NoError(t, rows.Scan(&b))
+		got = append(got, b.String)
+	}
+	require.NoError(t, rows.Err())
+	// Row 1: a is empty, so raw `b`="X" must survive the collision merge.
+	assert.Equal(t, []string{"X", "Y"}, got, "raw values of the collided source column must not be lost")
+}
+
+func TestColumnOverrides_CSVToDuckDB_RenamePreservesValues(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	csvPath := filepath.Join(tmpDir, "users.csv")
+	require.NoError(t, os.WriteFile(csvPath, []byte(csvWithRows), 0o644))
+
+	duckDBPath := filepath.Join(tmpDir, "out.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:           fmt.Sprintf("csv://%s", csvPath),
+		SourceTable:         "users",
+		DestURI:             fmt.Sprintf("duckdb:///%s", duckDBPath),
+		DestTable:           "main.users",
+		IncrementalStrategy: config.StrategyReplace,
+		// rename+type, rename-only, and an untouched column.
+		Columns: "id:bigint,full_name:varchar(50):name,eml::email",
+	}
+	require.NoError(t, cfg.Validate())
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+	types := readDuckDBColumnTypes(t, duckDBPath, "main.users")
+	assert.Contains(t, types, "full_name", "name should be renamed to full_name")
+	assert.Contains(t, types, "eml", "email should be renamed to eml")
+	assert.NotContains(t, types, "name", "original name column should not survive the rename")
+	assert.NotContains(t, types, "email", "original email column should not survive the rename")
+
+	db := openDuckDBForTest(t, duckDBPath)
+	defer func() { _ = db.Close() }()
+	rows, err := db.Query("SELECT id, full_name, eml FROM main.users ORDER BY id")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	type row struct {
+		id       int64
+		fullName string
+		eml      string
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		require.NoError(t, rows.Scan(&r.id, &r.fullName, &r.eml))
+		got = append(got, r)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []row{
+		{1, "User 1", "user1@example.com"},
+		{2, "User 2", "user2@example.com"},
+		{3, "User 3", "user3@example.com"},
+	}, got, "renamed columns must carry their source values, not NULLs")
+}
+
 func TestColumnOverrides_CSVToDuckDB_TinyInt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

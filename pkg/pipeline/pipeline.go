@@ -66,7 +66,8 @@ type Pipeline struct {
 	columnRenamer            *transformer.ColumnRenamer
 	namingMapping            map[string]string // original → normalized column names from naming convention
 	ingestrColumnFiller      *schemaevolution.IngestrColumnFiller
-	droppedColumns           map[string]bool // columns dropped during schema inference (all-null nullable)
+	droppedColumns           map[string]bool     // columns dropped during schema inference (all-null nullable)
+	rawInferredSchema        *schema.TableSchema // inferred schema with raw source names, before --columns renames
 	logWriter                io.Writer
 	cdcConnectorID           string
 }
@@ -621,6 +622,16 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 	copy(originalSourceSchema.Columns, tableSchema.Columns)
 	copy(originalSourceSchema.PrimaryKeys, tableSchema.PrimaryKeys)
+
+	// A --columns rename during inference renames columns in place before this
+	// snapshot and merges any that collide on a rename target. Use the raw
+	// inferred columns instead so the buffer reader references every original
+	// name. Only the rename case needs this; other paths already match the buffer.
+	if !table.HasKnownSchema() && !p.config.NoInference &&
+		p.columnRenamer != nil && p.columnRenamer.HasRenames() && p.rawInferredSchema != nil {
+		originalSourceSchema.Columns = append([]schema.Column(nil), p.rawInferredSchema.Columns...)
+		originalSourceSchema.PrimaryKeys = append([]string(nil), p.rawInferredSchema.PrimaryKeys...)
+	}
 
 	// Setup naming convention and column renamer using the convention resolved above.
 	if err := p.applyNamingConvention(tableSchema, namingConv); err != nil {
@@ -1281,6 +1292,10 @@ func (p *Pipeline) inferSchemaFromData(
 	}
 
 	p.droppedColumns = inferrer.DroppedColumns()
+
+	// Snapshot the raw names before --columns renames merge colliding columns;
+	// the buffer keeps every raw column, so replay must reference them all.
+	p.rawInferredSchema = cloneTableSchema(tableSchema)
 
 	stats := inferrer.Stats()
 	config.Debug("[PIPELINE] Schema inferred from %d batches, %d rows", stats.BatchCount, stats.RowCount)
