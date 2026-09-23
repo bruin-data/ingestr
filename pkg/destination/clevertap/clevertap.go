@@ -199,9 +199,8 @@ func parseShaper(table string, primaryKeys []string, rejectMode string, writeNul
 		return nil, fmt.Errorf("clevertap dest-table must be \"profiles\" or \"events\", got %q", path)
 	}
 
-	// The identity column comes from a single --primary-key; CleverTap resolves a
-	// user by one field, so a composite key is rejected. The deprecated
-	// identity_column dest-table param still wins when set, for backward compat.
+	// Identity comes from a single --primary-key (composite rejected); the
+	// deprecated identity_column dest-table param still wins when set.
 	identityCol := p.IdentityColumn
 	if identityCol == "" {
 		switch {
@@ -236,8 +235,7 @@ func parseShaper(table string, primaryKeys []string, rejectMode string, writeNul
 	}
 
 	// --reject-mode is the supported flag; the deprecated on_error dest-table param
-	// wins when set so a pre-existing on_error=skip keeps working under the
-	// framework's fail default (which is indistinguishable from an explicit --reject-mode=fail).
+	// wins when set, so a pre-existing on_error=skip keeps working.
 	resolvedReject := rejectMode
 	if p.OnError != "" {
 		resolvedReject = p.OnError
@@ -315,9 +313,8 @@ func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row in
 		if v := arrowToValue(col, row); v != nil {
 			data[name] = v
 		} else if s.writeNulls && s.recordType == "profile" && col.IsNull(row) {
-			// CleverTap silently ignores a null value; its $delete command is what
-			// actually unsets a profile attribute. Events are append-only, so null
-			// cells are simply omitted there.
+			// CleverTap ignores a null value; $delete is what unsets a profile
+			// attribute. Events are append-only, so null cells are omitted there.
 			data[name] = map[string]interface{}{"$delete": true}
 		}
 	}
@@ -451,9 +448,8 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 
 	wg.Wait()
 	close(errs)
-	// A worker that returned early on error (e.g. at --destination-parallelism 1)
-	// leaves the channel undrained; release anything still queued so the source
-	// producer goroutine can't block forever on a send.
+	// A worker that returned early on error leaves the channel undrained; release
+	// what's queued so the source producer can't block forever on a send.
 	drainRecords(records)
 	if err := <-errs; err != nil {
 		return err
@@ -653,10 +649,8 @@ func (d *CleverTapDestination) GetTableSchema(_ context.Context, _ string) (*sch
 
 func (d *CleverTapDestination) GetScheme() string { return "clevertap" }
 
-// IsReverseETL marks CleverTap as a reverse-ETL destination, enabling the RETL
-// write path (--primary-key identity, --reject-mode, --write-nulls) and dropping
-// the SQL-only checks. The upload endpoints fix the operation (profiles upsert,
-// events append), so the strategy label is not acted on.
+// IsReverseETL marks CleverTap as a reverse-ETL destination; the upload
+// endpoints fix the operation, so the strategy label is not acted on.
 func (d *CleverTapDestination) IsReverseETL() {}
 
 // SupportsReplaceStrategy is true because CleverTap has no destructive delete;
