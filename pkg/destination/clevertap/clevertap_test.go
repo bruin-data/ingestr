@@ -151,7 +151,7 @@ func TestIdentityRequired(t *testing.T) {
 	records := make(chan source.RecordBatchResult)
 	close(records)
 	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles"})
-	require.ErrorContains(t, err, "set identity_column=<column>")
+	require.ErrorContains(t, err, "pass a single --primary-key")
 }
 
 func TestEventTSSecondUnit(t *testing.T) {
@@ -273,6 +273,161 @@ func TestNullIdentityRowsSkipped(t *testing.T) {
 
 	require.Len(t, *bodies, 1)
 	assert.Len(t, (*bodies)[0].D, 1)
+}
+
+func TestPrimaryKeyAsIdentity(t *testing.T) {
+	server, bodies := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email"},
+	}))
+
+	rec := (*bodies)[0].D[0]
+	assert.Equal(t, "hasan@x.com", rec["identity"])
+	assert.Equal(t, map[string]interface{}{"name": "hasan", "age": float64(25)}, rec["profileData"])
+}
+
+func TestCompositePrimaryKeyRejected(t *testing.T) {
+	server, _ := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult)
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email", "phone"},
+	})
+	require.ErrorContains(t, err, "composite primary key")
+}
+
+func TestRejectModeSkipViaFlag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"success","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity"}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email"},
+		RejectMode:  "skip",
+	}))
+}
+
+func TestRejectModeFailFast(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"partial","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity","record":{"identity":"ali@x.com"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	err := d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email"},
+		RejectMode:  "fail_fast",
+	})
+	require.ErrorContains(t, err, "clevertap rejected a profile record")
+	require.ErrorContains(t, err, "code 513")
+}
+
+func TestWriteNullsClearsField(t *testing.T) {
+	profileWithNull := func() arrow.RecordBatch {
+		s := arrow.NewSchema([]arrow.Field{
+			{Name: "email", Type: arrow.BinaryTypes.String},
+			{Name: "name", Type: arrow.BinaryTypes.String},
+		}, nil)
+		b := array.NewRecordBuilder(memory.DefaultAllocator, s)
+		defer b.Release()
+		b.Field(0).(*array.StringBuilder).AppendValues([]string{"a@x.com"}, nil)
+		b.Field(1).(*array.StringBuilder).AppendValues([]string{""}, []bool{false})
+		return b.NewRecordBatch()
+	}
+
+	t.Run("omitted when write-nulls is false", func(t *testing.T) {
+		server, bodies := newUploadServer(t)
+		d := connectTestDestination(t, server.URL)
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: profileWithNull()}
+		close(records)
+		require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+			Table:       "profiles",
+			PrimaryKeys: []string{"email"},
+		}))
+		assert.Equal(t, map[string]interface{}{}, (*bodies)[0].D[0]["profileData"])
+	})
+
+	t.Run("cleared with write-nulls", func(t *testing.T) {
+		server, bodies := newUploadServer(t)
+		d := connectTestDestination(t, server.URL)
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: profileWithNull()}
+		close(records)
+		require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+			Table:       "profiles",
+			PrimaryKeys: []string{"email"},
+			WriteNulls:  true,
+		}))
+		assert.Equal(t, map[string]interface{}{"name": map[string]interface{}{"$delete": true}}, (*bodies)[0].D[0]["profileData"])
+	})
+}
+
+func TestFailFastParallelAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"partial","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity","record":{"identity":"ali@x.com"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 3)
+	for i := 0; i < 3; i++ {
+		records <- source.RecordBatchResult{Batch: profileBatch()}
+	}
+	close(records)
+	err := d.WriteParallel(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email"},
+		RejectMode:  "fail_fast",
+		Parallelism: 1,
+	})
+	require.ErrorContains(t, err, "clevertap rejected a profile record")
+}
+
+func TestWriteNullsEventsOmit(t *testing.T) {
+	s := arrow.NewSchema([]arrow.Field{
+		{Name: "user_id", Type: arrow.BinaryTypes.String},
+		{Name: "amount", Type: arrow.PrimitiveTypes.Float64},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, s)
+	defer b.Release()
+	b.Field(0).(*array.StringBuilder).AppendValues([]string{"u-1"}, nil)
+	b.Field(1).(*array.Float64Builder).AppendValues([]float64{0}, []bool{false})
+
+	server, bodies := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: b.NewRecordBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "events?event_name=Charged",
+		PrimaryKeys: []string{"user_id"},
+		WriteNulls:  true,
+	}))
+	assert.Equal(t, map[string]interface{}{}, (*bodies)[0].D[0]["evtData"])
+}
+
+func TestIsReverseETL(t *testing.T) {
+	assert.True(t, destination.IsReverseETL(NewCleverTapDestination()))
 }
 
 func TestStrategySupport(t *testing.T) {

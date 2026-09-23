@@ -146,14 +146,19 @@ func (d *CleverTapDestination) Close(_ context.Context) error {
 }
 
 // tableParams are the record-shaping options carried on the --dest-table string,
-// e.g. "profiles?identity_column=email" or "events?identity_column=user_id&event_name=Charged".
+// e.g. "profiles" or "events?event_name=Charged". The identity column comes from
+// --primary-key and rejection handling from --reject-mode.
 type tableParams struct {
+	// IdentityColumn is a deprecated, undocumented alias kept so pre-existing
+	// dest-tables keep working; --primary-key is the supported way to set identity.
 	IdentityColumn  string `mapstructure:"identity_column"`
 	IDType          string `mapstructure:"id_type"`
 	TS              string `mapstructure:"ts"`
 	EventName       string `mapstructure:"event_name"`
 	EventNameColumn string `mapstructure:"event_name_column"`
-	OnError         string `mapstructure:"on_error"`
+	// OnError is a deprecated, undocumented alias for --reject-mode kept for
+	// backward compatibility; it originally accepted "fail" and "skip".
+	OnError string `mapstructure:"on_error"`
 }
 
 // shaper turns a source row into a CleverTap upload record for one dest-table mode.
@@ -165,10 +170,13 @@ type shaper struct {
 	eventName    string
 	eventNameCol string
 	exclude      map[string]bool
-	onErrorSkip  bool
+	// rejectMode is fail | fail_fast | skip; writeNulls sends null cells through
+	// to clear the attribute instead of omitting them.
+	rejectMode string
+	writeNulls bool
 }
 
-func parseShaper(table string) (*shaper, error) {
+func parseShaper(table string, primaryKeys []string, rejectMode string, writeNulls bool) (*shaper, error) {
 	var p tableParams
 	path, _, err := tablespec.Parse(table, &p, tablespec.WithListSeparator(","))
 	if err != nil {
@@ -191,9 +199,18 @@ func parseShaper(table string) (*shaper, error) {
 		return nil, fmt.Errorf("clevertap dest-table must be \"profiles\" or \"events\", got %q", path)
 	}
 
+	// Identity comes from a single --primary-key (composite rejected); the
+	// deprecated identity_column dest-table param still wins when set.
 	identityCol := p.IdentityColumn
 	if identityCol == "" {
-		return nil, fmt.Errorf("clevertap: set identity_column=<column> on the dest-table")
+		switch {
+		case len(primaryKeys) == 1:
+			identityCol = primaryKeys[0]
+		case len(primaryKeys) > 1:
+			return nil, fmt.Errorf("clevertap: cannot resolve identity from a composite primary key [%s]; CleverTap resolves a user by a single field — pass a single --primary-key", strings.Join(primaryKeys, ", "))
+		default:
+			return nil, fmt.Errorf("clevertap: pass a single --primary-key to use as the identity column")
+		}
 	}
 	idType := p.IDType
 	if idType == "" {
@@ -217,8 +234,19 @@ func parseShaper(table string) (*shaper, error) {
 		naming.IngestrRunIDColumn:    true,
 	}
 
-	if p.OnError != "" && p.OnError != "skip" && p.OnError != "fail" {
-		return nil, fmt.Errorf("invalid on_error %q: must be \"fail\" (default) or \"skip\"", p.OnError)
+	// --reject-mode is the supported flag; the deprecated on_error dest-table param
+	// wins when set, so a pre-existing on_error=skip keeps working.
+	resolvedReject := rejectMode
+	if p.OnError != "" {
+		resolvedReject = p.OnError
+	}
+	if resolvedReject == "" {
+		resolvedReject = string(config.RejectFail)
+	}
+	switch resolvedReject {
+	case string(config.RejectFail), string(config.RejectFailFast), string(config.RejectSkip):
+	default:
+		return nil, fmt.Errorf("invalid reject mode %q: must be \"fail\" (default), \"fail_fast\", or \"skip\"", resolvedReject)
 	}
 
 	return &shaper{
@@ -229,7 +257,8 @@ func parseShaper(table string) (*shaper, error) {
 		eventName:    p.EventName,
 		eventNameCol: p.EventNameColumn,
 		exclude:      exclude,
-		onErrorSkip:  p.OnError == "skip",
+		rejectMode:   resolvedReject,
+		writeNulls:   writeNulls,
 	}, nil
 }
 
@@ -280,8 +309,13 @@ func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row in
 		if name == s.identityCol || name == s.tsCol || name == s.eventNameCol || s.exclude[name] {
 			continue
 		}
-		if v := arrowToValue(record.Column(i), row); v != nil {
+		col := record.Column(i)
+		if v := arrowToValue(col, row); v != nil {
 			data[name] = v
+		} else if s.writeNulls && s.recordType == "profile" && col.IsNull(row) {
+			// CleverTap ignores a null value; $delete is what unsets a profile
+			// attribute. Events are append-only, so null cells are omitted there.
+			data[name] = map[string]interface{}{"$delete": true}
 		}
 	}
 
@@ -301,9 +335,22 @@ func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row in
 	return item, true
 }
 
+// primaryKeysFor resolves the primary keys a run carries. executeReverseETL puts
+// them on WriteOptions.PrimaryKeys; the schema's PrimaryKeys is a reliable fallback.
+func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
+	if len(explicit) > 0 {
+		return explicit
+	}
+	if sch != nil {
+		return sch.PrimaryKeys
+	}
+	return nil
+}
+
 func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	sh, err := parseShaper(opts.Table)
+	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
+		drainRecords(records)
 		return err
 	}
 
@@ -312,6 +359,7 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 	var rejects rejectionLog
 	for result := range records {
 		if result.Err != nil {
+			drainRecords(records)
 			return result.Err
 		}
 		record := result.Batch
@@ -326,6 +374,7 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 		rows, err := d.writeBatch(ctx, sh, record, &skipped, &rejects)
 		record.Release()
 		if err != nil {
+			drainRecords(records)
 			return err
 		}
 		totalRows += rows
@@ -337,8 +386,9 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	sh, err := parseShaper(opts.Table)
+	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
+		drainRecords(records)
 		return err
 	}
 
@@ -398,12 +448,25 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 
 	wg.Wait()
 	close(errs)
+	// A worker that returned early on error leaves the channel undrained; release
+	// what's queued so the source producer can't block forever on a send.
+	drainRecords(records)
 	if err := <-errs; err != nil {
 		return err
 	}
 
 	warnSkipped(&skipped, sh)
 	return reportRejections(sh, &rejects)
+}
+
+// drainRecords releases any batches left in the channel so the source producer
+// goroutine can't block on a send after a worker returned early on error.
+func drainRecords(records <-chan source.RecordBatchResult) {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
 }
 
 func warnSkipped(skipped *atomic.Int64, sh *shaper) {
@@ -436,7 +499,7 @@ func (l *rejectionLog) add(items []rejection) {
 	l.mu.Unlock()
 }
 
-// reportRejections fails the run (or warns, under on_error=skip) with each
+// reportRejections fails the run (or warns, under --reject-mode=skip) with each
 // rejected record and its error once all batches have been uploaded.
 func reportRejections(sh *shaper, l *rejectionLog) error {
 	l.mu.Lock()
@@ -456,7 +519,7 @@ func reportRejections(sh *shaper, l *rejectionLog) error {
 		fmt.Fprintf(&b, "\n  ... and %d more", len(items)-shown)
 	}
 
-	if sh.onErrorSkip {
+	if sh.rejectMode == string(config.RejectSkip) {
 		output.Warnf("Warning: %s\n", b.String())
 		return nil
 	}
@@ -534,6 +597,9 @@ func (d *CleverTapDestination) upload(ctx context.Context, sh *shaper, items []m
 
 	if len(body.Unprocessed) > 0 {
 		first := body.Unprocessed[0]
+		if sh.rejectMode == string(config.RejectFailFast) {
+			return fmt.Errorf("clevertap rejected a %s record (code %d): %s: %s", sh.recordType, first.Code, first.Error, string(first.Record))
+		}
 		output.Warnf("Warning: clevertap rejected %d of %d record(s) in this batch; first error (code %d): %s\n", len(body.Unprocessed), len(items), first.Code, first.Error)
 		batch := make([]rejection, 0, len(body.Unprocessed))
 		for _, u := range body.Unprocessed {
@@ -582,6 +648,10 @@ func (d *CleverTapDestination) GetTableSchema(_ context.Context, _ string) (*sch
 }
 
 func (d *CleverTapDestination) GetScheme() string { return "clevertap" }
+
+// IsReverseETL marks CleverTap as a reverse-ETL destination; the upload
+// endpoints fix the operation, so the strategy label is not acted on.
+func (d *CleverTapDestination) IsReverseETL() {}
 
 // SupportsReplaceStrategy is true because CleverTap has no destructive delete;
 // replace degrades to a full upload, which upserts profiles by identity.
