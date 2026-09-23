@@ -15,7 +15,7 @@ Reverse ETL is ingestion in the other direction: instead of pulling data into yo
 A warehouse destination stages data, runs SQL, and swaps tables. A reverse-ETL destination does none of that:
 
 - No staging table, no SQL, no atomic swap.
-- Each source row maps to one record (or one link) in the target API.
+- Each source row is written to the target API as one record (or one link). It usually affects a single remote record, but not always — matching on a non-unique field can update or delete every record that matches (see [Matching records](#matching-records)).
 - Rows are sent in bulk through the API's batch endpoints, within its rate limits.
 
 Two things follow from this:
@@ -34,7 +34,7 @@ Each destination's page has its own URI, object types, and quirks. This page cov
 
 ## Strategies
 
-Pick the write behaviour with `--incremental-strategy`. There's often no sensible default, so some destinations require it explicitly. The names map to API operations:
+Pick the write behaviour with `--incremental-strategy`. There's often no sensible default, so some destinations require it explicitly. Where a destination honours the strategy, the names map to API operations like this:
 
 - `merge` — upsert: update the match, or create it if there's none. The usual choice.
 - `update` — update matches only; a row with no match is rejected, never created.
@@ -46,6 +46,7 @@ Notes:
 
 - Not every destination supports every strategy — check its page.
 - Impossible combinations are rejected before the run starts, not silently mishandled.
+- **Some destinations don't act on the strategy at all.** CleverTap, for example, always upserts profiles and always appends events regardless of the strategy you pass — so `merge`, `delete`, and `replace` don't perform the operations above (a `delete` or `replace` run can succeed while removing nothing). The strategy semantics here apply only where the destination's page says the strategy is honoured.
 
 ::: warning
 On a destination that supports deletion, `replace` removes **every** record that isn't in your source — including ones created by hand or by other tools. Use it only when the source is the complete system of record. A run with 0 source rows removes nothing (a safety guard). To remove specific records, use `delete`.
@@ -66,7 +67,7 @@ The exact identity rules differ per destination — what counts as a valid match
 
 Both flags apply only to reverse-ETL destinations. On a warehouse destination they're rejected.
 
-### `--reject-mode`
+### `--reject-mode` {#reject-mode}
 
 What happens to a row the API can't apply (no match, or rejected on its value). All three modes write the valid rows they process — they differ in how far they get and in the exit status:
 
