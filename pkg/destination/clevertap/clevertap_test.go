@@ -354,7 +354,7 @@ func TestWriteNullsClearsField(t *testing.T) {
 		return b.NewRecordBatch()
 	}
 
-	t.Run("omitted by default", func(t *testing.T) {
+	t.Run("omitted when write-nulls is false", func(t *testing.T) {
 		server, bodies := newUploadServer(t)
 		d := connectTestDestination(t, server.URL)
 		records := make(chan source.RecordBatchResult, 1)
