@@ -353,6 +353,7 @@ func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
 func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
+		drainRecords(records)
 		return err
 	}
 
@@ -361,6 +362,7 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 	var rejects rejectionLog
 	for result := range records {
 		if result.Err != nil {
+			drainRecords(records)
 			return result.Err
 		}
 		record := result.Batch
@@ -375,6 +377,7 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 		rows, err := d.writeBatch(ctx, sh, record, &skipped, &rejects)
 		record.Release()
 		if err != nil {
+			drainRecords(records)
 			return err
 		}
 		totalRows += rows
@@ -388,6 +391,7 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
+		drainRecords(records)
 		return err
 	}
 
@@ -447,12 +451,26 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 
 	wg.Wait()
 	close(errs)
+	// A worker that returned early on error (e.g. at --destination-parallelism 1)
+	// leaves the channel undrained; release anything still queued so the source
+	// producer goroutine can't block forever on a send.
+	drainRecords(records)
 	if err := <-errs; err != nil {
 		return err
 	}
 
 	warnSkipped(&skipped, sh)
 	return reportRejections(sh, &rejects)
+}
+
+// drainRecords releases any batches left in the channel so the source producer
+// goroutine can't block on a send after a worker returned early on error.
+func drainRecords(records <-chan source.RecordBatchResult) {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
 }
 
 func warnSkipped(skipped *atomic.Int64, sh *shaper) {

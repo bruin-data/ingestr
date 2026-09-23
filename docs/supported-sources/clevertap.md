@@ -144,7 +144,7 @@ The parameters are the same as the source (`account_id`, `passcode`, `region`). 
 
 Every row you send becomes one CleverTap record. The base of the `--dest-table` value (before the `?`) selects the record type — `profiles` or `events` — and the parameters after it tell ingestr which columns carry the special fields. Every other column is uploaded as an attribute under its own name. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never uploaded.
 
-The CleverTap identity for each row comes from `--primary-key` — pass a single column whose value identifies the user. A composite (multi-column) primary key is rejected, since CleverTap resolves a user by one field. If the source table declares a single primary key, that column is used automatically.
+The CleverTap identity for each row comes from `--primary-key` — pass a single column whose value identifies the user. A composite (multi-column) primary key is rejected, since CleverTap resolves a user by one field.
 
 Two optional CLI flags control how records are written:
 

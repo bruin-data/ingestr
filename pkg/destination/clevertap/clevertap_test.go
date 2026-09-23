@@ -382,6 +382,27 @@ func TestWriteNullsClearsField(t *testing.T) {
 	})
 }
 
+func TestFailFastParallelAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"partial","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity","record":{"identity":"ali@x.com"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	d := connectTestDestination(t, server.URL)
+
+	records := make(chan source.RecordBatchResult, 3)
+	for i := 0; i < 3; i++ {
+		records <- source.RecordBatchResult{Batch: profileBatch()}
+	}
+	close(records)
+	err := d.WriteParallel(context.Background(), records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email"},
+		RejectMode:  "fail_fast",
+		Parallelism: 1,
+	})
+	require.ErrorContains(t, err, "clevertap rejected a profile record")
+}
+
 func TestWriteNullsEventsOmit(t *testing.T) {
 	s := arrow.NewSchema([]arrow.Field{
 		{Name: "user_id", Type: arrow.BinaryTypes.String},
