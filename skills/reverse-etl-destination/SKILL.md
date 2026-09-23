@@ -21,7 +21,7 @@ Decide the strategy set and mappings from this — not the reverse.
 - Implement `destination.ReverseETLDestination` (`IsReverseETL()`) — turns on RETL flags/strategies and drops the SQL-only checks (e.g. merge without a PK).
 - Capability markers, not hardcoding: `RequiresExplicitStrategy()`, `SupportsReplace/Append/Merge/DeleteInsert/SCD2Strategy()`, `SupportsAtomicSwap() = false`.
 - Strategies go through `executeReverseETL`; each `Execute` checks `IsReverseETL` and delegates, each `Validate` calls `validateReverseETLReject`.
-- Defaults are resolved once in `Pipeline.Run`, not per-strategy.
+- The write-nulls default is resolved once in `Pipeline.Run`, not per-strategy.
 - `PrepareTable` has no table to build — use it for config validation / object-type resolution instead (HubSpot checks unknown properties there).
 
 ## Setup
