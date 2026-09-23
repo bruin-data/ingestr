@@ -623,10 +623,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	copy(originalSourceSchema.Columns, tableSchema.Columns)
 	copy(originalSourceSchema.PrimaryKeys, tableSchema.PrimaryKeys)
 
-	// The inference path renames columns in place before this snapshot, which
-	// also merges columns that collide on a rename target. Use the raw inferred
-	// columns instead so the buffer reader references every original name.
-	if !table.HasKnownSchema() && !p.config.NoInference && p.rawInferredSchema != nil {
+	// A --columns rename during inference renames columns in place before this
+	// snapshot and merges any that collide on a rename target. Use the raw
+	// inferred columns instead so the buffer reader references every original
+	// name. Only the rename case needs this; other paths already match the buffer.
+	if !table.HasKnownSchema() && !p.config.NoInference &&
+		p.columnRenamer != nil && p.columnRenamer.HasRenames() && p.rawInferredSchema != nil {
 		originalSourceSchema.Columns = append([]schema.Column(nil), p.rawInferredSchema.Columns...)
 		originalSourceSchema.PrimaryKeys = append([]string(nil), p.rawInferredSchema.PrimaryKeys...)
 	}
