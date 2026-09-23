@@ -396,6 +396,7 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 		parallelism = defaultParallelism
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -450,6 +451,11 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 	wg.Wait()
 	close(errs)
 	if err := <-errs; err != nil {
+		return err
+	}
+	// Caller cancellation leaves no worker error; surface it so executeReverseETL
+	// runs its drain and the run isn't reported as successful.
+	if err := parentCtx.Err(); err != nil {
 		return err
 	}
 

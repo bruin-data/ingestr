@@ -403,6 +403,25 @@ func TestFailFastParallelAborts(t *testing.T) {
 	require.ErrorContains(t, err, "clevertap rejected a profile record")
 }
 
+func TestWriteParallelCallerCancelReturnsError(t *testing.T) {
+	server, _ := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+
+	err := d.WriteParallel(ctx, records, destination.WriteOptions{
+		Table:       "profiles",
+		PrimaryKeys: []string{"email"},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestWriteNullsEventsOmit(t *testing.T) {
 	s := arrow.NewSchema([]arrow.Field{
 		{Name: "user_id", Type: arrow.BinaryTypes.String},
