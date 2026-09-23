@@ -261,13 +261,13 @@ ingestr ingest \
 
 When you include associations, the response will contain information about the related objects, allowing you to track relationships between your custom objects and standard HubSpot objects.
 
-# HubSpot as a destination
+## HubSpot as a destination
 
 ingestr can write CRM records and record-to-record associations back into HubSpot (reverse ETL). Each source row becomes one HubSpot record (or one association link), sent in bulk through HubSpot's batch APIs.
 
 The private app token you write with needs **write** scopes on the objects you target (e.g. `crm.objects.contacts.write`). For custom objects, add the schema read scope so ingestr can resolve the object by name.
 
-## URI format
+### URI format
 
 ```
 hubspot://?api_key=<private-app-token>
@@ -275,7 +275,7 @@ hubspot://?api_key=<private-app-token>
 
 The parameters are the same as the source — provide either `api_key` or `service_key`.
 
-## What gets written
+### What gets written
 
 The base of `--dest-table` (before the `?`) names the object type: a built-in object (`contacts`, `companies`, `deals`, `products`, `line_items`, …) or a custom object by its name. By default every source column is written as a HubSpot property whose **internal name** matches the column name — rename a column to a different property with [`--columns`](#column-mapping). Properties are always addressed by internal name (e.g. `numberofemployees`), never by display label; the column name (after any rename) must equal the target property's internal name. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never sent.
 
@@ -289,7 +289,7 @@ The **write behaviour is chosen with `--incremental-strategy`**, which is **requ
 | `delete` | Archive (soft-delete) the matching records. Rows with no match follow [`--reject-mode`](#reverse-etl-options) — use `--reject-mode skip` to report them but still succeed. |
 | `replace` | Mirror — upsert every source row, then archive any record whose match value is **not** in the source. Costly: it scans every record of the object type on each run, so it is slow and expensive on large objects. |
 
-### Matching records
+#### Matching records
 
 Upsert/update/delete match existing records on two independent things — **which HubSpot property** to match on, and **which source column** carries the value:
 
@@ -329,11 +329,11 @@ ingestr ingest \
 > [!WARNING]
 > `replace` is a full object-wide mirror: it archives **every** record of the object type that is not in your source (including records with no match value, and ones created via the UI or other integrations). Use it only when the source is the complete, sole system of record for that object. A run with **0 source rows** archives nothing; to remove records intentionally, use `delete`.
 
-## Reverse-ETL options
+### Reverse-ETL options
 
 These flags apply only when HubSpot is the **destination** (reverse ETL); on any other destination they are rejected with an error.
 
-### `--reject-mode`
+#### `--reject-mode`
 
 Controls how a row HubSpot can't apply (no match, or rejected) is handled. One of:
 
@@ -348,14 +348,14 @@ Only **per-record** problems count as rejects that `skip` tolerates: a row with 
 > [!NOTE]
 > HubSpot's batch writes aren't transactional, so `fail`/`fail_fast` may have written some records before the run stops.
 
-### `--write-nulls`
+#### `--write-nulls`
 
 - **`true`** *(default)* — a null source cell is written through as empty, clearing the field in HubSpot.
 - **`false`** (`--write-nulls=false`) — a null source cell is omitted, leaving the existing HubSpot value untouched.
 
 Only affects strategies that write property values — `merge`, `update`, `replace`, `append`. It has no effect on `delete` (archives by id) or associations (link records), which send no properties.
 
-## Column mapping
+### Column mapping
 
 When a source column name differs from the HubSpot property name, rename it with `--columns` using `dest_property::source_column` (comma-separated for several). `dest_property` is the property's **internal name** (not its display label):
 
@@ -365,18 +365,18 @@ When a source column name differs from the HubSpot property name, rename it with
 
 Only **renaming** is allowed for HubSpot — the property type is fixed on HubSpot's side, so a `--columns` entry that includes a type (e.g. `lead_score:int:score`) is rejected before the run starts. The right-hand side is the **source column** and must exist in the source: unlike SQL destinations (where an override creates the target column), HubSpot can't create a property from an override, so naming a source column that isn't there — e.g. writing the pair backwards as `first_name::firstname` — fails fast instead of silently doing nothing.
 
-## Properties must already exist
+### Properties must already exist
 
 HubSpot does **not** create properties on the fly. Every column you write must map to a property that already exists on the object (built-in or one you created in HubSpot beforehand). A row referencing an unknown property is rejected by HubSpot and handled per `--reject-mode`.
 
-## Multi-select properties
+### Multi-select properties
 
 For multi-select (checkbox) properties, HubSpot uses a semicolon-separated list of option values, and ingestr sends your source value through **verbatim** — it adds no special handling:
 
 - `"CHAMPION;DECISION_MAKER"` sets the property to exactly those two options (replacing any current selection).
 - A **leading** semicolon appends instead of replacing: `";BLOCKER"` adds `BLOCKER` to whatever is already selected.
 
-## Associations
+### Associations
 
 Link two objects by naming both sides of the dest-table as `obj1+obj2` and giving the two source key columns as `--primary-key k1,k2` (obj1 first, obj2 second):
 
@@ -426,7 +426,7 @@ ingestr ingest \
   --incremental-strategy merge
 ```
 
-## Writing to custom objects
+### Writing to custom objects
 
 Use a custom object anywhere a built-in object is accepted (records and associations). ingestr resolves the name to its `objectTypeId` via HubSpot's schemas API and caches it, so you can address it by any of:
 
