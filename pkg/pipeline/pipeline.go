@@ -66,7 +66,8 @@ type Pipeline struct {
 	columnRenamer            *transformer.ColumnRenamer
 	namingMapping            map[string]string // original → normalized column names from naming convention
 	ingestrColumnFiller      *schemaevolution.IngestrColumnFiller
-	droppedColumns           map[string]bool // columns dropped during schema inference (all-null nullable)
+	droppedColumns           map[string]bool     // columns dropped during schema inference (all-null nullable)
+	rawInferredSchema        *schema.TableSchema // inferred schema with raw source names, before --columns renames
 	logWriter                io.Writer
 	cdcConnectorID           string
 }
@@ -622,10 +623,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	copy(originalSourceSchema.Columns, tableSchema.Columns)
 	copy(originalSourceSchema.PrimaryKeys, tableSchema.PrimaryKeys)
 
-	// The inference path renames columns in place before this snapshot, but the
-	// buffered batches still use raw source names; revert to keep them aligned.
-	if !table.HasKnownSchema() && !p.config.NoInference {
-		p.revertToSourceNames(originalSourceSchema)
+	// The inference path renames columns in place before this snapshot, which
+	// also merges columns that collide on a rename target. Use the raw inferred
+	// columns instead so the buffer reader references every original name.
+	if !table.HasKnownSchema() && !p.config.NoInference && p.rawInferredSchema != nil {
+		originalSourceSchema.Columns = append([]schema.Column(nil), p.rawInferredSchema.Columns...)
+		originalSourceSchema.PrimaryKeys = append([]string(nil), p.rawInferredSchema.PrimaryKeys...)
 	}
 
 	// Setup naming convention and column renamer using the convention resolved above.
@@ -1287,6 +1290,10 @@ func (p *Pipeline) inferSchemaFromData(
 	}
 
 	p.droppedColumns = inferrer.DroppedColumns()
+
+	// Snapshot the raw names before --columns renames merge colliding columns;
+	// the buffer keeps every raw column, so replay must reference them all.
+	p.rawInferredSchema = cloneTableSchema(tableSchema)
 
 	stats := inferrer.Stats()
 	config.Debug("[PIPELINE] Schema inferred from %d batches, %d rows", stats.BatchCount, stats.RowCount)
@@ -2436,33 +2443,6 @@ func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
 	}
 	output.Infof("Identifier shortening: %d column(s) shortened to fit %d-byte limit\n", len(mapping), maxLen)
 	p.applyColumnMapping(sourceSchema, mapping)
-}
-
-// revertToSourceNames rewrites already-renamed column/PK/key names back to the
-// raw source names using the renamer mapping (source -> destination).
-func (p *Pipeline) revertToSourceNames(s *schema.TableSchema) {
-	if p.columnRenamer == nil || !p.columnRenamer.HasRenames() {
-		return
-	}
-
-	reverse := make(map[string]string)
-	for src, dst := range p.columnRenamer.Mapping() {
-		reverse[dst] = src
-	}
-	revert := func(name string) string {
-		if src, ok := reverse[name]; ok {
-			return src
-		}
-		return name
-	}
-
-	for i := range s.Columns {
-		s.Columns[i].Name = revert(s.Columns[i].Name)
-	}
-	for i, pk := range s.PrimaryKeys {
-		s.PrimaryKeys[i] = revert(pk)
-	}
-	s.IncrementalKey = revert(s.IncrementalKey)
 }
 
 // applyColumnMapping renames schema columns/PKs/incremental key and updates the column renamer.
