@@ -2,9 +2,13 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +64,64 @@ func TestReverseETL_PassesRejectModeAndWriteNulls(t *testing.T) {
 	assert.Equal(t, string(config.RejectSkip), base.writeCalls[0].RejectMode)
 	assert.True(t, base.writeCalls[0].WriteNulls)
 	assert.Equal(t, string(config.StrategyDelete), base.writeCalls[0].Strategy)
+}
+
+// endlessCtxSource emits batches forever until its read context is cancelled,
+// then signals via cancelled. It proves a write error halts the source read.
+type endlessCtxSource struct {
+	*fakeSourceTable
+	cancelled chan struct{}
+}
+
+func (s *endlessCtxSource) Read(ctx context.Context, _ source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	ch := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(ch)
+		for {
+			if ctx.Err() != nil {
+				close(s.cancelled)
+				return
+			}
+			select {
+			case ch <- source.RecordBatchResult{}:
+			case <-ctx.Done():
+				close(s.cancelled)
+				return
+			}
+		}
+	}()
+	return ch, nil
+}
+
+// promptErrRETLDestination is a reverse-ETL destination whose WriteParallel
+// returns an error after one batch without draining the rest of the stream.
+type promptErrRETLDestination struct {
+	*fakeDestination
+}
+
+func (d *promptErrRETLDestination) IsReverseETL() {}
+
+func (d *promptErrRETLDestination) WriteParallel(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+	<-records
+	return errors.New("boom")
+}
+
+// TestReverseETL_WriteErrorCancelsSourceRead verifies that a write failure stops
+// the source producer instead of draining the whole stream.
+func TestReverseETL_WriteErrorCancelsSourceRead(t *testing.T) {
+	job, src, base := minimalJob()
+	esrc := &endlessCtxSource{fakeSourceTable: src, cancelled: make(chan struct{})}
+	job.Table = esrc
+	job.Destination = &promptErrRETLDestination{fakeDestination: base}
+
+	err := (&AppendStrategy{}).Execute(context.Background(), job)
+	require.ErrorContains(t, err, "boom")
+
+	select {
+	case <-esrc.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("source read was not cancelled after the write error")
+	}
 }
 
 func TestValidateReverseETLReject(t *testing.T) {

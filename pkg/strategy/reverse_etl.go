@@ -28,7 +28,12 @@ func executeReverseETL(ctx context.Context, job *IngestionJob, strategyName conf
 		parallelism = 4
 	}
 
-	records, err := job.GetRecords(ctx, source.ReadOptions{
+	// A write error (e.g. a fail_fast rejection) must stop the source read; give it
+	// a cancelable context so the producer can be halted instead of drained in full.
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+
+	records, err := job.GetRecords(readCtx, source.ReadOptions{
 		IncrementalKey: job.Config.IncrementalKey,
 		IntervalStart:  job.Config.IntervalStart,
 		IntervalEnd:    job.Config.IntervalEnd,
@@ -64,6 +69,8 @@ func executeReverseETL(ctx context.Context, job *IngestionJob, strategyName conf
 	// WriteParallel dispatches up to Parallelism batches concurrently; the
 	// destination's own rate limiter still bounds the actual request rate.
 	if err := job.Destination.WriteParallel(ctx, records, writeOpts); err != nil {
+		cancelRead()
+		drainAndReleaseUntil(records, streamAbortDrainTimeout)
 		return fmt.Errorf("failed to write data: %w", err)
 	}
 	return nil

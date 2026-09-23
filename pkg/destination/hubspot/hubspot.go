@@ -813,6 +813,7 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 		parallelism = defaultParallelism
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -826,11 +827,13 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 		go func() {
 			defer wg.Done()
 			for result := range records {
+				// Stop promptly once another worker has failed; executeReverseETL
+				// cancels the source read and drains the rest.
 				if ctx.Err() != nil {
 					if result.Batch != nil {
 						result.Batch.Release()
 					}
-					continue
+					return
 				}
 				if result.Err != nil {
 					if result.Batch != nil {
@@ -867,12 +870,12 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 
 	wg.Wait()
 	close(errs)
-	// A worker that returned early on error (e.g. the sole worker at
-	// --destination-parallelism 1) leaves the channel undrained; release anything
-	// still queued so the producer goroutine can't block forever on a send. In the
-	// success path the channel is already closed and drained, so this is a no-op.
-	drainRecords(records)
 	if err := <-errs; err != nil {
+		return reportWithWriteErr(sh, &rejects, err)
+	}
+	// Caller cancellation leaves no worker error; surface it so executeReverseETL
+	// runs its drain and the run isn't reported as successful.
+	if err := parentCtx.Err(); err != nil {
 		return reportWithWriteErr(sh, &rejects, err)
 	}
 

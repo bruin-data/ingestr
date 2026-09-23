@@ -388,7 +388,6 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
-		drainRecords(records)
 		return err
 	}
 
@@ -397,6 +396,7 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 		parallelism = defaultParallelism
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -410,11 +410,13 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 		go func() {
 			defer wg.Done()
 			for result := range records {
+				// Stop promptly once another worker has failed; executeReverseETL
+				// cancels the source read and drains the rest.
 				if ctx.Err() != nil {
 					if result.Batch != nil {
 						result.Batch.Release()
 					}
-					continue
+					return
 				}
 				if result.Err != nil {
 					select {
@@ -448,10 +450,12 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 
 	wg.Wait()
 	close(errs)
-	// A worker that returned early on error leaves the channel undrained; release
-	// what's queued so the source producer can't block forever on a send.
-	drainRecords(records)
 	if err := <-errs; err != nil {
+		return err
+	}
+	// Caller cancellation leaves no worker error; surface it so executeReverseETL
+	// runs its drain and the run isn't reported as successful.
+	if err := parentCtx.Err(); err != nil {
 		return err
 	}
 
@@ -460,7 +464,7 @@ func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan
 }
 
 // drainRecords releases any batches left in the channel so the source producer
-// goroutine can't block on a send after a worker returned early on error.
+// goroutine can't block on a send after an early return.
 func drainRecords(records <-chan source.RecordBatchResult) {
 	for result := range records {
 		if result.Batch != nil {
