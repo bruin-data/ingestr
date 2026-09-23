@@ -622,6 +622,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	copy(originalSourceSchema.Columns, tableSchema.Columns)
 	copy(originalSourceSchema.PrimaryKeys, tableSchema.PrimaryKeys)
 
+	// The inference path renames columns in place before this snapshot, but the
+	// buffered batches still use raw source names; revert to keep them aligned.
+	if !table.HasKnownSchema() && !p.config.NoInference {
+		p.revertToSourceNames(originalSourceSchema)
+	}
+
 	// Setup naming convention and column renamer using the convention resolved above.
 	if err := p.applyNamingConvention(tableSchema, namingConv); err != nil {
 		return fmt.Errorf("failed to setup naming convention: %w", err)
@@ -2430,6 +2436,33 @@ func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
 	}
 	output.Infof("Identifier shortening: %d column(s) shortened to fit %d-byte limit\n", len(mapping), maxLen)
 	p.applyColumnMapping(sourceSchema, mapping)
+}
+
+// revertToSourceNames rewrites already-renamed column/PK/key names back to the
+// raw source names using the renamer mapping (source -> destination).
+func (p *Pipeline) revertToSourceNames(s *schema.TableSchema) {
+	if p.columnRenamer == nil || !p.columnRenamer.HasRenames() {
+		return
+	}
+
+	reverse := make(map[string]string)
+	for src, dst := range p.columnRenamer.Mapping() {
+		reverse[dst] = src
+	}
+	revert := func(name string) string {
+		if src, ok := reverse[name]; ok {
+			return src
+		}
+		return name
+	}
+
+	for i := range s.Columns {
+		s.Columns[i].Name = revert(s.Columns[i].Name)
+	}
+	for i, pk := range s.PrimaryKeys {
+		s.PrimaryKeys[i] = revert(pk)
+	}
+	s.IncrementalKey = revert(s.IncrementalKey)
 }
 
 // applyColumnMapping renames schema columns/PKs/incremental key and updates the column renamer.
