@@ -151,7 +151,7 @@ Two optional CLI flags control how records are written:
 | Flag | Description |
 | ---- | ----------- |
 | `--reject-mode` | How record rejections are handled: `fail` (default) prints every rejected record and fails the run; `fail_fast` aborts on the first rejected record; `skip` prints the rejected records but the run still succeeds. In every mode each rejection is printed as it happens. |
-| `--write-nulls` | By default a source `NULL` is sent through and clears the CleverTap attribute. Pass `--write-nulls=false` to omit `NULL` cells instead, leaving the stored value untouched. |
+| `--write-nulls` | Profiles only. By default a source `NULL` clears the CleverTap profile attribute (via CleverTap's `$delete` command). Pass `--write-nulls=false` to omit `NULL` cells instead, leaving the stored value untouched. Event attributes are append-only, so `NULL` cells are always omitted there. |
 
 ### Profiles
 

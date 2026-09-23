@@ -378,8 +378,31 @@ func TestWriteNullsClearsField(t *testing.T) {
 			PrimaryKeys: []string{"email"},
 			WriteNulls:  true,
 		}))
-		assert.Equal(t, map[string]interface{}{"name": nil}, (*bodies)[0].D[0]["profileData"])
+		assert.Equal(t, map[string]interface{}{"name": map[string]interface{}{"$delete": true}}, (*bodies)[0].D[0]["profileData"])
 	})
+}
+
+func TestWriteNullsEventsOmit(t *testing.T) {
+	s := arrow.NewSchema([]arrow.Field{
+		{Name: "user_id", Type: arrow.BinaryTypes.String},
+		{Name: "amount", Type: arrow.PrimitiveTypes.Float64},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, s)
+	defer b.Release()
+	b.Field(0).(*array.StringBuilder).AppendValues([]string{"u-1"}, nil)
+	b.Field(1).(*array.Float64Builder).AppendValues([]float64{0}, []bool{false})
+
+	server, bodies := newUploadServer(t)
+	d := connectTestDestination(t, server.URL)
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: b.NewRecordBatch()}
+	close(records)
+	require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+		Table:       "events?event_name=Charged",
+		PrimaryKeys: []string{"user_id"},
+		WriteNulls:  true,
+	}))
+	assert.Equal(t, map[string]interface{}{}, (*bodies)[0].D[0]["evtData"])
 }
 
 func TestIsReverseETL(t *testing.T) {

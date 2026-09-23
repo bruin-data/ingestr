@@ -314,10 +314,11 @@ func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row in
 		col := record.Column(i)
 		if v := arrowToValue(col, row); v != nil {
 			data[name] = v
-		} else if s.writeNulls && col.IsNull(row) {
-			// Send the null through so CleverTap clears the attribute, rather than
-			// leaving the stored value untouched.
-			data[name] = nil
+		} else if s.writeNulls && s.recordType == "profile" && col.IsNull(row) {
+			// CleverTap silently ignores a null value; its $delete command is what
+			// actually unsets a profile attribute. Events are append-only, so null
+			// cells are simply omitted there.
+			data[name] = map[string]interface{}{"$delete": true}
 		}
 	}
 
