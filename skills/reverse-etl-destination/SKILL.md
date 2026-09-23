@@ -32,6 +32,7 @@ Decide the strategy set and mappings from this — not the reverse.
 - Match field = the remote property, from a dest-table param (`id_property`).
 - Value column = the source column, from `--primary-key`.
 - Don't let one name the other.
+- The value column comes only from an explicit `--primary-key`. Reverse-ETL clears source-detected primary keys (`resolveTablePrimaryKeys` returns nil for a RETL dest), so there is no automatic fallback — any strategy that matches an existing record requires `--primary-key` to be set. Only create-only writes (`append`) can omit it. A dest that always matches (e.g. CleverTap, which upserts every row by identity) therefore requires `--primary-key` on every run.
 - Normalization: APIs may lowercase/trim stored values. Correlate with a folded key, but keep the exact value too — uniqueness may be case-sensitive. See `resolveMap` (exact + folded, exact wins).
 
 ## Strategy → API op
