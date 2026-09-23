@@ -126,6 +126,9 @@ Do NOT write comments everywhere. If the code is self-explanatory, do not write 
 ### BigQuery Destination
 Before changing `pkg/destination/bigquery/` or BigQuery-affecting behavior in the replace/merge strategies, read the `bigquery-destination` skill (`.claude/skills/bigquery-destination/SKILL.md`) — it documents the design (write path, dedup, swap selection, partition/cluster change handling). Update it in the same change if you alter that behavior.
 
+### Reverse-ETL Destinations
+Before adding or changing a destination under `pkg/destination/` that writes back to an external API (not a warehouse), or reverse-ETL behavior in `pkg/strategy/reverse_etl.go`, read the `reverse-etl-destination` skill (`.claude/skills/reverse-etl-destination/SKILL.md`) — it documents the recurring design choices (framework contract, two-axis matching, strategy→API mapping, batch bisection/systemic aborts, reject-mode/write-nulls defaults, mirror-safety guards, associations, and live-verifying API behavior). HubSpot (`pkg/destination/hubspot/`) is the reference implementation. Update the skill in the same change if you alter that behavior.
+
 ### Type Mapping
 Each source must map its native types to the `schema.DataType` enum. The ADBC dialect system delegates this via `MapDataType(dbType string)`. Native sources implement mapping directly (e.g., `pkg/source/postgres/mapper.go`).
 
