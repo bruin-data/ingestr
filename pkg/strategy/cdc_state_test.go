@@ -41,6 +41,8 @@ type cdcStateDestination struct {
 	failWrite      int
 	pruneBatchSize int
 	targets        map[string]string
+	maxLSNs        map[string]string
+	defaultMaxLSN  string
 }
 
 type caseCanonicalCDCStateDestination struct {
@@ -88,6 +90,21 @@ func (d *cdcStateDestination) GetTableSchema(_ context.Context, table string) (*
 	return &schema.TableSchema{}, nil
 }
 
+// GetMaxCDCLSN reports what the target actually holds. defaultMaxLSN stands in
+// for a table this connector filled; a per-table entry overrides it, and an
+// empty string means the table holds no CDC rows at all.
+func (d *cdcStateDestination) GetMaxCDCLSN(_ context.Context, table string) (string, error) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	if d.missing[table] {
+		return "", nil
+	}
+	if position, ok := d.maxLSNs[table]; ok {
+		return position, nil
+	}
+	return d.defaultMaxLSN, nil
+}
+
 func (d *cdcStateDestination) CDCTargetIncarnation(_ context.Context, table string) (string, bool, error) {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
@@ -108,6 +125,7 @@ func newCDCStateDestination() *cdcStateDestination {
 		targets:         make(map[string]string),
 		missing:         make(map[string]bool),
 		incarnations:    make(map[string]string),
+		maxLSNs:         make(map[string]string),
 	}
 }
 
@@ -929,6 +947,13 @@ func TestCDCStateDroppedTableCannotReuseOlderGeneration(t *testing.T) {
 	}
 	if position != "" {
 		t.Fatalf("recreated table resumed from stale state at %s", position)
+	}
+	position, err = recreated.ResumePositionForKeyedMerge(ctx, "public.orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if position != "" {
+		t.Fatalf("recreated table resumed a keyed merge from stale state at %s", position)
 	}
 }
 
@@ -2290,4 +2315,164 @@ func TestCDCStatePrepareRetriesThroughPositionMigration(t *testing.T) {
 	require.NoError(t, manager.RegisterTableState(ctx, "public.orders", "raw.orders", "", ""))
 	require.NoError(t, manager.BeginRun(ctx, false))
 	require.Equal(t, 1, dest.migrations, "prepare failure must be retried through the position migration exactly once")
+}
+
+// killRunAfterBeginRun reproduces a process killed between BeginRun and
+// Persist: the generation is opened and never certified.
+func killRunAfterBeginRun(t *testing.T, dest destination.Destination, connectorID string, tables map[string]string) {
+	t.Helper()
+	killed, err := NewCDCStateManager(dest, connectorID, "", "")
+	require.NoError(t, err)
+	for sourceTable, destTable := range tables {
+		require.NoError(t, killed.RegisterTable(t.Context(), sourceTable, destTable))
+	}
+	require.NoError(t, killed.BeginRun(t.Context(), false))
+}
+
+func completeCDCStateRun(t *testing.T, dest destination.Destination, connectorID string, tables map[string]string, checkpoint string, snapshots map[string]string) {
+	t.Helper()
+	manager, err := NewCDCStateManager(dest, connectorID, "", "")
+	require.NoError(t, err)
+	for sourceTable, destTable := range tables {
+		require.NoError(t, manager.RegisterTable(t.Context(), sourceTable, destTable))
+	}
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+	require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{
+		Position:          checkpoint,
+		SnapshotPositions: snapshots,
+	}))
+}
+
+func mustResumePosition(t *testing.T, manager *CDCStateManager, sourceTable string) string {
+	t.Helper()
+	position, err := manager.ResumePosition(t.Context(), sourceTable)
+	require.NoError(t, err)
+	return position
+}
+
+func mustKeyedResumePosition(t *testing.T, manager *CDCStateManager, sourceTable string) string {
+	t.Helper()
+	position, err := manager.ResumePositionForKeyedMerge(t.Context(), sourceTable)
+	require.NoError(t, err)
+	return position
+}
+
+func restartedCDCStateManager(t *testing.T, dest destination.Destination, connectorID string, tables map[string]string) *CDCStateManager {
+	t.Helper()
+	manager, err := NewCDCStateManager(dest, connectorID, "", "")
+	require.NoError(t, err)
+	for sourceTable, destTable := range tables {
+		require.NoError(t, manager.RegisterTable(t.Context(), sourceTable, destTable))
+	}
+	return manager
+}
+
+func TestCDCStateKeyedMergeResumesLastCompleteGenerationAfterKilledRun(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "keyed-crash-resume", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "keyed-crash-resume", tables)
+
+	restarted := restartedCDCStateManager(t, dest, "keyed-crash-resume", tables)
+	require.Empty(t, mustResumePosition(t, restarted, "public.orders"))
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateKeyedMergeResumesAfterConsecutiveKilledRuns(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "repeated-crash-resume", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "repeated-crash-resume", tables)
+	killRunAfterBeginRun(t, dest, "repeated-crash-resume", tables)
+
+	restarted := restartedCDCStateManager(t, dest, "repeated-crash-resume", tables)
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateKeylessResumeIgnoresCompletedGenerationAfterKilledRun(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.events": "raw.events"}
+	completeCDCStateRun(t, dest, "keyless-crash-resume", tables, "00000000/00000020", map[string]string{"public.events": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "keyless-crash-resume", tables)
+
+	restarted := restartedCDCStateManager(t, dest, "keyless-crash-resume", tables)
+	require.Empty(t, mustResumePosition(t, restarted, "public.events"))
+}
+
+func TestCDCStateKeyedMergeRefusesEmptiedDestination(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "emptied-target", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "emptied-target", tables)
+
+	// The killed run truncated the target for a replacement snapshot it never
+	// finished loading.
+	dest.maxLSNs["raw.orders"] = ""
+
+	restarted := restartedCDCStateManager(t, dest, "emptied-target", tables)
+	require.Empty(t, mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateKeyedMergeRefusesDestinationAheadOfCompletedGeneration(t *testing.T) {
+	dest := newCDCStateDestination()
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "ahead-target", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "ahead-target", tables)
+
+	// The killed run merged changes past the completed generation before dying.
+	dest.maxLSNs["raw.orders"] = "00000000/00000030"
+
+	restarted := restartedCDCStateManager(t, dest, "ahead-target", tables)
+	require.Empty(t, mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateKeyedMergeRefusesAfterSnapshotInvalidation(t *testing.T) {
+	ctx := t.Context()
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "invalidated-target", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+
+	killed, err := NewCDCStateManager(dest, "invalidated-target", "", "")
+	require.NoError(t, err)
+	require.NoError(t, killed.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.NoError(t, killed.BeginRun(ctx, false))
+	require.NoError(t, killed.InvalidateSnapshot(ctx, "public.orders", "raw.orders", ""))
+
+	restarted := restartedCDCStateManager(t, dest, "invalidated-target", tables)
+	require.Empty(t, mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateKeyedMergeRefusesReplacedDestination(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "replaced-target", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "replaced-target", tables)
+	dest.incarnations["raw.orders"] = "replacement"
+
+	restarted := restartedCDCStateManager(t, dest, "replaced-target", tables)
+	require.Empty(t, mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateBeginRunRetainsCompletedGenerationForPrune(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := make(map[string]string, cdcStatePruneThreshold)
+	snapshots := make(map[string]string, cdcStatePruneThreshold)
+	for i := range cdcStatePruneThreshold {
+		sourceTable := fmt.Sprintf("public.table_%03d", i)
+		tables[sourceTable] = fmt.Sprintf("raw.table_%03d", i)
+		snapshots[sourceTable] = "00000000/00000010"
+	}
+	completeCDCStateRun(t, dest, "prune-crash-resume", tables, "00000000/00000020", snapshots)
+	killRunAfterBeginRun(t, dest, "prune-crash-resume", tables)
+
+	restarted := restartedCDCStateManager(t, dest, "prune-crash-resume", tables)
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, "public.table_000"))
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, fmt.Sprintf("public.table_%03d", cdcStatePruneThreshold-1)))
 }
