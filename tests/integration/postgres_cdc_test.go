@@ -2430,3 +2430,51 @@ func TestPostgresCDC_SingleTableBatchRunAdvancesReplicationSlot(t *testing.T) {
 		}
 	})
 }
+
+func TestPostgresCDC_SingleTableRenamedColumns_SQLite(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceConnString := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	srcPool, err := pgxpool.New(ctx, sourceConnString)
+	require.NoError(t, err)
+	defer srcPool.Close()
+
+	_, err = srcPool.Exec(ctx, `
+		CREATE TABLE public.orders (
+			"orderId" INT PRIMARY KEY,
+			"CustomerName" TEXT NOT NULL,
+			"SHIP_CITY" TEXT NOT NULL
+		);
+		INSERT INTO public.orders VALUES (1, 'ann', 'Berlin'), (2, 'bob', 'Paris');
+		CREATE PUBLICATION orders_pub FOR TABLE public.orders;
+		ALTER USER testuser REPLICATION;
+	`)
+	require.NoError(t, err)
+
+	sqlitePath := t.TempDir() + "/test.db"
+	cfg := &config.IngestConfig{
+		SourceURI:   "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=orders_pub&mode=batch",
+		SourceTable: "public.orders",
+		DestURI:     "sqlite:///" + sqlitePath,
+		DestTable:   "orders",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	dest, err := sql.Open("sqlite3", sqlitePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dest.Close() })
+	requireRenamedCDCOrders(t, dest, "orders", map[int64]namingSourceRow{1: {"ann", "Berlin"}, 2: {"bob", "Paris"}}, nil)
+
+	_, err = srcPool.Exec(ctx, `
+		UPDATE public.orders SET "CustomerName" = 'bob-upd' WHERE "orderId" = 2;
+		INSERT INTO public.orders VALUES (3, 'cem', 'Rome');
+		DELETE FROM public.orders WHERE "orderId" = 1;
+	`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	requireRenamedCDCOrders(t, dest, "orders", map[int64]namingSourceRow{2: {"bob-upd", "Paris"}, 3: {"cem", "Rome"}}, []int64{1})
+}

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 type mockDestination struct {
@@ -4032,4 +4035,191 @@ func TestCDCConnectorIDUnchangedWithoutASubset(t *testing.T) {
 	}, "\x00")
 	sum := sha256.Sum256([]byte(legacy))
 	require.Equal(t, fmt.Sprintf("%x", sum[:8]), genericCDCConnectorID(cfg))
+}
+
+// fakeKnownSchemaSource returns a known schema and reads either from that same
+// object (like Oracle, ClickHouse and the CDC sources) or from opts.Schema.
+type fakeKnownSchemaSource struct {
+	table *fakeKnownSchemaTable
+}
+
+func (s *fakeKnownSchemaSource) Schemes() []string { return []string{"fakeknownschema"} }
+
+func (s *fakeKnownSchemaSource) Connect(ctx context.Context, uri string) error { return nil }
+
+func (s *fakeKnownSchemaSource) Close(ctx context.Context) error { return nil }
+
+func (s *fakeKnownSchemaSource) HandlesIncrementality() bool { return false }
+
+func (s *fakeKnownSchemaSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
+	return s.table, nil
+}
+
+type fakeKnownSchemaTable struct {
+	tableSchema    *schema.TableSchema
+	readOptsSchema bool
+	rows           [][]any
+	readColumns    []string
+}
+
+func (t *fakeKnownSchemaTable) Name() string                         { return t.tableSchema.Name }
+func (t *fakeKnownSchemaTable) PrimaryKeys() []string                { return t.tableSchema.PrimaryKeys }
+func (t *fakeKnownSchemaTable) IncrementalKey() string               { return "" }
+func (t *fakeKnownSchemaTable) Strategy() config.IncrementalStrategy { return "" }
+func (t *fakeKnownSchemaTable) HasKnownSchema() bool                 { return true }
+
+func (t *fakeKnownSchemaTable) GetSchema(ctx context.Context) (*schema.TableSchema, error) {
+	return t.tableSchema, nil
+}
+
+func (t *fakeKnownSchemaTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	readSchema := t.tableSchema
+	if t.readOptsSchema && opts.Schema != nil {
+		readSchema = opts.Schema
+	}
+	t.readColumns = t.readColumns[:0]
+	fields := make([]arrow.Field, len(readSchema.Columns))
+	for i, col := range readSchema.Columns {
+		t.readColumns = append(t.readColumns, col.Name)
+		fields[i] = arrow.Field{Name: col.Name, Type: schema.DataTypeToArrowType(col), Nullable: true}
+	}
+	builder := array.NewRecordBuilder(memory.NewGoAllocator(), arrow.NewSchema(fields, nil))
+	defer builder.Release()
+	for _, row := range t.rows {
+		for i, value := range row {
+			switch v := value.(type) {
+			case int64:
+				builder.Field(i).(*array.Int64Builder).Append(v)
+			case string:
+				builder.Field(i).(*array.StringBuilder).Append(v)
+			}
+		}
+	}
+	results := make(chan source.RecordBatchResult, 1)
+	results <- source.RecordBatchResult{Batch: builder.NewRecordBatch()}
+	close(results)
+	return results, nil
+}
+
+func newFakeKnownSchemaTable(idCol, nameCol string, readOptsSchema bool) *fakeKnownSchemaTable {
+	return &fakeKnownSchemaTable{
+		tableSchema: &schema.TableSchema{
+			Name: "ORDERS",
+			Columns: []schema.Column{
+				{Name: idCol, DataType: schema.TypeInt64},
+				{Name: nameCol, DataType: schema.TypeString},
+			},
+			PrimaryKeys: []string{idCol},
+		},
+		readOptsSchema: readOptsSchema,
+		rows:           [][]any{{int64(1), "ann"}, {int64(2), "bob"}},
+	}
+}
+
+func runFakeKnownSchemaIngest(t *testing.T, table *fakeKnownSchemaTable, destPath string, mutate func(*config.IngestConfig)) {
+	t.Helper()
+	src := &fakeKnownSchemaSource{table: table}
+	internalregistry.RegisterSource([]string{"fakeknownschema"}, func() any { return src })
+	cfg := &config.IngestConfig{
+		SourceURI:           "fakeknownschema://source",
+		SourceTable:         "ORDERS",
+		DestURI:             "sqlite:///" + destPath,
+		DestTable:           "orders",
+		IncrementalStrategy: config.StrategyReplace,
+	}
+	if mutate != nil {
+		mutate(cfg)
+	}
+	require.NoError(t, New(cfg).Run(context.Background()))
+}
+
+func readFakeKnownSchemaDest(t *testing.T, destPath, idCol, nameCol string) map[int64]string {
+	t.Helper()
+	db, err := sql.Open("sqlite", destPath)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	rows, err := db.Query(fmt.Sprintf(`SELECT %q, %q FROM orders`, idCol, nameCol))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	out := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var name sql.NullString
+		require.NoError(t, rows.Scan(&id, &name))
+		require.True(t, name.Valid, "column %q arrived NULL for id %d", nameCol, id)
+		out[id] = name.String
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+func TestPipelineKeepsSourceColumnNamesAcrossNamingConventions(t *testing.T) {
+	cases := []struct {
+		name        string
+		idCol       string
+		nameCol     string
+		naming      string
+		wantIDCol   string
+		wantNameCol string
+	}{
+		{"camelCase", "orderId", "customerName", "", "order_id", "customer_name"},
+		{"PascalCase", "OrderId", "CustomerName", "", "order_id", "customer_name"},
+		{"UPPER_SNAKE", "ORDER_ID", "CUSTOMER_NAME", "", "order_id", "customer_name"},
+		{"spaces and punctuation", "Order Id", "customer-name", "", "order_id", "customer_name"},
+		{"already snake_case", "order_id", "customer_name", "", "order_id", "customer_name"},
+		{"explicit snake_case", "OrderId", "customerName", "snake_case", "order_id", "customer_name"},
+		{"direct keeps names", "OrderId", "customerName", "direct", "OrderId", "customerName"},
+	}
+	for _, tc := range cases {
+		for _, readOptsSchema := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/readOptsSchema=%v", tc.name, readOptsSchema), func(t *testing.T) {
+				table := newFakeKnownSchemaTable(tc.idCol, tc.nameCol, readOptsSchema)
+				destPath := filepath.Join(t.TempDir(), "dest.db")
+				runFakeKnownSchemaIngest(t, table, destPath, func(cfg *config.IngestConfig) {
+					cfg.SchemaNaming = tc.naming
+				})
+
+				require.Equal(t, []string{tc.idCol, tc.nameCol}, table.readColumns,
+					"the source must read with its own column names")
+				require.Equal(t, tc.idCol, table.tableSchema.Columns[0].Name)
+				require.Equal(t, tc.nameCol, table.tableSchema.Columns[1].Name)
+				require.Equal(t, []string{tc.idCol}, table.tableSchema.PrimaryKeys)
+				require.Equal(t, map[int64]string{1: "ann", 2: "bob"},
+					readFakeKnownSchemaDest(t, destPath, tc.wantIDCol, tc.wantNameCol))
+			})
+		}
+	}
+}
+
+func TestPipelineKeepsSourceColumnNamesOnRepeatedRuns(t *testing.T) {
+	strategies := []config.IncrementalStrategy{config.StrategyReplace, config.StrategyMerge, config.StrategyAppend}
+	for _, strategy := range strategies {
+		for _, readOptsSchema := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/readOptsSchema=%v", strategy, readOptsSchema), func(t *testing.T) {
+				table := newFakeKnownSchemaTable("OrderId", "CustomerName", readOptsSchema)
+				destPath := filepath.Join(t.TempDir(), "dest.db")
+				setStrategy := func(cfg *config.IngestConfig) { cfg.IncrementalStrategy = strategy }
+				runFakeKnownSchemaIngest(t, table, destPath, setStrategy)
+
+				// The second run auto-detects snake_case from the existing table.
+				table.rows = [][]any{{int64(2), "bob-updated"}, {int64(3), "cem"}}
+				if strategy == config.StrategyAppend {
+					table.rows = [][]any{{int64(3), "cem"}}
+				}
+				runFakeKnownSchemaIngest(t, table, destPath, setStrategy)
+
+				require.Equal(t, []string{"OrderId", "CustomerName"}, table.readColumns)
+				require.Equal(t, []string{"OrderId"}, table.tableSchema.PrimaryKeys)
+				got := readFakeKnownSchemaDest(t, destPath, "order_id", "customer_name")
+				switch strategy {
+				case config.StrategyReplace:
+					require.Equal(t, map[int64]string{2: "bob-updated", 3: "cem"}, got)
+				case config.StrategyMerge:
+					require.Equal(t, map[int64]string{1: "ann", 2: "bob-updated", 3: "cem"}, got)
+				case config.StrategyAppend:
+					require.Equal(t, map[int64]string{1: "ann", 2: "bob", 3: "cem"}, got)
+				}
+			})
+		}
+	}
 }
