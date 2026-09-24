@@ -498,6 +498,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to get schema: %w", err)
 		}
+		// Naming renames in place; clone so the rename can't reach the source's
+		// own schema, matching normalizeMultiTableInfo.
+		tableSchema = cloneTableSchema(tableSchema)
 	} else if p.config.NoInference {
 		tableSchema, err = p.schemaFromColumnOverrides(table)
 		if err != nil {
