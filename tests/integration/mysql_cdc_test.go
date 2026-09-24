@@ -255,3 +255,57 @@ func TestMySQLCDC_FullRefreshAndIncremental_PostgresSnakeCase(t *testing.T) {
 	require.NoError(t, destDB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT _cdc_lsn) FROM `+pqTable(destSchema, "mrp")).Scan(&distinctLSNs))
 	assert.Greater(t, distinctLSNs, 1, "incremental changes should retain the unchanged row's snapshot LSN")
 }
+
+func TestMySQLCDC_SingleTableRenamedColumns_Postgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	sourceContainer, sourceURI := setupMySQLCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	sourceDB, err := sql.Open("mysql", mysqlDSN(sourceURI))
+	require.NoError(t, err)
+	defer func() { _ = sourceDB.Close() }()
+	for _, stmt := range []string{
+		`CREATE TABLE Orders (orderId INT NOT NULL PRIMARY KEY, CustomerName VARCHAR(50) NOT NULL, SHIP_CITY VARCHAR(50) NOT NULL)`,
+		`INSERT INTO Orders VALUES (1, 'ann', 'Berlin'), (2, 'bob', 'Paris')`,
+	} {
+		_, err := sourceDB.ExecContext(ctx, stmt)
+		require.NoError(t, err)
+	}
+
+	destURI := sharedPostgresURI(t, "dest")
+	destSchema := uniqueSchemaName(t, "mysql_cdc_renamed")
+	ensurePostgresSchema(t, ctx, destURI, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+	cfg := &config.IngestConfig{
+		SourceURI:   mysqlCDCURI(t, sourceURI, map[string]string{"mode": "batch", "server_id": "18890"}),
+		SourceTable: "Orders",
+		DestURI:     destURI,
+		DestTable:   destSchema + ".orders",
+	}
+	run := func() {
+		t.Helper()
+		runCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		require.NoError(t, pipeline.New(cfg).Run(runCtx))
+	}
+	run()
+	dest, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dest.Close() })
+	destTable := pqTable(destSchema, "orders")
+	requireRenamedCDCOrders(t, dest, destTable, map[int64]namingSourceRow{1: {"ann", "Berlin"}, 2: {"bob", "Paris"}}, nil)
+
+	for _, stmt := range []string{
+		`UPDATE Orders SET CustomerName = 'bob-upd' WHERE orderId = 2`,
+		`INSERT INTO Orders VALUES (3, 'cem', 'Rome')`,
+		`DELETE FROM Orders WHERE orderId = 1`,
+	} {
+		_, err := sourceDB.ExecContext(ctx, stmt)
+		require.NoError(t, err)
+	}
+	run()
+	requireRenamedCDCOrders(t, dest, destTable, map[int64]namingSourceRow{2: {"bob-upd", "Paris"}, 3: {"cem", "Rome"}}, []int64{1})
+}

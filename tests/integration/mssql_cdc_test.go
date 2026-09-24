@@ -611,3 +611,73 @@ func TestMSSQLCDC_MultiTable_Postgres(t *testing.T) {
 	require.NoError(t, pg.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q."dbo_items"`, destSchema)).Scan(&count))
 	assert.Equal(t, 4, count, "items insert should be applied")
 }
+
+// requireRenamedCDCOrders checks a CDC destination whose source columns were
+// renamed to snake_case: live rows carry their values, never NULL.
+func requireRenamedCDCOrders(t *testing.T, db *sql.DB, table string, live map[int64]namingSourceRow, deleted []int64) {
+	t.Helper()
+	rows, err := db.Query(`SELECT order_id, customer_name, ship_city, _cdc_deleted FROM ` + table)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	gotLive := map[int64]namingSourceRow{}
+	var gotDeleted []int64
+	for rows.Next() {
+		var id int64
+		var name, city sql.NullString
+		var isDeleted bool
+		require.NoError(t, rows.Scan(&id, &name, &city, &isDeleted))
+		if isDeleted {
+			gotDeleted = append(gotDeleted, id)
+			continue
+		}
+		require.True(t, name.Valid && city.Valid, "row %d arrived with NULL values", id)
+		gotLive[id] = namingSourceRow{name.String, city.String}
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, live, gotLive)
+	require.ElementsMatch(t, deleted, gotDeleted)
+}
+
+func TestMSSQLCDC_SingleTableRenamedColumns_SQLite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	dbName, db := setupMSSQLCDCDatabase(t, ctx)
+	_, err := db.ExecContext(ctx, `CREATE TABLE dbo.Orders (
+		OrderId INT NOT NULL PRIMARY KEY,
+		CustomerName NVARCHAR(50) NOT NULL,
+		SHIP_CITY NVARCHAR(50) NOT NULL
+	)`)
+	require.NoError(t, err)
+	enableMSSQLCDCOnTable(t, ctx, db, "Orders")
+	_, err = db.ExecContext(ctx, `INSERT INTO dbo.Orders VALUES (1, N'ann', N'Berlin'), (2, N'bob', N'Paris')`)
+	require.NoError(t, err)
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_Orders", 2)
+
+	sqlitePath := t.TempDir() + "/test.db"
+	cfg := &config.IngestConfig{
+		SourceURI:   mssqlURIForDatabase(t, mssqlDest.uri, "mssql+cdc", dbName, map[string]string{"mode": "batch"}),
+		SourceTable: "dbo.Orders",
+		DestURI:     "sqlite:///" + sqlitePath,
+		DestTable:   "orders",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	dest, err := sql.Open("sqlite3", sqlitePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dest.Close() })
+	requireRenamedCDCOrders(t, dest, "orders", map[int64]namingSourceRow{1: {"ann", "Berlin"}, 2: {"bob", "Paris"}}, nil)
+
+	for _, stmt := range []string{
+		`UPDATE dbo.Orders SET CustomerName = N'bob-upd' WHERE OrderId = 2`,
+		`INSERT INTO dbo.Orders VALUES (3, N'cem', N'Rome')`,
+		`DELETE FROM dbo.Orders WHERE OrderId = 1`,
+	} {
+		_, err := db.ExecContext(ctx, stmt)
+		require.NoError(t, err)
+	}
+	waitForMSSQLCDCRows(t, ctx, db, "dbo_Orders", 6)
+	require.NoError(t, pipeline.New(cfg).Run(ctx))
+	requireRenamedCDCOrders(t, dest, "orders", map[int64]namingSourceRow{2: {"bob-upd", "Paris"}, 3: {"cem", "Rome"}}, []int64{1})
+}
