@@ -175,3 +175,83 @@ func TestMySQLCDC_SnapshotAndIncremental_MySQL(t *testing.T) {
 	assert.Equal(t, 1, queryCount(`SELECT COUNT(DISTINCT big_unsigned) FROM items_dest WHERE id IN `+agreementIDs), "snapshot and binlog rows must agree on BIGINT UNSIGNED values")
 	assert.Equal(t, 2, queryCount(`SELECT COUNT(*) FROM items_dest WHERE id IN `+agreementIDs+` AND big_unsigned > 9.3e18`), "BIGINT UNSIGNED must keep its unsigned range instead of clamping to MaxInt64 or wrapping negative")
 }
+
+func TestMySQLCDC_FullRefreshAndIncremental_PostgresSnakeCase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	destURI := sharedPostgresURI(t, "dest")
+	sourceContainer, sourceURI := setupMySQLCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+
+	sourceDB, err := sql.Open("mysql", mysqlDSN(sourceURI))
+	require.NoError(t, err)
+	defer func() { _ = sourceDB.Close() }()
+	_, err = sourceDB.ExecContext(ctx, `CREATE TABLE MRP (
+		ID INT NOT NULL PRIMARY KEY,
+		MR_DIS_TYPE VARCHAR(100) NOT NULL
+	)`)
+	require.NoError(t, err)
+	_, err = sourceDB.ExecContext(ctx, `INSERT INTO MRP VALUES (1, 'initial'), (2, 'unchanged')`)
+	require.NoError(t, err)
+
+	destSchema := uniqueSchemaName(t, "mysql_cdc_naming")
+	ensurePostgresSchema(t, ctx, destURI, destSchema)
+	t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+	destDB, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = destDB.Close() }()
+
+	cdcURI := mysqlCDCURI(t, sourceURI, map[string]string{"mode": "batch", "server_id": "18889"})
+	run := func(fullRefresh bool) {
+		t.Helper()
+		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		cfg := &config.IngestConfig{
+			SourceURI:    cdcURI,
+			SourceTable:  "MRP",
+			DestURI:      destURI,
+			DestTable:    destSchema + ".mrp",
+			SchemaNaming: "auto",
+			FullRefresh:  fullRefresh,
+		}
+		require.NoError(t, pipeline.New(cfg).Run(runCtx))
+	}
+	assertRows := func(expected map[int]string) {
+		t.Helper()
+		rows, err := destDB.QueryContext(ctx, `SELECT id, mr_dis_type, _cdc_deleted FROM `+pqTable(destSchema, "mrp"))
+		require.NoError(t, err)
+		defer func() { _ = rows.Close() }()
+		actual := make(map[int]string)
+		for rows.Next() {
+			var id int
+			var value string
+			var deleted bool
+			require.NoError(t, rows.Scan(&id, &value, &deleted))
+			assert.False(t, deleted)
+			_, duplicate := actual[id]
+			assert.False(t, duplicate, "duplicate primary key %d", id)
+			actual[id] = value
+		}
+		require.NoError(t, rows.Err())
+		assert.Equal(t, expected, actual)
+	}
+
+	run(true)
+	assertRows(map[int]string{1: "initial", 2: "unchanged"})
+	run(true)
+	assertRows(map[int]string{1: "initial", 2: "unchanged"})
+
+	_, err = sourceDB.ExecContext(ctx, `UPDATE MRP SET MR_DIS_TYPE = 'updated' WHERE ID = 1`)
+	require.NoError(t, err)
+	_, err = sourceDB.ExecContext(ctx, `INSERT INTO MRP VALUES (3, 'inserted')`)
+	require.NoError(t, err)
+	run(false)
+	assertRows(map[int]string{1: "updated", 2: "unchanged", 3: "inserted"})
+
+	var distinctLSNs int
+	require.NoError(t, destDB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT _cdc_lsn) FROM `+pqTable(destSchema, "mrp")).Scan(&distinctLSNs))
+	assert.Greater(t, distinctLSNs, 1, "incremental changes should retain the unchanged row's snapshot LSN")
+}

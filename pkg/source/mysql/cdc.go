@@ -1301,6 +1301,7 @@ func validateMySQLCDCSnapshotSchema(expected, current *schema.TableSchema, table
 	if reflect.DeepEqual(expected, current) {
 		return nil
 	}
+	config.Debug("[MYSQL CDC] Snapshot schema mismatch for %s: expected=%+v, current=%+v", table, expected, current)
 	return fmt.Errorf("MySQL table %s changed after CDC schema discovery and before its snapshot; run with --full-refresh to restart with the current schema", table)
 }
 
@@ -3067,6 +3068,7 @@ func mysqlCDCResultTableName(tableName string, tableCount int, tagResults bool) 
 func addMySQLCDCColumns(tableSchema *schema.TableSchema) *schema.TableSchema {
 	copied := *tableSchema
 	copied.Columns = append(append([]schema.Column{}, tableSchema.Columns...), mysqlCDCColumns...)
+	copied.PrimaryKeys = append([]string(nil), tableSchema.PrimaryKeys...)
 	return &copied
 }
 

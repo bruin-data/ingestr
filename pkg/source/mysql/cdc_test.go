@@ -1066,6 +1066,30 @@ func TestMySQLCDCResultTableName(t *testing.T) {
 	assert.Equal(t, "items", mysqlCDCResultTableName("items", 2, false), "multiple-table stream batches must be tagged")
 }
 
+func TestMySQLCDCSnapshotSchemaSurvivesOutputRenaming(t *testing.T) {
+	discovered := &schema.TableSchema{
+		Name:   "MRP",
+		Schema: "NET",
+		Columns: []schema.Column{
+			{Name: "ID", DataType: schema.TypeInt64, IsPrimaryKey: true},
+			{Name: "MR_DIS_TYPE", DataType: schema.TypeString, Nullable: true},
+		},
+		PrimaryKeys: []string{"ID"},
+	}
+	fresh := cloneMySQLCDCTableSchema(discovered)
+	output := addMySQLCDCColumns(discovered)
+	metadata := newMySQLCDCMetadata("MRP", discovered, "NET")
+
+	output.Columns[0].Name = "id"
+	output.Columns[1].Name = "mr_dis_type"
+	output.PrimaryKeys[0] = "id"
+
+	require.NoError(t, validateMySQLCDCSnapshotSchema(removeMySQLCDCColumns(metadata.FullSchema), fresh, "MRP"))
+	assert.Equal(t, fresh, discovered)
+	assert.Equal(t, []string{"ID"}, metadata.FullSchema.PrimaryKeys)
+	assert.Equal(t, []string{"id"}, output.PrimaryKeys)
+}
+
 func TestValidateMySQLCDCSnapshotSchemaRejectsDiscoveryRace(t *testing.T) {
 	expected := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
 	current := &schema.TableSchema{Columns: []schema.Column{
@@ -1073,6 +1097,20 @@ func TestValidateMySQLCDCSnapshotSchemaRejectsDiscoveryRace(t *testing.T) {
 		{Name: "added", DataType: schema.TypeString},
 	}}
 	require.NoError(t, validateMySQLCDCSnapshotSchema(expected, expected, "items"))
+	require.ErrorContains(t, validateMySQLCDCSnapshotSchema(expected, current, "items"), "--full-refresh")
+}
+
+func TestValidateMySQLCDCSnapshotSchemaRejectsPrimaryKeyChange(t *testing.T) {
+	expected := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "ID", DataType: schema.TypeInt64},
+			{Name: "OTHER_ID", DataType: schema.TypeInt64},
+		},
+		PrimaryKeys: []string{"ID"},
+	}
+	current := cloneMySQLCDCTableSchema(expected)
+	current.PrimaryKeys[0] = "OTHER_ID"
+
 	require.ErrorContains(t, validateMySQLCDCSnapshotSchema(expected, current, "items"), "--full-refresh")
 }
 
