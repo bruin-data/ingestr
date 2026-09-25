@@ -1041,6 +1041,12 @@ func (d *SalesforceDestination) writeDeleteBatch(ctx context.Context, sh *shaper
 		}
 	}
 
+	// The collections DELETE isn't scoped to an object, so without the prefix a
+	// direct id could delete a record of another object.
+	if !resolve.initialized() && sh.keyPrefix == "" {
+		return 0, fmt.Errorf("salesforce: could not read %s's metadata, so its record ids can't be told apart from other objects'; refusing to delete by id (check the user can view %s)", sh.sobject, sh.sobject)
+	}
+
 	rows := int(record.NumRows())
 	batch := make([]string, 0, min(rows, batchLimit))
 	var written int64

@@ -194,6 +194,7 @@ Use one source table with good rows and several kinds of bad row: a missing requ
 If there is a bulk/async path, re-run a representative subset through it: merge, update by a case-insensitive field, delete, replace, append, rejects, and clearing a field. Also:
 - Refuse options that can't work up front (bulk + `fail_fast`).
 - Results may come back unordered, so check each reject is attributed to the right key.
+- Check whether the bulk format has a reserved value with no escape (Salesforce CSV's `#N/A` means "clear"). Reject rows holding it as literal text; sending them silently clears the field.
 
 #### Volume
 - More rows than one request holds (several requests' worth) on every path, including create, update and delete.

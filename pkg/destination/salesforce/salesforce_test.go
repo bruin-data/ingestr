@@ -513,9 +513,21 @@ func TestNon200AbortsRegardlessOfRejectMode(t *testing.T) {
 	}
 }
 
+// contactDescribe answers the describe that delete by Id reads the id prefix from.
+func contactDescribe(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.HasSuffix(r.URL.Path, "/describe") {
+		return false
+	}
+	_, _ = w.Write([]byte(`{"keyPrefix":"003","fields":[{"name":"Id","type":"id"}]}`))
+	return true
+}
+
 func TestDeleteByRecordID(t *testing.T) {
 	var cap capture
 	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
+		if contactDescribe(w, r) {
+			return true
+		}
 		if r.Method == http.MethodDelete {
 			_, _ = w.Write([]byte(`[{"id":"003000000000001","success":true,"errors":[]}]`))
 			return true
@@ -543,6 +555,9 @@ func TestDeleteByRecordID(t *testing.T) {
 func TestDeleteMatchesDefaultIDColumnCaseInsensitively(t *testing.T) {
 	var cap capture
 	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
+		if contactDescribe(w, r) {
+			return true
+		}
 		if r.Method == http.MethodDelete {
 			_, _ = w.Write([]byte(`[{"id":"003000000000001","success":true,"errors":[]}]`))
 			return true
@@ -563,6 +578,9 @@ func TestDeleteMatchesDefaultIDColumnCaseInsensitively(t *testing.T) {
 func TestDeleteRejectsMalformedIDLocally(t *testing.T) {
 	var cap capture
 	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
+		if contactDescribe(w, r) {
+			return true
+		}
 		if r.Method == http.MethodDelete {
 			_, _ = w.Write([]byte(`[{"id":"003000000000001","success":true,"errors":[]}]`))
 			return true
@@ -608,9 +626,26 @@ func TestDeleteRejectsIDOfAnotherSObject(t *testing.T) {
 	}
 }
 
+func TestDeleteByIDRefusesWithoutIDPrefix(t *testing.T) {
+	var cap capture
+	d, _ := newDest(t, &cap, nil)
+
+	records := stringBatch(t, map[string][]string{"Id": {"003000000000001"}}, []string{"Id"})
+	err := d.Write(context.Background(), records, writeOpts("Contact", "delete", nil))
+	if err == nil || !strings.Contains(err.Error(), "refusing to delete by id") {
+		t.Fatalf("error = %v, want delete by id refused when the describe is unavailable", err)
+	}
+	if reqs := cap.byPath("/composite/sobjects"); len(reqs) != 0 {
+		t.Fatalf("got %+v, want no DELETE", reqs)
+	}
+}
+
 func TestDeleteTreatsAlreadyDeletedAsSuccess(t *testing.T) {
 	var cap capture
 	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
+		if contactDescribe(w, r) {
+			return true
+		}
 		if r.Method == http.MethodDelete {
 			_, _ = w.Write([]byte(`[{"success":false,"errors":[{"statusCode":"ENTITY_IS_DELETED","message":"entity is deleted"}]}]`))
 			return true
@@ -1925,6 +1960,25 @@ func TestBulkAppendNamesRejectsByPrimaryKey(t *testing.T) {
 	err := d.Write(context.Background(), records, writeOpts("Contact", "append", []string{"Ext__c"}))
 	if err == nil || !strings.Contains(err.Error(), "[Ext__c=C-1]") {
 		t.Fatalf("error = %v, want the bulk reject named by the primary key", err)
+	}
+}
+
+func TestBulkRejectsLiteralNullMarker(t *testing.T) {
+	var cap capture
+	fb := &fakeBulk{}
+	d := newBulkDest(t, &cap, fb, nil)
+
+	records := stringBatch(t, map[string][]string{
+		"ext":   {"A-1", "A-2"},
+		"Title": {"#N/A", "CTO"},
+	}, []string{"ext", "Title"})
+	opts := writeOpts("Contact?external_id=Ext__c", "merge", []string{"ext"})
+	err := d.Write(context.Background(), records, opts)
+	if err == nil || !strings.Contains(err.Error(), bulkNullLiteralCode) || !strings.Contains(err.Error(), "Ext__c=A-1") {
+		t.Fatalf("error = %v, want the #N/A row rejected", err)
+	}
+	if len(fb.uploads) != 1 || strings.Contains(fb.uploads[0], "A-1") || !strings.Contains(fb.uploads[0], "A-2") {
+		t.Fatalf("uploads = %q, want only the A-2 row sent", fb.uploads)
 	}
 }
 

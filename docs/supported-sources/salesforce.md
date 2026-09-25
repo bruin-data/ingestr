@@ -368,6 +368,7 @@ Choose `rest` when:
 - you need `--reject-mode fail_fast`, which only works with `rest` (a bulk job reports rejects only once it finishes);
 - the syncs are small and frequent, and you want each run to finish right away (every bulk job waits in Salesforce's queue first, usually seconds, sometimes longer);
 - you want records written as the source is read. With `bulk`, records are sent once the source has been read, so a source that fails part-way writes little or nothing.
+- a text field can hold exactly `#N/A`. Bulk reads that value as "clear this field", so rows containing it are rejected instead of being written.
 
 Every strategy works the same with both. Bulk jobs are listed in Setup → **Bulk Data Load Jobs**.
 

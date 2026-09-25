@@ -30,6 +30,8 @@ const (
 
 	// bulkNull clears a field; an empty cell leaves it unchanged.
 	bulkNull = "#N/A"
+
+	bulkNullLiteralCode = "BULK_NULL_LITERAL"
 )
 
 // bulkPollWait is the wait between job status checks.
@@ -80,6 +82,15 @@ func (d *SalesforceDestination) bufferBulk(ctx context.Context, sh *shaper, acti
 	}
 	for _, r := range records {
 		row := bulkCells(r)
+		if field := literalBulkNull(r); field != "" {
+			rejects.add([]rejection{{
+				code:       bulkNullLiteralCode,
+				message:    fmt.Sprintf("%s holds the text %q, which the Bulk API reads as \"clear this field\"; use load_method=rest to write it as text", field, bulkNull),
+				fields:     []string{field},
+				identifier: bulkRowKey(sh, row),
+			}})
+			continue
+		}
 		for k, v := range row {
 			buf.headers[k] = struct{}{}
 			buf.size += len(k) + len(v) + 2
@@ -136,6 +147,25 @@ func bulkCells(r sfRecord) map[string]string {
 		out[k] = bulkCell(v)
 	}
 	return out
+}
+
+// literalBulkNull returns the field whose text is exactly bulkNull; bulk has no
+// escape for it, so sending it would clear the field instead.
+func literalBulkNull(r sfRecord) string {
+	for k, v := range r {
+		if nested, ok := v.(map[string]interface{}); ok {
+			for f, fv := range nested {
+				if fv == bulkNull {
+					return k + "." + f
+				}
+			}
+			continue
+		}
+		if v == bulkNull {
+			return k
+		}
+	}
+	return ""
 }
 
 func bulkCell(v interface{}) string {
