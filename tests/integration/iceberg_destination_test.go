@@ -497,7 +497,7 @@ func startIcebergMinioContainer(t *testing.T, ctx context.Context, networkName s
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "quay.io/minio/minio:latest",
+		Image:        "pgsty/minio:RELEASE.2026-08-04T00-00-00Z",
 		ExposedPorts: []string{"9000/tcp"},
 		Env: map[string]string{
 			"MINIO_ROOT_USER":     minioAccessKey,
