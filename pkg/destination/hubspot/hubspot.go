@@ -130,9 +130,6 @@ func (d *HubSpotDestination) Close(_ context.Context) error {
 // e.g. "contacts?id_property=email" or "deals".
 type tableParams struct {
 	IDProperty string `mapstructure:"id_property"`
-	// WriteNulls writes source NULLs through (as "") to clear the field, instead
-	// of the default of omitting them (leaving the existing value untouched).
-	WriteNulls bool `mapstructure:"write_nulls"`
 	// Association mode ("associations" dest-table): link From records to To records.
 	From                string `mapstructure:"from"`
 	To                  string `mapstructure:"to"`
@@ -189,6 +186,9 @@ type shaper struct {
 	// searchMatch (update/delete, non-unique idProperty): locate records via the
 	// Search API and update/archive every match, not one-to-one via batch update.
 	searchMatch bool
+	// labelColumns (append) are the --primary-key columns; they never match and
+	// only name a rejected row.
+	labelColumns []string
 
 	// Association mode fields (set when associateTo is non-empty).
 	associateTo string
@@ -263,12 +263,16 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 
 	case string(config.StrategyAppend):
 		// Create-only: no match, always create.
+		if p.IDProperty != "" {
+			return nil, fmt.Errorf("hubspot: append always creates records and never matches, so id_property=%s would be ignored; use --incremental-strategy merge to upsert on it, or remove id_property", p.IDProperty)
+		}
 		return &shaper{
-			objectType: objectType,
-			exclude:    exclude,
-			rejectMode: rejectMode,
-			createOnly: true,
-			writeNulls: writeNulls || p.WriteNulls,
+			objectType:   objectType,
+			exclude:      exclude,
+			rejectMode:   rejectMode,
+			createOnly:   true,
+			writeNulls:   writeNulls,
+			labelColumns: primaryKeys,
 		}, nil
 	}
 
@@ -311,7 +315,7 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 		rejectMode: rejectMode,
 		updateOnly: updateOnly,
 		mirror:     mirror,
-		writeNulls: writeNulls || p.WriteNulls,
+		writeNulls: writeNulls,
 	}
 	if mirror {
 		sh.seen = &sync.Map{}
@@ -645,6 +649,8 @@ type batchInput struct {
 	IDProperty string            `json:"idProperty,omitempty"`
 	ID         string            `json:"id,omitempty"`
 	Properties map[string]string `json:"properties"`
+	// rowLabel names a create-only row in a reject line; never sent.
+	rowLabel string
 }
 
 // shapeRow builds the batch input and endpoint action for one row. A row with a
@@ -667,6 +673,7 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 
 	in := batchInput{Properties: props}
 	if s.createOnly || !s.matchesRecords() {
+		in.rowLabel = labelKey(s.labelColumns, func(c string) string { return props[c] })
 		return in, "create", true
 	}
 
@@ -905,6 +912,15 @@ func (d *HubSpotDestination) finalizeAndReport(ctx context.Context, sh *shaper, 
 
 // finalizeMirror completes a record replace (mirror): lists the object's records
 // and archives any whose idProperty value was not in the source. No-op otherwise.
+func anyStored(m *sync.Map) bool {
+	found := false
+	m.Range(func(_, _ any) bool {
+		found = true
+		return false
+	})
+	return found
+}
+
 func (d *HubSpotDestination) finalizeMirror(ctx context.Context, sh *shaper, rejects *rejectionLog) error {
 	if !sh.mirror {
 		return nil
@@ -921,6 +937,10 @@ func (d *HubSpotDestination) finalizeMirror(ctx context.Context, sh *shaper, rej
 	// what --incremental-strategy delete is for.
 	if !sh.sawSource.Load() {
 		output.Warnf("Warning: hubspot replace (mirror) of %s: source produced 0 rows; skipping the archive sweep so an empty extract does not delete every record. Use --incremental-strategy delete to remove records intentionally.\n", sh.objectType)
+		return nil
+	}
+	if rejects.len() > 0 && !anyStored(sh.writtenIDs) {
+		output.Warnf("Warning: hubspot replace (mirror) of %s: every source row was rejected; skipping the archive sweep so a load that wrote nothing does not delete existing records.\n", sh.objectType)
 		return nil
 	}
 
@@ -1651,9 +1671,9 @@ func (d *HubSpotDestination) handleBatchResult(ctx context.Context, sh *shaper, 
 	if (!res.ok && !isRecordLevelStatus(res.status)) || sh.failFast() {
 		hint := ""
 		if res.category == "CONFLICT" || res.status == 409 {
-			hint = "; set id_property=<property> on the dest-table to upsert existing records instead of creating them"
+			hint = "; use --incremental-strategy merge with id_property=<property> to update existing records instead of creating them"
 			if unique := d.listUniqueProperties(ctx, sh.objectType); len(unique) > 0 {
-				hint = fmt.Sprintf("; set id_property=<property> to upsert existing records instead of creating them (unique properties on %s: %s)", sh.objectType, strings.Join(unique, ", "))
+				hint = fmt.Sprintf("; use --incremental-strategy merge with id_property=<property> to update existing records instead of creating them (unique properties on %s: %s)", sh.objectType, strings.Join(unique, ", "))
 			}
 		}
 		return fmt.Errorf("hubspot %s %s returned status %d: %s%s", action, sh.objectType, res.status, res.rejections[0].message, hint)
@@ -2357,11 +2377,11 @@ type rejection struct {
 	identifier string // which record, e.g. "email=a@x.com" (best-effort)
 }
 
-// key names the record for a reject line, e.g. "email=a@x.com". Empty for a
-// create (append) row, which carries no match value.
+// key names the record for a reject line, e.g. "email=a@x.com". A create
+// (append) row is named by its --primary-key values, if any.
 func (in batchInput) key() string {
 	if in.ID == "" {
-		return ""
+		return in.rowLabel
 	}
 	prop := in.IDProperty
 	if prop == "" {
@@ -2487,7 +2507,7 @@ func reportRejections(sh *shaper, l *rejectionLog) error {
 	// A conflict means the record already exists; nudge toward upsert.
 	for _, it := range items {
 		if it.category == "CONFLICT" {
-			b.WriteString("\n  hint: set id_property=<property> on the dest-table to upsert existing records instead of creating them")
+			b.WriteString("\n  hint: use --incremental-strategy merge with id_property=<property> to update existing records instead of creating them")
 			break
 		}
 	}
@@ -2517,11 +2537,20 @@ func (d *HubSpotDestination) PrepareTable(ctx context.Context, opts destination.
 		return nil
 	}
 
-	// Create-only load: if the object has unique properties the caller could have
-	// matched on, surface them so they can opt into upsert instead of duplicating.
+	// Create-only load: say it never matches (on --primary-key either) and list
+	// the unique properties the caller could upsert on instead.
 	if !sh.matchesRecords() {
-		if unique := d.listUniqueProperties(ctx, sh.objectType); len(unique) > 0 {
-			output.Warnf("Warning: hubspot %s records will be created (no id_property set); to update existing records set id_property=<property> (unique properties available: %s)\n", sh.objectType, strings.Join(unique, ", "))
+		unique := d.listUniqueProperties(ctx, sh.objectType)
+		if len(sh.labelColumns) > 0 || len(unique) > 0 {
+			msg := fmt.Sprintf("Warning: append always creates new %s records and never matches", sh.objectType)
+			if len(sh.labelColumns) > 0 {
+				msg += fmt.Sprintf(" on the primary key [%s]; it only labels rejected rows", strings.Join(sh.labelColumns, ", "))
+			}
+			msg += ". Use --incremental-strategy merge with id_property=<property> to update existing records"
+			if len(unique) > 0 {
+				msg += fmt.Sprintf(" (unique properties available: %s)", strings.Join(unique, ", "))
+			}
+			output.Warnf("%s\n", msg)
 		}
 	}
 
@@ -2832,3 +2861,17 @@ var (
 	_ destination.Destination           = (*HubSpotDestination)(nil)
 	_ destination.ReverseETLDestination = (*HubSpotDestination)(nil)
 )
+
+// labelKey names a create-only row by its --primary-key values, e.g.
+// "email=a@x.com"; empty when any value is missing.
+func labelKey(columns []string, value func(column string) string) string {
+	parts := make([]string, 0, len(columns))
+	for _, c := range columns {
+		v := value(c)
+		if v == "" {
+			return ""
+		}
+		parts = append(parts, c+"="+v)
+	}
+	return strings.Join(parts, ", ")
+}

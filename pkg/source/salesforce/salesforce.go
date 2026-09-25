@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/internal/salesforceauth"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -19,44 +19,13 @@ import (
 	"github.com/simpleforce/simpleforce"
 )
 
-const (
-	defaultAPIVersion        = "59.0"
-	salesforceOAuthTokenPath = "/services/oauth2/token"
-)
-
-type salesforceAuthMethod string
-
-const (
-	salesforceAuthPassword          salesforceAuthMethod = "password"
-	salesforceAuthClientCredentials salesforceAuthMethod = "client_credentials"
-	salesforceAuthAccessToken       salesforceAuthMethod = "access_token"
-)
-
 type salesforceSource struct {
-	client         *simpleforce.Client
-	httpClient     *httpclient.Client
-	instanceURL    string
-	sessionID      string
-	useBulkAPI     bool
-	sfUser         string
-	sfPassword     string
-	sfToken        string
-	sfAccessToken  string
-	sfClientID     string
-	sfClientSecret string
-	sfUrl          string
-	authMethod     salesforceAuthMethod
-}
-
-type salesforceConfig struct {
-	username     string
-	password     string
-	token        string
-	accessToken  string
-	domain       string
-	clientID     string
-	clientSecret string
-	authMethod   salesforceAuthMethod
+	client      *simpleforce.Client
+	httpClient  *httpclient.Client
+	instanceURL string
+	sessionID   string
+	useBulkAPI  bool
+	apiVersion  string
 }
 
 func NewSalesforceSource() *salesforceSource {
@@ -68,40 +37,17 @@ func (s *salesforceSource) Schemes() []string {
 }
 
 func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
-	cfg, err := parseSalesforceURI(uri)
+	cfg, err := salesforceauth.ParseURI(uri)
 	if err != nil {
 		return err
 	}
-	s.sfUser = cfg.username
-	s.sfPassword = cfg.password
-	s.sfToken = cfg.token
-	s.sfAccessToken = cfg.accessToken
-	s.sfClientID = cfg.clientID
-	s.sfClientSecret = cfg.clientSecret
-	s.authMethod = cfg.authMethod
-	s.sfUrl = salesforceBaseURL(cfg.domain)
 
-	s.client = simpleforce.NewClient(s.sfUrl, s.simpleforceClientID(), defaultAPIVersion)
-
-	if s.client == nil {
-		return fmt.Errorf("failed to create Salesforce client")
+	client, err := salesforceauth.Login(ctx, cfg)
+	if err != nil {
+		return err
 	}
-
-	switch s.authMethod {
-	case salesforceAuthPassword:
-		if err := s.client.LoginPassword(s.sfUser, s.sfPassword, s.sfToken); err != nil {
-			return fmt.Errorf("failed to login to Salesforce: %w", err)
-		}
-	case salesforceAuthClientCredentials:
-		if err := s.loginClientCredentials(ctx); err != nil {
-			return fmt.Errorf("failed to login to Salesforce with client credentials: %w", err)
-		}
-	case salesforceAuthAccessToken:
-		s.loginAccessToken()
-	default:
-		return fmt.Errorf("unsupported Salesforce auth method: %s", s.authMethod)
-	}
-
+	s.client = client
+	s.apiVersion = cfg.APIVersion
 	s.sessionID = s.client.GetSid()
 	s.instanceURL = s.client.GetLoc()
 	s.useBulkAPI = true
@@ -114,145 +60,6 @@ func (s *salesforceSource) Connect(ctx context.Context, uri string) error {
 
 	config.Debug("[SALESFORCE] Connected successfully")
 	return nil
-}
-
-func parseSalesforceURI(uri string) (salesforceConfig, error) {
-	if !strings.HasPrefix(uri, "salesforce://") {
-		return salesforceConfig{}, fmt.Errorf("invalid salesforce URI: must start with salesforce://")
-	}
-
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return salesforceConfig{}, fmt.Errorf("failed to parse salesforce URI: %w", err)
-	}
-
-	params := parsed.Query()
-	cfg := salesforceConfig{
-		username:     params.Get("username"),
-		password:     params.Get("password"),
-		token:        params.Get("token"),
-		accessToken:  params.Get("access_token"),
-		domain:       params.Get("domain"),
-		clientID:     params.Get("client_id"),
-		clientSecret: params.Get("client_secret"),
-	}
-
-	authMethod := params.Get("auth_method")
-	if authMethod == "" {
-		authMethod = params.Get("grant_type")
-	}
-	switch authMethod {
-	case "":
-		if cfg.accessToken != "" {
-			cfg.authMethod = salesforceAuthAccessToken
-		} else if cfg.clientID != "" || cfg.clientSecret != "" {
-			cfg.authMethod = salesforceAuthClientCredentials
-		} else {
-			cfg.authMethod = salesforceAuthPassword
-		}
-	case string(salesforceAuthPassword), "username_password":
-		cfg.authMethod = salesforceAuthPassword
-	case string(salesforceAuthClientCredentials):
-		cfg.authMethod = salesforceAuthClientCredentials
-	case string(salesforceAuthAccessToken):
-		cfg.authMethod = salesforceAuthAccessToken
-	default:
-		return salesforceConfig{}, fmt.Errorf("unsupported Salesforce auth_method: %s", authMethod)
-	}
-
-	if cfg.domain == "" {
-		return salesforceConfig{}, fmt.Errorf("domain is required for Salesforce")
-	}
-
-	switch cfg.authMethod {
-	case salesforceAuthPassword:
-		if cfg.username == "" {
-			return salesforceConfig{}, fmt.Errorf("username is required for Salesforce")
-		}
-		if cfg.password == "" {
-			return salesforceConfig{}, fmt.Errorf("password is required for Salesforce")
-		}
-		if cfg.token == "" {
-			return salesforceConfig{}, fmt.Errorf("token is required for Salesforce")
-		}
-	case salesforceAuthClientCredentials:
-		if cfg.clientID == "" {
-			return salesforceConfig{}, fmt.Errorf("client_id is required for Salesforce client credentials")
-		}
-		if cfg.clientSecret == "" {
-			return salesforceConfig{}, fmt.Errorf("client_secret is required for Salesforce client credentials")
-		}
-	case salesforceAuthAccessToken:
-		if cfg.accessToken == "" {
-			return salesforceConfig{}, fmt.Errorf("access_token is required for Salesforce access token authentication")
-		}
-	}
-
-	return cfg, nil
-}
-
-func salesforceBaseURL(domain string) string {
-	domain = strings.TrimRight(strings.TrimSpace(domain), "/")
-	if strings.HasPrefix(domain, "http://") || strings.HasPrefix(domain, "https://") {
-		return domain
-	}
-	if strings.HasSuffix(domain, ".salesforce.com") {
-		return fmt.Sprintf("https://%s", domain)
-	}
-	return fmt.Sprintf("https://%s.salesforce.com", domain)
-}
-
-func (s *salesforceSource) simpleforceClientID() string {
-	if s.authMethod == salesforceAuthClientCredentials && s.sfClientID != "" {
-		return s.sfClientID
-	}
-	return simpleforce.DefaultClientID
-}
-
-func (s *salesforceSource) loginClientCredentials(ctx context.Context) error {
-	tokenClient := httpclient.New(
-		httpclient.WithTimeout(30*time.Second),
-		httpclient.WithDebug(config.DebugMode),
-	)
-	defer func() { _ = tokenClient.Close() }()
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		InstanceURL string `json:"instance_url"`
-		TokenType   string `json:"token_type"`
-	}
-
-	resp, err := tokenClient.R(ctx).
-		SetHeader("Accept", "application/json").
-		SetFormData(map[string]string{
-			"grant_type":    string(salesforceAuthClientCredentials),
-			"client_id":     s.sfClientID,
-			"client_secret": s.sfClientSecret,
-		}).
-		SetResult(&tokenResp).
-		Post(fmt.Sprintf("%s%s", strings.TrimRight(s.sfUrl, "/"), salesforceOAuthTokenPath))
-	if err != nil {
-		return fmt.Errorf("token request failed: %w", err)
-	}
-	if !resp.IsSuccess() {
-		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode(), resp.String())
-	}
-	if tokenResp.AccessToken == "" {
-		return fmt.Errorf("empty access token in response")
-	}
-	if tokenResp.InstanceURL == "" {
-		return fmt.Errorf("empty instance_url in response")
-	}
-	if tokenResp.TokenType != "" && !strings.EqualFold(tokenResp.TokenType, "bearer") {
-		return fmt.Errorf("unsupported token type in response: %s", tokenResp.TokenType)
-	}
-
-	s.client.SetSidLoc(tokenResp.AccessToken, strings.TrimRight(tokenResp.InstanceURL, "/"))
-	return nil
-}
-
-func (s *salesforceSource) loginAccessToken() {
-	s.client.SetSidLoc(s.sfAccessToken, strings.TrimRight(s.sfUrl, "/"))
 }
 
 func (s *salesforceSource) Close(ctx context.Context) error {
@@ -671,7 +478,7 @@ func (s *salesforceSource) getRecordsREST(ctx context.Context, query string, dat
 }
 
 func (s *salesforceSource) bulkCreateJob(ctx context.Context, sobject string) (string, error) {
-	endpoint := fmt.Sprintf("%s/services/async/%s/job", s.instanceURL, defaultAPIVersion)
+	endpoint := fmt.Sprintf("%s/services/async/%s/job", s.instanceURL, s.apiVersion)
 
 	var result struct {
 		ID string `json:"id"`
@@ -694,7 +501,7 @@ func (s *salesforceSource) bulkCreateJob(ctx context.Context, sobject string) (s
 }
 
 func (s *salesforceSource) bulkAddQueryBatch(ctx context.Context, jobID, soqlQuery string) (string, error) {
-	endpoint := fmt.Sprintf("%s/services/async/%s/job/%s/batch", s.instanceURL, defaultAPIVersion, jobID)
+	endpoint := fmt.Sprintf("%s/services/async/%s/job/%s/batch", s.instanceURL, s.apiVersion, jobID)
 
 	var result struct {
 		ID string `json:"id"`
@@ -714,7 +521,7 @@ func (s *salesforceSource) bulkAddQueryBatch(ctx context.Context, jobID, soqlQue
 }
 
 func (s *salesforceSource) bulkCloseJob(ctx context.Context, jobID string) error {
-	endpoint := fmt.Sprintf("%s/services/async/%s/job/%s", s.instanceURL, defaultAPIVersion, jobID)
+	endpoint := fmt.Sprintf("%s/services/async/%s/job/%s", s.instanceURL, s.apiVersion, jobID)
 
 	resp, err := s.httpClient.R(ctx).
 		SetBody(map[string]string{"state": "Closed"}).
@@ -729,7 +536,7 @@ func (s *salesforceSource) bulkCloseJob(ctx context.Context, jobID string) error
 }
 
 func (s *salesforceSource) bulkPollBatch(ctx context.Context, jobID, batchID string) error {
-	endpoint := fmt.Sprintf("%s/services/async/%s/job/%s/batch/%s", s.instanceURL, defaultAPIVersion, jobID, batchID)
+	endpoint := fmt.Sprintf("%s/services/async/%s/job/%s/batch/%s", s.instanceURL, s.apiVersion, jobID, batchID)
 	pollInterval := 2 * time.Second
 	deadline := time.Now().Add(10 * time.Minute)
 
@@ -772,7 +579,7 @@ func (s *salesforceSource) bulkPollBatch(ctx context.Context, jobID, batchID str
 }
 
 func (s *salesforceSource) bulkGetQueryResults(ctx context.Context, jobID, batchID string, fn func([]map[string]interface{}) error) error {
-	baseEndpoint := fmt.Sprintf("%s/services/async/%s/job/%s/batch/%s/result", s.instanceURL, defaultAPIVersion, jobID, batchID)
+	baseEndpoint := fmt.Sprintf("%s/services/async/%s/job/%s/batch/%s/result", s.instanceURL, s.apiVersion, jobID, batchID)
 
 	var resultIDs []string
 	resp, err := s.httpClient.R(ctx).SetResult(&resultIDs).Get(baseEndpoint)

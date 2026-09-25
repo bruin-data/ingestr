@@ -220,6 +220,20 @@ func IsReverseETL(d Destination) bool {
 	return ok
 }
 
+// VerbatimColumnsDestination is implemented by a reverse-ETL destination whose
+// mixed-case field names (Salesforce FirstName) break under snake_case naming.
+type VerbatimColumnsDestination interface {
+	Destination
+	RequiresVerbatimColumns()
+}
+
+// RequiresVerbatimColumns reports whether source column names must reach the
+// destination unnormalized.
+func RequiresVerbatimColumns(d Destination) bool {
+	_, ok := d.(VerbatimColumnsDestination)
+	return ok
+}
+
 // ExplicitStrategyDestination is implemented by a destination whose default
 // write strategy would be destructive (e.g. HubSpot's replace mirrors and
 // archives records not in the source). Such a destination must not inherit the

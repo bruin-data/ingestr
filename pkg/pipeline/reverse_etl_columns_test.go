@@ -16,6 +16,10 @@ type retlMockDestination struct {
 
 func (retlMockDestination) IsReverseETL() {}
 
+func (retlMockDestination) SupportsSCD2Strategy() bool         { return false }
+func (retlMockDestination) SupportsDeleteInsertStrategy() bool { return false }
+func (retlMockDestination) GetScheme() string                  { return "retl" }
+
 // explicitStrategyRetlDestination is a reverse-ETL destination that also demands
 // an explicit --incremental-strategy (like HubSpot, whose default is destructive).
 type explicitStrategyRetlDestination struct {
@@ -177,5 +181,11 @@ func TestValidateReverseETLFlags(t *testing.T) {
 		err := validateReverseETLFlags(explicitDest, &config.IngestConfig{IncrementalStrategyExplicit: false})
 		require.ErrorContains(t, err, "no default write strategy")
 		require.NoError(t, validateReverseETLFlags(explicitDest, &config.IngestConfig{IncrementalStrategyExplicit: true}))
+	})
+	t.Run("RETL rejects strategies the destination does not support", func(t *testing.T) {
+		for _, s := range []config.IncrementalStrategy{config.StrategySCD2, config.StrategyDeleteInsert} {
+			err := validateReverseETLFlags(retlDest, &config.IngestConfig{IncrementalStrategy: s})
+			require.ErrorContains(t, err, "does not support the "+string(s)+" strategy")
+		}
 	})
 }
