@@ -1,7 +1,7 @@
 # Salesforce
 [Salesforce](https://www.salesforce.com/) is a cloud-based customer relationship management (CRM) platform that helps businesses manage sales, customer interactions, and business processes. It provides tools for sales automation, customer service, marketing, analytics, and application development.
 
-Ingestr supports Salesforce as a source.
+Ingestr supports Salesforce as a source and as a [reverse-ETL destination](#salesforce-as-a-destination).
 
 ## URI format
 
@@ -226,3 +226,192 @@ GET https://<your-domain>.my.salesforce.com/services/data/v59.0/sobjects/<object
 ```
 
 Only the fields listed in the response are ingested. Grant Read access to the fields you want and run the ingestion again.
+
+## Salesforce as a destination
+
+ingestr can write rows from any source back into Salesforce (reverse ETL). Each source row creates, updates or deletes one Salesforce record.
+
+### Quick start
+
+```sh
+ingestr ingest \
+  --source-uri "postgres://user:pass@host:5432/db" \
+  --source-table "public.customers" \
+  --dest-uri "salesforce://?access_token=<token>&domain=<domain>" \
+  --dest-table "Contact?external_id=External_Id__c" \
+  --primary-key customer_id \
+  --incremental-strategy merge
+```
+
+For every row, this finds the Contact whose `External_Id__c` equals the row's `customer_id`: if it exists it is updated, otherwise it is created. The other source columns (`FirstName`, `Email`, …) are written to the Contact fields of the same name.
+
+The destination URI is the same as the [source URI](#uri-format), with the same login options. The user you connect with needs **Create**, **Edit** and, for `delete`/`replace`, **Delete** permission on the object, plus **Edit** access to every field you write.
+
+### Objects and fields
+
+- `--dest-table` is the object's **API name**: `Contact`, `Account`, `Opportunity`, or a custom object such as `Invoice__c`.
+- Each source column is written to the field with the same **API name**, e.g. `FirstName` or `Amount__c`. Names are not case-sensitive.
+- Find API names in Setup → **Object Manager**. Labels don't work:
+
+| | Label | API name to use |
+|---|---|---|
+| Custom object | Invoice | `Invoice__c` |
+| Custom field | Amount | `Amount__c` |
+| Object from a managed package | Invoice (package `acme`) | `acme__Invoice__c` |
+
+- ingestr doesn't create objects or fields. A source column that isn't a field, or is read-only (a formula, or a system field like `CreatedDate`), stops the run **before anything is written**. Drop such columns, for example with `--sql-exclude-columns`.
+- A source column named `Id` is only used to find records, never written. ingestr's own `_ingestr_loaded_at` and `_ingestr_run_id` columns are never sent.
+
+### Strategies
+
+`--incremental-strategy` is **required**:
+
+| Strategy | What it does | What it needs |
+|---|---|---|
+| `merge` | Updates the matching record, or creates it if there is none | `external_id=` and `--primary-key` |
+| `update` | Updates matching records only; a row with no match is rejected | nothing when matching by record `Id` |
+| `append` | Always creates new records | nothing |
+| `delete` | Deletes matching records | nothing when matching by record `Id` |
+| `replace` | Like `merge`, then deletes every record that isn't in the source | `external_id=` and `--primary-key` |
+
+- **`append`** never matches, so re-running it creates duplicates, unless a unique field on the object refuses them (`DUPLICATE_VALUE`). `external_id=` isn't allowed with it; `--primary-key` is accepted and only names rejected rows in the report.
+- **`delete`** moves records to the Recycle Bin, where they can be restored for 15 days. They still count toward the org's storage until the bin is emptied.
+
+> [!WARNING]
+> `replace` deletes **every** record of the object that isn't in your source, including ones created in Salesforce or by other tools. Use it only when your source is the complete list. As a safety net, a run with **0 source rows** deletes nothing, and with the default `--reject-mode fail` a run with any rejected row deletes nothing either.
+
+### Matching records
+
+Two settings decide which record a row updates or deletes:
+
+| Setting | Set with | Example |
+|---|---|---|
+| The **Salesforce field** to match on | `external_id=` in `--dest-table` | `Contact?external_id=External_Id__c` |
+| The **source column** that holds the value | `--primary-key` | `--primary-key customer_id` |
+
+**`merge` and `replace`** need both. The field must be marked **External ID** in Salesforce, or be a standard lookup field such as a Contact's or Lead's `Email`. Standard objects have no External ID field by default, so create one first: Setup → Object Manager → *object* → Fields & Relationships → New, and tick **External ID**. If the field isn't unique and two records share a value, Salesforce rejects that row instead of guessing. The record `Id` can't be used, because Salesforce can't create a record with an id you choose.
+
+**`update` and `delete`** match by the Salesforce record id by default, using a source column named `Id`, so a source that has the ids needs no extra flags:
+
+```sh
+# Delete the contacts listed in the source by their Salesforce record id
+ingestr ingest \
+  --source-uri "csv://churned.csv" \
+  --source-table "churned" \
+  --dest-uri "salesforce://?access_token=<token>&domain=<domain>" \
+  --dest-table "Contact" \
+  --incremental-strategy delete
+```
+
+They can also match on any other text, number or id field with `external_id=`, even one that isn't unique. Then **every** matching record is updated or deleted. For example, one row keyed on `Department` updates every contact in that department.
+
+### Linking records
+
+In Salesforce, a record points to its parent through a **lookup field** on itself. A Contact's Account, for example, is stored in the Contact's `AccountId` field. To link records, write that field like any other column, in one of two ways:
+
+| You have | Column name | Example value |
+|---|---|---|
+| The parent's Salesforce record id | The lookup field, e.g. `AccountId` | `001WU00002EGrguYAD` |
+| Your own key for the parent | `<Relationship>.<Field>`, e.g. `Account.Ext_Id__c` | `ACC-1` |
+
+With your own key, Salesforce finds the parent for you:
+
+- The **relationship** is usually the lookup field without `Id`: `AccountId` → `Account`, `OwnerId` → `Owner`, `ParentId` → `Parent`. For a custom lookup, replace `__c` with `__r`: `Parent__c` → `Parent__r`.
+- The **field** must identify one parent: a field marked External ID, or a unique field such as a user's email (`Owner.Email`).
+- The source column can have this name already, or you can map one with `--columns`, e.g. `--columns 'Account.Ext_Id__c::account_code'`.
+- **Unlinking:** an empty (null) value removes the link. Pass `--write-nulls=false` to leave existing links alone.
+
+**Lookups that can point to more than one object.** A Task's or Event's `Who` can be a Contact or a Lead, and its `What` an Account, Opportunity, Case and more. For these, put the object in the middle, `<Relationship>.<Object>.<Field>`:
+
+```
+Subject,Who.Contact.Ext_Id__c
+Follow-up call,C-1
+```
+
+- A column without the object, such as `Who.Ext_Id__c`, stops the run before writing and lists the objects to choose from. This is about the column's final name, whether it comes straight from the source or from `--columns`.
+- `Owner` is the exception: `Owner.Email` means a User, so no object is needed. For a Queue, write `Owner.Group.<Field>`.
+- If rows point to different objects, use one column per object (`Who.Contact.Ext_Id__c` and `Who.Lead.Ext_Id__c`) and fill one per row. A row that fills both is rejected.
+- A record id in the lookup field itself (`WhoId`) needs no object name.
+
+**Many-to-many links.** Salesforce stores these as a record of their own, with a lookup to each side. For example, an `OpportunityContactRole` links a Contact to an Opportunity, and a `CampaignMember` links a Contact or Lead to a Campaign. Each source row creates one link, and can set the link's own fields:
+
+```sh
+# opportunity_contacts.csv:
+#   Opportunity.Opp_Ext_Id__c,Contact.Ext_Id__c,Role,IsPrimary
+#   OPP-7,C-1,Decision Maker,true
+#   OPP-7,C-2,Evaluator,false
+ingestr ingest \
+  --source-uri "csv://opportunity_contacts.csv" \
+  --source-table "opportunity_contacts" \
+  --dest-uri "salesforce://?access_token=<token>&domain=<domain>" \
+  --dest-table "OpportunityContactRole" \
+  --incremental-strategy append
+```
+
+To remove links, `delete` those records. To keep the links exactly in step with your source, give the object an External ID field and use `replace`. This only works when Salesforce lets the link's lookups change: a `CampaignMember`'s Campaign, for example, is fixed once created, so the run stops before writing. For such links, `delete` the stale ones and `append` the new ones.
+
+### Load method
+
+Add `load_method` to the destination URI to choose how records are sent:
+
+- **`bulk`** *(default)*: records are sent as a [Bulk API 2.0](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm) job, and the rejected rows are reported when the job finishes.
+- **`rest`**: records are written while the source is read, and results come back right away.
+
+```sh
+--dest-uri "salesforce://?access_token=<token>&domain=<domain>&load_method=rest"
+```
+
+Bulk is the default because it uses only a few of the org's daily API calls per run, however many rows you send, and Salesforce processes the rows in parallel. REST uses one call per 200 rows, so a large table synced often can use up the org's daily limit.
+
+Choose `rest` when:
+
+- you need `--reject-mode fail_fast`, which only works with `rest` (a bulk job reports rejects only once it finishes);
+- the syncs are small and frequent, and you want each run to finish right away (every bulk job waits in Salesforce's queue first, usually seconds, sometimes longer);
+- you want records written as the source is read. With `bulk`, records are sent once the source has been read, so a source that fails part-way writes little or nothing.
+
+Every strategy works the same with both. Bulk jobs are listed in Setup → **Bulk Data Load Jobs**.
+
+### Reverse-ETL options
+
+These flags only apply when Salesforce is the destination.
+
+#### `--reject-mode`
+
+What to do with a row Salesforce refuses, or that matches no record:
+
+| Mode | Behaviour |
+|---|---|
+| `fail` *(default)* | Write every valid row, then fail the run and list the rejected rows |
+| `fail_fast` | Stop at the first rejected row. Needs [`load_method=rest`](#load-method) |
+| `skip` | Write every valid row, list the rejected rows, and succeed |
+
+One bad row never blocks the others. Each rejected row is listed with Salesforce's reason (e.g. `REQUIRED_FIELD_MISSING`, `DUPLICATE_VALUE`) and its key. If a record is briefly locked because something else is editing it at the same moment, ingestr retries it a few times first.
+
+Problems that affect the whole run, such as an expired login or a full org storage, always stop it, whatever the mode.
+
+> [!NOTE]
+> Salesforce writes can't be rolled back, so with `fail` or `fail_fast` some records may already be written when the run stops.
+
+#### `--write-nulls`
+
+- **`true`** *(default)*: an empty (null) source value clears the field in Salesforce.
+- **`false`** (`--write-nulls=false`): an empty source value is skipped, and the field keeps its current value.
+
+It has no effect on `delete`.
+
+### Column mapping
+
+If a source column's name differs from the Salesforce field, rename it with `--columns 'field::source_column'`. Separate several with commas:
+
+```sh
+--columns 'FirstName::first_name,External_Id__c::customer_id'
+```
+
+- Only renaming is allowed. Field types are set in Salesforce, so an entry with a type is rejected.
+- `--primary-key` takes the **new** name. With `--columns 'Ext_Id__c::customer_ref'`, pass `--primary-key Ext_Id__c`.
+- [Link columns](#linking-records) can be mapped the same way, including lookups that can point to more than one object: `--columns 'Account.Ext_Id__c::account_code,Who.Contact.Ext_Id__c::contact_key'`.
+- Names are sent exactly as written. `--schema-naming` is ignored, since changing `FirstName` to `first_name` would no longer match the field.
+
+### Values
+
+Numbers, booleans, text, dates and timestamps are sent in the form Salesforce expects. Timestamps are sent in UTC; Salesforce keeps them to the whole second. Nested or JSON values are sent as a JSON string.
