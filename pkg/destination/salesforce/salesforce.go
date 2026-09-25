@@ -1136,6 +1136,10 @@ func (d *SalesforceDestination) finalizeMirror(ctx context.Context, sh *shaper, 
 		output.Warnf("Warning: salesforce replace (mirror) of %s: source produced 0 rows; skipping the delete sweep so an empty extract does not remove every record. Use --incremental-strategy delete to remove records intentionally.\n", sh.sobject)
 		return nil
 	}
+	if rejects.len() > 0 && !anyStored(sh.writtenIDs) {
+		output.Warnf("Warning: salesforce replace (mirror) of %s: every source row was rejected; skipping the delete sweep so a load that wrote nothing does not remove existing records.\n", sh.sobject)
+		return nil
+	}
 
 	stale, err := d.listStaleIDs(ctx, sh)
 	if err != nil {
@@ -1153,6 +1157,15 @@ func (d *SalesforceDestination) finalizeMirror(ctx context.Context, sh *shaper, 
 		}
 	}
 	return d.flushBulk(ctx, sh, rejects)
+}
+
+func anyStored(m *sync.Map) bool {
+	found := false
+	m.Range(func(_, _ any) bool {
+		found = true
+		return false
+	})
+	return found
 }
 
 // listStaleIDs queries the sObject and returns the Id of every record whose

@@ -278,7 +278,7 @@ The destination URI is the same as the [source URI](#uri-format), with the same 
 - **`delete`** moves records to the Recycle Bin, where they can be restored for 15 days. They still count toward the org's storage until the bin is emptied.
 
 > [!WARNING]
-> `replace` deletes **every** record of the object that isn't in your source, including ones created in Salesforce or by other tools. Use it only when your source is the complete list. As a safety net, a run with **0 source rows** deletes nothing, and with the default `--reject-mode fail` a run with any rejected row deletes nothing either.
+> `replace` deletes **every** record of the object that isn't in your source, including ones created in Salesforce or by other tools. Use it only when your source is the complete list. As a safety net, a run with **0 source rows** deletes nothing, and with the default `--reject-mode fail` a run with any rejected row deletes nothing either. Under `skip`, a run where every row was rejected also deletes nothing.
 
 ### Matching records
 

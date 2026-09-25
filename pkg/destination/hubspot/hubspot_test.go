@@ -206,6 +206,40 @@ func TestReplaceFailModeSkipsArchive(t *testing.T) {
 	assert.False(t, archived, "fail-mode mirror with rejects must not archive")
 }
 
+func TestReplaceSkipModeAllRejectedSkipsArchive(t *testing.T) {
+	var mu sync.Mutex
+	var archived bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/upsert":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"status":"error","category":"VALIDATION_ERROR","message":"bad row"}`)
+		case r.URL.Path == "/crm/v3/objects/contacts" && r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"results":[{"id":"2","properties":{"email":"old@x.com"}}]}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/archive":
+			mu.Lock()
+			archived = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "firstname": {"A"}}, []string{"email", "firstname"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts?id_property=email", Strategy: "replace", PrimaryKeys: []string{"email"}, RejectMode: "skip",
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.False(t, archived, "a mirror run that wrote nothing must not archive")
+}
+
 // TestSearchUpdateNotFoundToleratedUnderSkip: a record deleted between Search and
 // the update (TOCTOU 404) must be a per-record reject under --reject-mode skip,
 // not abort the whole run.

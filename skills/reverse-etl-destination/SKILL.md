@@ -70,6 +70,7 @@ Decide the strategy set and mappings from this — not the reverse.
 ## Mirror / replace safety
 - Require an explicit strategy (don't inherit a destructive default).
 - 0 source rows → skip the delete sweep, warn (`sawSource`).
+- Every row rejected (rejects, nothing in `writtenIDs`) → skip the sweep, warn. Under `skip` rejects don't block the sweep, so without this an all-rejected run deletes against a source that never reached the API.
 - Never delete records written this run (`writtenIDs`).
 - Never reconcile an entity whose desired set didn't fully resolve (`incompleteFroms`).
 
@@ -187,7 +188,7 @@ Use one source table with good rows and several kinds of bad row: a missing requ
 #### Mirror / replace
 - v1 then v2: an update, a create, and removal of every record not in the source.
 - An empty source: the sweep is skipped with a warning.
-- A rejected row under `fail`: the sweep is skipped and the run fails. Under `skip`: the sweep runs.
+- A rejected row under `fail`: the sweep is skipped and the run fails. Under `skip`: the sweep runs, unless every row was rejected.
 - A row with no key is created and survives its own sweep.
 
 #### Alternate write path
