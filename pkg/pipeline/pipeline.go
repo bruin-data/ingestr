@@ -179,6 +179,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := validateReverseETLFlags(dest, p.config); err != nil {
 		return err
 	}
+	if err := applyReverseETLNaming(dest, p.config); err != nil {
+		return err
+	}
 
 	managedPostgresCDC := isPostgresCDCSource(p.config.SourceURI)
 	managedMySQLCDC := isMySQLCDCSource(p.config.SourceURI)
@@ -3050,6 +3053,27 @@ func isManagedChangeSource(uri string) bool {
 	return strings.Contains(scheme, "+cdc") || strings.Contains(scheme, "+ct")
 }
 
+// applyReverseETLNaming pins destinations with mixed-case field names to direct
+// naming: "auto" resolves to snake_case when no table exists, so Salesforce's
+// FirstName would be sent as first_name and rejected.
+func applyReverseETLNaming(dest destination.Destination, cfg *config.IngestConfig) error {
+	if !destination.RequiresVerbatimColumns(dest) {
+		return nil
+	}
+	requested, err := naming.ParseConvention(cfg.SchemaNaming)
+	if err != nil {
+		return &config.ValidationError{Field: "schema-naming", Message: err.Error()}
+	}
+	if requested == naming.Direct {
+		return nil
+	}
+	if requested != naming.Auto {
+		output.Warnf("Warning: --schema-naming %s is ignored for %s: its field names are fixed by the API, so columns are sent verbatim; use --columns to rename\n", requested, dest.GetScheme())
+	}
+	cfg.SchemaNaming = string(naming.Direct)
+	return nil
+}
+
 // validateReverseETLFlags gates the reverse-ETL-only run flags. On a SQL
 // destination --reject-mode / --write-nulls are meaningless, so they fail fast
 // instead of being silently ignored. On a reverse-ETL destination the
@@ -3069,7 +3093,13 @@ func validateReverseETLFlags(dest destination.Destination, cfg *config.IngestCon
 	// source) must not inherit that default silently. Destinations with a safe
 	// default (most reverse-ETL targets) are unaffected.
 	if destination.RequiresExplicitStrategy(dest) && !cfg.IncrementalStrategyExplicit {
-		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%s has no default write strategy; pass --incremental-strategy explicitly (merge, append, update, delete, or replace — note replace mirrors and archives records not in the source)", dest.GetScheme())}
+		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%s has no default write strategy; pass --incremental-strategy explicitly (merge, append, update, delete, or replace — note replace mirrors the target and removes records not in the source)", dest.GetScheme())}
+	}
+	// Otherwise these fail late with a misleading error, e.g. scd2's tracking
+	// columns reported as unknown fields.
+	if (cfg.IncrementalStrategy == config.StrategySCD2 && !dest.SupportsSCD2Strategy()) ||
+		(cfg.IncrementalStrategy == config.StrategyDeleteInsert && !dest.SupportsDeleteInsertStrategy()) {
+		return &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%s does not support the %s strategy; use merge, append, update, delete, or replace", dest.GetScheme(), cfg.IncrementalStrategy)}
 	}
 	switch cfg.RejectMode {
 	case "", config.RejectFailFast, config.RejectFail, config.RejectSkip:

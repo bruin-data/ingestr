@@ -285,7 +285,7 @@ The **write behaviour is chosen with `--incremental-strategy`**, which is **requ
 | -------- | --------- |
 | `merge` | Upsert — update the matching record, or create it if none matches. This is the usual choice. |
 | `update` | Update matching records only; rows with no match are rejected (never created). Unmatched rows follow [`--reject-mode`](#reverse-etl-options) — use `--reject-mode skip` to report them but still succeed. |
-| `append` | Always create a new record, never match. Re-running over the same rows creates duplicates — scope each run to new rows with `--interval-start`/`--interval-end`, or use `merge` to stay idempotent. On a unique-property collision HubSpot returns a conflict, handled per [`--reject-mode`](#reverse-etl-options). |
+| `append` | Always create a new record, never match. Re-running over the same rows creates duplicates — scope each run to new rows with `--interval-start`/`--interval-end`, or use `merge` to stay idempotent. On a unique-property collision HubSpot returns a conflict, handled per [`--reject-mode`](#reverse-etl-options). `id_property` is refused with append; `--primary-key` is accepted with a warning and only names rejected rows. |
 | `delete` | Archive (soft-delete) the matching records. Rows with no match follow [`--reject-mode`](#reverse-etl-options) — use `--reject-mode skip` to report them but still succeed. |
 | `replace` | Mirror — upsert every source row, then archive any record whose match value is **not** in the source. Costly: it scans every record of the object type on each run, so it is slow and expensive on large objects. |
 
