@@ -912,6 +912,15 @@ func (d *HubSpotDestination) finalizeAndReport(ctx context.Context, sh *shaper, 
 
 // finalizeMirror completes a record replace (mirror): lists the object's records
 // and archives any whose idProperty value was not in the source. No-op otherwise.
+func anyStored(m *sync.Map) bool {
+	found := false
+	m.Range(func(_, _ any) bool {
+		found = true
+		return false
+	})
+	return found
+}
+
 func (d *HubSpotDestination) finalizeMirror(ctx context.Context, sh *shaper, rejects *rejectionLog) error {
 	if !sh.mirror {
 		return nil
@@ -928,6 +937,10 @@ func (d *HubSpotDestination) finalizeMirror(ctx context.Context, sh *shaper, rej
 	// what --incremental-strategy delete is for.
 	if !sh.sawSource.Load() {
 		output.Warnf("Warning: hubspot replace (mirror) of %s: source produced 0 rows; skipping the archive sweep so an empty extract does not delete every record. Use --incremental-strategy delete to remove records intentionally.\n", sh.objectType)
+		return nil
+	}
+	if rejects.len() > 0 && !anyStored(sh.writtenIDs) {
+		output.Warnf("Warning: hubspot replace (mirror) of %s: every source row was rejected; skipping the archive sweep so a load that wrote nothing does not delete existing records.\n", sh.objectType)
 		return nil
 	}
 

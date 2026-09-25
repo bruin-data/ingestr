@@ -759,6 +759,36 @@ func TestReplaceMirrorSkipsSweepWhenRowsWereRejected(t *testing.T) {
 	}
 }
 
+func TestReplaceMirrorSkipsSweepWhenEveryRowWasRejectedUnderSkip(t *testing.T) {
+	var cap capture
+	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/query"):
+			_, _ = w.Write([]byte(`{"done":true,"records":[{"Id":"003000000000009","Ext__c":"GONE"}]}`))
+			return true
+		case r.Method == http.MethodPatch:
+			_, _ = w.Write([]byte(`[{"success":false,"errors":[{"statusCode":"REQUIRED_FIELD_MISSING","message":"missing LastName"}]}]`))
+			return true
+		}
+		return false
+	})
+
+	records := stringBatch(t, map[string][]string{
+		"ext_id":    {"A-1"},
+		"FirstName": {"Ada"},
+	}, []string{"ext_id", "FirstName"})
+	opts := writeOpts("Contact?external_id=Ext__c", "replace", []string{"ext_id"})
+	opts.RejectMode = "skip"
+	if err := d.Write(context.Background(), records, opts); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	for _, r := range cap.all() {
+		if r.method == http.MethodDelete {
+			t.Fatalf("a mirror run that wrote nothing must not delete records; requests: %+v", cap.all())
+		}
+	}
+}
+
 func TestBatchesAreChunkedAtTheCollectionLimit(t *testing.T) {
 	var cap capture
 	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
