@@ -130,7 +130,7 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		d.pool.Reset()
 	}
 
-	if len(opts.PrimaryKeys) > 0 && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
+	if len(opts.PrimaryKeys) > 0 && !opts.PrimaryKeysOnlyOnCreate && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
 		if err := d.ensurePrimaryKey(ctx, schemaName, tableName, opts.PrimaryKeys, opts.RequirePrimaryKeyMatch); err != nil {
 			return fmt.Errorf("failed to ensure primary key: %w", err)
 		}

@@ -20,9 +20,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
+	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -675,6 +677,59 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 			var resumed string
 			require.NoError(t, db.QueryRowContext(ctx, "SELECT name FROM "+pqTable(destSchema, "users")+" WHERE id = 7").Scan(&resumed))
 			assert.Equal(t, "resumed", resumed)
+		})
+	}
+}
+
+func TestPostgresMultiTableRefreshReadFailurePreservesTargetKeys(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "failed_refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			table := pqTable(destSchema, "orders")
+			var originalOID int64
+			if existing {
+				_, err := db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint); INSERT INTO "+table+" VALUES (99), (99)")
+				require.NoError(t, err)
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&originalOID))
+			}
+			dest := postgresdest.NewPostgresDestination()
+			require.NoError(t, dest.Connect(ctx, destURI))
+			defer func() { _ = dest.Close(ctx) }()
+			src := newMockMultiTableSource()
+			src.tables["orders"] = filepath.Join(t.TempDir(), "missing.jsonl")
+			job := &strategy.MultiTableIngestionJob{
+				Config: &config.IngestConfig{FullRefresh: true}, Source: src, Destination: dest,
+				Tables: []source.SourceTableInfo{{Name: "orders", PrimaryKeys: []string{"id"}, Schema: &schema.TableSchema{
+					Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+				}}},
+				TableDestNames: map[string]string{"orders": destSchema + ".orders"},
+			}
+			err = (&strategy.ReplaceStrategy{}).ExecuteMultiTable(ctx, job)
+			require.ErrorContains(t, err, "missing.jsonl")
+			var count, oid int64
+			var hasPrimaryKey bool
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count))
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
+			if existing {
+				require.Equal(t, originalOID, oid)
+				require.Equal(t, int64(2), count)
+				require.False(t, hasPrimaryKey, "CREATE IF NOT EXISTS must not add constraints to a target that already exists")
+			} else {
+				require.Zero(t, count)
+				require.True(t, hasPrimaryKey, "a new target must be keyed even if extraction fails")
+			}
 		})
 	}
 }
