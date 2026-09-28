@@ -130,7 +130,7 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 		d.pool.Reset()
 	}
 
-	if len(opts.PrimaryKeys) > 0 && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
+	if len(opts.PrimaryKeys) > 0 && !opts.PrimaryKeysOnlyOnCreate && (!opts.DropFirst || opts.RequirePrimaryKeyMatch) {
 		if err := d.ensurePrimaryKey(ctx, schemaName, tableName, opts.PrimaryKeys, opts.RequirePrimaryKeyMatch); err != nil {
 			return fmt.Errorf("failed to ensure primary key: %w", err)
 		}
@@ -1152,9 +1152,33 @@ func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opt
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if opts.CDCExpectedIncarnation != "" {
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+			return err
+		}
+	}
+
 	if _, err := tx.Exec(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate target: %w", err)
+	}
+	if len(opts.PrimaryKeys) > 0 {
+		schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		actualKeys, err := postgresPrimaryKeyColumns(ctx, tx, schemaName, tableName)
+		if err != nil {
+			return fmt.Errorf("failed to check primary key: %w", err)
+		}
+		if len(actualKeys) == 0 {
+			// Old rows may contain duplicate keys, so add the constraint only
+			// after truncation, in the same transaction as the replacement.
+			alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quotePostgresTable(schemaName, tableName), strings.Join(quoteColumns(opts.PrimaryKeys), ", "))
+			if _, err := tx.Exec(ctx, alterSQL); err != nil {
+				return fmt.Errorf("failed to add primary key: %w", err)
+			}
+		}
 	}
 	if _, err := tx.Exec(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
