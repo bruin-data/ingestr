@@ -25,6 +25,7 @@ import (
 	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/destination/salesforce"
 	snowflakedest "github.com/bruin-data/ingestr/pkg/destination/snowflake"
+	_ "github.com/bruin-data/ingestr/pkg/destination/sqlite"
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -4189,6 +4190,33 @@ func TestPipelineKeepsSourceColumnNamesAcrossNamingConventions(t *testing.T) {
 				require.Equal(t, []string{tc.idCol}, table.tableSchema.PrimaryKeys)
 				require.Equal(t, map[int64]string{1: "ann", 2: "bob"},
 					readFakeKnownSchemaDest(t, destPath, tc.wantIDCol, tc.wantNameCol))
+			})
+		}
+	}
+}
+
+func TestPipelineKnownSchemaRenameAndTypeOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		columns string
+		wantCol string
+	}{
+		{"naming convention", "customer_name:bigint", "customer_name"},
+		{"explicit rename", "amount:bigint:customer_name", "amount"},
+		{"explicit rename with another cast", "amount:bigint:customer_name,order_id:string", "amount"},
+	} {
+		for _, readOptsSchema := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/readOptsSchema=%v", tc.name, readOptsSchema), func(t *testing.T) {
+				table := newFakeKnownSchemaTable("order_id", "CustomerName", readOptsSchema)
+				table.rows = [][]any{{int64(1), "42"}, {int64(2), "-17"}}
+				destPath := filepath.Join(t.TempDir(), "dest.db")
+				runFakeKnownSchemaIngest(t, table, destPath, func(cfg *config.IngestConfig) {
+					cfg.Columns = tc.columns
+				})
+				require.Equal(t, []string{"order_id", "CustomerName"}, table.readColumns)
+				require.Equal(t, schema.TypeString, table.tableSchema.Columns[1].DataType)
+				require.Equal(t, map[int64]string{1: "42", 2: "-17"},
+					readFakeKnownSchemaDest(t, destPath, "order_id", tc.wantCol))
 			})
 		}
 	}
