@@ -265,9 +265,13 @@ func (d *CrateDBDestination) writeListRecordBatch(ctx context.Context, record ar
 	for i, field := range record.Schema().Fields() {
 		colNames[i] = destination.QuoteIdentifier(field.Name)
 	}
-	// Stay below both the wire parameter limit and CrateDB's default 256 KiB
-	// statement_max_length, which also counts the placeholder text.
-	rowsPerBatch := max(1, 10000/numCols)
+	prefix := fmt.Sprintf("INSERT INTO %s (%s) VALUES ", destination.QuoteTableName(table), strings.Join(colNames, ", "))
+	// Budget for the default 256 KiB statement_max_length, including identifiers.
+	// Each placeholder needs at most 8 bytes ("$65535, "), plus row delimiters.
+	rowsPerBatch := min(10000/numCols, (262144-len(prefix))/(8*numCols+2))
+	if rowsPerBatch < 1 {
+		return 0, fmt.Errorf("list insert exceeds CrateDB statement or parameter limit for %d columns", numCols)
+	}
 	var written int64
 	for start := int64(0); start < record.NumRows(); start += int64(rowsPerBatch) {
 		end := min(start+int64(rowsPerBatch), record.NumRows())
@@ -281,8 +285,7 @@ func (d *CrateDBDestination) writeListRecordBatch(ctx context.Context, record ar
 			}
 			rows = append(rows, "("+strings.Join(placeholders, ", ")+")")
 		}
-		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
-			destination.QuoteTableName(table), strings.Join(colNames, ", "), strings.Join(rows, ", "))
+		insertSQL := prefix + strings.Join(rows, ", ")
 		if _, err := d.pool.Exec(ctx, insertSQL, params...); err != nil {
 			config.LogFailedQuery(insertSQL, err)
 			return written, fmt.Errorf("failed to insert rows: %w", err)
