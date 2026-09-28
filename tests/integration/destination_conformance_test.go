@@ -71,6 +71,7 @@ type destCase struct {
 	scd2Capable            bool
 	schemaEvolutionCapable bool
 	addColumnCapable       bool
+	optionalPKConstraint   bool // Some warehouses may discard informational PK hints on replace.
 	// replaceDedupCapable marks destinations that deduplicate by primary key on
 	// replace, so the dedup conformance tests run against them. Most swap+merge
 	// destinations do this via the strategy's pre-swap normalised table; Postgres
@@ -239,6 +240,7 @@ func destinationCases() []destCase {
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
+			optionalPKConstraint:   true,
 		},
 		{
 			name: "clickhouse",
@@ -2583,6 +2585,10 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 			assert.Equal(t, 0, oldTables, "No _old_ tables should exist after first replace")
 
 			// Second run: triggers swap (rename existing -> _old_, rename staging -> target, drop _old_)
+			if tc.name == "bigquery" {
+				// BigQuery only creates an aside table when the layout changes.
+				cfg.ClusterBy = []string{"id"}
+			}
 			p2 := pipeline.New(cfg)
 			require.NoError(t, p2.Run(ctx), "Second replace should succeed")
 
@@ -2626,7 +2632,7 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 	case strings.HasPrefix(uri, "clickhouse:"):
 		query = fmt.Sprintf(`SELECT COUNT(*) FROM system.tables WHERE database = '%s' AND name LIKE '%s_old_%%'`, schemaName, tableName)
 	case strings.HasPrefix(uri, "bigquery:"):
-		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s.INFORMATION_SCHEMA.TABLES` WHERE table_name LIKE '%s_old_%%'", schemaName, tableName)
+		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s.INFORMATION_SCHEMA.TABLES` WHERE STARTS_WITH(table_name, '%s__ingestr_repartition_')", schemaName, tableName)
 	case strings.HasPrefix(uri, "snowflake:"):
 		query = fmt.Sprintf(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '%s' AND table_name LIKE '%s_OLD_%%'`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
 	case strings.Contains(uri, "duckdb"):
@@ -2823,6 +2829,12 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 	swapCapableCases := []destCase{}
 	for _, tc := range destinationCases() {
 		if tc.sqlBackend == nil {
+			continue
+		}
+		if tc.optionalPKConstraint {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Skip("replace may discard informational primary-key hints (BigQuery CTAS)")
+			})
 			continue
 		}
 		dest, err := uri.DefaultRegistry.GetDestination(tc.name + "://")

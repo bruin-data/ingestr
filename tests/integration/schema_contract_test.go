@@ -33,7 +33,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_freeze_new_column", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -141,7 +141,7 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_evolve", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -197,7 +197,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_discard_value", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -315,7 +315,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_discard_row", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -379,7 +379,7 @@ func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_default", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})

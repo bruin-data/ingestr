@@ -23,6 +23,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -232,12 +233,14 @@ func assertConformanceValue(t *testing.T, backend string, typ schema.DataType, i
 		}
 		assert.JSONEq(t, want, s)
 	case schema.TypeArray:
-		if backend == "postgres" {
-			want := "{7,NULL,-2}"
+		if backend == "postgres" || backend == "cratedb" {
+			var actual []any
+			require.NoError(t, pgtype.NewMap().Scan(pgtype.Int8ArrayOID, pgtype.TextFormatCode, []byte(s), &actual))
+			want := []any{int64(7), nil, int64(-2)}
 			if id == 3 {
-				want = "{}"
+				want = []any{}
 			}
-			assert.Equal(t, want, s)
+			assert.Equal(t, want, actual)
 			return
 		}
 		if _, ok := value.(string); !ok {

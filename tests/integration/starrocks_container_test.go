@@ -21,8 +21,15 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string) {
+	t.Helper()
+	dsn, uri, cleanup := startStarRocksContainerWithCleanup(ctx, t)
+	t.Cleanup(cleanup)
+	return dsn, uri
+}
+
 // Callers own cleanup so conformance tests can share the slow-booting container.
-func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string, cleanup func()) {
+func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn, uri string, cleanup func()) {
 	requireDocker(t)
 	t.Helper()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -41,6 +48,12 @@ func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string
 	})
 	require.NoError(t, err)
 	cleanup = func() { _ = container.Terminate(context.Background()) }
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cleanup()
+		}
+	}()
 
 	host, err := container.Host(ctx)
 	require.NoError(t, err)
@@ -53,6 +66,7 @@ func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string
 	// Connect directly to this single BE for Stream Load: an FE redirect would
 	// advertise the container-private BE address, unreachable from the test host.
 	uri = fmt.Sprintf("starrocks://root@%s:%s/?http_port=%s&replication_num=1", host, port.Port(), httpPort.Port())
+	handedOff = true
 	return dsn, uri, cleanup
 }
 
@@ -133,8 +147,7 @@ func TestStarRocksToSQLite(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dsn, baseURI, cleanup := startStarRocksContainer(ctx, t)
-	t.Cleanup(cleanup)
+	dsn, baseURI := startStarRocksContainer(ctx, t)
 	waitForStarRocksBackend(t, dsn)
 
 	db, err := sql.Open("mysql", dsn)

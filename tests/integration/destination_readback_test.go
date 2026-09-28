@@ -18,8 +18,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/discard"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,7 +72,7 @@ func setupStarRocksConformance(t *testing.T, ctx context.Context) (string, strin
 	}
 	requireDocker(t)
 	starRocksConformance.Do(func() {
-		dsn, destURI, cleanup := startStarRocksContainer(ctx, t)
+		dsn, destURI, cleanup := startStarRocksContainerWithCleanup(ctx, t)
 		starRocksConformance.cleanup = cleanup
 		waitForStarRocksBackend(t, dsn)
 		db, err := sql.Open("mysql", dsn)
@@ -182,6 +184,18 @@ func validateMongoDBReplace(t *testing.T, destURI, table string) {
 func validateMongoDBAppend(t *testing.T, destURI, table string) {
 	want := append(readJSONLConformance(t, "testdata/conformance_append_initial.jsonl"), readJSONLConformance(t, "testdata/conformance_append_more.jsonl")...)
 	assert.ElementsMatch(t, want, readMongoDBConformance(t, destURI, table))
+}
+
+func TestDestinations_DiscardPipeline(t *testing.T) {
+	for _, strategy := range []config.IncrementalStrategy{config.StrategyReplace, config.StrategyAppend} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cfg := &config.IngestConfig{
+				SourceURI: jsonlURI(t, "testdata/conformance.jsonl"), SourceTable: "conformance",
+				DestURI: "discard://", DestTable: "conformance", IncrementalStrategy: strategy,
+			}
+			require.NoError(t, pipeline.New(cfg).Run(context.Background()))
+		})
+	}
 }
 
 // Discard has no readable output. Its observable contract is consuming and
