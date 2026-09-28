@@ -139,6 +139,41 @@ func TestIsValidTable(t *testing.T) {
 	assert.False(t, isValidTable("INVOICES"))
 }
 
+func TestReadQueriesMappedObject(t *testing.T) {
+	for _, table := range supportedTables {
+		t.Run(table, func(t *testing.T) {
+			object, ok := tableMapping[table]
+			require.True(t, ok, "%s has no API object mapping", table)
+
+			var gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotQuery = r.URL.Query().Get("query")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"QueryResponse": map[string]any{
+						object: []map[string]any{{"Id": "1", "MetaData": map[string]any{"LastUpdatedTime": "2025-06-15T10:30:00-08:00"}}},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			s := &QuickBooksSource{companyID: "1", client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+			results, err := s.read(context.Background(), table, source.ReadOptions{})
+			require.NoError(t, err)
+
+			var rows int64
+			for res := range results {
+				require.NoError(t, res.Err)
+				rows += res.Batch.NumRows()
+				res.Batch.Release()
+			}
+
+			assert.Equal(t, int64(1), rows)
+			assert.Contains(t, gotQuery, "SELECT * FROM "+object+" ")
+		})
+	}
+}
+
 func TestBuildQuery(t *testing.T) {
 	t.Run("no filters", func(t *testing.T) {
 		q := buildQuery("Customer", 1, source.ReadOptions{})

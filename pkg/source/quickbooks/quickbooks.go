@@ -36,6 +36,8 @@ var supportedTables = []string{
 	"accounts",
 	"vendors",
 	"payments",
+	"purchases",
+	"bills",
 }
 
 // tableMapping maps plural table names to singular API object names used in QuickBooks queries.
@@ -45,6 +47,8 @@ var tableMapping = map[string]string{
 	"accounts":  "Account",
 	"vendors":   "Vendor",
 	"payments":  "Payment",
+	"purchases": "Purchase",
+	"bills":     "Bill",
 }
 
 type QuickBooksSource struct {
@@ -152,6 +156,10 @@ func (s *QuickBooksSource) read(ctx context.Context, table string, opts source.R
 			err = s.readVendors(ctx, opts, results)
 		case "payments":
 			err = s.readPayments(ctx, opts, results)
+		case "purchases":
+			err = s.readPurchases(ctx, opts, results)
+		case "bills":
+			err = s.readBills(ctx, opts, results)
 		default:
 			err = fmt.Errorf("unsupported table: %s", table)
 		}
@@ -440,4 +448,14 @@ func (s *QuickBooksSource) readVendors(ctx context.Context, opts source.ReadOpti
 func (s *QuickBooksSource) readPayments(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[QUICKBOOKS] reading payments")
 	return s.paginateAndSend(ctx, "payments", tableMapping["payments"], opts, results)
+}
+
+func (s *QuickBooksSource) readPurchases(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	config.Debug("[QUICKBOOKS] reading purchases")
+	return s.paginateAndSend(ctx, "purchases", tableMapping["purchases"], opts, results)
+}
+
+func (s *QuickBooksSource) readBills(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	config.Debug("[QUICKBOOKS] reading bills")
+	return s.paginateAndSend(ctx, "bills", tableMapping["bills"], opts, results)
 }
