@@ -231,6 +231,32 @@ Only the fields listed in the response are ingested. Grant Read access to the fi
 
 ingestr can write rows from any source back into Salesforce (reverse ETL). Each source row creates, updates or deletes one Salesforce record.
 
+### URI format
+
+Using an OAuth access token:
+
+```plaintext
+salesforce://?access_token=<access_token>&domain=<domain>&load_method=<load_method>
+```
+
+Using username, password, and security token:
+
+```plaintext
+salesforce://?username=<username>&password=<password>&token=<token>&domain=<domain>&load_method=<load_method>
+```
+
+Using the OAuth 2.0 client credentials flow:
+
+```plaintext
+salesforce://?grant_type=client_credentials&client_id=<client_id>&client_secret=<client_secret>&domain=<domain>&load_method=<load_method>
+```
+
+URI parameters:
+- `access_token`, `username`, `password`, `token`, `grant_type`, `client_id`, `client_secret` and `domain` work the same as in the [source URI](#uri-format).
+- `load_method` is optional: `bulk` (default) or `rest`. See [Load method](#load-method) for when to use each.
+
+The user you connect with needs **Create**, **Edit** and, for `delete`/`replace`, **Delete** permission on the object, plus **Edit** access to every field you write.
+
 ### Quick start
 
 ```sh
@@ -244,8 +270,6 @@ ingestr ingest \
 ```
 
 For every row, this finds the Contact whose `External_Id__c` equals the row's `customer_id`: if it exists it is updated, otherwise it is created. The other source columns (`FirstName`, `Email`, …) are written to the Contact fields of the same name.
-
-The destination URI is the same as the [source URI](#uri-format), with the same login options. The user you connect with needs **Create**, **Edit** and, for `delete`/`replace`, **Delete** permission on the object, plus **Edit** access to every field you write.
 
 ### Objects and fields
 
