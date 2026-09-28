@@ -1267,6 +1267,17 @@ func TestLookupColumnInOtherCaseWinsOverNullRelationshipCell(t *testing.T) {
 	}
 }
 
+func TestSetRelationshipWinsOverNullLookupColumn(t *testing.T) {
+	recs := upsertBodies(t, map[string][]string{
+		"ext":            {"C-1"},
+		"AccountId":      {""},
+		"Account.Ext__c": {"ACC-1"},
+	}, []string{"ext", "AccountId", "Account.Ext__c"}, true)
+	if _, sent := recs[0]["AccountId"]; sent {
+		t.Fatalf("record = %v, a null AccountId must not be sent next to the Account relationship", recs[0])
+	}
+}
+
 func TestUnknownSObjectSuggestsTheAPIName(t *testing.T) {
 	var cap capture
 	d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
@@ -1662,18 +1673,18 @@ func TestConnectRejectsUnusableSessionOrAPIVersion(t *testing.T) {
 }
 
 func TestDuplicateKeyHintMatchesTheCause(t *testing.T) {
-	upsert := &shaper{sobject: "Contact", idField: "Ext__c"}
+	upsert := &shaper{sobject: "Contact", idField: "Ext__c", idColumn: "ext_id"}
 	var dup rejectionLog
 	dup.add([]rejection{{code: "DUPLICATE_VALUE", message: "Duplicate external id specified: a-1", identifier: "Ext__c=A-1"}})
 	err := reportRejections(upsert, &dup)
-	if err == nil || !strings.Contains(err.Error(), "same Ext__c value on more than one row") || strings.Contains(err.Error(), "incremental-strategy merge") {
+	if err == nil || !strings.Contains(err.Error(), "same value in column ext_id (matched on Ext__c)") || strings.Contains(err.Error(), "incremental-strategy merge") {
 		t.Fatalf("error = %v, want the de-duplicate hint", err)
 	}
 
-	update := &shaper{sobject: "Contact", idField: "Email"}
+	update := &shaper{sobject: "Contact", idField: "Email", idColumn: "customer_email"}
 	var dupID rejectionLog
 	dupID.add([]rejection{{code: "INVALID_FIELD", message: "Duplicate id specified: 003A", identifier: "Email=ada@x.com"}})
-	if err := reportRejections(update, &dupID); err == nil || !strings.Contains(err.Error(), "same Email value on more than one row") {
+	if err := reportRejections(update, &dupID); err == nil || !strings.Contains(err.Error(), "more than one source row points to the same Contact record") {
 		t.Fatalf("error = %v, want the de-duplicate hint for a duplicate id", err)
 	}
 

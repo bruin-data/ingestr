@@ -678,6 +678,14 @@ func (s *shaper) applyDefaultParentTypes(out sfRecord) {
 // lookup mapping the cell is omitted and the link left as is. A relationship the
 // row also sets elsewhere (a non-null dotted cell or the lookup column) wins.
 func (s *shaper) clearNullRelationships(out sfRecord, rels []string) {
+	for k, v := range out {
+		if _, nested := v.(map[string]interface{}); !nested {
+			continue
+		}
+		if field, ok := s.lookupFields[strings.ToLower(k)]; ok {
+			dropNullFieldFold(out, field)
+		}
+	}
 	for _, rel := range rels {
 		if _, set := out[rel]; set {
 			continue
@@ -688,6 +696,14 @@ func (s *shaper) clearNullRelationships(out sfRecord, rels []string) {
 		}
 		if !hasFieldFold(out, field) {
 			out[field] = nil
+		}
+	}
+}
+
+func dropNullFieldFold(out sfRecord, field string) {
+	for k, v := range out {
+		if v == nil && strings.EqualFold(k, field) {
+			delete(out, k)
 		}
 	}
 }
@@ -1729,9 +1745,14 @@ func reportRejections(sh *shaper, l *rejectionLog) error {
 		fmt.Fprintf(&b, "\n  ... and %d more", len(items)-shown)
 	}
 	for _, it := range items {
-		if strings.Contains(it.message, "Duplicate external id specified") || strings.Contains(it.message, "Duplicate id specified") {
+		if strings.Contains(it.message, "Duplicate external id specified") {
 			// Salesforce rejects every row sharing a key within one request.
-			fmt.Fprintf(&b, "\n  hint: the source has the same %s value on more than one row; de-duplicate it on that column", sh.idField)
+			fmt.Fprintf(&b, "\n  hint: the source has the same value in column %s (matched on %s) on more than one row; de-duplicate it on that column", sh.idColumn, sh.idField)
+			break
+		}
+		if strings.Contains(it.message, "Duplicate id specified") {
+			// Distinct match values can resolve to one record, e.g. differing only in case.
+			fmt.Fprintf(&b, "\n  hint: more than one source row points to the same %s record; de-duplicate the source so each record appears once", sh.sobject)
 			break
 		}
 		if sh.createOnly && (it.code == "DUPLICATE_VALUE" || it.code == "DUPLICATES_DETECTED") {
@@ -1991,7 +2012,7 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 		return fmt.Errorf("salesforce: source columns are read-only on %q: [%s]; drop them from the source (e.g. --sql-exclude-columns) and re-run", sh.sobject, strings.Join(notWritable, ", "))
 	}
 	if len(blob) > 0 {
-		return fmt.Errorf("salesforce: binary fields on %q need load_method=rest on the destination URI; Bulk API 2.0 can't load them: [%s]", sh.sobject, strings.Join(blob, ", "))
+		return fmt.Errorf("salesforce: binary fields on %q need load_method=rest on the destination URI; Bulk API 2.0 can't load them: [%s]. If you don't write them, drop them from the source instead", sh.sobject, strings.Join(blob, ", "))
 	}
 	return nil
 }
