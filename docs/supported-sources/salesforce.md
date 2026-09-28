@@ -242,9 +242,18 @@ salesforce://?access_token=<access_token>&domain=<domain>
 URI parameters:
 - `access_token` and `domain`: same as the source. The username/password and client credentials logins work here too.
 
-How records are sent is set per table, with `load_method` on the dest-table. See [Load method](#load-method).
-
 The user you connect with needs **Create**, **Edit** and, for `delete`/`replace`, **Delete** permission on the object, plus **Edit** access to every field you write.
+
+### Dest-table format
+
+```plaintext
+<object>?external_id=<field>&load_method=<load_method>
+```
+
+Dest-table parameters:
+- `<object>`: the Salesforce object to write to, e.g. `Contact`. See [Objects and fields](#objects-and-fields).
+- `external_id`: the field used to find existing records. Needed for `merge` and `replace`. See [Matching records](#matching-records).
+- `load_method` *(optional)*: `bulk` (default) or `rest`. See [Load method](#load-method).
 
 ### Quick start
 
@@ -262,7 +271,7 @@ For every row, this finds the Contact whose `External_Id__c` equals the row's `c
 
 ### Objects and fields
 
-- `--dest-table` is the object's **API name**: `Contact`, `Account`, `Opportunity`, or a custom object such as `Invoice__c`. Options follow a `?`, e.g. `Contact?external_id=External_Id__c&load_method=rest`.
+- `--dest-table` is the object's **API name**: `Contact`, `Account`, `Opportunity`, or a custom object such as `Invoice__c`.
 - Each source column is written to the field with the same **API name**, e.g. `FirstName` or `Amount__c`. Names are not case-sensitive.
 - Find API names in Setup → **Object Manager**. Labels don't work:
 
@@ -365,26 +374,14 @@ To remove links, `delete` those records. To keep the links exactly in step with 
 
 ### Load method
 
-Add `load_method` to the dest-table to choose how its records are sent:
-
-- **`bulk`** *(default)*: records are sent as a [Bulk API 2.0](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm) job, and the rejected rows are reported when the job finishes.
-- **`rest`**: records are written while the source is read, and results come back right away.
+- **`bulk`** *(default)*: uses Salesforce's Bulk API. It needs only a few API calls per run, however large the table, and reports rejected rows when the load finishes.
+- **`rest`**: writes records in small batches and reports results right away, but uses more API calls on large tables.
 
 ```sh
 --dest-table "Contact?external_id=External_Id__c&load_method=rest"
 ```
 
-Bulk is the default because it uses only a few of the org's daily API calls per run, however many rows you send, and Salesforce processes the rows in parallel. REST uses one call per 200 rows, so a large table synced often can use up the org's daily limit.
-
-Choose `rest` when:
-
-- you need `--reject-mode fail_fast`, which only works with `rest` (a bulk job reports rejects only once it finishes);
-- the syncs are small and frequent, and you want each run to finish right away (every bulk job waits in Salesforce's queue first, usually seconds, sometimes longer);
-- you want records written as the source is read. With `bulk`, records are held and sent in jobs of about 50 MB, so nothing reaches Salesforce until a job fills or the source finishes;
-- you write binary fields such as `ContentVersion.VersionData`, which bulk can't load;
-- a text field can hold exactly `#N/A`. Bulk reads that value as "clear this field", so rows containing it are rejected instead of being written.
-
-Every strategy works the same with both. Bulk jobs are listed in Setup → **Bulk Data Load Jobs**.
+Use `rest` if you need `--reject-mode fail_fast` or you upload files (such as `ContentVersion.VersionData`). If a run needs `rest`, ingestr says so before writing anything. Every strategy works the same with both.
 
 ### Reverse-ETL options
 
