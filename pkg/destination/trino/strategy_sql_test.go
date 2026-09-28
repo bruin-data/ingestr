@@ -12,7 +12,7 @@ import (
 func TestMergeExpectedSQL(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
 	mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."order" AS t
 USING (SELECT "tenant", "key""id", "value" FROM (SELECT "tenant", "key""id", "value", ROW_NUMBER() OVER (PARTITION BY "tenant", "key""id") AS __bruin_dedup_rn FROM "landing"."raw"."stage") AS _numbered WHERE __bruin_dedup_rn = 1) AS s
@@ -45,7 +45,7 @@ func TestSCD2ExpectedSQL(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
 			mock.ExpectExec(`UPDATE "iceberg"."analytics"."order" SET
 "_scd_valid_to" = ( SELECT source."_scd_valid_from" FROM "landing"."raw"."stage" AS source

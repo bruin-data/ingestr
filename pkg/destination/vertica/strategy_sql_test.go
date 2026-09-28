@@ -36,7 +36,7 @@ WHEN NOT MATCHED THEN INSERT ("tenant", "key""id") VALUES (source."tenant", sour
 		t.Run(tt.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			d := &VerticaDestination{db: db}
 			mock.ExpectExec(tt.want).WillReturnResult(sqlmock.NewResult(0, 2))
 			require.NoError(t, d.MergeTable(t.Context(), destination.MergeOptions{
@@ -57,7 +57,7 @@ func TestDeleteInsertExpectedSQL(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			d := &VerticaDestination{db: db}
 			opts := destination.DeleteInsertOptions{TargetTable: "warehouse.order", StagingTable: "landing.stage", Columns: []string{"tenant", `key"id`, "version"}, IncrementalKey: "version", IntervalStart: 11, IntervalEnd: 29}
 			selectSQL := `SELECT "tenant", "key""id", "version" FROM "landing"."stage"`

@@ -516,3 +516,69 @@ func boolStr(b bool) string {
 	}
 	return "false"
 }
+
+func TestClickHouseDestination_SCD2NullTransitions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	ctx := t.Context()
+	container, uri, err := startClickHouseContainer(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+
+	for _, joinUseNulls := range []int{0, 1} {
+		t.Run(fmt.Sprintf("join_use_nulls=%d", joinUseNulls), func(t *testing.T) {
+			dest := chdest.NewClickHouseDestination()
+			testURI := fmt.Sprintf("%s?join_use_nulls=%d", uri, joinUseNulls)
+			require.NoError(t, dest.Connect(ctx, testURI))
+			defer func() { _ = dest.Close(context.Background()) }()
+			target := fmt.Sprintf("scd2_target_%d", joinUseNulls)
+			stage := fmt.Sprintf("scd2_stage_%d", joinUseNulls)
+			for _, table := range []string{target, stage} {
+				require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (
+tenant UInt8, id UInt8, value Nullable(String),
+_scd_valid_from DateTime64(6), _scd_valid_to Nullable(DateTime64(6)), _scd_is_current UInt8
+) ENGINE = MergeTree ORDER BY (tenant, id)`, table)))
+			}
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO %s VALUES
+(1, 1, NULL, '2026-01-01', NULL, 1), (1, 2, NULL, '2026-01-01', NULL, 1),
+(1, 3, 'gone', '2026-01-01', NULL, 1), (1, 4, 'old', '2026-01-01', NULL, 1),
+(2, 1, 'keep', '2026-01-01', NULL, 1)`, target)))
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`INSERT INTO %s VALUES
+(1, 0, 'new', '2026-02-03 04:05:06.123456', NULL, 1),
+(1, 1, 'new', '2026-02-03 04:05:06.123456', NULL, 1),
+(1, 2, NULL, '2026-02-03 04:05:06.123456', NULL, 1),
+(1, 4, NULL, '2026-02-03 04:05:06.123456', NULL, 1),
+(2, 1, 'keep', '2026-02-03 04:05:06.123456', NULL, 1)`, stage)))
+			require.NoError(t, dest.SCD2Table(ctx, destpkg.SCD2Options{
+				TargetTable: target, StagingTable: stage, Columns: []string{"tenant", "id", "value"},
+				PrimaryKeys: []string{"tenant", "id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 123456000, time.UTC),
+			}))
+
+			opts, err := clickhouse.ParseDSN(testURI)
+			require.NoError(t, err)
+			db := clickhouse.OpenDB(opts)
+			defer func() { _ = db.Close() }()
+			rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT tenant, id, ifNull(value, '<NULL>'),
+_scd_is_current, ifNull(toString(_scd_valid_to), '') FROM %s ORDER BY tenant, id, _scd_is_current`, target))
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			var got []string
+			for rows.Next() {
+				var tenant, id, current uint8
+				var value, validTo string
+				require.NoError(t, rows.Scan(&tenant, &id, &value, &current, &validTo))
+				got = append(got, fmt.Sprintf("%d/%d %s %d %s", tenant, id, value, current, validTo))
+			}
+			require.NoError(t, rows.Err())
+			require.Equal(t, []string{
+				"1/0 new 1 ",
+				"1/1 <NULL> 0 2026-02-03 04:05:06.123456", "1/1 new 1 ",
+				"1/2 <NULL> 1 ",
+				"1/3 gone 0 2026-02-03 04:05:06.123456",
+				"1/4 old 0 2026-02-03 04:05:06.123456", "1/4 <NULL> 1 ",
+				"2/1 keep 1 ",
+			}, got)
+		})
+	}
+}
