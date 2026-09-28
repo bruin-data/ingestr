@@ -16,6 +16,70 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+func TestArrowCopyReaderTypedListValues(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+	b := array.NewListBuilder(mem, arrow.PrimitiveTypes.Int64)
+	defer b.Release()
+	child := b.ValueBuilder().(*array.Int64Builder)
+	b.Append(true)
+	child.Append(99) // A sliced record must not read this preceding list.
+	b.Append(true)
+	child.Append(7)
+	child.AppendNull()
+	child.Append(-2)
+	b.Append(true)
+	b.AppendNull()
+	full := b.NewArray()
+	defer full.Release()
+	values := array.NewSlice(full, 1, 4)
+	defer values.Release()
+	record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: values.DataType(), Nullable: true}}, nil), []arrow.Array{values}, 3)
+	defer record.Release()
+	typeMap := pgtype.NewMap()
+	want := []any{[]any{int64(7), nil, int64(-2)}, []any{}, nil}
+	get := postgresValueGetters(record, nil)[0]
+	for row, expected := range want {
+		gotBytes, err := typeMap.Encode(pgtype.Int8ArrayOID, pgx.BinaryFormatCode, get(row), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantBytes, err := typeMap.Encode(pgtype.Int8ArrayOID, pgx.BinaryFormatCode, expected, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
+			t.Errorf("fallback row %d = %x, want %x", row, gotBytes, wantBytes)
+		}
+	}
+	reader, ok := newArrowCopyReader(record, nil, typeMap, []uint32{pgtype.Int8ArrayOID})
+	if !ok {
+		t.Fatal("typed list rejected by COPY reader")
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := append([]byte(nil), postgresBinaryCopyHeader...)
+	for _, value := range want {
+		expected = binary.BigEndian.AppendUint16(expected, 1)
+		encoded, err := typeMap.Encode(pgtype.Int8ArrayOID, pgx.BinaryFormatCode, value, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		length := int32(-1)
+		if encoded != nil {
+			length = int32(len(encoded))
+		}
+		expected = binary.BigEndian.AppendUint32(expected, uint32(length))
+		expected = append(expected, encoded...)
+	}
+	expected = binary.BigEndian.AppendUint16(expected, 0xffff)
+	if !bytes.Equal(got, expected) {
+		t.Fatalf("COPY = %x, want %x", got, expected)
+	}
+}
+
 func TestArrowCopyReaderMatchesPGXBinaryEncoding(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	t.Cleanup(func() { mem.AssertSize(t, 0) })

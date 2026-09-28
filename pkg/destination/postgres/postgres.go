@@ -687,6 +687,19 @@ func postgresValueGetterForType(col arrow.Array, dataType schema.DataType) func(
 		}
 	case array.ExtensionArray:
 		return postgresValueGetterForType(a.Storage(), dataType)
+	case *array.List:
+		getElement := postgresValueGetter(a.ListValues())
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			start, end := a.ValueOffsets(i)
+			values := make([]any, end-start)
+			for j := start; j < end; j++ {
+				values[j-start] = getElement(int(j))
+			}
+			return values
+		}
 	default:
 		return func(i int) any {
 			return arrowutil.Value(col, i)
