@@ -833,7 +833,17 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for result := range records {
+			for {
+				var result source.RecordBatchResult
+				select {
+				case <-ctx.Done():
+					return
+				case next, ok := <-records:
+					if !ok {
+						return
+					}
+					result = next
+				}
 				// Stop promptly once another worker has failed; executeReverseETL
 				// cancels the source read and drains the rest.
 				if ctx.Err() != nil {
