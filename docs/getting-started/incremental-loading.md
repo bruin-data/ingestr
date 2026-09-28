@@ -116,7 +116,7 @@ ingestr ingest \
 Here's how the merge strategy works:
 - ingestr writes the source rows to a staging table.
 - If multiple staged rows have the same `primary_key`, most SQL destinations deduplicate the staged rows before merge. On destinations that support ordered merge deduplication, `incremental_key` makes the row with the highest incremental key value win; otherwise the winning row may be destination-dependent.
-- For PostgreSQL, Snowflake, DuckDB, BigQuery, MySQL, and SQL Server, non-null incremental keys take precedence over nulls. If every incremental key for a primary key is null, one row is retained; ties do not have a guaranteed winner.
+- For PostgreSQL, Snowflake, Oracle, DuckDB, BigQuery, MySQL, and SQL Server, non-null incremental keys take precedence over nulls. If every incremental key for a primary key is null, one row is retained; ties do not have a guaranteed winner.
 - If a staged row's `primary_key` already exists in the destination table, ingestr updates the destination row with the staged values.
 - If a staged row's `primary_key` does not exist in the destination table, ingestr inserts it.
 - Destination rows whose `primary_key` is not present in staging remain unchanged.
