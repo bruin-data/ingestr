@@ -41,6 +41,10 @@ const receiveTimeout = 1 * time.Second
 // point rather than the database-wide WAL head reported by a keepalive.
 const streamHeartbeatInterval = 10 * time.Second
 
+// streamingAccumulatorMaxAge bounds how long a partial per-table batch may
+// pin the streaming commit position while other tables keep producing WAL.
+const streamingAccumulatorMaxAge = 10 * time.Second
+
 // streamPosition holds the LSN the pipeline has confirmed durable (flushed and
 // merged into the destination). The pipeline goroutine advances it via
 // CommitStream; the replicator goroutine reads it when sending standby status
