@@ -208,13 +208,15 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("TRIM_WHITESPACE", "INGESTR_TRIM_WHITESPACE"),
 			},
 			&cli.StringFlag{
-				Name:    "reject-mode",
-				Usage:   "Reverse-ETL only: how to handle rows the destination can't apply — fail_fast (stop on first), fail (write valid rows, then error with the reject list), skip (write valid rows, succeed, report rejects). Default: fail",
-				Sources: cli.EnvVars("REJECT_MODE", "INGESTR_REJECT_MODE"),
+				Name:        "reject-mode",
+				Usage:       "Reverse-ETL only: how to handle rows the destination can't apply — fail_fast (stop on first), fail (write valid rows, then error with the reject list), skip (write valid rows, succeed, report rejects)",
+				DefaultText: "fail",
+				Sources:     cli.EnvVars("REJECT_MODE", "INGESTR_REJECT_MODE"),
 			},
 			&cli.BoolFlag{
 				Name:    "write-nulls",
-				Usage:   "Reverse-ETL only: write source NULLs through to the destination to clear the field. Default: clear; pass --write-nulls=false to omit NULLs and leave the existing value unchanged",
+				Usage:   "Reverse-ETL only: write source NULLs through to the destination to clear the field; pass --write-nulls=false to omit NULLs and leave the existing value unchanged",
+				Value:   true,
 				Sources: cli.EnvVars("WRITE_NULLS", "INGESTR_WRITE_NULLS"),
 			},
 			&cli.BoolFlag{
