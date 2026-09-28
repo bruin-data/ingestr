@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -242,4 +243,51 @@ func TestStagingCleanupCancelsOnLeaseLossDuringDrop(t *testing.T) {
 	cancel() // Ordinary cancellation must not suppress cleanup while the lease is held.
 	dropStagingTable(ctx, dest, "staging")
 	require.ErrorIs(t, dest.cause, source.ErrConnectorLeaseLost)
+}
+
+type postgresInPlaceCleanupDestination struct {
+	*atomicTruncateInsertDestination
+}
+
+func (d *postgresInPlaceCleanupDestination) GetScheme() string { return "postgres" }
+
+func TestMultiTableInPlaceReplaceCleanupOwnership(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep_staging=%t", keep), func(t *testing.T) {
+			base := &fakeDestination{liveTables: map[string]bool{"landing.a": true, "landing.b": true}}
+			dest := &postgresInPlaceCleanupDestination{atomicTruncateInsertDestination: &atomicTruncateInsertDestination{
+				truncateCapableDestination: &truncateCapableDestination{fakeDestination: base},
+			}}
+			src := &announcingMultiTableSource{
+				tables:  []source.SourceTableInfo{newTableInfo("a"), newTableInfo("b")},
+				records: mustClosedRecords(source.RecordBatchResult{TableName: "a"}, source.RecordBatchResult{TableName: "b"}),
+			}
+			job := &MultiTableIngestionJob{
+				Config: &config.IngestConfig{RunID: "combined", KeepStaging: keep},
+				Source: src, Destination: dest, Tables: src.tables,
+				TableDestNames: map[string]string{"a": "landing.a", "b": "landing.b"},
+			}
+			require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job))
+			require.Len(t, dest.finalizeCalls, 2)
+			require.Empty(t, base.swapCalls)
+			staged := []string{"_bruin_staging.landing__a_staging_combined", "_bruin_staging.landing__b_staging_combined"}
+			for i, opts := range dest.finalizeCalls {
+				require.Equal(t, staged[i], opts.StagingTable)
+				require.Equal(t, []string{"landing.a", "landing.b"}[i], opts.TargetTable)
+			}
+			expectedTables := map[string]bool{"landing.a": true, "landing.b": true}
+			if keep {
+				require.Empty(t, base.dropCalls, "successful KeepStaging must retain staging")
+				for _, table := range staged {
+					expectedTables[table] = true
+				}
+			} else {
+				require.ElementsMatch(t, staged, base.dropCalls, "each staging table must be dropped exactly once")
+				for _, bounded := range base.dropHasDeadline {
+					require.True(t, bounded)
+				}
+			}
+			require.Equal(t, expectedTables, base.liveTables)
+		})
+	}
 }

@@ -618,10 +618,9 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 					return fmt.Errorf("failed to replace table %s in place: %w", tableInfo.Name, err)
 				}
 				if !job.Config.KeepStaging {
-					if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-						config.Debug("[REPLACE] Warning: failed to drop staging table %s: %v", stagingTable, err)
-					}
+					dropStagingTable(ctx, job.Destination, stagingTable)
 				}
+				delete(stagingTables, tableInfo.Name)
 				continue
 			}
 			swapTable := stagingTable
