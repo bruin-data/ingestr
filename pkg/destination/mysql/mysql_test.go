@@ -8,13 +8,58 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/source"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWriteTypedLists(t *testing.T) {
+	for _, dt := range []arrow.DataType{
+		arrow.ListOf(arrow.PrimitiveTypes.Int64),
+		arrow.LargeListOf(arrow.PrimitiveTypes.Int64),
+	} {
+		t.Run(dt.String(), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			values, _, err := array.FromJSON(mem, dt, strings.NewReader(`[[99],[7,null,-2],null,[],[42]]`))
+			require.NoError(t, err)
+			defer values.Release()
+			sliced := array.NewSlice(values, 1, 5)
+			defer sliced.Release()
+			record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: dt, Nullable: true}}, nil), []arrow.Array{sliced}, 4)
+			defer record.Release()
+
+			t.Run("insert", func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+				mock.ExpectBegin()
+				mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `lists` (`values`) VALUES (?), (?), (?), (?)")).
+					WithArgs("[7,null,-2]", nil, "[]", "[42]").WillReturnResult(sqlmock.NewResult(0, 4))
+				mock.ExpectCommit()
+				record.Retain()
+				records := make(chan source.RecordBatchResult, 1)
+				records <- source.RecordBatchResult{Batch: record}
+				close(records)
+				dest := &MySQLDestination{db: db}
+				require.NoError(t, dest.Write(t.Context(), records, destination.WriteOptions{Table: "lists"}))
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+			t.Run("load data", func(t *testing.T) {
+				var got strings.Builder
+				require.NoError(t, writeRecordBatchTSV(&got, record))
+				assert.Equal(t, "[7,null,-2]\n\\N\n[]\n[42]\n", got.String())
+			})
+		})
+	}
+}
 
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
 	tests := []struct {

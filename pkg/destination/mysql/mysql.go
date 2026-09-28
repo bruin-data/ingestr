@@ -2318,6 +2318,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
 	case *array.Decimal256:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
+	case *array.List, *array.LargeList:
+		return a.ValueStr(idx)
 	case array.ExtensionArray:
 		storage := a.Storage()
 		return extractValue(storage, idx)
