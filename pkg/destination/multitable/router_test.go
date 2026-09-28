@@ -98,6 +98,37 @@ func TestWriteSourceErrorCancelsProducer(t *testing.T) {
 	}
 }
 
+func TestWriteSourceErrorAfterWritingStarts(t *testing.T) {
+	input := make(chan source.RecordBatchResult, 1)
+	var releases, written, cancellations atomic.Int64
+	input <- source.RecordBatchResult{TableName: "items", Batch: &releaseCountingBatch{releases: &releases}}
+	dest := &fakeDestination{writeFn: func(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+		for result := range records {
+			if result.Err != nil {
+				return result.Err
+			}
+			written.Add(1)
+			result.Batch.Release()
+			// Emit the error only after the destination receives the first batch.
+			input <- source.RecordBatchResult{Err: errors.New("source failed during write")}
+		}
+		return nil
+	}}
+	err := Write(context.Background(), dest, input, destination.MultiTableWriteOptions{
+		TableConfigs: map[string]destination.TableWriteConfig{"items": {DestTable: "items"}},
+		CancelSource: func() {
+			cancellations.Add(1)
+			close(input)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "table items: source failed during write") {
+		t.Fatalf("Write() = %v, want table consumer to report source failure", err)
+	}
+	if written.Load() != 1 || releases.Load() != 1 || cancellations.Load() != 1 {
+		t.Fatalf("written=%d releases=%d cancellations=%d, want 1 each", written.Load(), releases.Load(), cancellations.Load())
+	}
+}
+
 func waitForRouter(t *testing.T, router *Router) {
 	t.Helper()
 	done := make(chan struct{})
