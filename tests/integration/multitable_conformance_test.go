@@ -627,6 +627,10 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				require.NoError(t, err)
 				_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (99, 'stale'); GRANT SELECT ON "+table+" TO PUBLIC")
 				require.NoError(t, err)
+				if name == "orders" {
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT orders_pkey; INSERT INTO "+table+" VALUES (99, 'duplicate stale row')")
+					require.NoError(t, err)
+				}
 				if withView {
 					_, err = db.ExecContext(ctx, "CREATE VIEW "+pqTable(destSchema, name+"_view")+" AS SELECT id, name FROM "+table)
 					require.NoError(t, err)
@@ -651,6 +655,9 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				var granted bool
 				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_class, LATERAL aclexplode(relacl) acl WHERE oid = $1::regclass AND acl.grantee = 0 AND acl.privilege_type = 'SELECT')`, table).Scan(&granted))
 				assert.True(t, granted, "explicit PUBLIC SELECT grant must survive full refresh")
+				var hasPrimaryKey bool
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
+				assert.True(t, hasPrimaryKey, "missing primary keys must be added after stale rows are removed")
 				if withView {
 					table = pqTable(destSchema, name+"_view")
 				}

@@ -531,7 +531,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			}
 			if useInPlace {
 				if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
-					Table: destTable, Schema: destination.DestinationTableSchema(ti.Schema), PrimaryKeys: ti.PrimaryKeys,
+					Table: destTable, Schema: destination.DestinationTableSchema(ti.Schema),
 				}); err != nil {
 					errChan <- fmt.Errorf("failed to prepare destination table %s: %w", ti.Name, err)
 					return

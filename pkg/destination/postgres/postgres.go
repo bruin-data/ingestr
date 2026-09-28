@@ -1162,6 +1162,24 @@ func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opt
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate target: %w", err)
 	}
+	if len(opts.PrimaryKeys) > 0 {
+		schemaName, tableName, err := d.resolveSchemaTable(ctx, tx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		actualKeys, err := postgresPrimaryKeyColumns(ctx, tx, schemaName, tableName)
+		if err != nil {
+			return fmt.Errorf("failed to check primary key: %w", err)
+		}
+		if len(actualKeys) == 0 {
+			// Old rows may contain duplicate keys, so add the constraint only
+			// after truncation, in the same transaction as the replacement.
+			alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quotePostgresTable(schemaName, tableName), strings.Join(quoteColumns(opts.PrimaryKeys), ", "))
+			if _, err := tx.Exec(ctx, alterSQL); err != nil {
+				return fmt.Errorf("failed to add primary key: %w", err)
+			}
+		}
+	}
 	if _, err := tx.Exec(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
 		return fmt.Errorf("failed to insert from staging: %w", err)

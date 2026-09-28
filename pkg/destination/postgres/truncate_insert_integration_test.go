@@ -46,8 +46,8 @@ func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
 	defer func() { _ = dest.Close(context.Background()) }()
 	require.NoError(t, dest.Exec(ctx, `
 		CREATE SCHEMA _bruin_staging;
-		CREATE TABLE public.events (id bigint PRIMARY KEY, value text NOT NULL);
-		INSERT INTO public.events VALUES (1, 'old');
+		CREATE TABLE public.events (id bigint, value text NOT NULL);
+		INSERT INTO public.events VALUES (1, 'old'), (1, 'old');
 		CREATE VIEW public.current_events AS SELECT id, value FROM public.events;
 		CREATE TABLE _bruin_staging.events (id bigint, value text);
 		INSERT INTO _bruin_staging.events VALUES (2, NULL);
@@ -71,6 +71,12 @@ func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
 	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.current_events`).Scan(&id, &value))
 	require.Equal(t, int64(1), id)
 	require.Equal(t, "old", value)
+	var count int64
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.current_events`).Scan(&count))
+	require.Equal(t, int64(2), count)
+	keys, err := postgresPrimaryKeyColumns(ctx, dest.pool, "public", "events")
+	require.NoError(t, err)
+	require.Empty(t, keys, "failed replacement must also roll back primary key creation")
 
 	require.NoError(t, dest.Exec(ctx, `TRUNCATE _bruin_staging.events; INSERT INTO _bruin_staging.events VALUES (2, 'new')`))
 	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
