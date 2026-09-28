@@ -17,7 +17,7 @@ func intervalRecord(t *testing.T, dt arrow.DataType, values string) arrow.Record
 	t.Helper()
 	pool := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	t.Cleanup(func() { pool.AssertSize(t, 0) })
-	arr, _, err := array.FromJSON(pool, dt, strings.NewReader(values), array.WithUseNumber())
+	arr, _, err := array.FromJSON(pool, dt, strings.NewReader(values))
 	require.NoError(t, err)
 	defer arr.Release()
 	return array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "id", Type: dt, Nullable: true}}, nil), []arrow.Array{arr}, int64(arr.Len()))

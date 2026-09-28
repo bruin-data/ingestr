@@ -8,12 +8,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -158,6 +166,64 @@ func TestDeleteInsertStrategy_RejectsNullKeysWithoutChangingTarget(t *testing.T)
 	for range 2 {
 		require.ErrorContains(t, pipeline.New(cfg).Run(t.Context()), "NULL")
 		validateDuckDBDeleteInsertResults(t, dbPath, "Rejected NULL-key batch", 1, map[int64]string{1: "original"})
+	}
+}
+
+func TestDeleteInsertStrategy_AdditionalBoundsReachDuckDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	for _, tc := range []struct {
+		name, sqlType, values string
+		dt                    arrow.DataType
+		keys                  [5]string
+	}{
+		{
+			name: "uint64", sqlType: "UBIGINT", dt: arrow.PrimitiveTypes.Uint64,
+			values: `[18446744073709551614,9223372036854775808]`,
+			keys:   [5]string{"9223372036854775807", "9223372036854775808", "9223372036854775809", "18446744073709551614", "18446744073709551615"},
+		},
+		{
+			name: "time64", sqlType: "TIME", dt: arrow.FixedWidthTypes.Time64us,
+			values: `["13:04:05.000007","02:03:04.000005"]`,
+			keys:   [5]string{"'02:03:04.000004'", "'02:03:04.000005'", "'05:00:00.000000'", "'13:04:05.000007'", "'13:04:05.000008'"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			dbPath := filepath.Join(t.TempDir(), "bounds.duckdb")
+			dest := duckdb.NewDuckDBDestination()
+			require.NoError(t, dest.Connect(ctx, "duckdb:///"+dbPath))
+			t.Cleanup(func() { require.NoError(t, dest.Close(context.Background())) })
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("CREATE TABLE main.events (id BIGINT, k %s, name VARCHAR); CREATE TABLE staged AS SELECT * FROM main.events", tc.sqlType)))
+			for i, key := range tc.keys {
+				require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO main.events VALUES (%d, %s, 'old-%d')", i+1, key, i+1)))
+			}
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO staged VALUES (2, %s, 'new-2'), (4, %s, 'new-4')", tc.keys[1], tc.keys[3])))
+
+			pool := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			t.Cleanup(func() { pool.AssertSize(t, 0) })
+			arr, _, err := array.FromJSON(pool, tc.dt, strings.NewReader(tc.values))
+			require.NoError(t, err)
+			batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "k", Type: tc.dt}}, nil), []arrow.Array{arr}, int64(arr.Len()))
+			arr.Release()
+			in := make(chan source.RecordBatchResult, 1)
+			in <- source.RecordBatchResult{Batch: batch}
+			close(in)
+			tracker := strategy.NewIntervalTracker("k")
+			for result := range tracker.Wrap(in) {
+				result.Batch.Release()
+			}
+			for range 2 {
+				require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+					StagingTable: "staged", TargetTable: "main.events", IncrementalKey: "k",
+					IntervalStart: tracker.Min, IntervalEnd: tracker.Max, Columns: []string{"id", "k", "name"},
+				}))
+				validateDuckDBDeleteInsertResults(t, dbPath, "Typed bounds preserve adjacent values", 4, map[int64]string{
+					1: "old-1", 2: "new-2", 4: "new-4", 5: "old-5",
+				})
+			}
+		})
 	}
 }
 
