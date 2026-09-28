@@ -2,12 +2,76 @@ package databricks
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/databricks/databricks-sdk-go"
+	dbsql "github.com/databricks/databricks-sdk-go/service/sql"
 )
+
+func TestMergeTableSQL(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		incrementalKey string
+		orderBy        string
+	}{
+		{name: "arbitrary row without incremental key", orderBy: "NULL"},
+		{name: "latest row with incremental key", incrementalKey: "updated`at", orderBy: "`updated``at` DESC"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			statements := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/2.0/sql/statements" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				var request dbsql.ExecuteStatementRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode statement: %v", err)
+					http.Error(w, "invalid request", http.StatusBadRequest)
+					return
+				}
+				statements <- request.Statement
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":{"state":"SUCCEEDED"}}`))
+			}))
+			defer server.Close()
+
+			client, err := databricks.NewWorkspaceClient(&databricks.Config{
+				Host: server.URL, Token: "test-token", AuthType: "pat",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dest := &DatabricksDestination{client: client, catalog: "main", httpPath: "/sql/1.0/warehouses/test"}
+			err = dest.MergeTable(context.Background(), destination.MergeOptions{
+				StagingTable: "scratch.orders_merge", TargetTable: "analytics.orders",
+				Columns: []string{"tenant", "order`id", "updated`at"}, PrimaryKeys: []string{"tenant", "order`id"},
+				IncrementalKey: tt.incrementalKey,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf("MERGE INTO `main`.`analytics`.`orders` AS target\n"+
+				"USING (SELECT `tenant`, `order``id`, `updated``at` FROM (SELECT `tenant`, `order``id`, `updated``at`, ROW_NUMBER() OVER (PARTITION BY `tenant`, `order``id` ORDER BY %s) AS __bruin_dedup_rn FROM `main`.`ingestr_staging`.`orders_merge`) AS _numbered WHERE __bruin_dedup_rn = 1) AS source\n"+
+				"ON target.`tenant` = source.`tenant` AND target.`order``id` = source.`order``id`\n"+
+				"WHEN MATCHED THEN\n  UPDATE SET target.`updated``at` = source.`updated``at`\n"+
+				"WHEN NOT MATCHED THEN\n  INSERT (`tenant`, `order``id`, `updated``at`)\n"+
+				"  VALUES (source.`tenant`, source.`order``id`, source.`updated``at`)", tt.orderBy)
+			statement := <-statements
+			if statement != want {
+				t.Fatalf("merge SQL =\n%s\nwant:\n%s", statement, want)
+			}
+		})
+	}
+}
 
 func TestMapDataTypeToDatabricks_SizedString(t *testing.T) {
 	tests := []struct {
@@ -49,14 +113,12 @@ func TestBuildDeleteInsertSQLUsesAtomicBlock(t *testing.T) {
 	if want := "DELETE FROM `main`.`analytics`.`orders` WHERE `updated_at` >= '2026-01-01' AND `updated_at` <= '2026-01-31'"; deleteSQL != want {
 		t.Fatalf("deleteSQL = %q, want %q", deleteSQL, want)
 	}
-	for _, want := range []string{
-		"INSERT INTO `main`.`analytics`.`orders` (`id`, `name`, `updated_at`)",
-		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `updated_at` DESC)",
-		"FROM `main`.`ingestr_staging`.`orders_di`",
-	} {
-		if !strings.Contains(insertSQL, want) {
-			t.Fatalf("insertSQL missing %q:\n%s", want, insertSQL)
-		}
+	wantInsert := "INSERT INTO `main`.`analytics`.`orders` (`id`, `name`, `updated_at`) " +
+		"SELECT `id`, `name`, `updated_at` FROM (SELECT `id`, `name`, `updated_at`, " +
+		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `updated_at` DESC) AS __bruin_dedup_rn " +
+		"FROM `main`.`ingestr_staging`.`orders_di`) AS _numbered WHERE __bruin_dedup_rn = 1"
+	if insertSQL != wantInsert {
+		t.Fatalf("insertSQL = %q, want %q", insertSQL, wantInsert)
 	}
 
 	wantAtomic := "BEGIN ATOMIC\n  " + deleteSQL + ";\n  " + insertSQL + ";\nEND;"
