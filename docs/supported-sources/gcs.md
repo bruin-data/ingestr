@@ -109,6 +109,8 @@ Example layouts:
 - `{table_name}/{load_id}.{file_id}.{ext}` - Organized by table name
 - `{table_name}.{ext}` - Single file per table
 
+`replace` clears all objects under the destination path before writing, including nested layouts; `append` preserves existing objects except matching filenames. Use a dedicated, non-empty destination path. See [blobstore replace and append semantics](./s3.md#replace-and-append) for permissions, partition boundaries, and failure behavior.
+
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:
 * `csv`: Comma Separated Values with headers
