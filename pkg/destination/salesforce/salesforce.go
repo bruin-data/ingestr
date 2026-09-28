@@ -59,7 +59,8 @@ type SalesforceDestination struct {
 	client      *httpclient.Client
 	instanceURL string
 	apiVersion  string
-	loadMethod  string
+	// defaultLoadMethod applies when the dest-table sets no load_method.
+	defaultLoadMethod string
 
 	// describes caches sObject describe results by lowercased object name.
 	mu        sync.Mutex
@@ -67,39 +68,18 @@ type SalesforceDestination struct {
 }
 
 func NewSalesforceDestination() *SalesforceDestination {
-	return &SalesforceDestination{describes: map[string]*sobjectDescribe{}}
+	return &SalesforceDestination{defaultLoadMethod: loadMethodBulk, describes: map[string]*sobjectDescribe{}}
 }
 
 func (d *SalesforceDestination) Schemes() []string {
 	return []string{"salesforce"}
 }
 
-func parseURI(uri string) (salesforceauth.Config, string, error) {
-	cfg, err := salesforceauth.ParseURI(uri)
-	if err != nil {
-		return cfg, "", err
-	}
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return cfg, "", fmt.Errorf("failed to parse salesforce URI: %w", err)
-	}
-	method := parsed.Query().Get("load_method")
-	switch method {
-	case "":
-		method = loadMethodBulk
-	case loadMethodREST, loadMethodBulk:
-	default:
-		return cfg, "", fmt.Errorf("invalid salesforce load_method %q: use %s or %s", method, loadMethodREST, loadMethodBulk)
-	}
-	return cfg, method, nil
-}
-
 func (d *SalesforceDestination) Connect(ctx context.Context, uri string) error {
-	cfg, loadMethod, err := parseURI(uri)
+	cfg, err := salesforceauth.ParseURI(uri)
 	if err != nil {
 		return err
 	}
-	d.loadMethod = loadMethod
 
 	client, err := salesforceauth.Login(ctx, cfg)
 	if err != nil {
@@ -125,7 +105,7 @@ func (d *SalesforceDestination) Connect(ctx context.Context, uri string) error {
 	if err := d.checkAPI(ctx); err != nil {
 		return err
 	}
-	config.Debug("[SALESFORCE DEST] Connected to %s (API %s, load_method=%s)", d.instanceURL, d.apiVersion, d.loadMethod)
+	config.Debug("[SALESFORCE DEST] Connected to %s (API %s)", d.instanceURL, d.apiVersion)
 	return nil
 }
 
@@ -167,6 +147,8 @@ type tableParams struct {
 	// require a field marked External ID; update and delete match via SOQL and
 	// accept any field.
 	ExternalID string `mapstructure:"external_id"`
+	// LoadMethod is bulk (Bulk API 2.0) or rest; empty uses the default, bulk.
+	LoadMethod string `mapstructure:"load_method"`
 }
 
 // shaper turns a source row into a Salesforce sObject Collections record.
@@ -199,6 +181,9 @@ type shaper struct {
 	sawSource atomic.Bool
 	// writeNulls sends JSON null for null cells to clear the field.
 	writeNulls bool
+	// loadMethod is the dest-table's load_method; empty until resolved to the
+	// destination default.
+	loadMethod string
 	// bulk buffers records into Bulk API 2.0 jobs under load_method=bulk; nil
 	// sends them through REST collections.
 	bulk *bulkJobs
@@ -322,6 +307,33 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 	if err != nil {
 		return nil, err
 	}
+	switch p.LoadMethod {
+	case "", loadMethodREST, loadMethodBulk:
+	default:
+		return nil, fmt.Errorf("salesforce: invalid load_method %q on the dest-table: use %s or %s", p.LoadMethod, loadMethodBulk, loadMethodREST)
+	}
+	sh, err := newShaper(path, p, strategy, primaryKeys, rejectMode, writeNulls)
+	if err != nil {
+		return nil, err
+	}
+	sh.loadMethod = p.LoadMethod
+	return sh, nil
+}
+
+// shaperFor parses the dest-table and falls back to the destination's default
+// load method.
+func (d *SalesforceDestination) shaperFor(table, strategy string, primaryKeys []string, rejectMode string, writeNulls bool) (*shaper, error) {
+	sh, err := parseShaper(table, strategy, primaryKeys, rejectMode, writeNulls)
+	if err != nil {
+		return nil, err
+	}
+	if sh.loadMethod == "" {
+		sh.loadMethod = d.defaultLoadMethod
+	}
+	return sh, nil
+}
+
+func newShaper(path string, p tableParams, strategy string, primaryKeys []string, rejectMode string, writeNulls bool) (*shaper, error) {
 	// Tolerate an optional schema qualifier ("salesforce.Contact" -> "Contact").
 	sobject := strings.TrimSpace(path)
 	if i := strings.LastIndex(sobject, "."); i >= 0 {
@@ -741,7 +753,7 @@ func reportWithWriteErr(sh *shaper, rejects *rejectionLog, writeErr error) error
 func (d *SalesforceDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	// Errors return without draining: executeReverseETL cancels the source read
 	// first, so a failed run doesn't wait for the whole extract.
-	sh, err := parseShaper(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
+	sh, err := d.shaperFor(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
 		return err
 	}
@@ -793,13 +805,13 @@ func (d *SalesforceDestination) Write(ctx context.Context, records <-chan source
 }
 
 func (d *SalesforceDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	// Bulk jobs run in parallel server-side, so one client-side writer suffices.
-	if d.loadMethod == loadMethodBulk {
-		return d.Write(ctx, records, opts)
-	}
-	sh, err := parseShaper(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
+	sh, err := d.shaperFor(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
 		return err
+	}
+	// Bulk jobs run in parallel server-side, so one client-side writer suffices.
+	if sh.loadMethod == loadMethodBulk {
+		return d.Write(ctx, records, opts)
 	}
 	d.loadFieldMetadata(ctx, sh)
 
@@ -1912,7 +1924,7 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 	if opts.Schema == nil {
 		return nil
 	}
-	sh, err := parseShaper(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), "", false)
+	sh, err := d.shaperFor(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), "", false)
 	if err != nil {
 		return err
 	}
@@ -1995,7 +2007,7 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 		if !fieldWritable(f, sh) {
 			notWritable = append(notWritable, name)
 		}
-		if f.Type == "base64" && d.loadMethod == loadMethodBulk {
+		if f.Type == "base64" && sh.loadMethod == loadMethodBulk {
 			blob = append(blob, name)
 		}
 	}
@@ -2012,7 +2024,7 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 		return fmt.Errorf("salesforce: source columns are read-only on %q: [%s]; drop them from the source (e.g. --sql-exclude-columns) and re-run", sh.sobject, strings.Join(notWritable, ", "))
 	}
 	if len(blob) > 0 {
-		return fmt.Errorf("salesforce: binary fields on %q need load_method=rest on the destination URI; Bulk API 2.0 can't load them: [%s]. If you don't write them, drop them from the source instead", sh.sobject, strings.Join(blob, ", "))
+		return fmt.Errorf("salesforce: binary fields on %q need load_method=rest on the dest-table; Bulk API 2.0 can't load them: [%s]. If you don't write them, drop them from the source instead", sh.sobject, strings.Join(blob, ", "))
 	}
 	return nil
 }

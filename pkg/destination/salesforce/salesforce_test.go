@@ -77,9 +77,10 @@ func newDest(t *testing.T, cap *capture, handler handlerFunc) (*SalesforceDestin
 	t.Cleanup(server.Close)
 
 	d := NewSalesforceDestination()
-	if err := d.Connect(context.Background(), "salesforce://?access_token=tok&load_method=rest&domain="+server.URL); err != nil {
+	if err := d.Connect(context.Background(), "salesforce://?access_token=tok&domain="+server.URL); err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
+	d.defaultLoadMethod = loadMethodREST
 	t.Cleanup(func() { _ = d.Close(context.Background()) })
 	return d, server
 }
@@ -897,7 +898,7 @@ func TestPrepareTableRejectsBlobFieldsUnderBulk(t *testing.T) {
 			}
 			return false
 		})
-		d.loadMethod = method
+		d.defaultLoadMethod = method
 		err := d.PrepareTable(context.Background(), destination.PrepareOptions{
 			Table:    "ContentVersion",
 			Strategy: "append",
@@ -1488,20 +1489,48 @@ func newBulkDest(t *testing.T, cap *capture, fb *fakeBulk, extra handlerFunc) *S
 		}
 		return bulk(w, r, body)
 	})
-	d.loadMethod = loadMethodBulk
+	d.defaultLoadMethod = loadMethodBulk
 	return d
 }
 
-func TestParseURILoadMethod(t *testing.T) {
-	base := "salesforce://?access_token=tok&domain=example.my.salesforce.com"
-	for uri, want := range map[string]string{base: loadMethodBulk, base + "&load_method=rest": loadMethodREST, base + "&load_method=bulk": loadMethodBulk} {
-		_, got, err := parseURI(uri)
-		if err != nil || got != want {
-			t.Fatalf("parseURI(%q) = %q, %v; want %q", uri, got, err, want)
+func TestLoadMethodIsADestTableParam(t *testing.T) {
+	d := NewSalesforceDestination()
+	for table, want := range map[string]string{
+		"Contact":                                     loadMethodBulk,
+		"Contact?load_method=bulk":                    loadMethodBulk,
+		"Contact?load_method=rest":                    loadMethodREST,
+		"Contact?external_id=Ext__c&load_method=rest": loadMethodREST,
+	} {
+		sh, err := d.shaperFor(table, "update", nil, "", false)
+		if err != nil || sh.loadMethod != want {
+			t.Fatalf("shaperFor(%q) = %v, %v; want %q", table, sh, err, want)
 		}
 	}
-	if _, _, err := parseURI(base + "&load_method=bulk2"); err == nil || !strings.Contains(err.Error(), "load_method") {
+	if _, err := parseShaper("Contact?load_method=bulk2", "append", nil, "", false); err == nil || !strings.Contains(err.Error(), "invalid load_method") {
 		t.Fatalf("error = %v, want an invalid load_method error", err)
+	}
+}
+
+func TestDestTableLoadMethodOverridesDefault(t *testing.T) {
+	var cap capture
+	d := newBulkDest(t, &cap, &fakeBulk{}, func(w http.ResponseWriter, r *http.Request, body string) bool {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/composite/sobjects") {
+			successResults(w, countRecords(t, body), "003")
+			return true
+		}
+		return false
+	})
+	records := stringBatch(t, map[string][]string{"LastName": {"x"}}, []string{"LastName"})
+	if err := d.Write(context.Background(), records, writeOpts("Contact?load_method=rest", "append", nil)); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if reqs := cap.byPath("/composite/sobjects"); len(reqs) != 1 {
+		t.Fatalf("got %d collections request(s), want the rest load the dest-table asked for", len(reqs))
+	}
+	for _, r := range cap.all() {
+		if strings.Contains(r.path, "/jobs/ingest") {
+			t.Fatalf("load_method=rest must not create a bulk job: %s %s", r.method, r.path)
+		}
 	}
 }
 
@@ -2235,7 +2264,8 @@ func TestBulkIsTheDefaultLoadMethod(t *testing.T) {
 	if err := d.Connect(context.Background(), "salesforce://?access_token=tok&domain="+server.URL); err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
-	if d.loadMethod != loadMethodBulk {
-		t.Fatalf("loadMethod = %q, want bulk when the URI sets none", d.loadMethod)
+	sh, err := d.shaperFor("Contact", "append", nil, "", false)
+	if err != nil || sh.loadMethod != loadMethodBulk {
+		t.Fatalf("loadMethod = %v, %v; want bulk when the dest-table sets none", sh, err)
 	}
 }

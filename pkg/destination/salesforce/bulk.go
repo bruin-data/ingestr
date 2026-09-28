@@ -61,14 +61,14 @@ type bulkBuffer struct {
 	size    int
 }
 
-// useBulk switches the shaper to Bulk API 2.0, the default unless the URI sets
-// load_method=rest.
+// useBulk switches the shaper to Bulk API 2.0, the default unless the dest-table
+// sets load_method=rest.
 func (d *SalesforceDestination) useBulk(sh *shaper) error {
-	if d.loadMethod != loadMethodBulk {
+	if sh.loadMethod != loadMethodBulk {
 		return nil
 	}
 	if sh.failFast() {
-		return fmt.Errorf("salesforce: --reject-mode fail_fast needs load_method=rest on the destination URI; the default bulk load reports rejected records only after each job finishes, so use fail or skip with it")
+		return fmt.Errorf("salesforce: --reject-mode fail_fast needs load_method=rest on the dest-table; the default bulk load reports rejected records only after each job finishes, so use fail or skip with it")
 	}
 	sh.bulk = &bulkJobs{byAction: map[string]*bulkBuffer{}}
 	return nil
