@@ -46,7 +46,10 @@ func TestWriteTypedListPreservesValues(t *testing.T) {
 	dest := NewPostgresDestination()
 	require.NoError(t, dest.Connect(ctx, fmt.Sprintf("postgres://testuser:testpass@%s:%s/testdb?sslmode=disable", host, port.Port())))
 	defer func() { _ = dest.Close(context.Background()) }()
-	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "items", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true}}}
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "items", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true},
+		{Name: "uuids", DataType: schema.TypeArray, ArrayType: schema.TypeUUID, Nullable: true},
+	}}
 	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{Table: "public.typed_lists", Schema: tableSchema}))
 
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
@@ -62,7 +65,17 @@ func TestWriteTypedListPreservesValues(t *testing.T) {
 	b.AppendNull()
 	values := b.NewArray()
 	defer values.Release()
-	record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "items", Type: values.DataType(), Nullable: true}}, nil), []arrow.Array{values}, 3)
+	uuidBuilder := array.NewListBuilder(mem, arrow.BinaryTypes.String)
+	defer uuidBuilder.Release()
+	uuidBuilder.Append(true)
+	uuidChild := uuidBuilder.ValueBuilder().(*array.StringBuilder)
+	uuidChild.AppendNull()
+	uuidChild.Append("01234567-89ab-cdef-0123-456789abcdef")
+	uuidBuilder.Append(true)
+	uuidBuilder.AppendNull()
+	uuids := uuidBuilder.NewArray()
+	defer uuids.Release()
+	record := array.NewRecordBatch(tableSchema.ToArrowSchema(), []arrow.Array{values, uuids}, 3)
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Batch: record}
 	close(records)
@@ -73,6 +86,14 @@ func TestWriteTypedListPreservesValues(t *testing.T) {
 		count(*) FILTER (WHERE items = ARRAY[7,NULL,-2]::bigint[]),
 		count(*) FILTER (WHERE items = ARRAY[]::bigint[]),
 		count(*) FILTER (WHERE items IS NULL)
+		FROM public.typed_lists`).Scan(&populated, &empty, &nulls))
+	require.Equal(t, 1, populated)
+	require.Equal(t, 1, empty)
+	require.Equal(t, 1, nulls)
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE uuids = ARRAY[NULL,'01234567-89ab-cdef-0123-456789abcdef']::uuid[]),
+		count(*) FILTER (WHERE uuids = ARRAY[]::uuid[]),
+		count(*) FILTER (WHERE uuids IS NULL)
 		FROM public.typed_lists`).Scan(&populated, &empty, &nulls))
 	require.Equal(t, 1, populated)
 	require.Equal(t, 1, empty)
