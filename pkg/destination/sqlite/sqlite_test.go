@@ -798,6 +798,12 @@ func TestWriteListValues(t *testing.T) {
 			want:  []sql.NullString{{String: `[7,null,-2]`, Valid: true}, {}, {String: `[]`, Valid: true}},
 		},
 		{
+			name:  "strings",
+			typ:   arrow.ListOf(arrow.BinaryTypes.String),
+			input: `[["say \"hello\"","a\\b","line\nbreak",null,""],null,[]]`,
+			want:  []sql.NullString{{String: `["say \"hello\"","a\\b","line\nbreak",null,""]`, Valid: true}, {}, {String: `[]`, Valid: true}},
+		},
+		{
 			name:  "nested",
 			typ:   arrow.ListOf(arrow.ListOf(arrow.FixedWidthTypes.Boolean)),
 			input: `[[[true,null,false],null,[]],null,[]]`,
