@@ -255,6 +255,67 @@ func TestQuickBooksPipeline(t *testing.T) {
 				},
 			},
 		},
+		{
+			SourceTable:      "purchases",
+			DestTable:        "main.quickbooks_purchases",
+			KeyColumn:        "id",
+			ExpectedRowCount: 35,
+			ExpectedSchema: []schema.Column{
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "lastupdatedtime", DataType: schema.TypeTimestampTZ},
+				{Name: "credit", DataType: schema.TypeBoolean},
+				{Name: "doc_number", DataType: schema.TypeString},
+				{Name: "payment_type", DataType: schema.TypeString},
+				{Name: "print_status", DataType: schema.TypeString},
+				{Name: "private_note", DataType: schema.TypeString},
+				{Name: "sync_token", DataType: schema.TypeString},
+				{Name: "total_amt", DataType: schema.TypeFloat64},
+				{Name: "txn_date", DataType: schema.TypeDate},
+				{Name: "domain", DataType: schema.TypeString},
+				{Name: "sparse", DataType: schema.TypeBoolean},
+			},
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "139",
+					Fields: map[string]any{
+						"payment_type": "CreditCard",
+						"total_amt":    900.0,
+						"credit":       true,
+						"private_note": "Monthly Payment",
+						"sync_token":   "0",
+					},
+				},
+			},
+		},
+		{
+			SourceTable:      "bills",
+			DestTable:        "main.quickbooks_bills",
+			KeyColumn:        "id",
+			ExpectedRowCount: 15,
+			ExpectedSchema: []schema.Column{
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "lastupdatedtime", DataType: schema.TypeTimestampTZ},
+				{Name: "balance", DataType: schema.TypeFloat64},
+				{Name: "due_date", DataType: schema.TypeDate},
+				{Name: "private_note", DataType: schema.TypeString},
+				{Name: "sync_token", DataType: schema.TypeString},
+				{Name: "total_amt", DataType: schema.TypeFloat64},
+				{Name: "txn_date", DataType: schema.TypeDate},
+				{Name: "domain", DataType: schema.TypeString},
+				{Name: "sparse", DataType: schema.TypeBoolean},
+			},
+			Rows: []testutil.ExpectedRow{
+				{
+					ID: "1",
+					Fields: map[string]any{
+						"total_amt":    2000.0,
+						"balance":      0.0,
+						"private_note": "Opening Balance",
+						"sync_token":   "1",
+					},
+				},
+			},
+		},
 	}
 
 	for _, exp := range expectations {
