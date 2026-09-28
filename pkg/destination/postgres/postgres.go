@@ -29,6 +29,10 @@ import (
 type PostgresDestination struct {
 	pool *pgxpool.Pool
 	uri  string
+
+	// DefaultSchema bypasses PostgreSQL catalog resolution for compatible
+	// destinations that use a fixed schema for unqualified table names.
+	DefaultSchema string
 }
 
 type postgresStatementDescriber interface {
@@ -827,6 +831,9 @@ func (d *PostgresDestination) resolveSchemaTable(ctx context.Context, queryer po
 	}
 	if len(parts) == 2 {
 		return parts[0], parts[1], nil
+	}
+	if d.DefaultSchema != "" {
+		return d.DefaultSchema, parts[0], nil
 	}
 
 	var schemaName, tableName string

@@ -23,7 +23,9 @@ type RedshiftDestination struct {
 }
 
 func NewRedshiftDestination() *RedshiftDestination {
-	return &RedshiftDestination{PostgresDestination: postgres.NewPostgresDestination()}
+	// Redshift does not support the to_regclass/parse_ident resolver. Preserve
+	// its public-schema default instead of issuing PostgreSQL catalog queries.
+	return &RedshiftDestination{PostgresDestination: &postgres.PostgresDestination{DefaultSchema: "public"}}
 }
 
 func (d *RedshiftDestination) Schemes() []string {
