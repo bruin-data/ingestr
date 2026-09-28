@@ -314,16 +314,27 @@ func TestAllDialects_TypeName_Decimal(t *testing.T) {
 func TestAllDialects_TypeName_DecimalDefault(t *testing.T) {
 	col := schema.Column{Name: "amount", DataType: schema.TypeDecimal, Precision: 0, Scale: 0}
 
+	expected := map[string]string{
+		"athena": "DECIMAL(38,9)", "bigquery": "NUMERIC", "cassandra": "decimal",
+		"clickhouse": "Decimal(38,9)", "cratedb": "NUMERIC", "duckdb": "DECIMAL(38,9)",
+		"fabric": "DECIMAL(38,0)", "hana": "DECIMAL(38,0)", "maxcompute": "DECIMAL(38,9)",
+		"mssql": "DECIMAL(38,0)", "mysql": "DECIMAL(38,9)", "oracle": "NUMBER(38,0)",
+		"postgres": "NUMERIC", "redshift": "DECIMAL(38,9)", "snowflake": "NUMBER(38,9)",
+		"sqlite": "REAL", "synapse": "DECIMAL(38,9)", "trino": "DECIMAL(38,9)",
+	}
 	for _, dt := range allDialects() {
 		t.Run(dt.Scheme, func(t *testing.T) {
-			assert.NotEmpty(t, dt.Dialect.TypeName(col))
+			require.Contains(t, expected, dt.Scheme)
+			assert.Equal(t, expected[dt.Scheme], dt.Dialect.TypeName(col))
 		})
 	}
 }
 
-func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
+func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 	types := []schema.DataType{
+		schema.TypeUnknown,
 		schema.TypeBoolean,
+		schema.TypeInt8,
 		schema.TypeInt16,
 		schema.TypeInt32,
 		schema.TypeInt64,
@@ -342,14 +353,113 @@ func TestAllDialects_TypeName_NonEmptyForAllTypes(t *testing.T) {
 		schema.TypeArray,
 	}
 
+	// Each row follows types above. Decimal uses (18,4); arrays use Int64.
+	// These are dialect DDL contracts, not a promise of lossless round trips:
+	// Fabric/HANA have no timezone-bearing column type, and Synapse's clustered
+	// columnstore tables cannot use NVARCHAR(MAX) for JSON/array text.
+	expected := map[string][]string{
+		"athena": {
+			"VARCHAR", "BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "REAL", "DOUBLE", "DECIMAL(18,4)",
+			"VARCHAR", "VARBINARY", "DATE", "TIME(6)", "TIMESTAMP(6)", "TIMESTAMP(6) WITH TIME ZONE", "VARCHAR", "JSON", "UUID", "ARRAY(BIGINT)",
+		},
+		"bigquery": {
+			"STRING", "BOOL", "INT64", "INT64", "INT64", "INT64", "FLOAT64", "FLOAT64", "NUMERIC(18,4)",
+			"STRING", "BYTES", "DATE", "TIME", "DATETIME", "TIMESTAMP", "STRING", "JSON", "STRING", "ARRAY<INT64>",
+		},
+		"cassandra": {
+			"text", "boolean", "tinyint", "smallint", "int", "bigint", "float", "double", "decimal",
+			"text", "blob", "date", "time", "timestamp", "timestamp", "duration", "text", "uuid", "list<bigint>",
+		},
+		"clickhouse": {
+			"String", "Bool", "Int8", "Int16", "Int32", "Int64", "Float32", "Float64", "Decimal(18,4)",
+			"String", "String", "Date", "String", "DateTime64(6)", "DateTime64(6, 'UTC')", "String", "String", "UUID", "Array(Int64)",
+		},
+		"cratedb": {
+			"TEXT", "BOOLEAN", "BIGINT", "BIGINT", "BIGINT", "BIGINT", "DOUBLE PRECISION", "DOUBLE PRECISION", "NUMERIC(18,4)",
+			"TEXT", "TEXT", "TIMESTAMP WITHOUT TIME ZONE", "TEXT", "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP WITH TIME ZONE", "TEXT", "TEXT", "TEXT", "ARRAY(BIGINT)",
+		},
+		"duckdb": {
+			"VARCHAR", "BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "REAL", "DOUBLE", "DECIMAL(18,4)",
+			"VARCHAR", "BLOB", "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL", "JSON", "UUID", "BIGINT[]",
+		},
+		"fabric": {
+			"VARCHAR(MAX)", "BIT", "SMALLINT", "SMALLINT", "INT", "BIGINT", "REAL", "FLOAT", "DECIMAL(18,4)",
+			"VARCHAR(MAX)", "VARBINARY(MAX)", "DATE", "TIME(6)", "DATETIME2(6)", "DATETIME2(6)", "VARCHAR(255)", "VARCHAR(MAX)", "UNIQUEIDENTIFIER", "VARCHAR(MAX)",
+		},
+		"hana": {
+			"NCLOB", "BOOLEAN", "SMALLINT", "SMALLINT", "INTEGER", "BIGINT", "REAL", "DOUBLE", "DECIMAL(18,4)",
+			"NCLOB", "BLOB", "DATE", "TIME", "TIMESTAMP", "TIMESTAMP", "NVARCHAR(255)", "NCLOB", "NVARCHAR(36)", "NCLOB",
+		},
+		"maxcompute": {
+			"STRING", "BOOLEAN", "TINYINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL(18,4)",
+			"STRING", "BINARY", "DATE", "STRING", "DATETIME", "TIMESTAMP", "STRING", "STRING", "STRING", "STRING",
+		},
+		"mssql": {
+			"NVARCHAR(MAX)", "BIT", "SMALLINT", "SMALLINT", "INT", "BIGINT", "REAL", "FLOAT", "DECIMAL(18,4)",
+			"NVARCHAR(MAX)", "VARBINARY(MAX)", "DATE", "TIME(6)", "DATETIME2(6)", "DATETIMEOFFSET(6)", "NVARCHAR(255)", "NVARCHAR(MAX)", "UNIQUEIDENTIFIER", "NVARCHAR(MAX)",
+		},
+		"mysql": {
+			"TEXT", "TINYINT(1)", "TINYINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL(18,4)",
+			"TEXT", "BLOB", "DATE", "TIME(6)", "DATETIME(6)", "TIMESTAMP(6)", "VARCHAR(255)", "JSON", "VARCHAR(36)", "JSON",
+		},
+		"oracle": {
+			"CLOB", "NUMBER(1,0)", "NUMBER(3,0)", "NUMBER(5,0)", "NUMBER(10,0)", "NUMBER(19,0)", "BINARY_FLOAT", "BINARY_DOUBLE", "NUMBER(18,4)",
+			"CLOB", "BLOB", "DATE", "VARCHAR2(32 CHAR)", "TIMESTAMP(6)", "TIMESTAMP(6) WITH TIME ZONE", "VARCHAR2(255 CHAR)", "CLOB", "VARCHAR2(36 CHAR)", "CLOB",
+		},
+		"postgres": {
+			"TEXT", "BOOLEAN", "SMALLINT", "SMALLINT", "INTEGER", "BIGINT", "REAL", "DOUBLE PRECISION", "NUMERIC(18,4)",
+			"TEXT", "BYTEA", "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL", "JSONB", "UUID", "BIGINT[]",
+		},
+		"redshift": {
+			"VARCHAR(65535)", "BOOLEAN", "SMALLINT", "SMALLINT", "INTEGER", "BIGINT", "REAL", "DOUBLE PRECISION", "DECIMAL(18,4)",
+			"VARCHAR(65535)", "VARCHAR(65535)", "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "VARCHAR(255)", "SUPER", "VARCHAR(36)", "SUPER",
+		},
+		"snowflake": {
+			"VARCHAR", "BOOLEAN", "SMALLINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "NUMBER(18,4)",
+			"VARCHAR", "BINARY", "DATE", "TIME", "TIMESTAMP_NTZ", "TIMESTAMP_TZ", "VARCHAR", "VARIANT", "VARCHAR(36)", "ARRAY",
+		},
+		"sqlite": {
+			"TEXT", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "REAL", "REAL", "REAL",
+			"TEXT", "BLOB", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "JSON", "TEXT", "TEXT",
+		},
+		"synapse": {
+			"NVARCHAR(4000)", "BIT", "SMALLINT", "SMALLINT", "INT", "BIGINT", "REAL", "FLOAT", "DECIMAL(18,4)",
+			"NVARCHAR(4000)", "VARBINARY(8000)", "DATE", "TIME(7)", "DATETIME2(6)", "DATETIMEOFFSET(6)", "NVARCHAR(255)", "NVARCHAR(4000)", "UNIQUEIDENTIFIER", "NVARCHAR(4000)",
+		},
+		"trino": {
+			"VARCHAR", "BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "REAL", "DOUBLE", "DECIMAL(18,4)",
+			"VARCHAR", "VARBINARY", "DATE", "TIME(6)", "TIMESTAMP(6)", "TIMESTAMP(6) WITH TIME ZONE", "VARCHAR", "VARCHAR", "UUID", "ARRAY(BIGINT)",
+		},
+	}
+
+	require.Len(t, expected, len(dialectsByScheme()), "every dialect needs an expected mapping row")
 	for _, dt := range allDialects() {
 		t.Run(dt.Scheme, func(t *testing.T) {
-			for _, dataType := range types {
-				col := schema.Column{Name: "test", DataType: dataType, Precision: 10, Scale: 2}
-				assert.NotEmptyf(t, dt.Dialect.TypeName(col), "type %s should produce non-empty type name", dataType.String())
+			require.Len(t, expected[dt.Scheme], len(types), "every type needs an expected mapping")
+			for i, dataType := range types {
+				t.Run(dataType.String(), func(t *testing.T) {
+					col := schema.Column{Name: "test", DataType: dataType, Precision: 18, Scale: 4, ArrayType: schema.TypeInt64}
+					assert.Equal(t, expected[dt.Scheme][i], dt.Dialect.TypeName(col))
+				})
 			}
-			// String with max length must also resolve.
-			assert.NotEmpty(t, dt.Dialect.TypeName(schema.Column{Name: "v", DataType: schema.TypeString, MaxLength: 255}))
+		})
+	}
+}
+
+func TestAllDialects_TypeName_StringArray(t *testing.T) {
+	expected := map[string]string{
+		"athena": "ARRAY(VARCHAR)", "bigquery": "ARRAY<STRING>", "cassandra": "list<text>",
+		"clickhouse": "Array(String)", "cratedb": "ARRAY(TEXT)", "duckdb": "VARCHAR[]",
+		"fabric": "VARCHAR(MAX)", "hana": "NCLOB", "maxcompute": "STRING",
+		"mssql": "NVARCHAR(MAX)", "mysql": "JSON", "oracle": "CLOB",
+		"postgres": "TEXT[]", "redshift": "SUPER", "snowflake": "ARRAY",
+		"sqlite": "TEXT", "synapse": "NVARCHAR(4000)", "trino": "ARRAY(VARCHAR)",
+	}
+	for _, dt := range allDialects() {
+		t.Run(dt.Scheme, func(t *testing.T) {
+			require.Contains(t, expected, dt.Scheme)
+			col := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeString}
+			assert.Equal(t, expected[dt.Scheme], dt.Dialect.TypeName(col))
 		})
 	}
 }
@@ -362,6 +472,7 @@ func TestAllDialects_TypeName_SizedString(t *testing.T) {
 	expected := map[string]string{
 		"postgres":   "VARCHAR(50)",
 		"mysql":      "VARCHAR(50)",
+		"fabric":     "VARCHAR(50)",
 		"mssql":      "NVARCHAR(50)",
 		"synapse":    "NVARCHAR(50)",
 		"snowflake":  "VARCHAR(50)",

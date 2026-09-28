@@ -83,7 +83,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeTimestamp:
 		return "DATETIME(6)"
 	case schema.TypeTimestampTZ:
-		return "DATETIME(6)"
+		return "TIMESTAMP(6)"
 	case schema.TypeInterval:
 		return "VARCHAR(255)"
 	case schema.TypeJSON:
