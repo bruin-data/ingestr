@@ -528,10 +528,11 @@ func TestClickHouseDestination_SCD2NullTransitions(t *testing.T) {
 
 	for _, joinUseNulls := range []int{0, 1} {
 		t.Run(fmt.Sprintf("join_use_nulls=%d", joinUseNulls), func(t *testing.T) {
+			ctx := clickhouse.Context(t.Context(), clickhouse.WithSettings(clickhouse.Settings{"join_use_nulls": joinUseNulls}))
 			dest := chdest.NewClickHouseDestination()
-			testURI := fmt.Sprintf("%s?join_use_nulls=%d", uri, joinUseNulls)
-			require.NoError(t, dest.Connect(ctx, testURI))
+			require.NoError(t, dest.Connect(ctx, uri))
 			defer func() { _ = dest.Close(context.Background()) }()
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("SELECT throwIf(getSetting('join_use_nulls') != %d)", joinUseNulls)))
 			target := fmt.Sprintf("scd2_target_%d", joinUseNulls)
 			stage := fmt.Sprintf("scd2_stage_%d", joinUseNulls)
 			for _, table := range []string{target, stage} {
@@ -555,7 +556,7 @@ _scd_valid_from DateTime64(6), _scd_valid_to Nullable(DateTime64(6)), _scd_is_cu
 				PrimaryKeys: []string{"tenant", "id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 123456000, time.UTC),
 			}))
 
-			opts, err := clickhouse.ParseDSN(testURI)
+			opts, err := clickhouse.ParseDSN(uri)
 			require.NoError(t, err)
 			db := clickhouse.OpenDB(opts)
 			defer func() { _ = db.Close() }()
