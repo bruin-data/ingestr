@@ -132,6 +132,8 @@ The other tables always load in full and ignore the interval.
 
 ingestr can write user profiles and events into CleverTap through its [Upload API](https://developer.clevertap.com/docs/upload-user-profiles-api). Each source row is sent as one profile or event record, and rows are uploaded in bulk — up to 1000 records per request.
 
+Only `append` and `replace` are supported. Both upload the selected rows; `replace` does not delete existing CleverTap data. `update`, `delete`, `merge`, `delete+insert`, and `scd2` are rejected before uploading: this destination does not implement update-only writes, record deletion, or reconciliation.
+
 ## URI format
 
 ```
@@ -170,7 +172,7 @@ ingestr ingest \
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `id_type=objectId` sends each identifier value as an `objectId`. |
 
 Strategy:
-- **Always merged on CleverTap's side** — profiles are upserted by identity, so whichever strategy you run, re-sending a user updates their attributes instead of creating a duplicate.
+- **Always merged on CleverTap's side** — with either supported strategy, profiles are upserted by identity: re-sending a user updates their attributes, and a missing identity creates a new profile.
 - **No interval** — with no `--incremental-key`, the whole table is re-sent each run. Fine for small user bases.
 - **`--incremental-key`** (such as `updated_at`) with **`--interval-start`/`--interval-end`** — sends only the rows in that window instead of the whole table. Use this for large user bases.
 
@@ -196,7 +198,7 @@ ingestr ingest \
 | `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
 
 Strategy:
-- **Always appended on CleverTap's side** — whichever strategy you run, each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate.
+- **Always appended on CleverTap's side** — with either supported strategy, each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate.
 - **`--incremental-key`** (usually the same column as `ts`) with **`--interval-start`/`--interval-end`** — uploads only the events in that window, so you control exactly which events are sent each run.
 
 > [!NOTE]
@@ -204,3 +206,5 @@ Strategy:
 
 > [!NOTE]
 > CleverTap accepts up to 1000 records per request and limits uploads to 3 concurrent requests per account; ingestr batches and rate-limits accordingly.
+
+Uploads retry HTTP 429 responses up to three times. HTTP 5xx and transport errors are not retried, since replaying events or profile operators could apply the same change twice. Exhausted retries, HTTP errors, and API-level `status=fail` responses fail the run even with `--reject-mode=skip`.

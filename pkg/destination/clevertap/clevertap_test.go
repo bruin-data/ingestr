@@ -15,8 +15,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -457,6 +460,129 @@ func TestStrategySupport(t *testing.T) {
 	assert.False(t, d.SupportsDeleteInsertStrategy())
 	assert.False(t, d.SupportsSCD2Strategy())
 	assert.False(t, d.SupportsAtomicSwap())
+}
+
+func TestUnsupportedStrategiesNeverUpload(t *testing.T) {
+	for _, name := range []string{"update", "delete", "merge", "delete+insert", "scd2", "unknown"} {
+		for _, entry := range []string{"prepare", "write", "parallel"} {
+			t.Run(name+"/"+entry, func(t *testing.T) {
+				server, bodies := newUploadServer(t)
+				d := connectTestDestination(t, server.URL)
+				records := make(chan source.RecordBatchResult, 1)
+				records <- source.RecordBatchResult{Batch: profileBatch()}
+				close(records)
+				defer drainRecords(records)
+				opts := destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"email"}, Strategy: name}
+				var err error
+				switch entry {
+				case "prepare":
+					err = d.PrepareTable(context.Background(), destination.PrepareOptions{Strategy: name})
+				case "write":
+					err = d.Write(context.Background(), records, opts)
+				case "parallel":
+					err = d.WriteParallel(context.Background(), records, opts)
+				}
+				require.ErrorContains(t, err, "strategy "+strconv.Quote(name)+" is not supported for clevertap")
+				assert.Empty(t, *bodies)
+			})
+		}
+	}
+}
+
+type strategySource struct {
+	source.SourceTable
+	reads int
+}
+
+func (s *strategySource) Read(context.Context, source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	s.reads++
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: profileBatch()}
+	close(records)
+	return records, nil
+}
+
+func TestProductionStrategies(t *testing.T) {
+	for _, st := range []strategy.WriteStrategy{
+		&strategy.UpdateStrategy{}, &strategy.DeleteStrategy{},
+		&strategy.AppendStrategy{}, &strategy.ReplaceStrategy{},
+	} {
+		for _, table := range []string{"profiles", "events?event_name=Charged"} {
+			t.Run(string(st.Name())+"/"+table, func(t *testing.T) {
+				server, bodies := newUploadServer(t)
+				d := connectTestDestination(t, server.URL)
+				src := &strategySource{}
+				job := &strategy.IngestionJob{
+					Config: &config.IngestConfig{DestTable: table},
+					Table:  src, Destination: d,
+					Schema: &schema.TableSchema{PrimaryKeys: []string{"email"}},
+				}
+				err := st.Execute(context.Background(), job)
+				if st.Name() == config.StrategyUpdate || st.Name() == config.StrategyDelete {
+					require.ErrorContains(t, err, "failed to prepare table")
+					assert.Zero(t, src.reads)
+					assert.Empty(t, *bodies)
+				} else {
+					require.NoError(t, err)
+					assert.Equal(t, 1, src.reads)
+					require.Len(t, *bodies, 1)
+					assert.Len(t, (*bodies)[0].D, 2)
+				}
+			})
+		}
+	}
+}
+
+func TestUploadFailures(t *testing.T) {
+	for _, table := range []string{"profiles", "events?event_name=Charged"} {
+		for _, tc := range []struct {
+			name    string
+			status  int
+			body    string
+			recover bool
+			calls   int
+			wantErr string
+		}{
+			{"rate limit recovers", 429, `{"status":"fail","error":"rate limited"}`, true, 2, ""},
+			{"rate limit exhausted", 429, `{"status":"fail","error":"rate limited"}`, false, 4, "status 429"},
+			{"server error", 500, `{"status":"fail","error":"internal error"}`, false, 1, "status 500"},
+			{"unavailable", 503, `{"status":"fail","error":"Please come back later"}`, false, 1, "status 503"},
+			{"API failure", 200, `{"status":"fail","error":"Invalid account"}`, false, 1, "clevertap upload failed: Invalid account"},
+		} {
+			t.Run(table+"/"+tc.name, func(t *testing.T) {
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					assert.Equal(t, uploadEndpoint, r.URL.Path)
+					if tc.recover && calls > 1 {
+						_, _ = io.WriteString(w, `{"status":"success","processed":2}`)
+						return
+					}
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.body)
+				}))
+				t.Cleanup(server.Close)
+				d := connectTestDestination(t, server.URL)
+				d.client.Resty().SetRetryWaitTime(time.Millisecond).SetRetryMaxWaitTime(time.Millisecond)
+				records := make(chan source.RecordBatchResult, 2)
+				records <- source.RecordBatchResult{Batch: profileBatch()}
+				if tc.wantErr != "" {
+					records <- source.RecordBatchResult{Batch: profileBatch()}
+				}
+				close(records)
+				defer drainRecords(records)
+				err := d.WriteParallel(context.Background(), records, destination.WriteOptions{
+					Table: table, PrimaryKeys: []string{"email"}, Strategy: "append", RejectMode: "skip", Parallelism: 1,
+				})
+				if tc.wantErr == "" {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, tc.wantErr)
+				}
+				assert.Equal(t, tc.calls, calls)
+			})
+		}
+	}
 }
 
 func TestInvalidURI(t *testing.T) {

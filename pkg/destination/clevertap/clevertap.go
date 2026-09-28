@@ -348,6 +348,10 @@ func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
 }
 
 func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if err := validateStrategy(opts.Strategy); err != nil {
+		drainRecords(records)
+		return err
+	}
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
 		drainRecords(records)
@@ -386,6 +390,9 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if err := validateStrategy(opts.Strategy); err != nil {
+		return err
+	}
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
 		return err
@@ -573,7 +580,9 @@ func (d *CleverTapDestination) writeBatch(ctx context.Context, sh *shaper, recor
 // upload posts one batch to /1/upload, prints a per-batch warning on any
 // rejection, and records the rejected data for the final report.
 func (d *CleverTapDestination) upload(ctx context.Context, sh *shaper, items []map[string]interface{}, rejects *rejectionLog) error {
-	resp, err := d.client.R(ctx).SetBody(map[string]interface{}{"d": items}).Post(uploadEndpoint)
+	// Events and profile operators (e.g. $incr) cannot safely be replayed after
+	// an ambiguous server failure. Only retry requests rejected by throttling.
+	resp, err := d.client.R(ctx).SetRetryOnRateLimitOnly().SetBody(map[string]interface{}{"d": items}).Post(uploadEndpoint)
 	if err != nil {
 		return fmt.Errorf("clevertap upload request failed: %w", err)
 	}
@@ -615,8 +624,17 @@ func (d *CleverTapDestination) upload(ctx context.Context, sh *shaper, items []m
 	return nil
 }
 
-func (d *CleverTapDestination) PrepareTable(_ context.Context, _ destination.PrepareOptions) error {
-	return nil
+func validateStrategy(strategy string) error {
+	switch strategy {
+	case "", string(config.StrategyAppend), string(config.StrategyReplace):
+		return nil
+	default:
+		return fmt.Errorf("strategy %q is not supported for clevertap; use append or replace (both upload profiles or events, without deleting records)", strategy)
+	}
+}
+
+func (d *CleverTapDestination) PrepareTable(_ context.Context, opts destination.PrepareOptions) error {
+	return validateStrategy(opts.Strategy)
 }
 
 func (d *CleverTapDestination) SwapTable(_ context.Context, _ destination.SwapOptions) error {
@@ -653,8 +671,8 @@ func (d *CleverTapDestination) GetTableSchema(_ context.Context, _ string) (*sch
 
 func (d *CleverTapDestination) GetScheme() string { return "clevertap" }
 
-// IsReverseETL marks CleverTap as a reverse-ETL destination; the upload
-// endpoints fix the operation, so the strategy label is not acted on.
+// IsReverseETL marks CleverTap as a reverse-ETL destination; supported
+// strategies upload profiles or events without staging or SQL operations.
 func (d *CleverTapDestination) IsReverseETL() {}
 
 // SupportsReplaceStrategy is true because CleverTap has no destructive delete;
