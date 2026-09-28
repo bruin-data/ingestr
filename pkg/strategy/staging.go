@@ -21,7 +21,9 @@ func dropStagingTable(ctx context.Context, dest destination.Destination, table s
 		return
 	}
 	// Cancellation ends ingestion, but must not prevent bounded cleanup.
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	leaseCtx, cancelLease := source.WithoutCancelWithConnectorLease(ctx)
+	defer cancelLease()
+	cleanupCtx, cancel := context.WithTimeout(leaseCtx, 30*time.Second)
 	defer cancel()
 	if err := dest.DropTable(cleanupCtx, table); err != nil {
 		config.Debug("[STAGING] Warning: failed to drop staging table %s: %v", table, err)

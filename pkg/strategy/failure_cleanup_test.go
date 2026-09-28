@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -215,4 +216,30 @@ func TestDeleteInsertStrategyPropagatesDestinationError(t *testing.T) {
 	require.Len(t, dest.diCalls, 1)
 	require.Equal(t, job.Config.DestTable, dest.diCalls[0].TargetTable)
 	require.NotEqual(t, job.Config.DestTable, dest.diCalls[0].StagingTable)
+}
+
+type leaseLosingCleanupDestination struct {
+	*fakeDestination
+	lease *streamingTestLease
+	cause error
+}
+
+func (d *leaseLosingCleanupDestination) DropTable(ctx context.Context, _ string) error {
+	close(d.lease.done)
+	select {
+	case <-ctx.Done():
+		d.cause = context.Cause(ctx)
+		return ctx.Err()
+	case <-time.After(time.Second):
+		return errors.New("cleanup ignored lease loss")
+	}
+}
+
+func TestStagingCleanupCancelsOnLeaseLossDuringDrop(t *testing.T) {
+	lease := &streamingTestLease{done: make(chan struct{}), err: errors.New("lease expired")}
+	dest := &leaseLosingCleanupDestination{fakeDestination: &fakeDestination{}, lease: lease}
+	ctx, cancel := context.WithCancel(guardedStreamingContext(lease))
+	cancel() // Ordinary cancellation must not suppress cleanup while the lease is held.
+	dropStagingTable(ctx, dest, "staging")
+	require.ErrorIs(t, dest.cause, source.ErrConnectorLeaseLost)
 }
