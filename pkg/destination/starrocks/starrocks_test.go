@@ -1,11 +1,51 @@
 package starrocks
 
 import (
+	"context"
+	"database/sql"
 	"strings"
 	"testing"
 
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
 )
+
+func TestMergeTableLatestPerCompositeKey(t *testing.T) {
+	// SQLite executes the shared INSERT/SELECT/window SQL; the integration test
+	// separately exercises StarRocks table engines and INSERT OVERWRITE.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec(`CREATE TABLE staging (tenant INTEGER, id INTEGER, value TEXT, score REAL);
+		CREATE TABLE target (tenant INTEGER, id INTEGER, value TEXT, score REAL);
+		INSERT INTO staging VALUES
+		(1, 1, 'latest-a', 12), (1, 1, 'old-a', 2),
+		(2, 1, 'old-b', -9), (2, 1, 'latest-b', -3), (2, 1, 'null-b', NULL)`)
+	require.NoError(t, err)
+	d := &StarRocksDestination{db: db}
+	require.NoError(t, d.MergeTable(context.Background(), destination.MergeOptions{
+		StagingTable: "staging", TargetTable: "target", PrimaryKeys: []string{"tenant", "id"},
+		Columns: []string{"tenant", "id", "value", "score"}, IncrementalKey: "score",
+	}))
+	rows, err := db.Query("SELECT value, score FROM target ORDER BY tenant")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var values []string
+	var scores []float64
+	for rows.Next() {
+		var value string
+		var score sql.NullFloat64
+		require.NoError(t, rows.Scan(&value, &score))
+		require.True(t, score.Valid)
+		values = append(values, value)
+		scores = append(scores, score.Float64)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"latest-a", "latest-b"}, values)
+	require.Equal(t, []float64{12, -3}, scores)
+}
 
 func TestMapDataTypeToStarRocks(t *testing.T) {
 	tests := []struct {
