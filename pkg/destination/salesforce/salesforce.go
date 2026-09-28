@@ -686,10 +686,19 @@ func (s *shaper) clearNullRelationships(out sfRecord, rels []string) {
 		if !ok {
 			continue
 		}
-		if _, set := out[field]; !set {
+		if !hasFieldFold(out, field) {
 			out[field] = nil
 		}
 	}
+}
+
+func hasFieldFold(out sfRecord, field string) bool {
+	for k := range out {
+		if strings.EqualFold(k, field) {
+			return true
+		}
+	}
+	return false
 }
 
 // primaryKeysFor resolves the run's primary keys, falling back to the schema's
@@ -1720,7 +1729,7 @@ func reportRejections(sh *shaper, l *rejectionLog) error {
 		fmt.Fprintf(&b, "\n  ... and %d more", len(items)-shown)
 	}
 	for _, it := range items {
-		if strings.Contains(it.message, "Duplicate external id specified") {
+		if strings.Contains(it.message, "Duplicate external id specified") || strings.Contains(it.message, "Duplicate id specified") {
 			// Salesforce rejects every row sharing a key within one request.
 			fmt.Fprintf(&b, "\n  hint: the source has the same %s value on more than one row; de-duplicate it on that column", sh.idField)
 			break
@@ -1929,7 +1938,7 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 		return nil
 	}
 
-	var unknown, notWritable, untyped, badType []string
+	var unknown, notWritable, untyped, badType, blob []string
 	for _, col := range opts.Schema.Columns {
 		name := col.Name
 		if sh.isIDColumn(name) || sh.exclude[name] || strings.EqualFold(name, recordIDField) {
@@ -1965,6 +1974,9 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 		if !fieldWritable(f, sh) {
 			notWritable = append(notWritable, name)
 		}
+		if f.Type == "base64" && d.loadMethod == loadMethodBulk {
+			blob = append(blob, name)
+		}
 	}
 	if len(untyped) > 0 {
 		return fmt.Errorf("salesforce: polymorphic lookups on %q need the parent object in the column name, as Relationship.Object.Field: %s", sh.sobject, strings.Join(untyped, "; "))
@@ -1977,6 +1989,9 @@ func (d *SalesforceDestination) PrepareTable(ctx context.Context, opts destinati
 	}
 	if len(notWritable) > 0 {
 		return fmt.Errorf("salesforce: source columns are read-only on %q: [%s]; drop them from the source (e.g. --sql-exclude-columns) and re-run", sh.sobject, strings.Join(notWritable, ", "))
+	}
+	if len(blob) > 0 {
+		return fmt.Errorf("salesforce: binary fields on %q need load_method=rest on the destination URI; Bulk API 2.0 can't load them: [%s]", sh.sobject, strings.Join(blob, ", "))
 	}
 	return nil
 }

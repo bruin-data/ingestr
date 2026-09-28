@@ -887,6 +887,28 @@ func TestWriteNullsOffOmitsFields(t *testing.T) {
 	}
 }
 
+func TestPrepareTableRejectsBlobFieldsUnderBulk(t *testing.T) {
+	for method, wantErr := range map[string]bool{loadMethodBulk: true, loadMethodREST: false} {
+		var cap capture
+		d, _ := newDest(t, &cap, func(w http.ResponseWriter, r *http.Request, body string) bool {
+			if strings.HasSuffix(r.URL.Path, "/describe") {
+				_, _ = w.Write([]byte(`{"fields":[{"name":"Title","createable":true,"updateable":true},{"name":"VersionData","type":"base64","createable":true,"updateable":true}]}`))
+				return true
+			}
+			return false
+		})
+		d.loadMethod = method
+		err := d.PrepareTable(context.Background(), destination.PrepareOptions{
+			Table:    "ContentVersion",
+			Strategy: "append",
+			Schema:   &schema.TableSchema{Columns: []schema.Column{{Name: "Title"}, {Name: "versiondata", DataType: schema.TypeBinary}}},
+		})
+		if got := err != nil && strings.Contains(err.Error(), "need load_method=rest") && strings.Contains(err.Error(), "versiondata"); got != wantErr {
+			t.Fatalf("%s: error = %v, want blob rejection %v", method, err, wantErr)
+		}
+	}
+}
+
 func TestPrepareTableRejectsUnknownAndReadOnlyColumns(t *testing.T) {
 	describe := `{"fields":[
 		{"name":"Id","createable":false,"updateable":false},
@@ -1231,6 +1253,17 @@ func TestExplicitLookupValueWinsOverNullRelationshipCell(t *testing.T) {
 	}, []string{"ext", "AccountId", "Account.Ext__c"}, true)
 	if recs[0]["AccountId"] != "001000000000001" {
 		t.Fatalf("record = %v, a set AccountId must not be cleared by a null dotted cell", recs[0])
+	}
+}
+
+func TestLookupColumnInOtherCaseWinsOverNullRelationshipCell(t *testing.T) {
+	recs := upsertBodies(t, map[string][]string{
+		"ext":            {"C-1"},
+		"ACCOUNTID":      {"001000000000001"},
+		"Account.Ext__c": {""},
+	}, []string{"ext", "ACCOUNTID", "Account.Ext__c"}, true)
+	if _, cleared := recs[0]["AccountId"]; cleared {
+		t.Fatalf("record = %v, ACCOUNTID must not be cleared by a null dotted cell", recs[0])
 	}
 }
 
@@ -1635,6 +1668,13 @@ func TestDuplicateKeyHintMatchesTheCause(t *testing.T) {
 	err := reportRejections(upsert, &dup)
 	if err == nil || !strings.Contains(err.Error(), "same Ext__c value on more than one row") || strings.Contains(err.Error(), "incremental-strategy merge") {
 		t.Fatalf("error = %v, want the de-duplicate hint", err)
+	}
+
+	update := &shaper{sobject: "Contact", idField: "Email"}
+	var dupID rejectionLog
+	dupID.add([]rejection{{code: "INVALID_FIELD", message: "Duplicate id specified: 003A", identifier: "Email=ada@x.com"}})
+	if err := reportRejections(update, &dupID); err == nil || !strings.Contains(err.Error(), "same Email value on more than one row") {
+		t.Fatalf("error = %v, want the de-duplicate hint for a duplicate id", err)
 	}
 
 	create := &shaper{sobject: "Contact", createOnly: true}
