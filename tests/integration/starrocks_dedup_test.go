@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -24,7 +25,12 @@ func TestStarRocksDeduplication(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	dest := starrocks.NewStarRocksDestination()
-	require.NoError(t, dest.Connect(ctx, uri+"?replication_num=1"))
+	u, err := url.Parse(uri)
+	require.NoError(t, err)
+	params := u.Query()
+	params.Set("replication_num", "1")
+	u.RawQuery = params.Encode()
+	require.NoError(t, dest.Connect(ctx, u.String()))
 	t.Cleanup(func() { _ = dest.Close(ctx) })
 
 	tableSchema := &schema.TableSchema{Columns: []schema.Column{
