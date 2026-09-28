@@ -61,6 +61,44 @@ func TestWriteTypedLists(t *testing.T) {
 	}
 }
 
+func TestTimestampTZEvolutionPreservesExistingTemporalRange(t *testing.T) {
+	col := schema.Column{Name: "created_at", DataType: schema.TypeTimestampTZ, Nullable: true}
+	assert.Equal(t, "TIMESTAMP(6)", MapDataTypeToMySQL(col))
+	for _, tt := range []struct {
+		name     string
+		existing []schema.Column
+		want     []string
+	}{
+		{
+			name: "new column matches create",
+			want: []string{"ALTER TABLE events ADD COLUMN `created_at` TIMESTAMP(6) NULL"},
+		},
+		{
+			name:     "legacy datetime is not narrowed",
+			existing: []schema.Column{{Name: "created_at", DataType: schema.TypeTimestamp, Nullable: true}},
+		},
+		{
+			name:     "date widens without losing its range",
+			existing: []schema.Column{{Name: "created_at", DataType: schema.TypeDate, Nullable: true}},
+			want:     []string{"ALTER TABLE events MODIFY COLUMN `created_at` DATETIME(6) NULL"},
+		},
+		{
+			name:     "existing timestamp is unchanged",
+			existing: []schema.Column{col},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			comparison, err := schemaevolution.Compare(
+				&schema.TableSchema{Columns: []schema.Column{col}},
+				&schema.TableSchema{Columns: tt.existing}, nil)
+			require.NoError(t, err)
+			statements, _, err := destination.RenderEvolution(&Dialect{}, "events", comparison)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, statements)
+		})
+	}
+}
+
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
 	tests := []struct {
 		name       string

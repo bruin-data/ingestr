@@ -16,6 +16,10 @@ func (d *Dialect) Name() string {
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
 	typeName := d.TypeName(col)
+	if col.DataType == schema.TypeTimestampTZ {
+		// New columns follow CREATE TABLE; no existing values can be narrowed.
+		typeName = MapDataTypeToMySQL(col)
+	}
 	nullable := ""
 	if col.Nullable {
 		nullable = " NULL"
@@ -83,7 +87,9 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeTimestamp:
 		return "DATETIME(6)"
 	case schema.TypeTimestampTZ:
-		return "TIMESTAMP(6)"
+		// Preserve existing DATE/DATETIME ranges during evolution. TIMESTAMP
+		// only supports 1970-2038 and applies session-timezone conversions.
+		return "DATETIME(6)"
 	case schema.TypeInterval:
 		return "VARCHAR(255)"
 	case schema.TypeJSON:

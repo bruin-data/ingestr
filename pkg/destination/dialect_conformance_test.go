@@ -400,7 +400,7 @@ func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 		},
 		"mysql": {
 			"TEXT", "TINYINT(1)", "TINYINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL(18,4)",
-			"TEXT", "BLOB", "DATE", "TIME(6)", "DATETIME(6)", "TIMESTAMP(6)", "VARCHAR(255)", "JSON", "VARCHAR(36)", "JSON",
+			"TEXT", "BLOB", "DATE", "TIME(6)", "DATETIME(6)", "DATETIME(6)", "VARCHAR(255)", "JSON", "VARCHAR(36)", "JSON",
 		},
 		"oracle": {
 			"CLOB", "NUMBER(1,0)", "NUMBER(3,0)", "NUMBER(5,0)", "NUMBER(10,0)", "NUMBER(19,0)", "BINARY_FLOAT", "BINARY_DOUBLE", "NUMBER(18,4)",
