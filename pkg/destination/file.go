@@ -14,8 +14,12 @@ func CreateReplacementFile(target string) (*os.File, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to stat replacement target: %w", err)
 	}
+	mode := os.FileMode(0o666)
+	if info != nil {
+		mode = 0o600
+	}
 	path := filepath.Join(filepath.Dir(target), "."+filepath.Base(target)+"-"+rand.Text())
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create replacement file: %w", err)
 	}
