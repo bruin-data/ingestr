@@ -25,6 +25,7 @@ func TestFileReplaceLifecycle(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "output."+format)
 				old := []byte("previous output must survive failure")
 				require.NoError(t, os.WriteFile(path, old, 0o644))
+				require.NoError(t, os.Chmod(path, 0o640))
 				var dest destination.Destination = csvdest.NewCSVDestination()
 				if format == "parquet" {
 					dest = parquetdest.NewParquetDestination()
@@ -49,6 +50,9 @@ func TestFileReplaceLifecycle(t *testing.T) {
 				require.NoError(t, dest.Close(context.Background()))
 				got, readErr := os.ReadFile(path)
 				require.NoError(t, readErr)
+				info, statErr := os.Stat(path)
+				require.NoError(t, statErr)
+				require.Equal(t, os.FileMode(0o640), info.Mode().Perm())
 				switch scenario {
 				case "source-error", "cancelled":
 					if scenario == "source-error" {

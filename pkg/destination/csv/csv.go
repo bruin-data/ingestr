@@ -86,7 +86,7 @@ func (d *CSVDestination) PrepareTable(ctx context.Context, opts destination.Prep
 
 	// Publish replacements only after the complete stream has been written.
 	if opts.DropFirst {
-		file, err := os.CreateTemp(dir, "."+filepath.Base(d.filePath)+"-*")
+		file, err := destination.CreateReplacementFile(d.filePath)
 		if err != nil {
 			return fmt.Errorf("failed to create CSV file: %w", err)
 		}

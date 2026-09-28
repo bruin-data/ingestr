@@ -231,7 +231,7 @@ func (d *ParquetDestination) initWriter(ctx context.Context, arrowSchema *arrow.
 
 	targetPath := d.filePath
 	if !d.appendMode {
-		temp, err := os.CreateTemp(filepath.Dir(d.filePath), "."+filepath.Base(d.filePath)+"-*")
+		temp, err := destination.CreateReplacementFile(d.filePath)
 		if err != nil {
 			return fmt.Errorf("failed to create parquet replacement: %w", err)
 		}
