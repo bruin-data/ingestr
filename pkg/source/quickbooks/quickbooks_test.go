@@ -3,8 +3,10 @@ package quickbooks
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -140,10 +142,23 @@ func TestIsValidTable(t *testing.T) {
 }
 
 func TestReadQueriesMappedObject(t *testing.T) {
+	// Object names are spelled out here rather than read from tableMapping so a
+	// wrong mapping fails instead of being asserted against itself.
+	wantObjects := map[string]string{
+		"customers": "Customer",
+		"invoices":  "Invoice",
+		"accounts":  "Account",
+		"vendors":   "Vendor",
+		"payments":  "Payment",
+		"purchases": "Purchase",
+		"bills":     "Bill",
+	}
+	require.ElementsMatch(t, supportedTables, slices.Collect(maps.Keys(wantObjects)))
+
 	for _, table := range supportedTables {
 		t.Run(table, func(t *testing.T) {
-			object, ok := tableMapping[table]
-			require.True(t, ok, "%s has no API object mapping", table)
+			object := wantObjects[table]
+			require.Equal(t, object, tableMapping[table], "%s maps to the wrong QuickBooks object", table)
 
 			var gotQuery string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

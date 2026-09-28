@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/testutil"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -256,10 +257,12 @@ func TestQuickBooksPipeline(t *testing.T) {
 			},
 		},
 		{
-			SourceTable:      "purchases",
-			DestTable:        "main.quickbooks_purchases",
-			KeyColumn:        "id",
-			ExpectedRowCount: 35,
+			SourceTable:         "purchases",
+			DestTable:           "main.quickbooks_purchases",
+			KeyColumn:           "id",
+			ExpectedRowCount:    35,
+			IncrementalStrategy: config.StrategyMerge,
+			PrimaryKeys:         []string{"id"},
 			ExpectedSchema: []schema.Column{
 				{Name: "id", DataType: schema.TypeString},
 				{Name: "lastupdatedtime", DataType: schema.TypeTimestampTZ},
@@ -288,10 +291,12 @@ func TestQuickBooksPipeline(t *testing.T) {
 			},
 		},
 		{
-			SourceTable:      "bills",
-			DestTable:        "main.quickbooks_bills",
-			KeyColumn:        "id",
-			ExpectedRowCount: 15,
+			SourceTable:         "bills",
+			DestTable:           "main.quickbooks_bills",
+			KeyColumn:           "id",
+			ExpectedRowCount:    15,
+			IncrementalStrategy: config.StrategyMerge,
+			PrimaryKeys:         []string{"id"},
 			ExpectedSchema: []schema.Column{
 				{Name: "id", DataType: schema.TypeString},
 				{Name: "lastupdatedtime", DataType: schema.TypeTimestampTZ},
@@ -321,6 +326,9 @@ func TestQuickBooksPipeline(t *testing.T) {
 	for _, exp := range expectations {
 		t.Run(exp.SourceTable, func(t *testing.T) {
 			testutil.RunPipeline(t, ctx, sourceURI, destURI, exp)
+			if exp.IncrementalStrategy == config.StrategyMerge {
+				testutil.RunPipeline(t, ctx, sourceURI, destURI, exp)
+			}
 			testutil.Check(t, destURI, exp)
 		})
 	}
