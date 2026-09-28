@@ -4197,13 +4197,14 @@ func TestPipelineKeepsSourceColumnNamesAcrossNamingConventions(t *testing.T) {
 
 func TestPipelineKnownSchemaRenameAndTypeOverride(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		columns string
-		wantCol string
+		name       string
+		columns    string
+		wantCol    string
+		wantIDType string
 	}{
-		{"naming convention", "customer_name:bigint", "customer_name"},
-		{"explicit rename", "amount:bigint:customer_name", "amount"},
-		{"explicit rename with another cast", "amount:bigint:customer_name,order_id:string", "amount"},
+		{"naming convention", "customer_name:bigint", "customer_name", "integer"},
+		{"explicit rename", "amount:bigint:customer_name", "amount", "integer"},
+		{"explicit rename with another cast", "amount:bigint:customer_name,order_id:string", "amount", "text"},
 	} {
 		for _, readOptsSchema := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/readOptsSchema=%v", tc.name, readOptsSchema), func(t *testing.T) {
@@ -4217,6 +4218,13 @@ func TestPipelineKnownSchemaRenameAndTypeOverride(t *testing.T) {
 				require.Equal(t, schema.TypeString, table.tableSchema.Columns[1].DataType)
 				require.Equal(t, map[int64]string{1: "42", 2: "-17"},
 					readFakeKnownSchemaDest(t, destPath, "order_id", tc.wantCol))
+				db, err := sql.Open("sqlite", destPath)
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+				var wrongTypes int
+				err = db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM orders WHERE typeof(order_id) != ? OR typeof(%q) != 'integer'`, tc.wantCol), tc.wantIDType).Scan(&wrongTypes)
+				require.NoError(t, err)
+				require.Zero(t, wrongTypes, "destination values must have the overridden storage types")
 			})
 		}
 	}
