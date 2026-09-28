@@ -30,10 +30,11 @@ type Scenario struct {
 	Empty      bool
 }
 
-// Effects records successful wire operations, not attempted requests. Adapters
+// Effects separates successful wire operations from attempted writes. Adapters
 // synchronize access because WriteParallel can call their server concurrently.
 type Effects struct {
 	Created, Updated, Upserted, Deleted []string
+	Attempted                           []string
 	Pages                               []string
 }
 
@@ -92,6 +93,10 @@ func Run(t *testing.T, factory func(*testing.T, Scenario) Fixture) {
 					f := factory(t, tc)
 					f.Options.Strategy, f.Options.RejectMode = tc.Strategy, tc.RejectMode
 					f.Options.Parallelism = 3
+					if tc.RejectMode == "fail_fast" {
+						// A single worker makes the unsent next batch deterministic.
+						f.Options.Parallelism = 1
+					}
 					alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
 					t.Cleanup(func() { alloc.AssertSize(t, 0) })
 					ch := make(chan source.RecordBatchResult, 3)
@@ -123,6 +128,14 @@ func Run(t *testing.T, factory func(*testing.T, Scenario) Fixture) {
 						require.NoError(t, err)
 					}
 					e := f.Snapshot()
+					if tc.Reject {
+						require.Contains(t, e.Attempted, "alpha")
+						if tc.RejectMode == "fail_fast" {
+							require.NotContains(t, e.Attempted, "gamma")
+						} else {
+							require.Contains(t, e.Attempted, "gamma")
+						}
+					}
 					if tc.Empty || (tc.Reject && !tc.Mixed) {
 						require.Empty(t, e.Created)
 						require.Empty(t, e.Updated)
