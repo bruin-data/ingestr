@@ -105,14 +105,14 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	if err != nil {
 		return err
 	}
-	resolvedTable := schemaName + "." + tableName
+	resolvedTable := quotePostgresTable(schemaName, tableName)
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(resolvedTable))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", resolvedTable)
 		if _, err := d.pool.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -121,7 +121,7 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(resolvedTable), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(resolvedTable, opts.Schema.Columns, opts.PrimaryKeys)
 	if _, err := d.pool.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
