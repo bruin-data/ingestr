@@ -2706,6 +2706,45 @@ func TestWriteParallel_CancelsBridgeOnAppendError(t *testing.T) {
 	}
 }
 
+func TestDropTableWaitsForPendingPreparation(t *testing.T) {
+	for _, prepareErr := range []error{nil, errors.New("prepare failed after creating table")} {
+		pending := make(chan error, 1)
+		pending <- prepareErr
+		var deletes atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(pending) != 0 {
+				http.Error(w, "delete overtook pending preparation", http.StatusBadRequest)
+				return
+			}
+			if r.Method != http.MethodDelete || !strings.HasSuffix(r.URL.Path, "/datasets/staging/tables/raw") {
+				http.Error(w, "unexpected request", http.StatusBadRequest)
+				return
+			}
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(server.Close)
+		client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Close() })
+		dest := &BigQueryDestination{client: client, projectID: "test-project", datasetID: "staging"}
+		dest.setPendingTableErr("test-project.staging.raw", pending)
+		dest.setPendingTableErr("test-project.other.unrelated", make(chan error))
+		require.NoError(t, dest.DropTable(t.Context(), "staging.raw"))
+		require.Equal(t, int32(1), deletes.Load())
+		require.NotContains(t, dest.pendingTableErrs, "test-project.staging.raw")
+		require.Contains(t, dest.pendingTableErrs, "test-project.other.unrelated")
+	}
+}
+
+func TestDropTablePendingPreparationHonorsDeadline(t *testing.T) {
+	dest := &BigQueryDestination{projectID: "test-project", datasetID: "staging"}
+	dest.setPendingTableErr("test-project.staging.raw", make(chan error))
+	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, dest.DropTable(ctx, "staging.raw"), context.DeadlineExceeded)
+}
+
 func TestWriteParallel_WaitsOnlyForMatchingPendingTable(t *testing.T) {
 	dest := NewBigQueryDestination()
 	dest.projectID = "my-project"

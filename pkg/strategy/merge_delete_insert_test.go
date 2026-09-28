@@ -245,7 +245,7 @@ func TestMergeStrategy_Execute_SkipsOrderingKeyMissingFromStagingSchema(t *testi
 	}
 }
 
-func TestMergeStrategy_Execute_GetRecordsFails_LeavesStagingForDebugging(t *testing.T) {
+func TestMergeStrategy_Execute_GetRecordsFails_DropsStaging(t *testing.T) {
 	job, src, dest := minimalJob()
 	src.readErr = errors.New("read failed")
 
@@ -261,8 +261,8 @@ func TestMergeStrategy_Execute_GetRecordsFails_LeavesStagingForDebugging(t *test
 	if len(dest.prepareCalls) != 2 {
 		t.Fatalf("expected 2 PrepareTable calls, got %d", len(dest.prepareCalls))
 	}
-	if len(dest.dropCalls) != 0 {
-		t.Fatalf("expected staging table to be left for debugging, got %d DropTable calls", len(dest.dropCalls))
+	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != dest.prepareCalls[1].Table {
+		t.Fatalf("expected staging cleanup, got %v", dest.dropCalls)
 	}
 }
 

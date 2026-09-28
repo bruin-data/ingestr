@@ -181,7 +181,7 @@ func (s *MergeStrategy) RequiresIncrementalKey() bool {
 	return false
 }
 
-func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
+func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) (resultErr error) {
 	if destination.IsReverseETL(job.Destination) {
 		return executeReverseETL(ctx, job, config.StrategyMerge)
 	}
@@ -204,6 +204,14 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}); err != nil {
 		return err
 	}
+	defer func() {
+		if resultErr != nil || !job.Config.KeepStaging {
+			dropStagingTable(ctx, job.Destination, stagingTable)
+		}
+		if resultErr == nil {
+			resultErr = source.ConnectorLeaseLoss(ctx)
+		}
+	}()
 	expectedIncarnation := ""
 	if job.CDCStateManager != nil {
 		if err := job.CDCStateManager.BindDestinationIncarnation(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
@@ -321,24 +329,11 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		return err
 	}
 
-	// Drop staging table (skip when KeepStaging is set for test inspection).
-	if !job.Config.KeepStaging {
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
-			return err
-		}
-		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-			config.Debug("[MERGE] Warning: failed to drop staging table: %v", err)
-		}
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
 // ExecuteMultiTable implements multi-table merge strategy for CDC sources.
-func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIngestionJob) error {
+func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIngestionJob) (resultErr error) {
 	if len(job.Tables) == 0 {
 		return nil
 	}
@@ -359,6 +354,16 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	stagingTables := make(map[string]string)
 	tableConfigs := make(map[string]destination.TableWriteConfig)
 	var mu sync.Mutex
+	defer func() {
+		if resultErr != nil || !job.Config.KeepStaging {
+			for _, table := range stagingTables {
+				dropStagingTable(ctx, job.Destination, table)
+			}
+		}
+		if resultErr == nil {
+			resultErr = source.ConnectorLeaseLoss(ctx)
+		}
+	}()
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(job.Tables)*2)
@@ -423,6 +428,9 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				errChan <- err
 				return
 			}
+			mu.Lock()
+			stagingTables[ti.Name] = stagingTable
+			mu.Unlock()
 			if job.CDCStateManager != nil {
 				if err := job.CDCStateManager.BindDestinationIncarnation(ctx, ti.Name, destTable); err != nil {
 					errChan <- fmt.Errorf("failed to bind CDC destination table %s: %w", ti.Name, err)
@@ -431,7 +439,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			}
 
 			mu.Lock()
-			stagingTables[ti.Name] = stagingTable
 			tableConfigs[ti.Name] = destination.TableWriteConfig{
 				DestTable:   stagingTable,
 				Schema:      ti.Schema,
@@ -475,14 +482,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		CDCResumeSchemaFingerprints: resumeSchemas,
 	})
 	if err != nil {
-		if source.ConnectorLeaseLoss(ctx) == nil {
-			for _, stagingTable := range stagingTables {
-				if source.ConnectorLeaseLoss(ctx) != nil {
-					break
-				}
-				_ = job.Destination.DropTable(ctx, stagingTable)
-			}
-		}
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
 	}
 
@@ -500,33 +499,12 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 		CancelSource:     cancelRead,
 	})
 	if err != nil {
-		if source.ConnectorLeaseLoss(ctx) == nil {
-			for _, stagingTable := range stagingTables {
-				if source.ConnectorLeaseLoss(ctx) != nil {
-					break
-				}
-				_ = job.Destination.DropTable(ctx, stagingTable)
-			}
-		}
 		return fmt.Errorf("failed to write multi-table data: %w", err)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
 	if atomicMerger, ok := job.Destination.(destination.CDCMultiTableAtomicMerger); ok && anyTableHasCDC && len(stagingTables) == len(job.Tables) {
-		dropStagingTables := func() {
-			if source.ConnectorLeaseLoss(ctx) != nil {
-				return
-			}
-			for _, stagingTable := range stagingTables {
-				if source.ConnectorLeaseLoss(ctx) != nil {
-					break
-				}
-				if dropErr := job.Destination.DropTable(ctx, stagingTable); dropErr != nil {
-					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, dropErr)
-				}
-			}
-		}
 		merges := make([]destination.CDCAtomicTableMerge, 0, len(stagingTables))
 		for _, tableInfo := range job.Tables {
 			stagingTable, staged := stagingTables[tableInfo.Name]
@@ -537,7 +515,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			if job.CDCStateManager != nil {
 				expectedIncarnation, err = job.CDCStateManager.BoundDestinationIncarnation(tableInfo.Name)
 				if err != nil {
-					dropStagingTables()
 					return err
 				}
 			}
@@ -550,11 +527,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			return err
 		}
 		if err := atomicMerger.MergeCDCTablesAtomically(ctx, merges); err != nil {
-			dropStagingTables()
 			return fmt.Errorf("failed to atomically merge multi-table CDC batch: %w", err)
-		}
-		if !job.Config.KeepStaging {
-			dropStagingTables()
 		}
 		return source.ConnectorLeaseLoss(ctx)
 	}
@@ -618,19 +591,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				mergeErrChan <- err
 				return
 			}
-
-			if !job.Config.KeepStaging {
-				if err := source.ConnectorLeaseLoss(ctx); err != nil {
-					mergeErrChan <- err
-					return
-				}
-				if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
-				}
-				if err := source.ConnectorLeaseLoss(ctx); err != nil {
-					mergeErrChan <- err
-				}
-			}
 		}(tableInfo)
 	}
 
@@ -645,16 +605,6 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	}
 
 	if mergeErr != nil {
-		if source.ConnectorLeaseLoss(ctx) == nil {
-			for _, stagingTable := range stagingTables {
-				if source.ConnectorLeaseLoss(ctx) != nil {
-					break
-				}
-				if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-					config.Debug("[MERGE] Warning: failed to drop staging table %s: %v", stagingTable, err)
-				}
-			}
-		}
 		return mergeErr
 	}
 

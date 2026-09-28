@@ -173,6 +173,7 @@ func intersects(left, right []string) bool {
 // schema (so the swap is a same-schema atomic rename rather than a second
 // recreate+copy). Staging tables are cleaned up on error.
 func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTable, targetTable, stagingDataset, incrementalKey string, tableSchema *schema.TableSchema, primaryKeys []string, partitionBy string, clusterBy []string, runID string) (string, error) {
+	defer dropStagingTable(ctx, dest, rawTable)
 	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        normalised,
@@ -184,9 +185,6 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 		ClusterBy:    clusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,
 	}); err != nil {
-		if dropErr := dest.DropTable(ctx, rawTable); dropErr != nil {
-			config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
-		}
 		return "", fmt.Errorf("failed to prepare normalised staging table: %w", err)
 	}
 	if err := dest.MergeTable(ctx, destination.MergeOptions{
@@ -197,15 +195,8 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 		IncrementalKey: incrementalKey,
 		Schema:         tableSchema,
 	}); err != nil {
-		for _, t := range []string{rawTable, normalised} {
-			if dropErr := dest.DropTable(ctx, t); dropErr != nil {
-				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
-			}
-		}
+		dropStagingTable(ctx, dest, normalised)
 		return "", fmt.Errorf("failed to deduplicate staging table: %w", err)
-	}
-	if dropErr := dest.DropTable(ctx, rawTable); dropErr != nil {
-		config.Debug("[REPLACE] Warning: failed to drop raw staging table: %v", dropErr)
 	}
 	return normalised, nil
 }
@@ -339,6 +330,11 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	if err := job.Destination.PrepareTable(ctx, prepareOpts); err != nil {
 		return fmt.Errorf("failed to prepare table: %w", err)
 	}
+	pendingStaging := ""
+	if useStaging {
+		pendingStaging = writeTable
+		defer func() { dropStagingTable(ctx, job.Destination, pendingStaging) }()
+	}
 	expectedTargetIncarnation, err := bindCDCReplaceTarget(ctx, job.CDCStateManager, job.Destination, job.Config.SourceTable, targetTable)
 	if err != nil {
 		return fmt.Errorf("failed to bind CDC destination before replace: %w", err)
@@ -409,11 +405,6 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	if err := job.Destination.WriteParallel(ctx, records, writeOpts); err != nil {
 		cancelRead()
 		drainAndReleaseUntil(records, streamAbortDrainTimeout)
-		if useStaging {
-			if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
-				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
-			}
-		}
 		return fmt.Errorf("failed to write data: %w", err)
 	}
 
@@ -427,9 +418,6 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 				}
 				if expectedRows > 0 {
 					if err := verifier.WaitForExactRowCount(ctx, writeTable, expectedRows); err != nil {
-						if dropErr := job.Destination.DropTable(ctx, writeTable); dropErr != nil {
-							config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
-						}
 						return fmt.Errorf("failed to verify staging table row count: %w", err)
 					}
 				}
@@ -438,6 +426,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		swapTable := writeTable
 		swapPrimaryKeys := job.Config.PrimaryKeys
 		if stagedDedup {
+			pendingStaging = "" // deduplicateStaging owns raw-table cleanup.
 			normalised, err := deduplicateStaging(ctx, job.Destination, writeTable, targetTable,
 				job.Config.StagingDataset, job.Config.IncrementalKey, job.Schema,
 				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy, job.Config.RunID)
@@ -445,6 +434,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 				return err
 			}
 			swapTable = normalised
+			pendingStaging = normalised
 			swapPrimaryKeys = nil
 		}
 
@@ -456,11 +446,9 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		swapOpts.IncrementalKey = job.Config.IncrementalKey
 		swapOpts.Schema = job.Schema
 		if err := job.Destination.SwapTable(ctx, swapOpts); err != nil {
-			if dropErr := job.Destination.DropTable(ctx, swapTable); dropErr != nil {
-				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
-			}
 			return fmt.Errorf("failed to swap tables: %w", err)
 		}
+		pendingStaging = ""
 		if expectedTargetIncarnation != "" {
 			if err := job.CDCStateManager.CompleteConditionalSwap(ctx, job.Config.SourceTable, targetTable, expectedTargetIncarnation, swapOpts.CDCExpectedResultIncarnation); err != nil {
 				return fmt.Errorf("failed to bind CDC destination after replace: %w", err)
@@ -501,6 +489,13 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 	tableConfigs := make(map[string]destination.TableWriteConfig)
 	expectedTargetIncarnations := make(map[string]string)
 	var mu sync.Mutex
+	defer func() {
+		if useStaging {
+			for _, table := range stagingTables {
+				dropStagingTable(ctx, job.Destination, table)
+			}
+		}
+	}()
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(job.Tables))
@@ -529,6 +524,9 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 				errChan <- fmt.Errorf("failed to prepare table %s: %w", ti.Name, err)
 				return
 			}
+			mu.Lock()
+			stagingTables[ti.Name] = writeTable
+			mu.Unlock()
 			if useInPlace {
 				if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
 					Table: destTable, Schema: destination.DestinationTableSchema(ti.Schema),
@@ -545,7 +543,6 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			}
 
 			mu.Lock()
-			stagingTables[ti.Name] = writeTable
 			expectedTargetIncarnations[ti.Name] = expectedTarget
 			tableConfig := destination.TableWriteConfig{DestTable: writeTable, Schema: ti.Schema}
 			if dedup {
@@ -601,11 +598,6 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 		CancelSource:     cancelRead,
 	}); err != nil {
-		for _, stagingTable := range stagingTables {
-			if dropErr := job.Destination.DropTable(ctx, stagingTable); dropErr != nil {
-				config.Debug("[REPLACE] Warning: failed to drop staging table %s: %v", stagingTable, dropErr)
-			}
-		}
 		return fmt.Errorf("failed to write multi-table data: %w", err)
 	}
 
@@ -626,21 +618,22 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 					return fmt.Errorf("failed to replace table %s in place: %w", tableInfo.Name, err)
 				}
 				if !job.Config.KeepStaging {
-					if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
-						config.Debug("[REPLACE] Warning: failed to drop staging table %s: %v", stagingTable, err)
-					}
+					dropStagingTable(ctx, job.Destination, stagingTable)
 				}
+				delete(stagingTables, tableInfo.Name)
 				continue
 			}
 			swapTable := stagingTable
 			swapPrimaryKeys := tableInfo.PrimaryKeys
 			if replaceShouldDedup(job.Destination, tableInfo.PrimaryKeys) {
+				delete(stagingTables, tableInfo.Name)
 				normalised, err := deduplicateStaging(ctx, job.Destination, stagingTable, destTable,
 					job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID)
 				if err != nil {
 					return fmt.Errorf("failed to deduplicate table %s: %w", tableInfo.Name, err)
 				}
 				swapTable = normalised
+				stagingTables[tableInfo.Name] = normalised
 				swapPrimaryKeys = nil
 			}
 
@@ -654,6 +647,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			if err := job.Destination.SwapTable(ctx, swapOpts); err != nil {
 				return fmt.Errorf("failed to swap table %s: %w", tableInfo.Name, err)
 			}
+			delete(stagingTables, tableInfo.Name)
 			if expectedTarget != "" {
 				if err := job.CDCStateManager.CompleteConditionalSwap(ctx, tableInfo.Name, destTable, expectedTarget, swapOpts.CDCExpectedResultIncarnation); err != nil {
 					return fmt.Errorf("failed to bind CDC destination table %s after replace: %w", tableInfo.Name, err)

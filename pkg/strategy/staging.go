@@ -1,17 +1,34 @@
 package strategy
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
 const DefaultStagingSchema = "_bruin_staging"
+
+func dropStagingTable(ctx context.Context, dest destination.Destination, table string) {
+	if table == "" || source.ConnectorLeaseLoss(ctx) != nil {
+		return
+	}
+	// Cancellation ends ingestion, but must not prevent bounded cleanup.
+	leaseCtx, cancelLease := source.WithoutCancelWithConnectorLease(ctx)
+	defer cancelLease()
+	cleanupCtx, cancel := context.WithTimeout(leaseCtx, 30*time.Second)
+	defer cancel()
+	if err := dest.DropTable(cleanupCtx, table); err != nil {
+		config.Debug("[STAGING] Warning: failed to drop staging table %s: %v", table, err)
+	}
+}
 
 // maxStagingTableNameLen caps the unqualified staging table name. MySQL's
 // identifier limit is 64; Postgres truncates silently at 63. Stay under both so
