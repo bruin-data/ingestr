@@ -784,6 +784,50 @@ func newReleaseCountingBatch(t *testing.T) *releaseCountingBatch {
 	return &releaseCountingBatch{RecordBatch: record}
 }
 
+func TestWriteListValues(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		typ   arrow.DataType
+		input string
+		want  []sql.NullString
+	}{
+		{
+			name:  "int64",
+			typ:   arrow.ListOf(arrow.PrimitiveTypes.Int64),
+			input: `[[7,null,-2],null,[]]`,
+			want:  []sql.NullString{{String: `[7,null,-2]`, Valid: true}, {}, {String: `[]`, Valid: true}},
+		},
+		{
+			name:  "nested",
+			typ:   arrow.ListOf(arrow.ListOf(arrow.FixedWidthTypes.Boolean)),
+			input: `[[[true,null,false],null,[]],null,[]]`,
+			want:  []sql.NullString{{String: `[[true,null,false],null,[]]`, Valid: true}, {}, {String: `[]`, Valid: true}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewSQLiteDestination()
+			requireNoError(t, d.Connect(t.Context(), "sqlite://"+filepath.Join(t.TempDir(), "lists.db")))
+			defer func() { _ = d.Close(t.Context()) }()
+			requireNoError(t, d.Exec(t.Context(), `CREATE TABLE lists (value TEXT)`))
+			values, _, err := array.FromJSON(memory.DefaultAllocator, tt.typ, strings.NewReader(tt.input))
+			requireNoError(t, err)
+			defer values.Release()
+			batch := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "value", Type: tt.typ, Nullable: true}}, nil), []arrow.Array{values}, int64(values.Len()))
+			records := make(chan source.RecordBatchResult, 1)
+			records <- source.RecordBatchResult{Batch: batch}
+			close(records)
+			requireNoError(t, d.Write(t.Context(), records, destination.WriteOptions{Table: "lists"}))
+			for i, want := range tt.want {
+				var got sql.NullString
+				requireNoError(t, d.db.QueryRowContext(t.Context(), `SELECT value FROM lists WHERE rowid = ?`, i+1).Scan(&got))
+				if got != want {
+					t.Errorf("row %d = %#v, want %#v", i+1, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteParallelReleasesBatchExactlyOnce(t *testing.T) {
 	tests := []struct {
 		name      string
