@@ -85,37 +85,72 @@ func TestBatchKeepaliveDoesNotAdvanceSlotBeforeFinalize(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, "INSERT INTO public.keepalive_items VALUES (1000, 'after-slot')")
 	require.NoError(t, err)
-	sawInsertedRow := false
+	var insertEndRaw string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT pg_current_wal_insert_lsn()::text").Scan(&insertEndRaw))
+	insertEnd, err := pglogrepl.ParseLSN(insertEndRaw)
+	require.NoError(t, err)
+	t.Logf("slot boundary=%s, post-snapshot insert end=%s", before, insertEnd)
+
+	var snapshotIDs []int64
 	for result := range records {
 		require.NoError(t, result.Err)
 		if result.Batch != nil {
 			indices := result.Batch.Schema().FieldIndices("id")
-			if len(indices) == 1 {
-				switch values := result.Batch.Column(indices[0]).(type) {
-				case *array.Int32:
-					for i := 0; i < values.Len(); i++ {
-						sawInsertedRow = sawInsertedRow || values.Value(i) == 1000
-					}
-				case *array.Int64:
-					for i := 0; i < values.Len(); i++ {
-						sawInsertedRow = sawInsertedRow || values.Value(i) == 1000
-					}
-				}
-			}
+			require.Len(t, indices, 1)
+			values := result.Batch.Column(indices[0]).(*array.Int64)
+			snapshotIDs = append(snapshotIDs, values.Int64Values()...)
 			result.Batch.Release()
 		}
 	}
-	require.True(t, sawInsertedRow, "batch finalized an LSN covering row 1000 before emitting that row")
+	// An initial batch ends at the exported snapshot, not at a WAL barrier.
+	// The post-snapshot insert must remain available to a subsequent batch.
+	require.Len(t, snapshotIDs, 32)
+	require.NotContains(t, snapshotIDs, int64(1000))
+	snapshotPosition := src.CDCState().Position
+	snapshotLSN, err := pglogrepl.ParseLSN(snapshotPosition)
+	require.NoError(t, err)
+	require.Equal(t, before, snapshotLSN)
+	require.Less(t, snapshotLSN, insertEnd)
+	require.NoError(t, src.FinalizeBatch(ctx))
+	var snapshotConfirmed string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&snapshotConfirmed))
+	require.Equal(t, before.String(), snapshotConfirmed)
+	require.NoError(t, src.Close(ctx))
+
+	src = NewPostgresCDCSource()
+	require.NoError(t, src.Connect(ctx, strings.Replace(connString, "postgres://", "postgres+cdc://", 1)+"&publication=keepalive_pub&slot="+slotName+"&mode=batch"))
+	table, err = src.GetTable(ctx, source.TableRequest{Name: "public.keepalive_items"})
+	require.NoError(t, err)
+	records, err = table.Read(ctx, source.ReadOptions{PageSize: 1, Schema: tableSchema, CDCResumeLSN: snapshotPosition})
+	require.NoError(t, err)
+	var resumedIDs []int64
+	for result := range records {
+		require.NoError(t, result.Err)
+		if result.Batch != nil {
+			indices := result.Batch.Schema().FieldIndices("id")
+			require.Len(t, indices, 1)
+			values := result.Batch.Column(indices[0]).(*array.Int64)
+			resumedIDs = append(resumedIDs, values.Int64Values()...)
+			result.Batch.Release()
+		}
+	}
+	require.Equal(t, []int64{1000}, resumedIDs, "resumed batch must emit the post-snapshot row without repeating the snapshot")
 
 	caughtUpRaw := src.CDCState().Position
 	caughtUp, err := pglogrepl.ParseLSN(caughtUpRaw)
 	require.NoError(t, err)
 	require.Greater(t, caughtUp, before)
-	var beforeFinalizeRaw string
-	require.NoError(t, pool.QueryRow(ctx, "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&beforeFinalizeRaw))
-	beforeFinalize, err := pglogrepl.ParseLSN(beforeFinalizeRaw)
-	require.NoError(t, err)
-	require.LessOrEqual(t, beforeFinalize, before, "keepalive advanced confirmed_flush_lsn before destination durability")
+	require.GreaterOrEqual(t, caughtUp, insertEnd)
+	t.Logf("snapshot checkpoint=%s, resumed batch checkpoint=%s", snapshotLSN, caughtUp)
+	// Exercise both the immediate keepalive and a periodic send. A single
+	// query can race the goroutine before PostgreSQL processes its feedback.
+	require.Never(t, func() bool {
+		var raw string
+		require.NoError(t, pool.QueryRow(ctx, "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&raw))
+		confirmed, err := pglogrepl.ParseLSN(raw)
+		require.NoError(t, err)
+		return confirmed > before
+	}, 2*keepaliveInterval, 20*time.Millisecond, "keepalive advanced confirmed_flush_lsn before destination durability")
 
 	require.NoError(t, src.FinalizeBatch(ctx))
 	require.Eventually(t, func() bool {
