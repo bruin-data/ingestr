@@ -126,11 +126,16 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 
+	// Validate after draining the stream, leaving failed staging available for inspection.
+	if intervalTracker.err != nil {
+		return fmt.Errorf("cannot determine delete+insert interval: %w", intervalTracker.err)
+	}
+
 	intervalStart := resolveIntervalBound(job.Config.IntervalStart, intervalTracker.Min)
 	intervalEnd := resolveIntervalBound(job.Config.IntervalEnd, intervalTracker.Max)
 
 	if intervalStart == nil || intervalEnd == nil {
-		config.Debug("[DELETE+INSERT] No interval detected (empty data?), skipping delete+insert")
+		config.Debug("[DELETE+INSERT] Empty data and incomplete explicit interval, skipping delete+insert")
 		if !job.Config.KeepStaging {
 			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
 				config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)

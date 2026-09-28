@@ -100,9 +100,65 @@ func TestDeleteInsertStrategy_JSONLToDuckDB(t *testing.T) {
 }
 
 func TestDeleteInsertStrategy_WithExplicitInterval(t *testing.T) {
-	// Skip this test - explicit interval with non-timestamp types requires
-	// different handling in the config (IntervalStart/End are *time.Time)
-	t.Skip("Explicit interval with integer IDs not supported yet - requires config changes")
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	dir := t.TempDir()
+	initial := filepath.Join(dir, "initial.jsonl")
+	replacement := filepath.Join(dir, "replacement.jsonl")
+	require.NoError(t, os.WriteFile(initial, []byte(`{"id":1,"dt":"2024-01-01","name":"outside-before"}
+{"id":2,"dt":"2024-01-02","name":"start-boundary"}
+{"id":3,"dt":"2024-01-03","name":"old"}
+{"id":4,"dt":"2024-01-04","name":"end-boundary"}
+{"id":5,"dt":"2024-01-05","name":"outside-after"}
+`), 0o600))
+	require.NoError(t, os.WriteFile(replacement, []byte(`{"id":3,"dt":"2024-01-03","name":"new"}
+`), 0o600))
+	dbPath := filepath.Join(dir, "explicit.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:           "jsonl://" + initial,
+		SourceTable:         "data",
+		DestURI:             "duckdb:///" + dbPath,
+		DestTable:           "main.events",
+		IncrementalStrategy: config.StrategyDeleteInsert,
+		IncrementalKey:      "dt",
+		Columns:             "dt:date",
+	}
+	require.NoError(t, pipeline.New(cfg).Run(t.Context()))
+	start := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC)
+	cfg.SourceURI = "jsonl://" + replacement
+	cfg.IntervalStart, cfg.IntervalEnd = &start, &end
+	require.NoError(t, pipeline.New(cfg).Run(t.Context()))
+	validateDuckDBDeleteInsertResults(t, dbPath, "Explicit bounds wider than staged data", 3, map[int64]string{
+		1: "outside-before", 3: "new", 5: "outside-after",
+	})
+}
+
+func TestDeleteInsertStrategy_RejectsNullKeysWithoutChangingTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	dir := t.TempDir()
+	input := filepath.Join(dir, "rows.jsonl")
+	dbPath := filepath.Join(dir, "nulls.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:           "jsonl://" + input,
+		SourceTable:         "data",
+		DestURI:             "duckdb:///" + dbPath,
+		DestTable:           "main.events",
+		IncrementalStrategy: config.StrategyDeleteInsert,
+		IncrementalKey:      "batch_id",
+	}
+	require.NoError(t, os.WriteFile(input, []byte("{\"id\":1,\"batch_id\":3,\"name\":\"original\"}\n"), 0o600))
+	require.NoError(t, pipeline.New(cfg).Run(t.Context()))
+	require.NoError(t, os.WriteFile(input, []byte(`{"id":2,"batch_id":3,"name":"replacement"}
+{"id":3,"batch_id":null,"name":"unbounded"}
+`), 0o600))
+	for range 2 {
+		require.ErrorContains(t, pipeline.New(cfg).Run(t.Context()), "NULL")
+		validateDuckDBDeleteInsertResults(t, dbPath, "Rejected NULL-key batch", 1, map[int64]string{1: "original"})
+	}
 }
 
 func TestDeleteInsertStrategy_DeletesRecordsNotInNewData(t *testing.T) {
