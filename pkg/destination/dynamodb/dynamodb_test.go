@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -76,37 +77,39 @@ func TestBatchWriteRetriesOnlyUnprocessedItems(t *testing.T) {
 func TestBatchWriteFailures(t *testing.T) {
 	for _, mode := range []string{"exhausted", "cancelled", "API error"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			calls := 0
-			d := testDestination(t, func(op string, body map[string]any) (int, any) {
-				require.Equal(t, "BatchWriteItem", op)
-				calls++
-				if mode == "API error" {
-					return http.StatusBadRequest, map[string]any{"__type": "ValidationException", "message": "invalid item"}
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				calls := 0
+				d := testDestination(t, func(op string, body map[string]any) (int, any) {
+					require.Equal(t, "BatchWriteItem", op)
+					calls++
+					if mode == "API error" {
+						return http.StatusBadRequest, map[string]any{"__type": "ValidationException", "message": "invalid item"}
+					}
+					if mode == "cancelled" {
+						cancel()
+					}
+					return http.StatusOK, map[string]any{"UnprocessedItems": body["RequestItems"]}
+				})
+				written, err := d.batchWrite(ctx, "target", []types.WriteRequest{
+					{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{"id": &types.AttributeValueMemberS{Value: "a"}}}},
+				})
+				require.Zero(t, written)
+				switch mode {
+				case "exhausted":
+					require.EqualError(t, err, "failed to write all items after retries, 1 unprocessed")
+					require.Equal(t, 5, calls)
+				case "cancelled":
+					require.ErrorIs(t, err, context.Canceled)
+					require.Equal(t, 1, calls)
+				case "API error":
+					var validation smithy.APIError
+					require.ErrorAs(t, err, &validation)
+					require.Equal(t, "ValidationException", validation.ErrorCode())
+					require.Equal(t, 1, calls)
 				}
-				if mode == "cancelled" {
-					cancel()
-				}
-				return http.StatusOK, map[string]any{"UnprocessedItems": body["RequestItems"]}
 			})
-			written, err := d.batchWrite(ctx, "target", []types.WriteRequest{
-				{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{"id": &types.AttributeValueMemberS{Value: "a"}}}},
-			})
-			require.Zero(t, written)
-			switch mode {
-			case "exhausted":
-				require.EqualError(t, err, "failed to write all items after retries, 1 unprocessed")
-				require.Equal(t, 5, calls)
-			case "cancelled":
-				require.ErrorIs(t, err, context.Canceled)
-				require.Equal(t, 1, calls)
-			case "API error":
-				var validation smithy.APIError
-				require.ErrorAs(t, err, &validation)
-				require.Equal(t, "ValidationException", validation.ErrorCode())
-				require.Equal(t, 1, calls)
-			}
 		})
 	}
 }
