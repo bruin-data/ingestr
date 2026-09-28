@@ -180,6 +180,7 @@ type fakeDestination struct {
 	prepareErrByTable map[string]error
 	writeErr          error
 	swapErr           error
+	swapErrByTable    map[string]error
 	mergeErr          error
 	deleteInsertErr   error
 	truncateErr       error
@@ -188,6 +189,12 @@ type fakeDestination struct {
 	noDeleteInsert    bool
 	evolutionWarnings []string
 	evolutionErr      error
+	liveTables        map[string]bool
+	afterWrite        func()
+	observeBatch      func(arrow.RecordBatch)
+	dropContextErrors []error
+	dropHasDeadline   []bool
+	scd2Calls         []destination.SCD2Options
 
 	tableSchemas map[string]*schema.TableSchema
 }
@@ -251,6 +258,9 @@ func (d *fakeDestination) PrepareTable(ctx context.Context, opts destination.Pre
 	if d.prepareErrByTable != nil {
 		err = d.prepareErrByTable[opts.Table]
 	}
+	if err == nil && d.liveTables != nil {
+		d.liveTables[opts.Table] = true
+	}
 	d.mu.Unlock()
 	return err
 }
@@ -264,11 +274,17 @@ func (d *fakeDestination) WriteParallel(ctx context.Context, records <-chan sour
 
 	for result := range records {
 		if result.Batch != nil {
+			if d.observeBatch != nil {
+				d.observeBatch(result.Batch)
+			}
 			result.Batch.Release()
 		}
 		if result.Err != nil {
 			return result.Err
 		}
+	}
+	if d.afterWrite != nil {
+		d.afterWrite()
 	}
 	return writeErr
 }
@@ -279,6 +295,13 @@ func (d *fakeDestination) SwapTable(ctx context.Context, opts destination.SwapOp
 	d.swapCalls = append(d.swapCalls, [2]string{opts.StagingTable, opts.TargetTable})
 	d.swapOptions = append(d.swapOptions, opts)
 	swapErr := d.swapErr
+	if d.swapErrByTable != nil {
+		swapErr = d.swapErrByTable[opts.TargetTable]
+	}
+	if swapErr == nil && d.liveTables != nil {
+		delete(d.liveTables, opts.StagingTable)
+		d.liveTables[opts.TargetTable] = true
+	}
 	d.mu.Unlock()
 	return swapErr
 }
@@ -304,6 +327,7 @@ func (d *fakeDestination) DeleteInsertTable(ctx context.Context, opts destinatio
 func (d *fakeDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
 	d.mu.Lock()
 	d.calls = append(d.calls, "SCD2Table")
+	d.scd2Calls = append(d.scd2Calls, opts)
 	d.mu.Unlock()
 	return nil
 }
@@ -315,6 +339,17 @@ func (d *fakeDestination) DropTable(ctx context.Context, table string) error {
 	err := error(nil)
 	if d.dropErrByTable != nil {
 		err = d.dropErrByTable[table]
+	}
+	d.dropContextErrors = append(d.dropContextErrors, ctx.Err())
+	_, hasDeadline := ctx.Deadline()
+	d.dropHasDeadline = append(d.dropHasDeadline, hasDeadline)
+	if d.liveTables != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if err == nil {
+			delete(d.liveTables, table)
+		}
 	}
 	d.mu.Unlock()
 	return err

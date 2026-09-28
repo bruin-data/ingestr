@@ -21,6 +21,8 @@ source  ->  staging table  ->  destination table
 - Data is loaded into staging.
 - Replace swaps staging into the destination.
 
+Replace and merge clean up prepared staging tables on failure, including source-read failures and partially prepared multi-table jobs. Cleanup uses a detached context with a 30-second timeout per table, so cancellation does not prevent it; connector lease loss still suppresses cleanup. Replace transfers cleanup ownership from raw to normalised staging during deduplication and releases it after a successful swap. Cleanup failures are logged without replacing the ingestion error. Direct-write targets are never staging cleanup candidates.
+
 ## 2. Loading Data into Staging (load methods)
 
 - **`load_job`** (default): a BigQuery load job.
