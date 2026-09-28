@@ -65,9 +65,12 @@ func TestStarRocksDeduplication(t *testing.T) {
 				PrimaryKeys: []string{"id"}, Columns: tableSchema.ColumnNames(), IncrementalKey: incrementalKey,
 			}))
 			require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
-				StagingTable: "dedup.normalized", TargetTable: "dedup.result", Schema: tableSchema,
+				StagingTable: "dedup.normalized", TargetTable: "published.result", Schema: tableSchema,
 			}))
-			rows, err := db.Query("SELECT id, name, score, __bruin_dedup_rn FROM dedup.result ORDER BY id")
+			var tableName, createSQL string
+			require.NoError(t, db.QueryRow("SHOW CREATE TABLE published.result").Scan(&tableName, &createSQL))
+			require.Contains(t, createSQL, "PRIMARY KEY(`id`)", "swap must retain the normalized table's primary key on first and repeated replace")
+			rows, err := db.Query("SELECT id, name, score, __bruin_dedup_rn FROM published.result ORDER BY id")
 			require.NoError(t, err)
 			defer func() { _ = rows.Close() }()
 			var names []string

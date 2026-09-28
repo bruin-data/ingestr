@@ -317,12 +317,13 @@ func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.S
 			return fmt.Errorf("failed to ensure target database: %w", err)
 		}
 	}
-	if opts.Schema != nil {
-		createSQL := d.buildCreateTableSQL(opts.TargetTable, opts.Schema.Columns, opts.PrimaryKeys)
-		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-			config.LogFailedQuery(createSQL, err)
-			return fmt.Errorf("failed to create target table: %w", err)
-		}
+	// Normalized staging already carries the primary key; the replace strategy
+	// clears opts.PrimaryKeys after deduplication rather than repeating it here.
+	createSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s LIKE %s",
+		quoteTable(opts.TargetTable), quoteTable(opts.StagingTable))
+	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+		config.LogFailedQuery(createSQL, err)
+		return fmt.Errorf("failed to create target table: %w", err)
 	}
 
 	overwriteSQL := fmt.Sprintf("INSERT OVERWRITE %s SELECT * FROM %s",
