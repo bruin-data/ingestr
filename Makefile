@@ -129,7 +129,7 @@ test-python:
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p 64 -parallel 8 -timeout 20m ./tests/integration/...
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p 64 -parallel 8 -timeout 20m ./tests/integration/... ./pkg/...
 
 # Integration tests that need no Docker: container-backed tests skip themselves
 # when no Docker provider is available (see requireDocker), leaving the

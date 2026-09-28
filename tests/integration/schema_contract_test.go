@@ -33,7 +33,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_freeze_new_column", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -141,7 +141,7 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_evolve", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -197,7 +197,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_discard_value", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -315,7 +315,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_discard_row", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -379,7 +379,7 @@ func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || !(tc.addColumnCapable || tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_default", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -423,10 +423,7 @@ func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
 func validateContractInitialSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var count int
@@ -437,10 +434,7 @@ func validateContractInitialSQL(t *testing.T, backend *sqlBackend, uri, table st
 func validateContractRowCountSQL(t *testing.T, backend *sqlBackend, uri, table string, expected int) {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var count int
@@ -458,17 +452,11 @@ func validateContractEmailColumnExists(t *testing.T, backend *sqlBackend, uri, t
 func getColumnTypes(t *testing.T, backend *sqlBackend, uri, table string) map[string]string {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return nil
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	types, err := backend.schemaTypes(db, table)
-	if err != nil {
-		t.Skipf("Could not read schema types: %v", err)
-		return nil
-	}
+	require.NoError(t, err)
 	return types
 }
 
