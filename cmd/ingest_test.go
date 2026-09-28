@@ -1,10 +1,15 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/urfave/cli/v3"
 )
 
 func TestParseExtractPartitionInterval(t *testing.T) {
@@ -189,5 +194,57 @@ func TestTelemetryTableSelection(t *testing.T) {
 				t.Fatalf("telemetryTableSelection = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReverseETLFlagDefaults(t *testing.T) {
+	tests := []struct {
+		args          []string
+		wantNulls     bool
+		wantNullsSet  bool
+		wantRejectSet string
+	}{
+		{args: nil, wantNulls: true},
+		{args: []string{"--write-nulls=false"}, wantNulls: false, wantNullsSet: true},
+		{args: []string{"--write-nulls", "--reject-mode", "skip"}, wantNulls: true, wantNullsSet: true, wantRejectSet: "skip"},
+	}
+	for _, tt := range tests {
+		cmd := IngestCommand()
+		cmd.Writer, cmd.ErrWriter = io.Discard, io.Discard
+		cmd.Action = func(_ context.Context, c *cli.Command) error {
+			if got := c.Bool("write-nulls"); got != tt.wantNulls {
+				t.Errorf("%v: write-nulls = %v, want %v", tt.args, got, tt.wantNulls)
+			}
+			if got := c.IsSet("write-nulls"); got != tt.wantNullsSet {
+				t.Errorf("%v: write-nulls set = %v, want %v", tt.args, got, tt.wantNullsSet)
+			}
+			if got := c.String("reject-mode"); got != tt.wantRejectSet {
+				t.Errorf("%v: reject-mode = %q, want %q", tt.args, got, tt.wantRejectSet)
+			}
+			return nil
+		}
+		if err := cmd.Run(context.Background(), append([]string{"ingest", "--source-uri", "csv://a.csv", "--dest-uri", "duckdb:///a.db"}, tt.args...)); err != nil {
+			t.Fatalf("%v: Run returned error: %v", tt.args, err)
+		}
+	}
+}
+
+func TestReverseETLFlagHelpShowsDefaults(t *testing.T) {
+	var out bytes.Buffer
+	cmd := IngestCommand()
+	cmd.Writer = &out
+	if err := cmd.Run(context.Background(), []string{"ingest", "--help"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	for flag, want := range map[string]string{"--write-nulls": "(default: true)", "--reject-mode value": "(default: fail)"} {
+		line := ""
+		for _, l := range strings.Split(out.String(), "\n") {
+			if strings.Contains(l, flag) {
+				line = l
+			}
+		}
+		if !strings.Contains(line, want) {
+			t.Errorf("%s help = %q, want %s", flag, line, want)
+		}
 	}
 }
