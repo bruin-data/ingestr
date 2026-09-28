@@ -29,6 +29,7 @@ Two things follow from this:
 | ----------- | ------------------ |
 | [HubSpot](/supported-sources/hubspot.md#hubspot-as-a-destination) | CRM records (contacts, companies, deals, custom objects) and associations |
 | [CleverTap](/supported-sources/clevertap.md#what-to-upload) | User profiles and events |
+| [Salesforce](/supported-sources/salesforce.md#salesforce-as-a-destination) | sObject records (standard and custom objects) |
 
 Each destination's page has its own URI, object types, and quirks. This page covers what they share.
 
@@ -56,7 +57,7 @@ On a destination that supports deletion, `replace` removes **every** record that
 
 `merge`, `update`, and `delete` need to find the existing record. That's two separate things:
 
-- **Remote field to match on** — a destination-side property, set on `--dest-table` (e.g. `id_property=email`).
+- **Remote field to match on** — a destination-side property, set on `--dest-table` (e.g. `id_property=email` for HubSpot). Each destination names this parameter after its own API, so Salesforce calls it `external_id`. Check the destination's page for the name it uses.
 - **Source column with the value** — set with `--primary-key`.
 
 They're independent — `--dest-table "contacts?id_property=email" --primary-key customer_email` matches the `email` property against your `customer_email` column.
@@ -95,6 +96,7 @@ Rename a column to a differently-named property with `--columns`, using `dest_pr
 ```
 
 - Rename only — reverse-ETL destinations own their property types. Some destinations reject an entry that carries a type; check its page.
+- Renaming happens **before** the destination sees the row, so `--primary-key` must name the **renamed** column. With `--columns 'Ext_Id__c::customer_ref'`, pass `--primary-key Ext_Id__c`, not `customer_ref`.
 - Whether an unknown property is accepted also depends on the destination: some create attributes on the fly, others require the property to already exist. Check its page.
 
 ## Example

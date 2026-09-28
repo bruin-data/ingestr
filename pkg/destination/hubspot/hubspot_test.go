@@ -206,6 +206,40 @@ func TestReplaceFailModeSkipsArchive(t *testing.T) {
 	assert.False(t, archived, "fail-mode mirror with rejects must not archive")
 }
 
+func TestReplaceSkipModeAllRejectedSkipsArchive(t *testing.T) {
+	var mu sync.Mutex
+	var archived bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/upsert":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"status":"error","category":"VALIDATION_ERROR","message":"bad row"}`)
+		case r.URL.Path == "/crm/v3/objects/contacts" && r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"results":[{"id":"2","properties":{"email":"old@x.com"}}]}`)
+		case r.URL.Path == "/crm/v3/objects/contacts/batch/archive":
+			mu.Lock()
+			archived = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"email": {"a@x.com"}, "firstname": {"A"}}, []string{"email", "firstname"})
+	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts?id_property=email", Strategy: "replace", PrimaryKeys: []string{"email"}, RejectMode: "skip",
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.False(t, archived, "a mirror run that wrote nothing must not archive")
+}
+
 // TestSearchUpdateNotFoundToleratedUnderSkip: a record deleted between Search and
 // the update (TOCTOU 404) must be a per-record reject under --reject-mode skip,
 // not abort the whole run.
@@ -635,6 +669,15 @@ func TestParseShaperStrategies(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, sh.createOnly)
 		assert.False(t, sh.matchesRecords())
+	})
+
+	t.Run("append refuses id_property, keeps --primary-key as a label", func(t *testing.T) {
+		_, err := parseShaper("contacts?id_property=email", "append", []string{"email"}, "", false)
+		require.ErrorContains(t, err, "never matches")
+		sh, err := parseShaper("contacts", "append", []string{"email"}, "", false)
+		require.NoError(t, err)
+		assert.False(t, sh.matchesRecords())
+		assert.Equal(t, []string{"email"}, sh.labelColumns)
 	})
 
 	t.Run("delete archives, --primary-key names the source column", func(t *testing.T) {
@@ -2547,47 +2590,11 @@ func TestSourceMatchColumnViaPrimaryKey(t *testing.T) {
 	assert.Equal(t, "A", captured[0].Properties["name"])
 }
 
-// TestWriteNullsParamHonored: write_nulls=true on the dest-table (not just the
-// --write-nulls flag) must send a null cell as an empty string to clear it.
-func TestWriteNullsParamHonored(t *testing.T) {
-	var mu sync.Mutex
-	var captured []batchInput
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/batch/upsert") {
-			raw, _ := io.ReadAll(r.Body)
-			var body struct {
-				Inputs []batchInput `json:"inputs"`
-			}
-			_ = json.Unmarshal(raw, &body)
-			mu.Lock()
-			captured = append(captured, body.Inputs...)
-			mu.Unlock()
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[]}`)
-	}))
-	t.Cleanup(srv.Close)
-
-	d := connectTest(t, srv.URL)
-	s := arrow.NewSchema([]arrow.Field{
-		{Name: "email", Type: arrow.BinaryTypes.String},
-		{Name: "phone", Type: arrow.BinaryTypes.String},
-	}, nil)
-	b := array.NewRecordBuilder(memory.DefaultAllocator, s)
-	b.Field(0).(*array.StringBuilder).AppendValues([]string{"a@x.com"}, nil)
-	b.Field(1).(*array.StringBuilder).AppendValues([]string{""}, []bool{false})
-	rec := b.NewRecordBatch()
-	b.Release()
-
-	// No WriteNulls flag: the behavior comes purely from the dest-table param.
-	require.NoError(t, d.Write(context.Background(), feed(rec), destination.WriteOptions{
-		Table: "contacts?id_property=email&write_nulls=true", Strategy: "merge", PrimaryKeys: []string{"email"},
-	}))
-
-	require.Len(t, captured, 1)
-	phone, present := captured[0].Properties["phone"]
-	assert.True(t, present, "write_nulls param: null phone should be sent")
-	assert.Equal(t, "", phone, "write_nulls param: null phone should be an empty string")
+// TestWriteNullsIsFlagOnly: nulls are controlled by --write-nulls alone; a
+// dest-table write_nulls param is refused like any unknown parameter.
+func TestWriteNullsIsFlagOnly(t *testing.T) {
+	_, err := parseShaper("contacts?id_property=email&write_nulls=true", "merge", []string{"email"}, "", false)
+	require.ErrorContains(t, err, "unknown table parameter(s): write_nulls")
 }
 
 // TestPropertyValueDecimal256: high-precision decimals (precision >38) map to
@@ -2905,4 +2912,26 @@ func TestAppendConflictHintsUpsert(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "hint")
 	require.ErrorContains(t, err, "id_property")
+}
+
+func TestAppendNamesRejectsByPrimaryKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.HasSuffix(r.URL.Path, "/batch/create") && strings.Contains(string(body), "a@x.com") {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"category":"CONFLICT","message":"Contact already exists"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"COMPLETE","results":[{"id":"1"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := connectTest(t, srv.URL)
+	rec := stringBatch(map[string][]string{"email": {"a@x.com", "b@x.com"}}, []string{"email"})
+	err := d.Write(context.Background(), feed(rec), destination.WriteOptions{
+		Table: "contacts", Strategy: "append", RejectMode: "fail", PrimaryKeys: []string{"email"},
+	})
+	require.ErrorContains(t, err, "[email=a@x.com]")
+	require.NotContains(t, err.Error(), "b@x.com")
 }
