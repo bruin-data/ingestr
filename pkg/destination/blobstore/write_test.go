@@ -99,6 +99,11 @@ func TestCloudWriteReplaceAndAppend(t *testing.T) {
 							}
 						}
 					case http.MethodDelete:
+						if provider == ProviderAzure && r.Header.Get("x-ms-delete-snapshots") != "include" {
+							w.Header().Set("x-ms-error-code", "SnapshotsPresent")
+							w.WriteHeader(http.StatusConflict)
+							return
+						}
 						delete(objects, key)
 						if provider == ProviderAzure {
 							w.WriteHeader(http.StatusAccepted)

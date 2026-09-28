@@ -628,6 +628,7 @@ func (d *BlobstoreDestination) DropTable(ctx context.Context, table string) erro
 			}
 		}
 	case ProviderAzure:
+		deleteSnapshots := azblob.DeleteSnapshotsOptionTypeInclude
 		pager := d.azureClient.NewListBlobsFlatPager(bucket, &azblob.ListBlobsFlatOptions{Prefix: &prefix})
 		for pager.More() {
 			page, err := pager.NextPage(ctx)
@@ -635,7 +636,7 @@ func (d *BlobstoreDestination) DropTable(ctx context.Context, table string) erro
 				return fmt.Errorf("failed to list blobs: %w", err)
 			}
 			for _, object := range page.Segment.BlobItems {
-				if _, err := d.azureClient.DeleteBlob(ctx, bucket, *object.Name, nil); err != nil {
+				if _, err := d.azureClient.DeleteBlob(ctx, bucket, *object.Name, &azblob.DeleteBlobOptions{DeleteSnapshots: &deleteSnapshots}); err != nil {
 					return fmt.Errorf("failed to delete blob %s: %w", *object.Name, err)
 				}
 			}
