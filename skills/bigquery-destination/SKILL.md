@@ -23,6 +23,8 @@ source  ->  staging table  ->  destination table
 
 Replace and merge clean up prepared staging tables on failure, including source-read failures and partially prepared multi-table jobs. Cleanup uses a detached context with a 30-second timeout per table, so cancellation does not prevent it; connector lease loss still suppresses cleanup. Replace transfers cleanup ownership from raw to normalised staging during deduplication and releases it after a successful swap. Cleanup failures are logged without replacing the ingestion error. Direct-write targets are never staging cleanup candidates.
 
+BigQuery `DropTable` waits for that table's pending asynchronous preparation before deleting, even if preparation reports an error. This prevents early source-read cleanup from racing ahead of table creation; the cleanup context bounds the wait.
+
 ## 2. Loading Data into Staging (load methods)
 
 - **`load_job`** (default): a BigQuery load job.

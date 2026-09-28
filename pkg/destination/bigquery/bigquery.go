@@ -2781,18 +2781,19 @@ func (t *bigQueryTransaction) Rollback(_ context.Context) error {
 
 // DropTable drops a table if it exists.
 func (d *BigQueryDestination) DropTable(ctx context.Context, table string) error {
-	project, dataset, tableName, err := d.parseTable(table)
+	project, dataset, tableName, tableKey, err := d.resolveTable(table)
 	if err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
 	}
 
-	// Use dataset from table name if not set in URI
-	if dataset == "" && d.datasetID != "" {
-		dataset = d.datasetID
-	}
-
-	if dataset == "" {
-		return errors.New("dataset must be specified in table name (dataset.table) or URI path")
+	// A source-read failure can reach cleanup before async PrepareTable finishes.
+	// Delete even if preparation failed: it may have created the table first.
+	if pendingErr := d.takePendingTableErr(tableKey); pendingErr != nil {
+		select {
+		case <-pendingErr:
+		case <-ctx.Done():
+			return fmt.Errorf("waiting to drop table %s: %w", table, ctx.Err())
+		}
 	}
 
 	tableRef := d.client.DatasetInProject(project, dataset).Table(tableName)
