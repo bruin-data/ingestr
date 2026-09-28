@@ -233,15 +233,15 @@ ingestr can write rows from any source back into Salesforce (reverse ETL). Each 
 
 ### URI format
 
-The URI format for Salesforce as a destination is as follows:
+The destination URI is the same as the [source URI](#uri-format), with one extra parameter, `load_method`:
 
 ```plaintext
 salesforce://?access_token=<access_token>&domain=<domain>&load_method=<load_method>
 ```
 
 URI parameters:
-- `access_token` and `domain` work the same as in the [source URI](#uri-format). The username/password and client credentials logins work here too.
-- `load_method` is optional: `bulk` (default) or `rest`. See [Load method](#load-method) for when to use each.
+- `access_token` and `domain`: same as the source. The username/password and client credentials logins work here too.
+- `load_method` *(destination only, optional)*: `bulk` (default) or `rest`. See [Load method](#load-method) for when to use each.
 
 The user you connect with needs **Create**, **Edit** and, for `delete`/`replace`, **Delete** permission on the object, plus **Edit** access to every field you write.
 
