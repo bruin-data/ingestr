@@ -374,14 +374,14 @@ To remove links, `delete` those records. To keep the links exactly in step with 
 
 ### Load method
 
-- **`bulk`** *(default)*: uses Salesforce's Bulk API. It needs only a few API calls per run, however large the table, and reports rejected rows when the load finishes.
+- **`bulk`** *(default)*: uses Salesforce's Bulk API. It uses far fewer API calls than `rest` on large tables, and reports rejected rows when the load finishes.
 - **`rest`**: writes records in small batches and reports results right away, but uses more API calls on large tables.
 
 ```sh
 --dest-table "Contact?external_id=External_Id__c&load_method=rest"
 ```
 
-Use `rest` if you need `--reject-mode fail_fast` or you upload files (such as `ContentVersion.VersionData`). If a run needs `rest`, ingestr says so before writing anything. Every strategy works the same with both.
+Use `rest` if you need `--reject-mode fail_fast`, upload files (such as `ContentVersion.VersionData`), or write text that is exactly `#N/A`, which bulk reads as an empty value. Every strategy works the same with both.
 
 ### Reverse-ETL options
 
