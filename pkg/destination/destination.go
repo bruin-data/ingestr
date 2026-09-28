@@ -127,6 +127,7 @@ type TruncateInsertFromStagingOptions struct {
 	StagingPrimaryKeysUnique bool
 	Columns                  []string
 	IncrementalKey           string
+	CDCExpectedIncarnation   string
 }
 
 // InsertFromStagingOptions configures a keyless insert from a populated

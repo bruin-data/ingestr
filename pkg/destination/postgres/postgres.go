@@ -1152,6 +1152,12 @@ func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opt
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if opts.CDCExpectedIncarnation != "" {
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation, "ACCESS EXCLUSIVE"); err != nil {
+			return err
+		}
+	}
+
 	if _, err := tx.Exec(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate target: %w", err)

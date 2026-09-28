@@ -60,6 +60,10 @@ func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
 		StagingPrimaryKeysUnique: true,
 		Columns:                  []string{"id", "value"},
 	}
+	incarnation, exists, err := dest.CDCTargetIncarnation(ctx, opts.TargetTable)
+	require.NoError(t, err)
+	require.True(t, exists)
+	opts.CDCExpectedIncarnation = incarnation
 	require.Error(t, dest.TruncateInsertFromStaging(ctx, opts))
 
 	var id int64
@@ -97,4 +101,15 @@ func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
 	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.current_keyless_events`).Scan(&id, &value))
 	require.Equal(t, int64(20), id)
 	require.Equal(t, "new-keyless", value)
+
+	require.NoError(t, dest.Exec(ctx, `
+		DROP VIEW public.current_events;
+		DROP TABLE public.events;
+		CREATE TABLE public.events (id bigint PRIMARY KEY, value text NOT NULL);
+		INSERT INTO public.events VALUES (99, 'different table');
+	`))
+	require.ErrorContains(t, dest.TruncateInsertFromStaging(ctx, opts), "physical incarnation changed")
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.events`).Scan(&id, &value))
+	require.Equal(t, int64(99), id)
+	require.Equal(t, "different table", value)
 }
