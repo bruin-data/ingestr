@@ -77,6 +77,7 @@ func TestRESTWriteContract(t *testing.T) {
 						if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/sobjects") {
 							key, _ = record["Id"].(string)
 						}
+						effects.Attempted = append(effects.Attempted, key)
 						if s.Reject && (!s.Mixed || key == "beta") {
 							results = append(results, map[string]any{"success": false, "errors": []any{map[string]string{"statusCode": "FIELD_CUSTOM_VALIDATION_EXCEPTION", "message": "bad row"}}})
 							continue

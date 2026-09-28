@@ -60,6 +60,15 @@ func TestWriteContract(t *testing.T) {
 				return
 			}
 			op := strings.TrimPrefix(r.URL.Path, "/crm/v3/objects/contacts/batch/")
+			if op != "read" && op != "archive" {
+				for _, input := range body.Inputs {
+					key := input.ID
+					if op == "create" {
+						key = input.Properties["source_key"]
+					}
+					effects.Attempted = append(effects.Attempted, key)
+				}
+			}
 			if s.Reject && op != "read" && op != "archive" {
 				for _, input := range body.Inputs {
 					if !s.Mixed || input.ID == "beta" || input.Properties["source_key"] == "beta" {
