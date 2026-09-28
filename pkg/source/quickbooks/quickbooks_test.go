@@ -3,8 +3,10 @@ package quickbooks
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +139,54 @@ func TestIsValidTable(t *testing.T) {
 	assert.False(t, isValidTable(""))
 	assert.False(t, isValidTable("Customers"))
 	assert.False(t, isValidTable("INVOICES"))
+}
+
+func TestReadQueriesMappedObject(t *testing.T) {
+	// Object names are spelled out here rather than read from tableMapping so a
+	// wrong mapping fails instead of being asserted against itself.
+	wantObjects := map[string]string{
+		"customers": "Customer",
+		"invoices":  "Invoice",
+		"accounts":  "Account",
+		"vendors":   "Vendor",
+		"payments":  "Payment",
+		"purchases": "Purchase",
+		"bills":     "Bill",
+	}
+	require.ElementsMatch(t, supportedTables, slices.Collect(maps.Keys(wantObjects)))
+
+	for _, table := range supportedTables {
+		t.Run(table, func(t *testing.T) {
+			object := wantObjects[table]
+			require.Equal(t, object, tableMapping[table], "%s maps to the wrong QuickBooks object", table)
+
+			var gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotQuery = r.URL.Query().Get("query")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"QueryResponse": map[string]any{
+						object: []map[string]any{{"Id": "1", "MetaData": map[string]any{"LastUpdatedTime": "2025-06-15T10:30:00-08:00"}}},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			s := &QuickBooksSource{companyID: "1", client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+			results, err := s.read(context.Background(), table, source.ReadOptions{})
+			require.NoError(t, err)
+
+			var rows int64
+			for res := range results {
+				require.NoError(t, res.Err)
+				rows += res.Batch.NumRows()
+				res.Batch.Release()
+			}
+
+			assert.Equal(t, int64(1), rows)
+			assert.Contains(t, gotQuery, "SELECT * FROM "+object+" ")
+		})
+	}
 }
 
 func TestBuildQuery(t *testing.T) {

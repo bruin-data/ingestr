@@ -46,6 +46,8 @@ QuickBooks source allows ingesting the following tables:
 | `accounts`      | id | lastupdatedtime    | merge               | Retrives details of accounts. |
 | `vendors`       | id | lastupdatedtime     | merge               | Retrives vendor records. |
 | `payments`      | id | lastupdatedtime     | merge  | Retrives payments recorded. |
+| `purchases`     | id | lastupdatedtime     | merge               | Retrives expense transactions such as cash expenses, checks and credit card charges. |
+| `bills`         | id | lastupdatedtime     | merge               | Retrives vendor bills. |
 
 Use these as the `--source-table` parameter in the `ingestr ingest` command.
 
