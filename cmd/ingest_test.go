@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -197,7 +198,16 @@ func TestTelemetryTableSelection(t *testing.T) {
 	}
 }
 
+func unsetReverseETLEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"WRITE_NULLS", "INGESTR_WRITE_NULLS", "REJECT_MODE", "INGESTR_REJECT_MODE"} {
+		t.Setenv(name, "")
+		_ = os.Unsetenv(name)
+	}
+}
+
 func TestReverseETLFlagDefaults(t *testing.T) {
+	unsetReverseETLEnv(t)
 	tests := []struct {
 		args          []string
 		wantNulls     bool
@@ -230,6 +240,7 @@ func TestReverseETLFlagDefaults(t *testing.T) {
 }
 
 func TestReverseETLFlagHelpShowsDefaults(t *testing.T) {
+	unsetReverseETLEnv(t)
 	var out bytes.Buffer
 	cmd := IngestCommand()
 	cmd.Writer = &out
