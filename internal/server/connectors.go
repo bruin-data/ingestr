@@ -294,7 +294,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("asana", "Asana", []string{"asana"}, true, false),
 		genericURIConnector("athena", "Amazon Athena", []string{"athena"}, true, true),
 		genericURIConnector("iceberg", "Apache Iceberg", []string{"iceberg", "iceberg+rest", "iceberg+r2", "iceberg+glue", "iceberg+hive", "iceberg+hadoop", "iceberg+sql", "iceberg+sqlite", "iceberg+postgres"}, false, true),
-		genericURIConnector("attio", "Attio", []string{"attio"}, true, false),
+		genericURIConnector("attio", "Attio", []string{"attio"}, true, true),
 		genericURIConnector("avro", "Avro File", []string{"avro"}, true, false),
 		genericURIConnector("balldontlie", "balldontlie", []string{"balldontlie"}, true, false),
 		genericURIConnector("bamboohr", "BambooHR", []string{"bamboohr"}, true, false),
