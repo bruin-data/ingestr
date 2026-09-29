@@ -292,6 +292,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Typeform", link: "/supported-sources/typeform.md" },
               { text: "Wise", link: "/supported-sources/wise.md" },
               { text: "Wistia", link: "/supported-sources/wistia.md" },
+              { text: "Yahoo Finance", link: "/supported-sources/yfinance.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
               { text: "Zoom", link: "/supported-sources/zoom.md" },
             ],

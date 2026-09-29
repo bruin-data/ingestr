@@ -124,3 +124,4 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Lumify](/supported-sources/lumify.md)
 - [Polymarket](/supported-sources/polymarket.md)
 - [RIPEstat](/supported-sources/ripestat.md)
+- [Yahoo Finance](/supported-sources/yfinance.md)

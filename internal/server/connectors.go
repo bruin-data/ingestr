@@ -424,6 +424,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("vertica", "Vertica", []string{"vertica"}, true, true),
 		genericURIConnector("wise", "Wise", []string{"wise"}, true, false),
 		genericURIConnector("wistia", "Wistia", []string{"wistia"}, true, false),
+		genericURIConnector("yfinance", "Yahoo Finance", []string{"yfinance"}, true, false),
 		genericURIConnector("zendesk", "Zendesk", []string{"zendesk"}, true, false),
 		genericURIConnector("zoom", "Zoom", []string{"zoom"}, true, false),
 	)
