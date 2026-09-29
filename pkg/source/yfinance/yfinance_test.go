@@ -149,8 +149,7 @@ func TestHistoryRows(t *testing.T) {
 		"meta":{"symbol":"AAPL","currency":"USD","exchangeTimezoneName":"America/New_York","gmtoffset":-14400},
 		"timestamp":[1717421400,1717507800,1717594200],
 		"indicators":{
-			"quote":[{"open":[115.0,null,118.0],"high":[116.0,null,119.0],"low":[114.0,null,117.0],"close":[115.5,null,118.5],"volume":[1000,null,3000]}],
-			"adjclose":[{"adjclose":[115.1,null,118.1]}]
+			"quote":[{"open":[115.0,null,118.0],"high":[116.0,null,119.0],"low":[114.0,null,117.0],"close":[115.5,null,118.5],"volume":[1000,null,3000]}]
 		}}]}}`)
 
 	window := func(s, e int64) (time.Time, time.Time) { return time.Unix(s, 0), time.Unix(e, 0) }
@@ -162,13 +161,8 @@ func TestHistoryRows(t *testing.T) {
 	assert.Equal(t, "1d", items[0]["interval"])
 	assert.Equal(t, time.Unix(1717421400, 0).UTC(), items[0]["timestamp"])
 	assert.Equal(t, 115.5, items[0]["close"])
-	assert.Equal(t, 115.1, items[0]["adj_close"])
 	assert.Equal(t, int64(1000), items[0]["volume"])
 	assert.Equal(t, "USD", items[0]["currency"])
-
-	intraday := historyRows(res, "AAPL", "1h", false, start, end)
-	_, hasAdj := intraday[0]["adj_close"]
-	assert.False(t, hasAdj, "intraday rows carry no adj_close")
 
 	start, end = window(1717421400, 1717594200)
 	items = historyRows(res, "AAPL", "1d", false, start, end)
@@ -435,8 +429,11 @@ func TestReplaceTablesFailInsteadOfDroppingSymbols(t *testing.T) {
 	assert.ErrorContains(t, err, "no option contracts")
 }
 
-func TestHistoryReloadsFullOnSplitOrDividend(t *testing.T) {
+func TestHistoryReloadsFullOnSplit(t *testing.T) {
 	oldBar, newBar := int64(1717075800), int64(1717421400) // 2024-05-30, 2024-06-03 13:30 UTC
+	split := func(date int64) string {
+		return `{"splits":{"1":{"date":` + strconv.FormatInt(date, 10) + `,"numerator":10,"denominator":1,"splitRatio":"10:1"}}}`
+	}
 	for _, tc := range []struct {
 		name     string
 		events   string
@@ -444,21 +441,23 @@ func TestHistoryReloadsFullOnSplitOrDividend(t *testing.T) {
 		rows     int64
 	}{
 		{"no event", `{}`, 1, 1},
-		{"dividend", `{"dividends":{"1":{"amount":0.25,"date":1717421400}}}`, 2, 2},
-		{"split", `{"splits":{"1":{"date":1717421400,"numerator":10,"denominator":1,"splitRatio":"10:1"}}}`, 2, 2},
+		{"dividend does not reload", `{"dividends":{"1":{"amount":0.25,"date":1717421400}}}`, 1, 1},
+		{"split in window", split(newBar), 2, 2},
+		{"split in lookback", split(newBar - 10*86400), 2, 2},
+		{"split before lookback", split(newBar - 40*86400), 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var period1s []string
 			s := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
 				period1s = append(period1s, r.URL.Query().Get("period1"))
-				assert.Equal(t, "div,split", r.URL.Query().Get("events"))
+				assert.Equal(t, "split", r.URL.Query().Get("events"))
 				ts := []int64{newBar}
 				if r.URL.Query().Get("period1") == strconv.FormatInt(maxHistoryStart.Unix(), 10) {
 					ts = []int64{oldBar, newBar}
 				}
 				body, _ := json.Marshal(ts)
 				_, _ = w.Write([]byte(`{"chart":{"result":[{"meta":{"symbol":"AAPL","exchangeTimezoneName":"America/New_York"},"timestamp":` + string(body) +
-					`,"events":` + tc.events + `,"indicators":{"quote":[{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],"volume":[1,1]}],"adjclose":[{"adjclose":[1,1]}]}}]}}`))
+					`,"events":` + tc.events + `,"indicators":{"quote":[{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],"volume":[1,1]}]}}]}}`))
 			})
 
 			start, end := time.Date(2024, 6, 3, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 4, 0, 0, 0, 0, time.UTC)
@@ -469,4 +468,19 @@ func TestHistoryReloadsFullOnSplitOrDividend(t *testing.T) {
 			assert.Equal(t, tc.rows, rows)
 		})
 	}
+}
+
+func TestHasSplitUsesExchangeDate(t *testing.T) {
+	since := time.Date(2024, 6, 3, 0, 0, 0, 0, time.UTC)
+	res := func(split time.Time) *chartResult {
+		return decodeChart(t, `{"chart":{"result":[{"meta":{"exchangeTimezoneName":"Pacific/Auckland"},"events":`+
+			`{"splits":{"1":{"date":`+strconv.FormatInt(split.Unix(), 10)+`}}}}]}}`)
+	}
+	nz, err := time.LoadLocation("Pacific/Auckland")
+	require.NoError(t, err)
+	end := since.Add(7 * day)
+
+	assert.True(t, hasSplit(res(time.Date(2024, 6, 3, 10, 0, 0, 0, nz)), since, end), "local June 3 is June 2 in UTC")
+	assert.False(t, hasSplit(res(time.Date(2024, 6, 2, 10, 0, 0, 0, nz)), since, end))
+	assert.False(t, hasSplit(res(end.Add(time.Hour)), since, end))
 }

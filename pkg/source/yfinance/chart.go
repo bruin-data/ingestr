@@ -44,6 +44,8 @@ var supportedIntervals = []string{"1m", "2m", "5m", "15m", "30m", "60m", "90m", 
 // Earliest period1 Yahoo accepts; used as the start when no interval is given.
 var maxHistoryStart = time.Unix(-2208994789, 0).UTC()
 
+const splitLookback = 30 * day
+
 func isIntraday(interval string) bool {
 	return intervalLimits[interval].lookback > 0
 }
@@ -57,7 +59,6 @@ var historyColumns = []schema.Column{
 	{Name: "high", DataType: schema.TypeFloat64, Nullable: true},
 	{Name: "low", DataType: schema.TypeFloat64, Nullable: true},
 	{Name: "close", DataType: schema.TypeFloat64, Nullable: true},
-	{Name: "adj_close", DataType: schema.TypeFloat64, Nullable: true},
 	{Name: "volume", DataType: schema.TypeInt64, Nullable: true},
 	{Name: "currency", DataType: schema.TypeString, Nullable: true},
 }
@@ -111,9 +112,6 @@ type chartResult struct {
 			Close  []*float64 `json:"close"`
 			Volume []*float64 `json:"volume"`
 		} `json:"quote"`
-		AdjClose []struct {
-			AdjClose []*float64 `json:"adjclose"`
-		} `json:"adjclose"`
 	} `json:"indicators"`
 }
 
@@ -183,11 +181,18 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 		return nil
 	}
 
-	cols := historyColumns
-	if isIntraday(spec.interval) {
-		cols = withoutColumn(historyColumns, "adj_close")
-	}
 	chunk := intervalLimits[spec.interval].chunk
+	incremental := !isIntraday(spec.interval) && opts.IntervalStart != nil
+	params := func() url.Values {
+		p := url.Values{
+			"interval":       {spec.interval},
+			"includePrePost": {strconv.FormatBool(spec.prepost)},
+		}
+		if incremental {
+			p.Set("events", "split")
+		}
+		return p
+	}
 
 	for _, symbol := range spec.symbols {
 		for chunkStart := start; chunkStart.Before(end); {
@@ -200,23 +205,12 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 			}
 
 			config.Debug("[YFINANCE] Fetching %s history for %s from %s to %s", spec.interval, symbol, chunkStart.Format(time.RFC3339), chunkEnd.Format(time.RFC3339))
-			incremental := !isIntraday(spec.interval) && opts.IntervalStart != nil
-			params := func() url.Values {
-				p := url.Values{
-					"interval":             {spec.interval},
-					"includePrePost":       {strconv.FormatBool(spec.prepost)},
-					"includeAdjustedClose": {"true"},
-				}
-				if incremental {
-					p.Set("events", "div,split")
-				}
-				return p
-			}
 			// Yahoo aggregates daily+ bars from period1, so fetch from before the containing
 			// bar's start (the extra day covers exchange timezones) to get it complete.
 			fetchStart := chunkStart
+			splitsSince := chunkStart.UTC().Add(-splitLookback)
 			if incremental {
-				fetchStart = barPeriod(chunkStart.UTC(), spec.interval).Add(-day)
+				fetchStart = barPeriod(splitsSince, spec.interval).Add(-day)
 			}
 			res, err := s.fetchChart(ctx, symbol, fetchStart, chunkEnd, params())
 			if errors.Is(err, errNoData) {
@@ -232,9 +226,10 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 			}
 
 			rowStart := chunkStart
-			// A split or dividend makes Yahoo re-adjust every earlier bar, so reload the full history.
-			if incremental && hasAdjustingEvent(res, chunkStart, chunkEnd) {
-				config.Debug("[YFINANCE] Split or dividend for %s in window, reloading full %s history", symbol, spec.interval)
+			// A split re-scales every earlier bar; the lookback also catches a split that landed
+			// in a run gap or that Yahoo published late.
+			if incremental && hasSplit(res, splitsSince, chunkEnd) {
+				config.Debug("[YFINANCE] Split for %s since %s, reloading full %s history", symbol, splitsSince.Format(time.DateOnly), spec.interval)
 				if res, err = s.fetchChart(ctx, symbol, maxHistoryStart, chunkEnd, params()); err != nil {
 					return err
 				}
@@ -242,7 +237,7 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 			}
 
 			items := historyRows(res, symbol, spec.interval, spec.prepost, rowStart, chunkEnd)
-			if err := sendItems(ctx, results, items, cols, opts, "history"); err != nil {
+			if err := sendItems(ctx, results, items, historyColumns, opts, "history"); err != nil {
 				return err
 			}
 			config.Debug("[YFINANCE] Fetched %d %s bars for %s", len(items), spec.interval, symbol)
@@ -252,18 +247,13 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 	return nil
 }
 
-func hasAdjustingEvent(res *chartResult, start, end time.Time) bool {
-	inWindow := func(unix int64) bool {
-		t := time.Unix(unix, 0)
-		return !t.Before(start) && t.Before(end)
-	}
-	for _, d := range res.Events.Dividends {
-		if inWindow(d.Date) {
-			return true
-		}
-	}
+// hasSplit compares by exchange-local date, the same way history rows are kept.
+func hasSplit(res *chartResult, since, end time.Time) bool {
+	loc := exchangeLocation(res)
+	from := barPeriod(since, "1d")
 	for _, sp := range res.Events.Splits {
-		if inWindow(sp.Date) {
+		t := time.Unix(sp.Date, 0)
+		if !barPeriod(t.In(loc), "1d").Before(from) && t.Before(end) {
 			return true
 		}
 	}
@@ -271,9 +261,9 @@ func hasAdjustingEvent(res *chartResult, start, end time.Time) bool {
 }
 
 type bar struct {
-	ts                            time.Time
-	open, high, low, close, adjCl *float64
-	volume                        *float64
+	ts                     time.Time
+	open, high, low, close *float64
+	volume                 *float64
 }
 
 func (b bar) empty() bool {
@@ -286,10 +276,6 @@ func historyRows(res *chartResult, symbol, interval string, prepost bool, start,
 		q := res.Indicators.Quote[0]
 		quote.Open, quote.High, quote.Low, quote.Close, quote.Volume = q.Open, q.High, q.Low, q.Close, q.Volume
 	}
-	var adj []*float64
-	if len(res.Indicators.AdjClose) > 0 {
-		adj = res.Indicators.AdjClose[0].AdjClose
-	}
 
 	bars := make([]bar, 0, len(res.Timestamp))
 	for i, ts := range res.Timestamp {
@@ -299,7 +285,6 @@ func historyRows(res *chartResult, symbol, interval string, prepost bool, start,
 			high:   at(quote.High, i),
 			low:    at(quote.Low, i),
 			close:  at(quote.Close, i),
-			adjCl:  at(adj, i),
 			volume: at(quote.Volume, i),
 		})
 	}
@@ -337,9 +322,6 @@ func historyRows(res *chartResult, symbol, interval string, prepost bool, start,
 		if b.volume != nil {
 			item["volume"] = int64(*b.volume)
 		}
-		if !intraday {
-			item["adj_close"] = deref(b.adjCl)
-		}
 		items = append(items, item)
 	}
 	return items
@@ -371,14 +353,9 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 		return bars
 	}
 
-	var sameInterval bool
-	switch interval {
-	case "1wk":
-		sameInterval = sameISOWeek(p, l)
-	case "1mo":
-		sameInterval = monthsBetween(p, l) == 0
-	default:
-		sameInterval = l.Sub(p) < intervalLimits[interval].duration
+	sameInterval := l.Sub(p) < intervalLimits[interval].duration
+	if interval == "1wk" || interval == "1mo" {
+		sameInterval = barPeriod(p, interval).Equal(barPeriod(l, interval))
 	}
 	if !sameInterval {
 		return bars
@@ -394,7 +371,6 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 	merged.high = maxPtr(prev.high, last.high)
 	merged.low = minPtr(prev.low, last.low)
 	merged.close = last.close
-	merged.adjCl = last.adjCl
 	if last.volume != nil {
 		v := *last.volume
 		if prev.volume != nil {
@@ -405,15 +381,8 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 	return append(bars[:n-2], merged)
 }
 
-// sameISOWeek matches Yahoo's Monday-anchored weekly bars by calendar week, so neither
-// a DST shift nor a holiday-shifted bar start can fold two distinct weeks together.
-func sameISOWeek(a, b time.Time) bool {
-	ay, aw := a.ISOWeek()
-	by, bw := b.ISOWeek()
-	return ay == by && aw == bw
-}
-
 // barPeriod returns the calendar day, ISO-week Monday or month start a daily+ bar covers.
+// Matching weekly bars by Monday keeps DST or holiday-shifted starts in their own week.
 func barPeriod(t time.Time, interval string) time.Time {
 	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 	switch interval {
@@ -423,10 +392,6 @@ func barPeriod(t time.Time, interval string) time.Time {
 		return d.AddDate(0, 0, 1-d.Day())
 	}
 	return d
-}
-
-func monthsBetween(a, b time.Time) int {
-	return (b.Year()-a.Year())*12 + int(b.Month()) - int(a.Month())
 }
 
 func at(values []*float64, i int) *float64 {
@@ -455,16 +420,6 @@ func minPtr(a, b *float64) *float64 {
 		return b
 	}
 	return a
-}
-
-func withoutColumn(cols []schema.Column, name string) []schema.Column {
-	out := make([]schema.Column, 0, len(cols))
-	for _, c := range cols {
-		if c.Name != name {
-			out = append(out, c)
-		}
-	}
-	return out
 }
 
 // fetchEvents requests monthly bars so the payload stays small; the events block is
