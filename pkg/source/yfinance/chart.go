@@ -50,6 +50,7 @@ func isIntraday(interval string) bool {
 
 var historyColumns = []schema.Column{
 	{Name: "symbol", DataType: schema.TypeString, Nullable: false},
+	{Name: "interval", DataType: schema.TypeString, Nullable: false},
 	{Name: "timestamp", DataType: schema.TypeTimestampTZ, Nullable: false},
 	{Name: "date", DataType: schema.TypeDate, Nullable: false},
 	{Name: "open", DataType: schema.TypeFloat64, Nullable: true},
@@ -288,6 +289,7 @@ func historyRows(res *chartResult, symbol, interval string, prepost bool, start,
 		}
 		item := map[string]interface{}{
 			"symbol":    symbol,
+			"interval":  interval,
 			"timestamp": b.ts,
 			"date":      b.ts.In(loc).Format("2006-01-02"),
 			"open":      deref(b.open),

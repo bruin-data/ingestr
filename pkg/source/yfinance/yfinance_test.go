@@ -158,6 +158,7 @@ func TestHistoryRows(t *testing.T) {
 
 	require.Len(t, items, 2, "all-null bars are dropped")
 	assert.Equal(t, "2024-06-03", items[0]["date"])
+	assert.Equal(t, "1d", items[0]["interval"])
 	assert.Equal(t, time.Unix(1717421400, 0).UTC(), items[0]["timestamp"])
 	assert.Equal(t, 115.5, items[0]["close"])
 	assert.Equal(t, 115.1, items[0]["adj_close"])

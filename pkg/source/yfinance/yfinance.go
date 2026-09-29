@@ -233,9 +233,9 @@ func (s *YFinanceSource) GetTable(ctx context.Context, req source.TableRequest) 
 
 	switch spec.name {
 	case "history":
-		primaryKeys = []string{"symbol", "date"}
+		primaryKeys = []string{"symbol", "interval", "date"}
 		if isIntraday(spec.interval) {
-			primaryKeys = []string{"symbol", "timestamp"}
+			primaryKeys = []string{"symbol", "interval", "timestamp"}
 		}
 		incrementalKey = "timestamp"
 		strategy = config.StrategyMerge

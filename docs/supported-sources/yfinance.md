@@ -58,7 +58,7 @@ ingestr ingest \
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
-| `history` | `symbol, date` (intraday: `symbol, timestamp`) | `timestamp` | merge | OHLCV price bars with adjusted close. |
+| `history` | `symbol, interval, date` (intraday: `symbol, interval, timestamp`) | `timestamp` | merge | OHLCV price bars with adjusted close. |
 | `dividends` | `symbol, date` | `date` | merge | Dividend payments by ex-date. |
 | `splits` | `symbol, date` | `date` | merge | Stock splits with numerator, denominator and ratio. |
 | `quotes` | `symbol` | – | replace | Current quote snapshot: price, volume, market cap, 52-week range, valuation ratios and more. |
@@ -78,7 +78,7 @@ ingestr ingest \
 
 Without `--interval-start`, daily and longer intervals load the symbol's full history. Yahoo only keeps intraday bars for a limited window — 30 days for `1m`, 60 days for `2m`–`90m`, and 730 days for `60m`/`1h` — so intraday loads start at the oldest available bar.
 
-`close` is the raw closing price; `adj_close` adjusts for splits and dividends (daily and longer intervals only). `date` is the trading date in the exchange's timezone.
+`close` is adjusted for splits; `adj_close` also adjusts for dividends (daily and longer intervals only). `date` is the trading date in the exchange's timezone. Each row carries its `interval`, so daily-or-longer intervals (`1d`, `1wk`, `1mo`) can share one table, and intraday intervals another; keep the two groups in separate tables since their primary keys differ.
 
 ### `info`
 
@@ -103,6 +103,6 @@ Each row is one line item (`metric`, e.g. `TotalRevenue`, `NetIncome`, `FreeCash
 ### Notes
 
 - `--interval-start` and `--interval-end` apply to `history`, `dividends`, `splits`, the financial statement tables and `news`.
-- For `history`, the interval is matched against each bar's `timestamp` (UTC), so on exchanges that open before midnight UTC (e.g. the ASX) a window can start or end one local trading date later than the dates given.
+- For `history`, `--interval-start` includes the whole bar it falls in (e.g. the full week or month). `--interval-end` is matched against each bar's `timestamp` (UTC), so on exchanges that open before midnight UTC (e.g. the ASX) a window can end one local trading date later than the date given.
 - `news` returns the most recent articles Yahoo lists for each symbol, so it's best loaded on a schedule to build up an archive.
 - Yahoo returns quotes and prices with a delay that depends on the exchange.
