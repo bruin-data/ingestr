@@ -2515,115 +2515,32 @@ func TestNamingConsistency(t *testing.T) {
 	})
 }
 
-// TestSourceSchemaPreservesOriginalColumnNames verifies that SourceSchema
-// (used by strategies to read from the source) retains the original source
-// column names even when a naming convention renames columns for the
-// destination. The ColumnRenamer handles the rename on Arrow batches after
-// reading; the source SELECT query must use the original names.
-func TestSourceSchemaPreservesOriginalColumnNames(t *testing.T) {
-	sourceSchema := &schema.TableSchema{
-		Columns: []schema.Column{
-			{Name: "Id", DataType: schema.TypeString},
-			{Name: "FirstName", DataType: schema.TypeString},
-			{Name: "LastName", DataType: schema.TypeString},
-		},
-		PrimaryKeys: []string{"Id"},
-	}
-
-	// Deep copy, same as Run() gets from source.GetTable
-	tableSchema := *sourceSchema
-	tableSchema.Columns = make([]schema.Column, len(sourceSchema.Columns))
-	copy(tableSchema.Columns, sourceSchema.Columns)
-	tableSchema.PrimaryKeys = make([]string, len(sourceSchema.PrimaryKeys))
-	copy(tableSchema.PrimaryKeys, sourceSchema.PrimaryKeys)
-
-	p := &Pipeline{
-		config: &config.IngestConfig{
-			DestTable:    "users",
-			SchemaNaming: "", // defaults to snake_case
-		},
-		dest: &mockDestination{tableSchema: nil}, // no existing dest table
-	}
-
-	// Snapshot original column names before naming convention renames them.
-	// This is what Run() must do to preserve original names for SourceSchema.
-	originalSourceSchema := schema.TableSchema{
-		Name:           tableSchema.Name,
-		Schema:         tableSchema.Schema,
-		Columns:        make([]schema.Column, len(tableSchema.Columns)),
-		PrimaryKeys:    make([]string, len(tableSchema.PrimaryKeys)),
-		IncrementalKey: tableSchema.IncrementalKey,
-	}
-	copy(originalSourceSchema.Columns, tableSchema.Columns)
-	copy(originalSourceSchema.PrimaryKeys, tableSchema.PrimaryKeys)
-
-	// Run() applies naming convention which renames tableSchema columns in-place.
-	err := p.setupNamingConvention(context.Background(), &tableSchema)
-	if err != nil {
-		t.Fatalf("setupNamingConvention() error = %v", err)
-	}
-
-	// Verify the destination schema was renamed (sanity check)
-	destNames := tableSchema.ColumnNames()
-	wantDestNames := []string{"id", "first_name", "last_name"}
-	for i, want := range wantDestNames {
-		if destNames[i] != want {
-			t.Errorf("dest column[%d] = %q, want %q", i, destNames[i], want)
-		}
-	}
-
-	// SourceSchema must have the ORIGINAL column names because the source
-	// table has those names, not the renamed ones. Using renamed names causes:
-	//   ERROR: column "first_name" does not exist (SQLSTATE 42703)
-	originalNames := []string{"Id", "FirstName", "LastName"}
-	sourceSchemaNames := originalSourceSchema.ColumnNames()
-
-	for i, want := range originalNames {
-		if sourceSchemaNames[i] != want {
-			t.Errorf("SourceSchema column[%d] = %q, want original name %q (source uses these for SELECT queries)",
-				i, sourceSchemaNames[i], want)
-		}
-	}
-}
-
-func resolveIncrementality(
-	handlesIncrementality bool,
-	cfg *config.IngestConfig,
-	table *mockSourceTable,
-	tableSchema *schema.TableSchema,
-) config.IncrementalStrategy {
-	// Resolve PKs: user always wins, then table, then schema
-	if len(cfg.PrimaryKeys) > 0 {
-		tableSchema.PrimaryKeys = cfg.PrimaryKeys
-	} else if len(tableSchema.PrimaryKeys) == 0 {
-		tableSchema.PrimaryKeys = table.pks
-	}
-
-	// Track 1 vs Track 2
-	var resolvedStrategy config.IncrementalStrategy
-	if handlesIncrementality {
-		tableSchema.IncrementalKey = table.incrementalKey
-		resolvedStrategy = table.strategy
-	} else {
-		if cfg.IncrementalKey != "" {
-			tableSchema.IncrementalKey = cfg.IncrementalKey
-		} else if tableSchema.IncrementalKey == "" {
-			tableSchema.IncrementalKey = table.incrementalKey
-		}
-		resolvedStrategy = cfg.IncrementalStrategy
-	}
-
-	if cfg.FullRefresh {
-		resolvedStrategy = config.StrategyReplace
-	}
-
-	return resolvedStrategy
-}
-
 type mockSourceTable struct {
+	fakeKnownSchemaTable
 	pks            []string
 	incrementalKey string
 	strategy       config.IncrementalStrategy
+}
+
+func (t *mockSourceTable) PrimaryKeys() []string                { return t.pks }
+func (t *mockSourceTable) IncrementalKey() string               { return t.incrementalKey }
+func (t *mockSourceTable) Strategy() config.IncrementalStrategy { return t.strategy }
+
+type incrementalitySource struct {
+	fakeKnownSchemaSource
+	handlesIncrementality bool
+}
+
+func (s *incrementalitySource) HandlesIncrementality() bool { return s.handlesIncrementality }
+
+type streamingIncrementalitySource struct {
+	incrementalitySource
+	defaultStrategy config.IncrementalStrategy
+}
+
+func (*streamingIncrementalitySource) SupportsStreaming() bool { return true }
+func (s *streamingIncrementalitySource) DefaultStreamingStrategy() config.IncrementalStrategy {
+	return s.defaultStrategy
 }
 
 func TestResolveIncrementality(t *testing.T) {
@@ -2632,7 +2549,6 @@ func TestResolveIncrementality(t *testing.T) {
 		handlesIncrementality bool
 		cfg                   *config.IngestConfig
 		table                 *mockSourceTable
-		schemaIncrementalKey  string
 		schemaPKs             []string
 		wantStrategy          config.IncrementalStrategy
 		wantPKs               []string
@@ -2766,20 +2682,6 @@ func TestResolveIncrementality(t *testing.T) {
 			wantIncrementalKey: "",
 		},
 		{
-			name:                  "track2: schema incremental key used when table has none",
-			handlesIncrementality: false,
-			cfg: &config.IngestConfig{
-				IncrementalStrategy: config.StrategyReplace,
-			},
-			table: &mockSourceTable{
-				strategy: config.StrategyReplace,
-			},
-			schemaIncrementalKey: "schema_inc_key",
-			wantStrategy:         config.StrategyReplace,
-			wantPKs:              nil,
-			wantIncrementalKey:   "schema_inc_key",
-		},
-		{
 			name:                  "track2: full refresh overrides user strategy",
 			handlesIncrementality: false,
 			cfg: &config.IngestConfig{
@@ -2799,30 +2701,43 @@ func TestResolveIncrementality(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tableSchema := &schema.TableSchema{
-				PrimaryKeys:    tt.schemaPKs,
-				IncrementalKey: tt.schemaIncrementalKey,
-			}
+			src := &incrementalitySource{handlesIncrementality: tt.handlesIncrementality}
+			require.Equal(t, tt.wantStrategy, resolveStrategy(tt.cfg, src, tt.table))
+			require.Equal(t, tt.wantPKs, resolveTablePrimaryKeys(tt.cfg.PrimaryKeys, tt.schemaPKs, tt.table.PrimaryKeys(), false))
+			require.Equal(t, tt.wantIncrementalKey, resolveIncrementalKey(tt.cfg, src, tt.table))
+		})
+	}
+}
 
-			gotStrategy := resolveIncrementality(tt.handlesIncrementality, tt.cfg, tt.table, tableSchema)
-
-			if gotStrategy != tt.wantStrategy {
-				t.Errorf("strategy = %q, want %q", gotStrategy, tt.wantStrategy)
-			}
-
-			if len(tableSchema.PrimaryKeys) != len(tt.wantPKs) {
-				t.Errorf("PKs = %v, want %v", tableSchema.PrimaryKeys, tt.wantPKs)
-			} else {
-				for i, want := range tt.wantPKs {
-					if tableSchema.PrimaryKeys[i] != want {
-						t.Errorf("PK[%d] = %q, want %q", i, tableSchema.PrimaryKeys[i], want)
-					}
-				}
-			}
-
-			if tableSchema.IncrementalKey != tt.wantIncrementalKey {
-				t.Errorf("incrementalKey = %q, want %q", tableSchema.IncrementalKey, tt.wantIncrementalKey)
-			}
+func TestResolveStrategyStreamingAndCDC(t *testing.T) {
+	plain := &incrementalitySource{}
+	streaming := &streamingIncrementalitySource{defaultStrategy: config.StrategyAppend}
+	mergeStreaming := &streamingIncrementalitySource{defaultStrategy: config.StrategyMerge}
+	for _, tc := range []struct {
+		name string
+		src  source.Source
+		cfg  config.IngestConfig
+		pks  []string
+		want config.IncrementalStrategy
+	}{
+		{name: "stream defaults to source preference", src: streaming, cfg: config.IngestConfig{Stream: true}, want: config.StrategyAppend},
+		{name: "stream default is not always append", src: mergeStreaming, cfg: config.IngestConfig{Stream: true}, want: config.StrategyMerge},
+		{name: "batch ignores streaming preference", src: streaming, want: ""},
+		{name: "non-streaming source has no default", src: plain, cfg: config.IngestConfig{Stream: true}, want: ""},
+		{name: "explicit strategy beats stream default", src: streaming, cfg: config.IngestConfig{Stream: true, IncrementalStrategy: config.StrategyMerge}, want: config.StrategyMerge},
+		{name: "refresh beats stream default", src: streaming, cfg: config.IngestConfig{Stream: true, FullRefresh: true}, want: config.StrategyReplace},
+		{name: "CDC empty defaults to merge", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db"}, pks: []string{"id"}, want: config.StrategyMerge},
+		{name: "CDC replace becomes merge", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", IncrementalStrategy: config.StrategyReplace}, pks: []string{"id"}, want: config.StrategyMerge},
+		{name: "keyless CDC defaults to append", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db"}, want: config.StrategyAppend},
+		{name: "keyless CDC replace becomes append", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", IncrementalStrategy: config.StrategyReplace}, want: config.StrategyAppend},
+		{name: "user key enables CDC merge", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", PrimaryKeys: []string{"user_id"}}, want: config.StrategyMerge},
+		{name: "explicit CDC append is preserved", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", IncrementalStrategy: config.StrategyAppend}, pks: []string{"id"}, want: config.StrategyAppend},
+		{name: "CDC refresh beats merge default", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", FullRefresh: true}, pks: []string{"id"}, want: config.StrategyReplace},
+		{name: "keyless CDC refresh beats append default", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", FullRefresh: true}, want: config.StrategyReplace},
+		{name: "ordinary source keeps replace", src: plain, cfg: config.IngestConfig{SourceURI: "postgres://db", IncrementalStrategy: config.StrategyReplace}, pks: []string{"id"}, want: config.StrategyReplace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, resolveStrategy(&tc.cfg, tc.src, &mockSourceTable{pks: tc.pks}))
 		})
 	}
 }
@@ -4063,6 +3978,7 @@ type fakeKnownSchemaTable struct {
 	readOptsSchema bool
 	rows           [][]any
 	readColumns    []string
+	readSchema     *schema.TableSchema
 }
 
 func (t *fakeKnownSchemaTable) Name() string                         { return t.tableSchema.Name }
@@ -4076,6 +3992,7 @@ func (t *fakeKnownSchemaTable) GetSchema(ctx context.Context) (*schema.TableSche
 }
 
 func (t *fakeKnownSchemaTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	t.readSchema = opts.Schema
 	readSchema := t.tableSchema
 	if t.readOptsSchema && opts.Schema != nil {
 		readSchema = opts.Schema
@@ -4177,6 +4094,7 @@ func TestPipelineKeepsSourceColumnNamesAcrossNamingConventions(t *testing.T) {
 		for _, readOptsSchema := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/readOptsSchema=%v", tc.name, readOptsSchema), func(t *testing.T) {
 				table := newFakeKnownSchemaTable(tc.idCol, tc.nameCol, readOptsSchema)
+				table.tableSchema.IncrementalKey = tc.idCol
 				destPath := filepath.Join(t.TempDir(), "dest.db")
 				runFakeKnownSchemaIngest(t, table, destPath, func(cfg *config.IngestConfig) {
 					cfg.SchemaNaming = tc.naming
@@ -4184,6 +4102,11 @@ func TestPipelineKeepsSourceColumnNamesAcrossNamingConventions(t *testing.T) {
 
 				require.Equal(t, []string{tc.idCol, tc.nameCol}, table.readColumns,
 					"the source must read with its own column names")
+				require.NotNil(t, table.readSchema)
+				require.Equal(t, []string{tc.idCol, tc.nameCol}, table.readSchema.ColumnNames())
+				require.Equal(t, []string{tc.idCol}, table.readSchema.PrimaryKeys)
+				require.Equal(t, tc.idCol, table.readSchema.IncrementalKey,
+					"Run must retain the schema incremental key when neither config nor table supplies one")
 				require.Equal(t, tc.idCol, table.tableSchema.Columns[0].Name)
 				require.Equal(t, tc.nameCol, table.tableSchema.Columns[1].Name)
 				require.Equal(t, []string{tc.idCol}, table.tableSchema.PrimaryKeys)
