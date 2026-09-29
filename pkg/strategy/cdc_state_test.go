@@ -2325,6 +2325,7 @@ func killRunAfterBeginRun(t *testing.T, dest destination.Destination, connectorI
 	require.NoError(t, err)
 	for sourceTable, destTable := range tables {
 		require.NoError(t, killed.RegisterTable(t.Context(), sourceTable, destTable))
+		require.NotEmpty(t, mustKeyedResumePosition(t, killed, sourceTable))
 	}
 	require.NoError(t, killed.BeginRun(t.Context(), false))
 }
@@ -2402,6 +2403,66 @@ func TestCDCStateKeylessResumeIgnoresCompletedGenerationAfterKilledRun(t *testin
 	require.Empty(t, mustResumePosition(t, restarted, "public.events"))
 }
 
+func TestCDCStateKeyedMergeRequiresDurableResumeIntent(t *testing.T) {
+	for _, cursor := range []string{"00000000/00000010", "00000000/00000020"} {
+		for _, mode := range []string{"legacy", "non_keyed", "full_refresh"} {
+			t.Run(mode+"/"+cursor, func(t *testing.T) {
+				ctx := t.Context()
+				dest := newCDCStateDestination()
+				dest.defaultMaxLSN = "00000000/00000020"
+				tables := map[string]string{"public.orders": "raw.orders"}
+				completeCDCStateRun(t, dest, "partial-reload", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+
+				killed := restartedCDCStateManager(t, dest, "partial-reload", tables)
+				switch mode {
+				case "non_keyed":
+					require.NotEmpty(t, mustResumePosition(t, killed, "public.orders"))
+				case "full_refresh":
+					require.NotEmpty(t, mustKeyedResumePosition(t, killed, "public.orders"))
+				}
+				require.NoError(t, killed.BeginRun(ctx, mode == "full_refresh"))
+				// A partial replacement can have the same maximum cursor as a
+				// complete target, without changing its physical incarnation.
+				dest.maxLSNs["raw.orders"] = cursor
+
+				restarted := restartedCDCStateManager(t, dest, "partial-reload", tables)
+				require.Empty(t, mustKeyedResumePosition(t, restarted, "public.orders"))
+			})
+		}
+	}
+}
+
+func TestCDCStateKeyedMergeRefusesUnprovenIntermediateGeneration(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000020"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "unproven-intermediate", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "unproven-intermediate", tables)
+	killRunAfterBeginRun(t, dest, "unproven-intermediate", tables)
+	for _, states := range dest.states {
+		for i := range states {
+			entry := &states[i].entry
+			if entry.Generation == 2 && entry.StateKind == cdcStateKindSnapshot {
+				entry.Status = cdcStateStatusInProgress
+			}
+		}
+	}
+
+	restarted := restartedCDCStateManager(t, dest, "unproven-intermediate", tables)
+	require.Empty(t, mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
+func TestCDCStateKeyedMergeAcceptsUnchangedSnapshotBelowCheckpoint(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "00000000/00000010"
+	tables := map[string]string{"public.orders": "raw.orders"}
+	completeCDCStateRun(t, dest, "unchanged-target", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	killRunAfterBeginRun(t, dest, "unchanged-target", tables)
+
+	restarted := restartedCDCStateManager(t, dest, "unchanged-target", tables)
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, "public.orders"))
+}
+
 func TestCDCStateKeyedMergeRefusesEmptiedDestination(t *testing.T) {
 	dest := newCDCStateDestination()
 	dest.defaultMaxLSN = "00000000/00000020"
@@ -2440,6 +2501,7 @@ func TestCDCStateKeyedMergeRefusesAfterSnapshotInvalidation(t *testing.T) {
 	killed, err := NewCDCStateManager(dest, "invalidated-target", "", "")
 	require.NoError(t, err)
 	require.NoError(t, killed.RegisterTable(ctx, "public.orders", "raw.orders"))
+	require.NotEmpty(t, mustKeyedResumePosition(t, killed, "public.orders"))
 	require.NoError(t, killed.BeginRun(ctx, false))
 	require.NoError(t, killed.InvalidateSnapshot(ctx, "public.orders", "raw.orders", ""))
 

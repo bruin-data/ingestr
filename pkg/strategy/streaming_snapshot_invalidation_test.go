@@ -155,6 +155,54 @@ func TestStreamingSnapshotInvalidationFailurePreventsTruncate(t *testing.T) {
 	}
 }
 
+func TestStreamingSnapshotFallbackInvalidatesBeforePartialReload(t *testing.T) {
+	for _, position := range []string{"00000000/00000010", "00000000/00000020"} {
+		t.Run(position, func(t *testing.T) {
+			loop, dest, manager, _ := replacementSnapshotLoop(t)
+			resume, err := manager.ResumePositionForKeyedMerge(t.Context(), "public.items")
+			require.NoError(t, err)
+			require.Equal(t, "00000000/00000020", resume)
+			require.NoError(t, manager.BeginRun(t.Context(), false))
+			dest.resetOrder()
+
+			// A missing replication slot can replace a resumed stream with a
+			// snapshot that starts with a truncate and no invalidation event.
+			require.NoError(t, loop.processResult(t.Context(), source.RecordBatchResult{
+				TableName: "public.items",
+				Truncate:  true,
+			}))
+			require.Equal(t, []string{"state", "truncate"}, dest.recordedOrder())
+			require.NoError(t, loop.processResult(t.Context(), source.RecordBatchResult{
+				TableName: "public.items",
+				Batch:     int64RecordBatch(t, "id", []int64{7}, nil),
+			}))
+			require.NoError(t, loop.flush(t.Context()))
+			require.Len(t, dest.writeCalls, 1)
+			dest.maxLSNs["raw.items"] = position
+
+			restarted, err := NewCDCStateManager(dest, "stream-replacement", "raw.items", "")
+			require.NoError(t, err)
+			require.NoError(t, restarted.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"))
+			resume, err = restarted.ResumePositionForKeyedMerge(t.Context(), "public.items")
+			require.NoError(t, err)
+			require.Empty(t, resume)
+		})
+	}
+}
+
+func TestStreamingSnapshotFallbackInvalidationFailurePreventsTruncate(t *testing.T) {
+	loop, dest, _, _ := replacementSnapshotLoop(t)
+	dest.failWrite = dest.cdcWrites + 1
+
+	err := loop.processResult(t.Context(), source.RecordBatchResult{
+		TableName: "public.items",
+		Truncate:  true,
+	})
+	require.ErrorContains(t, err, "failed to invalidate CDC state before source truncate")
+	require.Equal(t, []string{"state"}, dest.recordedOrder())
+	require.Empty(t, dest.truncateCalls)
+}
+
 func TestStreamingWALTruncateCompletesStableDestinationIncarnation(t *testing.T) {
 	loop, dest, _, _ := replacementSnapshotLoop(t)
 	token := source.CDCStateCommitToken{Position: "00000000/00000030"}

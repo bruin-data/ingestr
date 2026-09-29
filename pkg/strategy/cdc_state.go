@@ -33,6 +33,7 @@ const (
 	cdcStateKindDestination   = "destination"
 	cdcStateKindRun           = "run"
 	cdcStateStatusInProgress  = "in_progress"
+	cdcStateStatusResuming    = "resuming"
 	zeroCDCPosition           = "00000000/00000000"
 	cdcStatePruneThreshold    = 100
 	cdcStatePruneBatchSize    = 900
@@ -73,6 +74,7 @@ type reducedCDCState struct {
 	position          string
 	destTable         string
 	complete          bool
+	resuming          bool
 	incarnation       string
 	schemaFingerprint string
 	snapshotEpoch     uint64
@@ -111,6 +113,7 @@ type CDCStateManager struct {
 	states               map[cdcStateKey]reducedCDCState
 	destTables           map[string]string
 	knownComplete        map[string]string
+	keyedResumes         map[string]bool
 	currentIncarnations  map[string]string
 	currentSchemas       map[string]string
 	knownIncarnations    map[string]string
@@ -186,6 +189,7 @@ func newCDCStateManager(dest destination.Destination, connectorID, stateTable st
 		states:               make(map[cdcStateKey]reducedCDCState),
 		destTables:           make(map[string]string),
 		knownComplete:        make(map[string]string),
+		keyedResumes:         make(map[string]bool),
 		currentIncarnations:  make(map[string]string),
 		currentSchemas:       make(map[string]string),
 		knownIncarnations:    make(map[string]string),
@@ -234,6 +238,20 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false)
+}
+
+// InvalidateBatchSnapshot prevents resume while a fully staged replacement is
+// applied. Keep the accepted snapshot and target binding so a successful WAL
+// truncate can be certified by a checkpoint-only commit token.
+func (m *CDCStateManager) InvalidateBatchSnapshot(ctx context.Context, sourceTable, destTable string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, "", true)
+}
+
+func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, destTable, incarnation string, preserveSnapshot bool) error {
 	if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
 		return err
 	}
@@ -252,6 +270,10 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 		return fmt.Errorf("failed to invalidate CDC snapshot for %s: %w", sourceTable, err)
 	}
 	m.snapshotEpochs[sourceTable] = epoch
+	delete(m.keyedResumes, sourceTable)
+	if preserveSnapshot {
+		return nil
+	}
 	delete(m.knownComplete, sourceTable)
 	delete(m.knownIncarnations, sourceTable)
 	delete(m.knownSchemas, sourceTable)
@@ -789,10 +811,8 @@ func (m *CDCStateManager) ResumePosition(ctx context.Context, sourceTable string
 }
 
 // ResumePositionForKeyedMerge also accepts the newest complete generation when
-// the latest run was killed before it certified anything. Such a run only
-// staged its work, so the destination is still the one that generation left
-// behind, and replaying the window into a merge keyed on primary keys is
-// idempotent. Only callers running the merge strategy with primary keys may
+// every intervening run durably recorded a keyed resume and never invalidated
+// that snapshot. Only callers running the merge strategy with primary keys may
 // use it; everything else must use ResumePosition.
 func (m *CDCStateManager) ResumePositionForKeyedMerge(ctx context.Context, sourceTable string) (string, error) {
 	return m.resumePosition(ctx, sourceTable, true)
@@ -802,6 +822,7 @@ func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable string
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	delete(m.keyedResumes, sourceTable)
 	if _, ok := m.destTables[sourceTable]; !ok {
 		return "", fmt.Errorf("CDC state is not registered for source table %q", sourceTable)
 	}
@@ -817,12 +838,17 @@ func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable string
 		return "", err
 	}
 	if outcome == cdcResumeAccepted {
+		m.keyedResumes[sourceTable] = allowInterruptedLatest
 		return m.acceptResumeCertificate(sourceTable, certificate), nil
 	}
 	if outcome == cdcResumeRejected || !allowInterruptedLatest {
 		return "", nil
 	}
-	return m.resumeFromCompletedGeneration(ctx, sourceTable)
+	position, err := m.resumeFromCompletedGeneration(ctx, sourceTable)
+	if err == nil && position != "" {
+		m.keyedResumes[sourceTable] = true
+	}
+	return position, err
 }
 
 func (m *CDCStateManager) evaluateGeneration(
@@ -891,15 +917,14 @@ func (m *CDCStateManager) acceptResumeCertificate(sourceTable string, certificat
 }
 
 // resumeFromCompletedGeneration looks past generations whose run was killed
-// before it certified anything. The destination must still hold CDC data at or
-// below the generation being trusted: an emptied target, or one carrying
-// changes the completed generation cannot account for, was rewritten by the
-// interrupted run and has to be snapshotted again.
+// before it certified anything. Every skipped run must prove it resumed a keyed
+// merge without starting a replacement snapshot; a destination cursor alone
+// cannot distinguish a certified snapshot from a partial reload.
 func (m *CDCStateManager) resumeFromCompletedGeneration(ctx context.Context, sourceTable string) (string, error) {
 	// A table the interrupted run never marked was not part of it. Its changes
 	// were never decoded, so no older certificate can account for them.
 	latest, tracked := m.states[cdcStateKey{runID: onlyCDCStateRun(m.runs), sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
-	if !tracked || latest.snapshotEpoch > 0 {
+	if !tracked || !latest.resuming || latest.snapshotEpoch > 0 {
 		return "", nil
 	}
 	destinationPosition, proven, err := m.destinationCDCPosition(ctx, sourceTable)
@@ -935,7 +960,7 @@ func (m *CDCStateManager) resumeFromCompletedGeneration(ctx context.Context, sou
 		case cdcResumeUnproven:
 			// This generation was interrupted too. Keep looking, unless it had
 			// already started replacing the table's snapshot.
-			if snapshot.snapshotEpoch > 0 {
+			if !snapshot.resuming || snapshot.snapshotEpoch > 0 {
 				return "", nil
 			}
 		}
@@ -1013,6 +1038,7 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	}
 	if fullRefresh {
 		m.knownComplete = make(map[string]string)
+		m.keyedResumes = make(map[string]bool)
 		m.knownIncarnations = make(map[string]string)
 		m.knownDestinations = make(map[string]string)
 	}
@@ -1045,7 +1071,11 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	sort.Strings(tables)
 	events := make([]cdcStateWriteEvent, 0, len(tables))
 	for _, sourceTable := range tables {
-		events = append(events, m.newStateWriteEvent(sourceTable, m.destTables[sourceTable], cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, zeroCDCPosition))
+		status := cdcStateStatusInProgress
+		if m.keyedResumes[sourceTable] && m.knownComplete[sourceTable] != "" {
+			status = cdcStateStatusResuming
+		}
+		events = append(events, m.newStateWriteEvent(sourceTable, m.destTables[sourceTable], cdcStateKindSnapshot, m.generation, status, zeroCDCPosition))
 	}
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
@@ -1455,12 +1485,16 @@ func reduceCDCStateEntry(state reducedCDCState, entry destination.CDCStateEntry,
 		}
 		if epoch > state.snapshotEpoch {
 			state.complete = false
+			state.resuming = false
 			state.position = ""
 			state.incarnation = incarnation
 			state.schemaFingerprint = schemaFingerprint
 			state.destTable = entry.DestinationTable
 			state.snapshotEpoch = epoch
 		}
+	}
+	if entry.StateKind == cdcStateKindSnapshot && entry.Status == cdcStateStatusResuming && epoch == 0 {
+		state.resuming = true
 	}
 	if entry.Status != destination.CDCStateStatusComplete {
 		return state

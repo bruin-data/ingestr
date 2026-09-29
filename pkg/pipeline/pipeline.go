@@ -432,11 +432,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
 	}
 
-	// A run killed before it persisted state leaves the newest generation
-	// incomplete. A merge keyed on primary keys replays that window
-	// idempotently, so resume from the last complete generation instead of
-	// snapshotting the source again. Anything else still snapshots.
-	if cdcStateManager != nil && !p.config.FullRefresh && p.config.CDCResumeLSN == "" &&
+	// Resolve keyed resume even when the latest generation is complete, so
+	// BeginRun can durably record that this run continues a verified snapshot.
+	if cdcStateManager != nil && !p.config.FullRefresh &&
 		preFetchStrategy == config.StrategyMerge && len(preFetchConfig.PrimaryKeys) > 0 {
 		resumeLSN, err := cdcStateManager.ResumePositionForKeyedMerge(ctx, p.config.SourceTable)
 		if err != nil {
@@ -446,8 +444,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			p.config.CDCResumeLSN = resumeLSN
 			p.config.CDCResumeIncarnation = sourceIncarnation
 			p.config.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
-			config.Debug("[PIPELINE] Latest CDC run was interrupted, resuming keyed merge from the last complete generation: %s", resumeLSN)
+			config.Debug("[PIPELINE] Resuming keyed merge from verified CDC state: %s", resumeLSN)
 		} else {
+			p.config.CDCResumeLSN = ""
+			p.config.CDCResumeIncarnation = ""
+			p.config.CDCResumeSchemaFingerprint = ""
 			config.Debug("[PIPELINE] No resumable CDC generation found, will perform full snapshot")
 		}
 	}

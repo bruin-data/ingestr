@@ -290,6 +290,11 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
+		if job.CDCStateManager != nil {
+			if err := job.CDCStateManager.InvalidateBatchSnapshot(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
+				return err
+			}
+		}
 		var truncateErr error
 		if expectedIncarnation != "" && destination.SupportsCDCConditionalTruncate(job.Destination) {
 			truncateErr = destination.ApplyCDCTruncateIfIncarnation(ctx, job.Destination, job.Config.DestTable, expectedIncarnation)
@@ -504,6 +509,16 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
+	}
+	if job.CDCStateManager != nil {
+		for _, tableInfo := range job.Tables {
+			if _, staged := stagingTables[tableInfo.Name]; !staged || !hasCDCColumns(tableInfo.Schema) || !writeResult.TruncatedTables[tableInfo.Name] {
+				continue
+			}
+			if err := job.CDCStateManager.InvalidateBatchSnapshot(ctx, tableInfo.Name, job.GetDestTableName(tableInfo.Name)); err != nil {
+				return err
+			}
+		}
 	}
 	if atomicMerger, ok := job.Destination.(destination.CDCMultiTableAtomicMerger); ok && anyTableHasCDC && len(stagingTables) == len(job.Tables) {
 		dropStagingTables := func() {
