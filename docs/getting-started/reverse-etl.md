@@ -96,7 +96,7 @@ Rename a column to a differently-named property with `--columns`, using `dest_pr
 ```
 
 - Rename only — reverse-ETL destinations own their property types. Some destinations reject an entry that carries a type; check its page.
-- Renaming happens **before** the destination sees the row, so `--primary-key` must name the **renamed** column. With `--columns 'Ext_Id__c::customer_ref'`, pass `--primary-key Ext_Id__c`, not `customer_ref`.
+- `--primary-key` can name either the source column or its new name. With `--columns 'Ext_Id__c::customer_ref'`, both `--primary-key Ext_Id__c` and `--primary-key customer_ref` work.
 - Whether an unknown property is accepted also depends on the destination: some create attributes on the fly, others require the property to already exist. Check its page.
 
 ## Example

@@ -198,7 +198,7 @@ If a source column's name differs from the Attio attribute, rename it with `--co
 ```
 
 - Only renaming is allowed. Attribute types are set in Attio, so an entry with a type is rejected.
-- `--primary-key` takes the **new** name.
+- `--primary-key` can name either the source column or its new name. With `--columns 'email_addresses::email'`, both `--primary-key email_addresses` and `--primary-key email` work.
 - Names are sent as written, so `--schema-naming` is ignored.
 
 ### Values
