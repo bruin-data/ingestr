@@ -403,7 +403,8 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	for i, pk := range opts.PrimaryKeys {
 		quotedPKsForPartition[i] = quoteIdentifier(pk)
 	}
-	dedupOrderBy := ""
+	// Spark requires an ORDER BY even when the winning row is arbitrary.
+	dedupOrderBy := " ORDER BY NULL"
 	if opts.IncrementalKey != "" {
 		dedupOrderBy = fmt.Sprintf(" ORDER BY %s DESC", quoteIdentifier(opts.IncrementalKey))
 	}
