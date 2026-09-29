@@ -443,8 +443,8 @@ func TestHistoryReloadsFullOnSplit(t *testing.T) {
 		{"no event", `{}`, 1, 1},
 		{"dividend does not reload", `{"dividends":{"1":{"amount":0.25,"date":1717421400}}}`, 1, 1},
 		{"split in window", split(newBar), 2, 2},
-		{"split in lookback", split(newBar - 10*86400), 2, 2},
-		{"split before lookback", split(newBar - 40*86400), 1, 1},
+		{"split in lookback", split(newBar - 5*86400), 2, 2},
+		{"split before lookback", split(newBar - 10*86400), 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var period1s []string

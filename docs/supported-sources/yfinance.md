@@ -80,7 +80,7 @@ Without `--interval-start`, daily and longer intervals load the symbol's full hi
 
 Prices are adjusted for splits but not for dividends; use the `dividends` table to compute dividend-adjusted returns. `date` is the trading date in the exchange's timezone. Each row carries its `interval`, so daily-or-longer intervals (`1d`, `1wk`, `1mo`) can share one table, and intraday intervals another; keep the two groups in separate tables since their primary keys differ.
 
-A split makes Yahoo re-adjust all earlier prices. When a symbol has split within the 30 days before a run's interval, or during it, its full daily, weekly or monthly history is reloaded so the table stays consistent. Intraday bars are not reloaded: after a split, bars loaded earlier stay on the old price scale until you run a full refresh.
+A split makes Yahoo re-adjust all earlier prices. When a symbol has split within the 7 days before a run's interval, or during it, its full daily, weekly or monthly history is reloaded so the table stays consistent. Intraday bars are not reloaded: after a split, bars loaded earlier stay on the old price scale until you run a full refresh.
 
 ### `info`
 

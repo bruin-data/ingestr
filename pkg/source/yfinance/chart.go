@@ -44,7 +44,7 @@ var supportedIntervals = []string{"1m", "2m", "5m", "15m", "30m", "60m", "90m", 
 // Earliest period1 Yahoo accepts; used as the start when no interval is given.
 var maxHistoryStart = time.Unix(-2208994789, 0).UTC()
 
-const splitLookback = 30 * day
+const splitLookback = 7 * day
 
 func isIntraday(interval string) bool {
 	return intervalLimits[interval].lookback > 0
