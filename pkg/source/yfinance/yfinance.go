@@ -249,7 +249,6 @@ func (s *YFinanceSource) GetTable(ctx context.Context, req source.TableRequest) 
 		primaryKeys = []string{"contractSymbol"}
 	case "income_statement", "balance_sheet", "cash_flow":
 		primaryKeys = []string{"symbol", "frequency", "as_of_date", "metric"}
-		incrementalKey = "as_of_date"
 		strategy = config.StrategyMerge
 	case "news":
 		primaryKeys = []string{"uuid"}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,14 +58,8 @@ func (s *YFinanceSource) readStatement(ctx context.Context, spec tableSpec, opts
 		types[i] = spec.frequency + m
 	}
 
-	start := fundamentalsStart
-	if opts.IntervalStart != nil {
-		start = opts.IntervalStart.UTC()
-	}
-	end := time.Now().UTC()
-	if opts.IntervalEnd != nil && opts.IntervalEnd.Before(end) {
-		end = opts.IntervalEnd.UTC()
-	}
+	// Filings land weeks after as_of_date, so a run window would miss them; always read the full series.
+	start, end := fundamentalsStart, time.Now().UTC()
 
 	for _, symbol := range spec.symbols {
 		if err := ctx.Err(); err != nil {
@@ -97,11 +90,6 @@ func (s *YFinanceSource) readStatement(ctx context.Context, spec tableSpec, opts
 		if err != nil {
 			return fmt.Errorf("failed to parse %s for %s: %w", spec.name, symbol, err)
 		}
-		// period2 is inclusive server-side; keep the window end-exclusive like the other tables.
-		items = slices.DeleteFunc(items, func(item map[string]interface{}) bool {
-			asOf, err := time.Parse(time.DateOnly, item["as_of_date"].(string))
-			return err == nil && !inInterval(asOf, opts)
-		})
 		if err := sendItems(ctx, results, items, statementColumns, opts, spec.name); err != nil {
 			return err
 		}

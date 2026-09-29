@@ -64,9 +64,9 @@ ingestr ingest \
 | `quotes` | `symbol` | – | replace | Current quote snapshot: price, volume, market cap, 52-week range, valuation ratios and more. |
 | `info` | `symbol` | – | replace | Company profile, key statistics, financial data and calendar events; one JSON column per module. |
 | `options` | `contractSymbol` | – | replace | Full option chain (calls and puts) across all expirations. |
-| `income_statement` | `symbol, frequency, as_of_date, metric` | `as_of_date` | merge | Income statement line items, one row per metric per period. |
-| `balance_sheet` | `symbol, frequency, as_of_date, metric` | `as_of_date` | merge | Balance sheet line items, one row per metric per period. |
-| `cash_flow` | `symbol, frequency, as_of_date, metric` | `as_of_date` | merge | Cash flow line items, one row per metric per period. |
+| `income_statement` | `symbol, frequency, as_of_date, metric` | – | merge | Income statement line items, one row per metric per period. |
+| `balance_sheet` | `symbol, frequency, as_of_date, metric` | – | merge | Balance sheet line items, one row per metric per period. |
+| `cash_flow` | `symbol, frequency, as_of_date, metric` | – | merge | Cash flow line items, one row per metric per period. |
 | `news` | `uuid` | `providerPublishTime` | merge | Recent news articles for each symbol. |
 
 ### `history`
@@ -102,7 +102,7 @@ Each row is one line item (`metric`, e.g. `TotalRevenue`, `NetIncome`, `FreeCash
 
 ### Notes
 
-- `--interval-start` and `--interval-end` apply to `history`, `dividends`, `splits`, the financial statement tables and `news`.
+- `--interval-start` and `--interval-end` apply to `history`, `dividends`, `splits` and `news`. Financial statements always load the full series Yahoo provides, so newly published and restated periods are picked up on every run.
 - For `history`, `--interval-start` includes the whole bar it falls in (e.g. the full week or month). `--interval-end` is matched against each bar's `timestamp` (UTC), so on exchanges that open before midnight UTC (e.g. the ASX) a window can end one local trading date later than the date given.
 - `news` returns the most recent articles Yahoo lists for each symbol, so it's best loaded on a schedule to build up an archive.
 - Yahoo returns quotes and prices with a delay that depends on the exchange.
