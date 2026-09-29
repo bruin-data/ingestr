@@ -3,7 +3,7 @@ package yfinance
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -54,8 +54,9 @@ func (s *YFinanceSource) readQuotes(ctx context.Context, spec tableSpec, opts so
 			return err
 		}
 
+		// quotes is a replace table, so skipping a symbol would drop its previously loaded row.
 		if missing := missingSymbols(chunk, resp.QuoteResponse.Result); len(missing) > 0 {
-			output.Warnf("Warning: no quotes for %s, skipping\n", strings.Join(missing, ", "))
+			return fmt.Errorf("yahoo returned no quotes for %s; remove unknown or delisted symbols", strings.Join(missing, ", "))
 		}
 		if err := sendItems(ctx, results, resp.QuoteResponse.Result, quoteColumns, opts, "quotes"); err != nil {
 			return err
@@ -96,16 +97,11 @@ func (s *YFinanceSource) readInfo(ctx context.Context, spec tableSpec, opts sour
 			"modules":   {strings.Join(spec.modules, ",")},
 			"formatted": {"false"},
 		}
-		err := s.get(ctx, "/v10/finance/quoteSummary/"+url.PathEscape(symbol), params, true, "info for "+symbol, &resp)
-		if errors.Is(err, errSymbolNotFound) {
-			output.Warnf("Warning: no info for %s, skipping: %v\n", symbol, err)
-			continue
-		}
-		if err != nil {
+		if err := s.get(ctx, "/v10/finance/quoteSummary/"+url.PathEscape(symbol), params, true, "info for "+symbol, &resp); err != nil {
 			return err
 		}
 		if len(resp.QuoteSummary.Result) == 0 {
-			continue
+			return fmt.Errorf("info for %s: %w", symbol, errSymbolNotFound)
 		}
 
 		item := map[string]interface{}{"symbol": symbol}
@@ -179,21 +175,19 @@ func (s *YFinanceSource) fetchOptionChain(ctx context.Context, symbol string, ex
 }
 
 func (s *YFinanceSource) readOptions(ctx context.Context, spec tableSpec, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	total := 0
 	for _, symbol := range spec.symbols {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
 		first, err := s.fetchOptionChain(ctx, symbol, 0)
-		if errors.Is(err, errSymbolNotFound) {
-			output.Warnf("Warning: no options for %s, skipping: %v\n", symbol, err)
-			continue
-		}
 		if err != nil {
 			return err
 		}
+		// Yahoo answers an unknown symbol the same way as one without listed options.
 		if len(first.OptionChain.Result) == 0 || len(first.OptionChain.Result[0].ExpirationDates) == 0 {
-			output.Warnf("Warning: no options for %s, skipping\n", symbol)
+			output.Warnf("Warning: no options listed for %s\n", symbol)
 			continue
 		}
 		expirations := first.OptionChain.Result[0].ExpirationDates
@@ -220,8 +214,13 @@ func (s *YFinanceSource) readOptions(ctx context.Context, spec tableSpec, opts s
 			if err := sendItems(ctx, results, items, optionColumns, opts, "options"); err != nil {
 				return err
 			}
+			total += len(items)
 			config.Debug("[YFINANCE] Fetched %d contracts for %s expiring %s", len(items), symbol, time.Unix(exp, 0).UTC().Format("2006-01-02"))
 		}
+	}
+	// options is a replace table; an empty read would wipe the previous snapshot.
+	if total == 0 {
+		return fmt.Errorf("yahoo returned no option contracts for %s", strings.Join(spec.symbols, ", "))
 	}
 	return nil
 }

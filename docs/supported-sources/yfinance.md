@@ -22,7 +22,7 @@ Every table needs one or more Yahoo ticker symbols, passed after a colon in the 
 history:AAPL,MSFT
 ```
 
-Use the symbols exactly as they appear on Yahoo Finance, e.g. `BTC-USD` for Bitcoin, `^GSPC` for the S&P 500, `EURUSD=X` for EUR/USD, or `SAP.DE` for SAP on XETRA. Symbols that Yahoo doesn't recognize are skipped with a warning.
+Use the symbols exactly as they appear on Yahoo Finance, e.g. `BTC-USD` for Bitcoin, `^GSPC` for the S&P 500, `EURUSD=X` for EUR/USD, or `SAP.DE` for SAP on XETRA. Symbols that Yahoo doesn't recognize are skipped with a warning, except in `quotes`, `info` and `options`: these tables are fully replaced on every run, so an unknown symbol fails the run instead of silently dropping its previously loaded rows.
 
 Options can be added as URL-style parameters:
 

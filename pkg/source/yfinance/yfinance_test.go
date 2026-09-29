@@ -2,10 +2,14 @@ package yfinance
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -226,6 +230,19 @@ func TestMergeLiveBar(t *testing.T) {
 		bars := []bar{{ts: at("2026-09-28 15:30:00"), close: f(1)}, {ts: at("2026-09-28 16:00:00"), close: f(2)}}
 		assert.Len(t, mergeLiveBar(bars, "1h", true, ny), 2)
 	})
+
+	t.Run("weekly bars across a DST change stay separate", func(t *testing.T) {
+		bars := []bar{{ts: at("2026-03-02 00:00:00"), close: f(1)}, {ts: at("2026-03-09 00:00:00"), close: f(2)}}
+		require.Less(t, bars[1].ts.Sub(bars[0].ts), 7*day)
+		assert.Len(t, mergeLiveBar(bars, "1wk", false, ny), 2)
+	})
+
+	t.Run("weekly live row folds into its week", func(t *testing.T) {
+		bars := []bar{{ts: at("2026-09-28 00:00:00"), close: f(1)}, {ts: at("2026-09-30 13:05:00"), close: f(2)}}
+		got := mergeLiveBar(bars, "1wk", false, ny)
+		require.Len(t, got, 1)
+		assert.Equal(t, 2.0, *got[0].close)
+	})
 }
 
 func TestExchangeLocationFallsBackToOffset(t *testing.T) {
@@ -309,4 +326,77 @@ func TestMissingSymbols(t *testing.T) {
 	quotes := []map[string]interface{}{{"symbol": "AAPL"}, {"symbol": "btc-usd"}}
 	assert.Equal(t, []string{"NOPE"}, missingSymbols([]string{"AAPL", "BTC-USD", "NOPE"}, quotes))
 	assert.Empty(t, missingSymbols([]string{"AAPL"}, quotes))
+}
+
+// newTestSource points the client at a stub server; a preset crumb skips the cookie handshake.
+func newTestSource(t *testing.T, handler http.HandlerFunc) *YFinanceSource {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	s := NewYFinanceSource()
+	s.client = ingestrhttp.New(ingestrhttp.WithBaseURL(server.URL), ingestrhttp.WithDisableRetry())
+	s.crumb = "test-crumb"
+	return s
+}
+
+func drain(results <-chan source.RecordBatchResult) (rows int64, err error) {
+	for r := range results {
+		if r.Err != nil {
+			err = r.Err
+		}
+		if r.Batch != nil {
+			rows += r.Batch.NumRows()
+			r.Batch.Release()
+		}
+	}
+	return rows, err
+}
+
+func TestFetchChartFallsBackToRangeMax(t *testing.T) {
+	var queries []string
+	s := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("range") != "max" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"chart":{"result":null,"error":{"code":"Bad Request","description":"Data doesn't exist for startDate = 1, endDate = 2"}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"chart":{"result":[{"meta":{"symbol":"NEW"},"timestamp":[1717421400]}]}}`))
+	})
+
+	res, err := s.fetchChart(context.Background(), "NEW", maxHistoryStart, time.Now(), map[string][]string{"interval": {"1d"}})
+	require.NoError(t, err)
+	assert.Equal(t, []int64{1717421400}, res.Timestamp)
+	require.Len(t, queries, 2)
+	assert.NotContains(t, queries[1], "period1")
+
+	_, err = s.fetchChart(context.Background(), "NEW", time.Date(1950, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC), map[string][]string{"interval": {"1d"}})
+	assert.ErrorIs(t, err, errNoData, "a bounded window before listing is a genuine empty result")
+}
+
+func TestReplaceTablesFailInsteadOfDroppingSymbols(t *testing.T) {
+	s := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v7/finance/quote":
+			_, _ = w.Write([]byte(`{"quoteResponse":{"result":[{"symbol":"AAPL","regularMarketPrice":1}]}}`))
+		case "/v10/finance/quoteSummary/NOPE":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"quoteSummary":{"result":null,"error":{"code":"Not Found"}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"optionChain":{"result":[{"expirationDates":[],"options":[]}]}}`))
+		}
+	})
+	ctx := context.Background()
+
+	results, _ := s.read(ctx, tableSpec{name: "quotes", symbols: []string{"AAPL", "NOPE"}}, source.ReadOptions{})
+	_, err := drain(results)
+	assert.ErrorContains(t, err, "no quotes for NOPE")
+
+	results, _ = s.read(ctx, tableSpec{name: "info", symbols: []string{"NOPE"}, modules: defaultInfoModules}, source.ReadOptions{})
+	_, err = drain(results)
+	assert.ErrorIs(t, err, errSymbolNotFound)
+
+	results, _ = s.read(ctx, tableSpec{name: "options", symbols: []string{"NOPE"}}, source.ReadOptions{})
+	_, err = drain(results)
+	assert.ErrorContains(t, err, "no option contracts")
 }

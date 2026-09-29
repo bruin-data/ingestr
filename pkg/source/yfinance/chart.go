@@ -120,8 +120,17 @@ func (s *YFinanceSource) fetchChart(ctx context.Context, symbol string, start, e
 	params.Set("period1", strconv.FormatInt(start.Unix(), 10))
 	params.Set("period2", strconv.FormatInt(end.Unix(), 10))
 
+	path := "/v8/finance/chart/" + url.PathEscape(symbol)
 	var resp chartResponse
-	if err := s.get(ctx, "/v8/finance/chart/"+url.PathEscape(symbol), params, false, "chart for "+symbol, &resp); err != nil {
+	err := s.get(ctx, path, params, false, "chart for "+symbol, &resp)
+	// An unbounded read must never come back silently empty; let Yahoo pick the range instead.
+	if errors.Is(err, errNoData) && !start.After(maxHistoryStart) {
+		params.Del("period1")
+		params.Del("period2")
+		params.Set("range", "max")
+		err = s.get(ctx, path, params, false, "chart for "+symbol, &resp)
+	}
+	if err != nil {
 		return nil, err
 	}
 	if len(resp.Chart.Result) == 0 {
@@ -314,6 +323,8 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 
 	var sameInterval bool
 	switch interval {
+	case "1wk":
+		sameInterval = daysBetween(p, l) < 7
 	case "1mo":
 		sameInterval = monthsBetween(p, l) == 0
 	default:
@@ -342,6 +353,12 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 		merged.volume = &v
 	}
 	return append(bars[:n-2], merged)
+}
+
+// daysBetween counts calendar days so a DST shift can't make two weeks look 167h apart.
+func daysBetween(a, b time.Time) int {
+	civil := func(t time.Time) time.Time { return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC) }
+	return int(civil(b).Sub(civil(a)) / day)
 }
 
 func monthsBetween(a, b time.Time) int {
