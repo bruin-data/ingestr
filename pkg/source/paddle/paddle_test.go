@@ -161,3 +161,61 @@ func TestPaddleByteCap(t *testing.T) {
 		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
 	}
 }
+
+func TestPaddleAddressesPerCustomer(t *testing.T) {
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		page := func(data []map[string]interface{}, next string) map[string]interface{} {
+			return map[string]interface{}{
+				"data": data,
+				"meta": map[string]interface{}{"pagination": map[string]interface{}{"has_more": next != "", "next": next}},
+			}
+		}
+		switch {
+		case r.URL.Path == "/customers" && r.URL.Query().Get("page") == "":
+			if got := r.URL.Query().Get("status"); got != "active,archived" {
+				t.Errorf("customers status = %q", got)
+			}
+			payload = page([]map[string]interface{}{{"id": "ctm_1"}}, srvURL+"/customers?page=2")
+		case r.URL.Path == "/customers":
+			payload = page([]map[string]interface{}{{"id": "ctm_2"}}, "")
+		case r.URL.Path == "/customers/ctm_1/addresses":
+			if got := r.URL.Query().Get("status"); got != "active,archived" {
+				t.Errorf("addresses status = %q", got)
+			}
+			payload = page([]map[string]interface{}{
+				{"id": "add_1", "customer_id": "ctm_1", "updated_at": "2024-01-10T00:00:00Z"},
+				{"id": "add_2", "customer_id": "ctm_1", "updated_at": "2023-06-01T00:00:00Z"},
+			}, "")
+		case r.URL.Path == "/customers/ctm_2/addresses":
+			payload = page([]map[string]interface{}{
+				{"id": "add_3", "customer_id": "ctm_2", "updated_at": "2024-01-20T00:00:00Z"},
+			}, "")
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(payload)
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := &PaddleSource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+	results, err := s.read(context.Background(), "addresses", endpoints["addresses"], source.ReadOptions{IntervalStart: &start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows int64
+	for res := range results {
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		rows += res.Batch.NumRows()
+		res.Batch.Release()
+	}
+	if rows != 2 {
+		t.Fatalf("rows=%d, want 2", rows)
+	}
+}

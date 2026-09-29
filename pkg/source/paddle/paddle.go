@@ -29,6 +29,7 @@ type endpoint struct {
 	statuses     string
 	maxPageSize  int
 	serverFilter bool
+	perCustomer  bool
 }
 
 var endpoints = map[string]endpoint{
@@ -39,6 +40,7 @@ var endpoints = map[string]endpoint{
 	"transactions":  {path: "/transactions", maxPageSize: 30, serverFilter: true},
 	"subscriptions": {path: "/subscriptions", maxPageSize: 200},
 	"adjustments":   {path: "/adjustments", maxPageSize: 50},
+	"addresses":     {path: "/customers/%s/addresses", statuses: "active,archived", maxPageSize: 200, perCustomer: true},
 }
 
 type listResponse struct {
@@ -159,12 +161,63 @@ func (s *PaddleSource) read(ctx context.Context, table string, ep endpoint, opts
 
 	go func() {
 		defer close(results)
-		if err := s.readEndpoint(ctx, table, ep, opts, results); err != nil {
+		if !ep.perCustomer {
+			if err := s.readEndpoint(ctx, table, ep, opts, results); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+			}
+			return
+		}
+
+		customerIDs, err := s.listCustomerIDs(ctx)
+		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
+			return
+		}
+		for _, id := range customerIDs {
+			customerEp := ep
+			customerEp.path = fmt.Sprintf(ep.path, url.PathEscape(id))
+			if err := s.readEndpoint(ctx, table, customerEp, opts, results); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
 		}
 	}()
 
 	return results, nil
+}
+
+func (s *PaddleSource) listCustomerIDs(ctx context.Context) ([]string, error) {
+	ep := endpoints["customers"]
+	params := url.Values{}
+	params.Set("per_page", strconv.Itoa(ep.maxPageSize))
+	params.Set("status", ep.statuses)
+
+	var ids []string
+	requestURL := ep.path
+	for requestURL != "" {
+		var resp listResponse
+		req := s.client.R(ctx).SetResult(&resp)
+		if requestURL == ep.path {
+			req.SetQueryParamValues(params)
+		}
+		httpResp, err := req.Get(requestURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch customers: %w", err)
+		}
+		if !httpResp.IsSuccess() {
+			return nil, fmt.Errorf("paddle customers request failed with status %d: %s", httpResp.StatusCode(), httpResp.String())
+		}
+		for _, c := range resp.Data {
+			if id, _ := c["id"].(string); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		requestURL = ""
+		if resp.Meta.Pagination.HasMore {
+			requestURL = resp.Meta.Pagination.Next
+		}
+	}
+	return ids, nil
 }
 
 func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoint, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
