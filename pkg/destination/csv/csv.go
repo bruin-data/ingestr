@@ -330,9 +330,7 @@ func formatValue(arr arrow.Array, idx int) string {
 	case *array.Date64:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Time64:
-		// Time64 in microseconds
-		micros := int64(a.Value(idx))
-		t := time.Duration(micros) * time.Microsecond
+		t := time.Duration(a.Value(idx)) * a.DataType().(*arrow.Time64Type).Unit.Multiplier()
 		hours := int(t.Hours())
 		mins := int(t.Minutes()) % 60
 		secs := int(t.Seconds()) % 60
@@ -349,6 +347,6 @@ func formatValue(arr arrow.Array, idx int) string {
 	case array.ExtensionArray:
 		return formatValue(a.Storage(), idx)
 	default:
-		return fmt.Sprintf("%v", arr)
+		return arr.ValueStr(idx)
 	}
 }
