@@ -387,9 +387,6 @@ func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
 
 func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
-	if err == nil {
-		err = checkStrategy(sh.recordType, opts.Strategy)
-	}
 	if err != nil {
 		drainRecords(records)
 		return err
@@ -429,9 +426,6 @@ func (d *CleverTapDestination) Write(ctx context.Context, records <-chan source.
 func (d *CleverTapDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	sh, err := parseShaper(opts.Table, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
-		return err
-	}
-	if err := checkStrategy(sh.recordType, opts.Strategy); err != nil {
 		return err
 	}
 

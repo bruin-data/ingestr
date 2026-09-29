@@ -482,11 +482,6 @@ func TestEachTableAcceptsOnlyItsStrategy(t *testing.T) {
 		}
 		require.ErrorContains(t, err, tt.wantErr, "%s/%s", tt.table, tt.strategy)
 	}
-
-	records := make(chan source.RecordBatchResult)
-	close(records)
-	err := d.Write(context.Background(), records, destination.WriteOptions{Table: "profiles?identity_column=email", Strategy: "delete"})
-	require.ErrorContains(t, err, "not supported")
 }
 
 func TestDefaultStrategy(t *testing.T) {
