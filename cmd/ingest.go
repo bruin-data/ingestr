@@ -299,7 +299,49 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	}
 	output.Init(os.Stdout, os.Stderr, outputMode)
 	cfg = config.DefaultConfig()
+	if err := configureIngest(c, cfg); err != nil {
+		return err
+	}
 
+	if metricsAddr := c.String("metrics-addr"); metricsAddr != "" {
+		boundAddr, stop, err := metrics.Serve(metricsAddr)
+		if err != nil {
+			return fmt.Errorf("failed to start metrics server: %w", err)
+		}
+		defer stop()
+		if !output.IsJSON() {
+			color.Green("Serving metrics on http://%s/metrics", boundAddr)
+		}
+	}
+
+	p := pipeline.New(cfg)
+	if err := p.Run(ctx); err != nil {
+		return err
+	}
+
+	if ctx.Err() != nil {
+		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
+		// stop; the pipeline has already flushed pending data.
+		if cfg.Stream {
+			if !output.IsJSON() {
+				color.Green("Streaming ingestion stopped.")
+				output.FlushDeferred()
+			}
+			return nil
+		}
+		return ctx.Err()
+	}
+
+	if !output.IsJSON() {
+		color.Green("Ingestion completed successfully!")
+		// End-of-run warnings (e.g. --reject-mode=skip rejects) print last, after
+		// the progress summary, so they are not buried mid-run.
+		output.FlushDeferred()
+	}
+	return nil
+}
+
+func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.SourceURI = c.String("source-uri")
 	cfg.DestURI = c.String("dest-uri")
 	if err := applySourceTable(cfg, c.String("source-table")); err != nil {
@@ -408,42 +450,6 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
 			return err
 		}
-	}
-
-	if metricsAddr != "" {
-		boundAddr, stop, err := metrics.Serve(metricsAddr)
-		if err != nil {
-			return fmt.Errorf("failed to start metrics server: %w", err)
-		}
-		defer stop()
-		if !output.IsJSON() {
-			color.Green("Serving metrics on http://%s/metrics", boundAddr)
-		}
-	}
-
-	p := pipeline.New(cfg)
-	if err := p.Run(ctx); err != nil {
-		return err
-	}
-
-	if ctx.Err() != nil {
-		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
-		// stop; the pipeline has already flushed pending data.
-		if cfg.Stream {
-			if !output.IsJSON() {
-				color.Green("Streaming ingestion stopped.")
-				output.FlushDeferred()
-			}
-			return nil
-		}
-		return ctx.Err()
-	}
-
-	if !output.IsJSON() {
-		color.Green("Ingestion completed successfully!")
-		// End-of-run warnings (e.g. --reject-mode=skip rejects) print last, after
-		// the progress summary, so they are not buried mid-run.
-		output.FlushDeferred()
 	}
 	return nil
 }
