@@ -190,12 +190,22 @@ func arrowLiteral(arr arrow.Array, dt arrow.DataType, idx int) (string, error) {
 			return "TRUE", nil
 		}
 		return "FALSE", nil
+	case interface{ Value(int) int8 }:
+		return strconv.FormatInt(int64(a.Value(idx)), 10), nil
 	case interface{ Value(int) int16 }:
 		return strconv.FormatInt(int64(a.Value(idx)), 10), nil
 	case interface{ Value(int) int32 }:
 		return strconv.FormatInt(int64(a.Value(idx)), 10), nil
 	case interface{ Value(int) int64 }:
 		return strconv.FormatInt(a.Value(idx), 10), nil
+	case interface{ Value(int) uint8 }:
+		return strconv.FormatUint(uint64(a.Value(idx)), 10), nil
+	case interface{ Value(int) uint16 }:
+		return strconv.FormatUint(uint64(a.Value(idx)), 10), nil
+	case interface{ Value(int) uint32 }:
+		return strconv.FormatUint(uint64(a.Value(idx)), 10), nil
+	case interface{ Value(int) uint64 }:
+		return strconv.FormatUint(a.Value(idx), 10), nil
 	case interface{ Value(int) float32 }:
 		return strconv.FormatFloat(float64(a.Value(idx)), 'g', -1, 32), nil
 	case interface{ Value(int) float64 }:
@@ -213,6 +223,9 @@ func arrowLiteral(arr arrow.Array, dt arrow.DataType, idx int) (string, error) {
 		dt := a.DataType().(*arrow.Decimal256Type)
 		return v.ToString(dt.Scale), nil
 	case *array.Date32:
+		t := a.Value(idx).ToTime()
+		return "DATE " + quoteString(t.Format("2006-01-02")), nil
+	case *array.Date64:
 		t := a.Value(idx).ToTime()
 		return "DATE " + quoteString(t.Format("2006-01-02")), nil
 	case *array.Time64:
