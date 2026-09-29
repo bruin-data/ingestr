@@ -104,6 +104,33 @@ func TestHistoryWindow(t *testing.T) {
 
 	_, end = historyWindow("1d", source.ReadOptions{IntervalEnd: ts("2030-01-01T00:00:00Z")}, now)
 	assert.Equal(t, now, end, "future end is clamped to now")
+
+	start, _ = historyWindow("1h", source.ReadOptions{IntervalStart: ts("2026-09-28T13:45:00Z")}, now)
+	assert.Equal(t, *ts("2026-09-28T12:45:00Z"), start, "intraday start re-reads the bar containing it")
+}
+
+func TestBarPeriod(t *testing.T) {
+	wed := time.Date(2026, 9, 16, 15, 0, 0, 0, time.UTC)
+	assert.Equal(t, time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC), barPeriod(wed, "1d"))
+	assert.Equal(t, time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC), barPeriod(wed, "1wk"))
+	assert.Equal(t, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), barPeriod(wed, "1mo"))
+	sun := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+	assert.Equal(t, time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC), barPeriod(sun, "1wk"))
+}
+
+func TestHistoryRowsKeepsBarContainingStart(t *testing.T) {
+	// Aug 1, Sep 1 (04:00Z = midnight New York) and the Sep 28 live row.
+	res := decodeChart(t, `{"chart":{"result":[{
+		"meta":{"symbol":"AAPL","currency":"USD","exchangeTimezoneName":"America/New_York","gmtoffset":-14400},
+		"timestamp":[1785556800,1788235200,1790625601],
+		"indicators":{"quote":[{"open":[309.0,317.0,340.0],"high":[320.0,345.0,343.0],"low":[300.0,315.0,338.0],"close":[316.0,341.0,338.4],"volume":[900,700,30]}]}}]}}`)
+
+	start := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+	items := historyRows(res, "AAPL", "1mo", false, start, time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC))
+	require.Len(t, items, 1, "the partial prior month is dropped and the live row folds into September")
+	assert.Equal(t, "2026-09-01", items[0]["date"])
+	assert.Equal(t, int64(730), items[0]["volume"])
+	assert.Equal(t, 338.4, items[0]["close"])
 }
 
 func f(v float64) *float64 { return &v }

@@ -161,6 +161,10 @@ func historyWindow(interval string, opts source.ReadOptions, now time.Time) (tim
 			output.Warnf("Warning: Yahoo only serves %s bars for the last %d days; starting from %s\n", interval, int(limit.lookback/day)+1, start.Format(time.RFC3339))
 		} else {
 			start = opts.IntervalStart.UTC()
+			// Re-read the bar containing the start; an earlier run may have loaded it in progress.
+			if limit.lookback > 0 {
+				start = start.Add(-limit.duration)
+			}
 		}
 	}
 
@@ -200,7 +204,13 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 				"includePrePost":       {strconv.FormatBool(spec.prepost)},
 				"includeAdjustedClose": {"true"},
 			}
-			res, err := s.fetchChart(ctx, symbol, chunkStart, chunkEnd, params)
+			// Yahoo aggregates daily+ bars from period1, so fetch from before the containing
+			// bar's start (the extra day covers exchange timezones) to get it complete.
+			fetchStart := chunkStart
+			if !isIntraday(spec.interval) && opts.IntervalStart != nil {
+				fetchStart = barPeriod(chunkStart.UTC(), spec.interval).Add(-day)
+			}
+			res, err := s.fetchChart(ctx, symbol, fetchStart, chunkEnd, params)
 			if errors.Is(err, errNoData) {
 				chunkStart = chunkEnd
 				continue
@@ -270,7 +280,10 @@ func historyRows(res *chartResult, symbol, interval string, prepost bool, start,
 		if b.empty() {
 			continue
 		}
-		if b.ts.Before(start) || !b.ts.Before(end) {
+		if !b.ts.Before(end) {
+			continue
+		}
+		if intraday && b.ts.Before(start) || !intraday && barPeriod(b.ts.In(loc), interval).Before(barPeriod(start.UTC(), interval)) {
 			continue
 		}
 		item := map[string]interface{}{
@@ -361,6 +374,18 @@ func sameISOWeek(a, b time.Time) bool {
 	ay, aw := a.ISOWeek()
 	by, bw := b.ISOWeek()
 	return ay == by && aw == bw
+}
+
+// barPeriod returns the calendar day, ISO-week Monday or month start a daily+ bar covers.
+func barPeriod(t time.Time, interval string) time.Time {
+	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	switch interval {
+	case "1wk":
+		return d.AddDate(0, 0, -(int(d.Weekday())+6)%7)
+	case "1mo":
+		return d.AddDate(0, 0, 1-d.Day())
+	}
+	return d
 }
 
 func monthsBetween(a, b time.Time) int {
