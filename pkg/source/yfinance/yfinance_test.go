@@ -237,6 +237,11 @@ func TestMergeLiveBar(t *testing.T) {
 		assert.Len(t, mergeLiveBar(bars, "1wk", false, ny), 2)
 	})
 
+	t.Run("holiday-shifted weekly bar stays separate from the next week", func(t *testing.T) {
+		bars := []bar{{ts: at("2026-09-08 00:00:00"), close: f(1)}, {ts: at("2026-09-14 00:00:00"), close: f(2)}}
+		assert.Len(t, mergeLiveBar(bars, "1wk", false, ny), 2)
+	})
+
 	t.Run("weekly live row folds into its week", func(t *testing.T) {
 		bars := []bar{{ts: at("2026-09-28 00:00:00"), close: f(1)}, {ts: at("2026-09-30 13:05:00"), close: f(2)}}
 		got := mergeLiveBar(bars, "1wk", false, ny)

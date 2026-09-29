@@ -324,7 +324,7 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 	var sameInterval bool
 	switch interval {
 	case "1wk":
-		sameInterval = daysBetween(p, l) < 7
+		sameInterval = sameISOWeek(p, l)
 	case "1mo":
 		sameInterval = monthsBetween(p, l) == 0
 	default:
@@ -355,10 +355,12 @@ func mergeLiveBar(bars []bar, interval string, prepost bool, loc *time.Location)
 	return append(bars[:n-2], merged)
 }
 
-// daysBetween counts calendar days so a DST shift can't make two weeks look 167h apart.
-func daysBetween(a, b time.Time) int {
-	civil := func(t time.Time) time.Time { return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC) }
-	return int(civil(b).Sub(civil(a)) / day)
+// sameISOWeek matches Yahoo's Monday-anchored weekly bars by calendar week, so neither
+// a DST shift nor a holiday-shifted bar start can fold two distinct weeks together.
+func sameISOWeek(a, b time.Time) bool {
+	ay, aw := a.ISOWeek()
+	by, bw := b.ISOWeek()
+	return ay == by && aw == bw
 }
 
 func monthsBetween(a, b time.Time) int {
