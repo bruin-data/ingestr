@@ -250,6 +250,12 @@ func RequiresExplicitStrategy(d Destination) bool {
 	return ok
 }
 
+// DefaultStrategyDestination picks the strategy for a table when the run sets
+// no --incremental-strategy, for destinations whose tables each support only one.
+type DefaultStrategyDestination interface {
+	DefaultStrategy(table string) string
+}
+
 // IncrementalPredicateSupport is implemented by destinations whose MergeTable
 // honors MergeOptions.IncrementalPredicate; others silently ignore it, so the
 // pipeline rejects the flag for them.

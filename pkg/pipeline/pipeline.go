@@ -176,6 +176,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := validateReverseETLColumnOverrides(dest, p.config.Columns); err != nil {
 		return err
 	}
+	applyDestinationDefaultStrategy(dest, p.config)
 	if err := validateReverseETLFlags(dest, p.config); err != nil {
 		return err
 	}
@@ -3051,6 +3052,21 @@ func isManagedChangeSource(uri string) bool {
 	}
 	scheme := strings.ToLower(uri[:schemeEnd])
 	return strings.Contains(scheme, "+cdc") || strings.Contains(scheme, "+ct")
+}
+
+// applyDestinationDefaultStrategy replaces the framework default "replace" with
+// the destination's own strategy for the table when none was requested.
+func applyDestinationDefaultStrategy(dest destination.Destination, cfg *config.IngestConfig) {
+	if cfg.IncrementalStrategyExplicit {
+		return
+	}
+	d, ok := dest.(destination.DefaultStrategyDestination)
+	if !ok {
+		return
+	}
+	if s := d.DefaultStrategy(cfg.DestTable); s != "" {
+		cfg.IncrementalStrategy = config.IncrementalStrategy(s)
+	}
 }
 
 // applyReverseETLNaming pins destinations with mixed-case field names to direct

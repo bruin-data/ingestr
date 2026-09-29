@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination/clevertap"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,4 +190,26 @@ func TestValidateReverseETLFlags(t *testing.T) {
 			require.ErrorContains(t, err, "does not support the "+string(s)+" strategy")
 		}
 	})
+}
+
+func TestApplyDestinationDefaultStrategy(t *testing.T) {
+	ct := clevertap.NewCleverTapDestination()
+	cases := []struct {
+		table    string
+		explicit bool
+		want     config.IncrementalStrategy
+	}{
+		{"events?event_name=Signup", false, config.StrategyAppend},
+		{"profiles", false, config.StrategyMerge},
+		{"profiles", true, config.StrategyReplace},
+	}
+	for _, tc := range cases {
+		cfg := &config.IngestConfig{DestTable: tc.table, IncrementalStrategy: config.StrategyReplace, IncrementalStrategyExplicit: tc.explicit}
+		applyDestinationDefaultStrategy(ct, cfg)
+		assert.Equal(t, tc.want, cfg.IncrementalStrategy, "%s explicit=%v", tc.table, tc.explicit)
+	}
+
+	cfg := &config.IngestConfig{DestTable: "t", IncrementalStrategy: config.StrategyReplace}
+	applyDestinationDefaultStrategy(duckdb.NewDuckDBDestination(), cfg)
+	assert.Equal(t, config.StrategyReplace, cfg.IncrementalStrategy, "warehouse default must not change")
 }
