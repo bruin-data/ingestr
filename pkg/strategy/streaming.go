@@ -449,8 +449,9 @@ type streamTableState struct {
 	incarnation          string
 	schemaFingerprint    string
 
-	pending     []arrow.RecordBatch
-	pendingRows int64
+	pending                     []arrow.RecordBatch
+	pendingRows                 int64
+	snapshotBoundaryInvalidated bool
 }
 
 type flushLoop struct {
@@ -614,6 +615,7 @@ func (l *flushLoop) invalidateSnapshot(ctx context.Context, invalidation source.
 		return err
 	}
 	st.incarnation = invalidation.Incarnation
+	st.snapshotBoundaryInvalidated = true
 	return connectorLeaseLoss(ctx)
 }
 
@@ -652,7 +654,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		if stateTable == "" {
 			return fmt.Errorf("cannot resolve source table for CDC truncate")
 		}
-		if res.CDCWALTruncate {
+		if res.CDCWALTruncate || !st.snapshotBoundaryInvalidated {
 			if err := l.opts.StateManager.InvalidateSnapshot(ctx, stateTable, st.destTable, st.incarnation); err != nil {
 				return fmt.Errorf("failed to invalidate CDC state before source truncate for %s: %w", stateTable, err)
 			}
@@ -663,6 +665,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 				return err
 			}
 			if handled {
+				st.snapshotBoundaryInvalidated = false
 				l.buffer(res)
 				return nil
 			}
@@ -693,6 +696,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	st.snapshotBoundaryInvalidated = false
 	if stateTable != "" && res.CDCWALTruncate {
 		l.pendingTruncates[stateTable] = st.incarnation
 	}

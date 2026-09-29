@@ -377,7 +377,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 					return err
 				}
 			}
-			config.Debug("[PIPELINE] No completed CDC snapshot state found, will perform full snapshot")
+			config.Debug("[PIPELINE] No completed CDC snapshot state for the latest generation")
 		}
 	} else if isManagedChangeSource(p.config.SourceURI) && !p.config.FullRefresh {
 		resumeProvider, ok := dest.(destination.CDCResumeProvider)
@@ -448,6 +448,27 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 
 	if shouldWarnCDCStrategy(p.config, preFetchStrategy) {
 		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", preFetchStrategy, config.StrategyMerge)
+	}
+
+	// Resolve keyed resume even when the latest generation is complete, so
+	// BeginRun can durably record that this run continues a verified snapshot.
+	if cdcStateManager != nil && !p.config.FullRefresh &&
+		preFetchStrategy == config.StrategyMerge && len(preFetchConfig.PrimaryKeys) > 0 {
+		resumeLSN, err := cdcStateManager.ResumePositionForKeyedMerge(ctx, p.config.SourceTable)
+		if err != nil {
+			return err
+		}
+		if resumeLSN != "" {
+			p.config.CDCResumeLSN = resumeLSN
+			p.config.CDCResumeIncarnation = sourceIncarnation
+			p.config.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
+			config.Debug("[PIPELINE] Resuming keyed merge from verified CDC state: %s", resumeLSN)
+		} else {
+			p.config.CDCResumeLSN = ""
+			p.config.CDCResumeIncarnation = ""
+			p.config.CDCResumeSchemaFingerprint = ""
+			config.Debug("[PIPELINE] No resumable CDC generation found, will perform full snapshot")
+		}
 	}
 
 	tracker, err := p.createTracker(ctx)
@@ -1605,7 +1626,13 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			return err
 		}
 		for _, table := range tables {
-			resumeLSN, err := cdcStateManager.ResumePosition(ctx, table.Name)
+			var resumeLSN string
+			var err error
+			if resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
+				resumeLSN, err = cdcStateManager.ResumePositionForKeyedMerge(ctx, table.Name)
+			} else {
+				resumeLSN, err = cdcStateManager.ResumePosition(ctx, table.Name)
+			}
 			if err != nil {
 				return err
 			}

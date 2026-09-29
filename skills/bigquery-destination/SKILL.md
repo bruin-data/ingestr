@@ -146,6 +146,7 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 
 ## 9. Merge Strategy (`MergeTable`)
 
+- **CDC snapshot safety:** batch merges durably invalidate the prior snapshot epoch before truncating any target for a replacement snapshot or source truncate. Interrupted replacements cannot resume from an older completion marker, even when their partial reload has an LSN at or below the prior checkpoint. The destination incarnation stays pinned through invalidation and final checkpoint persistence.
 - Runs a MERGE statement:
   ```sql
   MERGE target AS t
