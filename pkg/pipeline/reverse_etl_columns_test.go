@@ -192,7 +192,7 @@ func TestValidateReverseETLFlags(t *testing.T) {
 	})
 }
 
-func TestApplyDestinationDefaultStrategy(t *testing.T) {
+func TestDestinationDefaultStrategy(t *testing.T) {
 	ct := clevertap.NewCleverTapDestination()
 	cases := []struct {
 		table    string
@@ -201,15 +201,11 @@ func TestApplyDestinationDefaultStrategy(t *testing.T) {
 	}{
 		{"events?event_name=Signup", false, config.StrategyAppend},
 		{"profiles", false, config.StrategyMerge},
-		{"profiles", true, config.StrategyReplace},
+		{"profiles", true, ""},
 	}
 	for _, tc := range cases {
 		cfg := &config.IngestConfig{DestTable: tc.table, IncrementalStrategy: config.StrategyReplace, IncrementalStrategyExplicit: tc.explicit}
-		applyDestinationDefaultStrategy(ct, cfg)
-		assert.Equal(t, tc.want, cfg.IncrementalStrategy, "%s explicit=%v", tc.table, tc.explicit)
+		assert.Equal(t, tc.want, destinationDefaultStrategy(ct, cfg), "%s explicit=%v", tc.table, tc.explicit)
 	}
-
-	cfg := &config.IngestConfig{DestTable: "t", IncrementalStrategy: config.StrategyReplace}
-	applyDestinationDefaultStrategy(duckdb.NewDuckDBDestination(), cfg)
-	assert.Equal(t, config.StrategyReplace, cfg.IncrementalStrategy, "warehouse default must not change")
+	assert.Empty(t, destinationDefaultStrategy(duckdb.NewDuckDBDestination(), &config.IngestConfig{DestTable: "t"}))
 }

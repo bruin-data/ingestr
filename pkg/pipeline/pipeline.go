@@ -176,7 +176,6 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := validateReverseETLColumnOverrides(dest, p.config.Columns); err != nil {
 		return err
 	}
-	applyDestinationDefaultStrategy(dest, p.config)
 	if err := validateReverseETLFlags(dest, p.config); err != nil {
 		return err
 	}
@@ -427,6 +426,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	preFetchStrategy := resolveStrategy(p.config, src, table)
+	if s := destinationDefaultStrategy(dest, p.config); s != "" {
+		preFetchStrategy = s
+	}
 	preFetchConfig := *p.config
 	preFetchConfig.IncrementalStrategy = preFetchStrategy
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
@@ -3054,19 +3056,16 @@ func isManagedChangeSource(uri string) bool {
 	return strings.Contains(scheme, "+cdc") || strings.Contains(scheme, "+ct")
 }
 
-// applyDestinationDefaultStrategy replaces the framework default "replace" with
-// the destination's own strategy for the table when none was requested.
-func applyDestinationDefaultStrategy(dest destination.Destination, cfg *config.IngestConfig) {
+// destinationDefaultStrategy is the destination's own strategy for the table
+// when none was requested; it wins over the source's and --full-refresh's choice.
+func destinationDefaultStrategy(dest destination.Destination, cfg *config.IngestConfig) config.IncrementalStrategy {
 	if cfg.IncrementalStrategyExplicit {
-		return
+		return ""
 	}
-	d, ok := dest.(destination.DefaultStrategyDestination)
-	if !ok {
-		return
+	if d, ok := dest.(destination.DefaultStrategyDestination); ok {
+		return config.IncrementalStrategy(d.DefaultStrategy(cfg.DestTable))
 	}
-	if s := d.DefaultStrategy(cfg.DestTable); s != "" {
-		cfg.IncrementalStrategy = config.IncrementalStrategy(s)
-	}
+	return ""
 }
 
 // applyReverseETLNaming pins destinations with mixed-case field names to direct
