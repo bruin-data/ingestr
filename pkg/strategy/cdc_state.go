@@ -1015,11 +1015,7 @@ func (m *CDCStateManager) StateEmpty(ctx context.Context) (bool, error) {
 	return len(m.entries) == 0, nil
 }
 
-// BeginRun appends an in-progress marker for every registered source table at
-// a new connector generation. A crash leaves that generation incomplete, so
-// older completed rows cannot make a partial target resumable. Pruning keeps
-// the newest generation that certified each table until this one certifies it,
-// so ResumePositionForKeyedMerge can still find it after a killed run.
+// BeginRun starts a new CDC state generation for registered tables.
 func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
