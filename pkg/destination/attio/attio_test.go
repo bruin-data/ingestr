@@ -23,7 +23,7 @@ import (
 )
 
 func init() {
-	conflictBackoff = func(int) time.Duration { return 0 }
+	retryBackoff = func(int) time.Duration { return 0 }
 }
 
 type fakeAttr struct {
@@ -837,5 +837,64 @@ func TestNumericMatchValue(t *testing.T) {
 	}
 	if got := storedValues(json.RawMessage(`[{"value": 1001}]`)); len(got) != 1 || got[0] != "1001" {
 		t.Fatalf("storedValues = %v", got)
+	}
+}
+
+func TestRetriedDeleteThatLandedIsNotRejected(t *testing.T) {
+	f := newFake()
+	id := f.seed("people", map[string][]string{"external_id": {"E-1"}})
+	failed := false
+	f.hook = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+		if r.Method == http.MethodDelete && !failed {
+			failed = true
+			delete(f.records["people"], id)
+			apiErr(w, 502, "bad_gateway", "upstream timeout")
+			return true
+		}
+		return false
+	}
+	d := newDest(t, f)
+	err := d.Write(context.Background(), stringBatch(map[string][]string{"record_id": {id}}, []string{"record_id"}), opts("people", "delete"))
+	if err != nil {
+		t.Fatalf("delete that landed before the retry: %v", err)
+	}
+	if n := len(f.requestsMatching("DELETE ")); n != 2 {
+		t.Fatalf("deletes sent = %d, want 2", n)
+	}
+}
+
+func TestNullNamePartsClearName(t *testing.T) {
+	f := newFake()
+	id := f.seed("people", map[string][]string{"external_id": {"E-1"}, "name": {"x"}})
+	d := newDest(t, f)
+	rows := stringBatch(map[string][]string{"ext": {"E-1"}, "name.first_name": {""}, "name.last_name": {""}}, []string{"ext", "name.first_name", "name.last_name"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=external_id", "merge", "ext")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.get("people", id)["name"]; got != nil {
+		t.Fatalf("name = %v, want cleared", got)
+	}
+}
+
+func TestUpdateByCaseSensitiveKeyPrefersExactMatch(t *testing.T) {
+	f := newFake()
+	upper := f.seed("people", map[string][]string{"external_id": {"CASE-1"}})
+	lower := f.seed("people", map[string][]string{"external_id": {"case-1"}})
+	folded := f.seed("people", map[string][]string{"email_addresses": {"ada@example.com"}})
+	d := newDest(t, f)
+	rows := stringBatch(map[string][]string{"external_id": {"case-1"}, "job_title": {"lower only"}}, []string{"external_id", "job_title"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=external_id", "update")); err != nil {
+		t.Fatal(err)
+	}
+	if f.get("people", lower)["job_title"] == nil || f.get("people", upper)["job_title"] != nil {
+		t.Fatalf("exact match must win: upper=%v lower=%v", f.get("people", upper), f.get("people", lower))
+	}
+
+	rows = stringBatch(map[string][]string{"email_addresses": {"ADA@EXAMPLE.COM"}, "job_title": {"folded"}}, []string{"email_addresses", "job_title"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=email_addresses", "update")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.get("people", folded)["job_title"]; len(got) != 1 || got[0] != "folded" {
+		t.Fatalf("folded fallback: %v", got)
 	}
 }

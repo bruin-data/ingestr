@@ -124,6 +124,8 @@ Two settings decide which record a row updates or deletes:
 
 When the match attribute holds several values (like `email_addresses` or `domains`), `merge` adds the row's value to the record's list instead of replacing it.
 
+Email addresses and domains match regardless of case. A unique text attribute you create is case-sensitive: `A-1` and `a-1` are two different records.
+
 **`update` and `delete`** match by Attio's record id by default, using a source column named `record_id`:
 
 ```sh
@@ -201,7 +203,7 @@ If a source column's name differs from the Attio attribute, rename it with `--co
 
 ### Values
 
-- Numbers, booleans, text, dates and timestamps are sent in the form Attio expects. Timestamps are sent in UTC.
+- Numbers, booleans, text, dates and timestamps are sent in the form Attio expects. Timestamps are sent in UTC, and Attio keeps them to the millisecond.
 - Select and status attributes take the option's title, e.g. `Lead`.
 - A list value writes every item to an attribute that allows several values (tags, email addresses, domains). On `merge` and `update`, the list replaces the record's current values.
 - A JSON value is sent as-is, so any value format Attio documents (e.g. a full location object) can be written from a JSON column.

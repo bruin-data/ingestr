@@ -54,9 +54,9 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// conflictBackoff is the wait before re-sending a row after a write conflict; a
-// var so tests don't sleep.
-var conflictBackoff = func(attempt int) time.Duration { return 500 * time.Millisecond << attempt }
+// retryBackoff is the wait before re-sending a row after a write conflict or a
+// failed delete; a var so tests don't sleep.
+var retryBackoff = func(attempt int) time.Duration { return 500 * time.Millisecond << attempt }
 
 type AttioDestination struct {
 	client  *httpclient.Client
@@ -498,6 +498,7 @@ func (s *shaper) shapeValues(record arrow.RecordBatch, plan []colTarget, row int
 	values := make(map[string]interface{}, len(plan))
 	refs := map[string][]interface{}{}
 	nullRefs := map[string]bool{}
+	nullNames := map[string]bool{}
 	names := map[string]map[string]string{}
 	for _, c := range plan {
 		v, ok := cellValue(record.Column(c.idx), row)
@@ -528,6 +529,7 @@ func (s *shaper) shapeValues(record arrow.RecordBatch, plan []colTarget, row int
 			}
 		case kindName:
 			if !ok {
+				nullNames[c.attr] = true
 				continue
 			}
 			if names[c.attr] == nil {
@@ -542,6 +544,11 @@ func (s *shaper) shapeValues(record arrow.RecordBatch, plan []colTarget, row int
 	if clear {
 		for attr := range nullRefs {
 			if _, set := refs[attr]; !set {
+				values[attr] = []interface{}{}
+			}
+		}
+		for attr := range nullNames {
+			if _, set := names[attr]; !set {
 				values[attr] = []interface{}{}
 			}
 		}
@@ -708,7 +715,7 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 				continue
 			}
 		} else {
-			ids = resolved[matchKey(key)]
+			ids = resolved[key]
 			if len(ids) == 0 {
 				if err := sh.reject(rejects, rejection{code: notFoundCode, message: fmt.Sprintf("no %s record found with %s=%q", sh.slug(), sh.matchAttr, key), identifier: ident}); err != nil {
 					return err
@@ -774,18 +781,19 @@ func (s *shaper) label(record arrow.RecordBatch, row int) string {
 	return strings.Join(parts, ", ")
 }
 
-// resolveKeys maps each distinct match value to the ids of the records holding it.
+// resolveKeys maps each distinct match value to the ids of the records holding
+// it. Attio's filter ignores case but a unique text attribute doesn't, so an
+// exact match wins and the case-folded matches are only a fallback.
 func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []string, workers int) (map[string][]string, error) {
 	out := map[string][]string{}
 	var mu sync.Mutex
 	var tasks []rowTask
 	seen := map[string]bool{}
 	for _, k := range keys {
-		fk := matchKey(k)
-		if k == "" || seen[fk] {
+		if k == "" || seen[k] {
 			continue
 		}
-		seen[fk] = true
+		seen[k] = true
 		var filterValue interface{} = k
 		if sh.numericKey {
 			if _, ok := canonicalNumber(k); !ok {
@@ -793,16 +801,25 @@ func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []s
 			}
 			filterValue = json.Number(k)
 		}
-		tasks = append(tasks, rowTask{key: fk, run: func(ctx context.Context) error {
-			var ids []string
+		tasks = append(tasks, rowTask{key: matchKey(k), run: func(ctx context.Context) error {
+			var ids, exact []string
 			err := d.queryRecords(ctx, sh.slug(), map[string]interface{}{sh.matchAttr: filterValue}, func(rec queriedRecord) {
 				ids = append(ids, rec.ID.RecordID)
+				for _, v := range storedValues(rec.Values[sh.matchAttr]) {
+					if sh.matchValue(v) == k {
+						exact = append(exact, rec.ID.RecordID)
+						break
+					}
+				}
 			})
 			if err != nil {
 				return fmt.Errorf("attio: failed to look up %s records by %s: %w", sh.slug(), sh.matchAttr, err)
 			}
+			if len(exact) > 0 {
+				ids = exact
+			}
 			mu.Lock()
-			out[fk] = ids
+			out[k] = ids
 			mu.Unlock()
 			return nil
 		}})
@@ -853,6 +870,7 @@ func (d *AttioDestination) queryRecords(ctx context.Context, object string, filt
 // rejection, anything else aborts the run.
 func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, recordID string, values map[string]interface{}, ident string, rejects *rejectionLog) error {
 	base := "/objects/" + url.PathEscape(sh.slug()) + "/records"
+	deleteRetries := 0
 	for attempt := 0; ; attempt++ {
 		req := d.client.R(ctx)
 		if values != nil {
@@ -870,7 +888,19 @@ func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, reco
 		case "update":
 			resp, err = req.Put(base + "/" + url.PathEscape(recordID))
 		case "delete":
-			resp, err = req.Delete(base + "/" + url.PathEscape(recordID))
+			// Retried here rather than by the client, so a 404 after a failed
+			// attempt reads as already deleted instead of a missing record.
+			resp, err = req.SetRetryOnRateLimitOnly().Delete(base + "/" + url.PathEscape(recordID))
+			if (err != nil || resp.StatusCode() >= 500) && deleteRetries < retryCount {
+				if err := sleepCtx(ctx, retryBackoff(deleteRetries)); err != nil {
+					return err
+				}
+				deleteRetries++
+				continue
+			}
+			if err == nil && resp.StatusCode() == 404 && deleteRetries > 0 {
+				return nil
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("attio %s %s request failed: %w", action, sh.slug(), err)
@@ -890,10 +920,8 @@ func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, reco
 		apiErr := parseAPIError(resp)
 		if apiErr.code == conflictCode && attempt < conflictRetries {
 			config.Debug("[ATTIO DEST] retrying %s %s after %s (attempt %d)", action, ident, conflictCode, attempt+1)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(conflictBackoff(attempt)):
+			if err := sleepCtx(ctx, retryBackoff(attempt)); err != nil {
+				return err
 			}
 			continue
 		}
@@ -902,6 +930,15 @@ func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, reco
 			return sh.reject(rejects, rej)
 		}
 		return fmt.Errorf("attio %s %s failed: %w", action, sh.slug(), apiErr)
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
 	}
 }
 

@@ -16,7 +16,6 @@ import (
 // attribute is one attribute from GET /v2/objects/{object}/attributes.
 type attribute struct {
 	APISlug       string `json:"api_slug"`
-	Title         string `json:"title"`
 	Type          string `json:"type"`
 	IsWritable    bool   `json:"is_writable"`
 	IsUnique      bool   `json:"is_unique"`
