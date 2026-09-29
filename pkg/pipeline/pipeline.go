@@ -179,6 +179,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if err := validateReverseETLFlags(dest, p.config); err != nil {
 		return err
 	}
+	fixedStrategy, err := resolveFixedStrategy(dest, p.config)
+	if err != nil {
+		return err
+	}
 	if err := applyReverseETLNaming(dest, p.config); err != nil {
 		return err
 	}
@@ -426,6 +430,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	preFetchStrategy := resolveStrategy(p.config, src, table)
+	if fixedStrategy != "" {
+		preFetchStrategy = fixedStrategy
+	}
 	preFetchConfig := *p.config
 	preFetchConfig.IncrementalStrategy = preFetchStrategy
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
@@ -3051,6 +3058,25 @@ func isManagedChangeSource(uri string) bool {
 	}
 	scheme := strings.ToLower(uri[:schemeEnd])
 	return strings.Contains(scheme, "+cdc") || strings.Contains(scheme, "+ct")
+}
+
+// resolveFixedStrategy returns the only strategy the destination accepts for the
+// table. It overrides the source's pick, so flags asking for another are rejected.
+func resolveFixedStrategy(dest destination.Destination, cfg *config.IngestConfig) (config.IncrementalStrategy, error) {
+	d, ok := dest.(destination.FixedStrategyDestination)
+	if !ok {
+		return "", nil
+	}
+	s := config.IncrementalStrategy(d.FixedStrategy(cfg.DestTable))
+	switch {
+	case s == "":
+		return "", nil
+	case cfg.FullRefresh:
+		return "", &config.ValidationError{Field: "full-refresh", Message: fmt.Sprintf("cannot be used with %s %q, which only supports the %s strategy", dest.GetScheme(), cfg.DestTable, s)}
+	case cfg.IncrementalStrategyExplicit && cfg.IncrementalStrategy != s:
+		return "", &config.ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("%s is not supported by %s %q; use %s", cfg.IncrementalStrategy, dest.GetScheme(), cfg.DestTable, s)}
+	}
+	return s, nil
 }
 
 // applyReverseETLNaming pins destinations with mixed-case field names to direct

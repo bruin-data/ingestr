@@ -452,11 +452,43 @@ func TestIsReverseETL(t *testing.T) {
 func TestStrategySupport(t *testing.T) {
 	d := NewCleverTapDestination()
 	assert.True(t, d.SupportsAppendStrategy())
-	assert.True(t, d.SupportsReplaceStrategy())
-	assert.False(t, d.SupportsMergeStrategy())
+	assert.False(t, d.SupportsReplaceStrategy())
+	assert.True(t, d.SupportsMergeStrategy())
 	assert.False(t, d.SupportsDeleteInsertStrategy())
 	assert.False(t, d.SupportsSCD2Strategy())
 	assert.False(t, d.SupportsAtomicSwap())
+}
+
+func TestEachTableAcceptsOnlyItsStrategy(t *testing.T) {
+	d := NewCleverTapDestination()
+	tests := []struct {
+		table, strategy, wantErr string
+	}{
+		{"profiles", "merge", ""},
+		{"clevertap.profiles?id_type=objectId", "merge", ""},
+		{"events?event_name=Signup", "append", ""},
+		{"profiles", "", ""},
+		{"profiles", "append", "profiles are upserted by identity"},
+		{"profiles", "replace", "use merge"},
+		{"profiles", "delete", "use merge"},
+		{"events?event_name=Signup", "merge", "events are append-only"},
+		{"events?event_name=Signup", "update", "use append"},
+	}
+	for _, tt := range tests {
+		err := d.PrepareTable(context.Background(), destination.PrepareOptions{Table: tt.table, Strategy: tt.strategy})
+		if tt.wantErr == "" {
+			require.NoError(t, err, "%s/%s", tt.table, tt.strategy)
+			continue
+		}
+		require.ErrorContains(t, err, tt.wantErr, "%s/%s", tt.table, tt.strategy)
+	}
+}
+
+func TestFixedStrategy(t *testing.T) {
+	d := NewCleverTapDestination()
+	assert.Equal(t, "merge", d.FixedStrategy("profiles?id_type=identity"))
+	assert.Equal(t, "append", d.FixedStrategy("events?event_name=Signup"))
+	assert.Empty(t, d.FixedStrategy("nope"))
 }
 
 func TestInvalidURI(t *testing.T) {

@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination/clevertap"
+	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,4 +190,34 @@ func TestValidateReverseETLFlags(t *testing.T) {
 			require.ErrorContains(t, err, "does not support the "+string(s)+" strategy")
 		}
 	})
+}
+
+func TestResolveFixedStrategy(t *testing.T) {
+	ct := clevertap.NewCleverTapDestination()
+	cases := []struct {
+		name    string
+		cfg     config.IngestConfig
+		want    config.IncrementalStrategy
+		wantErr string
+	}{
+		{"events default", config.IngestConfig{DestTable: "events?event_name=Signup", IncrementalStrategy: config.StrategyReplace}, config.StrategyAppend, ""},
+		{"profiles default", config.IngestConfig{DestTable: "profiles", IncrementalStrategy: config.StrategyReplace}, config.StrategyMerge, ""},
+		{"explicit match", config.IngestConfig{DestTable: "profiles", IncrementalStrategy: config.StrategyMerge, IncrementalStrategyExplicit: true}, config.StrategyMerge, ""},
+		{"explicit mismatch", config.IngestConfig{DestTable: "events?event_name=Signup", IncrementalStrategy: config.StrategyMerge, IncrementalStrategyExplicit: true}, "", "incremental-strategy merge is not supported by clevertap"},
+		{"full refresh", config.IngestConfig{DestTable: "events?event_name=Signup", IncrementalStrategy: config.StrategyReplace, FullRefresh: true}, "", "full-refresh cannot be used with clevertap"},
+		{"unknown table", config.IngestConfig{DestTable: "nope", FullRefresh: true}, "", ""},
+	}
+	for _, tc := range cases {
+		got, err := resolveFixedStrategy(ct, &tc.cfg)
+		if tc.wantErr != "" {
+			require.ErrorContains(t, err, tc.wantErr, tc.name)
+			continue
+		}
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.want, got, tc.name)
+	}
+
+	got, err := resolveFixedStrategy(duckdb.NewDuckDBDestination(), &config.IngestConfig{DestTable: "t", FullRefresh: true})
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }

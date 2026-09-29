@@ -176,26 +176,64 @@ type shaper struct {
 	writeNulls bool
 }
 
+// recordTypeOf maps the dest-table path to "profile" or "event", tolerating a
+// schema qualifier ("clevertap.profiles"); empty when it names neither.
+func recordTypeOf(path string) string {
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		path = path[i+1:]
+	}
+	switch strings.ToLower(strings.TrimSpace(path)) {
+	case "profiles", "profile":
+		return "profile"
+	case "events", "event":
+		return "event"
+	default:
+		return ""
+	}
+}
+
+// strategyFor is the only strategy each upload type honours: profiles are
+// upserted by identity, events are always appended.
+func strategyFor(recordType string) config.IncrementalStrategy {
+	if recordType == "event" {
+		return config.StrategyAppend
+	}
+	return config.StrategyMerge
+}
+
+// checkStrategy refuses any other strategy, which CleverTap would otherwise
+// silently run as its native upload.
+func checkStrategy(recordType, strategy string) error {
+	want := strategyFor(recordType)
+	if strategy == "" || strategy == string(want) {
+		return nil
+	}
+	if recordType == "event" {
+		return fmt.Errorf("clevertap events are append-only, so --incremental-strategy %s is not supported; use append", strategy)
+	}
+	return fmt.Errorf("clevertap profiles are upserted by identity, so --incremental-strategy %s is not supported; use merge", strategy)
+}
+
+// FixedStrategy is the only strategy the table accepts; the pipeline always runs it.
+func (d *CleverTapDestination) FixedStrategy(table string) string {
+	path, _, _, err := tablespec.Split(table)
+	if err != nil {
+		return ""
+	}
+	if rt := recordTypeOf(path); rt != "" {
+		return string(strategyFor(rt))
+	}
+	return ""
+}
+
 func parseShaper(table string, primaryKeys []string, rejectMode string, writeNulls bool) (*shaper, error) {
 	var p tableParams
 	path, _, err := tablespec.Parse(table, &p, tablespec.WithListSeparator(","))
 	if err != nil {
 		return nil, err
 	}
-
-	// Tolerate an optional schema qualifier ("clevertap.profiles" -> "profiles").
-	recordPath := path
-	if i := strings.LastIndex(recordPath, "."); i >= 0 {
-		recordPath = recordPath[i+1:]
-	}
-
-	var recordType string
-	switch strings.ToLower(strings.TrimSpace(recordPath)) {
-	case "profiles", "profile":
-		recordType = "profile"
-	case "events", "event":
-		recordType = "event"
-	default:
+	recordType := recordTypeOf(path)
+	if recordType == "" {
 		return nil, fmt.Errorf("clevertap dest-table must be \"profiles\" or \"events\", got %q", path)
 	}
 
@@ -615,7 +653,15 @@ func (d *CleverTapDestination) upload(ctx context.Context, sh *shaper, items []m
 	return nil
 }
 
-func (d *CleverTapDestination) PrepareTable(_ context.Context, _ destination.PrepareOptions) error {
+// PrepareTable refuses an unsupported strategy before the source is read.
+func (d *CleverTapDestination) PrepareTable(_ context.Context, opts destination.PrepareOptions) error {
+	path, _, _, err := tablespec.Split(opts.Table)
+	if err != nil {
+		return err
+	}
+	if rt := recordTypeOf(path); rt != "" {
+		return checkStrategy(rt, opts.Strategy)
+	}
 	return nil
 }
 
@@ -654,14 +700,13 @@ func (d *CleverTapDestination) GetTableSchema(_ context.Context, _ string) (*sch
 func (d *CleverTapDestination) GetScheme() string { return "clevertap" }
 
 // IsReverseETL marks CleverTap as a reverse-ETL destination; the upload
-// endpoints fix the operation, so the strategy label is not acted on.
+// endpoints fix the operation, so each table accepts only its own strategy.
 func (d *CleverTapDestination) IsReverseETL() {}
 
-// SupportsReplaceStrategy is true because CleverTap has no destructive delete;
-// replace degrades to a full upload, which upserts profiles by identity.
-func (d *CleverTapDestination) SupportsReplaceStrategy() bool      { return true }
+// Profiles take merge and events take append; checkStrategy enforces which.
+func (d *CleverTapDestination) SupportsReplaceStrategy() bool      { return false }
 func (d *CleverTapDestination) SupportsAppendStrategy() bool       { return true }
-func (d *CleverTapDestination) SupportsMergeStrategy() bool        { return false }
+func (d *CleverTapDestination) SupportsMergeStrategy() bool        { return true }
 func (d *CleverTapDestination) SupportsDeleteInsertStrategy() bool { return false }
 func (d *CleverTapDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *CleverTapDestination) SupportsAtomicSwap() bool           { return false }

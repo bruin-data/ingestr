@@ -250,6 +250,12 @@ func RequiresExplicitStrategy(d Destination) bool {
 	return ok
 }
 
+// FixedStrategyDestination is implemented by destinations whose tables each
+// accept a single strategy; FixedStrategy returns it, or "" when the table has none.
+type FixedStrategyDestination interface {
+	FixedStrategy(table string) string
+}
+
 // IncrementalPredicateSupport is implemented by destinations whose MergeTable
 // honors MergeOptions.IncrementalPredicate; others silently ignore it, so the
 // pipeline rejects the flag for them.
