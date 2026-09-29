@@ -1472,6 +1472,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx)
 	case *array.Binary:
 		return a.Value(idx)
+	case *array.List:
+		return a.ValueStr(idx)
 	case *array.Date32:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Date64:
