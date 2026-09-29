@@ -192,20 +192,32 @@ func TestValidateReverseETLFlags(t *testing.T) {
 	})
 }
 
-func TestDestinationDefaultStrategy(t *testing.T) {
+func TestResolveFixedStrategy(t *testing.T) {
 	ct := clevertap.NewCleverTapDestination()
 	cases := []struct {
-		table    string
-		explicit bool
-		want     config.IncrementalStrategy
+		name    string
+		cfg     config.IngestConfig
+		want    config.IncrementalStrategy
+		wantErr string
 	}{
-		{"events?event_name=Signup", false, config.StrategyAppend},
-		{"profiles", false, config.StrategyMerge},
-		{"profiles", true, ""},
+		{"events default", config.IngestConfig{DestTable: "events?event_name=Signup", IncrementalStrategy: config.StrategyReplace}, config.StrategyAppend, ""},
+		{"profiles default", config.IngestConfig{DestTable: "profiles", IncrementalStrategy: config.StrategyReplace}, config.StrategyMerge, ""},
+		{"explicit match", config.IngestConfig{DestTable: "profiles", IncrementalStrategy: config.StrategyMerge, IncrementalStrategyExplicit: true}, config.StrategyMerge, ""},
+		{"explicit mismatch", config.IngestConfig{DestTable: "events?event_name=Signup", IncrementalStrategy: config.StrategyMerge, IncrementalStrategyExplicit: true}, "", "incremental-strategy merge is not supported by clevertap"},
+		{"full refresh", config.IngestConfig{DestTable: "events?event_name=Signup", IncrementalStrategy: config.StrategyReplace, FullRefresh: true}, "", "full-refresh cannot be used with clevertap"},
+		{"unknown table", config.IngestConfig{DestTable: "nope", FullRefresh: true}, "", ""},
 	}
 	for _, tc := range cases {
-		cfg := &config.IngestConfig{DestTable: tc.table, IncrementalStrategy: config.StrategyReplace, IncrementalStrategyExplicit: tc.explicit}
-		assert.Equal(t, tc.want, destinationDefaultStrategy(ct, cfg), "%s explicit=%v", tc.table, tc.explicit)
+		got, err := resolveFixedStrategy(ct, &tc.cfg)
+		if tc.wantErr != "" {
+			require.ErrorContains(t, err, tc.wantErr, tc.name)
+			continue
+		}
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.want, got, tc.name)
 	}
-	assert.Empty(t, destinationDefaultStrategy(duckdb.NewDuckDBDestination(), &config.IngestConfig{DestTable: "t"}))
+
+	got, err := resolveFixedStrategy(duckdb.NewDuckDBDestination(), &config.IngestConfig{DestTable: "t", FullRefresh: true})
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }

@@ -170,7 +170,7 @@ ingestr ingest \
 | `id_type` | Optional | How CleverTap resolves the identifier: `identity` (default), `objectId`, `FBID`, or `GPID`. For example, `id_type=objectId` sends each identifier value as an `objectId`. |
 
 Strategy:
-- **`merge` only** — profiles are upserted by identity, so re-sending a user updates their attributes instead of creating a duplicate. This is the default; any other `--incremental-strategy` stops the run before anything is sent.
+- **`merge` only** — profiles are upserted by identity, so re-sending a user updates their attributes instead of creating a duplicate. This is the default; any other `--incremental-strategy`, or `--full-refresh`, stops the run before anything is sent.
 - **No interval** — with no `--incremental-key`, the whole table is re-sent each run. Fine for small user bases.
 - **`--incremental-key`** (such as `updated_at`) with **`--interval-start`/`--interval-end`** — sends only the rows in that window instead of the whole table. Use this for large user bases.
 
@@ -196,7 +196,7 @@ ingestr ingest \
 | `ts` | Optional | The source column holding the event timestamp. If omitted, CleverTap stamps the upload time. |
 
 Strategy:
-- **`append` only** — each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate. This is the default; any other `--incremental-strategy` stops the run before anything is sent.
+- **`append` only** — each uploaded event is added to the user's timeline; CleverTap never replaces or de-duplicates events, so re-sending a row creates a duplicate. This is the default; any other `--incremental-strategy`, or `--full-refresh`, stops the run before anything is sent.
 - **`--incremental-key`** (usually the same column as `ts`) with **`--interval-start`/`--interval-end`** — uploads only the events in that window, so you control exactly which events are sent each run.
 
 > [!NOTE]

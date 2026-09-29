@@ -214,8 +214,8 @@ func checkStrategy(recordType, strategy string) error {
 	return fmt.Errorf("clevertap profiles are upserted by identity, so --incremental-strategy %s is not supported; use merge", strategy)
 }
 
-// DefaultStrategy is the strategy a run without --incremental-strategy uses.
-func (d *CleverTapDestination) DefaultStrategy(table string) string {
+// FixedStrategy is the only strategy the table accepts; the pipeline always runs it.
+func (d *CleverTapDestination) FixedStrategy(table string) string {
 	path, _, _, err := tablespec.Split(table)
 	if err != nil {
 		return ""

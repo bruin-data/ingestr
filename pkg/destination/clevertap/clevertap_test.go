@@ -484,11 +484,11 @@ func TestEachTableAcceptsOnlyItsStrategy(t *testing.T) {
 	}
 }
 
-func TestDefaultStrategy(t *testing.T) {
+func TestFixedStrategy(t *testing.T) {
 	d := NewCleverTapDestination()
-	assert.Equal(t, "merge", d.DefaultStrategy("profiles?id_type=identity"))
-	assert.Equal(t, "append", d.DefaultStrategy("events?event_name=Signup"))
-	assert.Empty(t, d.DefaultStrategy("nope"))
+	assert.Equal(t, "merge", d.FixedStrategy("profiles?id_type=identity"))
+	assert.Equal(t, "append", d.FixedStrategy("events?event_name=Signup"))
+	assert.Empty(t, d.FixedStrategy("nope"))
 }
 
 func TestInvalidURI(t *testing.T) {

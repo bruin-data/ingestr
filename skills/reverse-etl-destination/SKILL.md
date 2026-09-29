@@ -20,6 +20,7 @@ Decide the strategy set and mappings from this — not the reverse.
 ## Framework hooks
 - Implement `destination.ReverseETLDestination` (`IsReverseETL()`) — turns on RETL flags/strategies and drops the SQL-only checks (e.g. merge without a PK).
 - Capability markers, not hardcoding: `RequiresExplicitStrategy()`, `SupportsReplace/Append/Merge/DeleteInsert/SCD2Strategy()`, `SupportsAtomicSwap() = false`.
+- One strategy per table (CleverTap: profiles `merge`, events `append`): implement `FixedStrategy(table)`. The pipeline then runs that strategy even if the source picked another, and rejects `--full-refresh` or a different `--incremental-strategy` before reading.
 - Strategies go through `executeReverseETL`; each `Execute` checks `IsReverseETL` and delegates, each `Validate` calls `validateReverseETLReject`.
 - The write-nulls default is resolved once in `Pipeline.Run`, not per-strategy.
 - `PrepareTable` has no table to build — use it for config validation / object-type resolution instead (HubSpot checks unknown properties there).

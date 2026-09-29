@@ -250,10 +250,10 @@ func RequiresExplicitStrategy(d Destination) bool {
 	return ok
 }
 
-// DefaultStrategyDestination picks the strategy for a table when the run sets
-// no --incremental-strategy, for destinations whose tables each support only one.
-type DefaultStrategyDestination interface {
-	DefaultStrategy(table string) string
+// FixedStrategyDestination is implemented by destinations whose tables each
+// accept a single strategy; FixedStrategy returns it, or "" when the table has none.
+type FixedStrategyDestination interface {
+	FixedStrategy(table string) string
 }
 
 // IncrementalPredicateSupport is implemented by destinations whose MergeTable
