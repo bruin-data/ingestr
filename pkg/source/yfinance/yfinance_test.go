@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -432,4 +433,40 @@ func TestReplaceTablesFailInsteadOfDroppingSymbols(t *testing.T) {
 	results, _ = s.read(ctx, tableSpec{name: "options", symbols: []string{"NOPE"}}, source.ReadOptions{})
 	_, err = drain(results)
 	assert.ErrorContains(t, err, "no option contracts")
+}
+
+func TestHistoryReloadsFullOnSplitOrDividend(t *testing.T) {
+	oldBar, newBar := int64(1717075800), int64(1717421400) // 2024-05-30, 2024-06-03 13:30 UTC
+	for _, tc := range []struct {
+		name     string
+		events   string
+		requests int
+		rows     int64
+	}{
+		{"no event", `{}`, 1, 1},
+		{"dividend", `{"dividends":{"1":{"amount":0.25,"date":1717421400}}}`, 2, 2},
+		{"split", `{"splits":{"1":{"date":1717421400,"numerator":10,"denominator":1,"splitRatio":"10:1"}}}`, 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var period1s []string
+			s := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+				period1s = append(period1s, r.URL.Query().Get("period1"))
+				assert.Equal(t, "div,split", r.URL.Query().Get("events"))
+				ts := []int64{newBar}
+				if r.URL.Query().Get("period1") == strconv.FormatInt(maxHistoryStart.Unix(), 10) {
+					ts = []int64{oldBar, newBar}
+				}
+				body, _ := json.Marshal(ts)
+				_, _ = w.Write([]byte(`{"chart":{"result":[{"meta":{"symbol":"AAPL","exchangeTimezoneName":"America/New_York"},"timestamp":` + string(body) +
+					`,"events":` + tc.events + `,"indicators":{"quote":[{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],"volume":[1,1]}],"adjclose":[{"adjclose":[1,1]}]}}]}}`))
+			})
+
+			start, end := time.Date(2024, 6, 3, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 4, 0, 0, 0, 0, time.UTC)
+			results, _ := s.read(context.Background(), tableSpec{name: "history", symbols: []string{"AAPL"}, interval: "1d"}, source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+			rows, err := drain(results)
+			require.NoError(t, err)
+			assert.Len(t, period1s, tc.requests)
+			assert.Equal(t, tc.rows, rows)
+		})
+	}
 }

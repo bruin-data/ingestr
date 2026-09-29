@@ -80,6 +80,8 @@ Without `--interval-start`, daily and longer intervals load the symbol's full hi
 
 `close` is adjusted for splits; `adj_close` also adjusts for dividends (daily and longer intervals only). `date` is the trading date in the exchange's timezone. Each row carries its `interval`, so daily-or-longer intervals (`1d`, `1wk`, `1mo`) can share one table, and intraday intervals another; keep the two groups in separate tables since their primary keys differ.
 
+A split or dividend makes Yahoo re-adjust all earlier prices. When one falls inside a run's interval, that symbol's full daily, weekly or monthly history is reloaded so the table stays consistent. Intraday bars are not reloaded: after a split, bars loaded earlier stay on the old price scale until you run a full refresh.
+
 ### `info`
 
 | Parameter | Default | Description |

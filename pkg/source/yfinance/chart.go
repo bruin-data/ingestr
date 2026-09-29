@@ -200,18 +200,25 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 			}
 
 			config.Debug("[YFINANCE] Fetching %s history for %s from %s to %s", spec.interval, symbol, chunkStart.Format(time.RFC3339), chunkEnd.Format(time.RFC3339))
-			params := url.Values{
-				"interval":             {spec.interval},
-				"includePrePost":       {strconv.FormatBool(spec.prepost)},
-				"includeAdjustedClose": {"true"},
+			incremental := !isIntraday(spec.interval) && opts.IntervalStart != nil
+			params := func() url.Values {
+				p := url.Values{
+					"interval":             {spec.interval},
+					"includePrePost":       {strconv.FormatBool(spec.prepost)},
+					"includeAdjustedClose": {"true"},
+				}
+				if incremental {
+					p.Set("events", "div,split")
+				}
+				return p
 			}
 			// Yahoo aggregates daily+ bars from period1, so fetch from before the containing
 			// bar's start (the extra day covers exchange timezones) to get it complete.
 			fetchStart := chunkStart
-			if !isIntraday(spec.interval) && opts.IntervalStart != nil {
+			if incremental {
 				fetchStart = barPeriod(chunkStart.UTC(), spec.interval).Add(-day)
 			}
-			res, err := s.fetchChart(ctx, symbol, fetchStart, chunkEnd, params)
+			res, err := s.fetchChart(ctx, symbol, fetchStart, chunkEnd, params())
 			if errors.Is(err, errNoData) {
 				chunkStart = chunkEnd
 				continue
@@ -224,7 +231,17 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 				return err
 			}
 
-			items := historyRows(res, symbol, spec.interval, spec.prepost, chunkStart, chunkEnd)
+			rowStart := chunkStart
+			// A split or dividend makes Yahoo re-adjust every earlier bar, so reload the full history.
+			if incremental && hasAdjustingEvent(res, chunkStart, chunkEnd) {
+				config.Debug("[YFINANCE] Split or dividend for %s in window, reloading full %s history", symbol, spec.interval)
+				if res, err = s.fetchChart(ctx, symbol, maxHistoryStart, chunkEnd, params()); err != nil {
+					return err
+				}
+				rowStart = maxHistoryStart
+			}
+
+			items := historyRows(res, symbol, spec.interval, spec.prepost, rowStart, chunkEnd)
 			if err := sendItems(ctx, results, items, cols, opts, "history"); err != nil {
 				return err
 			}
@@ -233,6 +250,24 @@ func (s *YFinanceSource) readHistory(ctx context.Context, spec tableSpec, opts s
 		}
 	}
 	return nil
+}
+
+func hasAdjustingEvent(res *chartResult, start, end time.Time) bool {
+	inWindow := func(unix int64) bool {
+		t := time.Unix(unix, 0)
+		return !t.Before(start) && t.Before(end)
+	}
+	for _, d := range res.Events.Dividends {
+		if inWindow(d.Date) {
+			return true
+		}
+	}
+	for _, sp := range res.Events.Splits {
+		if inWindow(sp.Date) {
+			return true
+		}
+	}
+	return false
 }
 
 type bar struct {
