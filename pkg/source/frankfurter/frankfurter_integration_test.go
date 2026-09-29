@@ -32,7 +32,9 @@ func TestFrankfurterPipeline(t *testing.T) {
 	destURI := fmt.Sprintf("duckdb:///%s", dbPath)
 
 	start := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	// Frankfurter uses inclusive API dates; noon keeps the interval nonempty
+	// while including only the January 2 date-at-midnight records.
+	end := start.Add(12 * time.Hour)
 
 	expectations := []testutil.TableExpectation{
 		{
@@ -83,6 +85,7 @@ func TestFrankfurterPipeline(t *testing.T) {
 					ID: "EUR",
 					Fields: map[string]any{
 						"base_currency": "EUR",
+						"date":          start,
 						"rate":          1.0,
 					},
 				},
@@ -90,6 +93,7 @@ func TestFrankfurterPipeline(t *testing.T) {
 					ID: "USD",
 					Fields: map[string]any{
 						"base_currency": "EUR",
+						"date":          start,
 						"rate":          1.0956,
 					},
 				},
@@ -139,7 +143,7 @@ func TestFrankfurterPipeline_USDBase(t *testing.T) {
 	destURI := fmt.Sprintf("duckdb:///%s", dbPath)
 
 	start := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	end := start.Add(12 * time.Hour)
 
 	exp := testutil.TableExpectation{
 		SourceTable:   "exchange_rates",
@@ -159,6 +163,7 @@ func TestFrankfurterPipeline_USDBase(t *testing.T) {
 				ID: "USD",
 				Fields: map[string]any{
 					"base_currency": "USD",
+					"date":          start,
 					"rate":          1.0,
 				},
 			},
@@ -166,6 +171,7 @@ func TestFrankfurterPipeline_USDBase(t *testing.T) {
 				ID: "EUR",
 				Fields: map[string]any{
 					"base_currency": "USD",
+					"date":          start,
 					"rate":          0.91274,
 				},
 			},
@@ -214,7 +220,7 @@ func TestFrankfurterPipeline_Incremental(t *testing.T) {
 
 	// Run 1: load 2024-01-02 only
 	start1 := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	end1 := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	end1 := start1.Add(12 * time.Hour)
 
 	cfg1 := &config.IngestConfig{
 		SourceURI:           sourceURI,
@@ -225,6 +231,7 @@ func TestFrankfurterPipeline_Incremental(t *testing.T) {
 		IntervalStart:       &start1,
 		IntervalEnd:         &end1,
 	}
+	require.NoError(t, cfg1.Validate())
 	require.NoError(t, pipeline.New(cfg1).Run(ctx))
 
 	// Verify run 1: 31 rows (30 currencies + EUR base row)
@@ -238,7 +245,7 @@ func TestFrankfurterPipeline_Incremental(t *testing.T) {
 
 	// Run 2: load 2024-01-02..2024-01-03 (overlapping with run 1)
 	start2 := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	end2 := time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC)
+	end2 := time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC)
 
 	cfg2 := &config.IngestConfig{
 		SourceURI:           sourceURI,
@@ -249,6 +256,7 @@ func TestFrankfurterPipeline_Incremental(t *testing.T) {
 		IntervalStart:       &start2,
 		IntervalEnd:         &end2,
 	}
+	require.NoError(t, cfg2.Validate())
 	require.NoError(t, pipeline.New(cfg2).Run(ctx))
 
 	// Open a fresh connection after run 2 (DuckDB requires new connection to see committed changes)
