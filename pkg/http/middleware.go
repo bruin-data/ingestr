@@ -33,7 +33,7 @@ func autoParseFailOnTruncatedBody(client *resty.Client, resp *resty.Response) er
 	if err := resty.AutoParseResponseMiddleware(client, resp); err != nil {
 		return err
 	}
-	if body == nil || resp.Err != nil || !resp.IsSuccess() || resp.Request.DoNotParseResponse || resp.Request.IsSaveResponse {
+	if body == nil || resp.Err != nil || resp.Request.DoNotParseResponse || resp.Request.IsSaveResponse {
 		return nil
 	}
 	resp.Bytes()

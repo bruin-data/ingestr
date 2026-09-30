@@ -229,3 +229,35 @@ func TestTruncatedBodyErrorsWhenRetriesExhausted(t *testing.T) {
 		t.Fatalf("expected truncated body error, got %v", err)
 	}
 }
+
+func TestGetRetriedOnTruncatedErrorBody(t *testing.T) {
+	const body = `{"error":"bad request"}`
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusBadRequest)
+		if atomic.AddInt32(&hits, 1) > 1 {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		_, _ = w.Write([]byte(body[:len(body)/2]))
+	}))
+	defer srv.Close()
+
+	client := New(WithBaseURL(srv.URL), WithRetry(3, time.Millisecond, time.Millisecond), WithRetryStrategy(zeroDelayStrategy))
+	defer func() {
+		_ = client.Close()
+	}()
+
+	resp, err := client.R(context.Background()).Get("/")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode() != http.StatusBadRequest || resp.String() != body {
+		t.Fatalf("expected full 400 body, got %d %q", resp.StatusCode(), resp.String())
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected 2 requests, got %d", got)
+	}
+}
