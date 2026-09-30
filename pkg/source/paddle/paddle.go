@@ -168,56 +168,67 @@ func (s *PaddleSource) read(ctx context.Context, table string, ep endpoint, opts
 			return
 		}
 
-		customerIDs, err := s.listCustomerIDs(ctx)
-		if err != nil {
-			results <- source.RecordBatchResult{Err: err}
-			return
-		}
-		for _, id := range customerIDs {
+		err := s.forEachCustomer(ctx, func(id string) error {
 			customerEp := ep
 			customerEp.path = fmt.Sprintf(ep.path, url.PathEscape(id))
-			if err := s.readEndpoint(ctx, table, customerEp, opts, results); err != nil {
-				results <- source.RecordBatchResult{Err: err}
-				return
-			}
+			return s.readEndpoint(ctx, table, customerEp, opts, results)
+		})
+		if err != nil {
+			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
 
 	return results, nil
 }
 
-func (s *PaddleSource) listCustomerIDs(ctx context.Context) ([]string, error) {
+func (s *PaddleSource) forEachCustomer(ctx context.Context, fn func(id string) error) error {
 	ep := endpoints["customers"]
 	params := url.Values{}
 	params.Set("per_page", strconv.Itoa(ep.maxPageSize))
 	params.Set("status", ep.statuses)
 
-	var ids []string
 	requestURL := ep.path
-	for requestURL != "" {
+	useParams := true
+	for {
 		var resp listResponse
 		req := s.client.R(ctx).SetResult(&resp)
-		if requestURL == ep.path {
+		if useParams {
 			req.SetQueryParamValues(params)
 		}
 		httpResp, err := req.Get(requestURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch customers: %w", err)
+			return fmt.Errorf("failed to fetch customers: %w", err)
 		}
 		if !httpResp.IsSuccess() {
-			return nil, fmt.Errorf("paddle customers request failed with status %d: %s", httpResp.StatusCode(), httpResp.String())
+			return fmt.Errorf("paddle customers request failed with status %d: %s", httpResp.StatusCode(), httpResp.String())
+		}
+		if len(resp.Data) == 0 {
+			return nil
 		}
 		for _, c := range resp.Data {
 			if id, _ := c["id"].(string); id != "" {
-				ids = append(ids, id)
+				if err := fn(id); err != nil {
+					return err
+				}
 			}
 		}
-		requestURL = ""
-		if resp.Meta.Pagination.HasMore {
-			requestURL = resp.Meta.Pagination.Next
+		if !resp.Meta.Pagination.HasMore {
+			return nil
 		}
+
+		if next := resp.Meta.Pagination.Next; next != "" {
+			requestURL = next
+			useParams = false
+			continue
+		}
+		lastID, _ := resp.Data[len(resp.Data)-1]["id"].(string)
+		if lastID == "" {
+			return nil
+		}
+		params.Set("after", lastID)
+		requestURL = ep.path
+		useParams = true
 	}
-	return ids, nil
 }
 
 func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoint, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {

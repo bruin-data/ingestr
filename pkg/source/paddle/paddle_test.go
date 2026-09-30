@@ -3,13 +3,18 @@ package paddle
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -173,13 +178,20 @@ func TestPaddleAddressesPerCustomer(t *testing.T) {
 			}
 		}
 		switch {
-		case r.URL.Path == "/customers" && r.URL.Query().Get("page") == "":
+		case r.URL.Path == "/customers" && r.URL.Query().Get("page") == "" && r.URL.Query().Get("after") == "":
 			if got := r.URL.Query().Get("status"); got != "active,archived" {
 				t.Errorf("customers status = %q", got)
 			}
 			payload = page([]map[string]interface{}{{"id": "ctm_1"}}, srvURL+"/customers?page=2")
-		case r.URL.Path == "/customers":
+		case r.URL.Path == "/customers" && r.URL.Query().Get("page") == "2":
 			payload = page([]map[string]interface{}{{"id": "ctm_2"}}, "")
+			payload["meta"] = map[string]interface{}{"pagination": map[string]interface{}{"has_more": true}}
+		case r.URL.Path == "/customers" && r.URL.Query().Get("after") == "ctm_2":
+			payload = page([]map[string]interface{}{{"id": "ctm_3"}}, "")
+		case r.URL.Path == "/customers/ctm_3/addresses":
+			payload = page([]map[string]interface{}{
+				{"id": "add_4", "customer_id": "ctm_3", "updated_at": "2024-01-25T00:00:00Z"},
+			}, "")
 		case r.URL.Path == "/customers/ctm_1/addresses":
 			if got := r.URL.Query().Get("status"); got != "active,archived" {
 				t.Errorf("addresses status = %q", got)
@@ -207,15 +219,33 @@ func TestPaddleAddressesPerCustomer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rows int64
+	got := map[string]string{}
 	for res := range results {
 		if res.Err != nil {
 			t.Fatal(res.Err)
 		}
-		rows += res.Batch.NumRows()
-		res.Batch.Release()
+		rec := res.Batch
+		for i := 0; i < int(rec.NumRows()); i++ {
+			got[stringValue(t, rec, "id", i)] = stringValue(t, rec, "customer_id", i)
+		}
+		rec.Release()
 	}
-	if rows != 2 {
-		t.Fatalf("rows=%d, want 2", rows)
+	want := map[string]string{"add_1": "ctm_1", "add_3": "ctm_2", "add_4": "ctm_3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
 	}
+}
+
+func stringValue(t *testing.T, rec arrow.RecordBatch, col string, row int) string {
+	t.Helper()
+	ext := rec.Column(rec.Schema().FieldIndices(col)[0]).(array.ExtensionArray)
+	raw, ok := schemainfer.StringValueAt(ext.Storage(), row)
+	if !ok {
+		t.Fatalf("column %q is not string-backed", col)
+	}
+	v, err := schemainfer.DecodeUnknownValue(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprint(v)
 }
