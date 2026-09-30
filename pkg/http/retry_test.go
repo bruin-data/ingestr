@@ -196,6 +196,17 @@ func TestGetRetriedOnTruncatedBody(t *testing.T) {
 		if got := atomic.LoadInt32(&hits); got != 2 {
 			t.Fatalf("chunked=%v: expected 2 requests, got %d", chunked, got)
 		}
+
+		atomic.StoreInt32(&hits, 0)
+		var result struct {
+			Data []map[string]string `json:"data"`
+		}
+		if _, err := client.R(context.Background()).SetResult(&result).Get("/"); err != nil {
+			t.Fatalf("chunked=%v: SetResult: unexpected error: %v", chunked, err)
+		}
+		if len(result.Data) != 2 || atomic.LoadInt32(&hits) != 2 {
+			t.Fatalf("chunked=%v: SetResult: expected 2 rows after 2 requests, got %d rows, %d requests", chunked, len(result.Data), atomic.LoadInt32(&hits))
+		}
 		_ = client.Close()
 		srv.Close()
 	}
