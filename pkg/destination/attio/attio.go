@@ -309,22 +309,23 @@ func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
 }
 
 // applyMeta resolves the object's slug and the match attribute's canonical
-// slug and type. Best-effort: PrepareTable already warned if it is unavailable.
-func (d *AttioDestination) applyMeta(ctx context.Context, sh *shaper) {
+// slug and type. Without them numeric keys can't be compared, so a mirror sweep
+// could delete records the source still has.
+func (d *AttioDestination) applyMeta(ctx context.Context, sh *shaper) error {
 	meta, err := d.describe(ctx, sh.object)
 	if err != nil {
-		config.Debug("[ATTIO DEST] no attributes for %s (%v); using names as given", sh.object, err)
-		return
+		return fmt.Errorf("attio: cannot describe the %s object: %w", sh.object, err)
 	}
 	sh.meta = meta
 	if sh.matchAttr == "" || sh.byRecordID() {
-		return
+		return nil
 	}
 	if a, ok := meta.attr(sh.matchAttr); ok {
 		sh.matchAttr = a.APISlug
 		sh.numericKey = numericTypes[a.Type]
 		sh.matchMultiselect = a.IsMultiselect
 	}
+	return nil
 }
 
 func (d *AttioDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -332,7 +333,9 @@ func (d *AttioDestination) Write(ctx context.Context, records <-chan source.Reco
 	if err != nil {
 		return err
 	}
-	d.applyMeta(ctx, sh)
+	if err := d.applyMeta(ctx, sh); err != nil {
+		return err
+	}
 	workers := rowWorkers
 
 	var skipped atomic.Int64

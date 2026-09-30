@@ -204,8 +204,7 @@ func (d *AttioDestination) PrepareTable(ctx context.Context, opts destination.Pr
 		if errors.As(err, &apiErr) && (apiErr.status == 401 || apiErr.status == 403) {
 			return fmt.Errorf("attio: cannot read the %s object: %w; the access token needs the object_configuration:read scope", sh.object, err)
 		}
-		output.Warnf("Warning: attio could not describe %s (%v); skipping column validation\n", sh.object, err)
-		return nil
+		return fmt.Errorf("attio: cannot describe the %s object, so its columns and match values can't be checked: %w", sh.object, err)
 	}
 
 	if sh.matchAttr != "" && sh.matchAttr != recordIDAttr {

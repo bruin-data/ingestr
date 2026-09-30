@@ -856,11 +856,38 @@ func TestCellValue(t *testing.T) {
 
 func TestNumericMatchValue(t *testing.T) {
 	sh := &shaper{matchAttr: "score", numericKey: true}
-	if got := sh.matchValue("1001.00"); got != "1001" {
-		t.Fatalf("matchValue = %q, want 1001", got)
+	for in, want := range map[string]string{"1001.00": "1001", "1001.50": "1001.5", "1.0000000000000000001": "1.0000000000000000001", "-0.25": "-0.25"} {
+		if got := sh.matchValue(in); got != want {
+			t.Fatalf("matchValue(%s) = %q, want %s", in, got, want)
+		}
 	}
 	if got := storedValues(json.RawMessage(`[{"value": 1001}]`)); len(got) != 1 || got[0] != "1001" {
 		t.Fatalf("storedValues = %v", got)
+	}
+}
+
+func TestDescribeFailureStopsTheRun(t *testing.T) {
+	f := newFake()
+	f.seed("people", map[string][]string{"external_id": {"E-1"}})
+	f.hook = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+		if strings.HasSuffix(r.URL.Path, "/attributes") {
+			apiErr(w, 400, "invalid_request", "cannot read attributes")
+			return true
+		}
+		return false
+	}
+	d := newDest(t, f)
+	o := opts("people?matching_attribute=external_id", "replace", "external_id")
+	sch := &schema.TableSchema{Columns: []schema.Column{{Name: "external_id"}}}
+	if err := d.PrepareTable(context.Background(), destination.PrepareOptions{Table: o.Table, Strategy: o.Strategy, PrimaryKeys: o.PrimaryKeys, Schema: sch}); err == nil || !strings.Contains(err.Error(), "cannot describe the people object") {
+		t.Fatalf("PrepareTable error = %v", err)
+	}
+	err := d.Write(context.Background(), stringBatch(map[string][]string{"external_id": {"E-2"}}, []string{"external_id"}), o)
+	if err == nil || !strings.Contains(err.Error(), "cannot describe the people object") {
+		t.Fatalf("Write error = %v", err)
+	}
+	if f.count("people") != 1 || len(f.requestsMatching("DELETE ")) != 0 {
+		t.Fatalf("records = %d, deletes = %d; want nothing written", f.count("people"), len(f.requestsMatching("DELETE ")))
 	}
 }
 

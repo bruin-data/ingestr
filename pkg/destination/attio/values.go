@@ -147,7 +147,30 @@ func canonicalNumber(s string) (string, bool) {
 	if r.IsInt() {
 		return r.Num().String(), true
 	}
-	return strings.TrimRight(r.FloatString(18), "0"), true
+	digits, ok := decimalDigits(r.Denom())
+	if !ok {
+		return "", false
+	}
+	return strings.TrimRight(r.FloatString(digits), "0"), true
+}
+
+// decimalDigits is how many fraction digits write 1/denom exactly; false when
+// the fraction doesn't terminate (denom has a prime factor other than 2 or 5).
+func decimalDigits(denom *big.Int) (int, bool) {
+	d := new(big.Int).Set(denom)
+	count := func(p int64) int {
+		n, q, r := 0, new(big.Int), new(big.Int)
+		for {
+			q.QuoRem(d, big.NewInt(p), r)
+			if r.Sign() != 0 {
+				return n
+			}
+			d.Set(q)
+			n++
+		}
+	}
+	twos, fives := count(2), count(5)
+	return max(twos, fives), d.IsInt64() && d.Int64() == 1
 }
 
 // matchKey folds a match value for correlation; Attio compares emails and

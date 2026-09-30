@@ -96,7 +96,7 @@ Check against a real sandbox and write down what you find:
 - does a same-value update change anything? HubSpot: a true no-op (no `lastmodifieddate` bump, no history). Salesforce: every update bumps `LastModifiedDate`/`SystemModstamp` and fires triggers/flows even when no value changed, so an unchanged re-run is not free there.
 
 ## Schema validation in PrepareTable
-If the API can describe the target object, validate there rather than per record: unknown columns, and columns the strategy can't write (Salesforce splits `createable`/`updateable`, so upsert needs both). Exclude the server-assigned id from written fields entirely — it is never writable, and a warehouse round trip always carries it. Keep validation best-effort: a describe the token can't read should warn and continue, not block a valid load.
+If the API can describe the target object, validate there rather than per record: unknown columns, and columns the strategy can't write (Salesforce splits `createable`/`updateable`, so upsert needs both). Exclude the server-assigned id from written fields entirely — it is never writable, and a warehouse round trip always carries it. Keep validation best-effort: a describe the token can't read should warn and continue, not block a valid load. The exception is when the describe also decides how match values compare (Attio: whether the key is numeric, so `1001.00` equals `1001`). Without it a mirror sweep can delete records the source still has, so Attio fails the run instead.
 
 ## Misc
 - Resolve object/entity names to stable ids and cache; never match on display labels.
