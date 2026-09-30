@@ -172,8 +172,9 @@ Use one source table with good rows and several kinds of bad row: bad format, un
 | 8.05 | Same under `--reject-mode skip` | Sweep runs; rejected row reported |
 | 8.06 | A row with no key | Created, and survives its own sweep |
 | 8.07 | Every row rejected under `skip` | Sweep skipped with a warning |
-| 8.08 | Case-sensitive unique field: source has `A-1`, a stale `a-1` exists | `a-1` removed, `A-1` kept |
-| 8.09 | Metadata/describe call fails | Stops before writing if the metadata decides how keys compare (a mirror sweep could delete kept records); otherwise warns and skips column validation |
+| 8.08 | Every row's key is null or empty (e.g. a wrong column in the source query) | Sweep skipped with a warning; nothing removed |
+| 8.09 | Case-sensitive unique field: source has `A-1`, a stale `a-1` exists | `a-1` removed, `A-1` kept |
+| 8.10 | Metadata/describe call fails | Stops before writing if the metadata decides how keys compare (a mirror sweep could delete kept records); otherwise warns and skips column validation |
 
 ## 9. Alternate write path *(if the API has a bulk/async path)*
 
@@ -227,7 +228,7 @@ Every row must fail before any write.
 | 11.19 | update with the default record-id match but no record-id column | Refused |
 | 11.20 | A strategy a table doesn't accept *(if tables allow only some strategies)* | Refused before sending |
 | 11.21 | No strategy on such a table | The table's own strategy is used |
-| 11.22 | `--full-refresh` with any strategy | Refused before writing: there's no table to rebuild, and it must never turn into a mirror sweep. *Today it runs `replace`; the refusal is a planned change* |
+| 11.22 | `--full-refresh` with any strategy | Refused before writing: there's no table to rebuild, and it must never turn into a mirror sweep |
 | 11.23 | `--full-refresh` on a table with a fixed strategy | Refused before writing |
 
 ## 12. Auth and URI

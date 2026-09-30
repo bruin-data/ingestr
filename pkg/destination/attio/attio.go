@@ -1113,6 +1113,10 @@ func (d *AttioDestination) finalizeMirror(ctx context.Context, sh *shaper, worke
 		output.Warnf("Warning: attio replace (mirror) of %s: source produced 0 rows; skipping the delete sweep so an empty extract does not remove every record. Use --incremental-strategy delete to remove records intentionally.\n", sh.slug())
 		return nil
 	}
+	if !anyStored(sh.seen) {
+		output.Warnf("Warning: attio replace (mirror) of %s: no source row had a %s value; skipping the delete sweep so a missing or empty key column does not remove every record.\n", sh.slug(), sh.matchColumn)
+		return nil
+	}
 	if rejects.len() > 0 && !anyStored(sh.written) {
 		output.Warnf("Warning: attio replace (mirror) of %s: every source row was rejected; skipping the delete sweep so a load that wrote nothing does not remove existing records.\n", sh.slug())
 		return nil

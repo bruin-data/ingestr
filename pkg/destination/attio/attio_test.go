@@ -714,6 +714,19 @@ func TestReplaceMirrorsCaseSensitiveTextKey(t *testing.T) {
 	}
 }
 
+func TestReplaceWithoutAnyKeySkipsTheSweep(t *testing.T) {
+	f := newFake()
+	kept := f.seed("people", map[string][]string{"external_id": {"E-1"}})
+	d := newDest(t, f)
+	rows := stringBatch(map[string][]string{"ext": {"", ""}, "job_title": {"a", "b"}}, []string{"ext", "job_title"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=external_id", "replace", "ext")); err != nil {
+		t.Fatal(err)
+	}
+	if f.get("people", kept) == nil || len(f.requestsMatching("DELETE ")) != 0 {
+		t.Fatalf("an all-null key column must not sweep: records = %d", f.count("people"))
+	}
+}
+
 func TestReplaceGuards(t *testing.T) {
 	f := newFake()
 	f.seed("people", map[string][]string{"external_id": {"E-9"}})
