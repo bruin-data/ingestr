@@ -959,6 +959,11 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		if err := accum.flushReadyContext(ctx, results, token); err != nil {
 			return nil, err
 		}
+		if opts.Streaming && hadActivity {
+			if err := accum.flushStaleContext(ctx, results, token, streamingAccumulatorMaxAge, time.Now()); err != nil {
+				return nil, err
+			}
+		}
 
 		if barrierNonce != "" && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
