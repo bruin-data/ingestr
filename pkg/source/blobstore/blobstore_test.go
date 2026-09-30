@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -331,6 +333,85 @@ func TestSFTPInsecureHostKeyCallbackWarns(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, warning.String(), "SFTP host key verification is disabled")
 	require.NoError(t, callback("sftp.example.com:22", nil, newSSHTestPublicKey(t)))
+}
+
+func TestCreateSFTPClientKeyboardInteractiveOnly(t *testing.T) {
+	_, hostPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	hostSigner, err := ssh.NewSignerFromKey(hostPrivateKey)
+	require.NoError(t, err)
+
+	serverConfig := &ssh.ServerConfig{
+		KeyboardInteractiveCallback: func(conn ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			answers, err := challenge("", "", []string{"Password: "}, []bool{false})
+			if err != nil {
+				return nil, err
+			}
+			if conn.User() != "user" || len(answers) != 1 || answers[0] != "secret" {
+				return nil, errors.New("invalid credentials")
+			}
+			return nil, nil
+		},
+	}
+	serverConfig.AddHostKey(hostSigner)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go serveTestSFTP(listener, serverConfig)
+
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	require.NoError(t, err)
+	sshConn, sftpConn, err := createSFTPClient(&parsedBlobstoreURI{
+		sftpHost:                "127.0.0.1",
+		sftpPort:                port,
+		sftpUsername:            "user",
+		sftpPassword:            "secret",
+		sftpHostKeyFingerprints: []string{ssh.FingerprintSHA256(hostSigner.PublicKey())},
+	})
+	require.NoError(t, err)
+	defer func() { _ = sshConn.Close() }()
+	defer func() { _ = sftpConn.Close() }()
+
+	_, err = sftpConn.Getwd()
+	require.NoError(t, err)
+}
+
+func TestSFTPPasswordChallengeOnlyAnswersPasswordPrompts(t *testing.T) {
+	answers, err := sftpPasswordChallenge("secret")("", "", []string{"Username: ", "Password: ", "Enter PIN: "}, []bool{true, true, false})
+	require.NoError(t, err)
+	require.Equal(t, []string{"", "secret", "secret"}, answers)
+}
+
+func serveTestSFTP(listener net.Listener, config *ssh.ServerConfig) {
+	conn, err := listener.Accept()
+	if err != nil {
+		return
+	}
+	_, chans, reqs, err := ssh.NewServerConn(conn, config)
+	if err != nil {
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	for newChannel := range chans {
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			for req := range requests {
+				ok := req.Type == "subsystem" && string(req.Payload[4:]) == "sftp"
+				_ = req.Reply(ok, nil)
+				if ok {
+					server, err := sftp.NewServer(channel)
+					if err == nil {
+						_ = server.Serve()
+					}
+					_ = channel.Close()
+				}
+			}
+		}()
+	}
 }
 
 func newSSHTestPublicKey(t *testing.T) ssh.PublicKey {
