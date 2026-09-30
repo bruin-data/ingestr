@@ -894,7 +894,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	} else if p.config.Columns != "" && bufferedRecords == nil {
 		// For known-schema sources with column type overrides, add a type caster
 		// that converts Arrow batches from source types to the overridden types.
-		job.TypeCaster = p.buildTypeCaster(tableSchema, destSchema)
+		job.TypeCaster = p.buildTypeCaster(originalSourceSchema, destSchema)
 	}
 	if cdcStateManager != nil {
 		var err error
@@ -1101,7 +1101,14 @@ func (p *Pipeline) buildTypeCaster(sourceSchema, destSchema *schema.TableSchema)
 	hasOverride := false
 	fields := make([]arrow.Field, len(sourceSchema.Columns))
 	for i, col := range sourceSchema.Columns {
-		if destCol, ok := destTypes[col.Name]; ok && destCol.DataType != col.DataType {
+		// Casting runs before renaming, but destination types use the final names.
+		destName := col.Name
+		if p.columnRenamer != nil {
+			if renamed, ok := p.columnRenamer.Mapping()[col.Name]; ok {
+				destName = renamed
+			}
+		}
+		if destCol, ok := destTypes[destName]; ok && destCol.DataType != col.DataType {
 			fields[i] = arrow.Field{
 				Name:     col.Name,
 				Type:     schema.DataTypeToArrowType(destCol),
