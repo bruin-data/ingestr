@@ -33,6 +33,7 @@ type fakeAttr struct {
 	Multiselect bool
 	ReadOnly    bool
 	Targets     []string
+	Title       string
 }
 
 // fakeAttio is an in-memory Attio workspace with one "people" object and a
@@ -55,7 +56,7 @@ func newFake() *fakeAttio {
 			"people": {
 				{Slug: "email_addresses", Type: "email-address", Unique: true, Multiselect: true},
 				{Slug: "name", Type: "personal-name"},
-				{Slug: "job_title", Type: "text"},
+				{Slug: "job_title", Type: "text", Title: "Job title"},
 				{Slug: "external_id", Type: "text", Unique: true},
 				{Slug: "score", Type: "number"},
 				{Slug: "tags", Type: "select", Multiselect: true},
@@ -70,6 +71,10 @@ func newFake() *fakeAttio {
 		},
 		records: map[string]map[string]map[string][]string{"people": {}, "companies": {}},
 	}
+}
+
+func fakeAttrID(object string, i int) string {
+	return fmt.Sprintf("%08d-0000-4000-8000-%012d", len(object), i)
 }
 
 func (f *fakeAttio) attr(object, slug string) (fakeAttr, bool) {
@@ -194,12 +199,13 @@ func (f *fakeAttio) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"data": map[string]interface{}{"id": map[string]string{"object_id": "id-" + object}, "api_slug": object}})
 	case len(parts) == 3 && parts[2] == "attributes":
 		var data []map[string]interface{}
-		for _, a := range f.attrs[object] {
+		for i, a := range f.attrs[object] {
 			var ids []string
 			for _, t := range a.Targets {
 				ids = append(ids, "id-"+t)
 			}
 			data = append(data, map[string]interface{}{
+				"id": map[string]string{"attribute_id": fakeAttrID(object, i)}, "title": a.Title,
 				"api_slug": a.Slug, "type": a.Type, "is_unique": a.Unique, "is_multiselect": a.Multiselect,
 				"is_writable": !a.ReadOnly, "config": map[string]interface{}{"record_reference": map[string]interface{}{"allowed_object_ids": ids}},
 			})
@@ -557,6 +563,24 @@ func TestAppendCreatesAndLabelsRejects(t *testing.T) {
 	}
 	if f.count("people") != 2 {
 		t.Fatalf("records = %d, want E-2 created", f.count("people"))
+	}
+}
+
+func TestRejectNamesAttributeIDs(t *testing.T) {
+	f := newFake()
+	id := fakeAttrID("people", 2)
+	f.hook = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/records") {
+			apiErr(w, 400, "missing_value", `Required value for attribute with ID "`+id+`" was not provided.`)
+			return true
+		}
+		return false
+	}
+	d := newDest(t, f)
+	err := d.Write(context.Background(), stringBatch(map[string][]string{"job_title": {"x"}}, []string{"job_title"}), opts("people", "append"))
+	want := `attribute with ID "` + id + `" (people.job_title, "Job title", text) was not provided`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to contain %s", err, want)
 	}
 }
 

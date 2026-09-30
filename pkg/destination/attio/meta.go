@@ -15,7 +15,11 @@ import (
 
 // attribute is one attribute from GET /v2/objects/{object}/attributes.
 type attribute struct {
+	ID struct {
+		AttributeID string `json:"attribute_id"`
+	} `json:"id"`
 	APISlug       string `json:"api_slug"`
+	Title         string `json:"title"`
 	Type          string `json:"type"`
 	IsWritable    bool   `json:"is_writable"`
 	IsUnique      bool   `json:"is_unique"`
@@ -41,6 +45,7 @@ type objectInfo struct {
 type objectMeta struct {
 	slug   string
 	bySlug map[string]attribute
+	byID   map[string]attribute
 	// refTargets maps a lowercased record-reference slug to the api_slugs of the
 	// objects it may point to.
 	refTargets map[string][]string
@@ -127,8 +132,11 @@ func (d *AttioDestination) describe(ctx context.Context, object string) (*object
 		}
 	}
 
-	m := &objectMeta{slug: obj.Data.APISlug, bySlug: map[string]attribute{}, refTargets: map[string][]string{}}
+	m := &objectMeta{slug: obj.Data.APISlug, bySlug: map[string]attribute{}, byID: map[string]attribute{}, refTargets: map[string][]string{}}
 	for _, a := range attrs.Data {
+		if a.ID.AttributeID != "" {
+			m.byID[a.ID.AttributeID] = a
+		}
 		if a.IsArchived {
 			continue
 		}

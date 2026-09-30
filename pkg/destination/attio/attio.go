@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -918,6 +919,7 @@ func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, reco
 		}
 
 		apiErr := parseAPIError(resp)
+		apiErr.message = d.nameAttributes(apiErr.message)
 		if apiErr.code == conflictCode && attempt < conflictRetries {
 			config.Debug("[ATTIO DEST] retrying %s %s after %s (attempt %d)", action, ident, conflictCode, attempt+1)
 			if err := sleepCtx(ctx, retryBackoff(attempt)); err != nil {
@@ -931,6 +933,31 @@ func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, reco
 		}
 		return fmt.Errorf("attio %s %s failed: %w", action, sh.slug(), apiErr)
 	}
+}
+
+var quotedUUID = regexp.MustCompile(`"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`)
+
+// nameAttributes follows each attribute id in an Attio error message with the
+// attribute's object, slug, title and type, since the bare id means nothing to a user.
+func (d *AttioDestination) nameAttributes(msg string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return quotedUUID.ReplaceAllStringFunc(msg, func(quoted string) string {
+		id := strings.Trim(quoted, `"`)
+		for _, m := range d.metas {
+			a, ok := m.byID[id]
+			if !ok {
+				continue
+			}
+			parts := []string{m.slug + "." + a.APISlug}
+			if a.Title != "" {
+				parts = append(parts, strconv.Quote(a.Title))
+			}
+			parts = append(parts, a.Type)
+			return quoted + " (" + strings.Join(parts, ", ") + ")"
+		}
+		return quoted
+	})
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
