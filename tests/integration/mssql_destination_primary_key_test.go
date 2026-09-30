@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	mssqldest "github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/stretchr/testify/require"
 )
 
@@ -206,4 +207,65 @@ func quoteMSSQLPrimaryKeyTestName(name string) string {
 		parts[i] = "[" + strings.ReplaceAll(part, "]", "]]") + "]"
 	}
 	return strings.Join(parts, ".")
+}
+
+func TestMSSQLDestinationSchemaEvolutionKeepsStringPrimaryKeyIndexable(t *testing.T) {
+	if mssqlDest.uri == "" {
+		t.Skip("shared SQL Server destination container not available")
+	}
+
+	ctx := t.Context()
+	suffix := uniqueSuffix()
+	dest := mssqldest.NewMSSQLDestination()
+	require.NoError(t, dest.Connect(ctx, mssqlDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db := openMSSQLTestDB(t, mssqlDest.uri)
+	t.Cleanup(func() { _ = db.Close() })
+
+	cappedTable := "dbo.pk_evolve_capped_" + suffix
+	narrowTable := "dbo.pk_evolve_narrow_" + suffix
+	t.Cleanup(func() {
+		for _, table := range []string{cappedTable, narrowTable} {
+			_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteMSSQLPrimaryKeyTestName(table)))
+		}
+	})
+
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "attachment_key", DataType: schema.TypeString},
+		{Name: "subject", DataType: schema.TypeString, Nullable: true},
+	}}
+	keys := []string{"attachment_key"}
+	evolve := func(table string) {
+		t.Helper()
+		targetSchema, err := dest.GetTableSchema(ctx, table)
+		require.NoError(t, err)
+		comparison, err := schemaevolution.Compare(sourceSchema, targetSchema, &schemaevolution.CompareOptions{PrimaryKeys: keys})
+		require.NoError(t, err)
+		_, err = dest.ApplySchemaEvolution(ctx, table, comparison)
+		require.NoError(t, err)
+	}
+	keyLength := func(table string) int {
+		t.Helper()
+		targetSchema, err := dest.GetTableSchema(ctx, table)
+		require.NoError(t, err)
+		for _, col := range targetSchema.Columns {
+			if col.Name == "attachment_key" {
+				return col.MaxLength
+			}
+		}
+		t.Fatalf("attachment_key missing from %s", table)
+		return 0
+	}
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{Table: cappedTable, Schema: sourceSchema, PrimaryKeys: keys}))
+	require.Equal(t, 450, keyLength(cappedTable))
+	evolve(cappedTable)
+	require.Equal(t, 450, keyLength(cappedTable))
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (
+		[attachment_key] NVARCHAR(50) NOT NULL PRIMARY KEY,
+		[subject] NVARCHAR(100) NULL
+	)`, quoteMSSQLPrimaryKeyTestName(narrowTable))))
+	evolve(narrowTable)
+	require.Equal(t, 450, keyLength(narrowTable), "a narrower key widens in place up to the indexable limit")
 }
