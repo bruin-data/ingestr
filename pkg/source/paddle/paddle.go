@@ -29,6 +29,7 @@ type endpoint struct {
 	statuses     string
 	maxPageSize  int
 	serverFilter bool
+	perCustomer  bool
 }
 
 var endpoints = map[string]endpoint{
@@ -39,6 +40,7 @@ var endpoints = map[string]endpoint{
 	"transactions":  {path: "/transactions", maxPageSize: 30, serverFilter: true},
 	"subscriptions": {path: "/subscriptions", maxPageSize: 200},
 	"adjustments":   {path: "/adjustments", maxPageSize: 50},
+	"addresses":     {path: "/customers/%s/addresses", statuses: "active,archived", maxPageSize: 200, perCustomer: true},
 }
 
 type listResponse struct {
@@ -159,12 +161,74 @@ func (s *PaddleSource) read(ctx context.Context, table string, ep endpoint, opts
 
 	go func() {
 		defer close(results)
-		if err := s.readEndpoint(ctx, table, ep, opts, results); err != nil {
+		if !ep.perCustomer {
+			if err := s.readEndpoint(ctx, table, ep, opts, results); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+			}
+			return
+		}
+
+		err := s.forEachCustomer(ctx, func(id string) error {
+			customerEp := ep
+			customerEp.path = fmt.Sprintf(ep.path, url.PathEscape(id))
+			return s.readEndpoint(ctx, table, customerEp, opts, results)
+		})
+		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
 
 	return results, nil
+}
+
+func (s *PaddleSource) forEachCustomer(ctx context.Context, fn func(id string) error) error {
+	ep := endpoints["customers"]
+	params := url.Values{}
+	params.Set("per_page", strconv.Itoa(ep.maxPageSize))
+	params.Set("status", ep.statuses)
+
+	requestURL := ep.path
+	useParams := true
+	for {
+		var resp listResponse
+		req := s.client.R(ctx).SetResult(&resp)
+		if useParams {
+			req.SetQueryParamValues(params)
+		}
+		httpResp, err := req.Get(requestURL)
+		if err != nil {
+			return fmt.Errorf("failed to fetch customers: %w", err)
+		}
+		if !httpResp.IsSuccess() {
+			return fmt.Errorf("paddle customers request failed with status %d: %s", httpResp.StatusCode(), httpResp.String())
+		}
+		for _, c := range resp.Data {
+			if id, _ := c["id"].(string); id != "" {
+				if err := fn(id); err != nil {
+					return err
+				}
+			}
+		}
+		if !resp.Meta.Pagination.HasMore {
+			return nil
+		}
+
+		if next := resp.Meta.Pagination.Next; next != "" {
+			requestURL = next
+			useParams = false
+			continue
+		}
+		if len(resp.Data) == 0 {
+			return nil
+		}
+		lastID, _ := resp.Data[len(resp.Data)-1]["id"].(string)
+		if lastID == "" {
+			return nil
+		}
+		params.Set("after", lastID)
+		requestURL = ep.path
+		useParams = true
+	}
 }
 
 func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoint, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
