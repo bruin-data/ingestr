@@ -165,6 +165,7 @@ A run only counts if all of these hold:
 - **Clean up at the end.** Delete children before parents, and confirm the account is back to the start state so the next run is valid.
 
 ### Test matrix
+The numbered, run-by-run version of this matrix is [test-checklist.md](test-checklist.md). Run every row that applies and mark the rest N/A with a reason.
 
 Cover every row that applies to your API.
 
@@ -215,7 +216,7 @@ Use one source table with good rows and several kinds of bad row: a missing requ
 
 #### Column mapping and naming
 - `--columns dest::source` rename. `--primary-key` names the **renamed** column.
-- `--primary-key` naming the pre-rename column fails clearly.
+- `--primary-key` naming the pre-rename column matches the same record: the pipeline renames the key too.
 - `--columns` with a type is refused (rename-only).
 - `--schema-naming` is ignored with a warning, and names are sent verbatim.
 - Upper/mixed-case source column names resolve to the API's field names.
