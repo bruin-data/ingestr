@@ -17,6 +17,44 @@ The API decides which strategies are possible and how they map — you don't inv
 
 Decide the strategy set and mappings from this — not the reverse.
 
+## Questions to answer before calling it done
+These recur on every destination. Answer each with a doc link or a live test, not from memory.
+
+### Scope
+- **What kinds of collections does the platform have?** Records vs lists, memberships, audiences, junction objects. Does each need its own dest-table form, and can the dest-table string tell them apart? Confirm users actually need it before building it.
+- **What can the API do that the destination doesn't expose?** List the gaps and decide each: build, skip, or out of scope.
+- **Are relationships a separate API (associations) or a field on the record (lookups)?** That decides whether the destination needs a linking mode.
+
+### Write API
+- **Batch or single-record endpoints, and how many records per request?** That sets throughput and whether bisection is needed.
+- **Which strategies map to a real endpoint?** Link the create, update, upsert and delete docs. A strategy without an endpoint is refused, not simulated silently.
+- **Delete: permanent, archive, or recycle bin? Can it be restored?** The docs must say so; `replace` inherits the answer.
+- **Which endpoints are idempotent?** That decides what may be retried on 5xx. Without batches, where do retries happen?
+
+### Matching
+- **What is the platform's own record id called, and can we upsert on it?** Usually not (it's server-assigned), so `merge`/`replace` on it are refused.
+- **Which fields can be matched on: unique only, or any field through a search/filter endpoint?** If non-unique fields work, say plainly that every match is updated or deleted.
+- **Is matching case-sensitive, and the same for uniqueness and for search?** They can differ (Attio: unique text is case-sensitive, the filter isn't).
+- **How are records found for update/delete by a non-id field?** Does the read endpoint page, is the result held in memory, and what does that cost at volume?
+
+### Values
+- **Which values are composite (a name made of parts, an address, a currency with its code)?** Must every part be sent on each write? What happens when the source has only some parts, some null, or all null, under both `--write-nulls` settings? Never mix a new part with a stored part to invent a value neither side has.
+- **How is a multi-value field written: does a list replace or append?** Is the array expanded by ingestr or by the API? What happens when a list goes to a single-value field?
+- **How is a field cleared: null, empty string, empty list?** Is an empty string a value or a clear?
+
+### Our own conveniences
+- **Which features did we add on the ingestr side vs what the API does natively?** (dotted link columns, split name columns, numeric key normalization). Document every added convention as ours and justify it over plain SQL in the source query.
+- **Is any convention something SQL already does?** Prefer SQL over a template language or a new mini-syntax.
+
+### Framework interactions
+- **What happens when no strategy is given?** A destructive or table-specific default must be explicit. Can a table accept only some strategies?
+- **`--columns` and `--primary-key`:** test the key named by the source column and by the renamed one, and check the docs describe what happens.
+- **Which framework columns reach the destination** (`_ingestr_loaded_at`, `_ingestr_run_id`, round-tripped server ids), and are they dropped deliberately?
+
+### Docs
+- **Is every sentence understandable without knowing the code?** Treat each user question about the docs as a sign the wording failed, and fix the doc, not just the answer.
+- **Does every docs claim have a live test behind it?** Test the untested ones before merge.
+
 ## Framework hooks
 - Implement `destination.ReverseETLDestination` (`IsReverseETL()`) — turns on RETL flags/strategies and drops the SQL-only checks (e.g. merge without a PK).
 - Capability markers, not hardcoding: `RequiresExplicitStrategy()`, `SupportsReplace/Append/Merge/DeleteInsert/SCD2Strategy()`, `SupportsAtomicSwap() = false`.
@@ -49,7 +87,7 @@ Decide the strategy set and mappings from this — not the reverse.
 - No batch endpoint at all (Attio): one request per row. Get throughput from a worker pool under the rate limiter, and route rows by match key so two rows for one record run in order on the same worker instead of racing (`runTasks`).
 - Systemic failures (fail every row the same way) abort regardless of `--reject-mode` — don't bisect (`isSystemic`).
 - Retry transient per-record failures before rejecting them: Salesforce's `UNABLE_TO_LOCK_ROW` means the record was not written, so re-send just those records with backoff (`withLockRetry`), even for create.
-- If the API has an async bulk path (Salesforce Bulk API 2.0), expose it as a `load_method` dest-table param (BigQuery's name for the same choice), so each table picks its own without a second connection. Salesforce defaults to `bulk`: ingestr re-sends every row on each run (no change detection), so REST's one call per 200 rows can exhaust the org's daily API limit, which is also why Hightouch and Census default to bulk. `rest` stays available for `fail_fast` and small, latency-sensitive syncs. Never fall back from a failed bulk write to REST: rows the job already wrote would be sent twice. Reuse the shaping and funnel it at the send chokepoint so strategies stay identical. Bulk result files may not keep input order, so attribute rejects by the echoed match column, not by position. Rejects only exist after the job finishes, so refuse `fail_fast` up front.
+- If the API has an async bulk path (Salesforce Bulk API 2.0), expose it as a `load_method` dest-table param (BigQuery's name for the same choice), so each table picks its own without a second connection. Salesforce defaults to `bulk`: ingestr re-sends every row on each run (no change detection), so REST's one call per 200 rows can exhaust the org's daily API limit. `rest` stays available for `fail_fast` and small, latency-sensitive syncs. Never fall back from a failed bulk write to REST: rows the job already wrote would be sent twice. Reuse the shaping and funnel it at the send chokepoint so strategies stay identical. Bulk result files may not keep input order, so attribute rejects by the echoed match column, not by position. Rejects only exist after the job finishes, so refuse `fail_fast` up front.
 - Match API error category/code exactly, not by substring (`isRecordsAbsent404`).
 
 ## Serialization
