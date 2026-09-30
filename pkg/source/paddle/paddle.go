@@ -202,9 +202,6 @@ func (s *PaddleSource) forEachCustomer(ctx context.Context, fn func(id string) e
 		if !httpResp.IsSuccess() {
 			return fmt.Errorf("paddle customers request failed with status %d: %s", httpResp.StatusCode(), httpResp.String())
 		}
-		if len(resp.Data) == 0 {
-			return nil
-		}
 		for _, c := range resp.Data {
 			if id, _ := c["id"].(string); id != "" {
 				if err := fn(id); err != nil {
@@ -220,6 +217,9 @@ func (s *PaddleSource) forEachCustomer(ctx context.Context, fn func(id string) e
 			requestURL = next
 			useParams = false
 			continue
+		}
+		if len(resp.Data) == 0 {
+			return nil
 		}
 		lastID, _ := resp.Data[len(resp.Data)-1]["id"].(string)
 		if lastID == "" {

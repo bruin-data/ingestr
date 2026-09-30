@@ -182,7 +182,9 @@ func TestPaddleAddressesPerCustomer(t *testing.T) {
 			if got := r.URL.Query().Get("status"); got != "active,archived" {
 				t.Errorf("customers status = %q", got)
 			}
-			payload = page([]map[string]interface{}{{"id": "ctm_1"}}, srvURL+"/customers?page=2")
+			payload = page([]map[string]interface{}{{"id": "ctm_1"}}, srvURL+"/customers?page=empty")
+		case r.URL.Path == "/customers" && r.URL.Query().Get("page") == "empty":
+			payload = page([]map[string]interface{}{}, srvURL+"/customers?page=2")
 		case r.URL.Path == "/customers" && r.URL.Query().Get("page") == "2":
 			payload = page([]map[string]interface{}{{"id": "ctm_2"}}, "")
 			payload["meta"] = map[string]interface{}{"pagination": map[string]interface{}{"has_more": true}}
@@ -220,6 +222,7 @@ func TestPaddleAddressesPerCustomer(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := map[string]string{}
+	rows := 0
 	for res := range results {
 		if res.Err != nil {
 			t.Fatal(res.Err)
@@ -227,12 +230,13 @@ func TestPaddleAddressesPerCustomer(t *testing.T) {
 		rec := res.Batch
 		for i := 0; i < int(rec.NumRows()); i++ {
 			got[stringValue(t, rec, "id", i)] = stringValue(t, rec, "customer_id", i)
+			rows++
 		}
 		rec.Release()
 	}
 	want := map[string]string{"add_1": "ctm_1", "add_3": "ctm_2", "add_4": "ctm_3"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("addresses = %v, want %v", got, want)
+	if rows != len(want) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("rows=%d addresses=%v, want %v", rows, got, want)
 	}
 }
 
