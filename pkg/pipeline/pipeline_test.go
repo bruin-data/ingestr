@@ -22,6 +22,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/destination/hubspot"
+	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/destination/salesforce"
 	snowflakedest "github.com/bruin-data/ingestr/pkg/destination/snowflake"
@@ -1367,6 +1368,10 @@ func (m *normalizingMockSchemaEvolutionDestination) NormalizeSchemaEvolutionColu
 	return col
 }
 
+func (m *normalizingMockSchemaEvolutionDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	return (&mssql.MSSQLDestination{}).NormalizeSchemaEvolutionSourceColumn(source, dest)
+}
+
 func (m *mockSchemaEvolutionDestination) ApplySchemaEvolution(_ context.Context, _ string, _ *schemaevolution.SchemaComparison) ([]string, error) {
 	return nil, nil
 }
@@ -2236,6 +2241,26 @@ func TestEvolveSchemaIfNeededUsesDestinationTypeNormalization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 	require.False(t, plan.HasChanges())
+}
+
+func TestEvolveSchemaIfNeededPreservesMSSQLPrimaryKeyLength(t *testing.T) {
+	destSchema := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "attachment_key", DataType: schema.TypeString, MaxLength: 450, IsPrimaryKey: true,
+	}}}
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "attachment_key", DataType: schema.TypeString, Nullable: true,
+	}}}
+	dest := &normalizingMockSchemaEvolutionDestination{mockSchemaEvolutionDestination: &mockSchemaEvolutionDestination{
+		mockDestination: mockDestination{tableSchema: destSchema, scheme: "mssql"},
+	}}
+	p := &Pipeline{config: &config.IngestConfig{DestTable: "attachment_inventory", SchemaContract: "freeze"}, dest: dest}
+
+	plan, err := p.evolveSchemaIfNeeded(t.Context(), "attachment_inventory", sourceSchema, config.StrategyMerge)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.False(t, plan.HasChanges())
+	require.Equal(t, 450, plan.FinalSchema.Columns[0].MaxLength)
+	require.False(t, plan.FinalSchema.Columns[0].Nullable)
 }
 
 func TestNamingConsistency(t *testing.T) {

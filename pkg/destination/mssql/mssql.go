@@ -1707,11 +1707,23 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 
 	query := fmt.Sprintf(`
 		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
-		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH
+		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH,
+		       CASE WHEN EXISTS (
+		           SELECT 1 FROM %sINFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+		           JOIN %sINFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+		             ON tc.CONSTRAINT_CATALOG = kcu.CONSTRAINT_CATALOG
+		            AND tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+		            AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+		           WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+		             AND kcu.TABLE_CATALOG = c.TABLE_CATALOG
+		             AND kcu.TABLE_SCHEMA = c.TABLE_SCHEMA
+		             AND kcu.TABLE_NAME = c.TABLE_NAME
+		             AND kcu.COLUMN_NAME = c.COLUMN_NAME
+		       ) THEN 1 ELSE 0 END AS IS_PRIMARY_KEY
 		FROM %sINFORMATION_SCHEMA.COLUMNS c
 		JOIN %sINFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = @p1 AND c.TABLE_NAME = @p2
-		ORDER BY c.ORDINAL_POSITION`, prefix, prefix)
+		ORDER BY c.ORDINAL_POSITION`, prefix, prefix, prefix, prefix)
 
 	rows, err := d.db.QueryContext(ctx, query, identity.schema, identity.table)
 	if err != nil {
@@ -1721,18 +1733,24 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var primaryKeys []string
 	for rows.Next() {
 		var colName, dataType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
+		var isPrimaryKey bool
 
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
+		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &isPrimaryKey); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
 		col := schema.Column{
-			Name:     colName,
-			DataType: mapMSSQLTypeToSchema(dataType),
-			Nullable: isNullable == "YES",
+			Name:         colName,
+			DataType:     mapMSSQLTypeToSchema(dataType),
+			Nullable:     isNullable == "YES",
+			IsPrimaryKey: isPrimaryKey,
+		}
+		if isPrimaryKey {
+			primaryKeys = append(primaryKeys, colName)
 		}
 
 		if numPrecision != nil {
@@ -1757,9 +1775,10 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	}
 
 	return &schema.TableSchema{
-		Name:    identity.table,
-		Schema:  identity.schema,
-		Columns: columns,
+		Name:        identity.table,
+		Schema:      identity.schema,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 

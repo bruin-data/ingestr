@@ -1887,6 +1887,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if normalizer, ok := p.dest.(destination.SchemaEvolutionColumnNormalizer); ok {
 		opts.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
 	}
+	if normalizer, ok := p.dest.(destination.SchemaEvolutionSourceColumnNormalizer); ok {
+		opts.NormalizeSourceColumn = normalizer.NormalizeSchemaEvolutionSourceColumn
+	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
