@@ -336,10 +336,13 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 
 // Servers that disable "password" auth often expose the same password via keyboard-interactive.
 func sftpPasswordChallenge(password string) ssh.KeyboardInteractiveChallenge {
-	return func(_, _ string, questions []string, _ []bool) ([]string, error) {
+	return func(_, _ string, questions []string, echos []bool) ([]string, error) {
 		answers := make([]string, len(questions))
-		for i := range answers {
-			answers[i] = password
+		for i, question := range questions {
+			hidden := i < len(echos) && !echos[i]
+			if hidden || strings.Contains(strings.ToLower(question), "password") {
+				answers[i] = password
+			}
 		}
 		return answers, nil
 	}

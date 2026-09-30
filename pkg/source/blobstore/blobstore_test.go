@@ -363,7 +363,7 @@ func TestCreateSFTPClientKeyboardInteractiveOnly(t *testing.T) {
 	_, port, err := net.SplitHostPort(listener.Addr().String())
 	require.NoError(t, err)
 	sshConn, sftpConn, err := createSFTPClient(&parsedBlobstoreURI{
-		sftpHost:                "localhost",
+		sftpHost:                "127.0.0.1",
 		sftpPort:                port,
 		sftpUsername:            "user",
 		sftpPassword:            "secret",
@@ -375,6 +375,12 @@ func TestCreateSFTPClientKeyboardInteractiveOnly(t *testing.T) {
 
 	_, err = sftpConn.Getwd()
 	require.NoError(t, err)
+}
+
+func TestSFTPPasswordChallengeOnlyAnswersPasswordPrompts(t *testing.T) {
+	answers, err := sftpPasswordChallenge("secret")("", "", []string{"Username: ", "Password: ", "Enter PIN: "}, []bool{true, true, false})
+	require.NoError(t, err)
+	require.Equal(t, []string{"", "secret", "secret"}, answers)
 }
 
 func serveTestSFTP(listener net.Listener, config *ssh.ServerConfig) {
