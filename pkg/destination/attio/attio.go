@@ -184,8 +184,8 @@ type shaper struct {
 	// holds the record ids the run wrote, which the sweep never deletes.
 	seen    *sync.Map
 	written *sync.Map
-	// deleted holds the keys, record ids and folded stored values already queued
-	// for deletion, so a repeat isn't rejected as a missing record.
+	// deleted maps each record id queued for deletion to its outcome, and each
+	// folded stored value of a queried record to that record's id.
 	deleted   *sync.Map
 	sawSource atomic.Bool
 }
@@ -715,15 +715,6 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 			skipped.Add(1)
 			continue
 		}
-		if sh.archive {
-			var mark interface{} = deletedKey(key)
-			if sh.byRecordID() {
-				mark = deletedID(key)
-			}
-			if _, dup := sh.deleted.LoadOrStore(mark, struct{}{}); dup {
-				continue
-			}
-		}
 		ident := sh.matchAttr + "=" + key
 		ids := []string{key}
 		if sh.byRecordID() {
@@ -736,8 +727,10 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 		} else {
 			ids = resolved[key]
 			if len(ids) == 0 && sh.archive {
-				if _, gone := sh.deleted.Load(deletedValue(sh.foldKey(key))); gone {
-					continue
+				if id, ok := sh.deleted.Load(deletedValue(sh.foldKey(key))); ok {
+					if _, queued := sh.deleted.Load(deletedID(id.(string))); queued {
+						ids = []string{id.(string)}
+					}
 				}
 			}
 			if len(ids) == 0 {
@@ -752,8 +745,15 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 			values = sh.shapeValues(record, plan, row, false)
 		}
 		for _, id := range ids {
-			if sh.archive && !sh.byRecordID() {
-				if _, dup := sh.deleted.LoadOrStore(deletedID(id), struct{}{}); dup {
+			if sh.archive {
+				// A record is deleted once; later rows for it share that delete's outcome.
+				if st, dup := sh.deleted.LoadOrStore(deletedID(id), &deleteState{}); dup {
+					tasks = append(tasks, rowTask{key: id, run: func(context.Context) error {
+						if r := st.(*deleteState).rejected.Load(); r != nil {
+							return sh.reject(rejects, rejection{code: r.code, message: r.message, identifier: ident})
+						}
+						return nil
+					}})
 					continue
 				}
 			}
@@ -839,7 +839,7 @@ func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []s
 					mv := sh.matchValue(v)
 					isExact = isExact || mv == k
 					if sh.archive {
-						sh.deleted.Store(deletedValue(sh.foldKey(mv)), struct{}{})
+						sh.deleted.Store(deletedValue(sh.foldKey(mv)), rec.ID.RecordID)
 					}
 				}
 				if isExact {
@@ -864,12 +864,16 @@ func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []s
 	return out, nil
 }
 
-// Kinds of shaper.deleted entries, typed apart so a key never collides with an id.
+// Kinds of shaper.deleted keys, typed apart so a value never collides with an id.
 type (
-	deletedKey   string
 	deletedID    string
 	deletedValue string
 )
+
+// deleteState is the outcome of one record's delete; rejected stays nil on success.
+type deleteState struct {
+	rejected atomic.Pointer[rejection]
+}
 
 // foldKey compares match values the way Attio does: a unique text attribute is case-sensitive.
 func (s *shaper) foldKey(v string) string {
@@ -977,6 +981,11 @@ func (d *AttioDestination) sendRow(ctx context.Context, sh *shaper, action, reco
 		}
 		if rej, ok := rowRejection(action, apiErr); ok {
 			rej.identifier = ident
+			if action == "delete" && sh.deleted != nil {
+				if st, ok := sh.deleted.Load(deletedID(recordID)); ok {
+					st.(*deleteState).rejected.Store(&rej)
+				}
+			}
 			return sh.reject(rejects, rej)
 		}
 		return fmt.Errorf("attio %s %s failed: %w", action, sh.slug(), apiErr)

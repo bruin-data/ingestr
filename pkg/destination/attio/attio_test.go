@@ -965,6 +965,33 @@ func TestDeleteOfRecordGoneInEarlierBatchIsNotRejected(t *testing.T) {
 	}
 }
 
+func TestRejectedDeleteIsReportedForEveryRow(t *testing.T) {
+	f := newFake()
+	f.seed("people", map[string][]string{"email_addresses": {"a@x.com", "b@x.com"}})
+	f.hook = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+		if r.Method == http.MethodDelete {
+			apiErr(w, 400, "validation_type", "record is locked")
+			return true
+		}
+		return false
+	}
+	d := newDest(t, f)
+
+	rows := make(chan source.RecordBatchResult, 2)
+	rows <- <-stringBatch(map[string][]string{"email": {"a@x.com", "b@x.com"}}, []string{"email"})
+	rows <- <-stringBatch(map[string][]string{"email": {"B@x.com"}}, []string{"email"})
+	close(rows)
+	err := d.Write(context.Background(), rows, opts("people?matching_attribute=email_addresses", "delete", "email"))
+	for _, want := range []string{"[email_addresses=a@x.com]", "[email_addresses=b@x.com]", "[email_addresses=B@x.com]", "attio rejected 3"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to contain %s", err, want)
+		}
+	}
+	if n := len(f.requestsMatching("DELETE ")); n != 1 || f.count("people") != 1 {
+		t.Fatalf("deletes sent = %d, records = %d; want 1 and the record kept", n, f.count("people"))
+	}
+}
+
 func TestPartialNameIsWrittenWithoutWriteNulls(t *testing.T) {
 	f := newFake()
 	id := f.seed("people", map[string][]string{"external_id": {"E-1"}, "name": {"Ada Lovelace"}})
