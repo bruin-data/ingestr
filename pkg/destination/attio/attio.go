@@ -170,6 +170,7 @@ type shaper struct {
 	defaultColumn    bool
 	matchMultiselect bool
 	numericKey       bool
+	caseSensitiveKey bool
 	rejectMode       string
 	writeNulls       bool
 	updateOnly       bool
@@ -179,10 +180,13 @@ type shaper struct {
 	// labelColumns (append) are the --primary-key columns; they only name a rejected row.
 	labelColumns []string
 	meta         *objectMeta
-	// seen holds the folded match values of every source row (mirror); written
+	// seen holds the foldKey match values of every source row (mirror); written
 	// holds the record ids the run wrote, which the sweep never deletes.
-	seen      *sync.Map
-	written   *sync.Map
+	seen    *sync.Map
+	written *sync.Map
+	// deleted holds the keys, record ids and folded stored values already queued
+	// for deletion, so a repeat isn't rejected as a missing record.
+	deleted   *sync.Map
 	sawSource atomic.Bool
 }
 
@@ -254,6 +258,9 @@ func parseShaper(table, strategy string, primaryKeys []string, rejectMode string
 	case config.StrategyUpdate, config.StrategyDelete:
 		sh.updateOnly = strategy == string(config.StrategyUpdate)
 		sh.archive = strategy == string(config.StrategyDelete)
+		if sh.archive {
+			sh.deleted = &sync.Map{}
+		}
 		if matchAttr == "" {
 			matchAttr = recordIDAttr
 		}
@@ -323,6 +330,7 @@ func (d *AttioDestination) applyMeta(ctx context.Context, sh *shaper) error {
 	if a, ok := meta.attr(sh.matchAttr); ok {
 		sh.matchAttr = a.APISlug
 		sh.numericKey = numericTypes[a.Type]
+		sh.caseSensitiveKey = a.Type == "text" && a.IsUnique
 		sh.matchMultiselect = a.IsMultiselect
 	}
 	return nil
@@ -454,9 +462,7 @@ func (d *AttioDestination) columnPlan(ctx context.Context, s *shaper, record arr
 						c.kind = kindName
 						c.refField = strings.ToLower(field)
 					}
-					if targets := s.meta.refTargets[strings.ToLower(rel)]; typ == "" && len(targets) == 1 {
-						c.refObject = targets[0]
-					}
+					c.refObject = refObject(s.meta.refTargets[strings.ToLower(rel)], typ)
 				}
 			}
 			if c.kind == kindRef {
@@ -567,8 +573,8 @@ func (s *shaper) shapeValues(record arrow.RecordBatch, plan []colTarget, row int
 	return values
 }
 
-// rowTask is one API call. Tasks sharing a key run in order on the same worker,
-// so two rows for one record never race.
+// rowTask is one API call; tasks sharing a key run in order on one worker. Update/delete
+// key by record id, upserts by match value, so two values of one record may still race.
 type rowTask struct {
 	key string
 	run func(ctx context.Context) error
@@ -642,7 +648,7 @@ func (d *AttioDestination) writeBatch(ctx context.Context, sh *shaper, record ar
 	if sh.mirror {
 		for _, k := range keys {
 			if k != "" {
-				sh.seen.Store(matchKey(k), struct{}{})
+				sh.seen.Store(sh.foldKey(k), struct{}{})
 			}
 		}
 	}
@@ -709,6 +715,15 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 			skipped.Add(1)
 			continue
 		}
+		if sh.archive {
+			var mark interface{} = deletedKey(key)
+			if sh.byRecordID() {
+				mark = deletedID(key)
+			}
+			if _, dup := sh.deleted.LoadOrStore(mark, struct{}{}); dup {
+				continue
+			}
+		}
 		ident := sh.matchAttr + "=" + key
 		ids := []string{key}
 		if sh.byRecordID() {
@@ -720,6 +735,11 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 			}
 		} else {
 			ids = resolved[key]
+			if len(ids) == 0 && sh.archive {
+				if _, gone := sh.deleted.Load(deletedValue(sh.foldKey(key))); gone {
+					continue
+				}
+			}
 			if len(ids) == 0 {
 				if err := sh.reject(rejects, rejection{code: notFoundCode, message: fmt.Sprintf("no %s record found with %s=%q", sh.slug(), sh.matchAttr, key), identifier: ident}); err != nil {
 					return err
@@ -732,6 +752,11 @@ func (d *AttioDestination) writeMatchedBatch(ctx context.Context, sh *shaper, re
 			values = sh.shapeValues(record, plan, row, false)
 		}
 		for _, id := range ids {
+			if sh.archive && !sh.byRecordID() {
+				if _, dup := sh.deleted.LoadOrStore(deletedID(id), struct{}{}); dup {
+					continue
+				}
+			}
 			tasks = append(tasks, rowTask{key: id, run: func(ctx context.Context) error {
 				return d.sendRow(ctx, sh, action, id, values, ident, rejects)
 			}})
@@ -786,8 +811,8 @@ func (s *shaper) label(record arrow.RecordBatch, row int) string {
 }
 
 // resolveKeys maps each distinct match value to the ids of the records holding
-// it. Attio's filter ignores case but a unique text attribute doesn't, so an
-// exact match wins and the case-folded matches are only a fallback.
+// it. Attio's filter ignores case, so an exact match wins; a unique text
+// attribute is case-sensitive and takes nothing else.
 func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []string, workers int) (map[string][]string, error) {
 	out := map[string][]string{}
 	var mu sync.Mutex
@@ -809,17 +834,22 @@ func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []s
 			var ids, exact []string
 			err := d.queryRecords(ctx, sh.slug(), map[string]interface{}{sh.matchAttr: filterValue}, func(rec queriedRecord) {
 				ids = append(ids, rec.ID.RecordID)
+				isExact := false
 				for _, v := range storedValues(rec.Values[sh.matchAttr]) {
-					if sh.matchValue(v) == k {
-						exact = append(exact, rec.ID.RecordID)
-						break
+					mv := sh.matchValue(v)
+					isExact = isExact || mv == k
+					if sh.archive {
+						sh.deleted.Store(deletedValue(sh.foldKey(mv)), struct{}{})
 					}
+				}
+				if isExact {
+					exact = append(exact, rec.ID.RecordID)
 				}
 			})
 			if err != nil {
 				return fmt.Errorf("attio: failed to look up %s records by %s: %w", sh.slug(), sh.matchAttr, err)
 			}
-			if len(exact) > 0 {
+			if len(exact) > 0 || sh.caseSensitiveKey {
 				ids = exact
 			}
 			mu.Lock()
@@ -832,6 +862,21 @@ func (d *AttioDestination) resolveKeys(ctx context.Context, sh *shaper, keys []s
 		return nil, err
 	}
 	return out, nil
+}
+
+// Kinds of shaper.deleted entries, typed apart so a key never collides with an id.
+type (
+	deletedKey   string
+	deletedID    string
+	deletedValue string
+)
+
+// foldKey compares match values the way Attio does: a unique text attribute is case-sensitive.
+func (s *shaper) foldKey(v string) string {
+	if s.caseSensitiveKey {
+		return strings.TrimSpace(v)
+	}
+	return matchKey(v)
 }
 
 type queriedRecord struct {
@@ -1071,7 +1116,7 @@ func (d *AttioDestination) finalizeMirror(ctx context.Context, sh *shaper, worke
 			return
 		}
 		for _, v := range storedValues(rec.Values[sh.matchAttr]) {
-			if _, ok := sh.seen.Load(matchKey(sh.matchValue(v))); ok {
+			if _, ok := sh.seen.Load(sh.foldKey(sh.matchValue(v))); ok {
 				return
 			}
 		}

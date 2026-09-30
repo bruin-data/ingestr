@@ -124,7 +124,7 @@ Two settings decide which record a row updates or deletes:
 
 When the match attribute holds several values (like `email_addresses` or `domains`), `merge` adds the row's value to the record's list instead of replacing it.
 
-Email addresses and domains match regardless of case. A unique text attribute you create is case-sensitive: `A-1` and `a-1` are two different records.
+Email addresses and domains match regardless of case. A unique text attribute you create is case-sensitive: `A-1` and `a-1` are two different records, and `A-1` never matches `a-1`.
 
 **`update` and `delete`** match by Attio's record id by default, using a source column named `record_id`:
 
@@ -162,6 +162,8 @@ Attio links records through **record reference** attributes, such as a person's 
 A person's `name` can be written in two ways:
 - As one text column in the form `Last, First`, e.g. `Lovelace, Ada`. Text without a comma is taken as the first name only.
 - As separate columns `name.first_name`, `name.last_name` and, optionally, `name.full_name`. Without a full name, ingestr joins the first and last names.
+
+Attio stores a name as one value, so every write replaces the whole name: a row with only `name.first_name` clears the last name. When every name column is empty, the name is cleared, or left as it is with `--write-nulls=false`.
 
 ### Reverse-ETL options
 

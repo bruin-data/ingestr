@@ -288,7 +288,7 @@ func (d *AttioDestination) checkLinkField(ctx context.Context, typ string, targe
 	if strings.EqualFold(field, recordIDAttr) {
 		return ""
 	}
-	object := typ
+	object := refObject(targets, typ)
 	if object == "" {
 		object = firstOr(targets, "")
 	}
@@ -318,6 +318,21 @@ func uniqueAttributes(m *objectMeta) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// refObject is the linked object's slug as Attio spells it; typ is the name from
+// the column, empty when the attribute can point to only one object.
+func refObject(targets []string, typ string) string {
+	if typ == "" {
+		if len(targets) == 1 {
+			return targets[0]
+		}
+		return ""
+	}
+	if i := slices.IndexFunc(targets, func(t string) bool { return strings.EqualFold(t, typ) }); i >= 0 {
+		return targets[i]
+	}
+	return typ
 }
 
 func firstOr(s []string, def string) string {

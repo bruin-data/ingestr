@@ -699,6 +699,21 @@ func TestReplaceMirrors(t *testing.T) {
 	}
 }
 
+func TestReplaceMirrorsCaseSensitiveTextKey(t *testing.T) {
+	f := newFake()
+	kept := f.seed("people", map[string][]string{"external_id": {"A-1"}})
+	stale := f.seed("people", map[string][]string{"external_id": {"a-1"}})
+	d := newDest(t, f)
+
+	rows := stringBatch(map[string][]string{"ext": {"A-1"}}, []string{"ext"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=external_id", "replace", "ext")); err != nil {
+		t.Fatal(err)
+	}
+	if f.get("people", kept) == nil || f.get("people", stale) != nil {
+		t.Fatalf("records left = %d, want only A-1", f.count("people"))
+	}
+}
+
 func TestReplaceGuards(t *testing.T) {
 	f := newFake()
 	f.seed("people", map[string][]string{"external_id": {"E-9"}})
@@ -792,9 +807,9 @@ func TestShapeValues(t *testing.T) {
 		"name.last_name":            {"Lovelace"},
 		"company.domains":           {"acme.com"},
 		"related.people.record_id":  {"00000000-0000-0000-0000-000000000042"},
-		"related.companies.domains": {"other.com"},
+		"related.Companies.domains": {"other.com"},
 		"TAGS":                      {"vip"},
-	}, []string{"ext", "name.first_name", "name.last_name", "company.domains", "related.people.record_id", "related.companies.domains", "TAGS"})
+	}, []string{"ext", "name.first_name", "name.last_name", "company.domains", "related.people.record_id", "related.Companies.domains", "TAGS"})
 	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=external_id", "merge", "ext")); err != nil {
 		t.Fatal(err)
 	}
@@ -914,6 +929,58 @@ func TestRetriedDeleteThatLandedIsNotRejected(t *testing.T) {
 	}
 }
 
+func TestDeleteSendsEachRecordOnce(t *testing.T) {
+	f := newFake()
+	ada := f.seed("people", map[string][]string{"email_addresses": {"a@x.com", "b@x.com"}})
+	bob := f.seed("people", map[string][]string{"email_addresses": {"bob@x.com"}})
+	d := newDest(t, f)
+
+	rows := stringBatch(map[string][]string{"email": {"a@x.com", "b@x.com", "bob@x.com", "bob@x.com"}}, []string{"email"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=email_addresses", "delete", "email")); err != nil {
+		t.Fatalf("delete with repeated records: %v", err)
+	}
+	if f.get("people", ada) != nil || f.get("people", bob) != nil {
+		t.Fatalf("records left = %d, want 0", f.count("people"))
+	}
+	if n := len(f.requestsMatching("DELETE ")); n != 2 {
+		t.Fatalf("deletes sent = %d, want 2", n)
+	}
+}
+
+func TestDeleteOfRecordGoneInEarlierBatchIsNotRejected(t *testing.T) {
+	f := newFake()
+	f.seed("people", map[string][]string{"email_addresses": {"a@x.com", "b@x.com"}})
+	d := newDest(t, f)
+
+	rows := make(chan source.RecordBatchResult, 2)
+	for _, email := range []string{"a@x.com", "B@x.com"} {
+		rows <- <-stringBatch(map[string][]string{"email": {email}}, []string{"email"})
+	}
+	close(rows)
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=email_addresses", "delete", "email")); err != nil {
+		t.Fatalf("delete across batches: %v", err)
+	}
+	if n := len(f.requestsMatching("DELETE ")); n != 1 || f.count("people") != 0 {
+		t.Fatalf("deletes sent = %d, records left = %d; want 1 and 0", n, f.count("people"))
+	}
+}
+
+func TestPartialNameIsWrittenWithoutWriteNulls(t *testing.T) {
+	f := newFake()
+	id := f.seed("people", map[string][]string{"external_id": {"E-1"}, "name": {"Ada Lovelace"}})
+	d := newDest(t, f)
+	o := opts("people?matching_attribute=external_id", "merge", "ext")
+	o.WriteNulls = false
+
+	rows := stringBatch(map[string][]string{"ext": {"E-1"}, "name.first_name": {"Augusta"}}, []string{"ext", "name.first_name"})
+	if err := d.Write(context.Background(), rows, o); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.get("people", id)["name"]; len(got) != 1 || !strings.Contains(got[0], `"first_name":"Augusta"`) || !strings.Contains(got[0], `"last_name":""`) {
+		t.Fatalf("name = %v, want Augusta with an empty last name", got)
+	}
+}
+
 func TestNullNamePartsClearName(t *testing.T) {
 	f := newFake()
 	id := f.seed("people", map[string][]string{"external_id": {"E-1"}, "name": {"x"}})
@@ -939,6 +1006,16 @@ func TestUpdateByCaseSensitiveKeyPrefersExactMatch(t *testing.T) {
 	}
 	if f.get("people", lower)["job_title"] == nil || f.get("people", upper)["job_title"] != nil {
 		t.Fatalf("exact match must win: upper=%v lower=%v", f.get("people", upper), f.get("people", lower))
+	}
+
+	rows = stringBatch(map[string][]string{"job_title": {"LOWER ONLY"}, "score": {"3"}}, []string{"job_title", "score"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=job_title", "update")); err != nil {
+		t.Fatalf("non-unique text key keeps the folded fallback: %v", err)
+	}
+
+	rows = stringBatch(map[string][]string{"external_id": {"Case-1"}, "job_title": {"neither"}}, []string{"external_id", "job_title"})
+	if err := d.Write(context.Background(), rows, opts("people?matching_attribute=external_id", "update")); err == nil || !strings.Contains(err.Error(), "NOT_FOUND") {
+		t.Fatalf("text key without an exact match: err = %v, want NOT_FOUND", err)
 	}
 
 	rows = stringBatch(map[string][]string{"email_addresses": {"ADA@EXAMPLE.COM"}, "job_title": {"folded"}}, []string{"email_addresses", "job_title"})
