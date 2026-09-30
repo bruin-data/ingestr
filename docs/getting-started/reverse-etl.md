@@ -48,7 +48,8 @@ Notes:
 
 - Not every destination supports every strategy — check its page.
 - Impossible combinations are rejected before the run starts, not silently mishandled.
-- **Some destinations allow one strategy per table.** CleverTap, for example, only upserts profiles (`merge`) and only appends events (`append`); that strategy is also the default, and any other (or `--full-refresh`) stops the run before anything is sent.
+- `--full-refresh` isn't supported: there's no table to rebuild, and it would turn any strategy into a `replace`. To remove records that aren't in the source, use `--incremental-strategy replace`.
+- **Some destinations allow one strategy per table.** CleverTap, for example, only upserts profiles (`merge`) and only appends events (`append`); that strategy is also the default, and any other stops the run before anything is sent.
 
 ::: warning
 On a destination that supports deletion, `replace` removes **every** record that isn't in your source — including ones created by hand or by other tools. Use it only when the source is the complete system of record. A run with 0 source rows removes nothing (a safety guard). To remove specific records, use `delete`.

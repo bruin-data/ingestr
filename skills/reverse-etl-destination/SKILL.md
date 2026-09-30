@@ -109,7 +109,9 @@ These recur on every destination. Answer each with a doc link or a live test, no
 
 ## Mirror / replace safety
 - Require an explicit strategy (don't inherit a destructive default).
+- `--full-refresh` is refused for every reverse-ETL destination (`validateReverseETLFlags`): the pipeline would turn it into `replace` and mirror-delete, even with an explicit merge.
 - 0 source rows → skip the delete sweep, warn (`sawSource`).
+- No source row has a match value (all keys null or empty) → skip the sweep, warn. Keyless rows are created, so without this a missing key column deletes every record.
 - Every row rejected (rejects, nothing in `writtenIDs`) → skip the sweep, warn. Under `skip` rejects don't block the sweep, so without this an all-rejected run deletes against a source that never reached the API.
 - Never delete records written this run (`writtenIDs`).
 - Never reconcile an entity whose desired set didn't fully resolve (`incompleteFroms`).
