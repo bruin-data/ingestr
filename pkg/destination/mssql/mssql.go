@@ -1951,26 +1951,28 @@ func buildCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.C
 }
 
 func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
-	if !isPrimaryKey {
-		return MapDataTypeToMSSQL(col)
+	if isPrimaryKey {
+		col = clampKeyColumn(col)
 	}
+	return MapDataTypeToMSSQL(col)
+}
 
+// clampKeyColumn caps string and binary key columns at an indexable width:
+// SQL Server cannot index NVARCHAR(MAX)/VARBINARY(MAX), and clustered primary
+// keys are limited to 900 bytes (450 UTF-16 code units).
+func clampKeyColumn(col schema.Column) schema.Column {
 	switch col.DataType {
 	case schema.TypeString, schema.TypeJSON, schema.TypeArray:
-		// SQL Server cannot index NVARCHAR(MAX); clustered primary keys are
-		// limited to 900 bytes, which is 450 UTF-16 code units.
-		if col.MaxLength > 0 && col.MaxLength <= 450 {
-			return fmt.Sprintf("NVARCHAR(%d)", col.MaxLength)
+		if col.MaxLength <= 0 || col.MaxLength > 450 {
+			col.MaxLength = 450
 		}
-		return "NVARCHAR(450)"
+		col.DataType = schema.TypeString
 	case schema.TypeBinary:
-		if col.MaxLength > 0 && col.MaxLength <= 900 {
-			return fmt.Sprintf("VARBINARY(%d)", col.MaxLength)
+		if col.MaxLength <= 0 || col.MaxLength > 900 {
+			col.MaxLength = 900
 		}
-		return "VARBINARY(900)"
-	default:
-		return MapDataTypeToMSSQL(col)
 	}
+	return col
 }
 
 func extractValue(arr arrow.Array, idx int, col *schema.Column) (interface{}, error) {

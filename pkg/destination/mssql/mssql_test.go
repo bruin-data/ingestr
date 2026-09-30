@@ -19,6 +19,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
@@ -1366,5 +1367,57 @@ func assertContains(t *testing.T, got, want string) {
 	t.Helper()
 	if !strings.Contains(got, want) {
 		t.Fatalf("SQL does not contain %q:\n%s", want, got)
+	}
+}
+
+func TestApplySchemaEvolutionKeepsStringPrimaryKeyIndexable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	dest := &MSSQLDestination{db: db, server: "server-a", database: "AppDB"}
+
+	source := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "attachment_key", DataType: schema.TypeString},
+		{Name: "subject", DataType: schema.TypeString, Nullable: true},
+		{Name: "blob_key", DataType: schema.TypeBinary},
+	}}
+	target := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "attachment_key", DataType: schema.TypeString, MaxLength: 450},
+		{Name: "subject", DataType: schema.TypeString, MaxLength: 100, Nullable: true},
+		{Name: "blob_key", DataType: schema.TypeBinary, MaxLength: 900},
+	}}
+	comparison, err := schemaevolution.Compare(source, target, &schemaevolution.CompareOptions{PrimaryKeys: []string{"attachment_key", "blob_key"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectQuery(`FROM \[AppDB\]\.sys\.tables AS t`).
+		WithArgs("read_email", "attachment_inventory").
+		WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("attachment_key").AddRow("blob_key"))
+	mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE read_email.attachment_inventory ALTER COLUMN [subject] NVARCHAR(MAX) NULL")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if _, err := dest.ApplySchemaEvolution(t.Context(), "read_email.attachment_inventory", comparison); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClampPrimaryKeyTypeChangesKeepsWideningBelowKeyLimit(t *testing.T) {
+	old := schema.Column{Name: "code", DataType: schema.TypeString, MaxLength: 50}
+	comparison := &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type:       schemaevolution.ChangeWidenType,
+		ColumnName: "code",
+		OldColumn:  &old,
+		NewColumn:  schema.Column{Name: "code", DataType: schema.TypeString},
+	}}}
+
+	got := clampPrimaryKeyTypeChanges(comparison, []string{"CODE"})
+	if len(got.Changes) != 1 || got.Changes[0].NewColumn.MaxLength != 450 {
+		t.Fatalf("clampPrimaryKeyTypeChanges() = %#v", got.Changes)
 	}
 }
