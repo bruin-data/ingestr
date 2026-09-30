@@ -30,6 +30,7 @@ Two things follow from this:
 | [HubSpot](/supported-sources/hubspot.md#hubspot-as-a-destination) | CRM records (contacts, companies, deals, custom objects) and associations |
 | [CleverTap](/supported-sources/clevertap.md#what-to-upload) | User profiles and events |
 | [Salesforce](/supported-sources/salesforce.md#salesforce-as-a-destination) | sObject records (standard and custom objects) |
+| [Attio](/supported-sources/attio.md#attio-as-a-destination) | Object records (people, companies, deals, custom objects) |
 
 Each destination's page has its own URI, object types, and quirks. This page covers what they share.
 
