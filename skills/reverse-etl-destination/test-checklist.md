@@ -265,7 +265,7 @@ Real-world flows to run end to end once the rows above pass.
 | 14.02 | Last product activity per person | update by record id | Activity fields match the warehouse; unknown ids rejected |
 | 14.03 | Flag every person of an account at once | update by a non-unique field (every match) | Every person of the account is flagged; people of other accounts untouched |
 | 14.04 | Load new signups without duplicating existing people | merge by lookup field | New people created, existing ones updated; no duplicates on re-run |
-| 14.05 | Remove a person on a data-deletion request | delete by lookup field; document permanent vs soft delete | Records gone (or soft-deleted, as documented); a re-run rejects nothing new |
+| 14.05 | Remove a person on a data-deletion request | delete by lookup field; document permanent vs soft delete | Records gone (or soft-deleted, as documented). A re-run in a new run rejects each as NOT_FOUND (expected) and touches nothing else |
 | 14.06 | Enrich companies (industry, size, revenue) | merge by a custom unique field | Company fields match the warehouse; re-run creates nothing |
 | 14.07 | Plan/contract tier per company | update by a custom unique field | Tier set on existing companies; unknown keys rejected, nothing created |
 | 14.08 | Move tickets/records from another system | merge by a custom unique field | Every source record exists once remotely; re-run creates nothing |
