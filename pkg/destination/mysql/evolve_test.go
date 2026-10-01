@@ -59,3 +59,51 @@ func TestSchemaEvolutionKeepsExplicitPrimaryKeyLength(t *testing.T) {
 	got = dest.NormalizeSchemaEvolutionSourceColumn(schema.Column{Name: "id", DataType: schema.TypeString}, nonKey)
 	require.Zero(t, got.MaxLength)
 }
+
+func TestBoundKeyColumnsSharesBudgetAcrossCompositeKey(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "tenant", DataType: schema.TypeString},
+		{Name: "external_id", DataType: schema.TypeString},
+		{Name: "region", DataType: schema.TypeString, MaxLength: 100},
+		{Name: "version", DataType: schema.TypeInt64},
+		{Name: "note", DataType: schema.TypeString},
+	}
+	got := boundKeyColumns(columns, []string{"tenant", "EXTERNAL_ID", "region", "version"})
+	require.Equal(t, 333, got[0].MaxLength)
+	require.Equal(t, 333, got[1].MaxLength)
+	require.Equal(t, 100, got[2].MaxLength)
+	require.Zero(t, got[4].MaxLength)
+	require.Zero(t, columns[0].MaxLength)
+}
+
+func TestFitKeyWideningsSharesBudgetAcrossCompositeKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	dest := &MySQLDestination{db: db}
+	mock.ExpectQuery(`FROM INFORMATION_SCHEMA\.COLUMNS`).WillReturnRows(sqlmock.NewRows([]string{
+		"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH", "COLUMN_TYPE",
+	}).AddRow("tenant", "varchar", "NO", nil, nil, 100, "varchar(100)").
+		AddRow("external_id", "varchar", "NO", nil, nil, 100, "varchar(100)").
+		AddRow("note", "varchar", "YES", nil, nil, 100, "varchar(100)"))
+	mock.ExpectQuery(`KEY_COLUMN_USAGE`).WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("tenant").AddRow("external_id"))
+
+	widen := func(name string, oldLength, newLength int) schemaevolution.SchemaChange {
+		old := schema.Column{Name: name, DataType: schema.TypeString, MaxLength: oldLength}
+		return schemaevolution.SchemaChange{
+			Type: schemaevolution.ChangeWidenType, ColumnName: name, OldColumn: &old,
+			NewColumn: schema.Column{Name: name, DataType: schema.TypeString, MaxLength: newLength},
+		}
+	}
+	got, err := dest.fitKeyWidenings(t.Context(), "app.items", &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{
+		widen("tenant", 100, maxPrimaryKeyStringLength),
+		widen("external_id", 100, maxPrimaryKeyStringLength),
+		widen("note", 100, 0),
+	}})
+	require.NoError(t, err)
+	require.Len(t, got.Changes, 3)
+	require.Equal(t, 384, got.Changes[0].NewColumn.MaxLength)
+	require.Equal(t, 384, got.Changes[1].NewColumn.MaxLength)
+	require.Zero(t, got.Changes[2].NewColumn.MaxLength)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

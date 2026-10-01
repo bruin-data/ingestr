@@ -27,18 +27,121 @@ func (d *MySQLDestination) NormalizeSchemaEvolutionSourceColumn(source, dest sch
 	return source
 }
 
-// clampKeyColumn bounds unbounded string key columns at an indexable width,
-// since TEXT cannot be a key without a prefix length.
-func clampKeyColumn(col schema.Column) schema.Column {
-	if col.DataType == schema.TypeString && col.MaxLength <= 0 {
-		col.MaxLength = maxPrimaryKeyStringLength
+// stringKeyBudget is how many utf8mb4 characters the string columns of a key
+// can share, reserving 8 bytes for each non-string key column.
+func stringKeyBudget(nonStringKeys int) int {
+	return maxPrimaryKeyStringLength - 2*nonStringKeys
+}
+
+// boundKeyColumns gives unbounded string key columns an equal share of the
+// key budget left by the other key columns, since TEXT cannot be a key.
+func boundKeyColumns(columns []schema.Column, primaryKeys []string) []schema.Column {
+	nonStringKeys, unbounded := 0, 0
+	remaining := 0
+	for _, col := range columns {
+		if !containsFold(primaryKeys, col.Name) {
+			continue
+		}
+		switch {
+		case col.DataType != schema.TypeString:
+			nonStringKeys++
+		case col.MaxLength <= 0:
+			unbounded++
+		default:
+			remaining -= col.MaxLength
+		}
 	}
-	return col
+	if unbounded == 0 {
+		return columns
+	}
+	share := (stringKeyBudget(nonStringKeys) + remaining) / unbounded
+	if share < 1 {
+		share = maxPrimaryKeyStringLength / unbounded
+	}
+	bounded := append([]schema.Column(nil), columns...)
+	for i, col := range bounded {
+		if containsFold(primaryKeys, col.Name) && col.DataType == schema.TypeString && col.MaxLength <= 0 {
+			bounded[i].MaxLength = share
+		}
+	}
+	return bounded
+}
+
+// fitKeyWidenings caps widenings of string key columns so a composite key
+// stays within the InnoDB key limit; a single key is already bounded by
+// NormalizeSchemaEvolutionSourceColumn.
+func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) (*schemaevolution.SchemaComparison, error) {
+	if comparison == nil || !comparison.HasChanges {
+		return comparison, nil
+	}
+	widened := map[string]bool{}
+	for _, change := range comparison.Changes {
+		if isTypeChange(change) && change.NewColumn.DataType == schema.TypeString {
+			widened[strings.ToLower(change.ColumnName)] = true
+		}
+	}
+	if len(widened) == 0 {
+		return comparison, nil
+	}
+	current, err := d.GetTableSchema(ctx, table)
+	if err != nil || current == nil || len(current.PrimaryKeys) < 2 {
+		return comparison, err
+	}
+
+	nonStringKeys, fixed, widenedKeys := 0, 0, 0
+	for _, col := range current.Columns {
+		if !containsFold(current.PrimaryKeys, col.Name) {
+			continue
+		}
+		switch {
+		case col.DataType != schema.TypeString:
+			nonStringKeys++
+		case widened[strings.ToLower(col.Name)]:
+			widenedKeys++
+		default:
+			fixed += col.MaxLength
+		}
+	}
+	if widenedKeys == 0 {
+		return comparison, nil
+	}
+	share := (stringKeyBudget(nonStringKeys) - fixed) / widenedKeys
+
+	changes := make([]schemaevolution.SchemaChange, 0, len(comparison.Changes))
+	for _, change := range comparison.Changes {
+		if isTypeChange(change) && change.OldColumn != nil && change.NewColumn.DataType == schema.TypeString &&
+			containsFold(current.PrimaryKeys, change.ColumnName) &&
+			(change.NewColumn.MaxLength <= 0 || change.NewColumn.MaxLength > share) {
+			change.NewColumn.MaxLength = max(share, change.OldColumn.MaxLength)
+			if change.NewColumn.MaxLength == change.OldColumn.MaxLength && change.OldColumn.DataType == schema.TypeString {
+				continue
+			}
+		}
+		changes = append(changes, change)
+	}
+	return &schemaevolution.SchemaComparison{Changes: changes, HasChanges: len(changes) > 0}, nil
+}
+
+func isTypeChange(change schemaevolution.SchemaChange) bool {
+	return change.Type == schemaevolution.ChangeWidenType || change.Type == schemaevolution.ChangeOverrideType
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // ApplySchemaEvolution renders the abstract schema-change plan into this
 // destination's DDL using the local dialect and applies each statement.
 func (d *MySQLDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
+	comparison, err := d.fitKeyWidenings(ctx, table, comparison)
+	if err != nil {
+		return nil, err
+	}
 	return destination.ApplyEvolution(ctx, d, &Dialect{}, table, comparison)
 }
 
@@ -50,6 +153,10 @@ func (d *MySQLDestination) ApplySchemaEvolutionIfIncarnation(
 ) ([]string, string, error) {
 	if expectedIncarnation == "" {
 		return nil, "", fmt.Errorf("cannot conditionally evolve %s without a destination incarnation", table)
+	}
+	comparison, err := d.fitKeyWidenings(ctx, table, comparison)
+	if err != nil {
+		return nil, "", err
 	}
 	statements, warnings, err := destination.RenderEvolution(&Dialect{}, table, comparison)
 	if err != nil {

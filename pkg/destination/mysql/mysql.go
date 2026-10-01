@@ -2245,10 +2245,10 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 func buildCreateTableSQLForReference(tableReference string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
 	binaryClaimKey := isCDCTargetClaimTable(columns, primaryKeys)
+	if !binaryClaimKey {
+		columns = boundKeyColumns(columns, primaryKeys)
+	}
 	for _, col := range columns {
-		if !binaryClaimKey && slices.ContainsFunc(primaryKeys, func(key string) bool { return strings.EqualFold(key, col.Name) }) {
-			col = clampKeyColumn(col)
-		}
 		colType := MapDataTypeToMySQL(col)
 		if binaryClaimKey && col.Name == "destination_table" {
 			colType += " CHARACTER SET ascii COLLATE ascii_bin"
