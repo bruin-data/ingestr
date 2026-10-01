@@ -103,18 +103,23 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 		}
 	}
 
-	var keyChanges, requests []int
+	var keyChanges, requests, floors []int
 	for i, change := range comparison.Changes {
 		if isTypeChange(change) && change.OldColumn != nil && change.NewColumn.DataType == schema.TypeString &&
 			containsFold(current.PrimaryKeys, change.ColumnName) {
 			keyChanges = append(keyChanges, i)
 			requests = append(requests, change.NewColumn.MaxLength)
+			floor := 0
+			if change.OldColumn.DataType == schema.TypeString {
+				floor = change.OldColumn.MaxLength
+			}
+			floors = append(floors, floor)
 		}
 	}
 	if len(keyChanges) == 0 {
 		return comparison, nil
 	}
-	allowed := fairShares(requests, stringKeyBudget(nonStringKeys)-fixed)
+	allowed := fairShares(requests, floors, stringKeyBudget(nonStringKeys)-fixed)
 
 	changes := append([]schemaevolution.SchemaChange(nil), comparison.Changes...)
 	drop := map[int]bool{}
@@ -135,21 +140,28 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 	return &schemaevolution.SchemaComparison{Changes: changes, HasChanges: len(changes) > 0}, nil
 }
 
-// fairShares fits the requested lengths (0 meaning unbounded) into available:
-// requests that fit their share keep it and the rest split what remains.
-func fairShares(requests []int, available int) []int {
-	allowed := make([]int, len(requests))
+// fairShares fits the requested lengths (0 meaning unbounded) into available.
+// Columns never shrink below their floor; the space left above the floors goes
+// to the smallest requests first, and the rest is split between the others.
+func fairShares(requests, floors []int, available int) []int {
+	allowed := append([]int(nil), floors...)
+	for _, floor := range floors {
+		available -= floor
+	}
+	if available <= 0 {
+		return allowed
+	}
+	needs := make([]int, len(requests))
 	order := make([]int, len(requests))
-	for i := range order {
+	for i := range requests {
+		needs[i] = max(effectiveRequest(requests[i])-floors[i], 0)
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		return effectiveRequest(requests[order[a]]) < effectiveRequest(requests[order[b]])
-	})
+	sort.SliceStable(order, func(a, b int) bool { return needs[order[a]] < needs[order[b]] })
 	for n, i := range order {
-		share := max(available, 0) / (len(order) - n)
-		allowed[i] = min(effectiveRequest(requests[i]), share)
-		available -= allowed[i]
+		extra := min(needs[i], available/(len(order)-n))
+		allowed[i] += extra
+		available -= extra
 	}
 	return allowed
 }

@@ -109,8 +109,9 @@ func TestFitKeyWideningsSharesBudgetAcrossCompositeKey(t *testing.T) {
 }
 
 func TestFairSharesKeepsRequestsThatFit(t *testing.T) {
-	require.Equal(t, []int{200, 500}, fairShares([]int{200, 500}, 768))
-	require.Equal(t, []int{384, 384}, fairShares([]int{768, 768}, 768))
-	require.Equal(t, []int{200, 568}, fairShares([]int{200, 0}, 768))
-	require.Equal(t, []int{334, 100, 334}, fairShares([]int{0, 100, 768}, 768))
+	require.Equal(t, []int{200, 500}, fairShares([]int{200, 500}, []int{100, 100}, 768))
+	require.Equal(t, []int{384, 384}, fairShares([]int{768, 768}, []int{100, 100}, 768))
+	require.Equal(t, []int{200, 568}, fairShares([]int{200, 0}, []int{100, 100}, 768))
+	require.Equal(t, []int{500, 100, 168}, fairShares([]int{500, 100, 500}, []int{400, 50, 50}, 768))
+	require.Equal(t, []int{700, 100}, fairShares([]int{768, 768}, []int{700, 100}, 768))
 }
