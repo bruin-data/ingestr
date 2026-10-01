@@ -8,11 +8,15 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
+// maxPrimaryKeyStringLength is the widest NVARCHAR a clustered primary key can
+// index: 900 bytes of UTF-16.
+const maxPrimaryKeyStringLength = 450
+
 func (d *MSSQLDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
-	// An unspecified source length must not turn an indexed primary key into NVARCHAR(MAX).
+	// An unbounded source widens a string key to the indexable maximum, never to NVARCHAR(MAX).
 	if dest.IsPrimaryKey && dest.DataType == schema.TypeString && dest.MaxLength > 0 &&
 		source.DataType == schema.TypeString && source.MaxLength <= 0 {
-		source.MaxLength = dest.MaxLength
+		source.MaxLength = max(dest.MaxLength, maxPrimaryKeyStringLength)
 	}
 	return source
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSchemaEvolutionPreservesUnspecifiedPrimaryKeyLength(t *testing.T) {
+func TestSchemaEvolutionWidensUnspecifiedPrimaryKeyToIndexableLength(t *testing.T) {
 	for _, length := range []int{100, 450} {
 		for _, override := range []string{"", "attachment_key:string", "attachment_key:varchar(50)"} {
 			t.Run(fmt.Sprintf("length=%d/override=%s", length, override), func(t *testing.T) {
@@ -39,11 +39,14 @@ func TestSchemaEvolutionPreservesUnspecifiedPrimaryKeyLength(t *testing.T) {
 					Overrides: overrides, NormalizeSourceColumn: dest.NormalizeSchemaEvolutionSourceColumn,
 				})
 				require.NoError(t, err)
-				require.Len(t, comparison.Changes, 1)
 				statements, warnings, err := destination.RenderEvolution(&Dialect{}, "read_email.attachment_inventory", comparison)
 				require.NoError(t, err)
 				require.Empty(t, warnings)
-				require.Equal(t, []string{"ALTER TABLE read_email.attachment_inventory ALTER COLUMN [message_id] NVARCHAR(MAX) NULL"}, statements)
+				expected := []string{"ALTER TABLE read_email.attachment_inventory ALTER COLUMN [message_id] NVARCHAR(MAX) NULL"}
+				if length < maxPrimaryKeyStringLength && override != "attachment_key:varchar(50)" {
+					expected = append([]string{"ALTER TABLE read_email.attachment_inventory ALTER COLUMN [attachment_key] NVARCHAR(450) NOT NULL"}, expected...)
+				}
+				require.Equal(t, expected, statements)
 				require.Zero(t, incoming.Columns[0].MaxLength)
 				require.Equal(t, length, existing.Columns[0].MaxLength)
 				require.NoError(t, mock.ExpectationsWereMet())

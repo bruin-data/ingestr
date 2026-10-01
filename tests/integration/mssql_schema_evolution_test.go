@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -15,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMSSQLMergePreservesStringPrimaryKeyLength(t *testing.T) {
+func TestMSSQLMergeWidensStringPrimaryKeyToIndexableLength(t *testing.T) {
 	if mssqlDest.uri == "" {
 		t.Skip("shared SQL Server destination container not available")
 	}
@@ -65,8 +66,43 @@ func TestMSSQLMergePreservesStringPrimaryKeyLength(t *testing.T) {
 			require.Equal(t, []string{"attachment_key"}, actual.PrimaryKeys)
 			require.True(t, actual.Columns[0].IsPrimaryKey)
 			require.False(t, actual.Columns[0].Nullable)
-			require.Equal(t, length, actual.Columns[0].MaxLength)
+			require.Equal(t, max(length, 450), actual.Columns[0].MaxLength)
 			require.Equal(t, -1, actual.Columns[1].MaxLength)
 		})
 	}
+}
+
+func TestMSSQLMergeExplainsPrimaryKeyValueOverIndexLimit(t *testing.T) {
+	if mssqlDest.uri == "" {
+		t.Skip("shared SQL Server destination container not available")
+	}
+	db := openMSSQLTestDB(t, mssqlDest.uri)
+	t.Cleanup(func() { _ = db.Close() })
+
+	table := "dbo.attachment_inventory_" + uniqueSuffix()
+	quoted := quoteTableMSSQL(table)
+	_, err := db.ExecContext(t.Context(), fmt.Sprintf(`CREATE TABLE %s (
+		attachment_key NVARCHAR(600) NOT NULL PRIMARY KEY,
+		message_id NVARCHAR(MAX) NULL
+	)`, quoted))
+	require.NoError(t, err)
+	t.Cleanup(func() { dropMSSQLTable(t, context.Background(), db, table) })
+
+	path := filepath.Join(t.TempDir(), "attachments.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(fmt.Sprintf("{\"attachment_key\":%q,\"message_id\":\"new\"}\n", strings.Repeat("k", 500))), 0o600))
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "jsonl://" + path
+	cfg.SourceTable = "attachments"
+	cfg.DestURI = mssqlDest.uri
+	cfg.DestTable = table
+	cfg.IncrementalStrategy = config.StrategyMerge
+	cfg.PrimaryKeys = []string{"attachment_key"}
+	cfg.NoLoadTimestamp = true
+	cfg.NoRunID = true
+	cfg.Yes = true
+	require.NoError(t, cfg.Validate())
+
+	err = pipeline.New(cfg).Run(t.Context())
+	require.ErrorContains(t, err, "primary key value is too long")
+	require.ErrorContains(t, err, "exceeds the maximum length of 900 bytes")
 }
