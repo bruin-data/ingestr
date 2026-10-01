@@ -317,12 +317,13 @@ func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.S
 			return fmt.Errorf("failed to ensure target database: %w", err)
 		}
 	}
-	if opts.Schema != nil {
-		createSQL := d.buildCreateTableSQL(opts.TargetTable, opts.Schema.Columns, opts.PrimaryKeys)
-		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-			config.LogFailedQuery(createSQL, err)
-			return fmt.Errorf("failed to create target table: %w", err)
-		}
+	// Normalized staging already carries the primary key; the replace strategy
+	// clears opts.PrimaryKeys after deduplication rather than repeating it here.
+	createSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s LIKE %s",
+		quoteTable(opts.TargetTable), quoteTable(opts.StagingTable))
+	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+		config.LogFailedQuery(createSQL, err)
+		return fmt.Errorf("failed to create target table: %w", err)
 	}
 
 	overwriteSQL := fmt.Sprintf("INSERT OVERWRITE %s SELECT * FROM %s",
@@ -346,9 +347,19 @@ func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.S
 func (d *StarRocksDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	cols := quoteColumns(opts.Columns)
 	colList := strings.Join(cols, ", ")
-	// The target is a PRIMARY KEY table, so INSERT upserts on the key.
-	mergeSQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
-		quoteTable(opts.TargetTable), colList, colList, quoteTable(opts.StagingTable))
+	orderBy := ""
+	if opts.IncrementalKey != "" {
+		orderBy = quoteColumn(opts.IncrementalKey)
+	} else if len(opts.PrimaryKeys) > 0 {
+		// StarRocks rejects the helper's scalar-subquery fallback. A partition
+		// key is constant within each group and likewise leaves ties unordered.
+		orderBy = quoteColumn(opts.PrimaryKeys[0])
+	}
+	selectSQL := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), orderBy)
+	// Select the winner before the PRIMARY KEY engine upserts; its replacement
+	// order does not honor the incremental key.
+	mergeSQL := fmt.Sprintf("INSERT INTO %s (%s) %s",
+		quoteTable(opts.TargetTable), colList, selectSQL)
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to merge into table: %w", err)
