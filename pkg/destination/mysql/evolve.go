@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -88,7 +90,7 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 		return comparison, err
 	}
 
-	nonStringKeys, fixed, widenedKeys := 0, 0, 0
+	nonStringKeys, fixed := 0, 0
 	for _, col := range current.Columns {
 		if !containsFold(current.PrimaryKeys, col.Name) {
 			continue
@@ -96,30 +98,67 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 		switch {
 		case col.DataType != schema.TypeString:
 			nonStringKeys++
-		case widened[strings.ToLower(col.Name)]:
-			widenedKeys++
-		default:
+		case !widened[strings.ToLower(col.Name)]:
 			fixed += col.MaxLength
 		}
 	}
-	if widenedKeys == 0 {
+
+	var keyChanges, requests []int
+	for i, change := range comparison.Changes {
+		if isTypeChange(change) && change.OldColumn != nil && change.NewColumn.DataType == schema.TypeString &&
+			containsFold(current.PrimaryKeys, change.ColumnName) {
+			keyChanges = append(keyChanges, i)
+			requests = append(requests, change.NewColumn.MaxLength)
+		}
+	}
+	if len(keyChanges) == 0 {
 		return comparison, nil
 	}
-	share := (stringKeyBudget(nonStringKeys) - fixed) / widenedKeys
+	allowed := fairShares(requests, stringKeyBudget(nonStringKeys)-fixed)
 
-	changes := make([]schemaevolution.SchemaChange, 0, len(comparison.Changes))
-	for _, change := range comparison.Changes {
-		if isTypeChange(change) && change.OldColumn != nil && change.NewColumn.DataType == schema.TypeString &&
-			containsFold(current.PrimaryKeys, change.ColumnName) &&
-			(change.NewColumn.MaxLength <= 0 || change.NewColumn.MaxLength > share) {
-			change.NewColumn.MaxLength = max(share, change.OldColumn.MaxLength)
-			if change.NewColumn.MaxLength == change.OldColumn.MaxLength && change.OldColumn.DataType == schema.TypeString {
-				continue
-			}
+	changes := append([]schemaevolution.SchemaChange(nil), comparison.Changes...)
+	drop := map[int]bool{}
+	for j, i := range keyChanges {
+		change := &changes[i]
+		change.NewColumn.MaxLength = max(allowed[j], change.OldColumn.MaxLength)
+		if change.OldColumn.DataType == schema.TypeString && change.NewColumn.MaxLength == change.OldColumn.MaxLength {
+			drop[i] = true
 		}
-		changes = append(changes, change)
 	}
+	kept := changes[:0]
+	for i, change := range changes {
+		if !drop[i] {
+			kept = append(kept, change)
+		}
+	}
+	changes = kept
 	return &schemaevolution.SchemaComparison{Changes: changes, HasChanges: len(changes) > 0}, nil
+}
+
+// fairShares fits the requested lengths (0 meaning unbounded) into available:
+// requests that fit their share keep it and the rest split what remains.
+func fairShares(requests []int, available int) []int {
+	allowed := make([]int, len(requests))
+	order := make([]int, len(requests))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return effectiveRequest(requests[order[a]]) < effectiveRequest(requests[order[b]])
+	})
+	for n, i := range order {
+		share := max(available, 0) / (len(order) - n)
+		allowed[i] = min(effectiveRequest(requests[i]), share)
+		available -= allowed[i]
+	}
+	return allowed
+}
+
+func effectiveRequest(length int) int {
+	if length <= 0 {
+		return math.MaxInt
+	}
+	return length
 }
 
 func isTypeChange(change schemaevolution.SchemaChange) bool {
