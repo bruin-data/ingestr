@@ -2,6 +2,9 @@ package databricks
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -150,4 +153,85 @@ func TestProcessResultsByteCap(t *testing.T) {
 			assert.Equal(t, tc.wantBatches, batches)
 		})
 	}
+}
+
+func TestProcessResultsExternalLinks(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+		{Name: "b", DataType: schema.TypeString, Nullable: true},
+	}
+	rows := [][]string{
+		{"hello", "world"},
+		{"foo", "bar"},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(rows); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	resp := &dbsql.StatementResponse{
+		Result: &dbsql.ResultData{
+			ExternalLinks: []dbsql.ExternalLink{
+				{ExternalLink: server.URL},
+			},
+		},
+	}
+
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
+	}()
+
+	totalRows := int64(0)
+	for res := range results {
+		require.NoError(t, res.Err)
+		require.NotNil(t, res.Batch)
+		totalRows += res.Batch.NumRows()
+		res.Batch.Release()
+	}
+
+	assert.Equal(t, int64(2), totalRows)
+}
+
+func TestProcessResultsExternalLinksError(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	resp := &dbsql.StatementResponse{
+		Result: &dbsql.ResultData{
+			ExternalLinks: []dbsql.ExternalLink{
+				{ExternalLink: server.URL},
+			},
+		},
+	}
+
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
+	}()
+
+	var foundErr error
+	for res := range results {
+		if res.Err != nil {
+			foundErr = res.Err
+			break
+		}
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+
+	require.Error(t, foundErr)
+	assert.Contains(t, foundErr.Error(), "external link returned status 500")
 }

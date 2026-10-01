@@ -2,8 +2,10 @@ package databricks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -276,6 +278,30 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 	return results, nil
 }
 
+func fetchExternalLink(ctx context.Context, url string) ([][]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create external link request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download external link: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("external link returned status %d", resp.StatusCode)
+	}
+
+	var data [][]string
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("failed to decode external link data: %w", err)
+	}
+	return data, nil
+}
+
 func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, columns []schema.Column, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
 	batchSize := defaultBatchSize
 	alloc := memory.NewGoAllocator()
@@ -312,11 +338,65 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 		}
 	}
 
-	processChunk(resp.Result.DataArray)
+	processResultData := func(rd *dbsql.ResultData) error {
+		if rd.DataArray != nil {
+			config.Debug("[DATABRICKS] Processing inline chunk: data_array_rows=%d", len(rd.DataArray))
+			processChunk(rd.DataArray)
+		}
+		for i, link := range rd.ExternalLinks {
+			config.Debug("[DATABRICKS] Fetching external link %d/%d: row_count=%d, byte_count=%d", i+1, len(rd.ExternalLinks), link.RowCount, link.ByteCount)
+			data, err := fetchExternalLink(ctx, link.ExternalLink)
+			if err != nil {
+				return fmt.Errorf("failed to fetch external link: %w", err)
+			}
+			config.Debug("[DATABRICKS] External link fetched: rows=%d", len(data))
+			processChunk(data)
+		}
+		return nil
+	}
 
-	if resp.Result.NextChunkInternalLink != "" {
-		statementID := resp.StatementId
+	if err := processResultData(resp.Result); err != nil {
+		results <- source.RecordBatchResult{Err: err}
+		return
+	}
+
+	statementID := resp.StatementId
+	totalChunks := 0
+	if resp.Manifest != nil {
+		totalChunks = resp.Manifest.TotalChunkCount
+	}
+
+	if totalChunks > 1 {
+		config.Debug("[DATABRICKS] Fetching remaining %d chunks by index (total=%d)", totalChunks-1, totalChunks)
+		for chunkIndex := 1; chunkIndex < totalChunks; chunkIndex++ {
+			select {
+			case <-ctx.Done():
+				results <- source.RecordBatchResult{Err: ctx.Err()}
+				return
+			default:
+			}
+
+			config.Debug("[DATABRICKS] Fetching chunk index=%d", chunkIndex)
+			chunkResp, err := s.client.StatementExecution.GetStatementResultChunkN(ctx, dbsql.GetStatementResultChunkNRequest{
+				StatementId: statementID,
+				ChunkIndex:  chunkIndex,
+			})
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
+				return
+			}
+			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
+				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), len(chunkResp.DataArray), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
+
+			if err := processResultData(chunkResp); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
+		}
+		config.Debug("[DATABRICKS] Chunk pagination complete")
+	} else if resp.Result.NextChunkInternalLink != "" {
 		chunkIndex := resp.Result.NextChunkIndex
+		config.Debug("[DATABRICKS] Entering link-based chunk pagination: starting_chunk_index=%d", chunkIndex)
 
 		for {
 			select {
@@ -326,6 +406,7 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 			default:
 			}
 
+			config.Debug("[DATABRICKS] Fetching chunk index=%d", chunkIndex)
 			chunkResp, err := s.client.StatementExecution.GetStatementResultChunkN(ctx, dbsql.GetStatementResultChunkNRequest{
 				StatementId: statementID,
 				ChunkIndex:  chunkIndex,
@@ -334,16 +415,23 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
 				return
 			}
+			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
+				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), len(chunkResp.DataArray), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
 
-			if chunkResp.DataArray != nil {
-				processChunk(chunkResp.DataArray)
+			if err := processResultData(chunkResp); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
 			}
 
 			if chunkResp.NextChunkInternalLink == "" {
+				config.Debug("[DATABRICKS] No more chunks after index=%d", chunkIndex)
 				break
 			}
 			chunkIndex = chunkResp.NextChunkIndex
 		}
+		config.Debug("[DATABRICKS] Link-based chunk pagination complete")
+	} else {
+		config.Debug("[DATABRICKS] No chunk pagination needed")
 	}
 }
 
@@ -393,6 +481,7 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			WarehouseId: warehouseID,
 			Statement:   query,
 			WaitTimeout: statementTimeout,
+			Disposition: dbsql.DispositionExternalLinks,
 		})
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("custom query execution failed: %w", err)}
@@ -408,7 +497,16 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			return
 		}
 
-		if resp.Result == nil || resp.Result.DataArray == nil {
+		if resp.Manifest != nil {
+			config.Debug("[DATABRICKS] Manifest: total_row_count=%d, total_chunk_count=%d, total_byte_count=%d, truncated=%v",
+				resp.Manifest.TotalRowCount, resp.Manifest.TotalChunkCount, resp.Manifest.TotalByteCount, resp.Manifest.Truncated)
+		}
+		if resp.Result != nil {
+			config.Debug("[DATABRICKS] Initial result: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
+				resp.Result.RowCount, resp.Result.RowOffset, len(resp.Result.ExternalLinks), len(resp.Result.DataArray), resp.Result.NextChunkIndex, resp.Result.NextChunkInternalLink != "")
+		}
+
+		if resp.Result == nil || (resp.Result.DataArray == nil && len(resp.Result.ExternalLinks) == 0) {
 			config.Debug("[DATABRICKS] Custom query returned no results")
 			return
 		}
@@ -427,8 +525,21 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 				})
 			}
 		}
-		if len(columns) == 0 && len(resp.Result.DataArray) > 0 {
-			for i := range resp.Result.DataArray[0] {
+		if len(columns) == 0 {
+			rowWidth := 0
+			if len(resp.Result.DataArray) > 0 {
+				rowWidth = len(resp.Result.DataArray[0])
+			} else if len(resp.Result.ExternalLinks) > 0 {
+				data, err := fetchExternalLink(ctx, resp.Result.ExternalLinks[0].ExternalLink)
+				if err != nil {
+					results <- source.RecordBatchResult{Err: fmt.Errorf("custom query has no manifest and failed to fetch external link for schema inference: %w", err)}
+					return
+				}
+				if len(data) > 0 {
+					rowWidth = len(data[0])
+				}
+			}
+			for i := 0; i < rowWidth; i++ {
 				columns = append(columns, schema.Column{Name: fmt.Sprintf("col_%d", i), DataType: schema.TypeUnknown, Nullable: true})
 			}
 		}
