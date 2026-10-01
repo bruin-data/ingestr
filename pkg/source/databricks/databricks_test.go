@@ -3,14 +3,17 @@ package databricks
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/databricks/databricks-sdk-go"
 	dbsql "github.com/databricks/databricks-sdk-go/service/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -263,4 +266,47 @@ func TestFetchExternalLinkErrorOmitsURL(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "topsecret")
 	assert.NotContains(t, err.Error(), server.URL)
+}
+
+func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.TrimSuffix(r.URL.Path, "/") == "/api/2.0/sql/statements":
+			_, _ = fmt.Fprintf(w, `{"statement_id":"s1","status":{"state":"SUCCEEDED"},
+				"manifest":{"total_chunk_count":2},
+				"result":{"external_links":[{"chunk_index":0,"external_link":"%s/chunk0"}]}}`, server.URL)
+		case r.URL.Path == "/api/2.0/sql/statements/s1/result/chunks/1":
+			_, _ = fmt.Fprintf(w, `{"external_links":[{"chunk_index":1,"external_link":"%s/chunk1"}]}`, server.URL)
+		case r.URL.Path == "/chunk0":
+			_, _ = w.Write([]byte(`[["1","a"],["2","b"]]`))
+		case r.URL.Path == "/chunk1":
+			_, _ = w.Write([]byte(`[["3","c"]]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+	require.NoError(t, err)
+	s := &DatabricksSource{client: client, httpPath: "/sql/1.0/warehouses/w1", catalog: "main", schemaName: "default"}
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+		{Name: "name", DataType: schema.TypeString, Nullable: true},
+	}}
+
+	results, err := s.read(context.Background(), "t", tableSchema, source.ReadOptions{})
+	require.NoError(t, err)
+
+	var ids []int64
+	for res := range results {
+		require.NoError(t, res.Err)
+		col := res.Batch.Column(0).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		res.Batch.Release()
+	}
+	assert.Equal(t, []int64{1, 2, 3}, ids)
 }

@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	defaultCatalog     = "main"
-	defaultSchema      = "default"
-	defaultBatchSize   = 100000
-	statementTimeout   = "50s"
-	maxRowsPerResponse = 100000
+	defaultCatalog      = "main"
+	defaultSchema       = "default"
+	defaultBatchSize    = 100000
+	statementTimeout    = "50s"
+	maxRowsPerResponse  = 100000
+	externalLinkTimeout = 5 * time.Minute
 )
 
 type DatabricksSource struct {
@@ -288,7 +289,7 @@ func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: externalLinkTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		// The presigned URL carries a temporary credential, so drop it from the error.
