@@ -130,6 +130,38 @@ func TestResolveSchemaTableUsesSearchPathForUnqualifiedTarget(t *testing.T) {
 	}
 }
 
+func TestResolveSchemaTableWithDefaultSchema(t *testing.T) {
+	dest := &PostgresDestination{DefaultSchema: "public"}
+	for _, tt := range []struct {
+		input, schema, table string
+	}{
+		{"orders", "public", "orders"},
+		{`"Order.Events"`, "public", "Order.Events"},
+		{`"a""b"`, "public", `a"b`},
+		{"warehouse.orders", "warehouse", "orders"},
+		{`"Case.Schema"."Order.Events"`, "Case.Schema", "Order.Events"},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			resolver := &postgresResolverStub{}
+			schemaName, tableName, err := dest.resolveSchemaTable(t.Context(), resolver, tt.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if schemaName != tt.schema || tableName != tt.table {
+				t.Fatalf("resolveSchemaTable() = %q.%q, want %q.%q", schemaName, tableName, tt.schema, tt.table)
+			}
+			if resolver.query != "" {
+				t.Fatalf("fixed-schema destination issued PostgreSQL resolver query: %s", resolver.query)
+			}
+		})
+	}
+	for _, invalid := range []string{"", "schema.", "catalog.schema.table"} {
+		if _, _, err := dest.resolveSchemaTable(t.Context(), nil, invalid); err == nil {
+			t.Errorf("resolveSchemaTable(%q) accepted invalid name", invalid)
+		}
+	}
+}
+
 func TestPostgresPrimaryKeyColumnsUsesResolvedIdentifiers(t *testing.T) {
 	resolver := &postgresPrimaryKeyResolverStub{keys: []string{"part", "id"}}
 

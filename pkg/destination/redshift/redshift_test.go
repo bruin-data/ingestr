@@ -10,6 +10,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNewRedshiftDestinationUsesFixedSchemaResolution(t *testing.T) {
+	require.Equal(t, "public", NewRedshiftDestination().DefaultSchema)
+}
+
+func TestBuildMergeSQL(t *testing.T) {
+	dest := NewRedshiftDestination()
+	t.Run("composite key and quoted columns", func(t *testing.T) {
+		got := dest.buildMergeSQL("stage.events", "warehouse.events", []string{"tenant", "id"}, []string{"tenant", "id", `event"name`})
+		want := `MERGE INTO "warehouse"."events" AS target
+USING (SELECT "tenant", "id", "event""name" FROM (SELECT "tenant", "id", "event""name", ROW_NUMBER() OVER (PARTITION BY "tenant", "id" ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM "stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1) AS source
+ON target."tenant" = source."tenant" AND target."id" = source."id"
+WHEN MATCHED THEN
+  UPDATE SET "event""name" = source."event""name"
+WHEN NOT MATCHED THEN
+  INSERT ("tenant", "id", "event""name")
+  VALUES (source."tenant", source."id", source."event""name")`
+		require.Equal(t, want, got)
+	})
+	t.Run("key only omits update", func(t *testing.T) {
+		got := dest.buildMergeSQL("stage", "events", []string{"id"}, []string{"id"})
+		want := `MERGE INTO "events" AS target
+USING (SELECT "id" FROM (SELECT "id", ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY (SELECT NULL)) AS __bruin_dedup_rn FROM "stage") AS _numbered WHERE __bruin_dedup_rn = 1) AS source
+ON target."id" = source."id"
+WHEN NOT MATCHED THEN
+  INSERT ("id")
+  VALUES (source."id")`
+		require.Equal(t, want, got)
+	})
+}
+
 func TestValidateManagedCDCStateFailsClosed(t *testing.T) {
 	dest := NewRedshiftDestination()
 
