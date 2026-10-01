@@ -482,12 +482,12 @@ func TestVitessManagedCDCStateFailsWithoutDurableIncarnation(t *testing.T) {
 
 func TestCDCTargetClaimTableUsesBinaryCollation(t *testing.T) {
 	columns := []schema.Column{
-		{Name: "destination_table", DataType: schema.TypeString, MaxLength: 512},
+		{Name: "destination_table", DataType: schema.TypeString, MaxLength: 2048},
 		{Name: "connector_id", DataType: schema.TypeString, MaxLength: 64},
 		{Name: "claimed_at", DataType: schema.TypeTimestampTZ},
 	}
 	sql := buildCreateTableSQL("cdc_targets", columns, []string{"destination_table"})
-	if !strings.Contains(sql, "`destination_table` VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin") {
+	if !strings.Contains(sql, "`destination_table` VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin") {
 		t.Fatalf("CDC target DDL lacks binary claim key:\n%s", sql)
 	}
 }
@@ -1070,6 +1070,18 @@ func TestBuildCreateTableSQL(t *testing.T) {
 			},
 			primaryKeys: []string{"id"},
 			want:        "CREATE TABLE IF NOT EXISTS `test_table` (\n  `id` BIGINT,\n  `name` TEXT,\n  `active` BOOLEAN,\n  `score` DOUBLE,\n  `amount` DECIMAL(10,2),\n  `created_at` TIMESTAMP(6),\n  PRIMARY KEY (`id`)\n)",
+		},
+		{
+			name:  "unbounded string primary keys bounded at indexable width",
+			table: "keys",
+			columns: []schema.Column{
+				{Name: "unbounded", DataType: schema.TypeString},
+				{Name: "narrow", DataType: schema.TypeString, MaxLength: 100},
+				{Name: "wide", DataType: schema.TypeString, MaxLength: 1000},
+				{Name: "note", DataType: schema.TypeString, Nullable: true},
+			},
+			primaryKeys: []string{"UNBOUNDED", "narrow", "wide"},
+			want:        "CREATE TABLE IF NOT EXISTS `keys` (\n  `unbounded` VARCHAR(768),\n  `narrow` VARCHAR(100),\n  `wide` VARCHAR(1000),\n  `note` TEXT,\n  PRIMARY KEY (`UNBOUNDED`, `narrow`, `wide`)\n)",
 		},
 	}
 

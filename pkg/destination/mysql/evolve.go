@@ -10,8 +10,31 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
+
+// maxPrimaryKeyStringLength is the widest utf8mb4 VARCHAR an InnoDB key can
+// index: 3072 bytes at 4 bytes per character.
+const maxPrimaryKeyStringLength = 768
+
+func (d *MySQLDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	// An unbounded source widens a string key to the indexable maximum, never to TEXT.
+	if dest.IsPrimaryKey && dest.DataType == schema.TypeString && dest.MaxLength > 0 &&
+		source.DataType == schema.TypeString && source.MaxLength <= 0 {
+		source.MaxLength = max(dest.MaxLength, maxPrimaryKeyStringLength)
+	}
+	return source
+}
+
+// clampKeyColumn bounds unbounded string key columns at an indexable width,
+// since TEXT cannot be a key without a prefix length.
+func clampKeyColumn(col schema.Column) schema.Column {
+	if col.DataType == schema.TypeString && col.MaxLength <= 0 {
+		col.MaxLength = maxPrimaryKeyStringLength
+	}
+	return col
+}
 
 // ApplySchemaEvolution renders the abstract schema-change plan into this
 // destination's DDL using the local dialect and applies each statement.
