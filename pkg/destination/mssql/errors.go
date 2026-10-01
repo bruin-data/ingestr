@@ -17,6 +17,7 @@ const (
 var (
 	bulkCopyColumnIDPattern = regexp.MustCompile(`colid (\d+)`)
 	indexEntryLimitPattern  = regexp.MustCompile(`maximum length of (\d+) bytes`)
+	indexNamePattern        = regexp.MustCompile(`for the index '([^']+)'`)
 )
 
 // explainWriteError prefixes SQL Server errors whose raw text does not say
@@ -30,7 +31,11 @@ func explainWriteError(err error, columns []string) error {
 		switch item.Number {
 		case errIndexEntryTooLong:
 			limit := indexEntryLimitBytes(item.Message)
-			return fmt.Errorf("primary key value is too long: SQL Server keys hold at most %d bytes (%d NVARCHAR characters), regardless of the declared column length: %w", limit, limit/2, err)
+			index := ""
+			if match := indexNamePattern.FindStringSubmatch(item.Message); match != nil {
+				index = fmt.Sprintf(" for index %q", match[1])
+			}
+			return fmt.Errorf("key value is too long%s: SQL Server index keys hold at most %d bytes (%d NVARCHAR characters), regardless of the declared column length: %w", index, limit, limit/2, err)
 		case errBulkCopyColumnTooLong:
 			if column := bulkCopyColumnName(item.Message, columns); column != "" {
 				return fmt.Errorf("a value in column %q is longer than the destination column allows: %w", column, err)

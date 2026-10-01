@@ -103,6 +103,6 @@ func TestMSSQLMergeExplainsPrimaryKeyValueOverIndexLimit(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	err = pipeline.New(cfg).Run(t.Context())
-	require.ErrorContains(t, err, "primary key value is too long")
+	require.ErrorContains(t, err, "key value is too long for index \"PK__")
 	require.ErrorContains(t, err, "exceeds the maximum length of 900 bytes")
 }
