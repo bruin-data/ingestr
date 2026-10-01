@@ -436,11 +436,11 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	// Build column comparison for change detection (excluding metadata columns and PKs)
 	nonPKColumns := filterSCD2Columns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
 
-	// Build PK match condition for correlated subquery (target columns reference outer table)
-	pkMatchCondition := buildSCD2PKMatchCondition(opts.PrimaryKeys)
+	// UPDATE has no target alias; qualify outer references so they cannot bind to source.
+	pkMatchCondition := buildSCD2PKMatchCondition(targetFQN, opts.PrimaryKeys)
 
 	// Build change detection using subquery
-	changeDetectionSubquery := buildSCD2ChangeDetectionSubquery(stagingFQN, opts.PrimaryKeys, nonPKColumns)
+	changeDetectionSubquery := buildSCD2ChangeDetectionSubquery(targetFQN, stagingFQN, opts.PrimaryKeys, nonPKColumns)
 
 	// Step 1: Close changed records (update _scd_valid_to and _scd_is_current)
 	// Trino doesn't support UPDATE...FROM, so we use a correlated subquery to get the new _scd_valid_from
@@ -469,7 +469,7 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	// Step 2: Soft-delete missing records (only if no incremental_key)
 	if opts.IncrementalKey == "" {
 		timestamp := opts.Timestamp.Format("2006-01-02 15:04:05.000000")
-		notExistsCondition := buildSCD2NotExistsCondition(stagingFQN, opts.PrimaryKeys)
+		notExistsCondition := buildSCD2NotExistsCondition(targetFQN, stagingFQN, opts.PrimaryKeys)
 
 		softDeleteSQL := fmt.Sprintf(
 			`
@@ -892,49 +892,39 @@ func filterSCD2Columns(columns []string, exclude []string) []string {
 }
 
 // buildSCD2PKMatchCondition builds PK match condition for correlated subquery
-// References outer table columns directly (without alias) and source alias
-func buildSCD2PKMatchCondition(keys []string) string {
+// using the outer table's qualified name and the source alias.
+func buildSCD2PKMatchCondition(targetFQN string, keys []string) string {
 	conditions := make([]string, len(keys))
 	for i, key := range keys {
-		conditions[i] = fmt.Sprintf(`source.%s = %s`, quoteIdentifier(key), quoteIdentifier(key))
+		conditions[i] = fmt.Sprintf(`source.%s = %s.%s`, quoteIdentifier(key), targetFQN, quoteIdentifier(key))
 	}
 	return strings.Join(conditions, " AND ")
 }
 
 // buildSCD2ChangeDetectionSubquery builds EXISTS subquery to detect changed records
-func buildSCD2ChangeDetectionSubquery(stagingFQN string, primaryKeys, nonPKColumns []string) string {
-	pkConditions := make([]string, len(primaryKeys))
-	for i, key := range primaryKeys {
-		pkConditions[i] = fmt.Sprintf(`source.%s = %s`, quoteIdentifier(key), quoteIdentifier(key))
-	}
-
+func buildSCD2ChangeDetectionSubquery(targetFQN, stagingFQN string, primaryKeys, nonPKColumns []string) string {
 	if len(nonPKColumns) == 0 {
 		return "false"
 	}
 
 	changeConditions := make([]string, len(nonPKColumns))
 	for i, col := range nonPKColumns {
-		changeConditions[i] = fmt.Sprintf(`%s IS DISTINCT FROM source.%s`, quoteIdentifier(col), quoteIdentifier(col))
+		changeConditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM source.%s`, targetFQN, quoteIdentifier(col), quoteIdentifier(col))
 	}
 
 	return fmt.Sprintf(`EXISTS (
 		SELECT 1 FROM %s AS source
 		WHERE %s
 		  AND (%s)
-	)`, stagingFQN, strings.Join(pkConditions, " AND "), strings.Join(changeConditions, " OR "))
+	)`, stagingFQN, buildSCD2PKMatchCondition(targetFQN, primaryKeys), strings.Join(changeConditions, " OR "))
 }
 
 // buildSCD2NotExistsCondition builds NOT EXISTS condition for soft-delete
-func buildSCD2NotExistsCondition(stagingFQN string, primaryKeys []string) string {
-	pkConditions := make([]string, len(primaryKeys))
-	for i, key := range primaryKeys {
-		pkConditions[i] = fmt.Sprintf(`source.%s = %s`, quoteIdentifier(key), quoteIdentifier(key))
-	}
-
+func buildSCD2NotExistsCondition(targetFQN, stagingFQN string, primaryKeys []string) string {
 	return fmt.Sprintf(`NOT EXISTS (
 		SELECT 1 FROM %s AS source
 		WHERE %s
-	)`, stagingFQN, strings.Join(pkConditions, " AND "))
+	)`, stagingFQN, buildSCD2PKMatchCondition(targetFQN, primaryKeys))
 }
 
 // buildSCD2InsertNotExistsCondition builds NOT EXISTS condition for insert step

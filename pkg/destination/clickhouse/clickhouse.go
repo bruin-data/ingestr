@@ -460,20 +460,23 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	// Step 3: Insert new versions + net-new records
 	allColumns := destination.AppendSCD2Columns(opts.Columns)
 	quotedColumns := quoteColumns(allColumns)
+	sourceColumns := make([]string, len(quotedColumns))
+	for i, col := range quotedColumns {
+		sourceColumns[i] = "source." + col
+	}
 
+	// ANTI JOIN works with either join_use_nulls setting; unmatched keys normally contain defaults.
 	insertSQL := fmt.Sprintf(
 		`
 		INSERT INTO %s.%s (%s)
 		SELECT %s FROM %s.%s AS source
-		LEFT JOIN %s.%s AS target
-		  ON %s AND target._scd_is_current = 1
-		WHERE target.%s IS NULL`,
+		LEFT ANTI JOIN %s.%s AS target
+		  ON %s AND target._scd_is_current = 1`,
 		quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		strings.Join(quotedColumns, ", "),
-		strings.Join(quotedColumns, ", "), quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
+		strings.Join(sourceColumns, ", "), quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
 		quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		onCondition,
-		quoteIdentifier(opts.PrimaryKeys[0]),
 	)
 	config.Debug("[CLICKHOUSE SCD2] Step 3 - Insert new versions: %s", insertSQL)
 
@@ -979,9 +982,8 @@ func buildChangeConditionsClickHouse(columns []string, targetAlias, sourceAlias 
 	}
 	conditions := make([]string, len(columns))
 	for i, col := range columns {
-		// ClickHouse supports DISTINCT FROM
 		qc := quoteIdentifier(col)
-		conditions[i] = fmt.Sprintf("NOT (%s.%s = %s.%s OR (%s.%s IS NULL AND %s.%s IS NULL))",
+		conditions[i] = fmt.Sprintf("NOT (ifNull(%s.%s = %s.%s, 0) OR (%s.%s IS NULL AND %s.%s IS NULL))",
 			targetAlias, qc, sourceAlias, qc,
 			targetAlias, qc, sourceAlias, qc)
 	}
