@@ -235,3 +235,32 @@ func TestProcessResultsExternalLinksError(t *testing.T) {
 	require.Error(t, foundErr)
 	assert.Contains(t, foundErr.Error(), "external link returned status 500")
 }
+
+func TestFetchExternalLinkSendsHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-amz-server-side-encryption-customer-key") != "secret-key" {
+			http.Error(w, "missing header", http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte(`[["a"]]`))
+	}))
+	defer server.Close()
+
+	data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{
+		ExternalLink: server.URL,
+		HttpHeaders:  map[string]string{"x-amz-server-side-encryption-customer-key": "secret-key"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"a"}}, data)
+}
+
+func TestFetchExternalLinkErrorOmitsURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	link := server.URL + "/chunk?X-Databricks-Signature=topsecret"
+	server.Close()
+
+	_, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: link})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "topsecret")
+	assert.NotContains(t, err.Error(), server.URL)
+}

@@ -252,6 +252,7 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 			WarehouseId: warehouseID,
 			Statement:   query,
 			WaitTimeout: statementTimeout,
+			Disposition: dbsql.DispositionExternalLinks,
 		})
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("query execution failed: %w", err)}
@@ -267,7 +268,7 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 			return
 		}
 
-		if resp.Result == nil || resp.Result.DataArray == nil {
+		if resp.Result == nil || (resp.Result.DataArray == nil && len(resp.Result.ExternalLinks) == 0) {
 			config.Debug("[DATABRICKS] Query returned no results")
 			return
 		}
@@ -278,15 +279,23 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 	return results, nil
 }
 
-func fetchExternalLink(ctx context.Context, url string) ([][]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.ExternalLink, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create external link request: %w", err)
+		return nil, errors.New("failed to create external link request")
+	}
+	for k, v := range link.HttpHeaders {
+		req.Header.Set(k, v)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		// The presigned URL carries a temporary credential, so drop it from the error.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("failed to download external link: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -345,7 +354,7 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 		}
 		for i, link := range rd.ExternalLinks {
 			config.Debug("[DATABRICKS] Fetching external link %d/%d: row_count=%d, byte_count=%d", i+1, len(rd.ExternalLinks), link.RowCount, link.ByteCount)
-			data, err := fetchExternalLink(ctx, link.ExternalLink)
+			data, err := fetchExternalLink(ctx, link)
 			if err != nil {
 				return fmt.Errorf("failed to fetch external link: %w", err)
 			}
@@ -530,7 +539,7 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			if len(resp.Result.DataArray) > 0 {
 				rowWidth = len(resp.Result.DataArray[0])
 			} else if len(resp.Result.ExternalLinks) > 0 {
-				data, err := fetchExternalLink(ctx, resp.Result.ExternalLinks[0].ExternalLink)
+				data, err := fetchExternalLink(ctx, resp.Result.ExternalLinks[0])
 				if err != nil {
 					results <- source.RecordBatchResult{Err: fmt.Errorf("custom query has no manifest and failed to fetch external link for schema inference: %w", err)}
 					return
