@@ -2,8 +2,11 @@ package http
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -160,5 +163,101 @@ func TestGetRetriedByDefault(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(hits); got != 3 {
 		t.Fatalf("expected 3 requests (2 x 429 + 1 x 200), got %d", got)
+	}
+}
+
+func TestGetRetriedOnTruncatedBody(t *testing.T) {
+	const body = `{"data":[{"id":"a"},{"id":"b"}],"has_more":false}`
+	for _, chunked := range []bool{false, true} {
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if atomic.AddInt32(&hits, 1) > 1 {
+				_, _ = w.Write([]byte(body))
+				return
+			}
+			if !chunked {
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			}
+			_, _ = w.Write([]byte(body[:len(body)/2]))
+			w.(http.Flusher).Flush()
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+		}))
+
+		client := New(WithBaseURL(srv.URL), WithRetry(3, time.Millisecond, time.Millisecond), WithRetryStrategy(zeroDelayStrategy))
+		resp, err := client.R(context.Background()).Get("/")
+		if err != nil {
+			t.Fatalf("chunked=%v: unexpected error: %v", chunked, err)
+		}
+		if got := string(resp.Body()); got != body {
+			t.Fatalf("chunked=%v: expected full body, got %q", chunked, got)
+		}
+		if got := atomic.LoadInt32(&hits); got != 2 {
+			t.Fatalf("chunked=%v: expected 2 requests, got %d", chunked, got)
+		}
+
+		atomic.StoreInt32(&hits, 0)
+		var result struct {
+			Data []map[string]string `json:"data"`
+		}
+		if _, err := client.R(context.Background()).SetResult(&result).Get("/"); err != nil {
+			t.Fatalf("chunked=%v: SetResult: unexpected error: %v", chunked, err)
+		}
+		if len(result.Data) != 2 || atomic.LoadInt32(&hits) != 2 {
+			t.Fatalf("chunked=%v: SetResult: expected 2 rows after 2 requests, got %d rows, %d requests", chunked, len(result.Data), atomic.LoadInt32(&hits))
+		}
+		_ = client.Close()
+		srv.Close()
+	}
+}
+
+func TestTruncatedBodyErrorsWhenRetriesExhausted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = w.Write([]byte(`{"data":[`))
+	}))
+	defer srv.Close()
+
+	client := New(WithBaseURL(srv.URL), WithRetry(2, time.Millisecond, time.Millisecond), WithRetryStrategy(zeroDelayStrategy))
+	defer func() {
+		_ = client.Close()
+	}()
+
+	_, err := client.R(context.Background()).Get("/")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected truncated body error, got %v", err)
+	}
+}
+
+func TestGetRetriedOnTruncatedErrorBody(t *testing.T) {
+	const body = `{"error":"bad request"}`
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusBadRequest)
+		if atomic.AddInt32(&hits, 1) > 1 {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		_, _ = w.Write([]byte(body[:len(body)/2]))
+	}))
+	defer srv.Close()
+
+	client := New(WithBaseURL(srv.URL), WithRetry(3, time.Millisecond, time.Millisecond), WithRetryStrategy(zeroDelayStrategy))
+	defer func() {
+		_ = client.Close()
+	}()
+
+	resp, err := client.R(context.Background()).Get("/")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode() != http.StatusBadRequest || resp.String() != body {
+		t.Fatalf("expected full 400 body, got %d %q", resp.StatusCode(), resp.String())
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected 2 requests, got %d", got)
 	}
 }
