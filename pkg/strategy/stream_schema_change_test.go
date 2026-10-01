@@ -7,6 +7,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/destination/mssql"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
@@ -155,6 +156,23 @@ func (d *normalizingFakeDestination) NormalizeSchemaEvolutionColumn(col schema.C
 		col.DataType = schema.TypeInt64
 	}
 	return col
+}
+
+func (d *normalizingFakeDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	return (&mssql.MSSQLDestination{}).NormalizeSchemaEvolutionSourceColumn(source, dest)
+}
+
+func TestEvolveDestinationTablePreservesMSSQLPrimaryKeyLength(t *testing.T) {
+	dest := &normalizingFakeDestination{fakeDestination: &fakeDestination{
+		tableSchemas: map[string]*schema.TableSchema{"dest_items": {Columns: []schema.Column{{
+			Name: "attachment_key", DataType: schema.TypeString, MaxLength: 450, IsPrimaryKey: true,
+		}}}},
+	}}
+	sourceSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "attachment_key", DataType: schema.TypeString, Nullable: true}}}
+
+	err := evolveDestinationTable(t.Context(), dest, "dest_items", sourceSchema, &config.IngestConfig{SchemaContract: "freeze"})
+	require.NoError(t, err)
+	require.Empty(t, dest.execCalls)
 }
 
 func TestEvolveDestinationTableUsesDestinationTypeNormalization(t *testing.T) {

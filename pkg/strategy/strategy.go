@@ -194,6 +194,9 @@ func evolveDestinationTableIfIncarnation(
 	if normalizer, ok := dest.(destination.SchemaEvolutionColumnNormalizer); ok {
 		compareOptions.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
 	}
+	if normalizer, ok := dest.(destination.SchemaEvolutionSourceColumnNormalizer); ok {
+		compareOptions.NormalizeSourceColumn = normalizer.NormalizeSchemaEvolutionSourceColumn
+	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
 	if err != nil {
 		return "", fmt.Errorf("failed to compare schemas: %w", err)

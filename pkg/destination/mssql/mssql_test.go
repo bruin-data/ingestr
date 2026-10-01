@@ -132,8 +132,8 @@ func TestGetTableSchemaUsesConnectedDefaultSchemaAndDatabase(t *testing.T) {
 	mock.ExpectQuery(`FROM \[AppDB\]\.INFORMATION_SCHEMA\.COLUMNS c`).
 		WithArgs("tenant_a", "orders").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
-		}).AddRow("id", "bigint", "NO", nil, nil, nil))
+			"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH", "IS_PRIMARY_KEY",
+		}).AddRow("id", "bigint", "NO", nil, nil, nil, true))
 
 	got, err := dest.GetTableSchema(t.Context(), "orders")
 	if err != nil {
@@ -157,8 +157,8 @@ func TestGetTableSchemaUsesThreePartDatabase(t *testing.T) {
 	mock.ExpectQuery(`FROM \[Warehouse\]\.INFORMATION_SCHEMA\.COLUMNS c`).
 		WithArgs("sales", "orders").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
-		}).AddRow("id", "bigint", "NO", nil, nil, nil))
+			"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH", "IS_PRIMARY_KEY",
+		}).AddRow("id", "bigint", "NO", nil, nil, nil, true))
 
 	got, err := dest.GetTableSchema(t.Context(), "Warehouse.sales.orders")
 	if err != nil {

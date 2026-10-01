@@ -10,9 +10,10 @@ import (
 
 // CompareOptions contains optional parameters for schema comparison.
 type CompareOptions struct {
-	Overrides       ColumnOverrides
-	PrimaryKeys     []string
-	NormalizeColumn func(schema.Column) schema.Column
+	Overrides             ColumnOverrides
+	PrimaryKeys           []string
+	NormalizeColumn       func(schema.Column) schema.Column
+	NormalizeSourceColumn func(source, dest schema.Column) schema.Column
 }
 
 // Compare compares source and destination schemas and returns the differences.
@@ -39,8 +40,14 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}
 
 	destColumnMap := make(map[string]schema.Column)
+	for _, key := range dest.PrimaryKeys {
+		primaryKeys[strings.ToLower(key)] = struct{}{}
+	}
 	for _, col := range dest.Columns {
 		destColumnMap[strings.ToLower(col.Name)] = col
+		if col.IsPrimaryKey {
+			primaryKeys[strings.ToLower(col.Name)] = struct{}{}
+		}
 	}
 
 	srcColumnMap := make(map[string]bool)
@@ -55,11 +62,17 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 		lowerName := strings.ToLower(sourceColumn.Name)
 		destColumn, exists := destColumnMap[lowerName]
 		destCol := normalizeColumn(destColumn)
+		if exists && opts != nil && opts.NormalizeSourceColumn != nil {
+			srcCol = opts.NormalizeSourceColumn(srcCol, destCol)
+		}
 
 		// Check for user override first
 		if override, hasOverride := overrides.Get(sourceColumn.Name); hasOverride {
 			newCol := override.ApplyToColumn(sourceColumn)
 			comparisonCol := normalizeColumn(newCol)
+			if exists && opts != nil && opts.NormalizeSourceColumn != nil {
+				comparisonCol = opts.NormalizeSourceColumn(comparisonCol, destCol)
+			}
 			if exists {
 				newCol.Name = destColumn.Name
 				comparisonCol.Name = destCol.Name

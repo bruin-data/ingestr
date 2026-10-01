@@ -351,7 +351,8 @@ func (d *MSSQLDestination) TruncateTable(ctx context.Context, table string) erro
 	return nil
 }
 
-func (d *MSSQLDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+func (d *MSSQLDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	columns := destination.DestinationColumns(opts.Columns)
 	if len(columns) == 0 {
 		return errors.New("insert from staging requires at least one column")
@@ -561,13 +562,13 @@ func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 		}
 
 		if _, err := stmt.ExecContext(ctx, values...); err != nil {
-			return rowIdx, fmt.Errorf("failed to bulk copy row %d: %w", rowIdx, err)
+			return rowIdx, fmt.Errorf("failed to bulk copy row %d: %w", rowIdx, explainWriteError(err, colNames))
 		}
 	}
 
 	result, err := stmt.ExecContext(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to flush bulk copy: %w", err)
+		return 0, fmt.Errorf("failed to flush bulk copy: %w", explainWriteError(err, colNames))
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -759,7 +760,8 @@ func (d *MSSQLDestination) renameTableSQL(identity mssqlTargetIdentity, newName 
 	return d.databaseScopedSQL(identity, statement)
 }
 
-func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	startMerge := time.Now()
 
 	if len(opts.PrimaryKeys) > 0 && !destination.HasCDCDeletedColumn(opts.Columns) {
@@ -1217,7 +1219,8 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 	)
 }
 
-func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
+func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	startOp := time.Now()
 
 	quotedColumns := quoteColumns(opts.Columns)
@@ -1262,7 +1265,8 @@ func buildDeleteInsertDeleteSQL(targetTable, incrementalKey string) string {
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
-func (d *MSSQLDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
+func (d *MSSQLDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	startOp := time.Now()
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -1707,11 +1711,23 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 
 	query := fmt.Sprintf(`
 		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
-		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH
+		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH,
+		       CASE WHEN EXISTS (
+		           SELECT 1 FROM %sINFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+		           JOIN %sINFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+		             ON tc.CONSTRAINT_CATALOG = kcu.CONSTRAINT_CATALOG
+		            AND tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+		            AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+		           WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+		             AND kcu.TABLE_CATALOG = c.TABLE_CATALOG
+		             AND kcu.TABLE_SCHEMA = c.TABLE_SCHEMA
+		             AND kcu.TABLE_NAME = c.TABLE_NAME
+		             AND kcu.COLUMN_NAME = c.COLUMN_NAME
+		       ) THEN 1 ELSE 0 END AS IS_PRIMARY_KEY
 		FROM %sINFORMATION_SCHEMA.COLUMNS c
 		JOIN %sINFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = @p1 AND c.TABLE_NAME = @p2
-		ORDER BY c.ORDINAL_POSITION`, prefix, prefix)
+		ORDER BY c.ORDINAL_POSITION`, prefix, prefix, prefix, prefix)
 
 	rows, err := d.db.QueryContext(ctx, query, identity.schema, identity.table)
 	if err != nil {
@@ -1721,18 +1737,24 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var primaryKeys []string
 	for rows.Next() {
 		var colName, dataType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
+		var isPrimaryKey bool
 
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
+		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &isPrimaryKey); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
 		col := schema.Column{
-			Name:     colName,
-			DataType: mapMSSQLTypeToSchema(dataType),
-			Nullable: isNullable == "YES",
+			Name:         colName,
+			DataType:     mapMSSQLTypeToSchema(dataType),
+			Nullable:     isNullable == "YES",
+			IsPrimaryKey: isPrimaryKey,
+		}
+		if isPrimaryKey {
+			primaryKeys = append(primaryKeys, colName)
 		}
 
 		if numPrecision != nil {
@@ -1757,9 +1779,10 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	}
 
 	return &schema.TableSchema{
-		Name:    identity.table,
-		Schema:  identity.schema,
-		Columns: columns,
+		Name:        identity.table,
+		Schema:      identity.schema,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 
@@ -1959,10 +1982,10 @@ func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
 	case schema.TypeString, schema.TypeJSON, schema.TypeArray:
 		// SQL Server cannot index NVARCHAR(MAX); clustered primary keys are
 		// limited to 900 bytes, which is 450 UTF-16 code units.
-		if col.MaxLength > 0 && col.MaxLength <= 450 {
+		if col.MaxLength > 0 && col.MaxLength <= maxPrimaryKeyStringLength {
 			return fmt.Sprintf("NVARCHAR(%d)", col.MaxLength)
 		}
-		return "NVARCHAR(450)"
+		return fmt.Sprintf("NVARCHAR(%d)", maxPrimaryKeyStringLength)
 	case schema.TypeBinary:
 		if col.MaxLength > 0 && col.MaxLength <= 900 {
 			return fmt.Sprintf("VARBINARY(%d)", col.MaxLength)

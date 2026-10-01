@@ -277,6 +277,12 @@ type SchemaEvolutionColumnNormalizer interface {
 	NormalizeSchemaEvolutionColumn(schema.Column) schema.Column
 }
 
+// SchemaEvolutionSourceColumnNormalizer resolves unspecified source metadata
+// against an existing destination column before comparing their types.
+type SchemaEvolutionSourceColumnNormalizer interface {
+	NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column
+}
+
 // TableWriteConfig contains per-table write configuration for multi-table writes.
 type TableWriteConfig struct {
 	DestTable              string
