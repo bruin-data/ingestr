@@ -30,6 +30,7 @@ Two things follow from this:
 | [HubSpot](/supported-sources/hubspot.md#hubspot-as-a-destination) | CRM records (contacts, companies, deals, custom objects) and associations |
 | [CleverTap](/supported-sources/clevertap.md#what-to-upload) | User profiles and events |
 | [Salesforce](/supported-sources/salesforce.md#salesforce-as-a-destination) | sObject records (standard and custom objects) |
+| [Attio](/supported-sources/attio.md#attio-as-a-destination) | Object records (people, companies, deals, custom objects) |
 
 Each destination's page has its own URI, object types, and quirks. This page covers what they share.
 
@@ -47,7 +48,8 @@ Notes:
 
 - Not every destination supports every strategy — check its page.
 - Impossible combinations are rejected before the run starts, not silently mishandled.
-- **Some destinations allow one strategy per table.** CleverTap, for example, only upserts profiles (`merge`) and only appends events (`append`); that strategy is also the default, and any other (or `--full-refresh`) stops the run before anything is sent.
+- `--full-refresh` isn't supported: there's no table to rebuild, and it would turn any strategy into a `replace`. To remove records that aren't in the source, use `--incremental-strategy replace`.
+- **Some destinations allow one strategy per table.** CleverTap, for example, only upserts profiles (`merge`) and only appends events (`append`); that strategy is also the default, and any other stops the run before anything is sent.
 
 ::: warning
 On a destination that supports deletion, `replace` removes **every** record that isn't in your source — including ones created by hand or by other tools. Use it only when the source is the complete system of record. A run with 0 source rows removes nothing (a safety guard). To remove specific records, use `delete`.
@@ -96,7 +98,7 @@ Rename a column to a differently-named property with `--columns`, using `dest_pr
 ```
 
 - Rename only — reverse-ETL destinations own their property types. Some destinations reject an entry that carries a type; check its page.
-- Renaming happens **before** the destination sees the row, so `--primary-key` must name the **renamed** column. With `--columns 'Ext_Id__c::customer_ref'`, pass `--primary-key Ext_Id__c`, not `customer_ref`.
+- `--primary-key` can name either the source column or its new name. With `--columns 'Ext_Id__c::customer_ref'`, both `--primary-key Ext_Id__c` and `--primary-key customer_ref` work.
 - Whether an unknown property is accepted also depends on the destination: some create attributes on the fly, others require the property to already exist. Check its page.
 
 ## Example

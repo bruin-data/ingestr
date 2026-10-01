@@ -167,6 +167,13 @@ func TestValidateReverseETLFlags(t *testing.T) {
 			require.NoError(t, validateReverseETLFlags(retlDest, &config.IngestConfig{RejectMode: m, WriteNulls: true}))
 		}
 	})
+	t.Run("RETL rejects --full-refresh with any strategy", func(t *testing.T) {
+		for _, s := range []config.IncrementalStrategy{"", config.StrategyMerge, config.StrategyReplace} {
+			err := validateReverseETLFlags(retlDest, &config.IngestConfig{FullRefresh: true, IncrementalStrategy: s, IncrementalStrategyExplicit: s != ""})
+			require.ErrorContains(t, err, "full-refresh is not supported")
+		}
+		require.NoError(t, validateReverseETLFlags(sqlDest, &config.IngestConfig{FullRefresh: true}))
+	})
 	t.Run("RETL rejects a bogus reject-mode", func(t *testing.T) {
 		err := validateReverseETLFlags(retlDest, &config.IngestConfig{RejectMode: "bogus"})
 		require.ErrorContains(t, err, "invalid --reject-mode")

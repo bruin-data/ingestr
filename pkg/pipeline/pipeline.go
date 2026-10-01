@@ -3151,6 +3151,11 @@ func validateReverseETLFlags(dest destination.Destination, cfg *config.IngestCon
 		}
 		return nil
 	}
+	// --full-refresh turns into replace, and on an API that mirror-deletes every
+	// record not in the source, even when another strategy was asked for.
+	if cfg.FullRefresh {
+		return &config.ValidationError{Field: "full-refresh", Message: fmt.Sprintf("is not supported for %s: a reverse-ETL destination has no table to rebuild. To remove records that aren't in the source, use --incremental-strategy replace", dest.GetScheme())}
+	}
 	// A destination whose default strategy would be destructive (HubSpot's
 	// framework-default "replace" mirrors the object, archiving records not in the
 	// source) must not inherit that default silently. Destinations with a safe
