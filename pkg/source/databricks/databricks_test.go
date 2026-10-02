@@ -558,5 +558,5 @@ func TestDownloadExternalLinkMaxDuration(t *testing.T) {
 	_, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not finish within")
-	assert.Less(t, time.Since(start), 3*time.Second)
+	assert.Less(t, time.Since(start), 2*externalLinkMaxDuration, "must not retry after the overall limit")
 }

@@ -42,6 +42,8 @@ var (
 	externalLinkMaxDuration  = 15 * time.Minute
 )
 
+var errChunkTooSlow = errors.New("chunk download took too long")
+
 type stallReader struct {
 	r     io.Reader
 	timer *time.Timer
@@ -319,7 +321,8 @@ func downloadExternalLink(ctx context.Context, link dbsql.ExternalLink) ([]byte,
 		if err == nil {
 			return data, nil
 		}
-		if !retryable || ctx.Err() != nil {
+		// A chunk that hit the overall limit would only be restarted from scratch.
+		if !retryable || ctx.Err() != nil || errors.Is(err, errChunkTooSlow) {
 			return nil, err
 		}
 		config.Debug("[DATABRICKS] Chunk %d download attempt %d failed: %v", link.ChunkIndex, attempt+1, err)
@@ -340,7 +343,7 @@ func downloadExternalLinkOnce(parent context.Context, link dbsql.ExternalLink) (
 
 	wrap := func(msg string, err error) error {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
-			return fmt.Errorf("%s: download did not finish within %s", msg, externalLinkMaxDuration)
+			return fmt.Errorf("%s: download did not finish within %s: %w", msg, externalLinkMaxDuration, errChunkTooSlow)
 		}
 		if stalled.Load() {
 			return fmt.Errorf("%s: no data received for %s", msg, externalLinkStallTimeout)
