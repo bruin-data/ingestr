@@ -69,9 +69,8 @@ func boundKeyColumns(columns []schema.Column, primaryKeys []string) []schema.Col
 	return bounded
 }
 
-// fitKeyWidenings caps widenings of string key columns so a composite key
-// stays within the InnoDB key limit; a single key is already bounded by
-// NormalizeSchemaEvolutionSourceColumn.
+// fitKeyWidenings caps source-driven widenings of string key columns so the
+// key stays within the InnoDB key limit; overrides are applied as given.
 func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) (*schemaevolution.SchemaComparison, error) {
 	if comparison == nil || !comparison.HasChanges {
 		return comparison, nil
@@ -86,7 +85,7 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 		return comparison, nil
 	}
 	current, err := d.GetTableSchema(ctx, table)
-	if err != nil || current == nil || len(current.PrimaryKeys) < 2 {
+	if err != nil || current == nil || len(current.PrimaryKeys) == 0 {
 		return comparison, err
 	}
 
@@ -107,6 +106,10 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 	for i, change := range comparison.Changes {
 		if isTypeChange(change) && change.OldColumn != nil && change.NewColumn.DataType == schema.TypeString &&
 			containsFold(current.PrimaryKeys, change.ColumnName) {
+			if change.Type == schemaevolution.ChangeOverrideType {
+				fixed += change.NewColumn.MaxLength
+				continue
+			}
 			keyChanges = append(keyChanges, i)
 			requests = append(requests, change.NewColumn.MaxLength)
 			floor := 0

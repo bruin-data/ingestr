@@ -74,6 +74,9 @@ func TestBoundKeyColumnsSharesBudgetAcrossCompositeKey(t *testing.T) {
 	require.Equal(t, 100, got[2].MaxLength)
 	require.Zero(t, got[4].MaxLength)
 	require.Zero(t, columns[0].MaxLength)
+
+	got = boundKeyColumns([]schema.Column{{Name: "id", DataType: schema.TypeString, MaxLength: 1000}}, []string{"id"})
+	require.Equal(t, 1000, got[0].MaxLength)
 }
 
 func TestFitKeyWideningsSharesBudgetAcrossCompositeKey(t *testing.T) {
@@ -106,6 +109,55 @@ func TestFitKeyWideningsSharesBudgetAcrossCompositeKey(t *testing.T) {
 	require.Equal(t, 384, got.Changes[1].NewColumn.MaxLength)
 	require.Zero(t, got.Changes[2].NewColumn.MaxLength)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestFitKeyWideningsCapsSourceWideningsButNotOverrides(t *testing.T) {
+	change := func(changeType schemaevolution.ChangeType, name string, newLength int) schemaevolution.SchemaChange {
+		old := schema.Column{Name: name, DataType: schema.TypeString, MaxLength: 100}
+		return schemaevolution.SchemaChange{
+			Type: changeType, ColumnName: name, OldColumn: &old,
+			NewColumn: schema.Column{Name: name, DataType: schema.TypeString, MaxLength: newLength},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		keys    []string
+		changes []schemaevolution.SchemaChange
+		want    []int
+	}{
+		{"source widening capped", []string{"k"}, []schemaevolution.SchemaChange{change(schemaevolution.ChangeWidenType, "k", 1000)}, []int{maxPrimaryKeyStringLength}},
+		{"source widening that fits", []string{"k"}, []schemaevolution.SchemaChange{change(schemaevolution.ChangeWidenType, "k", 500)}, []int{500}},
+		{"override kept", []string{"k"}, []schemaevolution.SchemaChange{change(schemaevolution.ChangeOverrideType, "k", 1000)}, []int{1000}},
+		{"override takes its budget first", []string{"k", "j"}, []schemaevolution.SchemaChange{
+			change(schemaevolution.ChangeOverrideType, "k", 600),
+			change(schemaevolution.ChangeWidenType, "j", maxPrimaryKeyStringLength),
+		}, []int{600, 168}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			dest := &MySQLDestination{db: db}
+			columns := sqlmock.NewRows([]string{
+				"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH", "COLUMN_TYPE",
+			})
+			keys := sqlmock.NewRows([]string{"COLUMN_NAME"})
+			for _, key := range tc.keys {
+				columns.AddRow(key, "varchar", "NO", nil, nil, 100, "varchar(100)")
+				keys.AddRow(key)
+			}
+			mock.ExpectQuery(`FROM INFORMATION_SCHEMA\.COLUMNS`).WillReturnRows(columns)
+			mock.ExpectQuery(`KEY_COLUMN_USAGE`).WillReturnRows(keys)
+
+			got, err := dest.fitKeyWidenings(t.Context(), "app.items", &schemaevolution.SchemaComparison{HasChanges: true, Changes: tc.changes})
+			require.NoError(t, err)
+			require.Len(t, got.Changes, len(tc.want))
+			for i, want := range tc.want {
+				require.Equal(t, want, got.Changes[i].NewColumn.MaxLength)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestFairSharesKeepsRequestsThatFit(t *testing.T) {
