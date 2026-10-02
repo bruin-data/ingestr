@@ -486,7 +486,7 @@ func TestCDCTargetClaimTableUsesBinaryCollation(t *testing.T) {
 		{Name: "connector_id", DataType: schema.TypeString, MaxLength: 64},
 		{Name: "claimed_at", DataType: schema.TypeTimestampTZ},
 	}
-	sql := buildCreateTableSQL("cdc_targets", columns, []string{"destination_table"})
+	sql := buildCreateTableSQL("cdc_targets", columns, []string{"destination_table"}, utf8mb4BytesPerChar)
 	if !strings.Contains(sql, "`destination_table` VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin") {
 		t.Fatalf("CDC target DDL lacks binary claim key:\n%s", sql)
 	}
@@ -1087,7 +1087,7 @@ func TestBuildCreateTableSQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildCreateTableSQL(tt.table, tt.columns, tt.primaryKeys)
+			got := buildCreateTableSQL(tt.table, tt.columns, tt.primaryKeys, utf8mb4BytesPerChar)
 			assert.Equal(t, tt.want, got)
 		})
 	}

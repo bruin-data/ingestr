@@ -359,7 +359,7 @@ func (d *MySQLDestination) PrepareTable(ctx context.Context, opts destination.Pr
 
 	if opts.Schema != nil {
 		startCreate := time.Now()
-		createSQL := buildCreateTableSQL(opts.Table, opts.Schema.Columns, opts.PrimaryKeys)
+		createSQL := buildCreateTableSQL(opts.Table, opts.Schema.Columns, opts.PrimaryKeys, d.createCharBytes(ctx, opts.Table, opts.Schema.Columns, opts.PrimaryKeys))
 		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 			config.LogFailedQuery(createSQL, err)
 			return fmt.Errorf("failed to create table: %w", err)
@@ -1756,7 +1756,7 @@ func (d *MySQLDestination) ClaimAndPrepareEmptyCDCTarget(
 	tempTable := destination.ShortenIdentifier(tempCandidate, tempCandidate, destination.MaxIdentifierLength("mysql"))
 	tempRef := quoteMySQLTable(targetDatabase, tempTable)
 	targetRef := quoteMySQLTable(targetDatabase, targetTable)
-	createSQL := buildCreateTableSQLForReference(tempRef, opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQLForReference(tempRef, opts.Schema.Columns, opts.PrimaryKeys, d.createCharBytes(ctx, opts.Table, opts.Schema.Columns, opts.PrimaryKeys))
 	createSQL = strings.Replace(createSQL, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1) + " ENGINE=InnoDB"
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		return "", errors.Join(fmt.Errorf("failed to create temporary MySQL CDC target for %q: %w", opts.Table, err), cleanupClaim())
@@ -2238,15 +2238,28 @@ func extractTableName(table string) string {
 	return parts[len(parts)-1]
 }
 
-func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
-	return buildCreateTableSQLForReference(quoteTable(table), columns, primaryKeys)
+// createCharBytes is the charset width a table created with these columns
+// needs its keys sized for; the database is only queried when a key needs it.
+func (d *MySQLDestination) createCharBytes(ctx context.Context, table string, columns []schema.Column, primaryKeys []string) int {
+	if !needsKeyBounding(columns, primaryKeys) {
+		return utf8mb4BytesPerChar
+	}
+	database, _ := splitDatabaseTable(table)
+	if database == "" {
+		database = d.database
+	}
+	return d.databaseCharBytes(ctx, database)
 }
 
-func buildCreateTableSQLForReference(tableReference string, columns []schema.Column, primaryKeys []string) string {
+func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string, charBytes int) string {
+	return buildCreateTableSQLForReference(quoteTable(table), columns, primaryKeys, charBytes)
+}
+
+func buildCreateTableSQLForReference(tableReference string, columns []schema.Column, primaryKeys []string, charBytes int) string {
 	var colDefs []string
 	binaryClaimKey := isCDCTargetClaimTable(columns, primaryKeys)
 	if !binaryClaimKey {
-		columns = boundKeyColumns(columns, primaryKeys)
+		columns = boundKeyColumns(columns, primaryKeys, charBytes)
 	}
 	for _, col := range columns {
 		colType := MapDataTypeToMySQL(col)

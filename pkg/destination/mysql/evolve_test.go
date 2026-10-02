@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"testing"
@@ -111,7 +112,7 @@ func TestBoundKeyColumns(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			original := append([]schema.Column(nil), tc.columns...)
-			got := boundKeyColumns(tc.columns, tc.keys)
+			got := boundKeyColumns(tc.columns, tc.keys, utf8mb4BytesPerChar)
 			lengths := make([]int, len(got))
 			for i, col := range got {
 				lengths[i] = col.MaxLength
@@ -120,6 +121,54 @@ func TestBoundKeyColumns(t *testing.T) {
 			require.Equal(t, original, tc.columns)
 		})
 	}
+}
+
+func TestBoundKeyColumnsUsesTheTableCharset(t *testing.T) {
+	str := func(name string, length int) schema.Column {
+		return schema.Column{Name: name, DataType: schema.TypeString, MaxLength: length}
+	}
+	for _, tc := range []struct {
+		name      string
+		columns   []schema.Column
+		keys      []string
+		charBytes int
+		want      []int
+	}{
+		{"latin1 single key", []schema.Column{str("k", 0)}, []string{"k"}, 1, []int{3072}},
+		{"utf8mb3 single key", []schema.Column{str("k", 0)}, []string{"k"}, 3, []int{1024}},
+		{"latin1 composite key with a bigint", []schema.Column{str("a", 0), str("b", 0), {Name: "v", DataType: schema.TypeInt64}}, []string{"a", "b", "v"}, 1, []int{1532, 1532, 0}},
+		{"latin1 key with a uuid", []schema.Column{{Name: "id", DataType: schema.TypeUUID}, str("slug", 0)}, []string{"id", "slug"}, 1, []int{0, 3036}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := boundKeyColumns(tc.columns, tc.keys, tc.charBytes)
+			lengths := make([]int, len(got))
+			for i, col := range got {
+				lengths[i] = col.MaxLength
+			}
+			require.Equal(t, tc.want, lengths)
+		})
+	}
+}
+
+func TestCreateCharBytes(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	dest := &MySQLDestination{db: db, database: "app"}
+	unboundedKey := []schema.Column{{Name: "k", DataType: schema.TypeString}}
+
+	require.Equal(t, utf8mb4BytesPerChar, dest.createCharBytes(t.Context(), "app.items", []schema.Column{{Name: "k", DataType: schema.TypeString, MaxLength: 100}}, []string{"k"}), "bounded keys need no lookup")
+	require.Equal(t, utf8mb4BytesPerChar, dest.createCharBytes(t.Context(), "app.items", unboundedKey, nil), "tables without keys need no lookup")
+
+	mock.ExpectQuery(`information_schema\.SCHEMATA`).WithArgs("analytics").WillReturnRows(sqlmock.NewRows([]string{"MAXLEN"}).AddRow(1))
+	require.Equal(t, 1, dest.createCharBytes(t.Context(), "analytics.items", unboundedKey, []string{"k"}))
+
+	mock.ExpectQuery(`information_schema\.SCHEMATA`).WithArgs("app").WillReturnRows(sqlmock.NewRows([]string{"MAXLEN"}).AddRow(3))
+	require.Equal(t, 3, dest.createCharBytes(t.Context(), "items", unboundedKey, []string{"k"}), "unqualified tables use the connection database")
+
+	mock.ExpectQuery(`information_schema\.SCHEMATA`).WillReturnError(errors.New("access denied"))
+	require.Equal(t, utf8mb4BytesPerChar, dest.createCharBytes(t.Context(), "app.items", unboundedKey, []string{"k"}), "lookup errors assume utf8mb4")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestKeyBytesMatchesCreatedType(t *testing.T) {
@@ -153,19 +202,29 @@ func TestKeyBytesMatchesCreatedType(t *testing.T) {
 	} {
 		t.Run(tc.mysql, func(t *testing.T) {
 			require.Equal(t, tc.mysql, MapDataTypeToMySQL(tc.col))
-			require.Equal(t, tc.keyBytes, keyBytes(tc.col))
+			require.Equal(t, tc.keyBytes, keyBytes(tc.col, utf8mb4BytesPerChar))
 		})
 	}
 
-	require.Equal(t, 16, keyBytes(schema.Column{DataType: schema.TypeBinary, MaxLength: 16}), "VARBINARY(16) read from an existing table")
-	require.Equal(t, 3, keyBytes(decimal(5, 10)), "scale is clamped to the precision")
+	require.Equal(t, 16, keyBytes(schema.Column{DataType: schema.TypeBinary, MaxLength: 16}, utf8mb4BytesPerChar), "VARBINARY(16) read from an existing table")
+	require.Equal(t, 3, keyBytes(decimal(5, 10), utf8mb4BytesPerChar), "scale is clamped to the precision")
+	require.Equal(t, 36, keyBytes(schema.Column{DataType: schema.TypeUUID}, 1), "CHAR(36) in a latin1 table")
+	require.Equal(t, 765, keyBytes(schema.Column{DataType: schema.TypeInterval}, 3), "VARCHAR(255) in a utf8mb3 table")
 }
 
 func TestStringKeyBudget(t *testing.T) {
-	require.Equal(t, 768, stringKeyBudget(0))
-	require.Equal(t, 766, stringKeyBudget(8))
-	require.Equal(t, 763, stringKeyBudget(17))
-	require.Equal(t, 732, stringKeyBudget(144))
+	for _, tc := range []struct{ otherKeyBytes, charBytes, want int }{
+		{0, 4, 768},
+		{8, 4, 766},
+		{17, 4, 763},
+		{144, 4, 732},
+		{0, 3, 1024},
+		{0, 1, 3072},
+		{8, 1, 3064},
+		{1000, 4, 518},
+	} {
+		require.Equal(t, tc.want, stringKeyBudget(tc.otherKeyBytes, tc.charBytes), "%d other key bytes, %d bytes per char", tc.otherKeyBytes, tc.charBytes)
+	}
 }
 
 func TestFairShares(t *testing.T) {
@@ -191,10 +250,11 @@ func TestFairShares(t *testing.T) {
 }
 
 type keyTestColumn struct {
-	name     string
-	dataType string
-	length   int
-	key      bool
+	name      string
+	dataType  string
+	length    int
+	key       bool
+	charBytes int
 }
 
 func (c keyTestColumn) schema() schema.Column {
@@ -208,7 +268,7 @@ func (c keyTestColumn) schema() schema.Column {
 	return col
 }
 
-func expectMySQLTable(mock sqlmock.Sqlmock, columns []keyTestColumn) {
+func expectMySQLTable(mock sqlmock.Sqlmock, columns []keyTestColumn, tableCharBytes int) {
 	rows := sqlmock.NewRows([]string{
 		"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH", "COLUMN_TYPE",
 	})
@@ -231,6 +291,20 @@ func expectMySQLTable(mock sqlmock.Sqlmock, columns []keyTestColumn) {
 	}
 	mock.ExpectQuery(`FROM INFORMATION_SCHEMA\.COLUMNS`).WillReturnRows(rows)
 	mock.ExpectQuery(`KEY_COLUMN_USAGE`).WillReturnRows(keys)
+
+	hasKey := false
+	charsets := sqlmock.NewRows([]string{"COLUMN_NAME", "COLUMN_MAXLEN", "TABLE_MAXLEN"})
+	for _, col := range columns {
+		hasKey = hasKey || col.key
+		charBytes := 0
+		if col.dataType == "varchar" {
+			charBytes = cmp.Or(col.charBytes, utf8mb4BytesPerChar)
+		}
+		charsets.AddRow(col.name, charBytes, cmp.Or(tableCharBytes, utf8mb4BytesPerChar))
+	}
+	if hasKey {
+		mock.ExpectQuery(`information_schema\.CHARACTER_SETS`).WillReturnRows(charsets)
+	}
 }
 
 func TestSchemaEvolutionFitsStringKeysIntoTheKeyLimit(t *testing.T) {
@@ -248,11 +322,12 @@ func TestSchemaEvolutionFitsStringKeysIntoTheKeyLimit(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name      string
-		dest      []keyTestColumn
-		source    []schema.Column
-		overrides string
-		want      []string
+		name           string
+		dest           []keyTestColumn
+		tableCharBytes int
+		source         []schema.Column
+		overrides      string
+		want           []string
 	}{
 		{
 			name:   "unbounded source widens a single key to the limit",
@@ -370,6 +445,56 @@ func TestSchemaEvolutionFitsStringKeysIntoTheKeyLimit(t *testing.T) {
 			want:   []string{modify("k", "VARCHAR(768) NOT NULL"), modify("note", "TEXT NULL")},
 		},
 		{
+			name:           "latin1 keys are not capped at the utf8mb4 width",
+			dest:           []keyTestColumn{{name: "k", dataType: "varchar", length: 100, key: true, charBytes: 1}},
+			tableCharBytes: 1,
+			source:         []schema.Column{source("k", 1000)},
+			want:           []string{modify("k", "VARCHAR(1000) NOT NULL")},
+		},
+		{
+			name:           "latin1 keys are capped at the latin1 width",
+			dest:           []keyTestColumn{{name: "k", dataType: "varchar", length: 100, key: true, charBytes: 1}},
+			tableCharBytes: 1,
+			source:         []schema.Column{source("k", 4000)},
+			want:           []string{modify("k", "VARCHAR(3072) NOT NULL")},
+		},
+		{
+			name: "latin1 composite keys share the latin1 budget",
+			dest: []keyTestColumn{
+				{name: "k", dataType: "varchar", length: 100, key: true, charBytes: 1},
+				{name: "j", dataType: "varchar", length: 100, key: true, charBytes: 1},
+			},
+			tableCharBytes: 1,
+			source:         []schema.Column{source("k", 2000), source("j", 2000)},
+			want:           []string{modify("k", "VARCHAR(1536) NOT NULL"), modify("j", "VARCHAR(1536) NOT NULL")},
+		},
+		{
+			name:           "utf8mb3 tables use 3 bytes per character",
+			dest:           []keyTestColumn{{name: "k", dataType: "varchar", length: 100, key: true, charBytes: 3}},
+			tableCharBytes: 3,
+			source:         []schema.Column{source("k", 2000)},
+			want:           []string{modify("k", "VARCHAR(1024) NOT NULL")},
+		},
+		{
+			name: "unchanged key columns count with their own charset",
+			dest: []keyTestColumn{
+				{name: "k", dataType: "varchar", length: 100, key: true},
+				{name: "j", dataType: "varchar", length: 1000, key: true, charBytes: 1},
+			},
+			source: []schema.Column{source("k", 0), source("j", 1000)},
+			want:   []string{modify("k", "VARCHAR(518) NOT NULL")},
+		},
+		{
+			name: "widened columns are budgeted with the table charset",
+			dest: []keyTestColumn{
+				{name: "k", dataType: "varchar", length: 100, key: true, charBytes: 1},
+				{name: "j", dataType: "varchar", length: 100, key: true, charBytes: 1},
+			},
+			tableCharBytes: 4,
+			source:         []schema.Column{source("k", 2000), source("j", 100)},
+			want:           []string{modify("k", "VARCHAR(743) NOT NULL")},
+		},
+		{
 			name:   "tables without a primary key are not capped",
 			dest:   []keyTestColumn{varchar("k", 100, false)},
 			source: []schema.Column{source("k", 1000)},
@@ -381,7 +506,7 @@ func TestSchemaEvolutionFitsStringKeysIntoTheKeyLimit(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = db.Close() })
 			dest := &MySQLDestination{db: db}
-			expectMySQLTable(mock, tc.dest)
+			expectMySQLTable(mock, tc.dest, tc.tableCharBytes)
 
 			existing := &schema.TableSchema{}
 			for _, col := range tc.dest {
@@ -424,6 +549,27 @@ func TestFitKeyWideningsSkipsLookupWithoutStringWidenings(t *testing.T) {
 	got, err = dest.fitKeyWidenings(t.Context(), "app.items", nil)
 	require.NoError(t, err)
 	require.Nil(t, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestFitKeyWideningsAssumesUTF8MB4WhenCharsetsCannotBeRead(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	dest := &MySQLDestination{db: db}
+	mock.ExpectQuery(`FROM INFORMATION_SCHEMA\.COLUMNS`).WillReturnRows(sqlmock.NewRows([]string{
+		"COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH", "COLUMN_TYPE",
+	}).AddRow("k", "varchar", "NO", nil, nil, 100, "varchar(100)"))
+	mock.ExpectQuery(`KEY_COLUMN_USAGE`).WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("k"))
+	mock.ExpectQuery(`information_schema\.CHARACTER_SETS`).WillReturnError(errors.New("access denied"))
+
+	old := schema.Column{Name: "k", DataType: schema.TypeString, MaxLength: 100}
+	got, err := dest.fitKeyWidenings(t.Context(), "app.items", &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "k", OldColumn: &old,
+		NewColumn: schema.Column{Name: "k", DataType: schema.TypeString, MaxLength: 3000},
+	}}})
+	require.NoError(t, err)
+	require.Equal(t, maxPrimaryKeyStringLength, got.Changes[0].NewColumn.MaxLength)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
