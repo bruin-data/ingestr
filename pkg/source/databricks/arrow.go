@@ -52,6 +52,18 @@ func conformArray(ctx context.Context, alloc memory.Allocator, arr arrow.Array, 
 			return array.MakeFromData(data), nil
 		}
 	}
+	if list, ok := arr.(*array.List); ok {
+		if dst, ok := to.(*arrow.ListType); ok {
+			values, err := conformArray(ctx, alloc, list.ListValues(), dst.Elem())
+			if err != nil {
+				return nil, err
+			}
+			defer values.Release()
+			data := array.NewData(to, list.Len(), list.Data().Buffers(), []arrow.ArrayData{values.Data()}, list.NullN(), list.Data().Offset())
+			defer data.Release()
+			return array.MakeFromData(data), nil
+		}
+	}
 	if !isNested(arr.DataType()) {
 		if out, err := compute.CastArray(compute.WithAllocator(ctx, alloc), arr, compute.SafeCastOptions(to)); err == nil {
 			return out, nil

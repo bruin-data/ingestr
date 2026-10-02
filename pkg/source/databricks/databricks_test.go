@@ -365,3 +365,86 @@ func TestDownloadExternalLinkRetriesTransientErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestConformArrayListElements(t *testing.T) {
+	alloc := memory.NewGoAllocator()
+	src := arrow.NewSchema([]arrow.Field{
+		{Name: "bins", Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: true},
+		{Name: "tss", Type: arrow.ListOf(&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Etc/UTC"}), Nullable: true},
+	}, nil)
+	rec := recordFromJSON(t, src, `[{"bins": ["AAA=", null], "tss": ["2024-01-02T03:04:05.123456"]}, {"bins": null, "tss": null}]`)
+	defer rec.Release()
+
+	var columns []schema.Column
+	for _, typ := range []string{"ARRAY<BINARY>", "ARRAY<TIMESTAMP>"} {
+		dt, p, sc, at := MapDatabricksToDataType(typ)
+		columns = append(columns, schema.Column{Name: typ, DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true})
+	}
+	target := buildArrowSchema(columns)
+
+	out, err := conformRecord(context.Background(), alloc, rec, target)
+	require.NoError(t, err)
+	defer out.Release()
+	require.True(t, out.Schema().Equal(target))
+
+	bins := out.Column(0).(*array.List)
+	binValues := bins.ListValues().(*array.Binary)
+	assert.Equal(t, []byte{0, 0}, binValues.Value(0))
+	assert.True(t, binValues.IsNull(1))
+	assert.True(t, bins.IsNull(1))
+
+	tss := out.Column(1).(*array.List)
+	assert.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC).UnixMicro(), int64(tss.ListValues().(*array.Timestamp).Value(0)))
+	assert.True(t, tss.IsNull(1))
+}
+
+func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	rec0 := recordFromJSON(t, sc, `[{"id": 1}]`)
+	defer rec0.Release()
+	rec1 := recordFromJSON(t, sc, `[{"id": 2}]`)
+	defer rec1.Release()
+	chunk0, chunk1 := arrowIPC(t, rec0), arrowIPC(t, rec1)
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/2.0/sql/statements/s1/result/chunks/1":
+			_, _ = fmt.Fprintf(w, `{"external_links":[{"chunk_index":1,"external_link":"%s/chunk1"}]}`, server.URL)
+		case "/chunk0":
+			_, _ = w.Write(chunk0)
+		case "/chunk1":
+			_, _ = w.Write(chunk1)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+	require.NoError(t, err)
+	resp := &dbsql.StatementResponse{StatementId: "s1", Result: &dbsql.ResultData{
+		ExternalLinks: []dbsql.ExternalLink{{
+			ChunkIndex:            0,
+			ExternalLink:          server.URL + "/chunk0",
+			NextChunkIndex:        1,
+			NextChunkInternalLink: "/api/2.0/sql/statements/s1/result/chunks/1",
+		}},
+	}}
+
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, 0, results)
+	}()
+	var ids []int64
+	for res := range results {
+		require.NoError(t, res.Err)
+		col := res.Batch.Column(0).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		res.Batch.Release()
+	}
+	assert.Equal(t, []int64{1, 2}, ids)
+}

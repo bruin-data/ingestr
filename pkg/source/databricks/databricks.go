@@ -411,7 +411,9 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 	alloc := memory.NewGoAllocator()
 
 	nextChunk := 0
+	hasMore := false
 	processChunk := func(rd *dbsql.ResultData) error {
+		hasMore = rd.NextChunkInternalLink != ""
 		for _, link := range rd.ExternalLinks {
 			if link.ChunkIndex < nextChunk {
 				continue
@@ -421,6 +423,7 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				return fmt.Errorf("chunk %d: %w", link.ChunkIndex, err)
 			}
 			nextChunk = link.ChunkIndex + 1
+			hasMore = link.NextChunkInternalLink != ""
 		}
 		return nil
 	}
@@ -435,7 +438,7 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 		totalChunks = resp.Manifest.TotalChunkCount
 	}
 
-	for nextChunk < totalChunks {
+	for nextChunk < totalChunks || hasMore {
 		if ctx.Err() != nil {
 			results <- source.RecordBatchResult{Err: ctx.Err()}
 			return
