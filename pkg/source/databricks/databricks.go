@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
@@ -379,7 +380,34 @@ func conformRecord(alloc memory.Allocator, rec arrow.RecordBatch, target *arrow.
 		rec.Retain()
 		return rec, nil
 	}
-	return databuffer.CastRecordToSchema(rec, target, true)
+	if int(rec.NumCols()) != target.NumFields() {
+		return nil, fmt.Errorf("result has %d columns, expected %d", rec.NumCols(), target.NumFields())
+	}
+
+	// Cast column by column so columns match by position, not by name:
+	// custom queries can return duplicate column names.
+	cols := make([]arrow.Array, target.NumFields())
+	defer func() {
+		for _, c := range cols {
+			if c != nil {
+				c.Release()
+			}
+		}
+	}()
+	for i, field := range target.Fields() {
+		col := rec.Column(i)
+		srcField := arrow.Field{Name: field.Name, Type: col.DataType(), Nullable: true}
+		single := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{srcField}, nil), []arrow.Array{col}, rec.NumRows())
+		casted, err := databuffer.CastRecordToSchema(single, arrow.NewSchema([]arrow.Field{field}, nil), true)
+		single.Release()
+		if err != nil {
+			return nil, err
+		}
+		cols[i] = casted.Column(0)
+		cols[i].Retain()
+		casted.Release()
+	}
+	return array.NewRecordBatch(target, cols, rec.NumRows()), nil
 }
 
 func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, link dbsql.ExternalLink, arrowSchema *arrow.Schema, intervals []string, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {

@@ -503,3 +503,31 @@ func TestFormatIntervals(t *testing.T) {
 	assert.True(t, out.Column(1).IsNull(1))
 	assert.Equal(t, int64(2), out.Column(2).(*array.Int64).Value(1))
 }
+
+func TestConformRecordMatchesColumnsByPosition(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "x", Type: arrow.PrimitiveTypes.Int8, Nullable: true},
+		{Name: "x", Type: arrow.PrimitiveTypes.Int8, Nullable: true},
+	}, nil)
+	alloc := memory.NewGoAllocator()
+	cols := make([]arrow.Array, 2)
+	for i, v := range []int8{1, 2} {
+		b := array.NewInt8Builder(alloc)
+		b.Append(v)
+		cols[i] = b.NewArray()
+		defer cols[i].Release()
+		b.Release()
+	}
+	rec := array.NewRecordBatch(sc, cols, 1)
+	defer rec.Release()
+	target := arrow.NewSchema([]arrow.Field{
+		{Name: "x", Type: arrow.PrimitiveTypes.Int16, Nullable: true},
+		{Name: "x", Type: arrow.PrimitiveTypes.Int16, Nullable: true},
+	}, nil)
+
+	out, err := conformRecord(alloc, rec, target, nil)
+	require.NoError(t, err)
+	defer out.Release()
+	assert.Equal(t, int16(1), out.Column(0).(*array.Int16).Value(0))
+	assert.Equal(t, int16(2), out.Column(1).(*array.Int16).Value(0))
+}
