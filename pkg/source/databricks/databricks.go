@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/databuffer"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
@@ -371,6 +372,14 @@ func downloadExternalLinkOnce(ctx context.Context, link dbsql.ExternalLink) ([]b
 	return data, false, nil
 }
 
+func conformRecord(rec arrow.RecordBatch, target *arrow.Schema) (arrow.RecordBatch, error) {
+	if target == nil {
+		rec.Retain()
+		return rec, nil
+	}
+	return databuffer.CastRecordToSchema(rec, target, true)
+}
+
 func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, link dbsql.ExternalLink, arrowSchema *arrow.Schema, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {
 	data, err := downloadExternalLink(ctx, link)
 	if err != nil {
@@ -384,7 +393,7 @@ func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.
 	defer rdr.Release()
 
 	for rdr.Next() {
-		rec, err := conformRecord(ctx, alloc, rdr.RecordBatch(), arrowSchema)
+		rec, err := conformRecord(rdr.RecordBatch(), arrowSchema)
 		if err != nil {
 			return fmt.Errorf("failed to convert record batch: %w", err)
 		}

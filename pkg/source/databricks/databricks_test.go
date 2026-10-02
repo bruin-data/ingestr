@@ -98,9 +98,9 @@ func TestProcessResultsConformsArrowTypes(t *testing.T) {
 	defer server.Close()
 
 	var columns []schema.Column
-	for _, typ := range []string{"TINYINT", "INT", "STRING", "TIMESTAMP", "ARRAY<INT>", "MAP<STRING, INT>", "STRUCT<b: INT, a: ARRAY<STRING>>"} {
+	for i, typ := range []string{"TINYINT", "INT", "STRING", "TIMESTAMP", "ARRAY<INT>", "MAP<STRING, INT>", "STRUCT<b: INT, a: ARRAY<STRING>>"} {
 		dt, p, sc, at := MapDatabricksToDataType(typ)
-		columns = append(columns, schema.Column{Name: typ, DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true})
+		columns = append(columns, schema.Column{Name: src.Field(i).Name, DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true})
 	}
 	target := buildArrowSchema(columns)
 
@@ -367,7 +367,6 @@ func TestDownloadExternalLinkRetriesTransientErrors(t *testing.T) {
 }
 
 func TestConformArrayListElements(t *testing.T) {
-	alloc := memory.NewGoAllocator()
 	src := arrow.NewSchema([]arrow.Field{
 		{Name: "bins", Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: true},
 		{Name: "tss", Type: arrow.ListOf(&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Etc/UTC"}), Nullable: true},
@@ -376,13 +375,13 @@ func TestConformArrayListElements(t *testing.T) {
 	defer rec.Release()
 
 	var columns []schema.Column
-	for _, typ := range []string{"ARRAY<BINARY>", "ARRAY<TIMESTAMP>"} {
+	for i, typ := range []string{"ARRAY<BINARY>", "ARRAY<TIMESTAMP>"} {
 		dt, p, sc, at := MapDatabricksToDataType(typ)
-		columns = append(columns, schema.Column{Name: typ, DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true})
+		columns = append(columns, schema.Column{Name: src.Field(i).Name, DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true})
 	}
 	target := buildArrowSchema(columns)
 
-	out, err := conformRecord(context.Background(), alloc, rec, target)
+	out, err := conformRecord(rec, target)
 	require.NoError(t, err)
 	defer out.Release()
 	require.True(t, out.Schema().Equal(target))
