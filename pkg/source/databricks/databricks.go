@@ -26,12 +26,14 @@ import (
 )
 
 const (
-	defaultCatalog       = "main"
-	defaultSchema        = "default"
-	defaultBatchSize     = 100000
-	statementTimeout     = "50s"
-	externalLinkAttempts = 3
+	defaultCatalog     = "main"
+	defaultSchema      = "default"
+	defaultBatchSize   = 100000
+	statementTimeout   = "50s"
+	maxRowsPerResponse = 100000
 )
+
+const externalLinkAttempts = 3
 
 var externalLinkRetryDelay = 2 * time.Second
 
@@ -296,18 +298,18 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 			return
 		}
 
-		if resp.Result == nil || len(resp.Result.ExternalLinks) == 0 {
+		if resp.Result == nil || (resp.Result.DataArray == nil && len(resp.Result.ExternalLinks) == 0) {
 			config.Debug("[DATABRICKS] Query returned no results")
 			return
 		}
 
-		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, results)
+		s.processResults(ctx, resp, arrowSchema, columns, opts.MaxBatchBytes, results)
 	}()
 
 	return results, nil
 }
 
-func downloadExternalLink(ctx context.Context, link dbsql.ExternalLink) ([]byte, error) {
+func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < externalLinkAttempts; attempt++ {
 		if attempt > 0 {
@@ -317,7 +319,7 @@ func downloadExternalLink(ctx context.Context, link dbsql.ExternalLink) ([]byte,
 				return nil, ctx.Err()
 			}
 		}
-		data, retryable, err := downloadExternalLinkOnce(ctx, link)
+		data, retryable, err := fetchExternalLinkOnce(ctx, link)
 		if err == nil {
 			return data, nil
 		}
@@ -331,7 +333,7 @@ func downloadExternalLink(ctx context.Context, link dbsql.ExternalLink) ([]byte,
 	return nil, lastErr
 }
 
-func downloadExternalLinkOnce(parent context.Context, link dbsql.ExternalLink) ([]byte, bool, error) {
+func fetchExternalLinkOnce(parent context.Context, link dbsql.ExternalLink) ([]byte, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, externalLinkMaxDuration)
 	defer cancel()
 	var stalled atomic.Bool
@@ -420,7 +422,7 @@ func conformRecord(alloc memory.Allocator, rec arrow.RecordBatch, target *arrow.
 }
 
 func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, link dbsql.ExternalLink, arrowSchema *arrow.Schema, intervals []string, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {
-	data, err := downloadExternalLink(ctx, link)
+	data, err := fetchExternalLink(ctx, link)
 	if err != nil {
 		return err
 	}
@@ -455,62 +457,116 @@ func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.
 	return nil
 }
 
-func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
+func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, columns []schema.Column, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
 	alloc := memory.NewGoAllocator()
 	intervals := intervalQualifiers(resp.Manifest)
+	processed := -1
 
-	nextChunk := 0
-	hasMore := false
-	processChunk := func(rd *dbsql.ResultData) error {
-		hasMore = rd.NextChunkInternalLink != ""
-		for _, link := range rd.ExternalLinks {
-			if link.ChunkIndex < nextChunk {
+	processResultData := func(rd *dbsql.ResultData) error {
+		for i, link := range rd.ExternalLinks {
+			if link.ChunkIndex <= processed {
 				continue
 			}
-			config.Debug("[DATABRICKS] Fetching chunk %d: row_count=%d, byte_count=%d", link.ChunkIndex, link.RowCount, link.ByteCount)
+			config.Debug("[DATABRICKS] Fetching external link %d/%d: row_count=%d, byte_count=%d", i+1, len(rd.ExternalLinks), link.RowCount, link.ByteCount)
 			if err := s.streamExternalLink(ctx, alloc, link, arrowSchema, intervals, maxBatchBytes, results); err != nil {
-				return fmt.Errorf("chunk %d: %w", link.ChunkIndex, err)
+				return fmt.Errorf("failed to fetch external link: %w", err)
 			}
-			nextChunk = link.ChunkIndex + 1
-			hasMore = link.NextChunkInternalLink != ""
+			processed = link.ChunkIndex
 		}
 		return nil
 	}
 
-	if err := processChunk(resp.Result); err != nil {
+	if err := processResultData(resp.Result); err != nil {
 		results <- source.RecordBatchResult{Err: err}
 		return
 	}
 
+	statementID := resp.StatementId
 	totalChunks := 0
 	if resp.Manifest != nil {
 		totalChunks = resp.Manifest.TotalChunkCount
 	}
 
-	for nextChunk < totalChunks || hasMore {
-		if ctx.Err() != nil {
-			results <- source.RecordBatchResult{Err: ctx.Err()}
-			return
-		}
+	if totalChunks > 1 {
+		config.Debug("[DATABRICKS] Fetching remaining %d chunks by index (total=%d)", totalChunks-1, totalChunks)
+		for chunkIndex := 1; chunkIndex < totalChunks; chunkIndex++ {
+			if chunkIndex <= processed {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				results <- source.RecordBatchResult{Err: ctx.Err()}
+				return
+			default:
+			}
 
-		chunkIndex := nextChunk
-		chunkResp, err := s.client.StatementExecution.GetStatementResultChunkN(ctx, dbsql.GetStatementResultChunkNRequest{
-			StatementId: resp.StatementId,
-			ChunkIndex:  chunkIndex,
-		})
-		if err != nil {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk %d: %w", chunkIndex, err)}
-			return
+			config.Debug("[DATABRICKS] Fetching chunk index=%d", chunkIndex)
+			chunkResp, err := s.client.StatementExecution.GetStatementResultChunkN(ctx, dbsql.GetStatementResultChunkNRequest{
+				StatementId: statementID,
+				ChunkIndex:  chunkIndex,
+			})
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
+				return
+			}
+			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
+				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), len(chunkResp.DataArray), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
+
+			if err := processResultData(chunkResp); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
 		}
-		if err := processChunk(chunkResp); err != nil {
-			results <- source.RecordBatchResult{Err: err}
-			return
+		config.Debug("[DATABRICKS] Chunk pagination complete")
+	} else if next, ok := nextChunk(resp.Result); ok {
+		chunkIndex := next
+		config.Debug("[DATABRICKS] Entering link-based chunk pagination: starting_chunk_index=%d", chunkIndex)
+
+		for {
+			select {
+			case <-ctx.Done():
+				results <- source.RecordBatchResult{Err: ctx.Err()}
+				return
+			default:
+			}
+
+			config.Debug("[DATABRICKS] Fetching chunk index=%d", chunkIndex)
+			chunkResp, err := s.client.StatementExecution.GetStatementResultChunkN(ctx, dbsql.GetStatementResultChunkNRequest{
+				StatementId: statementID,
+				ChunkIndex:  chunkIndex,
+			})
+			if err != nil {
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
+				return
+			}
+			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
+				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), len(chunkResp.DataArray), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
+
+			if err := processResultData(chunkResp); err != nil {
+				results <- source.RecordBatchResult{Err: err}
+				return
+			}
+
+			next, ok := nextChunk(chunkResp)
+			if !ok {
+				config.Debug("[DATABRICKS] No more chunks after index=%d", chunkIndex)
+				break
+			}
+			chunkIndex = next
 		}
-		if nextChunk == chunkIndex {
-			results <- source.RecordBatchResult{Err: fmt.Errorf("result chunk %d returned no external links", chunkIndex)}
-			return
-		}
+		config.Debug("[DATABRICKS] Link-based chunk pagination complete")
+	} else {
+		config.Debug("[DATABRICKS] No chunk pagination needed")
 	}
+}
+
+// nextChunk reports the next chunk to fetch. With external links the
+// continuation is carried on the last link rather than on the result itself.
+func nextChunk(rd *dbsql.ResultData) (int, bool) {
+	if n := len(rd.ExternalLinks); n > 0 && rd.ExternalLinks[n-1].NextChunkInternalLink != "" {
+		return rd.ExternalLinks[n-1].NextChunkIndex, true
+	}
+	return rd.NextChunkIndex, rd.NextChunkInternalLink != ""
 }
 
 func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -543,7 +599,16 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			return
 		}
 
-		if resp.Result == nil || len(resp.Result.ExternalLinks) == 0 {
+		if resp.Manifest != nil {
+			config.Debug("[DATABRICKS] Manifest: total_row_count=%d, total_chunk_count=%d, total_byte_count=%d, truncated=%v",
+				resp.Manifest.TotalRowCount, resp.Manifest.TotalChunkCount, resp.Manifest.TotalByteCount, resp.Manifest.Truncated)
+		}
+		if resp.Result != nil {
+			config.Debug("[DATABRICKS] Initial result: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
+				resp.Result.RowCount, resp.Result.RowOffset, len(resp.Result.ExternalLinks), len(resp.Result.DataArray), resp.Result.NextChunkIndex, resp.Result.NextChunkInternalLink != "")
+		}
+
+		if resp.Result == nil || (resp.Result.DataArray == nil && len(resp.Result.ExternalLinks) == 0) {
 			config.Debug("[DATABRICKS] Custom query returned no results")
 			return
 		}
@@ -567,7 +632,7 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			arrowSchema = buildArrowSchema(columns)
 		}
 
-		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, results)
+		s.processResults(ctx, resp, arrowSchema, columns, opts.MaxBatchBytes, results)
 	}()
 
 	return results, nil

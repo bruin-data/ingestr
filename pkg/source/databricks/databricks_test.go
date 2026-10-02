@@ -23,6 +23,135 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestProcessResultsByteCap(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+		{Name: "b", DataType: schema.TypeString, Nullable: true},
+	}
+	const rowCount = 60
+	rows := make([]string, rowCount)
+	for i := range rows {
+		rows[i] = `{"a": "0123456789", "b": "0123456789"}`
+	}
+	rec := recordFromJSON(t, buildArrowSchema(columns), "["+strings.Join(rows, ",")+"]")
+	defer rec.Release()
+	server := arrowStreamServer(t, rec)
+	defer server.Close()
+
+	cases := []struct {
+		name          string
+		maxBatchBytes int64
+		wantBatches   int
+	}{
+		// Disabled cap: 60 rows well under defaultBatchSize -> one batch.
+		{"cap disabled", 0, 1},
+		// The Arrow chunk is sliced so each batch stays near the byte cap.
+		{"small byte cap", 200, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &dbsql.StatementResponse{Result: &dbsql.ResultData{ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL}}}}
+			results := make(chan source.RecordBatchResult)
+			go func() {
+				defer close(results)
+				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, tc.maxBatchBytes, results)
+			}()
+
+			batches := 0
+			total := int64(0)
+			for res := range results {
+				require.NoError(t, res.Err)
+				require.NotNil(t, res.Batch)
+				batches++
+				total += res.Batch.NumRows()
+				res.Batch.Release()
+			}
+
+			assert.Equal(t, int64(rowCount), total, "all rows must be preserved")
+			if tc.wantBatches > 0 {
+				assert.Equal(t, tc.wantBatches, batches)
+			} else {
+				assert.Greater(t, batches, 1)
+			}
+		})
+	}
+}
+
+func TestProcessResultsExternalLinks(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+		{Name: "b", DataType: schema.TypeString, Nullable: true},
+	}
+	rec := recordFromJSON(t, buildArrowSchema(columns), `[{"a": "hello", "b": "world"}, {"a": "foo", "b": "bar"}]`)
+	defer rec.Release()
+	server := arrowStreamServer(t, rec)
+	defer server.Close()
+
+	resp := &dbsql.StatementResponse{
+		Result: &dbsql.ResultData{
+			ExternalLinks: []dbsql.ExternalLink{
+				{ExternalLink: server.URL},
+			},
+		},
+	}
+
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
+	}()
+
+	totalRows := int64(0)
+	for res := range results {
+		require.NoError(t, res.Err)
+		require.NotNil(t, res.Batch)
+		totalRows += res.Batch.NumRows()
+		res.Batch.Release()
+	}
+
+	assert.Equal(t, int64(2), totalRows)
+}
+
+func TestProcessResultsExternalLinksError(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "a", DataType: schema.TypeString, Nullable: true},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	resp := &dbsql.StatementResponse{
+		Result: &dbsql.ResultData{
+			ExternalLinks: []dbsql.ExternalLink{
+				{ExternalLink: server.URL},
+			},
+		},
+	}
+
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
+	}()
+
+	var foundErr error
+	for res := range results {
+		if res.Err != nil {
+			foundErr = res.Err
+			break
+		}
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+
+	require.Error(t, foundErr)
+	assert.Contains(t, foundErr.Error(), "external link returned status 500")
+}
+
 func TestMain(m *testing.M) {
 	externalLinkRetryDelay = time.Millisecond
 	os.Exit(m.Run())
@@ -57,7 +186,7 @@ func collect(t *testing.T, resp *dbsql.StatementResponse, target *arrow.Schema, 
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, target, maxBatchBytes, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, target, nil, maxBatchBytes, results)
 	}()
 	var batches []arrow.RecordBatch
 	for res := range results {
@@ -115,7 +244,7 @@ func TestProcessResultsConformsArrowTypes(t *testing.T) {
 	require.True(t, out.Schema().Equal(target))
 	require.Equal(t, int64(2), out.NumRows())
 
-	assert.Equal(t, int8(7), out.Column(0).(*array.Int8).Value(0))
+	assert.Equal(t, int16(7), out.Column(0).(*array.Int16).Value(0))
 	assert.Equal(t, int32(1), out.Column(1).(*array.Int32).Value(0))
 	assert.Equal(t, "", out.Column(2).(*array.String).Value(0))
 	assert.False(t, out.Column(2).IsNull(0))
@@ -127,48 +256,6 @@ func TestProcessResultsConformsArrowTypes(t *testing.T) {
 
 	for i := 0; i < int(out.NumCols()); i++ {
 		assert.True(t, out.Column(i).IsNull(1), "column %d must keep NULL", i)
-	}
-}
-
-func TestProcessResultsByteCap(t *testing.T) {
-	sc := arrow.NewSchema([]arrow.Field{
-		{Name: "a", Type: arrow.BinaryTypes.String, Nullable: true},
-		{Name: "b", Type: arrow.BinaryTypes.String, Nullable: true},
-	}, nil)
-	const rowCount = 60
-	rows := make([]string, rowCount)
-	for i := range rows {
-		rows[i] = `{"a": "0123456789", "b": "0123456789"}`
-	}
-	rec := recordFromJSON(t, sc, "["+strings.Join(rows, ",")+"]")
-	defer rec.Release()
-	server := arrowStreamServer(t, rec)
-	defer server.Close()
-
-	for _, tc := range []struct {
-		name          string
-		maxBatchBytes int64
-		wantMin       int
-		wantMax       int
-	}{
-		{"cap disabled", 0, 1, 1},
-		{"small cap", 200, 2, 60},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			batches, err := collect(t, &dbsql.StatementResponse{Result: &dbsql.ResultData{
-				ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL}},
-			}}, sc, tc.maxBatchBytes)
-			require.NoError(t, err)
-
-			total := int64(0)
-			for _, b := range batches {
-				total += b.NumRows()
-				b.Release()
-			}
-			assert.Equal(t, int64(rowCount), total, "all rows must be preserved")
-			assert.GreaterOrEqual(t, len(batches), tc.wantMin)
-			assert.LessOrEqual(t, len(batches), tc.wantMax)
-		})
 	}
 }
 
@@ -187,20 +274,7 @@ func TestProcessResultsSkipsRepeatedChunks(t *testing.T) {
 	batches[0].Release()
 }
 
-func TestProcessResultsExternalLinkError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	_, err := collect(t, &dbsql.StatementResponse{Result: &dbsql.ResultData{
-		ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL}},
-	}}, nil, 0)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "external link returned status 500")
-}
-
-func TestDownloadExternalLinkSendsHeaders(t *testing.T) {
+func TestFetchExternalLinkSendsHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-amz-server-side-encryption-customer-key") != "secret-key" {
 			http.Error(w, "missing header", http.StatusForbidden)
@@ -210,7 +284,7 @@ func TestDownloadExternalLinkSendsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	data, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{
+	data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{
 		ExternalLink: server.URL,
 		HttpHeaders:  map[string]string{"x-amz-server-side-encryption-customer-key": "secret-key"},
 	})
@@ -218,12 +292,12 @@ func TestDownloadExternalLinkSendsHeaders(t *testing.T) {
 	assert.Equal(t, `[["a"]]`, string(data))
 }
 
-func TestDownloadExternalLinkErrorOmitsURL(t *testing.T) {
+func TestFetchExternalLinkErrorOmitsURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	link := server.URL + "/chunk?X-Databricks-Signature=topsecret"
 	server.Close()
 
-	_, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: link})
+	_, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: link})
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "topsecret")
 	assert.NotContains(t, err.Error(), server.URL)
@@ -282,7 +356,7 @@ func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
 	assert.Equal(t, []int64{1, 2, 3}, ids)
 }
 
-func TestDownloadExternalLinkStallTimeout(t *testing.T) {
+func TestFetchExternalLinkStallTimeout(t *testing.T) {
 	orig := externalLinkStallTimeout
 	externalLinkStallTimeout = 100 * time.Millisecond
 	defer func() { externalLinkStallTimeout = orig }()
@@ -316,7 +390,7 @@ func TestDownloadExternalLinkStallTimeout(t *testing.T) {
 			defer close(release)
 
 			start := time.Now()
-			data, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+			data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "no data received")
@@ -330,7 +404,7 @@ func TestDownloadExternalLinkStallTimeout(t *testing.T) {
 	}
 }
 
-func TestDownloadExternalLinkRetriesTransientErrors(t *testing.T) {
+func TestFetchExternalLinkRetriesTransientErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		failures  int
@@ -354,7 +428,7 @@ func TestDownloadExternalLinkRetriesTransientErrors(t *testing.T) {
 			}))
 			defer server.Close()
 
-			data, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+			data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
 			if tc.wantErr {
 				require.Error(t, err)
 			} else {
@@ -434,7 +508,7 @@ func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, 0, results)
+		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, nil, 0, results)
 	}()
 	var ids []int64
 	for res := range results {
@@ -532,7 +606,7 @@ func TestConformRecordMatchesColumnsByPosition(t *testing.T) {
 	assert.Equal(t, int16(2), out.Column(1).(*array.Int16).Value(0))
 }
 
-func TestDownloadExternalLinkMaxDuration(t *testing.T) {
+func TestFetchExternalLinkMaxDuration(t *testing.T) {
 	origStall, origMax := externalLinkStallTimeout, externalLinkMaxDuration
 	externalLinkStallTimeout, externalLinkMaxDuration = 100*time.Millisecond, 300*time.Millisecond
 	defer func() { externalLinkStallTimeout, externalLinkMaxDuration = origStall, origMax }()
@@ -555,7 +629,7 @@ func TestDownloadExternalLinkMaxDuration(t *testing.T) {
 	defer close(release)
 
 	start := time.Now()
-	_, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+	_, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not finish within")
 	assert.Less(t, time.Since(start), 2*externalLinkMaxDuration, "must not retry after the overall limit")

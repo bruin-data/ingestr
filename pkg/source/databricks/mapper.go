@@ -39,7 +39,7 @@ func MapDatabricksToDataType(dbType string) (schema.DataType, int, int, schema.D
 		return schema.TypeBoolean, 0, 0, schema.TypeUnknown
 
 	case upperType == "TINYINT" || upperType == "BYTE":
-		return schema.TypeInt8, 0, 0, schema.TypeUnknown
+		return schema.TypeInt16, 0, 0, schema.TypeUnknown
 
 	case upperType == "SMALLINT" || upperType == "SHORT":
 		return schema.TypeInt16, 0, 0, schema.TypeUnknown
@@ -68,10 +68,10 @@ func MapDatabricksToDataType(dbType string) (schema.DataType, int, int, schema.D
 	case upperType == "DATE":
 		return schema.TypeDate, 0, 0, schema.TypeUnknown
 
-	case upperType == "TIMESTAMP_NTZ":
+	case upperType == "TIMESTAMP" || upperType == "TIMESTAMP_NTZ":
 		return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
 
-	case upperType == "TIMESTAMP" || upperType == "TIMESTAMP_LTZ":
+	case upperType == "TIMESTAMP_LTZ":
 		return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown
 
 	case upperType == "INTERVAL":
