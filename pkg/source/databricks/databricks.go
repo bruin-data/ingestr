@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -23,22 +25,16 @@ import (
 )
 
 const (
-	defaultCatalog      = "main"
-	defaultSchema       = "default"
-	defaultBatchSize    = 100000
-	statementTimeout    = "50s"
-	maxRowsPerResponse  = 100000
-	externalLinkTimeout = 2 * time.Minute
-	linkResponseTimeout = 30 * time.Second
+	defaultCatalog     = "main"
+	defaultSchema      = "default"
+	defaultBatchSize   = 100000
+	statementTimeout   = "50s"
+	maxRowsPerResponse = 100000
 )
 
-var externalLinkClient = newExternalLinkClient()
-
-func newExternalLinkClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = linkResponseTimeout
-	return &http.Client{Transport: transport, Timeout: externalLinkTimeout}
-}
+// A chunk download fails only when no bytes arrive for this long, so slow
+// connections can still finish while hung ones fail fast.
+var externalLinkStallTimeout = 30 * time.Second
 
 type DatabricksSource struct {
 	client     *databricks.WorkspaceClient
@@ -289,7 +285,36 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 	return results, nil
 }
 
+type stallReader struct {
+	r     io.Reader
+	timer *time.Timer
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(externalLinkStallTimeout)
+	}
+	return n, err
+}
+
 func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	timer := time.AfterFunc(externalLinkStallTimeout, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	defer timer.Stop()
+
+	wrap := func(msg string, err error) error {
+		if stalled.Load() {
+			return fmt.Errorf("%s: no data received for %s", msg, externalLinkStallTimeout)
+		}
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.ExternalLink, nil)
 	if err != nil {
 		return nil, errors.New("failed to create external link request")
@@ -298,14 +323,14 @@ func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string
 		req.Header.Set(k, v)
 	}
 
-	resp, err := externalLinkClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		// The presigned URL carries a temporary credential, so drop it from the error.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return nil, fmt.Errorf("failed to download external link: %w", err)
+		return nil, wrap("failed to download external link", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -314,8 +339,8 @@ func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string
 	}
 
 	var data [][]string
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode external link data: %w", err)
+	if err := json.NewDecoder(&stallReader{r: resp.Body, timer: timer}).Decode(&data); err != nil {
+		return nil, wrap("failed to decode external link data", err)
 	}
 	return data, nil
 }

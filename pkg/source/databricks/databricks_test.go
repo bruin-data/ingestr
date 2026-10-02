@@ -312,22 +312,50 @@ func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
 	assert.Equal(t, []int64{1, 2, 3}, ids)
 }
 
-func TestFetchExternalLinkFailsFastWhenServerHangs(t *testing.T) {
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release
-	}))
-	defer server.Close()
-	defer close(release)
+func TestFetchExternalLinkStallTimeout(t *testing.T) {
+	orig := externalLinkStallTimeout
+	externalLinkStallTimeout = 100 * time.Millisecond
+	defer func() { externalLinkStallTimeout = orig }()
 
-	orig := externalLinkClient
-	transport := orig.Transport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 50 * time.Millisecond
-	externalLinkClient = &http.Client{Transport: transport, Timeout: orig.Timeout}
-	defer func() { externalLinkClient = orig }()
+	payload := []byte(`[["1"],["2"],["3"],["4"],["5"],["6"],["7"],["8"]]`)
+	for _, tc := range []struct {
+		name    string
+		handler func(w http.ResponseWriter, release <-chan struct{})
+		wantErr bool
+	}{
+		{"no response", func(w http.ResponseWriter, release <-chan struct{}) { <-release }, true},
+		{"stalls mid-body", func(w http.ResponseWriter, release <-chan struct{}) {
+			_, _ = w.Write(payload[:10])
+			w.(http.Flusher).Flush()
+			<-release
+		}, true},
+		{"slow but steady", func(w http.ResponseWriter, release <-chan struct{}) {
+			for i := range payload {
+				_, _ = w.Write(payload[i : i+1])
+				w.(http.Flusher).Flush()
+				time.Sleep(10 * time.Millisecond)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				tc.handler(w, release)
+			}))
+			defer server.Close()
+			defer close(release)
 
-	start := time.Now()
-	_, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
-	require.Error(t, err)
-	assert.Less(t, time.Since(start), time.Second)
+			start := time.Now()
+			data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "no data received")
+				assert.Less(t, time.Since(start), time.Second)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, data, 8)
+			assert.Greater(t, time.Since(start), externalLinkStallTimeout)
+		})
+	}
 }
