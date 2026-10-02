@@ -757,3 +757,49 @@ func TestCompare_NormalizationDoesNotChangeAddedColumnDDLType(t *testing.T) {
 	assert.Equal(t, schema.TypeJSON, result.Changes[0].NewColumn.DataType)
 	assert.Equal(t, 64, result.Changes[0].NewColumn.MaxLength)
 }
+
+func TestCompare_LengthFromOverride(t *testing.T) {
+	dest := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "k", DataType: schema.TypeString, MaxLength: 100},
+		{Name: "id", DataType: schema.TypeInt64},
+	}}
+	keyWidth := func(source, _ schema.Column) schema.Column {
+		if source.DataType == schema.TypeString && source.MaxLength <= 0 {
+			source.MaxLength = 768
+		}
+		return source
+	}
+	for _, tc := range []struct {
+		name      string
+		source    schema.Column
+		overrides string
+		wantType  ChangeType
+		want      bool
+	}{
+		{"override with a length", schema.Column{Name: "k", DataType: schema.TypeString}, "k:varchar(768)", ChangeOverrideType, true},
+		{"override without a length", schema.Column{Name: "k", DataType: schema.TypeString}, "k:string", ChangeOverrideType, false},
+		{"type override with a length", schema.Column{Name: "id", DataType: schema.TypeInt64}, "id:varchar(50)", ChangeOverrideType, true},
+		{"type override without a length", schema.Column{Name: "id", DataType: schema.TypeInt64}, "id:string", ChangeOverrideType, false},
+		{"source widening", schema.Column{Name: "k", DataType: schema.TypeString, MaxLength: 768}, "", ChangeWidenType, false},
+		{"new column with a length", schema.Column{Name: "extra", DataType: schema.TypeString}, "extra:varchar(50)", ChangeAddColumn, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			overrides, err := ParseColumnOverrides(tc.overrides)
+			require.NoError(t, err)
+			comparison, err := Compare(&schema.TableSchema{Columns: []schema.Column{tc.source}}, dest, &CompareOptions{
+				Overrides:             overrides,
+				NormalizeSourceColumn: keyWidth,
+			})
+			require.NoError(t, err)
+			var change *SchemaChange
+			for i := range comparison.Changes {
+				if comparison.Changes[i].ColumnName == tc.source.Name {
+					change = &comparison.Changes[i]
+				}
+			}
+			require.NotNil(t, change)
+			assert.Equal(t, tc.wantType, change.Type)
+			assert.Equal(t, tc.want, change.LengthFromOverride)
+		})
+	}
+}

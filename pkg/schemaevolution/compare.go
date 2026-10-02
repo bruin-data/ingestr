@@ -130,10 +130,11 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 			}
 
 			changes = append(changes, SchemaChange{
-				Type:       changeType,
-				ColumnName: newCol.Name,
-				OldColumn:  oldCol,
-				NewColumn:  newCol,
+				Type:               changeType,
+				ColumnName:         newCol.Name,
+				OldColumn:          oldCol,
+				NewColumn:          newCol,
+				LengthFromOverride: exists && override.MaxLength > 0,
 			})
 			continue
 		}
