@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -309,4 +310,24 @@ func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
 		res.Batch.Release()
 	}
 	assert.Equal(t, []int64{1, 2, 3}, ids)
+}
+
+func TestFetchExternalLinkFailsFastWhenServerHangs(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	orig := externalLinkClient
+	transport := orig.Transport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 50 * time.Millisecond
+	externalLinkClient = &http.Client{Transport: transport, Timeout: orig.Timeout}
+	defer func() { externalLinkClient = orig }()
+
+	start := time.Now()
+	_, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
 }

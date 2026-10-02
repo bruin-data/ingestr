@@ -28,8 +28,17 @@ const (
 	defaultBatchSize    = 100000
 	statementTimeout    = "50s"
 	maxRowsPerResponse  = 100000
-	externalLinkTimeout = 5 * time.Minute
+	externalLinkTimeout = 2 * time.Minute
+	linkResponseTimeout = 30 * time.Second
 )
+
+var externalLinkClient = newExternalLinkClient()
+
+func newExternalLinkClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = linkResponseTimeout
+	return &http.Client{Transport: transport, Timeout: externalLinkTimeout}
+}
 
 type DatabricksSource struct {
 	client     *databricks.WorkspaceClient
@@ -289,8 +298,7 @@ func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: externalLinkTimeout}
-	resp, err := client.Do(req)
+	resp, err := externalLinkClient.Do(req)
 	if err != nil {
 		// The presigned URL carries a temporary credential, so drop it from the error.
 		var urlErr *url.Error
