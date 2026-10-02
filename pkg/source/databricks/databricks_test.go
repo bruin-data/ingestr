@@ -531,3 +531,32 @@ func TestConformRecordMatchesColumnsByPosition(t *testing.T) {
 	assert.Equal(t, int16(1), out.Column(0).(*array.Int16).Value(0))
 	assert.Equal(t, int16(2), out.Column(1).(*array.Int16).Value(0))
 }
+
+func TestDownloadExternalLinkMaxDuration(t *testing.T) {
+	origStall, origMax := externalLinkStallTimeout, externalLinkMaxDuration
+	externalLinkStallTimeout, externalLinkMaxDuration = 100*time.Millisecond, 300*time.Millisecond
+	defer func() { externalLinkStallTimeout, externalLinkMaxDuration = origStall, origMax }()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for {
+			select {
+			case <-release:
+				return
+			case <-r.Context().Done():
+				return
+			case <-time.After(20 * time.Millisecond):
+				_, _ = w.Write([]byte("x"))
+				w.(http.Flusher).Flush()
+			}
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	start := time.Now()
+	_, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not finish within")
+	assert.Less(t, time.Since(start), 3*time.Second)
+}

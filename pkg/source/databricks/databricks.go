@@ -37,7 +37,10 @@ var externalLinkRetryDelay = 2 * time.Second
 
 // A chunk download fails only when no bytes arrive for this long, so slow
 // connections can still finish while hung ones fail fast.
-var externalLinkStallTimeout = 30 * time.Second
+var (
+	externalLinkStallTimeout = 30 * time.Second
+	externalLinkMaxDuration  = 15 * time.Minute
+)
 
 type stallReader struct {
 	r     io.Reader
@@ -325,8 +328,8 @@ func downloadExternalLink(ctx context.Context, link dbsql.ExternalLink) ([]byte,
 	return nil, lastErr
 }
 
-func downloadExternalLinkOnce(ctx context.Context, link dbsql.ExternalLink) ([]byte, bool, error) {
-	ctx, cancel := context.WithCancel(ctx)
+func downloadExternalLinkOnce(parent context.Context, link dbsql.ExternalLink) ([]byte, bool, error) {
+	ctx, cancel := context.WithTimeout(parent, externalLinkMaxDuration)
 	defer cancel()
 	var stalled atomic.Bool
 	timer := time.AfterFunc(externalLinkStallTimeout, func() {
@@ -336,6 +339,9 @@ func downloadExternalLinkOnce(ctx context.Context, link dbsql.ExternalLink) ([]b
 	defer timer.Stop()
 
 	wrap := func(msg string, err error) error {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+			return fmt.Errorf("%s: download did not finish within %s", msg, externalLinkMaxDuration)
+		}
 		if stalled.Load() {
 			return fmt.Errorf("%s: no data received for %s", msg, externalLinkStallTimeout)
 		}
