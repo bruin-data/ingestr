@@ -15,6 +15,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/stretchr/testify/assert"
@@ -865,14 +866,45 @@ func TestOracleSwapQuotedDotTargetDoesNotAddressUnrelatedOrder(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestOracleDialectDoesNotSupportDirectTypeAlter(t *testing.T) {
+func TestOracleDialectOnlyWidensVarchar2(t *testing.T) {
 	dialect := &Dialect{}
 
-	assert.False(t, dialect.SupportsAlterType())
-	assert.Empty(t, dialect.AlterColumnTypeSQL("users", "age", schema.Column{
-		Name:     "age",
-		DataType: schema.TypeString,
+	assert.True(t, dialect.SupportsAlterType())
+	assert.Equal(t, `ALTER TABLE "USERS" MODIFY ("NAME" VARCHAR2(200 CHAR))`, dialect.AlterColumnTypeSQL("users", "name", schema.Column{
+		Name: "name", DataType: schema.TypeString, MaxLength: 200,
 	}))
+	assert.Equal(t, `ALTER TABLE "USERS" MODIFY ("ID" VARCHAR2(4000 CHAR))`, dialect.AlterColumnTypeSQL("users", "id", schema.Column{
+		Name: "id", DataType: schema.TypeString, IsPrimaryKey: true,
+	}))
+	assert.Empty(t, dialect.AlterColumnTypeSQL("users", "bio", schema.Column{Name: "bio", DataType: schema.TypeString}))
+	assert.Empty(t, dialect.AlterColumnTypeSQL("users", "age", schema.Column{Name: "age", DataType: schema.TypeInt64}))
+}
+
+func TestOracleSchemaEvolutionWidensUnboundedPrimaryKey(t *testing.T) {
+	dest := &OracleDestination{}
+	key := schema.Column{Name: "ID", DataType: schema.TypeString, MaxLength: 100, IsPrimaryKey: true}
+	got := dest.NormalizeSchemaEvolutionSourceColumn(schema.Column{Name: "ID", DataType: schema.TypeString}, key)
+	assert.Equal(t, 4000, got.MaxLength)
+	got = dest.NormalizeSchemaEvolutionSourceColumn(schema.Column{Name: "ID", DataType: schema.TypeString, MaxLength: 200}, key)
+	assert.Equal(t, 200, got.MaxLength)
+	key.IsPrimaryKey = false
+	got = dest.NormalizeSchemaEvolutionSourceColumn(schema.Column{Name: "ID", DataType: schema.TypeString}, key)
+	assert.Zero(t, got.MaxLength)
+}
+
+func TestOracleApplySchemaEvolutionRejectsNonStringTypeChanges(t *testing.T) {
+	dest := &OracleDestination{}
+	old := schema.Column{Name: "AGE", DataType: schema.TypeInt32}
+	_, err := dest.ApplySchemaEvolution(t.Context(), "users", &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "AGE", OldColumn: &old, NewColumn: schema.Column{Name: "AGE", DataType: schema.TypeString},
+	}}})
+	assert.ErrorContains(t, err, "Oracle only supports widening VARCHAR2 columns")
+
+	number := schema.Column{Name: "QTY", DataType: schema.TypeDecimal}
+	_, err = dest.ApplySchemaEvolution(t.Context(), "users", &schemaevolution.SchemaComparison{HasChanges: true, Changes: []schemaevolution.SchemaChange{{
+		Type: schemaevolution.ChangeWidenType, ColumnName: "QTY", OldColumn: &number, NewColumn: schema.Column{Name: "QTY", DataType: schema.TypeDecimal, Precision: 38},
+	}}})
+	assert.NoError(t, err)
 }
 
 func TestOracleDialectTypeName_PrimaryKeyStringUsesVarchar(t *testing.T) {

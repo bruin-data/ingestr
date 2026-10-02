@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2058,10 +2059,20 @@ func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 		return nil, nil
 	}
 
+	// COLUMN_KEY reports a UNIQUE NOT NULL index as PRI when no primary key exists.
+	primaryKeys, err := d.primaryKeyColumns(ctx, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query table primary key: %w", err)
+	}
+	for i := range columns {
+		columns[i].IsPrimaryKey = slices.ContainsFunc(primaryKeys, func(key string) bool { return strings.EqualFold(key, columns[i].Name) })
+	}
+
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  database,
-		Columns: columns,
+		Name:        tableName,
+		Schema:      database,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 
@@ -2234,6 +2245,9 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 func buildCreateTableSQLForReference(tableReference string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
 	binaryClaimKey := isCDCTargetClaimTable(columns, primaryKeys)
+	if !binaryClaimKey {
+		columns = boundKeyColumns(columns, primaryKeys)
+	}
 	for _, col := range columns {
 		colType := MapDataTypeToMySQL(col)
 		if binaryClaimKey && col.Name == "destination_table" {

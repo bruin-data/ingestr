@@ -446,7 +446,12 @@ func TestAllDialects_AddColumnSQL_Nullable(t *testing.T) {
 func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 	// Dialects that fold unquoted identifiers to upper case.
 	dialectsUpperCasingIdentifiers := map[string]bool{
-		"hana": true,
+		"hana":   true,
+		"oracle": true,
+	}
+	// Dialects that can only widen string columns in place.
+	dialectsWideningStringsOnly := map[string]bool{
+		"oracle": true,
 	}
 
 	for _, dt := range allDialects() {
@@ -460,6 +465,9 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 				expectedTable = "TEST_TABLE"
 			}
 			newType := schema.Column{Name: "val", DataType: schema.TypeInt64, Nullable: true}
+			if dialectsWideningStringsOnly[dt.Scheme] {
+				newType = schema.Column{Name: "val", DataType: schema.TypeString, MaxLength: 200, Nullable: true}
+			}
 			sql := dt.Dialect.AlterColumnTypeSQL("test_table", "val", newType)
 			assert.Contains(t, sql, "ALTER TABLE")
 			assert.Contains(t, sql, expectedTable, "SQL should contain table name")
@@ -469,8 +477,8 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 }
 
 func TestDialect_SupportsAlterType(t *testing.T) {
-	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse", "fabric", "hana"}
-	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "maxcompute", "oracle"}
+	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse", "fabric", "hana", "oracle"}
+	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "maxcompute"}
 
 	for _, scheme := range dialectsWithAlter {
 		t.Run(scheme+"_supports", func(t *testing.T) {
