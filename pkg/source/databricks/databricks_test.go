@@ -381,7 +381,7 @@ func TestConformArrayListElements(t *testing.T) {
 	}
 	target := buildArrowSchema(columns)
 
-	out, err := conformRecord(rec, target)
+	out, err := conformRecord(memory.NewGoAllocator(), rec, target, nil)
 	require.NoError(t, err)
 	defer out.Release()
 	require.True(t, out.Schema().Equal(target))
@@ -446,4 +446,60 @@ func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
 		res.Batch.Release()
 	}
 	assert.Equal(t, []int64{1, 2}, ids)
+}
+
+func TestFormatIntervals(t *testing.T) {
+	for _, tc := range []struct {
+		qualifier string
+		micros    int64
+		want      string
+	}{
+		{"DAY", 86_400_000_000, "INTERVAL '1' DAY"},
+		{"DAY", -3 * 86_400_000_000, "INTERVAL '-3' DAY"},
+		{"HOUR", 26 * 3_600_000_000, "INTERVAL '26' HOUR"},
+		{"MINUTE", -90 * 60_000_000, "INTERVAL '-90' MINUTE"},
+		{"SECOND", 4_500_000, "INTERVAL '04.5' SECOND"},
+		{"SECOND", -1, "INTERVAL '-00.000001' SECOND"},
+		{"SECOND", 75_000_000, "INTERVAL '75' SECOND"},
+		{"DAY TO HOUR", 93_600_000_000, "INTERVAL '1 02' DAY TO HOUR"},
+		{"DAY TO MINUTE", 93_780_000_000, "INTERVAL '1 02:03' DAY TO MINUTE"},
+		{"DAY TO SECOND", 93_784_500_000, "INTERVAL '1 02:03:04.5' DAY TO SECOND"},
+		{"DAY TO SECOND", -93_784_123_456, "INTERVAL '-1 02:03:04.123456' DAY TO SECOND"},
+		{"DAY TO SECOND", 0, "INTERVAL '0 00:00:00' DAY TO SECOND"},
+		{"HOUR TO MINUTE", 93_780_000_000, "INTERVAL '26:03' HOUR TO MINUTE"},
+		{"HOUR TO SECOND", 93_784_500_000, "INTERVAL '26:03:04.5' HOUR TO SECOND"},
+		{"MINUTE TO SECOND", 5_404_500_000, "INTERVAL '90:04.5' MINUTE TO SECOND"},
+		{"MINUTE TO SECOND", -5_404_000_000, "INTERVAL '-90:04' MINUTE TO SECOND"},
+	} {
+		assert.Equal(t, tc.want, formatDayTimeInterval(tc.micros, tc.qualifier))
+	}
+	for _, tc := range []struct {
+		qualifier string
+		months    int64
+		want      string
+	}{
+		{"YEAR", 12, "INTERVAL '1' YEAR"},
+		{"YEAR", -24, "INTERVAL '-2' YEAR"},
+		{"MONTH", 15, "INTERVAL '15' MONTH"},
+		{"YEAR TO MONTH", 14, "INTERVAL '1-2' YEAR TO MONTH"},
+		{"YEAR TO MONTH", -14, "INTERVAL '-1-2' YEAR TO MONTH"},
+		{"YEAR TO MONTH", 0, "INTERVAL '0-0' YEAR TO MONTH"},
+	} {
+		assert.Equal(t, tc.want, formatYearMonthInterval(tc.months, tc.qualifier))
+	}
+
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "dt", Type: arrow.FixedWidthTypes.Duration_us, Nullable: true},
+		{Name: "ym", Type: arrow.FixedWidthTypes.MonthInterval, Nullable: true},
+		{Name: "n", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, nil)
+	rec := recordFromJSON(t, sc, `[{"dt": 86400000000, "ym": {"months": 14}, "n": 1}, {"dt": null, "ym": null, "n": 2}]`)
+	defer rec.Release()
+	out := formatIntervals(memory.NewGoAllocator(), rec, []string{"DAY", "YEAR TO MONTH", ""})
+	defer out.Release()
+	assert.Equal(t, "INTERVAL '1' DAY", out.Column(0).(*array.String).Value(0))
+	assert.Equal(t, "INTERVAL '1-2' YEAR TO MONTH", out.Column(1).(*array.String).Value(0))
+	assert.True(t, out.Column(0).IsNull(1))
+	assert.True(t, out.Column(1).IsNull(1))
+	assert.Equal(t, int64(2), out.Column(2).(*array.Int64).Value(1))
 }

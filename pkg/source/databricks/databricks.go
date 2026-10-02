@@ -372,7 +372,9 @@ func downloadExternalLinkOnce(ctx context.Context, link dbsql.ExternalLink) ([]b
 	return data, false, nil
 }
 
-func conformRecord(rec arrow.RecordBatch, target *arrow.Schema) (arrow.RecordBatch, error) {
+func conformRecord(alloc memory.Allocator, rec arrow.RecordBatch, target *arrow.Schema, intervals []string) (arrow.RecordBatch, error) {
+	rec = formatIntervals(alloc, rec, intervals)
+	defer rec.Release()
 	if target == nil {
 		rec.Retain()
 		return rec, nil
@@ -380,7 +382,7 @@ func conformRecord(rec arrow.RecordBatch, target *arrow.Schema) (arrow.RecordBat
 	return databuffer.CastRecordToSchema(rec, target, true)
 }
 
-func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, link dbsql.ExternalLink, arrowSchema *arrow.Schema, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {
+func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, link dbsql.ExternalLink, arrowSchema *arrow.Schema, intervals []string, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {
 	data, err := downloadExternalLink(ctx, link)
 	if err != nil {
 		return err
@@ -393,7 +395,7 @@ func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.
 	defer rdr.Release()
 
 	for rdr.Next() {
-		rec, err := conformRecord(rdr.RecordBatch(), arrowSchema)
+		rec, err := conformRecord(alloc, rdr.RecordBatch(), arrowSchema, intervals)
 		if err != nil {
 			return fmt.Errorf("failed to convert record batch: %w", err)
 		}
@@ -418,6 +420,7 @@ func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.
 
 func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
 	alloc := memory.NewGoAllocator()
+	intervals := intervalQualifiers(resp.Manifest)
 
 	nextChunk := 0
 	hasMore := false
@@ -428,7 +431,7 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				continue
 			}
 			config.Debug("[DATABRICKS] Fetching chunk %d: row_count=%d, byte_count=%d", link.ChunkIndex, link.RowCount, link.ByteCount)
-			if err := s.streamExternalLink(ctx, alloc, link, arrowSchema, maxBatchBytes, results); err != nil {
+			if err := s.streamExternalLink(ctx, alloc, link, arrowSchema, intervals, maxBatchBytes, results); err != nil {
 				return fmt.Errorf("chunk %d: %w", link.ChunkIndex, err)
 			}
 			nextChunk = link.ChunkIndex + 1
@@ -613,4 +616,44 @@ func formatValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("'%v'", val)
 	}
+}
+
+func sliceRecord(rec arrow.RecordBatch, batchSize int, maxBatchBytes int64) []arrow.RecordBatch {
+	rows := rec.NumRows()
+	step := int64(batchSize)
+	if maxBatchBytes > 0 && rows > 0 {
+		if size := recordBytes(rec); size > maxBatchBytes {
+			step = min(step, max(1, rows*maxBatchBytes/size))
+		}
+	}
+	if rows <= step {
+		rec.Retain()
+		return []arrow.RecordBatch{rec}
+	}
+	var out []arrow.RecordBatch
+	for start := int64(0); start < rows; start += step {
+		out = append(out, rec.NewSlice(start, min(start+step, rows)))
+	}
+	return out
+}
+
+func recordBytes(rec arrow.RecordBatch) int64 {
+	var n int64
+	for _, col := range rec.Columns() {
+		n += dataBytes(col.Data())
+	}
+	return n
+}
+
+func dataBytes(d arrow.ArrayData) int64 {
+	var n int64
+	for _, b := range d.Buffers() {
+		if b != nil {
+			n += int64(b.Len())
+		}
+	}
+	for _, c := range d.Children() {
+		n += dataBytes(c)
+	}
+	return n
 }
