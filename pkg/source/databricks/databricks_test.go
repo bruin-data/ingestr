@@ -115,7 +115,7 @@ func TestProcessResultsConformsArrowTypes(t *testing.T) {
 	require.True(t, out.Schema().Equal(target))
 	require.Equal(t, int64(2), out.NumRows())
 
-	assert.Equal(t, int16(7), out.Column(0).(*array.Int16).Value(0))
+	assert.Equal(t, int8(7), out.Column(0).(*array.Int8).Value(0))
 	assert.Equal(t, int32(1), out.Column(1).(*array.Int32).Value(0))
 	assert.Equal(t, "", out.Column(2).(*array.String).Value(0))
 	assert.False(t, out.Column(2).IsNull(0))

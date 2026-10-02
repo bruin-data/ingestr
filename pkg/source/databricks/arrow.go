@@ -45,6 +45,13 @@ func conformArray(ctx context.Context, alloc memory.Allocator, arr arrow.Array, 
 		arr.Retain()
 		return arr, nil
 	}
+	if from, ok := arr.DataType().(*arrow.TimestampType); ok {
+		if dst, ok := to.(*arrow.TimestampType); ok && from.Unit == dst.Unit {
+			data := array.NewData(to, arr.Len(), arr.Data().Buffers(), nil, arr.NullN(), arr.Data().Offset())
+			defer data.Release()
+			return array.MakeFromData(data), nil
+		}
+	}
 	if !isNested(arr.DataType()) {
 		if out, err := compute.CastArray(compute.WithAllocator(ctx, alloc), arr, compute.SafeCastOptions(to)); err == nil {
 			return out, nil
