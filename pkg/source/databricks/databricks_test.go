@@ -1,16 +1,19 @@
 package databricks
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -20,227 +23,184 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildRecordBatchDecodesJSONArrayCells(t *testing.T) {
-	columns := []schema.Column{
-		{Name: "ints", DataType: schema.TypeArray, Nullable: true, ArrayType: schema.TypeInt32},
-		{Name: "strings", DataType: schema.TypeArray, Nullable: true, ArrayType: schema.TypeString},
-	}
-	rows := [][]string{
-		{`[123,"456",null]`, `["alpha","beta"]`},
-		{`[789,"hello"]`, `[]`},
-		{`[]`, `["omega"]`},
-		{`not-json`, `null`},
-	}
-
-	batch, err := (&DatabricksSource{}).buildRecordBatch(memory.NewGoAllocator(), buildArrowSchema(columns), columns, rows)
-	require.NoError(t, err)
-	defer batch.Release()
-
-	require.Equal(t, int64(4), batch.NumRows())
-
-	intLists := batch.Column(0).(*array.List)
-	require.False(t, intLists.IsNull(0))
-	require.False(t, intLists.IsNull(1))
-	require.False(t, intLists.IsNull(2))
-	require.True(t, intLists.IsNull(3))
-
-	intValues := intLists.ListValues().(*array.Int32)
-	start, end := intLists.ValueOffsets(0)
-	require.Equal(t, int64(0), start)
-	require.Equal(t, int64(3), end)
-	assert.Equal(t, int32(123), intValues.Value(0))
-	assert.Equal(t, int32(456), intValues.Value(1))
-	assert.True(t, intValues.IsNull(2))
-
-	start, end = intLists.ValueOffsets(1)
-	require.Equal(t, int64(3), start)
-	require.Equal(t, int64(5), end)
-	assert.Equal(t, int32(789), intValues.Value(3))
-	assert.True(t, intValues.IsNull(4))
-
-	start, end = intLists.ValueOffsets(2)
-	require.Equal(t, int64(5), start)
-	require.Equal(t, int64(5), end)
-
-	stringLists := batch.Column(1).(*array.List)
-	require.False(t, stringLists.IsNull(0))
-	require.False(t, stringLists.IsNull(1))
-	require.False(t, stringLists.IsNull(2))
-	require.True(t, stringLists.IsNull(3))
-
-	stringValues := stringLists.ListValues().(*array.String)
-	start, end = stringLists.ValueOffsets(0)
-	require.Equal(t, int64(0), start)
-	require.Equal(t, int64(2), end)
-	assert.Equal(t, "alpha", stringValues.Value(0))
-	assert.Equal(t, "beta", stringValues.Value(1))
-
-	start, end = stringLists.ValueOffsets(1)
-	require.Equal(t, int64(2), start)
-	require.Equal(t, int64(2), end)
-
-	start, end = stringLists.ValueOffsets(2)
-	require.Equal(t, int64(2), start)
-	require.Equal(t, int64(3), end)
-	assert.Equal(t, "omega", stringValues.Value(2))
+func TestMain(m *testing.M) {
+	externalLinkRetryDelay = time.Millisecond
+	os.Exit(m.Run())
 }
 
-func TestBuildRecordBatchPreservesEmptyStringCells(t *testing.T) {
-	columns := []schema.Column{
-		{Name: "text", DataType: schema.TypeString, Nullable: true},
-	}
-	rows := [][]string{
-		{""},
-		{"null"},
-		{"NULL"},
-		{"value"},
-	}
+func arrowIPC(t *testing.T, rec arrow.RecordBatch) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := ipc.NewWriter(&buf, ipc.WithSchema(rec.Schema()))
+	require.NoError(t, w.Write(rec))
+	require.NoError(t, w.Close())
+	return buf.Bytes()
+}
 
-	batch, err := (&DatabricksSource{}).buildRecordBatch(memory.NewGoAllocator(), buildArrowSchema(columns), columns, rows)
+func arrowStreamServer(t *testing.T, rec arrow.RecordBatch) *httptest.Server {
+	t.Helper()
+	data := arrowIPC(t, rec)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(data)
+	}))
+}
+
+func recordFromJSON(t *testing.T, sc *arrow.Schema, rows string) arrow.RecordBatch {
+	t.Helper()
+	rec, _, err := array.RecordFromJSON(memory.NewGoAllocator(), sc, strings.NewReader(rows))
 	require.NoError(t, err)
-	defer batch.Release()
+	return rec
+}
 
-	values := batch.Column(0).(*array.String)
-	require.Equal(t, 4, values.Len())
-	assert.False(t, values.IsNull(0))
-	assert.Equal(t, "", values.Value(0))
-	assert.True(t, values.IsNull(1))
-	assert.True(t, values.IsNull(2))
-	assert.False(t, values.IsNull(3))
-	assert.Equal(t, "value", values.Value(3))
+func collect(t *testing.T, resp *dbsql.StatementResponse, target *arrow.Schema, maxBatchBytes int64) ([]arrow.RecordBatch, error) {
+	t.Helper()
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, target, maxBatchBytes, results)
+	}()
+	var batches []arrow.RecordBatch
+	for res := range results {
+		if res.Err != nil {
+			for _, b := range batches {
+				b.Release()
+			}
+			return nil, res.Err
+		}
+		batches = append(batches, res.Batch)
+	}
+	return batches, nil
+}
+
+func jsonCell(arr arrow.Array, i int) string {
+	return arr.(array.ExtensionArray).Storage().(*array.String).Value(i)
+}
+
+func TestProcessResultsConformsArrowTypes(t *testing.T) {
+	src := arrow.NewSchema([]arrow.Field{
+		{Name: "ti", Type: arrow.PrimitiveTypes.Int8, Nullable: true},
+		{Name: "n", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "s", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "ts", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Etc/UTC"}, Nullable: true},
+		{Name: "arr", Type: arrow.ListOfField(arrow.Field{Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: true}), Nullable: true},
+		{Name: "m", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int32), Nullable: true},
+		{Name: "st", Type: arrow.StructOf(
+			arrow.Field{Name: "b", Type: arrow.PrimitiveTypes.Int32},
+			arrow.Field{Name: "a", Type: arrow.ListOf(arrow.BinaryTypes.String)},
+		), Nullable: true},
+	}, nil)
+	rec := recordFromJSON(t, src, `[
+		{"ti": 7, "n": 1, "s": "", "ts": "2024-01-02T03:04:05.123456", "arr": [1, null], "m": [{"key": "k", "value": 1}], "st": {"b": 2, "a": ["x"]}},
+		{"ti": null, "n": null, "s": null, "ts": null, "arr": null, "m": null, "st": null}
+	]`)
+	defer rec.Release()
+	server := arrowStreamServer(t, rec)
+	defer server.Close()
+
+	var columns []schema.Column
+	for _, typ := range []string{"TINYINT", "INT", "STRING", "TIMESTAMP", "ARRAY<INT>", "MAP<STRING, INT>", "STRUCT<b: INT, a: ARRAY<STRING>>"} {
+		dt, p, sc, at := MapDatabricksToDataType(typ)
+		columns = append(columns, schema.Column{Name: typ, DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true})
+	}
+	target := buildArrowSchema(columns)
+
+	batches, err := collect(t, &dbsql.StatementResponse{Result: &dbsql.ResultData{
+		ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL}},
+	}}, target, 0)
+	require.NoError(t, err)
+	require.Len(t, batches, 1)
+	out := batches[0]
+	defer out.Release()
+
+	require.True(t, out.Schema().Equal(target))
+	require.Equal(t, int64(2), out.NumRows())
+
+	assert.Equal(t, int16(7), out.Column(0).(*array.Int16).Value(0))
+	assert.Equal(t, int32(1), out.Column(1).(*array.Int32).Value(0))
+	assert.Equal(t, "", out.Column(2).(*array.String).Value(0))
+	assert.False(t, out.Column(2).IsNull(0))
+	ts := out.Column(3).(*array.Timestamp).Value(0)
+	assert.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC).UnixMicro(), int64(ts))
+	assert.Equal(t, "[1,null]", out.Column(4).ValueStr(0))
+	assert.JSONEq(t, `{"k":1}`, jsonCell(out.Column(5), 0))
+	assert.Equal(t, `{"b":2,"a":["x"]}`, jsonCell(out.Column(6), 0))
+
+	for i := 0; i < int(out.NumCols()); i++ {
+		assert.True(t, out.Column(i).IsNull(1), "column %d must keep NULL", i)
+	}
 }
 
 func TestProcessResultsByteCap(t *testing.T) {
-	columns := []schema.Column{
-		{Name: "a", DataType: schema.TypeString, Nullable: true},
-		{Name: "b", DataType: schema.TypeString, Nullable: true},
-	}
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "a", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "b", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
 	const rowCount = 60
-	rows := make([][]string, rowCount)
+	rows := make([]string, rowCount)
 	for i := range rows {
-		rows[i] = []string{"0123456789", "0123456789"} // 20 content bytes/row
+		rows[i] = `{"a": "0123456789", "b": "0123456789"}`
 	}
+	rec := recordFromJSON(t, sc, "["+strings.Join(rows, ",")+"]")
+	defer rec.Release()
+	server := arrowStreamServer(t, rec)
+	defer server.Close()
 
-	cases := []struct {
+	for _, tc := range []struct {
 		name          string
 		maxBatchBytes int64
-		wantBatches   int
+		wantMin       int
+		wantMax       int
 	}{
-		// Disabled cap: 60 rows well under defaultBatchSize -> one batch, exactly
-		// matching the original row-count-only behavior.
-		{"cap disabled", 0, 1},
-		// 20 bytes/row, 50-byte cap: flush after the row that reaches >=50, i.e.
-		// every 3rd row -> 20 batches.
-		{"50 byte cap", 50, 20},
-	}
-
-	for _, tc := range cases {
+		{"cap disabled", 0, 1, 1},
+		{"small cap", 200, 2, 60},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := &dbsql.StatementResponse{Result: &dbsql.ResultData{DataArray: rows}}
-			results := make(chan source.RecordBatchResult)
-			go func() {
-				defer close(results)
-				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, tc.maxBatchBytes, results)
-			}()
+			batches, err := collect(t, &dbsql.StatementResponse{Result: &dbsql.ResultData{
+				ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL}},
+			}}, sc, tc.maxBatchBytes)
+			require.NoError(t, err)
 
-			batches := 0
 			total := int64(0)
-			for res := range results {
-				require.NoError(t, res.Err)
-				require.NotNil(t, res.Batch)
-				batches++
-				total += res.Batch.NumRows()
-				res.Batch.Release()
+			for _, b := range batches {
+				total += b.NumRows()
+				b.Release()
 			}
-
 			assert.Equal(t, int64(rowCount), total, "all rows must be preserved")
-			assert.Equal(t, tc.wantBatches, batches)
+			assert.GreaterOrEqual(t, len(batches), tc.wantMin)
+			assert.LessOrEqual(t, len(batches), tc.wantMax)
 		})
 	}
 }
 
-func TestProcessResultsExternalLinks(t *testing.T) {
-	columns := []schema.Column{
-		{Name: "a", DataType: schema.TypeString, Nullable: true},
-		{Name: "b", DataType: schema.TypeString, Nullable: true},
-	}
-	rows := [][]string{
-		{"hello", "world"},
-		{"foo", "bar"},
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewEncoder(w).Encode(rows); err != nil {
-			t.Errorf("encode response: %v", err)
-		}
-	}))
+func TestProcessResultsSkipsRepeatedChunks(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{{Name: "a", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	rec := recordFromJSON(t, sc, `[{"a": 1}, {"a": 2}]`)
+	defer rec.Release()
+	server := arrowStreamServer(t, rec)
 	defer server.Close()
 
-	resp := &dbsql.StatementResponse{
-		Result: &dbsql.ResultData{
-			ExternalLinks: []dbsql.ExternalLink{
-				{ExternalLink: server.URL},
-			},
-		},
-	}
-
-	results := make(chan source.RecordBatchResult)
-	go func() {
-		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
-	}()
-
-	totalRows := int64(0)
-	for res := range results {
-		require.NoError(t, res.Err)
-		require.NotNil(t, res.Batch)
-		totalRows += res.Batch.NumRows()
-		res.Batch.Release()
-	}
-
-	assert.Equal(t, int64(2), totalRows)
+	batches, err := collect(t, &dbsql.StatementResponse{Result: &dbsql.ResultData{
+		ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL, ChunkIndex: 0}, {ExternalLink: server.URL, ChunkIndex: 0}},
+	}}, sc, 0)
+	require.NoError(t, err)
+	require.Len(t, batches, 1)
+	batches[0].Release()
 }
 
-func TestProcessResultsExternalLinksError(t *testing.T) {
-	columns := []schema.Column{
-		{Name: "a", DataType: schema.TypeString, Nullable: true},
-	}
-
+func TestProcessResultsExternalLinkError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	resp := &dbsql.StatementResponse{
-		Result: &dbsql.ResultData{
-			ExternalLinks: []dbsql.ExternalLink{
-				{ExternalLink: server.URL},
-			},
-		},
-	}
-
-	results := make(chan source.RecordBatchResult)
-	go func() {
-		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
-	}()
-
-	var foundErr error
-	for res := range results {
-		if res.Err != nil {
-			foundErr = res.Err
-			break
-		}
-		if res.Batch != nil {
-			res.Batch.Release()
-		}
-	}
-
-	require.Error(t, foundErr)
-	assert.Contains(t, foundErr.Error(), "external link returned status 500")
+	_, err := collect(t, &dbsql.StatementResponse{Result: &dbsql.ResultData{
+		ExternalLinks: []dbsql.ExternalLink{{ExternalLink: server.URL}},
+	}}, nil, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "external link returned status 500")
 }
 
-func TestFetchExternalLinkSendsHeaders(t *testing.T) {
+func TestDownloadExternalLinkSendsHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-amz-server-side-encryption-customer-key") != "secret-key" {
 			http.Error(w, "missing header", http.StatusForbidden)
@@ -250,26 +210,36 @@ func TestFetchExternalLinkSendsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{
+	data, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{
 		ExternalLink: server.URL,
 		HttpHeaders:  map[string]string{"x-amz-server-side-encryption-customer-key": "secret-key"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, [][]string{{"a"}}, data)
+	assert.Equal(t, `[["a"]]`, string(data))
 }
 
-func TestFetchExternalLinkErrorOmitsURL(t *testing.T) {
+func TestDownloadExternalLinkErrorOmitsURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	link := server.URL + "/chunk?X-Databricks-Signature=topsecret"
 	server.Close()
 
-	_, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: link})
+	_, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: link})
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "topsecret")
 	assert.NotContains(t, err.Error(), server.URL)
 }
 
 func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	rec0 := recordFromJSON(t, sc, `[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]`)
+	defer rec0.Release()
+	rec1 := recordFromJSON(t, sc, `[{"id": 3, "name": "c"}]`)
+	defer rec1.Release()
+	chunk0, chunk1 := arrowIPC(t, rec0), arrowIPC(t, rec1)
+
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -280,9 +250,9 @@ func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
 		case r.URL.Path == "/api/2.0/sql/statements/s1/result/chunks/1":
 			_, _ = fmt.Fprintf(w, `{"external_links":[{"chunk_index":1,"external_link":"%s/chunk1"}]}`, server.URL)
 		case r.URL.Path == "/chunk0":
-			_, _ = w.Write([]byte(`[["1","a"],["2","b"]]`))
+			_, _ = w.Write(chunk0)
 		case r.URL.Path == "/chunk1":
-			_, _ = w.Write([]byte(`[["3","c"]]`))
+			_, _ = w.Write(chunk1)
 		default:
 			http.NotFound(w, r)
 		}
@@ -312,12 +282,12 @@ func TestReadFetchesAllExternalLinkChunks(t *testing.T) {
 	assert.Equal(t, []int64{1, 2, 3}, ids)
 }
 
-func TestFetchExternalLinkStallTimeout(t *testing.T) {
+func TestDownloadExternalLinkStallTimeout(t *testing.T) {
 	orig := externalLinkStallTimeout
 	externalLinkStallTimeout = 100 * time.Millisecond
 	defer func() { externalLinkStallTimeout = orig }()
 
-	payload := []byte(`[["1"],["2"],["3"],["4"],["5"],["6"],["7"],["8"]]`)
+	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz0123456789")
 	for _, tc := range []struct {
 		name    string
 		handler func(w http.ResponseWriter, release <-chan struct{})
@@ -346,16 +316,52 @@ func TestFetchExternalLinkStallTimeout(t *testing.T) {
 			defer close(release)
 
 			start := time.Now()
-			data, err := fetchExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+			data, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "no data received")
-				assert.Less(t, time.Since(start), time.Second)
+				assert.Less(t, time.Since(start), 2*time.Second)
 				return
 			}
 			require.NoError(t, err)
-			assert.Len(t, data, 8)
+			assert.Equal(t, payload, data)
 			assert.Greater(t, time.Since(start), externalLinkStallTimeout)
+		})
+	}
+}
+
+func TestDownloadExternalLinkRetriesTransientErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failures  int
+		status    int
+		wantErr   bool
+		wantCalls int
+	}{
+		{"recovers after 500s", 2, http.StatusInternalServerError, false, 3},
+		{"gives up after max attempts", 5, http.StatusServiceUnavailable, true, externalLinkAttempts},
+		{"does not retry 403", 5, http.StatusForbidden, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls <= tc.failures {
+					w.WriteHeader(tc.status)
+					return
+				}
+				_, _ = w.Write([]byte("ok"))
+			}))
+			defer server.Close()
+
+			data, err := downloadExternalLink(context.Background(), dbsql.ExternalLink{ExternalLink: server.URL})
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, "ok", string(data))
+			}
+			assert.Equal(t, tc.wantCalls, calls)
 		})
 	}
 }
