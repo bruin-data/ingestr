@@ -16,9 +16,12 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
-// maxPrimaryKeyStringLength is the widest utf8mb4 VARCHAR an InnoDB key can
-// index: 3072 bytes at 4 bytes per character.
-const maxPrimaryKeyStringLength = 768
+const (
+	maxKeyBytes  = 3072
+	bytesPerChar = 4 // utf8mb4
+	// maxPrimaryKeyStringLength is the widest utf8mb4 VARCHAR an InnoDB key can index.
+	maxPrimaryKeyStringLength = maxKeyBytes / bytesPerChar
+)
 
 func (d *MySQLDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
 	// An unbounded source widens a string key to the indexable maximum, never to TEXT.
@@ -30,15 +33,58 @@ func (d *MySQLDestination) NormalizeSchemaEvolutionSourceColumn(source, dest sch
 }
 
 // stringKeyBudget is how many utf8mb4 characters the string columns of a key
-// can share, reserving 8 bytes for each non-string key column.
-func stringKeyBudget(nonStringKeys int) int {
-	return maxPrimaryKeyStringLength - 2*nonStringKeys
+// can share after the other key columns take their bytes.
+func stringKeyBudget(otherKeyBytes int) int {
+	return (maxKeyBytes - otherKeyBytes) / bytesPerChar
+}
+
+// keyBytes is how many bytes a non-string column takes in an InnoDB key, for
+// the type MapDataTypeToMySQL creates it as or the length read from the table.
+func keyBytes(col schema.Column) int {
+	switch col.DataType {
+	case schema.TypeBoolean, schema.TypeInt8:
+		return 1
+	case schema.TypeInt16:
+		return 2
+	case schema.TypeInt32, schema.TypeFloat32:
+		return 4
+	case schema.TypeDate:
+		return 3
+	case schema.TypeTime:
+		return 6
+	case schema.TypeTimestampTZ:
+		return 7
+	case schema.TypeDecimal:
+		if col.Precision <= 0 {
+			return decimalBytes(38, 9)
+		}
+		return decimalBytes(col.Precision, min(max(col.Scale, 0), col.Precision))
+	case schema.TypeBinary:
+		if col.MaxLength > 0 {
+			return col.MaxLength
+		}
+		return 8
+	case schema.TypeUUID:
+		return 36 * bytesPerChar
+	case schema.TypeInterval:
+		return 255 * bytesPerChar
+	default:
+		return 8
+	}
+}
+
+// decimalBytes follows MySQL's DECIMAL storage: 4 bytes per 9 digits on each
+// side of the point, plus a partial word for the leftover digits.
+func decimalBytes(precision, scale int) int {
+	leftover := [9]int{0, 1, 1, 2, 2, 3, 3, 4, 4}
+	digits := func(n int) int { return n/9*4 + leftover[n%9] }
+	return digits(precision-scale) + digits(scale)
 }
 
 // boundKeyColumns gives unbounded string key columns an equal share of the
 // key budget left by the other key columns, since TEXT cannot be a key.
 func boundKeyColumns(columns []schema.Column, primaryKeys []string) []schema.Column {
-	nonStringKeys, unbounded := 0, 0
+	otherKeyBytes, unbounded := 0, 0
 	remaining := 0
 	for _, col := range columns {
 		if !containsFold(primaryKeys, col.Name) {
@@ -46,7 +92,7 @@ func boundKeyColumns(columns []schema.Column, primaryKeys []string) []schema.Col
 		}
 		switch {
 		case col.DataType != schema.TypeString:
-			nonStringKeys++
+			otherKeyBytes += keyBytes(col)
 		case col.MaxLength <= 0:
 			unbounded++
 		default:
@@ -56,7 +102,7 @@ func boundKeyColumns(columns []schema.Column, primaryKeys []string) []schema.Col
 	if unbounded == 0 {
 		return columns
 	}
-	share := (stringKeyBudget(nonStringKeys) + remaining) / unbounded
+	share := (stringKeyBudget(otherKeyBytes) + remaining) / unbounded
 	if share < 1 {
 		share = maxPrimaryKeyStringLength / unbounded
 	}
@@ -89,7 +135,7 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 		return comparison, err
 	}
 
-	nonStringKeys, fixed := 0, 0
+	otherKeyBytes, fixed := 0, 0
 	for _, col := range current.Columns {
 		if !containsFold(current.PrimaryKeys, col.Name) {
 			continue
@@ -97,7 +143,7 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 		switch {
 		case widened[strings.ToLower(col.Name)]:
 		case col.DataType != schema.TypeString:
-			nonStringKeys++
+			otherKeyBytes += keyBytes(col)
 		default:
 			fixed += col.MaxLength
 		}
@@ -123,7 +169,7 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 	if len(keyChanges) == 0 {
 		return comparison, nil
 	}
-	allowed := fairShares(requests, floors, stringKeyBudget(nonStringKeys)-fixed)
+	allowed := fairShares(requests, floors, stringKeyBudget(otherKeyBytes)-fixed)
 
 	changes := append([]schemaevolution.SchemaChange(nil), comparison.Changes...)
 	drop := map[int]bool{}

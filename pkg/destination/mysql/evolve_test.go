@@ -94,7 +94,11 @@ func TestBoundKeyColumns(t *testing.T) {
 		{"explicit single key over the limit is kept", []schema.Column{str("k", 1000)}, []string{"k"}, []int{1000}},
 		{"unbounded composite keys split the budget", []schema.Column{str("a", 0), str("b", 0)}, []string{"a", "b"}, []int{384, 384}},
 		{"unbounded keys share what explicit keys leave", []schema.Column{str("a", 0), str("b", 600)}, []string{"a", "b"}, []int{168, 600}},
-		{"non-string keys reserve 8 bytes each", []schema.Column{str("a", 0), bigint}, []string{"a", "version"}, []int{766, 0}},
+		{"bigint keys reserve 8 bytes", []schema.Column{str("a", 0), bigint}, []string{"a", "version"}, []int{766, 0}},
+		{"uuid keys reserve 144 bytes", []schema.Column{{Name: "id", DataType: schema.TypeUUID}, str("slug", 0)}, []string{"id", "slug"}, []int{0, 732}},
+		{"decimal keys reserve their storage size", []schema.Column{{Name: "id", DataType: schema.TypeDecimal, Precision: 38}, str("slug", 0)}, []string{"id", "slug"}, []int{0, 763}},
+		{"interval keys reserve their VARCHAR(255)", []schema.Column{{Name: "span", DataType: schema.TypeInterval}, str("slug", 0)}, []string{"span", "slug"}, []int{0, 513}},
+		{"several non-string keys add up", []schema.Column{{Name: "at", DataType: schema.TypeTimestamp}, bigint, str("slug", 0)}, []string{"at", "version", "slug"}, []int{0, 0, 764}},
 		{"key names match case-insensitively", []schema.Column{str("tenant", 0), str("external_id", 0)}, []string{"TENANT", "External_Id"}, []int{384, 384}},
 		{"non-key columns stay unbounded", []schema.Column{str("k", 0), str("note", 0)}, []string{"k"}, []int{768, 0}},
 		{"tables without string keys are unchanged", []schema.Column{bigint, str("note", 0)}, []string{"version"}, []int{0, 0}},
@@ -116,6 +120,52 @@ func TestBoundKeyColumns(t *testing.T) {
 			require.Equal(t, original, tc.columns)
 		})
 	}
+}
+
+func TestKeyBytesMatchesCreatedType(t *testing.T) {
+	decimal := func(precision, scale int) schema.Column {
+		return schema.Column{DataType: schema.TypeDecimal, Precision: precision, Scale: scale}
+	}
+	for _, tc := range []struct {
+		col      schema.Column
+		mysql    string
+		keyBytes int
+	}{
+		{schema.Column{DataType: schema.TypeBoolean}, "BOOLEAN", 1},
+		{schema.Column{DataType: schema.TypeInt8}, "TINYINT", 1},
+		{schema.Column{DataType: schema.TypeInt16}, "SMALLINT", 2},
+		{schema.Column{DataType: schema.TypeInt32}, "INT", 4},
+		{schema.Column{DataType: schema.TypeInt64}, "BIGINT", 8},
+		{schema.Column{DataType: schema.TypeFloat32}, "FLOAT", 4},
+		{schema.Column{DataType: schema.TypeFloat64}, "DOUBLE", 8},
+		{schema.Column{DataType: schema.TypeDate}, "DATE", 3},
+		{schema.Column{DataType: schema.TypeTime}, "TIME(6)", 6},
+		{schema.Column{DataType: schema.TypeTimestamp}, "DATETIME(6)", 8},
+		{schema.Column{DataType: schema.TypeTimestampTZ}, "TIMESTAMP(6)", 7},
+		{schema.Column{DataType: schema.TypeUUID}, "CHAR(36)", 144},
+		{schema.Column{DataType: schema.TypeInterval}, "VARCHAR(255)", 1020},
+		{decimal(0, 0), "DECIMAL(38,9)", 17},
+		{decimal(38, 0), "DECIMAL(38,0)", 17},
+		{decimal(18, 0), "DECIMAL(18,0)", 8},
+		{decimal(10, 2), "DECIMAL(10,2)", 5},
+		{decimal(65, 30), "DECIMAL(65,30)", 30},
+		{decimal(5, -1), "DECIMAL(5,0)", 3},
+	} {
+		t.Run(tc.mysql, func(t *testing.T) {
+			require.Equal(t, tc.mysql, MapDataTypeToMySQL(tc.col))
+			require.Equal(t, tc.keyBytes, keyBytes(tc.col))
+		})
+	}
+
+	require.Equal(t, 16, keyBytes(schema.Column{DataType: schema.TypeBinary, MaxLength: 16}), "VARBINARY(16) read from an existing table")
+	require.Equal(t, 3, keyBytes(decimal(5, 10)), "scale is clamped to the precision")
+}
+
+func TestStringKeyBudget(t *testing.T) {
+	require.Equal(t, 768, stringKeyBudget(0))
+	require.Equal(t, 766, stringKeyBudget(8))
+	require.Equal(t, 763, stringKeyBudget(17))
+	require.Equal(t, 732, stringKeyBudget(144))
 }
 
 func TestFairShares(t *testing.T) {
@@ -149,8 +199,11 @@ type keyTestColumn struct {
 
 func (c keyTestColumn) schema() schema.Column {
 	col := schema.Column{Name: c.name, DataType: schema.TypeString, MaxLength: c.length, IsPrimaryKey: c.key, Nullable: !c.key}
-	if c.dataType == "bigint" {
+	switch c.dataType {
+	case "bigint":
 		col = schema.Column{Name: c.name, DataType: schema.TypeInt64, IsPrimaryKey: c.key, Nullable: !c.key}
+	case "decimal":
+		col = schema.Column{Name: c.name, DataType: schema.TypeDecimal, Precision: c.length, IsPrimaryKey: c.key, Nullable: !c.key}
 	}
 	return col
 }
@@ -166,8 +219,12 @@ func expectMySQLTable(mock sqlmock.Sqlmock, columns []keyTestColumn) {
 			nullable = "NO"
 			keys.AddRow(col.name)
 		}
-		if col.dataType == "bigint" {
+		switch col.dataType {
+		case "bigint":
 			rows.AddRow(col.name, "bigint", nullable, 19, 0, nil, "bigint")
+			continue
+		case "decimal":
+			rows.AddRow(col.name, "decimal", nullable, col.length, 0, nil, fmt.Sprintf("decimal(%d,0)", col.length))
 			continue
 		}
 		rows.AddRow(col.name, "varchar", nullable, nil, nil, col.length, fmt.Sprintf("varchar(%d)", col.length))
@@ -281,6 +338,15 @@ func TestSchemaEvolutionFitsStringKeysIntoTheKeyLimit(t *testing.T) {
 			dest:   []keyTestColumn{bigint("version", true), varchar("k", 100, true)},
 			source: []schema.Column{{Name: "version", DataType: schema.TypeInt64, Nullable: true}, source("k", 0)},
 			want:   []string{modify("k", "VARCHAR(766) NOT NULL")},
+		},
+		{
+			name: "decimal key columns reserve their storage size",
+			dest: []keyTestColumn{{name: "id", dataType: "decimal", length: 38, key: true}, varchar("slug", 100, true)},
+			source: []schema.Column{
+				{Name: "id", DataType: schema.TypeDecimal, Precision: 38, Nullable: true},
+				source("slug", 0),
+			},
+			want: []string{modify("slug", "VARCHAR(763) NOT NULL")},
 		},
 		{
 			name:   "key columns never shrink below their current width",
