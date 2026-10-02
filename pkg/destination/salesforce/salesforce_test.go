@@ -3,6 +3,7 @@ package salesforce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -2267,5 +2268,38 @@ func TestBulkIsTheDefaultLoadMethod(t *testing.T) {
 	sh, err := d.shaperFor("Contact", "append", nil, "", false)
 	if err != nil || sh.loadMethod != loadMethodBulk {
 		t.Fatalf("loadMethod = %v, %v; want bulk when the dest-table sets none", sh, err)
+	}
+}
+
+func TestWriteParallelReturnsWithOpenSource(t *testing.T) {
+	for _, failure := range []string{"canceled", "source"} {
+		t.Run(failure, func(t *testing.T) {
+			var cap capture
+			d, _ := newDest(t, &cap, nil)
+			records := make(chan source.RecordBatchResult, 1)
+			defer close(records)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			want := context.Canceled
+			if failure == "source" {
+				want = errors.New("source failed")
+				records <- source.RecordBatchResult{Err: want}
+			}
+			opts := writeOpts("Contact", "update", []string{"Id"})
+			opts.Parallelism = 3
+			done := make(chan error, 1)
+			go func() { done <- d.WriteParallel(ctx, records, opts) }()
+			if failure == "canceled" {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, want) {
+					t.Fatalf("WriteParallel error = %v, want %v", err, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("write waited for the source to close before returning its error")
+			}
+		})
 	}
 }
