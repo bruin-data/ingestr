@@ -95,9 +95,10 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 			continue
 		}
 		switch {
+		case widened[strings.ToLower(col.Name)]:
 		case col.DataType != schema.TypeString:
 			nonStringKeys++
-		case !widened[strings.ToLower(col.Name)]:
+		default:
 			fixed += col.MaxLength
 		}
 	}
@@ -106,7 +107,7 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 	for i, change := range comparison.Changes {
 		if isTypeChange(change) && change.OldColumn != nil && change.NewColumn.DataType == schema.TypeString &&
 			containsFold(current.PrimaryKeys, change.ColumnName) {
-			if change.Type == schemaevolution.ChangeOverrideType {
+			if pinsKeyLength(change) {
 				fixed += change.NewColumn.MaxLength
 				continue
 			}
@@ -141,6 +142,17 @@ func (d *MySQLDestination) fitKeyWidenings(ctx context.Context, table string, co
 	}
 	changes = kept
 	return &schemaevolution.SchemaComparison{Changes: changes, HasChanges: len(changes) > 0}, nil
+}
+
+// pinsKeyLength reports whether an override sets the key length itself rather
+// than leaving it to the indexable maximum chosen by NormalizeSchemaEvolutionSourceColumn.
+func pinsKeyLength(change schemaevolution.SchemaChange) bool {
+	if change.Type != schemaevolution.ChangeOverrideType || change.NewColumn.MaxLength <= 0 {
+		return false
+	}
+	old := change.OldColumn
+	return old.DataType != schema.TypeString || old.MaxLength <= 0 ||
+		change.NewColumn.MaxLength != max(old.MaxLength, maxPrimaryKeyStringLength)
 }
 
 // fairShares fits the requested lengths (0 meaning unbounded) into available.

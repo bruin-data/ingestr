@@ -114,6 +114,9 @@ func TestFitKeyWideningsSharesBudgetAcrossCompositeKey(t *testing.T) {
 func TestFitKeyWideningsCapsSourceWideningsButNotOverrides(t *testing.T) {
 	change := func(changeType schemaevolution.ChangeType, name string, newLength int) schemaevolution.SchemaChange {
 		old := schema.Column{Name: name, DataType: schema.TypeString, MaxLength: 100}
+		if name == "id" {
+			old = schema.Column{Name: name, DataType: schema.TypeInt64}
+		}
 		return schemaevolution.SchemaChange{
 			Type: changeType, ColumnName: name, OldColumn: &old,
 			NewColumn: schema.Column{Name: name, DataType: schema.TypeString, MaxLength: newLength},
@@ -132,6 +135,10 @@ func TestFitKeyWideningsCapsSourceWideningsButNotOverrides(t *testing.T) {
 			change(schemaevolution.ChangeOverrideType, "k", 600),
 			change(schemaevolution.ChangeWidenType, "j", maxPrimaryKeyStringLength),
 		}, []int{600, 168}},
+		{"unsized override on a numeric key", []string{"id"}, []schemaevolution.SchemaChange{change(schemaevolution.ChangeOverrideType, "id", 0)}, []int{maxPrimaryKeyStringLength}},
+		{"unsized override on a composite key", []string{"k", "j"}, []schemaevolution.SchemaChange{
+			change(schemaevolution.ChangeOverrideType, "k", maxPrimaryKeyStringLength),
+		}, []int{668}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -143,6 +150,11 @@ func TestFitKeyWideningsCapsSourceWideningsButNotOverrides(t *testing.T) {
 			})
 			keys := sqlmock.NewRows([]string{"COLUMN_NAME"})
 			for _, key := range tc.keys {
+				if key == "id" {
+					columns.AddRow(key, "bigint", "NO", 19, 0, nil, "bigint")
+					keys.AddRow(key)
+					continue
+				}
 				columns.AddRow(key, "varchar", "NO", nil, nil, 100, "varchar(100)")
 				keys.AddRow(key)
 			}
