@@ -55,7 +55,7 @@ func TestProcessResultsByteCap(t *testing.T) {
 			results := make(chan source.RecordBatchResult)
 			go func() {
 				defer close(results)
-				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, tc.maxBatchBytes, results)
+				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), tc.maxBatchBytes, results)
 			}()
 
 			batches := 0
@@ -99,7 +99,7 @@ func TestProcessResultsExternalLinks(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), 0, results)
 	}()
 
 	totalRows := int64(0)
@@ -134,7 +134,7 @@ func TestProcessResultsExternalLinksError(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), columns, 0, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), 0, results)
 	}()
 
 	var foundErr error
@@ -186,7 +186,7 @@ func collect(t *testing.T, resp *dbsql.StatementResponse, target *arrow.Schema, 
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, target, nil, maxBatchBytes, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, target, maxBatchBytes, results)
 	}()
 	var batches []arrow.RecordBatch
 	for res := range results {
@@ -508,7 +508,7 @@ func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, nil, 0, results)
+		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, 0, results)
 	}()
 	var ids []int64
 	for res := range results {

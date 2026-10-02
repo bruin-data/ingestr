@@ -298,12 +298,12 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 			return
 		}
 
-		if resp.Result == nil || (resp.Result.DataArray == nil && len(resp.Result.ExternalLinks) == 0) {
+		if resp.Result == nil || len(resp.Result.ExternalLinks) == 0 {
 			config.Debug("[DATABRICKS] Query returned no results")
 			return
 		}
 
-		s.processResults(ctx, resp, arrowSchema, columns, opts.MaxBatchBytes, results)
+		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, results)
 	}()
 
 	return results, nil
@@ -457,7 +457,7 @@ func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.
 	return nil
 }
 
-func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, columns []schema.Column, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
+func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
 	alloc := memory.NewGoAllocator()
 	intervals := intervalQualifiers(resp.Manifest)
 	processed := -1
@@ -509,8 +509,8 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
 				return
 			}
-			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
-				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), len(chunkResp.DataArray), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
+			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, next_chunk_index=%d, has_next_chunk=%v",
+				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
 
 			if err := processResultData(chunkResp); err != nil {
 				results <- source.RecordBatchResult{Err: err}
@@ -539,8 +539,8 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
 				return
 			}
-			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
-				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), len(chunkResp.DataArray), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
+			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, next_chunk_index=%d, has_next_chunk=%v",
+				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
 
 			if err := processResultData(chunkResp); err != nil {
 				results <- source.RecordBatchResult{Err: err}
@@ -604,11 +604,11 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 				resp.Manifest.TotalRowCount, resp.Manifest.TotalChunkCount, resp.Manifest.TotalByteCount, resp.Manifest.Truncated)
 		}
 		if resp.Result != nil {
-			config.Debug("[DATABRICKS] Initial result: row_count=%d, row_offset=%d, external_links=%d, data_array_rows=%d, next_chunk_index=%d, has_next_chunk=%v",
-				resp.Result.RowCount, resp.Result.RowOffset, len(resp.Result.ExternalLinks), len(resp.Result.DataArray), resp.Result.NextChunkIndex, resp.Result.NextChunkInternalLink != "")
+			config.Debug("[DATABRICKS] Initial result: row_count=%d, row_offset=%d, external_links=%d, next_chunk_index=%d, has_next_chunk=%v",
+				resp.Result.RowCount, resp.Result.RowOffset, len(resp.Result.ExternalLinks), resp.Result.NextChunkIndex, resp.Result.NextChunkInternalLink != "")
 		}
 
-		if resp.Result == nil || (resp.Result.DataArray == nil && len(resp.Result.ExternalLinks) == 0) {
+		if resp.Result == nil || len(resp.Result.ExternalLinks) == 0 {
 			config.Debug("[DATABRICKS] Custom query returned no results")
 			return
 		}
@@ -632,7 +632,7 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			arrowSchema = buildArrowSchema(columns)
 		}
 
-		s.processResults(ctx, resp, arrowSchema, columns, opts.MaxBatchBytes, results)
+		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, results)
 	}()
 
 	return results, nil
