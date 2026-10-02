@@ -98,6 +98,7 @@ These recur on every destination. Answer each with a doc link or a live test, no
 
 ## Rate limiting
 - `WriteParallel` fans out batches concurrently — the destination still needs its own rate limiter to bound the real request rate; cap parallelism to what the API allows.
+- HubSpot uses a two-minute HTTP timeout per attempt and up to ten retries. Its serial and parallel writes share cancellation-aware workers: channel receives must select on cancellation, and failures must return without draining an open source. `executeReverseETL` cancels the source and performs a bounded drain after the destination returns; waiting for the source first can deadlock and hide an HTTP timeout.
 
 ## Flags
 - `--reject-mode`: `fail` (default; write valid, then error) / `fail_fast` (stop at first) / `skip` (write valid, report, exit 0). Only per-record problems are skippable.
