@@ -32,9 +32,12 @@ const (
 	maxRowsPerResponse = 100000
 )
 
-// A chunk download fails only when no bytes arrive for this long, so slow
-// connections can still finish while hung ones fail fast.
-var externalLinkStallTimeout = 30 * time.Second
+// A chunk download fails when no bytes arrive for the stall timeout, or when it
+// runs past the overall ceiling (guards against responses that trickle forever).
+var (
+	externalLinkStallTimeout = 30 * time.Second
+	externalLinkMaxDuration  = 15 * time.Minute
+)
 
 type DatabricksSource struct {
 	client     *databricks.WorkspaceClient
@@ -299,16 +302,24 @@ func (s *stallReader) Read(p []byte) (int, error) {
 }
 
 func fetchExternalLink(ctx context.Context, link dbsql.ExternalLink) ([][]string, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithTimeout(ctx, externalLinkMaxDuration)
 	defer cancel()
-	var stalled atomic.Bool
+	var stalled, expired atomic.Bool
 	timer := time.AfterFunc(externalLinkStallTimeout, func() {
 		stalled.Store(true)
 		cancel()
 	})
 	defer timer.Stop()
+	ceiling := time.AfterFunc(externalLinkMaxDuration, func() {
+		expired.Store(true)
+		cancel()
+	})
+	defer ceiling.Stop()
 
 	wrap := func(msg string, err error) error {
+		if expired.Load() {
+			return fmt.Errorf("%s: download did not finish within %s", msg, externalLinkMaxDuration)
+		}
 		if stalled.Load() {
 			return fmt.Errorf("%s: no data received for %s", msg, externalLinkStallTimeout)
 		}
