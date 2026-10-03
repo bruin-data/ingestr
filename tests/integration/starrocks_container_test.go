@@ -21,15 +21,21 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Runs as part of `make test-integration`. The all-in-one image is slow to boot,
-// so this test manages its own container instead of the shared TestMain.
 func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string) {
+	t.Helper()
+	dsn, uri, cleanup := startStarRocksContainerWithCleanup(ctx, t)
+	t.Cleanup(cleanup)
+	return dsn, uri
+}
+
+// Callers own cleanup so conformance tests can share the slow-booting container.
+func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn, uri string, cleanup func()) {
 	requireDocker(t)
 	t.Helper()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "starrocks/allin1-ubuntu:3.3-latest",
-			ExposedPorts: []string{"9030/tcp"},
+			ExposedPorts: []string{"9030/tcp", "8040/tcp"},
 			// Relax the backend disk-flood thresholds before startup: the defaults
 			// (~1 GiB free / <95% used) mark the BE unavailable for tablet placement
 			// on disk-constrained CI runners, so CREATE TABLE finds no usable backend.
@@ -41,16 +47,27 @@ func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string
 		Started: true,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+	cleanup = func() { _ = container.Terminate(context.Background()) }
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cleanup()
+		}
+	}()
 
 	host, err := container.Host(ctx)
 	require.NoError(t, err)
 	port, err := container.MappedPort(ctx, "9030")
 	require.NoError(t, err)
+	httpPort, err := container.MappedPort(ctx, "8040")
+	require.NoError(t, err)
 
 	dsn = fmt.Sprintf("root@tcp(%s:%s)/", host, port.Port())
-	uri = fmt.Sprintf("starrocks://root@%s:%s/", host, port.Port())
-	return dsn, uri
+	// Connect directly to this single BE for Stream Load: an FE redirect would
+	// advertise the container-private BE address, unreachable from the test host.
+	uri = fmt.Sprintf("starrocks://root@%s:%s/?http_port=%s&replication_num=1", host, port.Port(), httpPort.Port())
+	handedOff = true
+	return dsn, uri, cleanup
 }
 
 // waitForStarRocksBackend blocks until a backend reports Alive=true; the FE

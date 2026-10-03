@@ -267,6 +267,10 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	if starRocksConformance.cleanup != nil {
+		starRocksConformance.cleanup()
+	}
+
 	containers := []testcontainers.Container{
 		pgSource.container, pgDest.container, chDest.container,
 		mysqlDest.container, mssqlDest.container, oracleDest.container, cratedbDest.container,
