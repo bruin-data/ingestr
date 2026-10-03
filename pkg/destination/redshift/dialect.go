@@ -64,7 +64,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeDate:
 		return "DATE"
 	case schema.TypeTime:
-		return "VARCHAR(20)"
+		return "TIME"
 	case schema.TypeTimestamp:
 		return "TIMESTAMP"
 	case schema.TypeTimestampTZ:
