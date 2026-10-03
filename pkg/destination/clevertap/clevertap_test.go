@@ -3,6 +3,7 @@ package clevertap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -420,6 +421,37 @@ func TestWriteParallelCallerCancelReturnsError(t *testing.T) {
 		PrimaryKeys: []string{"email"},
 	})
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWriteParallelReturnsWithOpenSource(t *testing.T) {
+	for _, failure := range []string{"canceled", "source"} {
+		t.Run(failure, func(t *testing.T) {
+			server, _ := newUploadServer(t)
+			d := connectTestDestination(t, server.URL)
+			records := make(chan source.RecordBatchResult, 1)
+			defer close(records)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			want := context.Canceled
+			if failure == "source" {
+				want = errors.New("source failed")
+				records <- source.RecordBatchResult{Err: want}
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- d.WriteParallel(ctx, records, destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"email"}, Parallelism: 3})
+			}()
+			if failure == "canceled" {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, want)
+			case <-time.After(time.Second):
+				t.Fatal("write waited for the source to close before returning its error")
+			}
+		})
+	}
 }
 
 func TestWriteNullsEventsOmit(t *testing.T) {
