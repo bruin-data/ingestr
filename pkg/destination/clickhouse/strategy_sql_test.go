@@ -104,7 +104,7 @@ func TestDeleteInsertExpectedSQL(t *testing.T) {
 			selectSQL := "SELECT `tenant`, `id`, `version` FROM `landing`.`stage`"
 			if withKeys {
 				opts.PrimaryKeys = []string{"tenant", "id"}
-				selectSQL = "SELECT `tenant`, `id`, `version` FROM (SELECT `tenant`, `id`, `version`, ROW_NUMBER() OVER (PARTITION BY `tenant`, `id` ORDER BY `version` DESC) AS __bruin_dedup_rn FROM `landing`.`stage`) AS _numbered WHERE __bruin_dedup_rn = 1"
+				selectSQL = "SELECT `tenant`, `id`, `version` FROM (SELECT `tenant`, `id`, `version`, ROW_NUMBER() OVER (PARTITION BY `tenant`, `id` ORDER BY CASE WHEN `version` IS NULL THEN 1 ELSE 0 END ASC, `version` DESC) AS __bruin_dedup_rn FROM `landing`.`stage`) AS _numbered WHERE __bruin_dedup_rn = 1"
 			}
 			require.NoError(t, d.DeleteInsertTable(t.Context(), opts))
 			require.Equal(t, []string{"ALTER TABLE `warehouse`.`order` DELETE WHERE `version` >= 11 AND `version` <= 29", "WAIT FOR MUTATIONS", "INSERT INTO `warehouse`.`order` (`tenant`, `id`, `version`) " + selectSQL}, c.statements)

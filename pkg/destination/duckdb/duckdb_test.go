@@ -1338,6 +1338,41 @@ func TestMergeTable_EmptyTargetDedupesStagingByPK(t *testing.T) {
 	assert.Equal(t, 20, updatedAt)
 }
 
+func TestDedupNullIncrementalKey(t *testing.T) {
+	ctx := context.Background()
+	for _, nullOrder := range []string{"NULLS_FIRST", "NULLS_LAST"} {
+		t.Run(nullOrder, func(t *testing.T) {
+			dest, path := connectTestDuckDB(t, ctx)
+			require.NoError(t, dest.Exec(ctx, "SET default_null_order = '"+nullOrder+"'"))
+			require.NoError(t, dest.Exec(ctx, `CREATE TABLE staging (id BIGINT, score BIGINT);
+				INSERT INTO staging VALUES (1, NULL), (1, -10), (1, -3), (2, -7), (2, NULL), (3, NULL), (3, NULL);
+				CREATE TABLE target (id BIGINT PRIMARY KEY, score BIGINT)`))
+
+			for _, populated := range []bool{false, true} {
+				require.NoError(t, dest.Exec(ctx, "DELETE FROM target"))
+				if populated {
+					require.NoError(t, dest.Exec(ctx, "INSERT INTO target VALUES (1, 99)"))
+				}
+				require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+					StagingTable: "staging", TargetTable: "target", PrimaryKeys: []string{"id"},
+					Columns: []string{"id", "score"}, IncrementalKey: "score",
+				}))
+				db := openDuckDB(t, ctx, path)
+				var winners string
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT string_agg(id || ':' || coalesce(score::VARCHAR, 'NULL'), ',' ORDER BY id) FROM target`).Scan(&winners))
+				assert.Equal(t, "1:-3,2:-7,3:NULL", winners)
+			}
+
+			selectSQL := destination.DedupStagingSelect(`"id", "score"`, `"id"`, `"staging"`, `"score"`)
+			require.NoError(t, dest.Exec(ctx, "CREATE TABLE selected AS "+selectSQL))
+			db := openDuckDB(t, ctx, path)
+			var winners string
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT string_agg(id || ':' || coalesce(score::VARCHAR, 'NULL'), ',' ORDER BY id) FROM selected`).Scan(&winners))
+			assert.Equal(t, "1:-3,2:-7,3:NULL", winners)
+		})
+	}
+}
+
 func TestMergeTable_EmptyTargetUniqueStagingInsertsRows(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

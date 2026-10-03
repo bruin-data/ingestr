@@ -358,7 +358,7 @@ func TestBuildDeleteInsertStatements(t *testing.T) {
 
 	wantParts := []string{
 		"INSERT INTO `analytics`.`events` (`id`, `name`, `event_time`)",
-		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `event_time` DESC)",
+		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY CASE WHEN `event_time` IS NULL THEN 1 ELSE 0 END ASC, `event_time` DESC)",
 		"FROM `analytics`.`events_staging`",
 		"WHERE __bruin_dedup_rn = 1",
 	}

@@ -285,7 +285,7 @@ func TestBuildTruncateInsertFromStagingSQL(t *testing.T) {
 				Columns:        []string{"id", "updated_at", "value"},
 				IncrementalKey: "updated_at",
 			},
-			contains: `SELECT DISTINCT ON ("id") "id", "updated_at", "value" FROM "_bruin_staging"."events" ORDER BY "id", "updated_at" DESC`,
+			contains: `SELECT DISTINCT ON ("id") "id", "updated_at", "value" FROM "_bruin_staging"."events" ORDER BY "id", "updated_at" DESC NULLS LAST`,
 			excludes: "ON CONFLICT",
 		},
 	}

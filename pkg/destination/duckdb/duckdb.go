@@ -1004,7 +1004,7 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteIdentifier)
 	} else if opts.IncrementalKey != "" {
-		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC"
+		dedupOrderBy = destination.QuoteIdentifier(opts.IncrementalKey) + " DESC NULLS LAST"
 	}
 	usedInternalNames := make(map[string]struct{}, len(stagingColumns)+6)
 	for _, col := range stagingColumns {
