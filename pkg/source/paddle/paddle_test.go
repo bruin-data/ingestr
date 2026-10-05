@@ -240,6 +240,77 @@ func TestPaddleAddressesPerCustomer(t *testing.T) {
 	}
 }
 
+func TestPaddleAddressesFromEvents(t *testing.T) {
+	now := time.Now().UTC()
+	ts := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339Nano) }
+	event := func(id, typ, addressID, customerID, status string, age time.Duration) map[string]interface{} {
+		return map[string]interface{}{
+			"event_id":    id,
+			"event_type":  typ,
+			"occurred_at": ts(age),
+			"data":        map[string]interface{}{"id": addressID, "customer_id": customerID, "status": status, "updated_at": ts(age)},
+		}
+	}
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data []map[string]interface{}
+		next := ""
+		switch {
+		case r.URL.Path == "/events" && r.URL.Query().Get("page") == "":
+			q := r.URL.Query()
+			if q.Get("event_type") != "address.created,address.updated,address.imported" || q.Get("order_by") != "id[DESC]" || q.Get("from") == "" {
+				t.Errorf("events query = %v", q)
+			}
+			data = []map[string]interface{}{
+				event("evt_5", "address.updated", "add_1", "ctm_1", "archived", time.Hour),
+				event("evt_4", "address.created", "add_2", "ctm_2", "active", 2*time.Hour),
+				event("evt_3", "address.created", "add_1", "ctm_1", "active", 3*time.Hour),
+			}
+			next = srvURL + "/events?page=2"
+		case r.URL.Path == "/events" && r.URL.Query().Get("page") == "2":
+			data = []map[string]interface{}{
+				event("evt_2", "address.imported", "add_3", "ctm_3", "active", 24*time.Hour),
+				event("evt_1", "address.created", "add_4", "ctm_4", "active", 30*24*time.Hour),
+			}
+			next = srvURL + "/events?page=3"
+		default:
+			t.Errorf("unexpected request %s", r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": data,
+			"meta": map[string]interface{}{"pagination": map[string]interface{}{"has_more": next != "", "next": next}},
+		})
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	start := now.Add(-7 * 24 * time.Hour)
+	s := &PaddleSource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+	results, err := s.read(context.Background(), "addresses", endpoints["addresses"], source.ReadOptions{IntervalStart: &start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	rows := 0
+	for res := range results {
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		rec := res.Batch
+		for i := 0; i < int(rec.NumRows()); i++ {
+			got[stringValue(t, rec, "id", i)] = stringValue(t, rec, "status", i)
+			rows++
+		}
+		rec.Release()
+	}
+	want := map[string]string{"add_1": "archived", "add_2": "active", "add_3": "active"}
+	if rows != len(want) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("rows=%d addresses=%v, want %v", rows, got, want)
+	}
+}
+
 func stringValue(t *testing.T, rec arrow.RecordBatch, col string, row int) string {
 	t.Helper()
 	ext := rec.Column(rec.Schema().FieldIndices(col)[0]).(array.ExtensionArray)

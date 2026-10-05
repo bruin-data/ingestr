@@ -18,6 +18,8 @@ URI parameters:
 
 You can create an API key in the Paddle dashboard under **Developer tools > Authentication**. See the [Paddle API reference](https://developer.paddle.com/api-reference/overview) for more details.
 
+The key needs read permission for every table you ingest. Incremental `addresses` loads with an `--interval-start` in the last 89 days also need the `notification.read` permission.
+
 Here's a sample command that copies Paddle customers into a DuckDB database:
 
 ```sh

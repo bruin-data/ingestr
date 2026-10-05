@@ -22,6 +22,14 @@ const (
 
 	rateLimitPerSecond = 4
 	rateLimitBurst     = 4
+	// A 429 locks the IP for the Retry-After period (60s), so allow several lockouts before failing.
+	rateLimitRetries = 10
+
+	// The per-customer scan sends one request per customer; half of Paddle's per-IP cap leaves room for other traffic.
+	perCustomerRatePerSecond = 2
+
+	// Paddle keeps events for 90 days; the margin keeps the window's start safely inside it.
+	eventRetention = 89 * 24 * time.Hour
 )
 
 type endpoint struct {
@@ -30,6 +38,7 @@ type endpoint struct {
 	maxPageSize  int
 	serverFilter bool
 	perCustomer  bool
+	eventTypes   string
 }
 
 var endpoints = map[string]endpoint{
@@ -40,7 +49,7 @@ var endpoints = map[string]endpoint{
 	"transactions":  {path: "/transactions", maxPageSize: 30, serverFilter: true},
 	"subscriptions": {path: "/subscriptions", maxPageSize: 200},
 	"adjustments":   {path: "/adjustments", maxPageSize: 50},
-	"addresses":     {path: "/customers/%s/addresses", statuses: "active,archived", maxPageSize: 200, perCustomer: true},
+	"addresses":     {path: "/customers/%s/addresses", statuses: "active,archived", maxPageSize: 200, perCustomer: true, eventTypes: "address.created,address.updated,address.imported"},
 }
 
 type listResponse struct {
@@ -80,6 +89,8 @@ func (s *PaddleSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithAuth(httpclient.NewBearerAuth(s.apiKey)),
 		httpclient.WithRateLimiter(rateLimitPerSecond, rateLimitBurst),
+		httpclient.WithRetry(rateLimitRetries, time.Second, 60*time.Second),
+		httpclient.WithHeader("Skip-Count", "true"),
 	)
 
 	config.Debug("[PADDLE] Connected successfully")
@@ -168,11 +179,20 @@ func (s *PaddleSource) read(ctx context.Context, table string, ep endpoint, opts
 			return
 		}
 
-		err := s.forEachCustomer(ctx, func(id string) error {
-			customerEp := ep
-			customerEp.path = fmt.Sprintf(ep.path, url.PathEscape(id))
-			return s.readEndpoint(ctx, table, customerEp, opts, results)
-		})
+		var err error
+		if start := toTime(opts.IntervalStart); start != nil && time.Since(*start) < eventRetention {
+			err = s.readEvents(ctx, table, ep, opts, results)
+		} else {
+			limiter := httpclient.NewRateLimiter(perCustomerRatePerSecond, 1)
+			err = s.forEachCustomer(ctx, func(id string) error {
+				if err := limiter.Wait(ctx); err != nil {
+					return err
+				}
+				customerEp := ep
+				customerEp.path = fmt.Sprintf(ep.path, url.PathEscape(id))
+				return s.readEndpoint(ctx, table, customerEp, opts, results)
+			})
+		}
 		if err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
@@ -251,24 +271,6 @@ func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoi
 	}
 
 	totalSent := 0
-	var batch []map[string]interface{}
-	var accBytes int64
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
-		if err != nil {
-			return err
-		}
-		totalSent += len(batch)
-		config.Debug("[PADDLE] Sending batch of %d %s (total: %d)", len(batch), table, totalSent)
-		results <- source.RecordBatchResult{Batch: rec}
-		batch = nil
-		accBytes = 0
-		return nil
-	}
-
 	requestURL := ep.path
 	useParams := true
 	for {
@@ -304,19 +306,7 @@ func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoi
 				}
 			}
 		}
-		for _, row := range items {
-			if opts.MaxBatchBytes > 0 {
-				rowBytes := arrowconv.RowBytes(row)
-				if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
-					if err := flush(); err != nil {
-						return err
-					}
-				}
-				accBytes += rowBytes
-			}
-			batch = append(batch, row)
-		}
-		if err := flush(); err != nil {
+		if err := sendRows(table, items, opts, results, &totalSent); err != nil {
 			return err
 		}
 
@@ -342,6 +332,122 @@ func (s *PaddleSource) readEndpoint(ctx context.Context, table string, ep endpoi
 
 	config.Debug("[PADDLE] Finished reading %s, total: %d", table, totalSent)
 	return nil
+}
+
+// readEvents rebuilds a table from the account-wide event stream, which is
+// newest-first, so paging stops at the first event older than the window start.
+func (s *PaddleSource) readEvents(ctx context.Context, table string, ep endpoint, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	start := toTime(opts.IntervalStart)
+	end := toTime(opts.IntervalEnd)
+
+	params := url.Values{}
+	params.Set("per_page", "200")
+	params.Set("order_by", "id[DESC]")
+	params.Set("event_type", ep.eventTypes)
+	params.Set("from", start.UTC().Format(time.RFC3339))
+	if end != nil {
+		// An event can land just after the update it carries; inRange applies the exact end.
+		params.Set("to", end.Add(time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	seen := map[string]bool{}
+	totalSent := 0
+	requestURL := "/events"
+	useParams := true
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var resp listResponse
+		req := s.client.R(ctx).SetResult(&resp)
+		if useParams {
+			req.SetQueryParamValues(params)
+		}
+		httpResp, err := req.Get(requestURL)
+		if err != nil {
+			return fmt.Errorf("failed to fetch %s events: %w", table, err)
+		}
+		if !httpResp.IsSuccess() {
+			return fmt.Errorf("paddle %s events request failed with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
+		}
+
+		done := !resp.Meta.Pagination.HasMore || len(resp.Data) == 0
+		var items []map[string]interface{}
+		for _, event := range resp.Data {
+			occurredAt, _ := event["occurred_at"].(string)
+			if t, err := parsePaddleTime(occurredAt); err == nil && t.Before(*start) {
+				done = true
+				break
+			}
+			entity, _ := event["data"].(map[string]interface{})
+			id, _ := entity["id"].(string)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			if inRange(entity, start, end) {
+				items = append(items, entity)
+			}
+		}
+		if err := sendRows(table, items, opts, results, &totalSent); err != nil {
+			return err
+		}
+		if done {
+			break
+		}
+
+		if next := resp.Meta.Pagination.Next; next != "" {
+			requestURL = next
+			useParams = false
+			continue
+		}
+		lastID, _ := resp.Data[len(resp.Data)-1]["event_id"].(string)
+		if lastID == "" {
+			break
+		}
+		params.Set("after", lastID)
+		requestURL = "/events"
+		useParams = true
+	}
+
+	config.Debug("[PADDLE] Finished reading %s from events, total: %d", table, totalSent)
+	return nil
+}
+
+func sendRows(table string, rows []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult, totalSent *int) error {
+	var batch []map[string]interface{}
+	var accBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rec, err := arrowconv.ItemsToArrowRecordWithSchema(batch, nil, opts.ExcludeColumns)
+		if err != nil {
+			return err
+		}
+		*totalSent += len(batch)
+		config.Debug("[PADDLE] Sending batch of %d %s (total: %d)", len(batch), table, *totalSent)
+		results <- source.RecordBatchResult{Batch: rec}
+		batch = nil
+		accBytes = 0
+		return nil
+	}
+	for _, row := range rows {
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(row)
+			if len(batch) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			accBytes += rowBytes
+		}
+		batch = append(batch, row)
+	}
+	return flush()
 }
 
 func toTime(v *time.Time) *time.Time {
