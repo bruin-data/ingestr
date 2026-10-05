@@ -259,10 +259,11 @@ func TestPaddleAddressesFromEvents(t *testing.T) {
 		switch {
 		case r.URL.Path == "/events" && r.URL.Query().Get("page") == "":
 			q := r.URL.Query()
-			if q.Get("event_type") != "address.created,address.updated,address.imported" || q.Get("order_by") != "id[DESC]" || q.Get("from") == "" {
+			if q.Get("event_type") != "address.created,address.updated,address.imported" || q.Get("order_by") != "id[DESC]" || q.Get("from") == "" || q.Get("to") == "" {
 				t.Errorf("events query = %v", q)
 			}
 			data = []map[string]interface{}{
+				event("evt_6", "address.updated", "add_2", "ctm_2", "archived", 10*time.Minute),
 				event("evt_5", "address.updated", "add_1", "ctm_1", "archived", time.Hour),
 				event("evt_4", "address.created", "add_2", "ctm_2", "active", 2*time.Hour),
 				event("evt_3", "address.created", "add_1", "ctm_1", "active", 3*time.Hour),
@@ -287,8 +288,9 @@ func TestPaddleAddressesFromEvents(t *testing.T) {
 	srvURL = srv.URL
 
 	start := now.Add(-7 * 24 * time.Hour)
+	end := now.Add(-30 * time.Minute)
 	s := &PaddleSource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
-	results, err := s.read(context.Background(), "addresses", endpoints["addresses"], source.ReadOptions{IntervalStart: &start})
+	results, err := s.read(context.Background(), "addresses", endpoints["addresses"], source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
 	if err != nil {
 		t.Fatal(err)
 	}

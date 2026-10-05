@@ -387,8 +387,8 @@ func (s *PaddleSource) readEvents(ctx context.Context, table string, ep endpoint
 			if id == "" || seen[id] {
 				continue
 			}
-			seen[id] = true
 			if inRange(entity, start, end) {
+				seen[id] = true
 				items = append(items, entity)
 			}
 		}
