@@ -24,6 +24,10 @@ func TestParseBigQueryPartitionBy(t *testing.T) {
 		"range_bucket(`id`, generate_array(-100, 100, 5))": {
 			Column: "id", Range: &PartitionRange{Start: -100, End: 100, Interval: 5},
 		},
+		"TIMESTAMP_TRUNC(`Event Time`, HOUR)": {Column: "Event Time", Granularity: "HOUR"},
+		"RANGE_BUCKET(`Customer Id`, GENERATE_ARRAY(0, 10, 1))": {
+			Column: "Customer Id", Range: &PartitionRange{Start: 0, End: 10, Interval: 1},
+		},
 	}
 	for value, want := range valid {
 		got, err := ParseBigQueryPartitionBy(value)
@@ -51,16 +55,20 @@ func TestParseIcebergPartitionBy(t *testing.T) {
 	t.Parallel()
 
 	valid := map[string]PartitionSpec{
-		"created_at":         {Column: "created_at"},
-		"hour(ts)":           {Column: "ts", Granularity: "HOUR"},
-		"DAY(`ts`)":          {Column: "ts", Granularity: "DAY"},
-		`day("eventTime")`:   {Column: "eventTime", Granularity: "DAY"},
-		"months(ts)":         {Column: "ts", Granularity: "MONTH"},
-		"years( ts )":        {Column: "ts", Granularity: "YEAR"},
-		"bucket(16, id)":     {Column: "id", Bucket: 16},
-		"bucket(id, 16)":     {Column: "id", Bucket: 16},
-		"truncate(10, name)": {Column: "name", Truncate: 10},
-		"truncate(name, 10)": {Column: "name", Truncate: 10},
+		"created_at":                 {Column: "created_at"},
+		"hour(ts)":                   {Column: "ts", Granularity: "HOUR"},
+		"DAY(`ts`)":                  {Column: "ts", Granularity: "DAY"},
+		`day("eventTime")`:           {Column: "eventTime", Granularity: "DAY"},
+		"months(ts)":                 {Column: "ts", Granularity: "MONTH"},
+		"years( ts )":                {Column: "ts", Granularity: "YEAR"},
+		"bucket(16, id)":             {Column: "id", Bucket: 16},
+		"bucket(id, 16)":             {Column: "id", Bucket: 16},
+		"truncate(10, name)":         {Column: "name", Truncate: 10},
+		"truncate(name, 10)":         {Column: "name", Truncate: 10},
+		`day("Event Time")`:          {Column: "Event Time", Granularity: "DAY"},
+		`hour("Date (UTC)")`:         {Column: "Date (UTC)", Granularity: "HOUR"},
+		`bucket(16, "Customer Id")`:  {Column: "Customer Id", Bucket: 16},
+		"truncate(`Customer Id`, 4)": {Column: "Customer Id", Truncate: 4},
 	}
 	for value, want := range valid {
 		got, err := ParseIcebergPartitionBy(value)
@@ -86,6 +94,8 @@ func TestMapPartitionColumn(t *testing.T) {
 	require.Equal(t, "bucket(16, ID)", MapPartitionColumn("bucket(16, id)", upper))
 	require.Equal(t, "truncate(NAME, 10)", MapPartitionColumn("truncate(name, 10)", upper))
 	require.Equal(t, "WEEK(ts)", MapPartitionColumn("WEEK(ts)", upper))
+	require.Equal(t, `day("EVENT TIME")`, MapPartitionColumn(`day("Event Time")`, upper))
+	require.Equal(t, "TIMESTAMP_TRUNC(`DATE (UTC)`, HOUR)", MapPartitionColumn("TIMESTAMP_TRUNC(`Date (UTC)`, HOUR)", upper))
 }
 
 func TestHasPartitionColumn(t *testing.T) {
@@ -106,4 +116,5 @@ func TestPartitionColumn(t *testing.T) {
 	require.Equal(t, "id", PartitionColumn("RANGE_BUCKET(id, GENERATE_ARRAY(0, 100, 10))"))
 	require.Equal(t, "id", PartitionColumn("bucket(16, id)"))
 	require.Empty(t, PartitionColumn("WEEK(ts)"))
+	require.Equal(t, "Date (UTC)", PartitionColumn(`day("Date (UTC)")`))
 }

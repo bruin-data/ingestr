@@ -3869,6 +3869,13 @@ func TestApplyPartitionNaming(t *testing.T) {
 			wantPartitionBy: "DATE(created_at)",
 		},
 		{
+			name:            "quoted column with spaces inside an expression is normalized",
+			convention:      naming.SnakeCase,
+			destURI:         "iceberg+hadoop://warehouse",
+			partitionBy:     `day("Event Time")`,
+			wantPartitionBy: `day("event_time")`,
+		},
+		{
 			name:          "cluster_by columns normalized to snake_case",
 			convention:    naming.SnakeCase,
 			clusterBy:     []string{"countryCode", "region"},

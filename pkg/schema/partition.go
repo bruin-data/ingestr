@@ -8,16 +8,17 @@ import (
 	"strings"
 )
 
-const partitionColumnPattern = "[`\"]?(?P<col>[^`\",()\\s]+)[`\"]?"
+// A partition column is a bare name, or a backtick/double-quoted name that may contain spaces or parentheses.
+const partitionColumnPattern = "(?:`(?P<bq>[^`]+)`|\"(?P<dq>[^\"]+)\"|(?P<col>[^`\",()\\s]+))"
 
 var (
-	bigQueryTimePartitionPattern  = regexp.MustCompile(`(?i)^\s*(DATE|DATE_TRUNC|DATETIME_TRUNC|TIMESTAMP_TRUNC)\s*\(\s*` + partitionColumnPattern + `\s*(?:,\s*(\w+)\s*)?\)\s*$`)
-	bigQueryRangePartitionPattern = regexp.MustCompile(`(?i)^\s*RANGE_BUCKET\s*\(\s*` + partitionColumnPattern + `\s*,\s*GENERATE_ARRAY\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)\s*\)\s*$`)
+	bigQueryTimePartitionPattern  = regexp.MustCompile(`(?i)^\s*(?P<fn>DATE|DATE_TRUNC|DATETIME_TRUNC|TIMESTAMP_TRUNC)\s*\(\s*` + partitionColumnPattern + `\s*(?:,\s*(?P<unit>\w+)\s*)?\)\s*$`)
+	bigQueryRangePartitionPattern = regexp.MustCompile(`(?i)^\s*RANGE_BUCKET\s*\(\s*` + partitionColumnPattern + `\s*,\s*GENERATE_ARRAY\s*\(\s*(?P<start>-?\d+)\s*,\s*(?P<end>-?\d+)\s*,\s*(?P<interval>-?\d+)\s*\)\s*\)\s*$`)
 
-	icebergTimePartitionPattern = regexp.MustCompile(`(?i)^\s*(YEARS?|MONTHS?|DAYS?|HOURS?)\s*\(\s*` + partitionColumnPattern + `\s*\)\s*$`)
+	icebergTimePartitionPattern = regexp.MustCompile(`(?i)^\s*(?P<fn>YEARS?|MONTHS?|DAYS?|HOURS?)\s*\(\s*` + partitionColumnPattern + `\s*\)\s*$`)
 	// Athena and Spark write bucket(N, col); Trino writes bucket(col, N).
-	icebergWidthFirstPattern  = regexp.MustCompile(`(?i)^\s*(BUCKET|TRUNCATE)\s*\(\s*(\d+)\s*,\s*` + partitionColumnPattern + `\s*\)\s*$`)
-	icebergColumnFirstPattern = regexp.MustCompile(`(?i)^\s*(BUCKET|TRUNCATE)\s*\(\s*` + partitionColumnPattern + `\s*,\s*(\d+)\s*\)\s*$`)
+	icebergWidthFirstPattern  = regexp.MustCompile(`(?i)^\s*(?P<fn>BUCKET|TRUNCATE)\s*\(\s*(?P<width>\d+)\s*,\s*` + partitionColumnPattern + `\s*\)\s*$`)
+	icebergColumnFirstPattern = regexp.MustCompile(`(?i)^\s*(?P<fn>BUCKET|TRUNCATE)\s*\(\s*` + partitionColumnPattern + `\s*,\s*(?P<width>\d+)\s*\)\s*$`)
 
 	partitionPatterns = []*regexp.Regexp{
 		bigQueryTimePartitionPattern, bigQueryRangePartitionPattern,
@@ -61,11 +62,12 @@ func ParseBigQueryPartitionBy(value string) (PartitionSpec, error) {
 	if m := bigQueryRangePartitionPattern.FindStringSubmatch(value); m != nil {
 		return parseRangePartition(value, m)
 	}
-	m := bigQueryTimePartitionPattern.FindStringSubmatch(value)
+	p := bigQueryTimePartitionPattern
+	m := p.FindStringSubmatch(value)
 	if m == nil {
 		return PartitionSpec{}, fmt.Errorf("unsupported partition_by expression %q: use a column, DATE(col), DATE_TRUNC/DATETIME_TRUNC/TIMESTAMP_TRUNC(col, HOUR|DAY|MONTH|YEAR) or RANGE_BUCKET(col, GENERATE_ARRAY(start, end, interval))", value)
 	}
-	fn, column, unit := strings.ToUpper(m[1]), m[2], strings.ToUpper(m[3])
+	fn, column, unit := strings.ToUpper(group(p, m, "fn")), matchedColumn(p, m), strings.ToUpper(group(p, m, "unit"))
 	if fn == "DATE" {
 		if unit != "" {
 			return PartitionSpec{}, fmt.Errorf("unsupported partition_by expression %q: DATE() takes only a column", value)
@@ -83,9 +85,10 @@ func ParseBigQueryPartitionBy(value string) (PartitionSpec, error) {
 }
 
 func parseRangePartition(value string, m []string) (PartitionSpec, error) {
+	p := bigQueryRangePartitionPattern
 	var bounds [3]int64
-	for i := range bounds {
-		n, err := strconv.ParseInt(m[i+2], 10, 64)
+	for i, name := range []string{"start", "end", "interval"} {
+		n, err := strconv.ParseInt(group(p, m, name), 10, 64)
 		if err != nil {
 			return PartitionSpec{}, fmt.Errorf("invalid partition_by expression %q: %w", value, err)
 		}
@@ -95,7 +98,7 @@ func parseRangePartition(value string, m []string) (PartitionSpec, error) {
 	if r.Interval <= 0 || r.End <= r.Start {
 		return PartitionSpec{}, fmt.Errorf("invalid partition_by expression %q: GENERATE_ARRAY needs start < end and a positive interval", value)
 	}
-	return PartitionSpec{Column: m[1], Range: r}, nil
+	return PartitionSpec{Column: matchedColumn(p, m), Range: r}, nil
 }
 
 // ParseIcebergPartitionBy accepts a bare column or an Iceberg transform: year/month/day/hour(col)
@@ -104,15 +107,18 @@ func ParseIcebergPartitionBy(value string) (PartitionSpec, error) {
 	if !IsPartitionExpression(value) {
 		return PartitionSpec{Column: strings.TrimSpace(value)}, nil
 	}
-	if m := icebergTimePartitionPattern.FindStringSubmatch(value); m != nil {
-		return PartitionSpec{Column: m[2], Granularity: strings.TrimSuffix(strings.ToUpper(m[1]), "S")}, nil
+	p := icebergTimePartitionPattern
+	if m := p.FindStringSubmatch(value); m != nil {
+		return PartitionSpec{Column: matchedColumn(p, m), Granularity: strings.TrimSuffix(strings.ToUpper(group(p, m, "fn")), "S")}, nil
 	}
 	var fn, width, column string
-	if m := icebergWidthFirstPattern.FindStringSubmatch(value); m != nil {
-		fn, width, column = m[1], m[2], m[3]
-	} else if m := icebergColumnFirstPattern.FindStringSubmatch(value); m != nil {
-		fn, column, width = m[1], m[2], m[3]
-	} else {
+	for _, p := range []*regexp.Regexp{icebergWidthFirstPattern, icebergColumnFirstPattern} {
+		if m := p.FindStringSubmatch(value); m != nil {
+			fn, width, column = group(p, m, "fn"), group(p, m, "width"), matchedColumn(p, m)
+			break
+		}
+	}
+	if fn == "" {
 		return PartitionSpec{}, fmt.Errorf("unsupported partition_by expression %q: use a column, year/month/day/hour(col), bucket(N, col) or truncate(W, col)", value)
 	}
 	n, err := strconv.Atoi(width)
@@ -150,9 +156,25 @@ func MapPartitionColumn(value string, mapColumn func(string) string) string {
 func partitionColumnSpan(value string) (int, int, bool) {
 	for _, pattern := range partitionPatterns {
 		if idx := pattern.FindStringSubmatchIndex(value); idx != nil {
-			col := 2 * pattern.SubexpIndex("col")
-			return idx[col], idx[col+1], true
+			for _, name := range []string{"bq", "dq", "col"} {
+				if i := 2 * pattern.SubexpIndex(name); idx[i] >= 0 {
+					return idx[i], idx[i+1], true
+				}
+			}
 		}
 	}
 	return 0, 0, false
+}
+
+func group(p *regexp.Regexp, m []string, name string) string {
+	return m[p.SubexpIndex(name)]
+}
+
+func matchedColumn(p *regexp.Regexp, m []string) string {
+	for _, name := range []string{"bq", "dq", "col"} {
+		if v := group(p, m, name); v != "" {
+			return v
+		}
+	}
+	return ""
 }
