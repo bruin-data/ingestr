@@ -1231,6 +1231,14 @@ func TestManagedStagingPolicyAvoidsUnderscoreOnS3Tables(t *testing.T) {
 			name: "plain rest",
 			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/wh",
 		},
+		{
+			name: "warehouse path containing s3tablescatalog",
+			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/s3tablescatalog/",
+		},
+		{
+			name: "glue catalog id without s3tablescatalog",
+			uri:  "iceberg+glue://?glue.id=123456789012&warehouse=s3://bucket/wh",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
