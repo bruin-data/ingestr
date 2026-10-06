@@ -1,0 +1,37 @@
+version: 2
+
+# Group security fixes for the maintained root manifests only.
+# The required schedules do not enable version PRs while the limits are zero.
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    groups:
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    groups:
+      docs-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    groups:
+      python-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
