@@ -1487,9 +1487,13 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		frac := (micros % 1000000)
 		return fmt.Sprintf("%02d:%02d:%02d.%06d", hours, mins, secs, frac)
 	case *array.Timestamp:
-		// Arrow's own rendering ("2026-03-30T13:15:43.123456Z") so create-run
-		// inserts and merge-run schema-aligner casts store identical text.
-		return a.ValueStr(idx)
+		// RFC3339 with offset ("2026-03-30T13:15:43.123456Z") so create-run inserts and
+		// merge-run casts store identical text; arrow-go's ValueStr drops Z for naive values.
+		toTime, err := a.DataType().(*arrow.TimestampType).GetToTimeFunc()
+		if err != nil {
+			return a.ValueStr(idx)
+		}
+		return toTime(a.Value(idx)).Format(time.RFC3339Nano)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
 	case *array.Decimal256:
