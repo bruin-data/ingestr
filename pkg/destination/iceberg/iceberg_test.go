@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1197,4 +1200,69 @@ func icebergPartitionFieldNames(ctx context.Context, t *testing.T, dest *Destina
 		names = append(names, field.Name)
 	}
 	return names
+}
+
+func TestManagedStagingPolicyAvoidsUnderscoreOnS3Tables(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{
+			name: "s3 tables rest",
+			uri:  "iceberg+rest://?uri=https://s3tables.us-east-1.amazonaws.com/iceberg&warehouse=arn:aws:s3tables:us-east-1:123456789012:bucket/b&rest.sigv4-enabled=true&rest.signing-name=s3tables&rest.signing-region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "glue iceberg rest endpoint",
+			uri:  "iceberg+rest://?uri=https://glue.us-east-1.amazonaws.com/iceberg&warehouse=123456789012:s3tablescatalog/b&rest.sigv4-enabled=true&rest.signing-name=glue&rest.signing-region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "glue federated catalog",
+			uri:  "iceberg+glue://?glue.id=123456789012:s3tablescatalog/b&glue.region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "plain glue",
+			uri:  "iceberg+glue://?warehouse=s3://bucket/wh&glue.region=us-east-1",
+		},
+		{
+			name: "plain rest",
+			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/wh",
+		},
+		{
+			name: "warehouse path containing s3tablescatalog",
+			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/s3tablescatalog/",
+		},
+		{
+			name: "glue catalog id without s3tablescatalog",
+			uri:  "iceberg+glue://?glue.id=123456789012&warehouse=s3://bucket/wh",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseIcebergConfig(tt.uri)
+			require.NoError(t, err)
+			dest := &Destination{cfg: cfg}
+			require.Equal(t, tt.want, dest.ManagedStagingPolicy().DefaultManagedSchema)
+		})
+	}
+}
+
+func TestDestinationConnectSignsSigV4RESTCatalog(t *testing.T) {
+	var authHeader atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{}}`))
+	}))
+	defer srv.Close()
+
+	uri := "iceberg+rest://?uri=" + url.QueryEscape(srv.URL) +
+		"&warehouse=wh&rest.sigv4-enabled=true&rest.signing-name=s3tables&rest.signing-region=us-east-1" +
+		"&s3.access-key-id=AKIDEXAMPLE&s3.secret-access-key=secret"
+	dest := &Destination{}
+	require.NoError(t, dest.Connect(context.Background(), uri))
+	defer func() { _ = dest.Close(context.Background()) }()
+	require.Contains(t, authHeader.Load(), "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
 }

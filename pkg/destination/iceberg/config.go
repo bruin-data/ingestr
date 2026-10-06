@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -92,6 +93,20 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 		}
 	}
 	return cfg, nil
+}
+
+var s3TablesFederatedCatalogID = regexp.MustCompile(`^\d{12}:s3tablescatalog/[^/]+$`)
+
+// isS3TablesCatalog reports whether the catalog targets AWS S3 Tables, directly
+// over REST or through the Glue s3tablescatalog federation.
+func isS3TablesCatalog(props iceberggo.Properties) bool {
+	if strings.EqualFold(props.Get("rest.signing-name", ""), "s3tables") {
+		return true
+	}
+	warehouse := props.Get("warehouse", "")
+	return strings.HasPrefix(warehouse, "arn:aws:s3tables:") ||
+		s3TablesFederatedCatalogID.MatchString(warehouse) ||
+		s3TablesFederatedCatalogID.MatchString(props.Get("glue.id", ""))
 }
 
 // isAWSEndpoint reports whether an S3 endpoint is AWS itself rather than an

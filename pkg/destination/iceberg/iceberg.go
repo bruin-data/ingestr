@@ -23,6 +23,7 @@ import (
 	_ "github.com/apache/iceberg-go/catalog/hadoop"
 	_ "github.com/apache/iceberg-go/catalog/hive"
 	_ "github.com/apache/iceberg-go/catalog/rest"
+	_ "github.com/apache/iceberg-go/catalog/rest/sigv4"
 	_ "github.com/apache/iceberg-go/catalog/sql"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	icebergtable "github.com/apache/iceberg-go/table"
@@ -80,6 +81,16 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 	d.orphanCleanupLastAttempt = make(map[string]time.Time)
 	config.Debug("[ICEBERG] Connected catalog type=%s name=%s", cat.CatalogType(), cfg.CatalogName)
 	return nil
+}
+
+// ManagedStagingPolicy keeps the default _bruin_staging namespace, except on S3
+// Tables, which rejects namespaces starting with an underscore.
+func (d *Destination) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	policy := destination.ReplaceStagingPolicy{DefaultPlacement: destination.ReplaceStagingManagedSchema}
+	if isS3TablesCatalog(d.cfg.Properties) {
+		policy.DefaultManagedSchema = "bruin_staging"
+	}
+	return policy
 }
 
 func (d *Destination) Close(ctx context.Context) error {
