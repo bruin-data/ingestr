@@ -578,7 +578,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 				if ik == "" {
 					ik = table.IncrementalKey()
 				}
-				partitionCol := resolvePartitionBy(p.config, table)
+				partitionCol := partitionColumn(resolvePartitionBy(p.config, table), synthetic)
 				if err := schemainfer.AddKeyColumnsIfMissing(synthetic, pks, ik, partitionCol, p.config.SchemaNaming); err != nil {
 					return fmt.Errorf("failed to add key columns to synthetic schema: %w", err)
 				}
@@ -807,7 +807,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
 	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
 
-	applyPartitionNaming(&resolvedConfig, tableSchema, namingConv)
+	applyPartitionNaming(&resolvedConfig, originalSourceSchema, tableSchema, namingConv)
+	if err := validatePartitionBy(&resolvedConfig, p.config.PartitionBy, tableSchema); err != nil {
+		return err
+	}
 
 	// Primary key columns must be NOT NULL
 	pkSet := make(map[string]bool, len(ingestSchema.PrimaryKeys))
@@ -1051,7 +1054,7 @@ func (p *Pipeline) schemaFromColumnOverrides(table source.SourceTable) (*schema.
 	if ik == "" {
 		ik = table.IncrementalKey()
 	}
-	partitionCol := resolvePartitionBy(p.config, table)
+	partitionCol := partitionColumn(resolvePartitionBy(p.config, table), tableSchema)
 	if err := schemainfer.AddKeyColumnsIfMissing(tableSchema, pks, ik, partitionCol, p.config.SchemaNaming); err != nil {
 		return nil, fmt.Errorf("failed to add key columns to --columns schema: %w", err)
 	}
@@ -1316,8 +1319,8 @@ func (p *Pipeline) inferSchemaFromData(
 		return nil, nil, nil, nil, err
 	}
 
-	if partitionCol := resolvePartitionBy(p.config, table); partitionCol != "" {
-		inferrer.ProtectColumns([]string{partitionCol})
+	if partitionBy := resolvePartitionBy(p.config, table); partitionBy != "" {
+		inferrer.ProtectColumns([]string{strings.TrimSpace(partitionBy), schema.PartitionColumn(partitionBy)})
 	}
 
 	// Infer schema
@@ -2297,12 +2300,12 @@ func (p *Pipeline) setupNamingConvention(ctx context.Context, sourceSchema *sche
 
 // applyPartitionNaming normalizes partition_by/cluster_by to the destination column
 // naming (no-op for direct); partition_by falls back to the source partition column.
-func applyPartitionNaming(cfg *config.IngestConfig, tableSchema *schema.TableSchema, namingConv naming.NamingConvention) {
+func applyPartitionNaming(cfg *config.IngestConfig, sourceSchema, tableSchema *schema.TableSchema, namingConv naming.NamingConvention) {
 	switch {
 	case cfg.PartitionBy != "":
-		cfg.PartitionBy = namingConv.Normalize(cfg.PartitionBy)
+		cfg.PartitionBy = normalizePartitionBy(cfg, cfg.PartitionBy, sourceSchema, namingConv)
 	case tableSchema.PartitionBy != "":
-		cfg.PartitionBy = namingConv.Normalize(tableSchema.PartitionBy)
+		cfg.PartitionBy = normalizePartitionBy(cfg, tableSchema.PartitionBy, tableSchema, namingConv)
 	}
 	if len(cfg.ClusterBy) > 0 {
 		clusterBy := make([]string, len(cfg.ClusterBy))
@@ -2311,6 +2314,34 @@ func applyPartitionNaming(cfg *config.IngestConfig, tableSchema *schema.TableSch
 		}
 		cfg.ClusterBy = clusterBy
 	}
+}
+
+// normalizePartitionBy treats an existing column name as a column, keeps a value that parses for the
+// destination as an expression, and otherwise falls back to the whole value as a column name.
+func normalizePartitionBy(cfg *config.IngestConfig, partitionBy string, s *schema.TableSchema, namingConv naming.NamingConvention) string {
+	if !s.HasPartitionColumn(partitionBy) && schema.IsPartitionExpression(partitionBy) && cfg.ParsePartitionExpression(partitionBy) == nil {
+		return schema.MapPartitionColumn(partitionBy, namingConv.Normalize)
+	}
+	return namingConv.Normalize(strings.TrimSpace(partitionBy))
+}
+
+// validatePartitionBy rejects a partition_by that is neither a supported expression nor a column.
+func validatePartitionBy(cfg *config.IngestConfig, partitionBy string, s *schema.TableSchema) error {
+	if !schema.IsPartitionExpression(partitionBy) || s.HasPartitionColumn(cfg.PartitionBy) {
+		return nil
+	}
+	if err := cfg.ParsePartitionExpression(partitionBy); err != nil {
+		return &config.ValidationError{Field: "partition-by", Message: fmt.Sprintf("%q is neither a supported expression (%v) nor a column", partitionBy, err)}
+	}
+	return nil
+}
+
+// partitionColumn returns the column AddKeyColumnsIfMissing must ensure; an existing column needs nothing added.
+func partitionColumn(partitionBy string, s *schema.TableSchema) string {
+	if s.HasPartitionColumn(partitionBy) {
+		return strings.TrimSpace(partitionBy)
+	}
+	return schema.PartitionColumn(partitionBy)
 }
 
 // resolveNamingConvention determines which naming convention applies, resolving
@@ -2446,6 +2477,13 @@ func applyColumnMappingToSchema(s *schema.TableSchema, mapping map[string]string
 	}
 	if newName, ok := mapping[s.PartitionBy]; ok {
 		s.PartitionBy = newName
+	} else {
+		s.PartitionBy = schema.MapPartitionColumn(s.PartitionBy, func(col string) string {
+			if newName, ok := mapping[col]; ok {
+				return newName
+			}
+			return col
+		})
 	}
 }
 
@@ -2518,6 +2556,13 @@ func (p *Pipeline) applyColumnMapping(s *schema.TableSchema, mapping map[string]
 	}
 	if newName, ok := mapping[s.PartitionBy]; ok {
 		s.PartitionBy = newName
+	} else {
+		s.PartitionBy = schema.MapPartitionColumn(s.PartitionBy, func(col string) string {
+			if newName, ok := mapping[col]; ok {
+				return newName
+			}
+			return col
+		})
 	}
 
 	// Compose with existing renamer: if A→B already exists and B→C is new, result is A→C.

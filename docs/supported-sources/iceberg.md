@@ -262,6 +262,20 @@ Use an Iceberg table identifier in `--dest-table`, usually `namespace.table`.
 
 For nested namespaces, use dot-separated identifiers such as `lake.analytics.events`.
 
+## Partitioning
+
+`--partition-by` accepts a column name or an Iceberg partition transform, written as in Athena, Trino or Spark:
+
+| `--partition-by` | Iceberg transform |
+|---|---|
+| `created_at` | `identity` (one partition per distinct value) |
+| `year(created_at)`, `month(...)`, `day(...)`, `hour(...)` | `year`, `month`, `day`, `hour` |
+| `years(created_at)`, `months(...)`, `days(...)`, `hours(...)` | same, Spark spelling |
+| `bucket(16, customer_id)` or `bucket(customer_id, 16)` | `bucket[16]` |
+| `truncate(10, name)` or `truncate(name, 10)` | `truncate[10]` |
+
+`hour` requires a timestamp column. Changing the partitioning of an existing table is applied by the `replace` strategy (the default) and by `--full-refresh`. Other strategies keep the existing table's partitioning.
+
 ## Supported write dispositions
 
 Iceberg supports `append`, `replace`, `merge`, `delete+insert`, and `scd2`.

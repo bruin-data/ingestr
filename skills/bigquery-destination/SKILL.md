@@ -32,7 +32,7 @@ Selected via the destination URI: `bigquery://project/dataset?load_method=storag
 ## 3. Preparing Tables (`PrepareTable`)
 
 - Before inspecting or creating a table, `PrepareTable` ensures its dataset exists. The location it creates a dataset in is the **effective location** (`effectiveLocation`): the URI's configured `location` if set, otherwise the location resolved once from the target table's dataset (`resolveLocation`, cached in `resolvedLocation`). So with **no `location` configured**, a newly created `_bruin_staging` inherits the target table's location instead of the hardcoded `US` default, keeping staging and target in the same location so the cross-location swap failure never arises. `resolveLocation` runs at the top of `PrepareTable` off `opts.TargetTable` (replace sets it on the staging prepare, since replace prepares only the staging table) or `opts.Table` (other strategies prepare the target first, which resolves it); the resolved value flows through `effectiveLocation()` into every dataset create and every load/copy/query job's `Location`. If a dataset already exists and its live BigQuery location differs from the effective location, preparation fails with an actionable, non-retryable `datasetLocationMismatchError`. When no location resolves (none configured and the target dataset does not exist yet), the effective location falls back to `defaultDatasetLocation` (`US`) for this check too, so a pre-existing `_bruin_staging` in a non-US region still fails fast rather than loading and dying at swap time on a cross-location job. Projects that write in multiple locations need a separate staging dataset per location, selected with `--staging-dataset`.
-- Tables are created through the BigQuery API (`BuildTableMetadata` -> `FieldSchema`, `TimePartitioning{Field}`, `Clustering{Fields}`), not SQL DDL.
+- Tables are created through the BigQuery API (`BuildTableMetadata` -> `FieldSchema`, `TimePartitioning{Field, Type}` or `RangePartitioning`, `Clustering{Fields}`), not SQL DDL. See section 9 for how `partition_by` maps to these.
 - **Staging table**: prepared with `DropFirst = true` and the configured `PartitionBy` / `ClusterBy`. After synchronous dataset existence/location validation, `DropFirst` is implemented as an **optimistic async TRUNCATE**: fire `TRUNCATE TABLE` without checking table existence first (the remaining flow runs in a goroutine, overlapping with source reading); if the table doesn't exist, fall back to a fresh CREATE. So an existing staging table is *truncated and reused*, not dropped and recreated.
 - **Destination table**: created only if it does not already exist; if it exists, schema evolution runs instead (`addMissingColumns`, plus REQUIRED→NULLABLE column relaxation for load jobs).
 - **Primary key constraint**: `BuildTableMetadata` adds an informational (`NOT ENFORCED`) `PRIMARY KEY` constraint when primary keys are present. BigQuery never enforces uniqueness with it — it is only a query-optimizer hint; ingestr's own dedup guarantees uniqueness. Whether the destination ends up carrying the constraint depends on the swap path: the copy job (and the merge/append `PrepareTable` path) inherit it from staging (pk present); CTAS does not declare one (pk absent). BigQuery caps the constraint at 16 columns — with more PKs the constraint is skipped with a warning (merge still works; the MERGE SQL keys on the in-memory PK list, not the constraint).
@@ -133,9 +133,10 @@ The check only runs at all when a spec is configured (`partition_by` set, or the
 
 Returns `true` (recreate) if any of these differ from the configured spec:
 
-- Range partitioning is present on the table (ingestr never creates range partitioning).
+- The partitioning kind differs (time vs integer range).
 - Partition field differs, or is absent when a partition is configured (compared case-insensitively).
-- Partition type differs from what ingestr creates (an unset type is treated as the default, DAY).
+- Time partition type differs from the configured granularity (an unset type on either side is treated as the default, DAY).
+- Integer range (start, end, interval) differs.
 - Clustering fields differ by count, order, or name (case-insensitive) from the effective `cluster_by`.
 
 ## 8. `partition_by` / `cluster_by` Naming
@@ -143,8 +144,19 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - `partition_by` and `cluster_by` are normalized through the same naming convention as the columns (default snake_case; no-op under direct naming), because they name destination columns.
 - Applies to both the user-specified value and a `PartitionedTable` source hint.
 - Example: `partition_by "updatedAt"` becomes `"updated_at"` under snake_case, matching the destination column.
+- For an expression, only the column inside is normalized (`schema.MapPartitionColumn`): `TIMESTAMP_TRUNC(updatedAt, HOUR)` becomes `TIMESTAMP_TRUNC(updated_at, HOUR)`.
 
-## 9. Merge Strategy (`MergeTable`)
+## 9. `partition_by` Expressions
+
+`partition_by` takes a bare column or the same expressions a Bruin `bq.sql` asset writes (`schema.ParseBigQueryPartitionBy`):
+
+- bare column -> `TimePartitioning{Field}` with the type unset, i.e. BigQuery's default DAY (unchanged legacy behavior).
+- `DATE(col)` -> DAY; `DATE_TRUNC`/`DATETIME_TRUNC`/`TIMESTAMP_TRUNC(col, HOUR|DAY|MONTH|YEAR)` -> that `Type`.
+- `RANGE_BUCKET(col, GENERATE_ARRAY(start, end, interval))` -> `RangePartitioning` (requires start < end, interval > 0).
+
+The function name only carries the granularity: `partitionByClause` (CTAS swap, type rewrite) picks the `*_TRUNC` matching the column's actual type and keeps `col` / `DATE(col)` for DAY. `applyPartitionNaming` keeps a value as an expression when it parses for the destination (`IngestConfig.ParsePartitionExpression`), and otherwise falls back to the whole value as a column name, so `Amount (USD)` still works. A value with `(` that is neither fails with `"..." is neither a supported expression (...) nor a column` (`validatePartitionBy`, after the source schema is known); DuckLake accepts no expressions; other destinations ignore partition_by. Each destination takes its native syntax: Iceberg parses its own transforms (`schema.ParseIcebergPartitionBy`: `day(col)`, `bucket(N, col)`, ...) and rejects the BigQuery forms; `PrepareTable` re-validates. A changed granularity or range is applied only by replace/full-refresh (rename-aside recreate, section 6). Merge partition pruning applies to time partitioning only.
+
+## 10. Merge Strategy (`MergeTable`)
 
 - **CDC snapshot safety:** batch merges durably invalidate the prior snapshot epoch before truncating any target for a replacement snapshot or source truncate. Interrupted replacements cannot resume from an older completion marker, even when their partial reload has an LSN at or below the prior checkpoint. The destination incarnation stays pinned through invalidation and final checkpoint persistence.
 - Runs a MERGE statement:
@@ -161,13 +173,13 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - **CDC ordering:** CDC matches use the primary key (plus safe partition pruning) without the user incremental predicate; that predicate applies only to matched updates so an existing row cannot become a duplicate insert. Matched updates require a greater `_cdc_lsn`, except an equal-LSN delete may supersede an active row. The merge source combines the latest active row image with the latest overall CDC metadata; row data is applied only when that active image is not older than the target, while newer delete metadata can still advance independently. Its synthetic composition aliases are allocated case-insensitively around source columns. An unknown delete-only key is materialized as a payload-null tombstone so its LSN fences stale replay. PostgreSQL CDC is serialized by its source lease. MySQL CDC is rejected outright: `Pipeline.Run` requires a `ManagedCDCRunLeaser`, which BigQuery does not implement (nor any of the `CDCConditional*` fencing interfaces `validateMySQLCDCMutationFencing` demands). The remaining change sources (`mssql+ct`, `mssql+cdc`, `mongodb+cdc`, `vitess+cdc`, `ps_mysql+cdc`) have no run lease either, but `warnUnserializedCDCRuns` (`pkg/pipeline/pipeline.go`) only warns for them — it used to reject them. BigQuery's informational primary key cannot prevent two concurrent MERGEs from inserting the same absent key, so overlapping runs of one connector can leave permanent duplicate rows; run such connectors serially. Tracked in [#1190](https://github.com/bruin-data/ingestr/issues/1190).
 - Operates in place on the existing destination; does not repartition. If the target was just created asynchronously by `PrepareTable` (the dedup path's normalised staging), MergeTable waits for that pending creation before running, so the MERGE doesn't 404.
 
-## 10. Append Strategy
+## 11. Append Strategy
 
 - Inserts/appends rows directly into the destination table; no swap.
 
 (BigQuery also implements `DeleteInsertTable` — DELETE + INSERT wrapped in a `BEGIN TRANSACTION` script — and SCD2 SQL builders, used by the delete+insert and SCD2 strategies. Neither repartitions.)
 
-## 11. Relevant BigQuery Constraints (all verified live)
+## 12. Relevant BigQuery Constraints (all verified live)
 
 - A table's partitioning cannot be altered in place; changing it requires recreating the table.
 - `CREATE OR REPLACE TABLE` cannot replace a table with a different partitioning spec ("Instead, DROP the table, and then recreate it").
@@ -179,7 +191,7 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - An `expiration_timestamp` survives `ALTER TABLE RENAME`.
 - Copy jobs, RENAME, SET OPTIONS and DROP are free (0 bytes billed); CTAS is billed as a query.
 
-## 12. Key Files
+## 13. Key Files
 
 - `pkg/destination/bigquery/bigquery.go` — `PrepareTable`, `SwapTable`, `renameAsideSwap`, `renameTargetAside`, `restoreTargetFromAside`, `runCTASSwap`, `partitionOrClusterMismatch`, `recreateSpecGuard`, `effectiveClusterBy`, `MergeTable`, merge partition pruning helpers.
 - `pkg/destination/bigquery/load_job.go` — `swapTableWithCopyJob` (copy job), load-job writes.
@@ -188,3 +200,4 @@ Returns `true` (recreate) if any of these differ from the configured spec:
 - `pkg/strategy/replace.go` — replace flow, `deduplicateStaging` (raw -> normalised).
 - `pkg/strategy/merge.go` — merge flow.
 - `pkg/pipeline/pipeline.go` — naming convention, `partition_by`/`cluster_by` normalization.
+- `pkg/schema/partition.go` — `ParseBigQueryPartitionBy`, `ParseIcebergPartitionBy`, `MapPartitionColumn` (partition_by expressions).

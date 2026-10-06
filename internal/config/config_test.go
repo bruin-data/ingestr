@@ -385,6 +385,37 @@ func TestIngestConfigValidate_CDCMode(t *testing.T) {
 	}
 }
 
+func TestIngestConfigParsePartitionExpression(t *testing.T) {
+	tests := []struct {
+		destURI     string
+		partitionBy string
+		wantErr     bool
+	}{
+		{"bigquery://project/dataset", "created_at", false},
+		{"bigquery://project/dataset", "TIMESTAMP_TRUNC(created_at, HOUR)", false},
+		{"bigquery://project/dataset", "RANGE_BUCKET(id, GENERATE_ARRAY(0, 100, 10))", false},
+		{"bigquery://project/dataset", "HOUR(created_at)", true},
+		{"iceberg+r2://account/warehouse", "hour(created_at)", false},
+		{"iceberg+r2://account/warehouse", "bucket(16, id)", false},
+		{"iceberg+r2://account/warehouse", "TIMESTAMP_TRUNC(created_at, HOUR)", true},
+		{"bigquery://project/dataset", "hour(created_at)", true},
+		{"duckdb:///tmp/out.duckdb", "created_at", false},
+		{"postgres://localhost/out", "DATE(created_at)", true},
+		{"duckdb:///tmp/out.duckdb", "DATE(created_at)", true},
+		{"ducklake://catalog.ducklake", "DATE(created_at)", true},
+		{"bigquery://project/dataset", "WEEK(created_at)", true},
+	}
+	for _, tt := range tests {
+		cfg := DefaultConfig()
+		cfg.DestURI = tt.destURI
+
+		err := cfg.ParsePartitionExpression(tt.partitionBy)
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("ParsePartitionExpression(%s, %q) error = %v, wantErr %v", tt.destURI, tt.partitionBy, err, tt.wantErr)
+		}
+	}
+}
+
 func TestIngestConfigValidate_ChangeTrackingRejectsSQLLimit(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SourceURI = "mssql+ct://example:1433/app"
