@@ -28,6 +28,7 @@ ingestr ingest \
 - `--interval-start`: Sets the inclusive start of the interval for the incremental key and passes that start bound to the source read when the source supports interval filtering. For `delete+insert`, this becomes the lower delete bound. If omitted, ingestr can infer the lower bound from staged rows; if it cannot infer a required bound, `delete+insert` skips the delete and insert. Defaults to `None`.
 - `--interval-end`: Sets the inclusive end of the interval for the incremental key and passes that end bound to the source read when the source supports interval filtering. For `delete+insert`, this becomes the upper delete bound. If omitted, ingestr can infer the upper bound from staged rows; if it cannot infer a required bound, `delete+insert` skips the delete and insert. Defaults to `None`.
 - `--primary-key TEXT`: Specifies a column used to identify one logical row for `merge` and `scd2`. For `delete+insert`, some destinations can use it to deduplicate staged rows during the insert or overwrite step, but this is destination-specific. Use the flag multiple times for composite keys. Primary key values should be non-null: some destinations match null keys as equal during merge, while others reject or duplicate them. This is ingestr strategy configuration; do not rely only on a primary key constraint already existing in the destination database. Defaults to `None`.
+- `--partition-by TEXT`: Partitions the destination table by a column or, on BigQuery and Iceberg, a partition expression. See [Partitioning](#partitioning).
 - `--columns <name>:<type>:<source>`: Specifies the columns to be ingested. Use `name:type` to override a column's type, `name:type:source` to rename `source` to `name` with a type, or `name::source` to rename only. Multiple entries are comma-separated. Defaults to `None`.
 - `--no-inference`: Skips schema inference for schema-less sources and uses `--columns` as the source schema. Requires `--columns`.
 - `--mask <column_name>:<algorithm>[:param]`: Applies data masking to specified columns. Can be used multiple times for different columns. See the [Data Masking](../getting-started/data-masking.md) documentation for available algorithms and usage examples. Defaults to `None`.
@@ -50,6 +51,18 @@ The `interval-start` and `interval-end` options support various datetime formats
 > [!INFO]
 > For the details around the incremental key and the various strategies, please refer to the [Incremental Loading](../getting-started/incremental-loading.md) section.
 
+
+## Partitioning
+
+`--partition-by` takes a column name on every destination that supports partitioning. BigQuery and Iceberg also accept their native partition expressions, written the same way as in their own SQL:
+
+| Destination | Column only | Expressions | Details |
+|---|---|---|---|
+| BigQuery | Daily partitions | `DATE(col)`, `TIMESTAMP_TRUNC(col, HOUR)`, `DATE_TRUNC(col, MONTH)`, `RANGE_BUCKET(col, GENERATE_ARRAY(0, 1000, 10))` | [BigQuery partitioning](../supported-sources/bigquery.md#partitioning) |
+| Iceberg | One partition per value | `day(col)`, `hour(col)`, `month(col)`, `year(col)`, `bucket(16, col)`, `truncate(10, col)` | [Iceberg partitioning](../supported-sources/iceberg.md#partitioning) |
+| DuckLake | Daily partitions for timestamps | Not supported | [DuckLake table layout](../supported-sources/duckdb.md#ducklake-table-layout) |
+
+Other destinations do not partition tables, and reject partition expressions.
 
 ## Streaming ingestion
 

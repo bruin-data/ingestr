@@ -50,3 +50,29 @@ ingestr ingest
     --staging-bucket "gs://your-bucket-name" # [!code focus]
 ```
 
+
+### Partitioning
+
+`--partition-by` accepts a column name or a BigQuery partition expression, the same forms you would write in `PARTITION BY`:
+
+| `--partition-by` | Partitioning |
+|---|---|
+| `created_at` | Daily (default) |
+| `DATE(created_at)` | Daily |
+| `TIMESTAMP_TRUNC(created_at, HOUR)` | Hourly; also `DAY`, `MONTH`, `YEAR` |
+| `DATETIME_TRUNC(created_at, MONTH)` | Monthly |
+| `DATE_TRUNC(created_date, YEAR)` | Yearly |
+| `RANGE_BUCKET(customer_id, GENERATE_ARRAY(0, 1000000, 1000))` | Integer ranges of 1000 from 0 to 1,000,000 |
+
+Only the unit of a `*_TRUNC` expression matters; ingestr uses the function that matches the column's type.
+
+```bash
+ingestr ingest
+    --source-uri $SOURCE_URI
+    --dest-uri $BIGQUERY_URI
+    --source-table raw.events
+    --dest-table raw.events
+    --partition-by "TIMESTAMP_TRUNC(created_at, HOUR)" # [!code focus]
+```
+
+Changing the partitioning of an existing table is applied by the `replace` strategy (the default) and by `--full-refresh`. Other strategies keep the existing table's partitioning.

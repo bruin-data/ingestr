@@ -1,12 +1,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 var DebugMode bool
@@ -281,6 +283,23 @@ func (c *IngestConfig) Validate() error {
 		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless full-refresh is enabled", StrategyMerge)}
 	}
 	return nil
+}
+
+// ParsePartitionExpression checks a partition_by expression against the destination's syntax.
+func (c *IngestConfig) ParsePartitionExpression(value string) error {
+	if !schema.IsPartitionExpression(value) {
+		return nil
+	}
+	var err error
+	switch scheme, _, _ := strings.Cut(strings.ToLower(c.DestURI), "://"); {
+	case scheme == "bigquery":
+		_, err = schema.ParseBigQueryPartitionBy(value)
+	case scheme == "iceberg" || strings.HasPrefix(scheme, "iceberg+"):
+		_, err = schema.ParseIcebergPartitionBy(value)
+	default:
+		err = errors.New("partition expressions are not supported for this destination")
+	}
+	return err
 }
 
 func (c *IngestConfig) validateExtractPartitioning() error {

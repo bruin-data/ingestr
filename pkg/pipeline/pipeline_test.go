@@ -3755,13 +3755,41 @@ func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
 
+func TestValidatePartitionBy(t *testing.T) {
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "ts"}, {Name: "amount_usdx"}}}
+	tests := []struct {
+		partitionBy string
+		normalized  string
+		wantErr     string
+	}{
+		{"ts", "ts", ""},
+		{"TIMESTAMP_TRUNC(ts, HOUR)", "TIMESTAMP_TRUNC(ts, HOUR)", ""},
+		{"Amount (USD)", "amount_usdx", ""},
+		{"WEEK(ts)", "week_tsx", `partition-by "WEEK(ts)" is neither a supported expression (unsupported partition_by expression`},
+	}
+	for _, tt := range tests {
+		cfg := config.DefaultConfig()
+		cfg.DestURI = "bigquery://project/dataset"
+		cfg.PartitionBy = tt.normalized
+
+		err := validatePartitionBy(cfg, tt.partitionBy, tableSchema)
+		if tt.wantErr == "" {
+			require.NoError(t, err, tt.partitionBy)
+		} else {
+			require.ErrorContains(t, err, tt.wantErr, tt.partitionBy)
+		}
+	}
+}
+
 func TestApplyPartitionNaming(t *testing.T) {
 	tests := []struct {
 		name            string
 		convention      naming.Convention
+		destURI         string
 		partitionBy     string
 		clusterBy       []string
 		schemaPartition string
+		sourceColumns   []string
 		wantPartitionBy string
 		wantClusterBy   []string
 	}{
@@ -3791,6 +3819,56 @@ func TestApplyPartitionNaming(t *testing.T) {
 			wantPartitionBy: "created_at",
 		},
 		{
+			name:            "only the column inside a partition_by expression is normalized",
+			convention:      naming.SnakeCase,
+			destURI:         "bigquery://project/dataset",
+			partitionBy:     "TIMESTAMP_TRUNC(updatedAt, HOUR)",
+			wantPartitionBy: "TIMESTAMP_TRUNC(updated_at, HOUR)",
+		},
+		{
+			name:            "range partition_by expression keeps its bounds",
+			convention:      naming.SnakeCase,
+			destURI:         "bigquery://project/dataset",
+			partitionBy:     "RANGE_BUCKET(customerId, GENERATE_ARRAY(0, 1000, 10))",
+			wantPartitionBy: "RANGE_BUCKET(customer_id, GENERATE_ARRAY(0, 1000, 10))",
+		},
+		{
+			name:            "iceberg bucket expression keeps its width",
+			convention:      naming.SnakeCase,
+			destURI:         "iceberg+hadoop://warehouse",
+			partitionBy:     "bucket(16, customerId)",
+			wantPartitionBy: "bucket(16, customer_id)",
+		},
+		{
+			name:            "value that does not parse falls back to a column",
+			convention:      naming.SnakeCase,
+			destURI:         "bigquery://project/dataset",
+			partitionBy:     "Amount (USD)",
+			wantPartitionBy: "amount_usdx",
+		},
+		{
+			name:            "fallback column stays verbatim under direct naming",
+			convention:      naming.Direct,
+			destURI:         "iceberg+r2://account/warehouse",
+			partitionBy:     "Date (UTC)",
+			wantPartitionBy: "Date (UTC)",
+		},
+		{
+			name:            "existing column that parses as an expression stays a column",
+			convention:      naming.SnakeCase,
+			destURI:         "bigquery://project/dataset",
+			partitionBy:     "Date (UTC)",
+			sourceColumns:   []string{"Date (UTC)"},
+			wantPartitionBy: "date_utcx",
+		},
+		{
+			name:            "expression wins over a column fallback",
+			convention:      naming.SnakeCase,
+			destURI:         "bigquery://project/dataset",
+			partitionBy:     "DATE(createdAt)",
+			wantPartitionBy: "DATE(created_at)",
+		},
+		{
 			name:          "cluster_by columns normalized to snake_case",
 			convention:    naming.SnakeCase,
 			clusterBy:     []string{"countryCode", "region"},
@@ -3806,11 +3884,16 @@ func TestApplyPartitionNaming(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.DefaultConfig()
+			cfg.DestURI = tt.destURI
 			cfg.PartitionBy = tt.partitionBy
 			cfg.ClusterBy = tt.clusterBy
 			tableSchema := &schema.TableSchema{PartitionBy: tt.schemaPartition}
+			sourceSchema := &schema.TableSchema{}
+			for _, name := range tt.sourceColumns {
+				sourceSchema.Columns = append(sourceSchema.Columns, schema.Column{Name: name})
+			}
 
-			applyPartitionNaming(cfg, tableSchema, naming.Get(tt.convention))
+			applyPartitionNaming(cfg, sourceSchema, tableSchema, naming.Get(tt.convention))
 
 			if cfg.PartitionBy != tt.wantPartitionBy {
 				t.Fatalf("PartitionBy = %q, want %q", cfg.PartitionBy, tt.wantPartitionBy)

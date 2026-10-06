@@ -83,7 +83,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "partition-by",
-				Usage:   "The partition key to be used for partitioning the destination table",
+				Usage:   "The partition key to be used for partitioning the destination table; see https://bruin-data.github.io/ingestr/commands/ingest.html#partitioning for supported expressions",
 				Sources: cli.EnvVars("PARTITION_BY", "INGESTR_PARTITION_BY"),
 			},
 			&cli.StringFlag{

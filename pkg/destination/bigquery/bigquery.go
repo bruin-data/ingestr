@@ -649,57 +649,58 @@ func (d *BigQueryDestination) waitForBigQueryJob(ctx context.Context, job *bigqu
 	return status, err
 }
 
-// isDatePartitionColumn reports whether the named partition column is a DATE
-// column in the given internal schema. A DATE column must be referenced bare in
-// a PARTITION BY clause; TIMESTAMP/DATETIME columns must be wrapped in DATE().
-func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
-	if s == nil || column == "" {
-		return false
+// partitionByClause builds the PARTITION BY clause. DAY, the default for a bare column, is written
+// as `col` for DATE and `DATE(col)` for TIMESTAMP/DATETIME; other units use the matching *_TRUNC.
+func partitionByClause(tp *bigquery.TimePartitioning, rp *bigquery.RangePartitioning, fieldType bigquery.FieldType) string {
+	if rp != nil {
+		return fmt.Sprintf("PARTITION BY RANGE_BUCKET(%s, GENERATE_ARRAY(%d, %d, %d))\n",
+			quoteIdentifier(rp.Field), rp.Range.Start, rp.Range.End, rp.Range.Interval)
 	}
-	for _, col := range s.Columns {
-		if strings.EqualFold(col.Name, column) {
-			return col.DataType == schema.TypeDate
+	column := quoteIdentifier(tp.Field)
+	unit := effectivePartitionType(tp)
+	if unit == bigquery.DayPartitioningType {
+		if fieldType == bigquery.DateFieldType {
+			return fmt.Sprintf("PARTITION BY %s\n", column)
 		}
+		return fmt.Sprintf("PARTITION BY DATE(%s)\n", column)
 	}
-	return false
+	trunc := "TIMESTAMP_TRUNC"
+	switch fieldType {
+	case bigquery.DateFieldType:
+		trunc = "DATE_TRUNC"
+	case bigquery.DateTimeFieldType:
+		trunc = "DATETIME_TRUNC"
+	}
+	return fmt.Sprintf("PARTITION BY %s(%s, %s)\n", trunc, column, unit)
 }
 
-// partitionFieldIsDate is the equivalent of isDatePartitionColumn for a live
-// BigQuery schema, used where only table metadata (not the internal schema) is
-// available.
-func partitionFieldIsDate(s bigquery.Schema, column string) bool {
-	for _, field := range s {
-		if strings.EqualFold(field.Name, column) {
-			return field.Type == bigquery.DateFieldType
-		}
+func partitionRangeEqual(a, b *bigquery.RangePartitioningRange) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	return false
-}
-
-// partitionByClause builds the PARTITION BY clause for a partition column.
-// BigQuery requires a DATE-valued expression: an already-DATE column is used
-// bare, while TIMESTAMP/DATETIME columns are wrapped in DATE().
-func partitionByClause(column string, isDateColumn bool) string {
-	if isDateColumn {
-		return fmt.Sprintf("PARTITION BY %s\n", quoteIdentifier(column))
-	}
-	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
+	return *a == *b
 }
 
 // partitionOrClusterMismatch reports whether the table's partition/cluster spec
 // differs from the configured one. An empty configured spec means "leave as-is".
 func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata, clusterBy []string) bool {
 	if d.partitionBy != "" {
-		if meta.RangePartitioning != nil {
+		tp, rp, err := bigQueryPartitioning(d.partitionBy)
+		if err != nil {
 			return true
 		}
-		if meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, d.partitionBy) {
-			return true
-		}
-		// Compare the partition type against what we would create; ingestr builds
-		// only Field, so the desired type is BigQuery's default.
-		if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(&bigquery.TimePartitioning{Field: d.partitionBy}) {
-			return true
+		if rp != nil {
+			if meta.TimePartitioning != nil || meta.RangePartitioning == nil ||
+				!strings.EqualFold(meta.RangePartitioning.Field, rp.Field) || !partitionRangeEqual(meta.RangePartitioning.Range, rp.Range) {
+				return true
+			}
+		} else {
+			if meta.RangePartitioning != nil || meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, tp.Field) {
+				return true
+			}
+			if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(tp) {
+				return true
+			}
 		}
 	}
 
@@ -910,6 +911,11 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		requiredColumns = cdcKeyColumns
 	}
 
+	if opts.PartitionBy != "" {
+		if _, _, err := bigQueryPartitioning(opts.PartitionBy); err != nil {
+			return err
+		}
+	}
 	// Store partition and cluster information for use in SwapTable
 	d.partitionBy = opts.PartitionBy
 	d.clusterBy = opts.ClusterBy
@@ -1701,7 +1707,16 @@ func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.
 		// For partitioned/clustered tables, must use SQL to apply partitioning.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
 		if d.partitionBy != "" {
-			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
+			tp, rp, err := bigQueryPartitioning(d.partitionBy)
+			if err != nil {
+				return err
+			}
+			var bqSchema bigquery.Schema
+			if opts.Schema != nil {
+				bqSchema = BuildBigQuerySchema(opts.Schema)
+			}
+			fieldType, _ := partitionFieldType(bqSchema, schema.PartitionColumn(d.partitionBy))
+			sql += partitionByClause(tp, rp, fieldType)
 		}
 		if len(clusterBy) > 0 {
 			clusterCols := make([]string, len(clusterBy))
@@ -2073,9 +2088,6 @@ func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
 	if len(typeChanges) == 0 {
 		return "", errors.New("no column type changes provided")
 	}
-	if meta.RangePartitioning != nil {
-		return "", errors.New("range-partitioned tables are not supported for type rewrite")
-	}
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field == "" {
 		return "", errors.New("ingestion-time partitioned tables are not supported for type rewrite")
 	}
@@ -2098,8 +2110,12 @@ func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
 
 	var sqlBuilder strings.Builder
 	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
-	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
-		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
+	switch {
+	case meta.RangePartitioning != nil:
+		sqlBuilder.WriteString(partitionByClause(nil, meta.RangePartitioning, ""))
+	case meta.TimePartitioning != nil:
+		fieldType, _ := partitionFieldType(meta.Schema, meta.TimePartitioning.Field)
+		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning, nil, fieldType))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))
