@@ -23,6 +23,7 @@ import (
 	_ "github.com/apache/iceberg-go/catalog/hadoop"
 	_ "github.com/apache/iceberg-go/catalog/hive"
 	_ "github.com/apache/iceberg-go/catalog/rest"
+	_ "github.com/apache/iceberg-go/catalog/rest/sigv4"
 	_ "github.com/apache/iceberg-go/catalog/sql"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	icebergtable "github.com/apache/iceberg-go/table"

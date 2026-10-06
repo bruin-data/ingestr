@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1237,4 +1240,21 @@ func TestManagedStagingPolicyAvoidsUnderscoreOnS3Tables(t *testing.T) {
 			require.Equal(t, tt.want, dest.ManagedStagingPolicy().DefaultManagedSchema)
 		})
 	}
+}
+
+func TestDestinationConnectSignsSigV4RESTCatalog(t *testing.T) {
+	var authHeader atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{}}`))
+	}))
+	defer srv.Close()
+
+	uri := "iceberg+rest://?uri=" + url.QueryEscape(srv.URL) +
+		"&warehouse=wh&rest.sigv4-enabled=true&rest.signing-name=s3tables&rest.signing-region=us-east-1" +
+		"&s3.access-key-id=AKIDEXAMPLE&s3.secret-access-key=secret"
+	dest := &Destination{}
+	require.NoError(t, dest.Connect(context.Background(), uri))
+	defer func() { _ = dest.Close(context.Background()) }()
+	require.Contains(t, authHeader.Load(), "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
 }
