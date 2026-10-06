@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -313,6 +314,12 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 		result, rerr := castToDecimalTruncating(ctx, wide, target)
 		wide.Release()
 		return result, rerr
+	}
+
+	// arrow-go casts integer strings as raw target-unit values; route them through
+	// dateparse instead so epoch seconds/millis are detected.
+	if target.ID() == arrow.TIMESTAMP && hasIntegerString(arr) {
+		return castStringArrayViaAppendValue(arr, target)
 	}
 
 	var casted arrow.Array
@@ -745,6 +752,22 @@ func castArrayToString(ctx context.Context, arr arrow.Array) (arrow.Array, error
 	}
 
 	return builder.NewArray(), nil
+}
+
+func hasIntegerString(arr arrow.Array) bool {
+	strs, ok := arr.(interface{ Value(int) string })
+	if !ok || (arr.DataType().ID() != arrow.STRING && arr.DataType().ID() != arrow.LARGE_STRING) {
+		return false
+	}
+	for i := 0; i < arr.Len(); i++ {
+		if arr.IsNull(i) {
+			continue
+		}
+		if _, err := strconv.ParseInt(strs.Value(i), 10, 64); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func isIntegerType(dt arrow.DataType) bool {
