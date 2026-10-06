@@ -1198,3 +1198,43 @@ func icebergPartitionFieldNames(ctx context.Context, t *testing.T, dest *Destina
 	}
 	return names
 }
+
+func TestManagedStagingPolicyAvoidsUnderscoreOnS3Tables(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{
+			name: "s3 tables rest",
+			uri:  "iceberg+rest://?uri=https://s3tables.us-east-1.amazonaws.com/iceberg&warehouse=arn:aws:s3tables:us-east-1:123456789012:bucket/b&rest.sigv4-enabled=true&rest.signing-name=s3tables&rest.signing-region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "glue iceberg rest endpoint",
+			uri:  "iceberg+rest://?uri=https://glue.us-east-1.amazonaws.com/iceberg&warehouse=123456789012:s3tablescatalog/b&rest.sigv4-enabled=true&rest.signing-name=glue&rest.signing-region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "glue federated catalog",
+			uri:  "iceberg+glue://?glue.id=123456789012:s3tablescatalog/b&glue.region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "plain glue",
+			uri:  "iceberg+glue://?warehouse=s3://bucket/wh&glue.region=us-east-1",
+		},
+		{
+			name: "plain rest",
+			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/wh",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseIcebergConfig(tt.uri)
+			require.NoError(t, err)
+			dest := &Destination{cfg: cfg}
+			require.Equal(t, tt.want, dest.ManagedStagingPolicy().DefaultManagedSchema)
+		})
+	}
+}

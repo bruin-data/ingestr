@@ -94,6 +94,18 @@ func parseIcebergConfig(rawURI string) (icebergConfig, error) {
 	return cfg, nil
 }
 
+// isS3TablesCatalog reports whether the catalog targets AWS S3 Tables, directly
+// over REST or through the Glue s3tablescatalog federation.
+func isS3TablesCatalog(props iceberggo.Properties) bool {
+	if strings.EqualFold(props.Get("rest.signing-name", ""), "s3tables") {
+		return true
+	}
+	warehouse := props.Get("warehouse", "")
+	return strings.HasPrefix(warehouse, "arn:aws:s3tables:") ||
+		strings.Contains(warehouse, "s3tablescatalog") ||
+		strings.Contains(props.Get("glue.id", ""), "s3tablescatalog")
+}
+
 // isAWSEndpoint reports whether an S3 endpoint is AWS itself rather than an
 // S3-compatible service; regional, VPC, FIPS and dualstack all count as AWS.
 func isAWSEndpoint(endpoint string) bool {

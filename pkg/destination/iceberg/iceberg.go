@@ -82,6 +82,16 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 	return nil
 }
 
+// ManagedStagingPolicy keeps the default _bruin_staging namespace, except on S3
+// Tables, which rejects namespaces starting with an underscore.
+func (d *Destination) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	policy := destination.ReplaceStagingPolicy{DefaultPlacement: destination.ReplaceStagingManagedSchema}
+	if isS3TablesCatalog(d.cfg.Properties) {
+		policy.DefaultManagedSchema = "bruin_staging"
+	}
+	return policy
+}
+
 func (d *Destination) Close(ctx context.Context) error {
 	cat := d.catalog
 	d.catalog = nil
