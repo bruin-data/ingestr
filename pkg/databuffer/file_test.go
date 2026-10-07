@@ -1879,6 +1879,61 @@ func TestFileBuffer_UnknownToTimestamp(t *testing.T) {
 	assert.Equal(t, 20, t2.Day())
 }
 
+func TestFileBuffer_UnknownNumbersToTimestamp(t *testing.T) {
+	// API sources keep untyped JSON numbers in Unknown columns; pre-2001 epochs
+	// have fewer digits and must not be read as seconds.
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	items := []map[string]interface{}{
+		{"ts": float64(946684800)},
+		{"ts": float64(946684800000)},
+		{"ts": json.Number("946684800000000")},
+		{"ts": json.Number("946684800000000000")},
+		{"ts": float64(1772431961778)},
+		{"ts": float64(-86400)},
+		{"ts": nil},
+	}
+	want := []*time.Time{
+		&y2k,
+		&y2k,
+		&y2k,
+		&y2k,
+		new(time.UnixMilli(1772431961778).UTC()),
+		new(time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)),
+		nil,
+	}
+
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, nil)
+	require.NoError(t, err)
+	defer record.Release()
+	require.True(t, arrow.TypeEqual(record.Schema().Field(0).Type, schema.UnknownArrowType))
+
+	buf, err := NewFileBuffer()
+	require.NoError(t, err)
+	defer func() { _ = buf.Close() }()
+	require.NoError(t, buf.Append(context.Background(), record))
+
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tsType, Nullable: true}}, nil)
+	ch, err := buf.Reader(context.Background(), targetSchema)
+	require.NoError(t, err)
+
+	batches := readAllBatches(t, ch)
+	defer releaseBatches(batches)
+	require.Len(t, batches, 1)
+
+	tsCol, ok := batches[0].Column(0).(*array.Timestamp)
+	require.True(t, ok, "expected Timestamp array, got %T", batches[0].Column(0))
+	require.Equal(t, len(want), tsCol.Len())
+	for i, w := range want {
+		if w == nil {
+			assert.True(t, tsCol.IsNull(i), "row %d should be null", i)
+			continue
+		}
+		require.False(t, tsCol.IsNull(i), "row %d should not be null", i)
+		assert.Equal(t, *w, time.UnixMicro(int64(tsCol.Value(i))).UTC(), "row %d", i)
+	}
+}
+
 func TestFileBuffer_StringToTimestamp(t *testing.T) {
 	mem := memory.DefaultAllocator
 
