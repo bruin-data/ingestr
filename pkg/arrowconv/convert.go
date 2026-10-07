@@ -532,7 +532,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 			}
 		case float64:
-			b.Append(arrow.Timestamp(UnixToMicroseconds(int64(v))))
+			b.Append(arrow.Timestamp(unixFloatToMicroseconds(v)))
 		case int64:
 			b.Append(arrow.Timestamp(UnixToMicroseconds(v)))
 		case int:
@@ -541,7 +541,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 			if i, err := v.Int64(); err == nil {
 				b.Append(arrow.Timestamp(UnixToMicroseconds(i)))
 			} else if f, err := v.Float64(); err == nil {
-				b.Append(arrow.Timestamp(UnixToMicroseconds(int64(f))))
+				b.Append(arrow.Timestamp(unixFloatToMicroseconds(f)))
 			} else {
 				b.AppendNull()
 			}
@@ -1018,6 +1018,21 @@ func UnixToMicroseconds(v int64) int64 {
 	default: // seconds
 		return v * 1_000_000
 	}
+}
+
+// unixFloatToMicroseconds is UnixToMicroseconds that keeps the fractional part
+// (e.g. 1700000000.5 seconds); whole values take the integer path unchanged.
+func unixFloatToMicroseconds(f float64) int64 {
+	whole, frac := math.Modf(f)
+	usec := UnixToMicroseconds(int64(whole))
+	if frac == 0 || math.IsNaN(frac) {
+		return usec
+	}
+	unit := 1_000_000.0
+	if whole != 0 {
+		unit = float64(usec) / whole
+	}
+	return usec + int64(math.Round(frac*unit))
 }
 
 // epochStringToMicroseconds handles digit-only strings dateparse rejects (it only knows

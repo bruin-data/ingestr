@@ -336,6 +336,35 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 	}
 }
 
+func TestUnixFloatToMicroseconds(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want int64
+	}{
+		{name: "fractional seconds", in: 1700000000.5, want: 1700000000_500_000},
+		{name: "fractional seconds with float noise", in: 1700000000.123, want: 1700000000_123_000},
+		{name: "pre-2001 fractional seconds", in: 946684800.75, want: 946684800_750_000},
+		{name: "fractional milliseconds", in: 1700000000000.5, want: 1700000000000_500},
+		{name: "pre-2001 fractional milliseconds", in: 946684800000.25, want: 946684800000_250},
+		{name: "sub-microsecond fraction dropped", in: 946684800000000.4, want: 946684800000000},
+		{name: "below one second", in: 0.5, want: 500_000},
+		{name: "negative below one second", in: -0.25, want: -250_000},
+		{name: "negative fractional seconds", in: -1.5, want: -1_500_000},
+		{name: "whole seconds", in: 1700000000, want: UnixToMicroseconds(1700000000)},
+		{name: "whole milliseconds", in: 946684800000, want: UnixToMicroseconds(946684800000)},
+		{name: "whole nanoseconds", in: 1.7e18, want: UnixToMicroseconds(int64(1.7e18))},
+		{name: "zero", in: 0, want: 0},
+		{name: "positive infinity keeps integer path", in: math.Inf(1), want: UnixToMicroseconds(int64(math.Inf(1)))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, unixFloatToMicroseconds(tt.in))
+		})
+	}
+}
+
 func TestEpochStringToMicroseconds(t *testing.T) {
 	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -460,6 +489,10 @@ func TestAppendValue_TimestampBuilder_PreY2KNumbers(t *testing.T) {
 		{name: "int milliseconds", val: 946684800000, want: y2k},
 		{name: "float64 milliseconds", val: float64(946684800000), want: y2k},
 		{name: "int64 negative seconds", val: int64(-86400), want: time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)},
+		{name: "float64 fractional seconds", val: 946684800.5, want: y2k.Add(500 * time.Millisecond)},
+		{name: "float64 fractional milliseconds", val: 946684800000.5, want: y2k.Add(500 * time.Microsecond)},
+		{name: "json.Number fractional seconds", val: json.Number("946684800.25"), want: y2k.Add(250 * time.Millisecond)},
+		{name: "json.Number exponent seconds", val: json.Number("9.466848e8"), want: y2k},
 	}
 
 	for _, tt := range tests {
