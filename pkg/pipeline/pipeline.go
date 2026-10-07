@@ -1928,10 +1928,6 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 			return nil, contractResult.ViolationError()
 		}
 		p.filteredSchemaComparison = comparison
-		return &schemaevolution.EvolutionPlan{
-			Table:       destTable,
-			FinalSchema: buildFinalSchema(comparisonDestSchema, sourceSchema, p.filteredSchemaComparison),
-		}, nil
 
 	case schemaevolution.ContractDiscardRow:
 		if contractResult.HasViolations() {
