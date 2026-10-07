@@ -548,6 +548,8 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case string:
 			if t, err := dateparse.ParseAny(v); err == nil {
 				b.Append(arrow.Timestamp(t.UnixMicro()))
+			} else if usec, ok := epochStringToMicroseconds(v); ok {
+				b.Append(arrow.Timestamp(usec))
 			} else {
 				b.AppendNull()
 			}
@@ -1011,6 +1013,29 @@ func UnixToMicroseconds(v int64) int64 {
 		return v * 1000
 	default: // seconds
 		return v * 1_000_000
+	}
+}
+
+// epochStringToMicroseconds picks the unit by magnitude for digit-only strings dateparse
+// rejects (it only knows 10/13/16/19 digits), so pre-2001 epochs aren't lost.
+func epochStringToMicroseconds(s string) (int64, bool) {
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || s[0] == '+' || v == math.MinInt64 {
+		return 0, false
+	}
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs < 1e11:
+		return v * 1_000_000, true
+	case abs < 1e14:
+		return v * 1000, true
+	case abs < 1e17:
+		return v, true
+	default:
+		return time.Unix(0, v).UnixMicro(), true
 	}
 }
 

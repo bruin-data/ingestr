@@ -1948,10 +1948,12 @@ func TestFileBuffer_NumericToTimestamp(t *testing.T) {
 	ib := array.NewInt64Builder(mem)
 	ib.Append(1772431961778) // milliseconds
 	ib.Append(1771583633)    // seconds
+	ib.Append(946684800000)  // pre-2001 milliseconds
+	ib.Append(999999999)     // pre-2001 seconds
 	intArr := ib.NewArray()
 	ib.Release()
 
-	batch := array.NewRecordBatch(sourceSchema, []arrow.Array{intArr}, 2)
+	batch := array.NewRecordBatch(sourceSchema, []arrow.Array{intArr}, 4)
 	intArr.Release()
 	defer batch.Release()
 
@@ -1990,6 +1992,173 @@ func TestFileBuffer_NumericToTimestamp(t *testing.T) {
 	assert.Equal(t, 2026, t2.Year())
 	assert.Equal(t, time.February, t2.Month())
 	assert.Equal(t, 20, t2.Day())
+
+	require.False(t, tsCol.IsNull(2))
+	assert.Equal(t, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), time.UnixMicro(int64(tsCol.Value(2))).UTC())
+	require.False(t, tsCol.IsNull(3))
+	assert.Equal(t, time.Unix(999999999, 0).UTC(), time.UnixMicro(int64(tsCol.Value(3))).UTC())
+}
+
+func TestFileBuffer_PreY2KEpochStringsToTimestamp(t *testing.T) {
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	values := []*string{
+		new("946684800"),
+		new("946684800000"),
+		new("946684800000000"),
+		new("946684800000000000"),
+		new("999999999"),
+		new("-86400"),
+		new("1772431961778"),
+		new("20200101"),
+		new("2026-03-02T06:12:41Z"),
+		new("not-a-date"),
+		nil,
+	}
+	want := []*time.Time{
+		&y2k,
+		&y2k,
+		&y2k,
+		&y2k,
+		new(time.Unix(999999999, 0).UTC()),
+		new(time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)),
+		new(time.UnixMilli(1772431961778).UTC()),
+		new(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)),
+		new(time.Date(2026, 3, 2, 6, 12, 41, 0, time.UTC)),
+		nil,
+		nil,
+	}
+
+	sourceTypes := map[string]arrow.DataType{
+		"string":       arrow.BinaryTypes.String,
+		"large_string": arrow.BinaryTypes.LargeString,
+		"unknown":      schema.UnknownArrowType,
+	}
+
+	for name, srcType := range sourceTypes {
+		t.Run(name, func(t *testing.T) {
+			mem := memory.DefaultAllocator
+			builder := array.NewBuilder(mem, srcType)
+			for _, v := range values {
+				if v == nil {
+					builder.AppendNull()
+					continue
+				}
+				switch b := builder.(type) {
+				case *array.StringBuilder:
+					b.Append(*v)
+				case *array.LargeStringBuilder:
+					b.Append(*v)
+				case *array.ExtensionBuilder:
+					arrowconv.AppendUnknownValue(b.StorageBuilder().(*array.StringBuilder), *v)
+				}
+			}
+			col := builder.NewArray()
+			builder.Release()
+
+			sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: srcType, Nullable: true}}, nil)
+			batch := array.NewRecordBatch(sourceSchema, []arrow.Array{col}, int64(len(values)))
+			col.Release()
+			defer batch.Release()
+
+			buf, err := NewFileBuffer()
+			require.NoError(t, err)
+			defer func() { _ = buf.Close() }()
+			require.NoError(t, buf.Append(context.Background(), batch))
+
+			tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+			targetSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tsType, Nullable: true}}, nil)
+			ch, err := buf.Reader(context.Background(), targetSchema)
+			require.NoError(t, err)
+
+			batches := readAllBatches(t, ch)
+			defer releaseBatches(batches)
+			require.Len(t, batches, 1)
+
+			tsCol, ok := batches[0].Column(0).(*array.Timestamp)
+			require.True(t, ok, "expected Timestamp array, got %T", batches[0].Column(0))
+			require.Equal(t, len(want), tsCol.Len())
+			for i, w := range want {
+				if w == nil {
+					assert.True(t, tsCol.IsNull(i), "row %d (%v) should be null", i, values[i])
+					continue
+				}
+				require.False(t, tsCol.IsNull(i), "row %d (%s) should not be null", i, *values[i])
+				assert.Equal(t, *w, time.UnixMicro(int64(tsCol.Value(i))).UTC(), "row %d (%s)", i, *values[i])
+			}
+		})
+	}
+}
+
+func TestFileBuffer_PreY2KEpochNumbersToTimestamp(t *testing.T) {
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		col  func(memory.Allocator) arrow.Array
+		want []time.Time
+	}{
+		{
+			name: "int64",
+			col: func(mem memory.Allocator) arrow.Array {
+				b := array.NewInt64Builder(mem)
+				defer b.Release()
+				b.AppendValues([]int64{946684800, 946684800000, 946684800000000, 946684800000000000, -86400}, nil)
+				return b.NewArray()
+			},
+			want: []time.Time{y2k, y2k, y2k, y2k, time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)},
+		},
+		{
+			name: "int32",
+			col: func(mem memory.Allocator) arrow.Array {
+				b := array.NewInt32Builder(mem)
+				defer b.Release()
+				b.AppendValues([]int32{946684800, 999999999}, nil)
+				return b.NewArray()
+			},
+			want: []time.Time{y2k, time.Unix(999999999, 0).UTC()},
+		},
+		{
+			name: "uint64",
+			col: func(mem memory.Allocator) arrow.Array {
+				b := array.NewUint64Builder(mem)
+				defer b.Release()
+				b.AppendValues([]uint64{946684800000, 1772431961778}, nil)
+				return b.NewArray()
+			},
+			want: []time.Time{y2k, time.UnixMilli(1772431961778).UTC()},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			col := tt.col(memory.DefaultAllocator)
+			sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: col.DataType(), Nullable: false}}, nil)
+			batch := array.NewRecordBatch(sourceSchema, []arrow.Array{col}, int64(col.Len()))
+			col.Release()
+			defer batch.Release()
+
+			buf, err := NewFileBuffer()
+			require.NoError(t, err)
+			defer func() { _ = buf.Close() }()
+			require.NoError(t, buf.Append(context.Background(), batch))
+
+			tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+			targetSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tsType, Nullable: true}}, nil)
+			ch, err := buf.Reader(context.Background(), targetSchema)
+			require.NoError(t, err)
+
+			batches := readAllBatches(t, ch)
+			defer releaseBatches(batches)
+			require.Len(t, batches, 1)
+
+			tsCol, ok := batches[0].Column(0).(*array.Timestamp)
+			require.True(t, ok)
+			require.Equal(t, len(tt.want), tsCol.Len())
+			for i, w := range tt.want {
+				require.False(t, tsCol.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, w, time.UnixMicro(int64(tsCol.Value(i))).UTC(), "row %d", i)
+			}
+		})
+	}
 }
 
 func TestFileBuffer_RoundTrip(t *testing.T) {
