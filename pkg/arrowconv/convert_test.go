@@ -160,6 +160,23 @@ func TestUnixToMicroseconds(t *testing.T) {
 			input:    0,
 			wantUsec: 0,
 		},
+		{name: "pre-2001 seconds (9 digits)", input: 999999999, wantUsec: 999999999_000_000},
+		{name: "largest seconds", input: 99999999999, wantUsec: 99999999999_000_000},
+		{name: "smallest milliseconds", input: 100000000000, wantUsec: 100000000000_000},
+		{name: "pre-2001 milliseconds (12 digits)", input: 946684800000, wantUsec: 946684800000_000},
+		{name: "largest milliseconds", input: 99999999999999, wantUsec: 99999999999999_000},
+		{name: "smallest microseconds", input: 100000000000000, wantUsec: 100000000000000},
+		{name: "pre-2001 microseconds (15 digits)", input: 946684800000000, wantUsec: 946684800000000},
+		{name: "largest microseconds", input: 99999999999999999, wantUsec: 99999999999999999},
+		{name: "smallest nanoseconds", input: 100000000000000000, wantUsec: 100000000000000},
+		{name: "pre-2001 nanoseconds (18 digits)", input: 946684800000000000, wantUsec: 946684800000000},
+		{name: "max int64", input: math.MaxInt64, wantUsec: math.MaxInt64 / 1000},
+		{name: "negative seconds", input: -86400, wantUsec: -86400_000_000},
+		{name: "negative milliseconds", input: -946684800000, wantUsec: -946684800000_000},
+		{name: "negative microseconds", input: -946684800000000, wantUsec: -946684800000000},
+		{name: "negative nanoseconds", input: -946684800000000000, wantUsec: -946684800000000},
+		{name: "negative nanoseconds with remainder", input: -946684800000000001, wantUsec: -946684800000001},
+		{name: "min int64", input: math.MinInt64, wantUsec: time.Unix(0, math.MinInt64).UnixMicro()},
 	}
 
 	for _, tt := range tests {
@@ -421,6 +438,40 @@ func TestAppendValue_TimestampBuilder_NonEpochStringsStayNull(t *testing.T) {
 			defer arr.Release()
 
 			assert.True(t, arr.IsNull(0))
+		})
+	}
+}
+
+func TestAppendValue_TimestampBuilder_PreY2KNumbers(t *testing.T) {
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+
+	tests := []struct {
+		name string
+		val  interface{}
+		want time.Time
+	}{
+		{name: "json.Number seconds", val: json.Number("946684800"), want: y2k},
+		{name: "json.Number milliseconds", val: json.Number("946684800000"), want: y2k},
+		{name: "json.Number microseconds", val: json.Number("946684800000000"), want: y2k},
+		{name: "json.Number nanoseconds", val: json.Number("946684800000000000"), want: y2k},
+		{name: "json.Number float milliseconds", val: json.Number("946684800000.0"), want: y2k},
+		{name: "int64 milliseconds", val: int64(946684800000), want: y2k},
+		{name: "int milliseconds", val: 946684800000, want: y2k},
+		{name: "float64 milliseconds", val: float64(946684800000), want: y2k},
+		{name: "int64 negative seconds", val: int64(-86400), want: time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
+			defer builder.Release()
+			AppendValue(builder, tt.val)
+			arr := builder.NewArray().(*array.Timestamp)
+			defer arr.Release()
+
+			require.False(t, arr.IsNull(0))
+			assert.Equal(t, tt.want, time.UnixMicro(int64(arr.Value(0))).UTC())
 		})
 	}
 }

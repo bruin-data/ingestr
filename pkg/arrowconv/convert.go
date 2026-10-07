@@ -1001,42 +1001,33 @@ func AppendUnknownValue(b *array.StringBuilder, val interface{}) {
 	b.Append(string(jsonBytes))
 }
 
-// UnixToMicroseconds converts a Unix timestamp to microseconds,
-// detecting the unit from the value magnitude.
+// UnixToMicroseconds converts a Unix timestamp to microseconds, detecting the unit from
+// the magnitude. Each unit spans roughly 1973–5138 so pre-2001 epochs aren't read as seconds.
 func UnixToMicroseconds(v int64) int64 {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
 	switch {
-	case v > 1e18: // nanoseconds
-		return v / 1000
-	case v > 1e15: // microseconds
+	case abs >= 1e17 || abs < 0: // nanoseconds
+		return time.Unix(0, v).UnixMicro()
+	case abs >= 1e14: // microseconds
 		return v
-	case v > 1e12: // milliseconds
+	case abs >= 1e11: // milliseconds
 		return v * 1000
 	default: // seconds
 		return v * 1_000_000
 	}
 }
 
-// epochStringToMicroseconds picks the unit by magnitude for digit-only strings dateparse
-// rejects (it only knows 10/13/16/19 digits), so pre-2001 epochs aren't lost.
+// epochStringToMicroseconds handles digit-only strings dateparse rejects (it only knows
+// 10/13/16/19 digits), so pre-2001 epochs aren't lost.
 func epochStringToMicroseconds(s string) (int64, bool) {
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || s[0] == '+' || v == math.MinInt64 {
 		return 0, false
 	}
-	abs := v
-	if abs < 0 {
-		abs = -abs
-	}
-	switch {
-	case abs < 1e11:
-		return v * 1_000_000, true
-	case abs < 1e14:
-		return v * 1000, true
-	case abs < 1e17:
-		return v, true
-	default:
-		return time.Unix(0, v).UnixMicro(), true
-	}
+	return UnixToMicroseconds(v), true
 }
 
 func marshalJSON(v interface{}) ([]byte, error) {
