@@ -1035,7 +1035,7 @@ func epochStringToMicroseconds(s string) (int64, bool) {
 	case abs < 1e17:
 		return v, true
 	default:
-		return v / 1000, true
+		return time.Unix(0, v).UnixMicro(), true
 	}
 }
 

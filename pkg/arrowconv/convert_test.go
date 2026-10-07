@@ -351,6 +351,8 @@ func TestEpochStringToMicroseconds(t *testing.T) {
 		{name: "negative milliseconds", in: "-946684800000", want: -y2k.UnixMicro(), wantOK: true},
 		{name: "negative microseconds", in: "-946684800000000", want: -y2k.UnixMicro(), wantOK: true},
 		{name: "negative nanoseconds", in: "-946684800000000000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "positive nanoseconds with remainder", in: "946684800000000999", want: y2k.UnixMicro(), wantOK: true},
+		{name: "negative nanoseconds with remainder", in: "-946684800000000001", want: time.Unix(0, -946684800000000001).UnixMicro(), wantOK: true},
 		{name: "min int64", in: "-9223372036854775808"},
 		{name: "overflows int64", in: "99999999999999999999"},
 		{name: "explicit plus sign", in: "+123"},
