@@ -2207,6 +2207,30 @@ func TestEvolveSchemaIfNeededBuildsAbstractPlanForSchemaEvolver(t *testing.T) {
 	assertColumns(t, "columns", gotColumns, []string{"id", "age"})
 }
 
+func TestEvolveSchemaIfNeededFreezeAddsIngestrColumns(t *testing.T) {
+	destSchema := tschema("events", tcol("id", schema.TypeInt64))
+	sourceSchema := tschema(
+		"events",
+		tcol("id", schema.TypeInt64),
+		tcol(naming.IngestrLoadedAtColumn, schema.TypeTimestampTZ),
+		tcol(naming.IngestrRunIDColumn, schema.TypeString),
+	)
+	p := &Pipeline{
+		config: &config.IngestConfig{DestTable: "events", SchemaContract: "freeze"},
+		dest: &mockSchemaEvolutionDestination{mockDestination: mockDestination{
+			tableSchema: destSchema,
+			scheme:      "schema_evolver_without_dialect",
+		}},
+	}
+
+	plan, err := p.evolveSchemaIfNeeded(t.Context(), "events", sourceSchema, config.StrategyAppend)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.True(t, plan.HasChanges())
+	require.Len(t, plan.Comparison.Changes, 2)
+	assertColumns(t, "columns", plan.FinalSchema.ColumnNames(), []string{"id", naming.IngestrLoadedAtColumn, naming.IngestrRunIDColumn})
+}
+
 func TestEvolveSchemaIfNeededDoesNotRelaxPrimaryKeyNullability(t *testing.T) {
 	destSchema := &schema.TableSchema{Columns: []schema.Column{{
 		Name: "ID", DataType: schema.TypeInt64, Nullable: false,
