@@ -218,6 +218,18 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		{
+			ID:            "d1",
+			Name:          "Cloudflare D1",
+			Schemes:       []string{"d1", "cloudflare-d1"},
+			IsSource:      false,
+			IsDestination: true,
+			Fields: []ConnectorField{
+				{Name: "account_id", Label: "Account ID", Type: "string", Required: true},
+				{Name: "database_id", Label: "Database ID", Type: "string", Required: true, Placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+				{Name: "api_token", Label: "API Token", Type: "password", Required: true},
+			},
+		},
+		{
 			ID:            "csv",
 			Name:          "CSV File",
 			Schemes:       []string{"csv"},
@@ -491,6 +503,14 @@ func BuildURI(connectorID string, fields map[string]string) string {
 		return "duckdb:///" + fields["path"]
 	case "sqlite":
 		return "sqlite:///" + fields["path"]
+	case "d1":
+		uri := url.URL{
+			Scheme:   "d1",
+			Host:     fields["account_id"],
+			Path:     "/" + fields["database_id"],
+			RawQuery: url.Values{"api_token": {fields["api_token"]}}.Encode(),
+		}
+		return uri.String()
 	case "csv":
 		return "csv://" + fields["path"]
 	case "parquet":
