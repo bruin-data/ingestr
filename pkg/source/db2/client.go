@@ -22,6 +22,14 @@ type db2Client struct {
 	timeout  time.Duration
 	private  *big.Int
 	mu       sync.Mutex
+	platform db2Platform
+}
+
+// Platform returns the Db2 platform serving the RDB: either the value
+// forced via the connection's platform override, or the one detected
+// from the server's PRDID during the handshake.
+func (c *db2Client) Platform() db2Platform {
+	return c.platform
 }
 
 const (
@@ -65,6 +73,7 @@ func dialDb2(ctx context.Context, cfg db2ConnConfig) (*db2Client, error) {
 		password: cfg.Password,
 		timeout:  cfg.Timeout,
 		private:  private,
+		platform: cfg.Platform,
 	}
 	if err := client.handshake(ctx); err != nil {
 		_ = conn.Close()
@@ -315,7 +324,15 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 						return err
 					}
 				}
-			case cpSECCHKRM, cpACCRDBRM, cpEXCSATRD:
+			case cpACCRDBRM:
+				if c.platform == db2PlatformAuto {
+					if v, ok := parseReplyObject(packet.object)[cpPRDID]; ok && len(v) > 0 {
+						if detected := detectDb2PlatformFromPRDID(decodeString(v, "cp500")); detected != db2PlatformAuto {
+							c.platform = detected
+						}
+					}
+				}
+			case cpSECCHKRM, cpEXCSATRD:
 			default:
 			}
 		}

@@ -157,6 +157,65 @@ func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
 	}
 }
 
+func TestParseResponseDetectsIBMiPlatformFromPRDID(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{
+		conn:    clientConn,
+		timeout: time.Second,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	prdid, err := packString(cpPRDID, "QSQ07030", "cp500")
+	require.NoError(t, err)
+	require.NoError(t, writeTestDSS(serverConn, cpACCRDBRM, prdid, false))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected parseResponse to finish")
+	}
+
+	require.Equal(t, db2PlatformIBMi, client.Platform())
+}
+
+func TestParseResponseHonorsPlatformOverride(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{
+		conn:     clientConn,
+		timeout:  time.Second,
+		platform: db2PlatformLUW,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	prdid, err := packString(cpPRDID, "QSQ07030", "cp500")
+	require.NoError(t, err)
+	require.NoError(t, writeTestDSS(serverConn, cpACCRDBRM, prdid, false))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected parseResponse to finish")
+	}
+
+	require.Equal(t, db2PlatformLUW, client.Platform(), "explicit override must not be clobbered by auto-detection")
+}
+
 func TestRefreshDeadlineZeroTimeoutClearsDeadline(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()

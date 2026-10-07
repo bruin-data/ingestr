@@ -25,3 +25,13 @@ Optional query parameters:
 - `schema`: default schema to use for unqualified table names. If omitted, ingestr uses the username uppercased.
 - `ssl`: set to `true` or `1` to connect with TLS.
 - `timeout`: connection/read timeout in seconds.
+- `platform`: forces which Db2 catalog dialect is used when reading table metadata. One of `luw`, `zos`, or `ibmi`. ingestr auto-detects this from the server's PRDID during the connection handshake, so this is only needed if detection picks the wrong dialect.
+
+## Platform support
+
+ingestr's Db2 client speaks DRDA directly, the wire protocol shared by every Db2 platform, so the same `db2://` URI works against:
+- Db2 for Linux/Unix/Windows (LUW)
+- Db2 for z/OS
+- **Db2 for i (iSeries/AS400)**
+
+The platform is detected automatically from the server's product ID during the handshake and determines which system catalog (`SYSCAT.*` for LUW/z/OS, `QSYS2.*` for i) is used to read column and primary key metadata. For Db2 for i, `database` must be the system's relational database directory entry name (see `WRKRDBDIRE` on the host) rather than an arbitrary label.
