@@ -373,6 +373,12 @@ func (d *D1Destination) DeleteInsertTable(ctx context.Context, opts destination.
 }
 
 func intervalParam(value interface{}, dataType schema.DataType) (interface{}, error) {
+	if bound, ok := value.(*time.Time); ok {
+		if bound == nil {
+			return nil, fmt.Errorf("interval bound must not be nil")
+		}
+		value = *bound
+	}
 	if dataType == schema.TypeTimestamp || dataType == schema.TypeTimestampTZ || dataType == schema.TypeDate {
 		var temporal time.Time
 		switch v := value.(type) {

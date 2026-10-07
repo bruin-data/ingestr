@@ -89,3 +89,13 @@ D1 supports at most 100 columns per table and 100 bound parameters per query. in
 The column limit includes ingestr's `_ingestr_loaded_at` and `_ingestr_run_id` metadata columns. Use `--no-load-timestamp` and `--no-run-id` when all 100 columns are needed for source data.
 
 The REST API is also subject to [Cloudflare API rate limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/). Large loads are constrained by these limits and D1's query execution limits.
+
+## Live integration test
+
+The opt-in API contract test requires a disposable, pre-created D1 database and a token with D1 Write permission. Set `INGESTR_D1_TEST_URI` to its destination URI, then run:
+
+```shell
+go test -tags integration -count=1 -v -run '^TestD1LiveBatchContract$' ./pkg/destination/d1
+```
+
+The test creates and drops a uniquely named table. It verifies multi-statement writes, integer and binary bindings, and rollback when a later statement in an API batch fails. It skips when `INGESTR_D1_TEST_URI` is unset.
