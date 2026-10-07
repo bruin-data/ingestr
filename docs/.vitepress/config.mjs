@@ -104,6 +104,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "Cassandra", link: "/supported-sources/cassandra.md" },
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
+              { text: "Cloudflare D1", link: "/supported-sources/cloudflare-d1.md" },
               { text: "Couchbase", link: "/supported-sources/couchbase.md" },
               { text: "CouchDB", link: "/supported-sources/couchdb.md" },
               { text: "CrateDB", link: "/supported-sources/cratedb.md" },

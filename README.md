@@ -175,6 +175,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td><a href="https://bruin-data.github.io/ingestr/supported-sources/cloudflare-d1.html">Cloudflare D1</a></td>
+        <td>-</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Couchbase</td>
         <td>✅</td>
         <td>-</td>
