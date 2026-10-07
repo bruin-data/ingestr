@@ -1890,6 +1890,8 @@ func TestFileBuffer_UnknownNumbersToTimestamp(t *testing.T) {
 		{"ts": json.Number("946684800000000000")},
 		{"ts": float64(1772431961778)},
 		{"ts": float64(-86400)},
+		{"ts": float64(946684800.5)},
+		{"ts": float64(1772431961778.5)},
 		{"ts": nil},
 	}
 	want := []*time.Time{
@@ -1899,6 +1901,8 @@ func TestFileBuffer_UnknownNumbersToTimestamp(t *testing.T) {
 		&y2k,
 		new(time.UnixMilli(1772431961778).UTC()),
 		new(time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)),
+		new(y2k.Add(500 * time.Millisecond)),
+		new(time.UnixMilli(1772431961778).UTC().Add(500 * time.Microsecond)),
 		nil,
 	}
 
