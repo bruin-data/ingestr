@@ -2,6 +2,7 @@ package arrowconv
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"net"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -242,6 +244,36 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 			wantUsec: expectedUsec,
 		},
 		{
+			name:     "string 9-digit unix seconds",
+			val:      "999999999",
+			wantUsec: time.Unix(999999999, 0).UnixMicro(),
+		},
+		{
+			name:     "string 12-digit unix milliseconds",
+			val:      "946684800000",
+			wantUsec: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string 15-digit unix microseconds",
+			val:      "946684800000000",
+			wantUsec: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string 18-digit unix nanoseconds",
+			val:      "946684800000000000",
+			wantUsec: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string negative unix seconds",
+			val:      "-86400",
+			wantUsec: time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string yyyyMMdd keeps date parsing",
+			val:      "20200101",
+			wantUsec: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
 			name:     "string ISO timestamp",
 			val:      "2026-03-02T06:12:41.778Z",
 			wantUsec: expectedUsec,
@@ -283,6 +315,110 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 					time.UnixMicro(got).UTC().Format(time.RFC3339Nano),
 					time.UnixMicro(tt.wantUsec).UTC().Format(time.RFC3339Nano))
 			}
+		})
+	}
+}
+
+func TestEpochStringToMicroseconds(t *testing.T) {
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name   string
+		in     string
+		want   int64
+		wantOK bool
+	}{
+		{name: "zero", in: "0", want: 0, wantOK: true},
+		{name: "one second", in: "1", want: 1_000_000, wantOK: true},
+		{name: "one day seconds", in: "86400", want: 86400 * 1_000_000, wantOK: true},
+		{name: "9-digit seconds", in: "999999999", want: time.Unix(999999999, 0).UnixMicro(), wantOK: true},
+		{name: "y2k seconds", in: "946684800", want: y2k.UnixMicro(), wantOK: true},
+		{name: "10-digit seconds", in: "1700000000", want: 1700000000 * 1_000_000, wantOK: true},
+		{name: "largest seconds", in: "99999999999", want: 99999999999 * 1_000_000, wantOK: true},
+		{name: "smallest milliseconds", in: "100000000000", want: 100000000000 * 1000, wantOK: true},
+		{name: "12-digit milliseconds", in: "946684800000", want: y2k.UnixMicro(), wantOK: true},
+		{name: "13-digit milliseconds", in: "1700000000000", want: 1700000000000 * 1000, wantOK: true},
+		{name: "largest milliseconds", in: "99999999999999", want: 99999999999999 * 1000, wantOK: true},
+		{name: "smallest microseconds", in: "100000000000000", want: 100000000000000, wantOK: true},
+		{name: "15-digit microseconds", in: "946684800000000", want: y2k.UnixMicro(), wantOK: true},
+		{name: "largest microseconds", in: "99999999999999999", want: 99999999999999999, wantOK: true},
+		{name: "smallest nanoseconds", in: "100000000000000000", want: 100000000000000, wantOK: true},
+		{name: "18-digit nanoseconds", in: "946684800000000000", want: y2k.UnixMicro(), wantOK: true},
+		{name: "19-digit nanoseconds", in: "1700000000000000000", want: 1700000000000000, wantOK: true},
+		{name: "max int64", in: "9223372036854775807", want: math.MaxInt64 / 1000, wantOK: true},
+		{name: "leading zeros", in: "000946684800", want: y2k.UnixMicro(), wantOK: true},
+		{name: "negative seconds", in: "-86400", want: -86400 * 1_000_000, wantOK: true},
+		{name: "negative milliseconds", in: "-946684800000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "negative microseconds", in: "-946684800000000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "negative nanoseconds", in: "-946684800000000000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "min int64", in: "-9223372036854775808"},
+		{name: "overflows int64", in: "99999999999999999999"},
+		{name: "explicit plus sign", in: "+123"},
+		{name: "surrounding spaces", in: " 123 "},
+		{name: "empty", in: ""},
+		{name: "minus only", in: "-"},
+		{name: "decimal", in: "1.5"},
+		{name: "scientific", in: "1e9"},
+		{name: "trailing letters", in: "123abc"},
+		{name: "text", in: "not-a-date"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := epochStringToMicroseconds(tt.in)
+			require.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.want, got,
+					"got %s, want %s",
+					time.UnixMicro(got).UTC().Format(time.RFC3339Nano),
+					time.UnixMicro(tt.want).UTC().Format(time.RFC3339Nano))
+			}
+		})
+	}
+}
+
+// Values dateparse already understood must convert exactly as before the epoch fallback existed.
+func TestAppendValue_TimestampBuilder_DateparseResultsUnchanged(t *testing.T) {
+	inputs := []string{
+		"1700000000", "1772431961", "9999999999",
+		"1700000000000", "1772431961778",
+		"1700000000000000", "1772431961778123",
+		"1700000000000000000", "1772431961778123456",
+		"19700101", "20200101", "20260302",
+		"20200101123045", "19991231235959",
+		"2026-03-02", "2026-03-02T06:12:41Z", "2026-03-02 06:12:41.778",
+		"2026/03/02", "03/02/2026", "Mon, 02 Mar 2026 06:12:41 +0000",
+	}
+
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			parsed, err := dateparse.ParseAny(in)
+			require.NoError(t, err, "input must be one dateparse accepts")
+
+			builder := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
+			defer builder.Release()
+			AppendValue(builder, in)
+			arr := builder.NewArray().(*array.Timestamp)
+			defer arr.Release()
+
+			require.False(t, arr.IsNull(0))
+			assert.Equal(t, parsed.UnixMicro(), int64(arr.Value(0)))
+		})
+	}
+}
+
+func TestAppendValue_TimestampBuilder_NonEpochStringsStayNull(t *testing.T) {
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	for _, in := range []string{"", " ", "not-a-date", "1e9", "+123", " 123 ", "123abc", "-", "99999999999999999999"} {
+		t.Run(in, func(t *testing.T) {
+			builder := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
+			defer builder.Release()
+			AppendValue(builder, in)
+			arr := builder.NewArray().(*array.Timestamp)
+			defer arr.Release()
+
+			assert.True(t, arr.IsNull(0))
 		})
 	}
 }
