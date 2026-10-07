@@ -347,6 +347,7 @@ func TestUnixFloatToMicroseconds(t *testing.T) {
 		{name: "pre-2001 fractional seconds", in: 946684800.75, want: 946684800_750_000},
 		{name: "fractional milliseconds", in: 1700000000000.5, want: 1700000000000_500},
 		{name: "pre-2001 fractional milliseconds", in: 946684800000.25, want: 946684800000_250},
+		{name: "far-future fractional milliseconds", in: 80000000000001.0625, want: 80000000000001_063},
 		{name: "sub-microsecond fraction dropped", in: 946684800000000.4, want: 946684800000000},
 		{name: "below one second", in: 0.5, want: 500_000},
 		{name: "negative below one second", in: -0.25, want: -250_000},

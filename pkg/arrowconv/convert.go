@@ -1028,11 +1028,11 @@ func unixFloatToMicroseconds(f float64) int64 {
 	if frac == 0 || math.IsNaN(frac) {
 		return usec
 	}
-	unit := 1_000_000.0
+	unit := int64(1_000_000) // microseconds per unit; exact because usec is whole*unit
 	if whole != 0 {
-		unit = float64(usec) / whole
+		unit = usec / int64(whole)
 	}
-	return usec + int64(math.Round(frac*unit))
+	return usec + int64(math.Round(frac*float64(unit)))
 }
 
 // epochStringToMicroseconds handles digit-only strings dateparse rejects (it only knows
