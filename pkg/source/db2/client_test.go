@@ -74,6 +74,25 @@ func TestReadDRDAFieldTimePreservesFraction(t *testing.T) {
 	require.Equal(t, "03:04:05.100000", value)
 }
 
+func TestResolveSecMec(t *testing.T) {
+	cases := []struct {
+		name   string
+		secmec int
+		sectkn []byte
+		want   int
+	}{
+		{"explicit encrypted passes through", secmecEncryptedUserPassword, []byte("token"), secmecEncryptedUserPassword},
+		{"explicit plaintext passes through", secmecUserPassword, nil, secmecUserPassword},
+		{"omitted with token defaults to encrypted", 0, make([]byte, 32), secmecEncryptedUserPassword},
+		{"omitted with no token falls back to plaintext", 0, nil, secmecUserPassword},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, resolveSecMec(tc.secmec, tc.sectkn))
+		})
+	}
+}
+
 func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
 	client := &db2Client{
 		database: "TESTDB",

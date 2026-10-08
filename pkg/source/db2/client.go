@@ -191,9 +191,7 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if secmec == 0 {
-		secmec = secmecEncryptedUserPassword
-	}
+	secmec = resolveSecMec(secmec, sectkn)
 
 	secchk, err := c.packSECCHK(secmec, sectkn)
 	if err != nil {
@@ -414,6 +412,24 @@ func (c *db2Client) refreshDeadline(ctx context.Context) {
 		deadline = ctxDeadline
 	}
 	_ = conn.SetDeadline(deadline)
+}
+
+// resolveSecMec picks the security mechanism to use when the server's
+// ACCSECRD reply doesn't state one explicitly (secmec == 0). Some Db2 for i
+// configurations omit SECMEC entirely for plain-text-only auth: there's no
+// Diffie-Hellman exchange, so there's no security token either. Defaulting
+// unconditionally to encrypted auth in that case sends a 0-byte token into
+// encryptCredential, which always fails ("expected 32-byte security token,
+// got 0"). Only default to encrypted auth when the server actually handed
+// back a token to encrypt against.
+func resolveSecMec(secmec int, sectkn []byte) int {
+	if secmec != 0 {
+		return secmec
+	}
+	if len(sectkn) > 0 {
+		return secmecEncryptedUserPassword
+	}
+	return secmecUserPassword
 }
 
 func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
