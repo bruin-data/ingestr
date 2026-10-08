@@ -270,3 +270,27 @@ func TestJiraByteCap(t *testing.T) {
 		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
 	}
 }
+
+func TestJiraVerifyCredentials(t *testing.T) {
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/myself" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+
+	s := &JiraSource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+	if err := s.verifyCredentials(context.Background()); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+
+	status = http.StatusUnauthorized
+	err := s.verifyCredentials(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "jira rejected the credentials") {
+		t.Fatalf("expected credentials error, got %v", err)
+	}
+}

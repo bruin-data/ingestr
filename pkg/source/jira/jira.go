@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -85,7 +87,26 @@ func (s *JiraSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithAuth(httpclient.NewBasicAuth(creds.email, creds.apiToken)),
 	)
 
+	if err := s.verifyCredentials(ctx); err != nil {
+		return err
+	}
+
 	config.Debug("[JIRA] Connected to domain: %s", creds.domain)
+	return nil
+}
+
+// Jira runs requests with rejected credentials anonymously, so tables silently return 0 rows.
+func (s *JiraSource) verifyCredentials(ctx context.Context) error {
+	resp, err := s.client.R(ctx).Get("/myself")
+	if err != nil {
+		return fmt.Errorf("failed to verify jira credentials: %w", err)
+	}
+	if resp.StatusCode() == http.StatusUnauthorized {
+		return errors.New("jira rejected the credentials: check that the api_token is valid, not expired, and belongs to the given email")
+	}
+	if !resp.IsSuccess() {
+		return fmt.Errorf("failed to verify jira credentials: status %d: %s", resp.StatusCode(), resp.String())
+	}
 	return nil
 }
 
