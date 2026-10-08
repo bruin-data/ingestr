@@ -217,7 +217,7 @@ func TestProcessResultsConformsArrowTypes(t *testing.T) {
 		), Nullable: true},
 	}, nil)
 	rec := recordFromJSON(t, src, `[
-		{"ti": 7, "n": 1, "s": "", "ts": "2024-01-02T03:04:05.123456", "arr": [1, null], "m": [{"key": "k", "value": 1}], "st": {"b": 2, "a": ["x"]}},
+		{"ti": 7, "n": 1, "s": "", "ts": "2024-01-02T03:04:05.123456Z", "arr": [1, null], "m": [{"key": "k", "value": 1}], "st": {"b": 2, "a": ["x"]}},
 		{"ti": null, "n": null, "s": null, "ts": null, "arr": null, "m": null, "st": null}
 	]`)
 	defer rec.Release()
@@ -443,7 +443,7 @@ func TestConformArrayListElements(t *testing.T) {
 		{Name: "bins", Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: true},
 		{Name: "tss", Type: arrow.ListOf(&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Etc/UTC"}), Nullable: true},
 	}, nil)
-	rec := recordFromJSON(t, src, `[{"bins": ["AAA=", null], "tss": ["2024-01-02T03:04:05.123456"]}, {"bins": null, "tss": null}]`)
+	rec := recordFromJSON(t, src, `[{"bins": ["AAA=", null], "tss": ["2024-01-02T03:04:05.123456Z"]}, {"bins": null, "tss": null}]`)
 	defer rec.Release()
 
 	var columns []schema.Column
