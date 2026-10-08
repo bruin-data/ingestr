@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bruin-data/ingestr/internal/config"
 )
 
 type db2Client struct {
@@ -180,17 +182,19 @@ func (c *db2Client) handshake(ctx context.Context) error {
 
 	curID := uint16(1)
 	var err error
+	config.Debug("[DB2] handshake: sending EXCSAT + ACCSEC (secmec=%d)", secmecEncryptedUserPassword)
 	if curID, err = writeRequestDSS(c.conn, packEXCSAT(), curID, false, false); err != nil {
-		return err
+		return fmt.Errorf("sending EXCSAT: %w", err)
 	}
 	if _, err = writeRequestDSS(c.conn, packACCSEC(c.database, secmecEncryptedUserPassword, publicKey(c.private)), curID, false, true); err != nil {
-		return err
+		return fmt.Errorf("sending ACCSEC: %w", err)
 	}
 
 	secmec, sectkn, err := c.parseACCSECRD()
 	if err != nil {
-		return err
+		return fmt.Errorf("reading ACCSECRD: %w", err)
 	}
+	config.Debug("[DB2] handshake: ACCSECRD received, secmec=%d, token_len=%d", secmec, len(sectkn))
 	resolved := resolveSecMec(secmec, sectkn)
 
 	if resolved != secmecEncryptedUserPassword {
@@ -200,14 +204,16 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		// getting the server's confirmation before SECCHK - some Db2 for i
 		// configurations drop the connection if SECCHK arrives with a
 		// mechanism that was never explicitly negotiated.
+		config.Debug("[DB2] handshake: re-sending ACCSEC with secmec=%d", resolved)
 		curID = 1
 		if curID, err = writeRequestDSS(c.conn, packACCSEC(c.database, resolved, nil), curID, false, true); err != nil {
-			return err
+			return fmt.Errorf("re-sending ACCSEC with secmec=%d: %w", resolved, err)
 		}
 		confirmedSecmec, confirmedSectkn, err := c.parseACCSECRD()
 		if err != nil {
-			return err
+			return fmt.Errorf("reading confirming ACCSECRD for secmec=%d: %w", resolved, err)
 		}
+		config.Debug("[DB2] handshake: confirming ACCSECRD received, secmec=%d, token_len=%d", confirmedSecmec, len(confirmedSectkn))
 		if confirmedSecmec != 0 {
 			resolved = confirmedSecmec
 		}
@@ -220,18 +226,23 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		return err
 	}
 
+	config.Debug("[DB2] handshake: sending SECCHK (secmec=%d) + ACCRDB", secmec)
 	curID = 1
 	if curID, err = writeRequestDSS(c.conn, secchk, curID, false, false); err != nil {
-		return err
+		return fmt.Errorf("sending SECCHK: %w", err)
 	}
 	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database), curID, false, true); err != nil {
-		return err
+		return fmt.Errorf("sending ACCRDB: %w", err)
 	}
 	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
-		return err
+		return fmt.Errorf("reading SECCHKRM/ACCRDBRM: %w", err)
 	}
+	config.Debug("[DB2] handshake: SECCHKRM/ACCRDBRM received, authenticated")
 
-	return c.setClientVariables(ctx)
+	if err := c.setClientVariables(ctx); err != nil {
+		return fmt.Errorf("setting client variables: %w", err)
+	}
+	return nil
 }
 
 func (c *db2Client) parseACCSECRD() (int, []byte, error) {
