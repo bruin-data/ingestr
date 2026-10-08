@@ -251,6 +251,99 @@ func TestHandshakeRenegotiatesACCSECWhenDowngrading(t *testing.T) {
 	require.Equal(t, []uint16{cpEXCSAT, cpACCSEC, cpACCSEC}, codePoints)
 }
 
+// drainOneRequest reads DSS packets from conn until a non-chained one is
+// seen, recording each codepoint, then writes back a single innocuous
+// reply so the caller's parseResponse completes without error.
+func drainOneRequest(t *testing.T, conn net.Conn, codePoints *[]uint16) {
+	t.Helper()
+	for {
+		p, err := readDSS(conn)
+		require.NoError(t, err)
+		*codePoints = append(*codePoints, p.codePoint)
+		if !p.chained {
+			break
+		}
+	}
+	require.NoError(t, writeTestDSS(conn, cpRDBCMM, nil, false))
+}
+
+func TestSetClientVariablesSkipsLUWStatementsOnIBMi(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second, platform: db2PlatformIBMi}
+
+	var codePoints []uint16
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		drainOneRequest(t, serverConn, &codePoints) // CCSID EXCSAT
+		drainOneRequest(t, serverConn, &codePoints) // commit
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.setClientVariables(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("setClientVariables did not return in time")
+	}
+
+	require.Equal(t, []uint16{cpEXCSAT, cpRDBCMM}, codePoints)
+}
+
+func TestSetClientVariablesSendsLUWStatementsOnLUW(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second, platform: db2PlatformLUW}
+
+	var codePoints []uint16
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		drainOneRequest(t, serverConn, &codePoints) // CCSID EXCSAT
+		drainOneRequest(t, serverConn, &codePoints) // SET CLIENT WRKSTNNAME
+		drainOneRequest(t, serverConn, &codePoints) // SET CURRENT LOCALE
+		drainOneRequest(t, serverConn, &codePoints) // commit
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.setClientVariables(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("setClientVariables did not return in time")
+	}
+
+	require.Equal(t, []uint16{
+		cpEXCSAT,
+		cpEXCSQLSET, cpSQLSTT,
+		cpEXCSQLSET, cpSQLSTT,
+		cpRDBCMM,
+	}, codePoints)
+}
+
 func TestParseResponseDetectsIBMiPlatformFromPRDID(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()

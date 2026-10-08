@@ -390,12 +390,56 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 	return nil
 }
 
+// setClientVariables renegotiates the CCSID manager to UTF-8 and sets a
+// couple of DB2-LUW-specific SQL special registers (client workstation
+// name, locale) that some LUW/z/OS servers expect post-auth. Each piece is
+// its own request/reply round trip rather than one combined chain, so a
+// statement the server rejects is isolated and reported precisely instead
+// of surfacing as an opaque EOF for the whole function.
 func (c *db2Client) setClientVariables(ctx context.Context) error {
-	curID := uint16(1)
-	var err error
-	if curID, err = writeRequestDSS(c.conn, packEXCSATMGRLVLLS(), curID, false, false); err != nil {
+	config.Debug("[DB2] setClientVariables: renegotiating CCSID manager (UTF-8)")
+	if err := c.sendAndAwait(ctx, packEXCSATMGRLVLLS()); err != nil {
+		return fmt.Errorf("renegotiating CCSID manager: %w", err)
+	}
+
+	if c.platform == db2PlatformIBMi {
+		// SET CLIENT WRKSTNNAME and SET CURRENT LOCALE are DB2-LUW SQL
+		// special registers; IBM i doesn't recognize them (workstation
+		// name travels in DRDA's own EXCSAT/ACCRDB fields, and locale/CCSID
+		// is a job-level attribute, not a settable SQL register).
+		config.Debug("[DB2] setClientVariables: skipping SET CLIENT WRKSTNNAME / SET CURRENT LOCALE on IBM i")
+	} else {
+		config.Debug("[DB2] setClientVariables: setting client workstation name")
+		if err := c.execSetStatement(ctx, "SET CLIENT WRKSTNNAME 'ingestr'"); err != nil {
+			return fmt.Errorf("setting client workstation name: %w", err)
+		}
+
+		config.Debug("[DB2] setClientVariables: setting current locale")
+		if err := c.execSetStatement(ctx, "SET CURRENT LOCALE LC_CTYPE='en_US'"); err != nil {
+			return fmt.Errorf("setting current locale: %w", err)
+		}
+	}
+
+	config.Debug("[DB2] setClientVariables: committing")
+	if err := c.sendAndAwait(ctx, packRDBCMM()); err != nil {
+		return fmt.Errorf("committing: %w", err)
+	}
+	return nil
+}
+
+// sendAndAwait sends a single, already-packed DSS object as a complete
+// request (not chained to anything else) and reads its reply.
+func (c *db2Client) sendAndAwait(ctx context.Context, object []byte) error {
+	if _, err := writeRequestDSS(c.conn, object, 1, false, true); err != nil {
 		return err
 	}
+	return c.parseResponse(ctx, db2StreamHandler{})
+}
+
+// execSetStatement runs one SET SQL statement as its own request/reply
+// round trip.
+func (c *db2Client) execSetStatement(ctx context.Context, stmt string) error {
+	curID := uint16(1)
 	excSQLSET, err := c.packEXCSQLSET()
 	if err != nil {
 		return err
@@ -403,21 +447,11 @@ func (c *db2Client) setClientVariables(ctx context.Context) error {
 	if curID, err = writeRequestDSS(c.conn, excSQLSET, curID, true, false); err != nil {
 		return err
 	}
-	sqlSTT, err := packSQLSTT("SET CLIENT WRKSTNNAME 'ingestr'")
+	sqlSTT, err := packSQLSTT(stmt)
 	if err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, true, false); err != nil {
-		return err
-	}
-	sqlSTT, err = packSQLSTT("SET CURRENT LOCALE LC_CTYPE='en_US'")
-	if err != nil {
-		return err
-	}
-	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, false, false); err != nil {
-		return err
-	}
-	if _, err = writeRequestDSS(c.conn, packRDBCMM(), curID, false, true); err != nil {
+	if _, err = writeRequestDSS(c.conn, sqlSTT, curID, false, true); err != nil {
 		return err
 	}
 	return c.parseResponse(ctx, db2StreamHandler{})
