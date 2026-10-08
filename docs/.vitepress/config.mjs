@@ -27,6 +27,16 @@ export default defineConfig({
       { rel: 'canonical', href: canonicalUrl }
     ])
   },
+  // The getbruin.com/docs proxy rewrites every "/ingestr/" in the HTML to
+  // "/docs/ingestr/", which turns the canonical into /docs/docs/ingestr/... (404).
+  // Writing the "i" as a character reference keeps the proxy from matching it,
+  // while browsers and crawlers still read https://getbruin.com/docs/ingestr/...
+  transformHtml(code) {
+    return code.replace(
+      '<link rel="canonical" href="https://getbruin.com/docs/ingestr/',
+      '<link rel="canonical" href="https://getbruin.com/docs/&#105;ngestr/'
+    )
+  },
   head: [
     [
       "script",
