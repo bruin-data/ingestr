@@ -81,10 +81,12 @@ func TestResolveSecMec(t *testing.T) {
 		sectkn []byte
 		want   int
 	}{
-		{"explicit encrypted passes through", secmecEncryptedUserPassword, []byte("token"), secmecEncryptedUserPassword},
+		{"explicit encrypted with valid token passes through", secmecEncryptedUserPassword, make([]byte, 32), secmecEncryptedUserPassword},
 		{"explicit plaintext passes through", secmecUserPassword, nil, secmecUserPassword},
-		{"omitted with token defaults to encrypted", 0, make([]byte, 32), secmecEncryptedUserPassword},
+		{"omitted with valid token defaults to encrypted", 0, make([]byte, 32), secmecEncryptedUserPassword},
 		{"omitted with no token falls back to plaintext", 0, nil, secmecUserPassword},
+		{"claimed encrypted but no token falls back to plaintext", secmecEncryptedUserPassword, nil, secmecUserPassword},
+		{"claimed encrypted but wrong-length token falls back to plaintext", secmecEncryptedUserPassword, []byte("short-token"), secmecUserPassword},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

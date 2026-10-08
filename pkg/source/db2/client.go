@@ -414,19 +414,30 @@ func (c *db2Client) refreshDeadline(ctx context.Context) {
 	_ = conn.SetDeadline(deadline)
 }
 
-// resolveSecMec picks the security mechanism to use when the server's
-// ACCSECRD reply doesn't state one explicitly (secmec == 0). Some Db2 for i
-// configurations omit SECMEC entirely for plain-text-only auth: there's no
-// Diffie-Hellman exchange, so there's no security token either. Defaulting
-// unconditionally to encrypted auth in that case sends a 0-byte token into
-// encryptCredential, which always fails ("expected 32-byte security token,
-// got 0"). Only default to encrypted auth when the server actually handed
-// back a token to encrypt against.
+// resolveSecMec picks the security mechanism to actually use based on
+// whether the server's ACCSECRD reply came with a usable token, not just on
+// what SECMEC value it claims. Encrypted auth (SECMEC 9) needs a real
+// 32-byte Diffie-Hellman token to encrypt credentials against; without one,
+// encryption is impossible regardless of what the server said. Two known
+// server behaviors land here:
+//   - the server omits SECMEC entirely (secmec == 0) when it only supports
+//     plain-text auth, since there's no DH exchange and so no token either
+//   - the server echoes back SECMEC 9 (what the client proposed) without
+//     ever populating a valid token, because it doesn't actually implement
+//     DH-encrypted auth
+//
+// Both would otherwise reach encryptCredential with a 0-byte (or
+// wrong-length) token and fail with "expected 32-byte security token, got
+// N". Basing the decision on the token's actual validity, not the claimed
+// mechanism, handles both.
 func resolveSecMec(secmec int, sectkn []byte) int {
+	if secmec == secmecEncryptedUserPassword && len(sectkn) != 32 {
+		return secmecUserPassword
+	}
 	if secmec != 0 {
 		return secmec
 	}
-	if len(sectkn) > 0 {
+	if len(sectkn) == 32 {
 		return secmecEncryptedUserPassword
 	}
 	return secmecUserPassword
