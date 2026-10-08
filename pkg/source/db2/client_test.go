@@ -178,6 +178,79 @@ func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
 	}
 }
 
+func TestHandshakeRenegotiatesACCSECWhenDowngrading(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	private, err := newPrivateKey()
+	require.NoError(t, err)
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		user:     "user",
+		password: "pass",
+		timeout:  time.Second,
+		private:  private,
+	}
+
+	var codePoints []uint16
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		// EXCSAT, then ACCSEC (two separate on-wire DSS packets).
+		p, err := readDSS(serverConn)
+		if err != nil {
+			return
+		}
+		codePoints = append(codePoints, p.codePoint)
+		p, err = readDSS(serverConn)
+		if err != nil {
+			return
+		}
+		codePoints = append(codePoints, p.codePoint)
+
+		// Reply exactly like DBHPROD2: claims SECMEC 9, no token.
+		if writeTestDSS(serverConn, cpEXCSATRD, nil, true) != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEncryptedUserPassword, 2), false) != nil {
+			return
+		}
+
+		// The client should re-propose ACCSEC with the downgraded
+		// mechanism next, not jump straight to SECCHK.
+		p, err = readDSS(serverConn)
+		if err != nil {
+			return
+		}
+		codePoints = append(codePoints, p.codePoint)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handshake(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	_ = serverConn.Close()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "handshake should fail once the test closes the connection")
+	case <-time.After(time.Second):
+		t.Fatal("handshake did not return after connection closed")
+	}
+
+	require.Equal(t, []uint16{cpEXCSAT, cpACCSEC, cpACCSEC}, codePoints)
+}
+
 func TestParseResponseDetectsIBMiPlatformFromPRDID(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()

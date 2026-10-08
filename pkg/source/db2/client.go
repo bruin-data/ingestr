@@ -191,7 +191,29 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	secmec = resolveSecMec(secmec, sectkn)
+	resolved := resolveSecMec(secmec, sectkn)
+
+	if resolved != secmecEncryptedUserPassword {
+		// The server couldn't actually back the mechanism it claimed (or
+		// claimed none), and we're downgrading locally. DRDA requires
+		// re-proposing ACCSEC with the mechanism we're committing to and
+		// getting the server's confirmation before SECCHK - some Db2 for i
+		// configurations drop the connection if SECCHK arrives with a
+		// mechanism that was never explicitly negotiated.
+		curID = 1
+		if curID, err = writeRequestDSS(c.conn, packACCSEC(c.database, resolved, nil), curID, false, true); err != nil {
+			return err
+		}
+		confirmedSecmec, confirmedSectkn, err := c.parseACCSECRD()
+		if err != nil {
+			return err
+		}
+		if confirmedSecmec != 0 {
+			resolved = confirmedSecmec
+		}
+		sectkn = confirmedSectkn
+	}
+	secmec = resolved
 
 	secchk, err := c.packSECCHK(secmec, sectkn)
 	if err != nil {
