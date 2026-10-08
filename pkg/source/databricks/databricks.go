@@ -37,6 +37,8 @@ const externalLinkAttempts = 3
 
 var externalLinkRetryDelay = 2 * time.Second
 
+var errLinkForbidden = errors.New("link expired or forbidden")
+
 // A chunk download fails only when no bytes arrive for this long, so slow
 // connections can still finish while hung ones fail fast.
 var (
@@ -301,7 +303,7 @@ func (s *DatabricksSource) read(ctx context.Context, table string, tableSchema *
 			return
 		}
 
-		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, results)
+		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, opts.Parallelism, results)
 	}()
 
 	return results, nil
@@ -344,6 +346,9 @@ func fetchExternalLink(parent context.Context, link dbsql.ExternalLink) ([]byte,
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, false, fmt.Errorf("external link returned status %d: %w", resp.StatusCode, errLinkForbidden)
+		}
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
 		return nil, retryable, fmt.Errorf("external link returned status %d", resp.StatusCode)
 	}
@@ -428,12 +433,30 @@ func conformRecord(alloc memory.Allocator, rec arrow.RecordBatch, target *arrow.
 	return array.NewRecordBatch(target, cols, rec.NumRows()), nil
 }
 
-func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, link dbsql.ExternalLink, arrowSchema *arrow.Schema, intervals []string, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {
+// downloadChunk fetches a chunk's data, asking Databricks for a fresh link once
+// if the current one has expired.
+func (s *DatabricksSource) downloadChunk(ctx context.Context, statementID string, link dbsql.ExternalLink) ([]byte, error) {
 	data, err := fetchExternalLinkWithRetry(ctx, link)
-	if err != nil {
-		return err
+	if !errors.Is(err, errLinkForbidden) || s.client == nil || statementID == "" {
+		return data, err
 	}
+	config.Debug("[DATABRICKS] Chunk %d link rejected, requesting a fresh one", link.ChunkIndex)
+	fresh, ferr := s.client.StatementExecution.GetStatementResultChunkN(ctx, dbsql.GetStatementResultChunkNRequest{
+		StatementId: statementID,
+		ChunkIndex:  link.ChunkIndex,
+	})
+	if ferr != nil {
+		return nil, fmt.Errorf("failed to refresh external link: %w", ferr)
+	}
+	for _, l := range fresh.ExternalLinks {
+		if l.ChunkIndex == link.ChunkIndex {
+			return fetchExternalLinkWithRetry(ctx, l)
+		}
+	}
+	return nil, err
+}
 
+func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.Allocator, data []byte, arrowSchema *arrow.Schema, intervals []string, maxBatchBytes int64, results chan<- source.RecordBatchResult) error {
 	rdr, err := ipc.NewReader(bytes.NewReader(data), ipc.WithAllocator(alloc))
 	if err != nil {
 		return fmt.Errorf("failed to read arrow stream: %w", err)
@@ -464,31 +487,120 @@ func (s *DatabricksSource) streamExternalLink(ctx context.Context, alloc memory.
 	return nil
 }
 
-func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, maxBatchBytes int64, results chan<- source.RecordBatchResult) {
+type pendingChunk struct {
+	done chan struct{}
+	data []byte
+	err  error
+}
+
+// processResults downloads up to parallelism chunks at once while emitting them
+// in chunk order. Every queued chunk holds a slot until it has been emitted,
+// which bounds memory to that many chunks.
+func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.StatementResponse, arrowSchema *arrow.Schema, maxBatchBytes int64, parallelism int, results chan<- source.RecordBatchResult) {
+	if parallelism <= 0 {
+		parallelism = config.DefaultExtractParallelism
+	}
+	parent := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	alloc := memory.NewGoAllocator()
 	intervals := intervalQualifiers(resp.Manifest)
 	processed := -1
+	statementID := resp.StatementId
 
-	processResultData := func(rd *dbsql.ResultData) error {
+	slots := make(chan struct{}, parallelism)
+	queue := make(chan *pendingChunk, parallelism)
+	emitted := make(chan struct{})
+	failed := false
+	// The first failure, from a download or a link request, cancels the other
+	// downloads right away instead of waiting for earlier, slower chunks.
+	var firstErr atomic.Pointer[error]
+	go func() {
+		defer close(emitted)
+		for p := range queue {
+			if !failed {
+				<-p.done
+				err := p.err
+				if err == nil {
+					err = s.streamExternalLink(ctx, alloc, p.data, arrowSchema, intervals, maxBatchBytes, results)
+				}
+				if first := firstErr.Load(); err != nil && first != nil {
+					err = *first
+				}
+				if err != nil {
+					results <- source.RecordBatchResult{Err: err}
+					failed = true
+					cancel()
+				}
+			}
+			<-slots
+		}
+	}()
+	defer func() {
+		close(queue)
+		<-emitted
+		if failed {
+			return
+		}
+		if first := firstErr.Load(); first != nil {
+			results <- source.RecordBatchResult{Err: *first}
+		} else if parent.Err() != nil {
+			results <- source.RecordBatchResult{Err: parent.Err()}
+		}
+	}()
+
+	// A slot is taken before asking Databricks for a chunk's link, so links are
+	// fetched only when they can be downloaded right away.
+	held := false
+	acquire := func() bool {
+		if held {
+			return true
+		}
+		select {
+		case slots <- struct{}{}:
+			held = true
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	fail := func(err error) {
+		if firstErr.CompareAndSwap(nil, &err) {
+			cancel()
+		}
+	}
+
+	processResultData := func(rd *dbsql.ResultData) bool {
 		for i, link := range rd.ExternalLinks {
 			if link.ChunkIndex <= processed {
 				continue
 			}
-			config.Debug("[DATABRICKS] Fetching external link %d/%d: row_count=%d, byte_count=%d", i+1, len(rd.ExternalLinks), link.RowCount, link.ByteCount)
-			if err := s.streamExternalLink(ctx, alloc, link, arrowSchema, intervals, maxBatchBytes, results); err != nil {
-				return fmt.Errorf("failed to fetch external link: %w", err)
+			if !acquire() {
+				return false
 			}
+			held = false
+			config.Debug("[DATABRICKS] Fetching external link %d/%d: row_count=%d, byte_count=%d", i+1, len(rd.ExternalLinks), link.RowCount, link.ByteCount)
+			p := &pendingChunk{done: make(chan struct{})}
+			go func(link dbsql.ExternalLink) {
+				defer close(p.done)
+				p.data, p.err = s.downloadChunk(ctx, statementID, link)
+				if p.err != nil {
+					p.err = fmt.Errorf("failed to fetch external link: %w", p.err)
+					if firstErr.CompareAndSwap(nil, &p.err) {
+						cancel()
+					}
+				}
+			}(link)
+			queue <- p
 			processed = link.ChunkIndex
 		}
-		return nil
+		return true
 	}
 
-	if err := processResultData(resp.Result); err != nil {
-		results <- source.RecordBatchResult{Err: err}
+	if !processResultData(resp.Result) {
 		return
 	}
 
-	statementID := resp.StatementId
 	totalChunks := 0
 	if resp.Manifest != nil {
 		totalChunks = resp.Manifest.TotalChunkCount
@@ -500,11 +612,8 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 			if chunkIndex <= processed {
 				continue
 			}
-			select {
-			case <-ctx.Done():
-				results <- source.RecordBatchResult{Err: ctx.Err()}
+			if !acquire() {
 				return
-			default:
 			}
 
 			config.Debug("[DATABRICKS] Fetching chunk index=%d", chunkIndex)
@@ -513,14 +622,13 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				ChunkIndex:  chunkIndex,
 			})
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
+				fail(fmt.Errorf("failed to get result chunk: %w", err))
 				return
 			}
 			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, next_chunk_index=%d, has_next_chunk=%v",
 				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
 
-			if err := processResultData(chunkResp); err != nil {
-				results <- source.RecordBatchResult{Err: err}
+			if !processResultData(chunkResp) {
 				return
 			}
 		}
@@ -530,11 +638,8 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 		config.Debug("[DATABRICKS] Entering link-based chunk pagination: starting_chunk_index=%d", chunkIndex)
 
 		for {
-			select {
-			case <-ctx.Done():
-				results <- source.RecordBatchResult{Err: ctx.Err()}
+			if !acquire() {
 				return
-			default:
 			}
 
 			config.Debug("[DATABRICKS] Fetching chunk index=%d", chunkIndex)
@@ -543,14 +648,13 @@ func (s *DatabricksSource) processResults(ctx context.Context, resp *dbsql.State
 				ChunkIndex:  chunkIndex,
 			})
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to get result chunk: %w", err)}
+				fail(fmt.Errorf("failed to get result chunk: %w", err))
 				return
 			}
 			config.Debug("[DATABRICKS] Chunk %d response: row_count=%d, row_offset=%d, external_links=%d, next_chunk_index=%d, has_next_chunk=%v",
 				chunkIndex, chunkResp.RowCount, chunkResp.RowOffset, len(chunkResp.ExternalLinks), chunkResp.NextChunkIndex, chunkResp.NextChunkInternalLink != "")
 
-			if err := processResultData(chunkResp); err != nil {
-				results <- source.RecordBatchResult{Err: err}
+			if !processResultData(chunkResp) {
 				return
 			}
 
@@ -639,7 +743,7 @@ func (s *DatabricksSource) ExecuteCustomQuery(ctx context.Context, query string,
 			arrowSchema = buildArrowSchema(columns)
 		}
 
-		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, results)
+		s.processResults(ctx, resp, arrowSchema, opts.MaxBatchBytes, opts.Parallelism, results)
 	}()
 
 	return results, nil
