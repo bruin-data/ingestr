@@ -275,7 +275,9 @@ func TestJiraVerifyCredentials(t *testing.T) {
 	status := http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/myself" {
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusBadRequest)
+			return
 		}
 		w.WriteHeader(status)
 	}))
