@@ -22,11 +22,7 @@ The same URI structure can be used both for sources and destinations.
 
 [DuckLake](https://ducklake.select/) is a lakehouse table format developed by the DuckDB team. Data is stored as Parquet files in object storage (S3 / GCS / Azure Blob / S3-compatible); table metadata (schemas, snapshots, file lists) lives in a regular SQL database (DuckDB, SQLite, or Postgres).
 
-DuckLake does not support physical `PRIMARY KEY` or `UNIQUE` constraints. ingestr omits
-primary key constraints when creating DuckLake tables, including staging tables. Primary
-keys still identify rows for merge and deduplication, but DuckLake does not enforce their
-uniqueness. Use a separate data quality check if uniqueness must be validated. Ordinary
-DuckDB destinations continue to create primary key constraints.
+DuckLake does not support physical `PRIMARY KEY` or `UNIQUE` constraints. ingestr omits primary key constraints when creating DuckLake tables, including staging tables. Primary keys still identify rows for merge and deduplication, but DuckLake does not enforce their uniqueness. Use a separate data quality check if uniqueness must be validated. Ordinary DuckDB destinations continue to create primary key constraints.
 
 ingestr can read from and write to DuckLake tables using the `ducklake://` URI scheme. The same URI shape works for both source and destination:
 
