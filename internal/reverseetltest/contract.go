@@ -65,6 +65,40 @@ func Run(t *testing.T, factory func(*testing.T, Scenario) Fixture) {
 			t.Fatal("WriteParallel waits for the producer to close after a source error; the strategy cannot cancel the producer until WriteParallel returns")
 		}
 	})
+	t.Run("WriteParallel/fail-fast-with-idle-producer", func(t *testing.T) {
+		f := factory(t, Scenario{Strategy: "merge", RejectMode: "fail_fast", Reject: true})
+		f.Options.Strategy, f.Options.RejectMode = "merge", "fail_fast"
+		f.Options.Parallelism = 3
+		alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		t.Cleanup(func() { alloc.AssertSize(t, 0) })
+		// Fewer batches than workers leaves at least one waiting for input.
+		ch := make(chan source.RecordBatchResult, 2)
+		for _, key := range []string{"alpha", "beta"} {
+			b := array.NewRecordBuilder(alloc, arrow.NewSchema([]arrow.Field{{Name: "source_key", Type: arrow.BinaryTypes.String}}, nil))
+			b.Field(0).(*array.StringBuilder).Append(key)
+			ch <- source.RecordBatchResult{Batch: b.NewRecordBatch()}
+			b.Release()
+		}
+		done := make(chan error, 1)
+		go func() { done <- f.Writer.WriteParallel(context.Background(), ch, f.Options) }()
+		var err error
+		select {
+		case err = <-done:
+			close(ch)
+		case <-time.After(2 * time.Second):
+			close(ch)
+			err = <-done
+			t.Error("WriteParallel waits for the producer to close after an API rejection")
+		}
+		// Release only batches the workers never received, as the strategy does.
+		for result := range ch {
+			result.Batch.Release()
+		}
+		require.ErrorContains(t, err, "bad row")
+		e := f.Snapshot()
+		require.NotEmpty(t, e.Attempted)
+		require.Empty(t, e.Upserted)
+	})
 	for _, parallel := range []bool{false, true} {
 		name := "Write"
 		if parallel {
