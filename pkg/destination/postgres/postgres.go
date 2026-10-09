@@ -1122,7 +1122,7 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 		pkList := strings.Join(quotedPKs, ", ")
 		orderBy := pkList
 		if opts.IncrementalKey != "" {
-			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+			orderBy = fmt.Sprintf("%s, %s DESC NULLS LAST", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
 		}
 		var upsertSQL string
 		if strings.TrimSpace(opts.IncrementalPredicate) != "" {
@@ -2013,7 +2013,7 @@ func buildTruncateInsertFromStagingSQL(opts destination.TruncateInsertFromStagin
 		pkList := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
 		orderBy := pkList
 		if opts.IncrementalKey != "" {
-			orderBy = fmt.Sprintf("%s, %s DESC", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
+			orderBy = fmt.Sprintf("%s, %s DESC NULLS LAST", pkList, destination.QuoteIdentifier(opts.IncrementalKey))
 		}
 		stagingSelect = buildMergeStagingSelect(
 			quotedStagingTable,

@@ -51,7 +51,7 @@ func TestBuildMergeSQL(t *testing.T) {
 	t.Run("non_cdc_with_incremental_key", func(t *testing.T) {
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, []string{"id", "name", "updated_at"}, "updated_at", nil)
 
-		assert.Contains(t, sql, `ORDER BY "UPDATED_AT" DESC`)
+		assert.Contains(t, sql, `ORDER BY "UPDATED_AT" DESC NULLS LAST`)
 		assert.NotContains(t, sql, "ORDER BY (SELECT NULL)")
 	})
 
