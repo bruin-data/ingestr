@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1014,6 +1015,17 @@ func checkMySQLBinlogSettings(ctx context.Context, db *sql.DB) error {
 }
 
 func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database string, table string) error {
+	unsupported, err := unsupportedMySQLCDCColumns(ctx, db, database, table)
+	if err != nil {
+		return err
+	}
+	if len(unsupported) > 0 {
+		return fmt.Errorf("MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
+	}
+	return nil
+}
+
+func unsupportedMySQLCDCColumns(ctx context.Context, db *sql.DB, database string, table string, supportedTypes ...string) ([]string, error) {
 	schemaName, tableName := parseMySQLTableName(database, table)
 	rows, err := db.QueryContext(ctx, `
 		SELECT COLUMN_NAME, DATA_TYPE
@@ -1028,7 +1040,7 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 		ORDER BY ORDINAL_POSITION
 	`, schemaName, tableName)
 	if err != nil {
-		return fmt.Errorf("failed to check MySQL CDC column support: %w", err)
+		return nil, fmt.Errorf("failed to check MySQL CDC column support: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1036,17 +1048,17 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 	for rows.Next() {
 		var name, dataType string
 		if err := rows.Scan(&name, &dataType); err != nil {
-			return fmt.Errorf("failed to scan MySQL CDC column support: %w", err)
+			return nil, fmt.Errorf("failed to scan MySQL CDC column support: %w", err)
+		}
+		if slices.Contains(supportedTypes, strings.ToLower(dataType)) {
+			continue
 		}
 		unsupported = append(unsupported, fmt.Sprintf("%s %s", name, strings.ToUpper(dataType)))
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	if len(unsupported) > 0 {
-		return fmt.Errorf("MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
-	}
-	return nil
+	return unsupported, nil
 }
 
 func mysqlCDCResumeExpiredError(table string, pos gomysql.Position) error {
