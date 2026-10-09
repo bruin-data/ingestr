@@ -31,6 +31,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/google/uuid"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -245,6 +246,12 @@ func (d *BlobstoreDestination) Close(ctx context.Context) error {
 func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if opts.DropFirst {
+		if err := d.DropTable(ctx, opts.Table); err != nil {
+			return fmt.Errorf("failed to clear blobstore destination: %w", err)
+		}
+	}
 
 	d.schema = opts.Schema
 
@@ -584,6 +591,71 @@ func (d *BlobstoreDestination) SCD2Table(ctx context.Context, opts destination.S
 }
 
 func (d *BlobstoreDestination) DropTable(ctx context.Context, table string) error {
+	bucket, basePath := parseBucketAndPath(table)
+	if bucket == "" || strings.Trim(basePath, "/") == "" {
+		return fmt.Errorf("blobstore replace requires a non-empty destination path; refusing to clear an entire bucket or container")
+	}
+	prefix := strings.TrimSuffix(basePath, "/") + "/"
+
+	switch d.provider {
+	case ProviderS3:
+		pager := s3.NewListObjectsV2Paginator(d.s3Client, &s3.ListObjectsV2Input{
+			Bucket: aws.String(bucket), Prefix: aws.String(prefix),
+		})
+		for pager.HasMorePages() {
+			page, err := pager.NextPage(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to list objects: %w", err)
+			}
+			for _, object := range page.Contents {
+				if _, err := d.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: object.Key}); err != nil {
+					return fmt.Errorf("failed to delete object %s: %w", aws.ToString(object.Key), err)
+				}
+			}
+		}
+	case ProviderGCS:
+		objects := d.gcsClient.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix})
+		for {
+			object, err := objects.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to list objects: %w", err)
+			}
+			if err := d.gcsClient.Bucket(bucket).Object(object.Name).Delete(ctx); err != nil {
+				return fmt.Errorf("failed to delete object %s: %w", object.Name, err)
+			}
+		}
+	case ProviderAzure:
+		deleteSnapshots := azblob.DeleteSnapshotsOptionTypeInclude
+		pager := d.azureClient.NewListBlobsFlatPager(bucket, &azblob.ListBlobsFlatOptions{Prefix: &prefix})
+		for pager.More() {
+			page, err := pager.NextPage(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to list blobs: %w", err)
+			}
+			for _, object := range page.Segment.BlobItems {
+				if _, err := d.azureClient.DeleteBlob(ctx, bucket, *object.Name, &azblob.DeleteBlobOptions{DeleteSnapshots: &deleteSnapshots}); err != nil {
+					return fmt.Errorf("failed to delete blob %s: %w", *object.Name, err)
+				}
+			}
+		}
+	case ProviderAzureDatalake:
+		pathURL, err := buildAzureDatalakePathURL(d.adlsClient.accountName, bucket, strings.TrimSuffix(basePath, "/"))
+		if err != nil {
+			return err
+		}
+		client, err := d.adlsClient.newDirectoryClient(pathURL)
+		if err != nil {
+			return fmt.Errorf("failed to create directory client: %w", err)
+		}
+		if _, err := client.Delete(ctx, nil); err != nil && !datalakeerror.HasCode(err, datalakeerror.PathNotFound) {
+			return fmt.Errorf("failed to delete directory: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported provider: %s", d.provider)
+	}
 	return nil
 }
 
