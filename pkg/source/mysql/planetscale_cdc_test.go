@@ -565,7 +565,7 @@ func TestDecodePsdbChangesEnumSet(t *testing.T) {
 	}
 
 	resp := &psdbconnect.SyncResponse{
-		Result:  []*querypb.QueryResult{result(1, "active", "red,blue"), result(2, "2", "3")},
+		Result:  []*querypb.QueryResult{result(1, "active", "red,blue"), result(2, "inactive", "red,green")},
 		Updates: []*psdbconnect.UpdatedRow{{Before: result(1, "active", "red,blue"), After: result(1, "inactive", "")}},
 	}
 	changes, err := decodePsdbChanges(resp, sourceCols, []int{0})

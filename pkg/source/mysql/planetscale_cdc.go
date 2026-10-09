@@ -1049,7 +1049,6 @@ func psdbResultRows(qr *querypb.QueryResult, sourceCols []schema.Column) ([][]in
 	for i, f := range qr.Fields {
 		idxByName[strings.ToLower(f.Name)] = i
 	}
-	enumSets := vitessEnumSetColumns(qr.Fields)
 	out := make([][]interface{}, 0, len(qr.Rows))
 	for _, row := range qr.Rows {
 		vals := sqltypes.MakeRowTrusted(qr.Fields, row)
@@ -1070,10 +1069,6 @@ func psdbResultRows(qr *querypb.QueryResult, sourceCols []schema.Column) ([][]in
 				cp := make([]byte, len(raw))
 				copy(cp, raw)
 				decoded[i] = cp
-				continue
-			}
-			if c, ok := enumSets[idx]; ok {
-				decoded[i] = c.decode(v.ToString())
 				continue
 			}
 			decoded[i] = v.ToString()

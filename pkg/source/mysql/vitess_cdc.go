@@ -588,7 +588,11 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 					info.idxByName[strings.ToLower(f.Name)] = i
 				}
 				if !fe.EnumSetStringValues {
-					info.enumSets = vitessEnumSetColumns(fe.Fields)
+					enumSets, err := vitessEnumSetColumns(fe.Fields)
+					if err != nil {
+						return fmt.Errorf("vitess CDC: table %s: %w", s.bareTableName(fe.TableName), err)
+					}
+					info.enumSets = enumSets
 					for idx, c := range info.enumSets {
 						if c.hasNumericLabel() {
 							return fmt.Errorf("vitess CDC: column %s.%s has numeric ENUM/SET labels, which this Vitess server streams ambiguously as binlog indexes; upgrade to Vitess v20+ or change the column type", s.bareTableName(fe.TableName), fe.Fields[idx].Name)
@@ -996,9 +1000,9 @@ type vitessEnumSetColumn struct {
 }
 
 // vitessEnumSetColumns returns the ENUM/SET columns of fields keyed by field
-// index. Columns without a parseable ColumnType are skipped (values pass
-// through unchanged).
-func vitessEnumSetColumns(fields []*querypb.Field) map[int]*vitessEnumSetColumn {
+// index. It fails when a column's labels cannot be read from its ColumnType,
+// since its index values could not be decoded.
+func vitessEnumSetColumns(fields []*querypb.Field) (map[int]*vitessEnumSetColumn, error) {
 	var out map[int]*vitessEnumSetColumn
 	for i, f := range fields {
 		colType := strings.ToLower(strings.TrimSpace(f.GetColumnType()))
@@ -1012,7 +1016,7 @@ func vitessEnumSetColumns(fields []*querypb.Field) map[int]*vitessEnumSetColumn 
 		}
 		labels, ok := parseMySQLEnumSetLabels(f.GetColumnType())
 		if !ok {
-			continue
+			return nil, fmt.Errorf("column %s streams ENUM/SET values as binlog indexes but its labels are unavailable (column type %q); upgrade to Vitess v20+", f.GetName(), f.GetColumnType())
 		}
 		known := make(map[string]struct{}, len(labels))
 		for _, l := range labels {
@@ -1023,7 +1027,7 @@ func vitessEnumSetColumns(fields []*querypb.Field) map[int]*vitessEnumSetColumn 
 		}
 		out[i] = &vitessEnumSetColumn{set: isSet, labels: labels, known: known}
 	}
-	return out
+	return out, nil
 }
 
 func (c *vitessEnumSetColumn) decode(v string) string {

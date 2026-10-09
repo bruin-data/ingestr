@@ -415,13 +415,15 @@ func TestParseMySQLEnumSetLabels(t *testing.T) {
 }
 
 func TestVitessEnumSetDecode(t *testing.T) {
-	cols := vitessEnumSetColumns([]*querypb.Field{
+	cols, err := vitessEnumSetColumns([]*querypb.Field{
 		{Name: "id", Type: querypb.Type_INT32},
 		{Name: "status", Type: querypb.Type_ENUM, ColumnType: "enum('active','inactive','2')"},
 		{Name: "tags", Type: querypb.Type_SET, ColumnType: "set('red','green','blue')"},
 		{Name: "bin_enum", Type: querypb.Type_BINARY, ColumnType: "enum('x','y')"},
-		{Name: "no_type", Type: querypb.Type_ENUM},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(cols) != 3 || cols[1] == nil || cols[2] == nil || cols[3] == nil {
 		t.Fatalf("unexpected enum/set columns: %+v", cols)
 	}
@@ -455,6 +457,10 @@ func TestVitessEnumSetDecode(t *testing.T) {
 		t.Errorf("hasNumericLabel: status=%v tags=%v binEnum=%v; want true,false,false",
 			status.hasNumericLabel(), tags.hasNumericLabel(), binEnum.hasNumericLabel())
 	}
+
+	if _, err := vitessEnumSetColumns([]*querypb.Field{{Name: "no_type", Type: querypb.Type_ENUM}}); err == nil {
+		t.Error("expected an error for an ENUM field without readable labels")
+	}
 }
 
 func TestVitessDecodeRowChangesMapsEnumSetIndexes(t *testing.T) {
@@ -484,7 +490,11 @@ func TestVitessDecodeRowChangesMapsEnumSetIndexes(t *testing.T) {
 	ev := &binlogdatapb.RowEvent{TableName: "items", RowChanges: []*binlogdatapb.RowChange{{After: row}}}
 	idxByName := map[string]int{"id": 0, "status": 1, "tags": 2}
 
-	legacy := &vitessFieldInfo{fields: fields, idxByName: idxByName, enumSets: vitessEnumSetColumns(fields)}
+	enumSets, err := vitessEnumSetColumns(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := &vitessFieldInfo{fields: fields, idxByName: idxByName, enumSets: enumSets}
 	changes, err := vitessDecodeRowChanges("items", ev, out, legacy)
 	if err != nil {
 		t.Fatal(err)
