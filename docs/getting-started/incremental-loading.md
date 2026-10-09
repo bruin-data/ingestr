@@ -37,7 +37,7 @@ Replace can use `--extract-partition-by` to read a bounded incremental-key inter
 
 The interval still defines the complete replacement data set: destination rows outside `--interval-start` and `--interval-end` are not retained. Use `merge` or `delete+insert` instead when the destination should keep rows outside the extracted interval.
 
-Destinations choose the safest replace implementation they support. For example, single-table PostgreSQL loads replace rows in place so dependent views, grants, and foreign keys continue to refer to the same table object.
+Destinations choose the safest replace implementation they support. PostgreSQL loads, including multi-table `--full-refresh`, replace rows in place so dependent views and grants continue to refer to the same table object. All input is staged before replacement; each table's truncate and insert is atomic, but a multi-table refresh is not one transaction across all tables. Existing table definitions and constraints are retained: incompatible schemas or foreign keys that prevent `TRUNCATE` cause the replacement to fail rather than dropping the table or cascading to dependents.
 
 > [!CAUTION]
 > This strategy removes all existing destination rows and replaces them with the source rows, use with caution.
