@@ -135,7 +135,7 @@ func (s *VitessCDCSource) GetTable(ctx context.Context, req source.TableRequest)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateMySQLCDCTableSupported(ctx, s.db, s.keyspace, req.Name); err != nil {
+	if err := validateVitessCDCTableSupported(ctx, s.db, s.keyspace, req.Name, "Vitess"); err != nil {
 		return nil, err
 	}
 	tableSchema := addMySQLCDCColumns(fullSchema)
@@ -232,7 +232,7 @@ func (s *VitessCDCSource) getTables(ctx context.Context) ([]source.SourceTableIn
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName, err)
 		}
-		if err := validateMySQLCDCTableSupported(ctx, s.db, s.keyspace, tableName); err != nil {
+		if err := validateVitessCDCTableSupported(ctx, s.db, s.keyspace, tableName, "Vitess"); err != nil {
 			return nil, err
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
@@ -347,6 +347,7 @@ type vitessCDCTarget struct {
 type vitessFieldInfo struct {
 	fields    []*querypb.Field
 	idxByName map[string]int
+	enumSets  map[int]*vitessEnumSetColumn
 }
 
 type vitessTxnRow struct {
@@ -585,6 +586,14 @@ func (s *VitessCDCSource) streamVGroup(ctx context.Context, cc *grpc.ClientConn,
 				info := &vitessFieldInfo{fields: fe.Fields, idxByName: make(map[string]int, len(fe.Fields))}
 				for i, f := range fe.Fields {
 					info.idxByName[strings.ToLower(f.Name)] = i
+				}
+				if !fe.EnumSetStringValues {
+					info.enumSets = vitessEnumSetColumns(fe.Fields)
+					for idx, c := range info.enumSets {
+						if c.hasNumericLabel() {
+							return fmt.Errorf("vitess CDC: column %s.%s has numeric ENUM/SET labels, which this Vitess server streams ambiguously as binlog indexes; upgrade to Vitess v20+ or change the column type", s.bareTableName(fe.TableName), fe.Fields[idx].Name)
+						}
+					}
 				}
 				fieldsByTable[s.bareTableName(fe.TableName)] = info
 
@@ -898,14 +907,14 @@ func vitessDecodeRowChanges(bareName string, re *binlogdatapb.RowEvent, outSchem
 		before, after := rc.Before, rc.After
 		switch {
 		case after != nil && before == nil: // INSERT (also copy-phase rows)
-			vals, err := vitessRowValues(info.fields, after, sourceCols, info.idxByName)
+			vals, err := vitessRowValues(info.fields, after, sourceCols, info.idxByName, info.enumSets)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, vitessTxnRow{bareName: bareName, values: vals, deleted: false})
 
 		case after == nil && before != nil: // DELETE
-			vals, err := vitessRowValues(info.fields, before, sourceCols, info.idxByName)
+			vals, err := vitessRowValues(info.fields, before, sourceCols, info.idxByName, info.enumSets)
 			if err != nil {
 				return nil, err
 			}
@@ -913,13 +922,13 @@ func vitessDecodeRowChanges(bareName string, re *binlogdatapb.RowEvent, outSchem
 
 		case after != nil && before != nil: // UPDATE
 			if vitessPKChanged(info.fields, before, after, pkIdx) {
-				vals, err := vitessRowValues(info.fields, before, sourceCols, info.idxByName)
+				vals, err := vitessRowValues(info.fields, before, sourceCols, info.idxByName, info.enumSets)
 				if err != nil {
 					return nil, err
 				}
 				out = append(out, vitessTxnRow{bareName: bareName, values: vals, deleted: true})
 			}
-			vals, err := vitessRowValues(info.fields, after, sourceCols, info.idxByName)
+			vals, err := vitessRowValues(info.fields, after, sourceCols, info.idxByName, info.enumSets)
 			if err != nil {
 				return nil, err
 			}
@@ -941,7 +950,9 @@ func (s *VitessCDCSource) bareTableName(name string) string {
 // vitessRowValues decodes a VStream row into source-column-ordered Go values,
 // mirroring convertMySQLCDCValue: binary columns keep their raw bytes, everything
 // else becomes a string that arrowconv coerces into the target Arrow type.
-func vitessRowValues(fields []*querypb.Field, row *querypb.Row, sourceCols []schema.Column, idxByName map[string]int) ([]interface{}, error) {
+// enumSets, when non-nil, maps ENUM/SET values sent as binlog integer indexes
+// back to their string labels.
+func vitessRowValues(fields []*querypb.Field, row *querypb.Row, sourceCols []schema.Column, idxByName map[string]int, enumSets map[int]*vitessEnumSetColumn) ([]interface{}, error) {
 	vals := sqltypes.MakeRowTrusted(fields, row)
 	out := make([]interface{}, len(sourceCols))
 	for i, col := range sourceCols {
@@ -965,9 +976,150 @@ func vitessRowValues(fields []*querypb.Field, row *querypb.Row, sourceCols []sch
 			out[i] = cp
 			continue
 		}
+		if c, ok := enumSets[idx]; ok {
+			out[i] = c.decode(v.ToString())
+			continue
+		}
 		out[i] = v.ToString()
 	}
 	return out, nil
+}
+
+// vitessEnumSetColumn holds the labels of an ENUM or SET column. Vitess v20+
+// vstreamer (and therefore PlanetScale) already sends string labels; older
+// servers send the binlog representation instead: a 1-based index for ENUM and
+// a bitmap for SET. decode normalizes both forms to the label string.
+type vitessEnumSetColumn struct {
+	set    bool
+	labels []string
+	known  map[string]struct{}
+}
+
+// vitessEnumSetColumns returns the ENUM/SET columns of fields keyed by field
+// index. Columns without a parseable ColumnType are skipped (values pass
+// through unchanged).
+func vitessEnumSetColumns(fields []*querypb.Field) map[int]*vitessEnumSetColumn {
+	var out map[int]*vitessEnumSetColumn
+	for i, f := range fields {
+		colType := strings.ToLower(strings.TrimSpace(f.GetColumnType()))
+		var isSet bool
+		switch {
+		case f.GetType() == querypb.Type_ENUM || strings.HasPrefix(colType, "enum("):
+		case f.GetType() == querypb.Type_SET || strings.HasPrefix(colType, "set("):
+			isSet = true
+		default:
+			continue
+		}
+		labels, ok := parseMySQLEnumSetLabels(f.GetColumnType())
+		if !ok {
+			continue
+		}
+		known := make(map[string]struct{}, len(labels))
+		for _, l := range labels {
+			known[l] = struct{}{}
+		}
+		if out == nil {
+			out = make(map[int]*vitessEnumSetColumn)
+		}
+		out[i] = &vitessEnumSetColumn{set: isSet, labels: labels, known: known}
+	}
+	return out
+}
+
+func (c *vitessEnumSetColumn) decode(v string) string {
+	if v == "" || c.isLabelValue(v) {
+		return v
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return v
+	}
+	if !c.set {
+		if n == 0 {
+			return ""
+		}
+		if n <= uint64(len(c.labels)) {
+			return c.labels[n-1]
+		}
+		return v
+	}
+	parts := make([]string, 0, len(c.labels))
+	for i, l := range c.labels {
+		if i < 64 && n&(1<<uint(i)) != 0 {
+			parts = append(parts, l)
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// hasNumericLabel reports whether a label is indistinguishable from a binlog
+// index/bitmap value, making legacy decoding ambiguous.
+func (c *vitessEnumSetColumn) hasNumericLabel() bool {
+	for _, l := range c.labels {
+		if _, err := strconv.ParseUint(l, 10, 64); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *vitessEnumSetColumn) isLabelValue(v string) bool {
+	if !c.set {
+		_, ok := c.known[v]
+		return ok
+	}
+	for _, p := range strings.Split(v, ",") {
+		if _, ok := c.known[p]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// parseMySQLEnumSetLabels extracts the labels from a column type such as
+// enum('a','b”c') or set('x','y').
+func parseMySQLEnumSetLabels(columnType string) ([]string, bool) {
+	begin := strings.Index(columnType, "(")
+	end := strings.LastIndex(columnType, ")")
+	if begin == -1 || end <= begin {
+		return nil, false
+	}
+	body := columnType[begin+1 : end]
+	var labels []string
+	for i := 0; i < len(body); {
+		switch body[i] {
+		case ' ', ',':
+			i++
+			continue
+		case '\'':
+		default:
+			return nil, false
+		}
+		j := i + 1
+		for ; j < len(body); j++ {
+			if body[j] == '\\' {
+				j++
+				continue
+			}
+			if body[j] == '\'' {
+				if j+1 < len(body) && body[j+1] == '\'' {
+					j++
+					continue
+				}
+				break
+			}
+		}
+		if j >= len(body) {
+			return nil, false
+		}
+		label, err := sqltypes.DecodeStringSQL(body[i : j+1])
+		if err != nil {
+			return nil, false
+		}
+		labels = append(labels, label)
+		i = j + 1
+	}
+	return labels, len(labels) > 0
 }
 
 func vitessPKFieldIndexes(primaryKeys []string, idxByName map[string]int) []int {

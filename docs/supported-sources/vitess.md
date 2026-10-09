@@ -66,7 +66,7 @@ Vitess CDC URI parameters:
 Requirements:
 - The vtgate gRPC endpoint must be reachable (`grpc_port`, plus `grpc_host` if it differs from the MySQL host).
 - Source tables must have primary keys, or `--primary-key` must be provided. A keyless table fails a whole-keyspace run; name the tables you want with a comma-separated `--source-table` to replicate the rest of the keyspace around it.
-- Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
+- Source tables must not contain `BIT` or spatial (`GEOMETRY`, `POINT`, ...) columns. `ENUM` and `SET` columns are replicated as their string labels (`SET` values comma-separated). On Vitess versions before v20, `ENUM`/`SET` columns with numeric labels (for example `ENUM('1','2')`) are rejected because the stream cannot tell labels from binlog indexes.
 - Multi-table streaming cannot start with a mix of already-synced tables and new tables without stored cursors. Run once without `--stream` to establish cursors for the new tables, or use `--full-refresh` to rebuild all selected tables before starting the stream.
 
 ## Related docs

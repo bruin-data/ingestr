@@ -1013,22 +1013,38 @@ func checkMySQLBinlogSettings(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+var mysqlCDCSpatialTypes = []string{
+	"geometry", "point", "linestring", "polygon",
+	"multipoint", "multilinestring", "multipolygon",
+	"geomcollection", "geometrycollection",
+}
+
 func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database string, table string) error {
+	return validateCDCColumnTypes(ctx, db, database, table,
+		append([]string{"enum", "set", "bit"}, mysqlCDCSpatialTypes...),
+		"MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet")
+}
+
+// validateVitessCDCTableSupported is the VStream-based (Vitess, PlanetScale)
+// counterpart: vstreamer emits ENUM/SET values as their string labels, so only
+// BIT and spatial columns are rejected.
+func validateVitessCDCTableSupported(ctx context.Context, db *sql.DB, keyspace string, table string, label string) error {
+	return validateCDCColumnTypes(ctx, db, keyspace, table,
+		append([]string{"bit"}, mysqlCDCSpatialTypes...),
+		label+" CDC does not support BIT or spatial (GEOMETRY) columns yet")
+}
+
+func validateCDCColumnTypes(ctx context.Context, db *sql.DB, database string, table string, dataTypes []string, message string) error {
 	schemaName, tableName := parseMySQLTableName(database, table)
 	rows, err := db.QueryContext(ctx, `
 		SELECT COLUMN_NAME, DATA_TYPE
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-		  AND LOWER(DATA_TYPE) IN (
-			'enum', 'set', 'bit',
-			'geometry', 'point', 'linestring', 'polygon',
-			'multipoint', 'multilinestring', 'multipolygon',
-			'geomcollection', 'geometrycollection'
-		  )
+		  AND LOWER(DATA_TYPE) IN ('`+strings.Join(dataTypes, "', '")+`')
 		ORDER BY ORDINAL_POSITION
 	`, schemaName, tableName)
 	if err != nil {
-		return fmt.Errorf("failed to check MySQL CDC column support: %w", err)
+		return fmt.Errorf("failed to check CDC column support: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1036,7 +1052,7 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 	for rows.Next() {
 		var name, dataType string
 		if err := rows.Scan(&name, &dataType); err != nil {
-			return fmt.Errorf("failed to scan MySQL CDC column support: %w", err)
+			return fmt.Errorf("failed to scan CDC column support: %w", err)
 		}
 		unsupported = append(unsupported, fmt.Sprintf("%s %s", name, strings.ToUpper(dataType)))
 	}
@@ -1044,7 +1060,7 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 		return err
 	}
 	if len(unsupported) > 0 {
-		return fmt.Errorf("MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
+		return fmt.Errorf("%s; unsupported columns in %s: %s", message, table, strings.Join(unsupported, ", "))
 	}
 	return nil
 }

@@ -541,3 +541,48 @@ func TestDecodePsdbChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodePsdbChangesEnumSet(t *testing.T) {
+	sourceCols := []schema.Column{
+		{Name: "id", DataType: schema.TypeString},
+		{Name: "status", DataType: schema.TypeString},
+		{Name: "tags", DataType: schema.TypeString},
+	}
+	fields := []*querypb.Field{
+		{Name: "id", Type: querypb.Type_INT64},
+		{Name: "status", Type: querypb.Type_ENUM, ColumnType: "enum('active','inactive')"},
+		{Name: "tags", Type: querypb.Type_SET, ColumnType: "set('red','green','blue')"},
+	}
+	result := func(id int64, status, tags string) *querypb.QueryResult {
+		return &querypb.QueryResult{
+			Fields: fields,
+			Rows: []*querypb.Row{sqltypes.RowToProto3([]sqltypes.Value{
+				sqltypes.NewInt64(id),
+				sqltypes.MakeTrusted(querypb.Type_ENUM, []byte(status)),
+				sqltypes.MakeTrusted(querypb.Type_SET, []byte(tags)),
+			})},
+		}
+	}
+
+	resp := &psdbconnect.SyncResponse{
+		Result:  []*querypb.QueryResult{result(1, "active", "red,blue"), result(2, "2", "3")},
+		Updates: []*psdbconnect.UpdatedRow{{Before: result(1, "active", "red,blue"), After: result(1, "inactive", "")}},
+	}
+	changes, err := decodePsdbChanges(resp, sourceCols, []int{0})
+	if err != nil {
+		t.Fatalf("decodePsdbChanges: %v", err)
+	}
+	want := [][]interface{}{
+		{"1", "active", "red,blue"},
+		{"2", "inactive", "red,green"},
+		{"1", "inactive", ""},
+	}
+	if len(changes) != len(want) {
+		t.Fatalf("change count: got %d want %d (%+v)", len(changes), len(want), changes)
+	}
+	for i, w := range want {
+		if !reflect.DeepEqual(changes[i].values, w) {
+			t.Errorf("change %d values: got %#v want %#v", i, changes[i].values, w)
+		}
+	}
+}

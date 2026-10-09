@@ -86,7 +86,7 @@ CDC URI parameters:
 Requirements:
 - PlanetScale database credentials (`user:password`) with read access to the branch/keyspace.
 - Source tables must have primary keys, or `--primary-key` must be provided.
-- Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
+- Source tables must not contain `BIT` or spatial (`GEOMETRY`, `POINT`, ...) columns. `ENUM` and `SET` columns are replicated as their string labels (`SET` values comma-separated).
 
 ## Related docs
 - [MySQL](/supported-sources/mysql.md) for the generic MySQL connector and binary-log CDC.

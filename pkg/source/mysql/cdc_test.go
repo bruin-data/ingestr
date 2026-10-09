@@ -154,6 +154,27 @@ func TestValidateMySQLCDCTableSupportedRejectsNativeBinlogTypes(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestValidateVitessCDCTableSupportedAllowsEnumAndSet(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery(`IN \('bit', 'geometry'`).
+		WithArgs("app", "items").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
+	require.NoError(t, validateVitessCDCTableSupported(context.Background(), db, "app", "items", "PlanetScale"))
+
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.COLUMNS").
+		WithArgs("app", "items").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}).
+			AddRow("flags", "bit"))
+	err = validateVitessCDCTableSupported(context.Background(), db, "app", "items", "PlanetScale")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PlanetScale CDC does not support BIT or spatial (GEOMETRY) columns yet")
+	assert.Contains(t, err.Error(), "flags BIT")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestMySQLCDCReadAllValidatesOnlySelectedTables(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

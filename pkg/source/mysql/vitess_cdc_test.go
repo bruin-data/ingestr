@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -389,4 +390,120 @@ func TestVitessDecodeRowChanges(t *testing.T) {
 			t.Errorf("second change should be upsert of new PK: %+v", changes[1])
 		}
 	})
+}
+
+func TestParseMySQLEnumSetLabels(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+		ok   bool
+	}{
+		{"enum('a','b','c')", []string{"a", "b", "c"}, true},
+		{"set('x', 'y')", []string{"x", "y"}, true},
+		{"enum('it''s','a,b','back\\\\slash')", []string{"it's", "a,b", "back\\slash"}, true},
+		{"enum('')", []string{""}, true},
+		{"enum()", nil, false},
+		{"varchar(10)", nil, false},
+		{"enum('unterminated)", nil, false},
+	}
+	for _, tc := range cases {
+		got, ok := parseMySQLEnumSetLabels(tc.in)
+		if ok != tc.ok || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("parseMySQLEnumSetLabels(%q) = %#v, %v; want %#v, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestVitessEnumSetDecode(t *testing.T) {
+	cols := vitessEnumSetColumns([]*querypb.Field{
+		{Name: "id", Type: querypb.Type_INT32},
+		{Name: "status", Type: querypb.Type_ENUM, ColumnType: "enum('active','inactive','2')"},
+		{Name: "tags", Type: querypb.Type_SET, ColumnType: "set('red','green','blue')"},
+		{Name: "bin_enum", Type: querypb.Type_BINARY, ColumnType: "enum('x','y')"},
+		{Name: "no_type", Type: querypb.Type_ENUM},
+	})
+	if len(cols) != 3 || cols[1] == nil || cols[2] == nil || cols[3] == nil {
+		t.Fatalf("unexpected enum/set columns: %+v", cols)
+	}
+	status, tags, binEnum := cols[1], cols[2], cols[3]
+
+	cases := []struct {
+		col  *vitessEnumSetColumn
+		in   string
+		want string
+	}{
+		{status, "inactive", "inactive"},
+		{status, "1", "active"},
+		{status, "2", "2"}, // a label wins over the index interpretation
+		{status, "3", "2"},
+		{status, "0", ""},
+		{status, "", ""},
+		{status, "9", "9"},
+		{tags, "red,blue", "red,blue"},
+		{tags, "", ""},
+		{tags, "5", "red,blue"},
+		{tags, "2", "green"},
+		{tags, "0", ""},
+		{binEnum, "2", "y"},
+	}
+	for _, tc := range cases {
+		if got := tc.col.decode(tc.in); got != tc.want {
+			t.Errorf("decode(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if !status.hasNumericLabel() || tags.hasNumericLabel() || binEnum.hasNumericLabel() {
+		t.Errorf("hasNumericLabel: status=%v tags=%v binEnum=%v; want true,false,false",
+			status.hasNumericLabel(), tags.hasNumericLabel(), binEnum.hasNumericLabel())
+	}
+}
+
+func TestVitessDecodeRowChangesMapsEnumSetIndexes(t *testing.T) {
+	base := &schema.TableSchema{
+		Name:   "items",
+		Schema: "vtdb",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt32, IsPrimaryKey: true},
+			{Name: "status", DataType: schema.TypeString},
+			{Name: "tags", DataType: schema.TypeString},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+	out := addMySQLCDCColumns(base)
+	out.PrimaryKeys = []string{"id"}
+
+	fields := []*querypb.Field{
+		{Name: "id", Type: querypb.Type_INT32},
+		{Name: "status", Type: querypb.Type_ENUM, ColumnType: "enum('active','inactive')"},
+		{Name: "tags", Type: querypb.Type_SET, ColumnType: "set('red','green','blue')"},
+	}
+	row := sqltypes.RowToProto3([]sqltypes.Value{
+		sqltypes.NewInt32(1),
+		sqltypes.MakeTrusted(querypb.Type_ENUM, []byte("2")),
+		sqltypes.MakeTrusted(querypb.Type_SET, []byte("6")),
+	})
+	ev := &binlogdatapb.RowEvent{TableName: "items", RowChanges: []*binlogdatapb.RowChange{{After: row}}}
+	idxByName := map[string]int{"id": 0, "status": 1, "tags": 2}
+
+	legacy := &vitessFieldInfo{fields: fields, idxByName: idxByName, enumSets: vitessEnumSetColumns(fields)}
+	changes, err := vitessDecodeRowChanges("items", ev, out, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []interface{}{"1", "inactive", "green,blue"}; !reflect.DeepEqual(changes[0].values, want) {
+		t.Errorf("legacy index values: got %#v want %#v", changes[0].values, want)
+	}
+
+	strRow := sqltypes.RowToProto3([]sqltypes.Value{
+		sqltypes.NewInt32(1),
+		sqltypes.MakeTrusted(querypb.Type_ENUM, []byte("active")),
+		sqltypes.MakeTrusted(querypb.Type_SET, []byte("red,blue")),
+	})
+	ev.RowChanges[0].After = strRow
+	changes, err = vitessDecodeRowChanges("items", ev, out, &vitessFieldInfo{fields: fields, idxByName: idxByName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []interface{}{"1", "active", "red,blue"}; !reflect.DeepEqual(changes[0].values, want) {
+		t.Errorf("string values: got %#v want %#v", changes[0].values, want)
+	}
 }

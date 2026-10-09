@@ -158,6 +158,83 @@ func TestVitessCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	require.Greater(t, queryDuck(`SELECT COUNT(DISTINCT "_cdc_lsn") FROM main.items_dest`), snapshotLSNs, "VGTID/ordinal should advance")
 }
 
+// TestVitessCDC_EnumSet_DuckDB proves ENUM and SET columns land as their string
+// labels in both the VStream copy phase and binlog-sourced changes.
+func TestVitessCDC_EnumSet_DuckDB(t *testing.T) {
+	requireDocker(t)
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	container, host, mysqlPort, grpcPort, err := startVitessCDCContainer(ctx)
+	require.NoError(t, err, "failed to start vttestserver")
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	mysqlURI := fmt.Sprintf("mysql://root@%s:%s/%s", host, mysqlPort, vitessCDCKeyspace)
+	db, err := sql.Open("mysql", mysqlDSN(mysqlURI))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.Eventually(t, func() bool {
+		return db.PingContext(ctx) == nil
+	}, 90*time.Second, 2*time.Second, "vtgate did not become query-ready")
+
+	_, err = db.ExecContext(ctx, "DROP TABLE IF EXISTS enum_items")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE enum_items (
+		id INT NOT NULL PRIMARY KEY,
+		status ENUM('active','inactive','it''s') NOT NULL,
+		rank_label ENUM('2','1') NULL,
+		tags SET('red','green','blue') NULL,
+		code ENUM('x','y') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL
+	)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO enum_items (id, status, rank_label, tags, code) VALUES
+		(1,'active','1','red,blue','x'),
+		(2,'inactive',NULL,'',NULL)`)
+	require.NoError(t, err)
+
+	duckPath := filepath.Join(t.TempDir(), "vitess_cdc_enum.duckdb")
+	cfg := &config.IngestConfig{
+		SourceURI:   fmt.Sprintf("vitess+cdc://root@%s:%s/%s?grpc_port=%s&mode=batch", host, mysqlPort, vitessCDCKeyspace, grpcPort),
+		SourceTable: vitessCDCKeyspace + ".enum_items",
+		DestURI:     fmt.Sprintf("duckdb:///%s", duckPath),
+		DestTable:   "main.enum_items_dest",
+	}
+
+	queryDuck := func(query string) int64 {
+		t.Helper()
+		duck, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckPath))
+		require.NoError(t, err)
+		defer func() { _ = duck.Close() }()
+		var v int64
+		require.NoError(t, duck.QueryRowContext(ctx, query).Scan(&v))
+		return v
+	}
+
+	require.NoError(t, pipeline.New(cfg).Run(ctx), "snapshot run should succeed")
+	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.enum_items_dest WHERE id = 1 AND status = 'active' AND rank_label = '1' AND tags = 'red,blue' AND code = 'x'`))
+	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.enum_items_dest WHERE id = 2 AND status = 'inactive' AND rank_label IS NULL AND tags = '' AND code IS NULL`))
+
+	_, err = db.ExecContext(ctx, `INSERT INTO enum_items (id, status, rank_label, tags, code) VALUES (3,'it''s','2','green','y')`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE enum_items SET status = 'inactive', rank_label = '2', tags = 'green,blue', code = 'y' WHERE id = 1`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM enum_items WHERE id = 2`)
+	require.NoError(t, err)
+
+	incCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	require.NoError(t, pipeline.New(cfg).Run(incCtx), "incremental run should succeed")
+
+	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.enum_items_dest WHERE id = 1 AND status = 'inactive' AND rank_label = '2' AND tags = 'green,blue' AND code = 'y' AND NOT "_cdc_deleted"`), "update should carry ENUM/SET labels")
+	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.enum_items_dest WHERE id = 3 AND status = 'it''s' AND rank_label = '2' AND tags = 'green' AND code = 'y' AND NOT "_cdc_deleted"`), "insert should carry ENUM/SET labels")
+	require.EqualValues(t, 1, queryDuck(`SELECT COUNT(*) FROM main.enum_items_dest WHERE id = 2 AND "_cdc_deleted"`), "delete should be soft-applied")
+}
+
 func TestVitessCDC_Streaming_Postgres(t *testing.T) {
 	requireDocker(t)
 	t.Parallel()

@@ -121,7 +121,7 @@ func (s *PlanetScaleCDCSource) GetTable(ctx context.Context, req source.TableReq
 	if err != nil {
 		return nil, err
 	}
-	if err := validateMySQLCDCTableSupported(ctx, s.db, s.keyspace, req.Name); err != nil {
+	if err := validateVitessCDCTableSupported(ctx, s.db, s.keyspace, req.Name, "PlanetScale"); err != nil {
 		return nil, err
 	}
 	tableSchema := addMySQLCDCColumns(fullSchema)
@@ -218,7 +218,7 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName, err)
 		}
-		if err := validateMySQLCDCTableSupported(ctx, s.db, s.keyspace, tableName); err != nil {
+		if err := validateVitessCDCTableSupported(ctx, s.db, s.keyspace, tableName, "PlanetScale"); err != nil {
 			return nil, err
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
@@ -1049,6 +1049,7 @@ func psdbResultRows(qr *querypb.QueryResult, sourceCols []schema.Column) ([][]in
 	for i, f := range qr.Fields {
 		idxByName[strings.ToLower(f.Name)] = i
 	}
+	enumSets := vitessEnumSetColumns(qr.Fields)
 	out := make([][]interface{}, 0, len(qr.Rows))
 	for _, row := range qr.Rows {
 		vals := sqltypes.MakeRowTrusted(qr.Fields, row)
@@ -1069,6 +1070,10 @@ func psdbResultRows(qr *querypb.QueryResult, sourceCols []schema.Column) ([][]in
 				cp := make([]byte, len(raw))
 				copy(cp, raw)
 				decoded[i] = cp
+				continue
+			}
+			if c, ok := enumSets[idx]; ok {
+				decoded[i] = c.decode(v.ToString())
 				continue
 			}
 			decoded[i] = v.ToString()
