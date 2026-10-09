@@ -49,6 +49,11 @@ func (d *DuckLakeDestination) AcquireManagedCDCRunLease(context.Context, string)
 }
 
 func (d *DuckLakeDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if opts.RequirePrimaryKeyMatch {
+		return fmt.Errorf("DuckLake does not support physical primary key constraints")
+	}
+	// Keys remain logical merge/dedup keys; DuckLake cannot enforce them in DDL.
+	opts.PrimaryKeys = nil
 	layout, err := buildDuckLakeTableLayout(opts)
 	if err != nil {
 		return err

@@ -10,6 +10,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDuckLakePrepareTableOmitsPhysicalPrimaryKeys(t *testing.T) {
+	for _, keys := range [][]string{{"id"}, {"id", "part"}} {
+		for _, target := range []string{"main.items", "analytics.items"} {
+			t.Run(strings.Join(keys, ",")+"/"+target, func(t *testing.T) {
+				ctx := context.Background()
+				// Use regular DuckDB to inspect the DDL without requiring the DuckLake extension.
+				base, path := connectTestDuckDB(t, ctx)
+				dest := NewDuckLakeDestination()
+				dest.DuckDBDestination = base
+				tableSchema := &schema.TableSchema{
+					Columns: []schema.Column{
+						{Name: "id", DataType: schema.TypeInt64},
+						{Name: "part", DataType: schema.TypeString},
+					},
+					PrimaryKeys: keys,
+				}
+				opts := destination.PrepareOptions{
+					Table:       "main.items_staging",
+					Schema:      tableSchema,
+					PrimaryKeys: keys,
+				}
+				require.NoError(t, dest.PrepareTable(ctx, opts))
+				require.Equal(t, keys, opts.PrimaryKeys)
+				require.Equal(t, keys, tableSchema.PrimaryKeys, "logical keys must remain available to strategies")
+				require.NoError(t, dest.Exec(ctx, `INSERT INTO main.items_staging VALUES (7, 'a'), (7, 'a'), (8, 'b')`))
+				require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+					StagingTable: opts.Table,
+					TargetTable:  target,
+				}))
+				physicalSchema, err := dest.GetTableSchema(ctx, target)
+				require.NoError(t, err)
+				require.Empty(t, physicalSchema.PrimaryKeys)
+				db := openDuckDB(t, ctx, path)
+				var count, sum int64
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*), SUM(id)::BIGINT FROM "+target).Scan(&count, &sum))
+				require.Equal(t, int64(3), count)
+				require.Equal(t, int64(22), sum)
+			})
+		}
+	}
+}
+
+func TestDuckLakePrepareTableRejectsRequiredPhysicalPrimaryKey(t *testing.T) {
+	dest := NewDuckLakeDestination()
+	err := dest.PrepareTable(context.Background(), destination.PrepareOptions{
+		Table:                  "items",
+		PrimaryKeys:            []string{"id"},
+		RequirePrimaryKeyMatch: true,
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+		}},
+	})
+	require.ErrorContains(t, err, "DuckLake does not support physical primary key constraints")
+}
+
 func TestDuckLakeMemStageName(t *testing.T) {
 	t.Parallel()
 
