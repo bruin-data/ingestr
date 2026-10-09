@@ -142,6 +142,7 @@ func TestValidateMySQLCDCTableSupportedRejectsNativeBinlogTypes(t *testing.T) {
 		WithArgs("app", "items").
 		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}).
 			AddRow("status", "enum").
+			AddRow("tags", "set").
 			AddRow("flags", "bit").
 			AddRow("location", "point"))
 
@@ -149,6 +150,7 @@ func TestValidateMySQLCDCTableSupportedRejectsNativeBinlogTypes(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ENUM, SET, BIT, or spatial (GEOMETRY)")
 	assert.Contains(t, err.Error(), "status ENUM")
+	assert.Contains(t, err.Error(), "tags SET")
 	assert.Contains(t, err.Error(), "flags BIT")
 	assert.Contains(t, err.Error(), "location POINT")
 	require.NoError(t, mock.ExpectationsWereMet())

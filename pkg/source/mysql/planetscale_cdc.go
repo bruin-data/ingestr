@@ -121,7 +121,7 @@ func (s *PlanetScaleCDCSource) GetTable(ctx context.Context, req source.TableReq
 	if err != nil {
 		return nil, err
 	}
-	if err := validateMySQLCDCTableSupported(ctx, s.db, s.keyspace, req.Name); err != nil {
+	if err := validatePlanetScaleCDCTableSupported(ctx, s.db, s.keyspace, req.Name); err != nil {
 		return nil, err
 	}
 	tableSchema := addMySQLCDCColumns(fullSchema)
@@ -218,7 +218,7 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for %s: %w", tableName, err)
 		}
-		if err := validateMySQLCDCTableSupported(ctx, s.db, s.keyspace, tableName); err != nil {
+		if err := validatePlanetScaleCDCTableSupported(ctx, s.db, s.keyspace, tableName); err != nil {
 			return nil, err
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
@@ -244,6 +244,18 @@ func (s *PlanetScaleCDCSource) getTables(ctx context.Context) ([]source.SourceTa
 		return nil, fmt.Errorf("no PlanetScale tables found in keyspace %s", s.keyspace)
 	}
 	return tables, nil
+}
+
+func validatePlanetScaleCDCTableSupported(ctx context.Context, db *sql.DB, database, table string) error {
+	// psdbconnect supplies ENUM/SET labels and BIT bytes in both snapshots and changes.
+	unsupported, err := unsupportedMySQLCDCColumns(ctx, db, database, table, "enum", "set", "bit")
+	if err != nil {
+		return err
+	}
+	if len(unsupported) > 0 {
+		return fmt.Errorf("PlanetScale CDC does not support spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
+	}
+	return nil
 }
 
 func (s *PlanetScaleCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
