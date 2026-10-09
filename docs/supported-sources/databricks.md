@@ -43,6 +43,10 @@ You can read more about Databricks OAuth M2M authentication [here](https://docs.
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Databricks dialect [here](https://docs.databricks.com/en/dev-tools/sqlalchemy.html).
 
+## Reading large tables
+
+Large results are downloaded in parts, several at a time. `--extract-parallelism` sets how many parts are downloaded at once (default 5). Each part in progress uses about 20 MB of memory.
+
 ## Supported destination strategies
 
 When using Databricks as a destination, ingestr supports `replace`, `append`, `merge`, and `delete+insert`.
