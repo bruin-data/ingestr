@@ -1498,6 +1498,54 @@ func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 
 func (d *SnowflakeDestination) RequiresSerializedCDCRuns() bool { return true }
 
+func (d *SnowflakeDestination) CheckDuplicatePrimaryKeys(ctx context.Context, table string, primaryKeys []string) ([]string, error) {
+	if len(primaryKeys) == 0 {
+		return nil, nil
+	}
+
+	quoted := make([]string, 0, len(primaryKeys))
+	for _, key := range primaryKeys {
+		quoted = append(quoted, quoteIdentifier(key))
+	}
+	grouping := strings.Join(quoted, ", ")
+	query := fmt.Sprintf("SELECT %s, COUNT(*) FROM %s GROUP BY %s HAVING COUNT(*) > 1 LIMIT 25", grouping, quoteFQN(sfTable(table)), grouping)
+
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") ||
+			strings.Contains(err.Error(), "invalid identifier") {
+			return nil, nil
+		}
+		config.LogFailedQuery(query, err)
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	duplicates := make([]string, 0)
+	for rows.Next() {
+		keyParts := make([]sql.NullString, len(primaryKeys)+1)
+		scanArgs := make([]interface{}, len(primaryKeys)+1)
+		for i := range keyParts {
+			scanArgs[i] = &keyParts[i]
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
+			return nil, err
+		}
+		partStrings := make([]string, len(primaryKeys))
+		for i, part := range keyParts[:len(primaryKeys)] {
+			partStrings[i] = part.String
+		}
+		duplicates = append(duplicates, strings.Join(partStrings, ", "))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return duplicates, nil
+}
+
 func (d *SnowflakeDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	tn := sfTable(table)
 

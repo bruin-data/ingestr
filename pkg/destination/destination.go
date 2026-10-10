@@ -441,6 +441,10 @@ type SerializedCDCRunsRequired interface {
 	RequiresSerializedCDCRuns() bool
 }
 
+type DuplicateKeyChecker interface {
+	CheckDuplicatePrimaryKeys(ctx context.Context, table string, primaryKeys []string) ([]string, error)
+}
+
 // CDCConditionalSwapCapable advertises that SwapTable enforces both expected
 // target and staging incarnations in the same atomic operation that replaces
 // the target.

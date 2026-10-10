@@ -958,6 +958,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
+	if err := checkUnserializedCDCDuplicateKeys(ctx, p.config, dest); err != nil {
+		return err
+	}
+
 	// After a successful, durable write, let CDC sources confirm the position
 	// they caught up to (e.g. advance the replication slot's flush LSN). Safe
 	// here because the write above committed. Best-effort: a failure to confirm
@@ -3402,27 +3406,51 @@ func validateChangeTrackingDestination(dest destination.Destination) error {
 // can each merge the same absent key and insert it twice, which no later merge
 // repairs. See https://github.com/bruin-data/ingestr/issues/1190.
 func warnUnserializedCDCRuns(cfg *config.IngestConfig, dest destination.Destination) {
-	if cfg.FullRefresh || !isManagedChangeSource(cfg.SourceURI) {
+	sourceScheme, unserialized := cdcRunSerializationGap(cfg, dest)
+	if !unserialized {
 		return
+	}
+	output.Warnf("Warning: destination scheme %q does not enforce primary-key uniqueness and source scheme %q has no pipeline-managed run lease; two overlapping runs of this connector can each insert the same key, leaving permanent duplicate rows. Run this connector serially. See https://github.com/bruin-data/ingestr/issues/1190\n", dest.GetScheme(), sourceScheme)
+}
+
+func cdcRunSerializationGap(cfg *config.IngestConfig, dest destination.Destination) (string, bool) {
+	if cfg.FullRefresh || !isManagedChangeSource(cfg.SourceURI) {
+		return "", false
 	}
 	requirement, ok := dest.(destination.SerializedCDCRunsRequired)
 	if !ok || !requirement.RequiresSerializedCDCRuns() {
-		return
+		return "", false
 	}
 	if isPostgresCDCSource(cfg.SourceURI) {
-		return
+		return "", false
 	}
-	// MySQL CDC is gated separately and more strictly: Run requires a
-	// ManagedCDCRunLeaser outright, so a destination without one fails hard
-	// rather than reaching a merge an operator could schedule around.
 	if isMySQLCDCSource(cfg.SourceURI) {
-		return
+		return "", false
 	}
 	sourceScheme, err := uri.ExtractScheme(cfg.SourceURI)
 	if err != nil {
 		sourceScheme = "CDC"
 	}
-	output.Warnf("Warning: destination scheme %q does not enforce primary-key uniqueness and source scheme %q has no pipeline-managed run lease; two overlapping runs of this connector can each insert the same key, leaving permanent duplicate rows. Run this connector serially. See https://github.com/bruin-data/ingestr/issues/1190\n", dest.GetScheme(), sourceScheme)
+	return sourceScheme, true
+}
+
+func checkUnserializedCDCDuplicateKeys(ctx context.Context, cfg *config.IngestConfig, dest destination.Destination) error {
+	sourceScheme, unserialized := cdcRunSerializationGap(cfg, dest)
+	if !unserialized {
+		return nil
+	}
+	checker, ok := dest.(destination.DuplicateKeyChecker)
+	if !ok {
+		return nil
+	}
+	duplicates, err := checker.CheckDuplicatePrimaryKeys(ctx, cfg.DestTable, cfg.PrimaryKeys)
+	if err != nil {
+		return fmt.Errorf("failed to check %s for duplicate primary keys after CDC merge: %w", cfg.DestTable, err)
+	}
+	if len(duplicates) == 0 {
+		return nil
+	}
+	return fmt.Errorf("destination table %q contains duplicate primary keys (%s); destination scheme %q does not enforce primary-key uniqueness and source scheme %q has no pipeline-managed run lease, so overlapping runs of this connector inserted the same key more than once. Remove the duplicate rows and run this connector serially. See https://github.com/bruin-data/ingestr/issues/1190", cfg.DestTable, strings.Join(duplicates, "; "), dest.GetScheme(), sourceScheme)
 }
 
 func supportsDestinationManagedCDCState(dest destination.Destination) bool {
