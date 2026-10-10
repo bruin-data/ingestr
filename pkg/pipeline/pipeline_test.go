@@ -4361,3 +4361,219 @@ func TestApplyReverseETLNamingRejectsUnknownConvention(t *testing.T) {
 		t.Fatalf("error = %v, want the unknown convention rejected", err)
 	}
 }
+
+type stubDuplicateKeyChecker struct {
+	serializedCDCRunsDestination
+	dupes []string
+	err   error
+	calls int
+}
+
+func (d *stubDuplicateKeyChecker) CheckDuplicatePrimaryKeys(_ context.Context, _ string, _ []string) ([]string, error) {
+	d.calls++
+	return d.dupes, d.err
+}
+
+func TestCheckUnserializedCDCDuplicateKeys(t *testing.T) {
+	newCfg := func() *config.IngestConfig {
+		cfg := config.DefaultConfig()
+		cfg.SourceURI = "mssql+ct://source/db"
+		cfg.DestTable = "raw.items"
+		cfg.PrimaryKeys = []string{"id"}
+		return cfg
+	}
+
+	t.Run("fails loudly when duplicates are found", func(t *testing.T) {
+		dest := &stubDuplicateKeyChecker{serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}, dupes: []string{"K1", "K2"}}
+		err := checkUnserializedCDCDuplicateKeys(context.Background(), newCfg(), dest)
+		require.ErrorContains(t, err, `destination table "raw.items" contains duplicate primary keys (K1; K2)`)
+		require.ErrorContains(t, err, "does not enforce primary-key uniqueness")
+		require.ErrorContains(t, err, "https://github.com/bruin-data/ingestr/issues/1190")
+		require.Equal(t, 1, dest.calls)
+	})
+
+	t.Run("passes when every key is unique", func(t *testing.T) {
+		dest := &stubDuplicateKeyChecker{serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}}
+		require.NoError(t, checkUnserializedCDCDuplicateKeys(context.Background(), newCfg(), dest))
+		require.Equal(t, 1, dest.calls)
+	})
+
+	t.Run("checker failures fail the run", func(t *testing.T) {
+		dest := &stubDuplicateKeyChecker{serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}, err: errors.New("query timeout")}
+		err := checkUnserializedCDCDuplicateKeys(context.Background(), newCfg(), dest)
+		require.ErrorContains(t, err, "failed to check raw.items for duplicate primary keys")
+		require.ErrorContains(t, err, "query timeout")
+	})
+
+	t.Run("destinations without a checker are skipped", func(t *testing.T) {
+		dest := &serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}
+		require.NoError(t, checkUnserializedCDCDuplicateKeys(context.Background(), newCfg(), dest))
+	})
+
+	t.Run("serialized-safe combinations are skipped", func(t *testing.T) {
+		dest := &stubDuplicateKeyChecker{serializedCDCRunsDestination: serializedCDCRunsDestination{mockDestination: mockDestination{scheme: "unenforced-key-dest"}}, dupes: []string{"K1"}}
+		cfg := newCfg()
+		cfg.SourceURI = "postgres+cdc://source/db"
+		require.NoError(t, checkUnserializedCDCDuplicateKeys(context.Background(), cfg, dest))
+		cfg.SourceURI = "postgres://source/db"
+		require.NoError(t, checkUnserializedCDCDuplicateKeys(context.Background(), cfg, dest))
+		cfg.SourceURI = "mssql+ct://source/db"
+		cfg.FullRefresh = true
+		require.NoError(t, checkUnserializedCDCDuplicateKeys(context.Background(), cfg, dest))
+		require.Zero(t, dest.calls)
+	})
+}
+
+type duplicateKeyCDCSource struct {
+	table *fakeKnownSchemaTable
+}
+
+func (s *duplicateKeyCDCSource) Schemes() []string { return []string{"mongodb+cdc"} }
+
+func (s *duplicateKeyCDCSource) Connect(ctx context.Context, uri string) error { return nil }
+
+func (s *duplicateKeyCDCSource) Close(ctx context.Context) error { return nil }
+
+func (s *duplicateKeyCDCSource) HandlesIncrementality() bool { return true }
+
+func (s *duplicateKeyCDCSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
+	return s.table, nil
+}
+
+type unenforcedWarehouseDestination struct {
+	mockDestination
+	rows       map[string][][]string
+	checkCalls int
+}
+
+func (d *unenforcedWarehouseDestination) RequiresSerializedCDCRuns() bool { return true }
+
+func (d *unenforcedWarehouseDestination) Connect(ctx context.Context, uri string) error { return nil }
+
+func (d *unenforcedWarehouseDestination) Close(ctx context.Context) error { return nil }
+
+func (d *unenforcedWarehouseDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
+	return nil, nil
+}
+
+func (d *unenforcedWarehouseDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if d.rows == nil {
+		d.rows = map[string][][]string{}
+	}
+	if _, ok := d.rows[opts.Table]; !ok {
+		d.rows[opts.Table] = nil
+	}
+	return nil
+}
+
+func (d *unenforcedWarehouseDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if d.rows == nil {
+		d.rows = map[string][][]string{}
+	}
+	for result := range records {
+		if result.Err != nil {
+			return result.Err
+		}
+		rec := result.Batch
+		pks := opts.Schema.PrimaryKeys
+		for i := 0; i < int(rec.NumRows()); i++ {
+			row := make([]string, 0, len(pks))
+			for _, pk := range pks {
+				for f := 0; f < int(rec.NumCols()); f++ {
+					if rec.Schema().Field(f).Name != pk {
+						continue
+					}
+					switch col := rec.Column(f).(type) {
+					case *array.String:
+						row = append(row, col.Value(i))
+					case *array.Int64:
+						row = append(row, fmt.Sprintf("%d", col.Value(i)))
+					}
+				}
+			}
+			d.rows[opts.Table] = append(d.rows[opts.Table], row)
+		}
+	}
+	return nil
+}
+
+func (d *unenforcedWarehouseDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	d.rows[opts.TargetTable] = append(d.rows[opts.TargetTable], d.rows[opts.StagingTable]...)
+	return nil
+}
+
+func (d *unenforcedWarehouseDestination) DropTable(ctx context.Context, table string) error {
+	delete(d.rows, table)
+	return nil
+}
+
+func (d *unenforcedWarehouseDestination) CheckDuplicatePrimaryKeys(ctx context.Context, table string, primaryKeys []string) ([]string, error) {
+	d.checkCalls++
+	counts := map[string]int{}
+	order := []string{}
+	for _, row := range d.rows[table] {
+		key := strings.Join(row, "\x00")
+		if counts[key] == 0 {
+			order = append(order, key)
+		}
+		counts[key]++
+	}
+	duplicates := []string{}
+	for _, key := range order {
+		if counts[key] > 1 {
+			duplicates = append(duplicates, key)
+		}
+	}
+	return duplicates, nil
+}
+
+func newDuplicateKeyTable() *fakeKnownSchemaTable {
+	return &fakeKnownSchemaTable{
+		tableSchema: &schema.TableSchema{
+			Name: "items",
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeString},
+				{Name: "value", DataType: schema.TypeString},
+			},
+			PrimaryKeys: []string{"id"},
+		},
+		rows: [][]any{{"K1", "ann"}},
+	}
+}
+
+func TestUnserializedCDCRunFailsLoudlyOnDuplicatePrimaryKeys(t *testing.T) {
+	oldSource, err := internalregistry.Default.GetSourceConstructor("mongodb+cdc")
+	require.NoError(t, err)
+	defer internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, oldSource)
+	if oldDest, err := internalregistry.Default.GetDestinationConstructor("unenforced-warehouse"); err == nil {
+		defer internalregistry.Default.RegisterDestination([]string{"unenforced-warehouse"}, oldDest)
+	}
+
+	src := &duplicateKeyCDCSource{table: newDuplicateKeyTable()}
+	dest := &unenforcedWarehouseDestination{mockDestination: mockDestination{scheme: "unenforced-warehouse"}}
+	internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, func() interface{} { return src })
+	defer internalregistry.Default.RegisterSource([]string{"mongodb+cdc"}, oldSource)
+	internalregistry.Default.RegisterDestination([]string{"unenforced-warehouse"}, func() interface{} { return dest })
+
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mongodb+cdc://source/db"
+	cfg.DestURI = "unenforced-warehouse://destination/db"
+	cfg.SourceTable = "app.items"
+	cfg.DestTable = "raw.items"
+	cfg.IncrementalStrategy = config.StrategyMerge
+	cfg.PrimaryKeys = []string{"id"}
+
+	require.NoError(t, New(cfg).Run(context.Background()))
+	require.Len(t, dest.rows["raw.items"], 1)
+
+	err = New(cfg).Run(context.Background())
+	require.ErrorContains(t, err, "duplicate primary key")
+	require.ErrorContains(t, err, "https://github.com/bruin-data/ingestr/issues/1190")
+	require.Len(t, dest.rows["raw.items"], 2)
+	require.Equal(t, 2, dest.checkCalls)
+
+	err = New(cfg).Run(context.Background())
+	require.ErrorContains(t, err, "duplicate primary key")
+	require.Len(t, dest.rows["raw.items"], 3)
+	require.Equal(t, 3, dest.checkCalls)
+}

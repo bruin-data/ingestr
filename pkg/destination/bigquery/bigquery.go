@@ -3119,6 +3119,66 @@ func (d *BigQueryDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	return maxLSN, nil
 }
 
+func buildDuplicateKeyCheckSQL(fqn string, primaryKeys []string) string {
+	quoted := make([]string, 0, len(primaryKeys))
+	for _, key := range primaryKeys {
+		quoted = append(quoted, quoteIdentifier(key))
+	}
+	grouping := strings.Join(quoted, ", ")
+	return fmt.Sprintf("SELECT %s, COUNT(*) FROM %s GROUP BY %s HAVING COUNT(*) > 1 LIMIT 25", grouping, fqn, grouping)
+}
+
+func (d *BigQueryDestination) CheckDuplicatePrimaryKeys(ctx context.Context, table string, primaryKeys []string) ([]string, error) {
+	if len(primaryKeys) == 0 {
+		return nil, nil
+	}
+
+	project, dataset, tableName, err := d.parseTable(table)
+	if err != nil {
+		return nil, err
+	}
+
+	if dataset == "" && d.datasetID != "" {
+		dataset = d.datasetID
+	}
+
+	if dataset == "" {
+		return nil, errors.New("dataset must be specified in table name (dataset.table) or URI path")
+	}
+
+	fqn := fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(tableName))
+	query := d.client.Query(annotation.Prepend(ctx, buildDuplicateKeyCheckSQL(fqn, primaryKeys)))
+	if loc := d.effectiveLocation(); loc != "" {
+		query.Location = loc
+	}
+
+	it, err := query.Read(ctx)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	duplicates := make([]string, 0)
+	for {
+		var row []bigquery.Value
+		if err := it.Next(&row); err != nil {
+			if err == iterator.Done {
+				break
+			}
+			return nil, err
+		}
+		keyParts := make([]string, 0, len(primaryKeys))
+		for _, value := range row[:len(primaryKeys)] {
+			keyParts = append(keyParts, fmt.Sprintf("%v", value))
+		}
+		duplicates = append(duplicates, strings.Join(keyParts, ", "))
+	}
+
+	return duplicates, nil
+}
+
 type bigQueryCDCStateRow struct {
 	EventID          string
 	Version          string

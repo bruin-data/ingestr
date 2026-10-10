@@ -4279,3 +4279,32 @@ func TestRenameAsideSwapRestoresOnSwapFailure(t *testing.T) {
 		t.Fatalf("restore must clear the expiration, queries = %v", queries)
 	}
 }
+
+func TestBuildDuplicateKeyCheckSQL(t *testing.T) {
+	tests := []struct {
+		name        string
+		fqn         string
+		primaryKeys []string
+		want        string
+	}{
+		{
+			name:        "single key",
+			fqn:         "`my-project`.`raw`.`items`",
+			primaryKeys: []string{"id"},
+			want:        "SELECT `id`, COUNT(*) FROM `my-project`.`raw`.`items` GROUP BY `id` HAVING COUNT(*) > 1 LIMIT 25",
+		},
+		{
+			name:        "composite key",
+			fqn:         "`my-project`.`raw`.`items`",
+			primaryKeys: []string{"id", "name"},
+			want:        "SELECT `id`, `name`, COUNT(*) FROM `my-project`.`raw`.`items` GROUP BY `id`, `name` HAVING COUNT(*) > 1 LIMIT 25",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sql := buildDuplicateKeyCheckSQL(tt.fqn, tt.primaryKeys)
+			require.Equal(t, tt.want, sql)
+		})
+	}
+}
