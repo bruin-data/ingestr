@@ -58,6 +58,10 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		r.schemaFingerprint = fingerprint
 		replacementSnapshot := false
 		if opts.CDCResumeLSN != "" && resumeMetadataChanged(opts.CDCResumeIncarnation, opts.CDCResumeSchemaFingerprint, incarnation, fingerprint) {
+			if err := r.source.requireSnapshotAllowed(); err != nil {
+				_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
+				return
+			}
 			config.Debug("[CDC] Resume metadata changed for %s; replacing its snapshot", r.tableName)
 			opts.CDCResumeLSN = ""
 			replacementSnapshot = true
@@ -122,6 +126,10 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		}
 
 		// Full mode: Phase 1: Snapshot
+		if err := r.source.requireSnapshotAllowed(); err != nil {
+			_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
+			return
+		}
 		if replacementSnapshot && opts.Streaming {
 			if err := sendResult(ctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
 				TableName: r.tableName, Incarnation: incarnation,
@@ -273,6 +281,9 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 // Returns the LSN to resume from — the slot's confirmed position, so the
 // transaction that surfaced the change is re-decoded in full.
 func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, results chan<- source.RecordBatchResult, schemaErr *SchemaChangedError, opts source.ReadOptions) (pglogrepl.LSN, error) {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return 0, err
+	}
 	if schemaErr == nil {
 		if err := r.source.reconcilePublication(ctx); err != nil {
 			return 0, fmt.Errorf("failed to reconcile publication after table recreation: %w", err)

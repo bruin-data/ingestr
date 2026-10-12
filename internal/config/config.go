@@ -9,6 +9,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/jackc/pglogrepl"
 )
 
 var DebugMode bool
@@ -146,6 +147,8 @@ type IngestConfig struct {
 	StagingDataset string
 	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
+	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to initial
+	CDCStartLSN                string // Bootstrap boundary for externally loaded PostgreSQL CDC targets
 	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCResumeIncarnation       string
 	CDCResumeSchemaFingerprint string
@@ -238,6 +241,9 @@ func (c *IngestConfig) Validate() error {
 	if err := c.validateCDCTableNaming(); err != nil {
 		return err
 	}
+	if err := c.ValidateCDCSnapshotMode(); err != nil {
+		return err
+	}
 	if err := c.validateExtractPartitioning(); err != nil {
 		return err
 	}
@@ -281,6 +287,46 @@ func (c *IngestConfig) Validate() error {
 	}
 	if c.IsChangeTrackingSource() && !c.FullRefresh && c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge {
 		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless full-refresh is enabled", StrategyMerge)}
+	}
+	return nil
+}
+
+// ValidateCDCSnapshotMode also runs after loading the destination's saved policy.
+func (c *IngestConfig) ValidateCDCSnapshotMode() error {
+	if c.CDCSnapshotMode == "" && c.CDCStartLSN == "" {
+		return nil
+	}
+	u, err := url.Parse(c.SourceURI)
+	if err != nil || u.Scheme != "postgres+cdc" {
+		return &ValidationError{Field: "cdc-snapshot-mode", Message: "is only supported for postgres+cdc sources"}
+	}
+	if c.CDCSnapshotMode != "" && c.CDCSnapshotMode != "initial" && c.CDCSnapshotMode != "never" {
+		return &ValidationError{Field: "cdc-snapshot-mode", Message: "must be initial or never"}
+	}
+	if c.CDCStartLSN != "" {
+		if c.CDCSnapshotMode != "never" {
+			return &ValidationError{Field: "cdc-start-lsn", Message: "requires --cdc-snapshot-mode never"}
+		}
+		lsn, err := pglogrepl.ParseLSN(c.CDCStartLSN)
+		if err != nil || lsn == 0 {
+			return &ValidationError{Field: "cdc-start-lsn", Message: "must be a nonzero PostgreSQL LSN"}
+		}
+	}
+	if c.CDCSnapshotMode != "never" {
+		return nil
+	}
+	if c.FullRefresh {
+		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with CDC snapshot mode never"}
+	}
+	if c.SourceTable == "" && len(c.SourceTables) == 0 {
+		return &ValidationError{Field: "source-table", Message: "must explicitly select tables with CDC snapshot mode never"}
+	}
+	if u.Query().Get("slot") == "" {
+		return &ValidationError{Field: "source-uri", Message: "CDC snapshot mode never requires an existing explicit slot= replication slot"}
+	}
+	if c.IncrementalStrategy != "" && c.IncrementalStrategy != StrategyMerge &&
+		(c.IncrementalStrategy != StrategyReplace || c.IncrementalStrategyExplicit) {
+		return &ValidationError{Field: "incremental-strategy", Message: "CDC snapshot mode never requires merge"}
 	}
 	return nil
 }
