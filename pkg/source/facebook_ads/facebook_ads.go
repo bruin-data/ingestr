@@ -57,13 +57,33 @@ func facebookRetryCondition(resp *httpclient.Response, err error) bool {
 		return false
 	}
 
+	body := resp.Body()
+	if isRetryableFacebookError(body) {
+		return true
+	}
+
+	// Batch responses: retry the whole batch if any item timed out (null) or hit a transient error.
+	var items []*batchItemResponse
+	if jsonErr := json.Unmarshal(body, &items); jsonErr != nil {
+		return false
+	}
+	for _, item := range items {
+		if item == nil || isRetryableFacebookError([]byte(item.Body)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isRetryableFacebookError(body []byte) bool {
 	var fbErr struct {
 		Error struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if jsonErr := json.Unmarshal(resp.Body(), &fbErr); jsonErr != nil {
+	if jsonErr := json.Unmarshal(body, &fbErr); jsonErr != nil {
 		return false
 	}
 
@@ -73,6 +93,11 @@ func facebookRetryCondition(resp *httpclient.Response, err error) bool {
 	}
 
 	return false
+}
+
+type batchItemResponse struct {
+	Code int    `json:"code"`
+	Body string `json:"body"`
 }
 
 var supportedTables = []string{
@@ -550,7 +575,7 @@ func (s *FacebookAdsSource) readAdCreatives(ctx context.Context, accountIDs []st
 		}
 		config.Debug("[FACEBOOK_ADS] Found %d unique creative IDs for account %s", len(creativeIDs), accountID)
 
-		// Phase 2: batch-fetch full creative data using /?ids=id1,id2,...
+		// Phase 2: batch-fetch full creative data via the Graph Batch API (POST / batch=[...])
 		total := 0
 		const batchSize = 50
 		for i := 0; i < len(creativeIDs); i += batchSize {
@@ -566,10 +591,15 @@ func (s *FacebookAdsSource) readAdCreatives(ctx context.Context, accountIDs []st
 			}
 			batch := creativeIDs[i:end]
 
+			batchReq, err := buildCreativeBatch(batch)
+			if err != nil {
+				return err
+			}
+
 			resp, err := s.client.R(ctx).
-				SetQueryParam("ids", strings.Join(batch, ",")).
-				SetQueryParam("fields", adCreativeFields).
-				Get(baseURL)
+				SetAllowNonIdempotentRetry().
+				SetFormData(map[string]string{"batch": batchReq, "include_headers": "false"}).
+				Post("/")
 			if err != nil {
 				return fmt.Errorf("failed to batch-fetch creatives: %w", err)
 			}
@@ -580,15 +610,9 @@ func (s *FacebookAdsSource) readAdCreatives(ctx context.Context, accountIDs []st
 				return fmt.Errorf("failed to batch-fetch creatives with status %d: %s", resp.StatusCode(), resp.String())
 			}
 
-			// Response is a map of id -> creative object
-			var batchResult map[string]map[string]interface{}
-			if err := json.Unmarshal(resp.Body(), &batchResult); err != nil {
-				return fmt.Errorf("failed to parse batch creatives response: %w", err)
-			}
-
-			var items []map[string]interface{}
-			for _, creative := range batchResult {
-				items = append(items, creative)
+			items, err := parseCreativeBatch(resp.Body(), batch)
+			if err != nil {
+				return err
 			}
 
 			if opts.Limit > 0 && total+len(items) > opts.Limit {
@@ -641,6 +665,47 @@ func (s *FacebookAdsSource) readAdCreatives(ctx context.Context, accountIDs []st
 		config.Debug("[FACEBOOK_ADS] Fetched %d unique ad creatives for account %s", total, accountID)
 	}
 	return nil
+}
+
+func buildCreativeBatch(ids []string) (string, error) {
+	reqs := make([]map[string]string, len(ids))
+	for i, id := range ids {
+		reqs[i] = map[string]string{
+			"method":       "GET",
+			"relative_url": id + "?fields=" + url.QueryEscape(adCreativeFields),
+		}
+	}
+	b, err := json.Marshal(reqs)
+	if err != nil {
+		return "", fmt.Errorf("failed to build creatives batch request: %w", err)
+	}
+	return string(b), nil
+}
+
+func parseCreativeBatch(body []byte, ids []string) ([]map[string]interface{}, error) {
+	var batchResult []*batchItemResponse
+	if err := json.Unmarshal(body, &batchResult); err != nil {
+		return nil, fmt.Errorf("failed to parse batch creatives response: %w", err)
+	}
+	if len(batchResult) != len(ids) {
+		return nil, fmt.Errorf("batch creatives response has %d items, expected %d", len(batchResult), len(ids))
+	}
+
+	items := make([]map[string]interface{}, 0, len(batchResult))
+	for i, r := range batchResult {
+		if r == nil {
+			return nil, fmt.Errorf("batch request for creative %s timed out", ids[i])
+		}
+		if r.Code != 200 {
+			return nil, fmt.Errorf("failed to fetch creative %s with status %d: %s", ids[i], r.Code, r.Body)
+		}
+		var creative map[string]interface{}
+		if err := json.Unmarshal([]byte(r.Body), &creative); err != nil {
+			return nil, fmt.Errorf("failed to parse creative %s: %w", ids[i], err)
+		}
+		items = append(items, creative)
+	}
+	return items, nil
 }
 
 func (s *FacebookAdsSource) listCreativeIDs(ctx context.Context, accountID string, opts source.ReadOptions) ([]string, error) {

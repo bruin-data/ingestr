@@ -3,6 +3,7 @@ package facebook_ads
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -608,4 +609,70 @@ func TestFacebookAdsByteCap(t *testing.T) {
 	if offR != onR || offR != 50 {
 		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
 	}
+}
+
+func TestReadAdCreatives_UsesBatchAPI(t *testing.T) {
+	batchCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Empty(t, r.URL.Query().Get("ids"))
+
+		if r.URL.Path == "/act_1/ads" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []map[string]interface{}{
+				{"creative": map[string]interface{}{"id": "c1"}},
+				{"creative": map[string]interface{}{"id": "c2"}},
+				{"creative": map[string]interface{}{"id": "c1"}},
+			}})
+			return
+		}
+
+		batchCalls++
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/", r.URL.Path)
+		require.NoError(t, r.ParseForm())
+		var reqs []map[string]string
+		require.NoError(t, json.Unmarshal([]byte(r.PostForm.Get("batch")), &reqs))
+		require.Len(t, reqs, 2)
+		assert.Equal(t, "GET", reqs[0]["method"])
+		assert.True(t, strings.HasPrefix(reqs[0]["relative_url"], "c1?fields="))
+
+		if batchCalls == 1 {
+			_, _ = w.Write([]byte(`[null, {"code":200,"body":"{\"id\":\"c2\"}"}]`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"code": 200, "body": `{"id":"c1","name":"first","object_story_spec":{"page_id":"p1"}}`},
+			{"code": 200, "body": `{"id":"c2","name":"second"}`},
+		})
+	}))
+	defer srv.Close()
+
+	s := &FacebookAdsSource{client: httpclient.New(
+		httpclient.WithBaseURL(srv.URL),
+		httpclient.WithRetry(2, time.Millisecond, time.Millisecond),
+		httpclient.WithRetryCondition(facebookRetryCondition),
+	)}
+	results, err := s.read(context.Background(), "ad_creatives", []string{"act_1"}, source.ReadOptions{})
+	require.NoError(t, err)
+
+	var ids []string
+	for res := range results {
+		require.NoError(t, res.Err)
+		col := res.Batch.Column(int(res.Batch.Schema().FieldIndices("id")[0]))
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, fmt.Sprint(col.GetOneForMarshal(i)))
+		}
+		res.Batch.Release()
+	}
+
+	assert.Equal(t, 2, batchCalls, "null batch item should retry the batch")
+	assert.Equal(t, []string{`"c1"`, `"c2"`}, ids)
+}
+
+func TestParseCreativeBatch_ItemError(t *testing.T) {
+	body := []byte(`[{"code":200,"body":"{\"id\":\"c1\"}"},{"code":400,"body":"{\"error\":{\"code\":100,\"message\":\"Unsupported get request\"}}"}]`)
+	_, err := parseCreativeBatch(body, []string{"c1", "c2"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creative c2")
+	assert.Contains(t, err.Error(), "Unsupported get request")
 }
