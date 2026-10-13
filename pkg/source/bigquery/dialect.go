@@ -65,7 +65,7 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[BIGQUERY] ADBC driver not found, installing...")
 
-	if err := adbc.InstallDriver(ctx, "bigquery"); err != nil {
+	if err := adbc.InstallDriver(ctx, "bigquery", tryLoadDriver); err != nil {
 		return err
 	}
 
