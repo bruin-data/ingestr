@@ -1396,7 +1396,7 @@ dependencies:
         - BSD-3-Clause
       status: allowed
     - module: github.com/richardlehane/mscfb
-      version: v1.0.7
+      version: v1.0.8
       licenses:
         - Apache-2.0
       status: allowed
@@ -1683,12 +1683,12 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/xuri/efp
-      version: v0.0.1
+      version: v0.0.2
       licenses:
         - BSD-3-Clause
       status: allowed
     - module: github.com/xuri/excelize/v2
-      version: v2.11.0
+      version: v2.11.1-0.20261011032807-402e3bdd9eae
       licenses:
         - BSD-3-Clause
       status: allowed
