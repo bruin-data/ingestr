@@ -184,7 +184,7 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 
 		dt, precision, scale, arrayType := MapPostgresToDataType(pgType)
 		if p, sc := NumericTypmodPrecisionScale(typmod); udtName == "_numeric" && p > 0 {
-			precision, scale = p, sc
+			precision, scale = p-min(sc, 0), max(sc, 0)
 		}
 
 		col := schema.Column{
