@@ -1344,3 +1344,17 @@ func TestDestinationConnectSignsSigV4RESTCatalog(t *testing.T) {
 	defer func() { _ = dest.Close(context.Background()) }()
 	require.Contains(t, authHeader.Load(), "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
 }
+
+func TestNormalizeSchemaEvolutionSourceColumnKeepsDecimalArrayScale(t *testing.T) {
+	d := &Destination{}
+	src := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 5, Scale: 2}
+	dest := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 38, Scale: 0}
+
+	got := d.NormalizeSchemaEvolutionSourceColumn(src, dest)
+	require.Equal(t, 38, got.Precision)
+	require.Equal(t, 0, got.Scale)
+
+	dest.Scale = 2
+	dest.Precision = 4
+	require.Equal(t, src, d.NormalizeSchemaEvolutionSourceColumn(src, dest))
+}
