@@ -676,3 +676,22 @@ func TestParseCreativeBatch_ItemError(t *testing.T) {
 	assert.Contains(t, err.Error(), "creative c2")
 	assert.Contains(t, err.Error(), "Unsupported get request")
 }
+
+func TestFacebookRetryCondition_BatchItems(t *testing.T) {
+	retry := func(body string) bool {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		defer srv.Close()
+		resp, err := httpclient.New(httpclient.WithBaseURL(srv.URL), httpclient.WithDisableRetry()).R(context.Background()).Get("/")
+		require.NoError(t, err)
+		return facebookRetryCondition(resp, nil)
+	}
+
+	assert.True(t, retry(`[{"code":200,"body":"{}"},null]`))
+	assert.True(t, retry(`[{"code":429,"body":"{}"}]`))
+	assert.True(t, retry(`[{"code":503,"body":"oops"}]`))
+	assert.True(t, retry(`[{"code":400,"body":"{\"error\":{\"code\":17}}"}]`))
+	assert.False(t, retry(`[{"code":400,"body":"{\"error\":{\"code\":100}}"}]`))
+	assert.False(t, retry(`[{"code":200,"body":"{}"}]`))
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -68,7 +69,7 @@ func facebookRetryCondition(resp *httpclient.Response, err error) bool {
 		return false
 	}
 	for _, item := range items {
-		if item == nil || isRetryableFacebookError([]byte(item.Body)) {
+		if item == nil || item.Code == http.StatusTooManyRequests || item.Code >= 500 || isRetryableFacebookError([]byte(item.Body)) {
 			return true
 		}
 	}
