@@ -100,7 +100,7 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[DUCKDB] ADBC driver not found, installing...")
 
-	if err := adbc.InstallDriver(ctx, "duckdb"); err != nil {
+	if err := adbc.InstallDriver(ctx, "duckdb", tryLoadDriver); err != nil {
 		return err
 	}
 

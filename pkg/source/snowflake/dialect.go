@@ -84,7 +84,7 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[SNOWFLAKE] ADBC driver not found, installing...")
 
-	if err := adbc.InstallDriver(ctx, "snowflake"); err != nil {
+	if err := adbc.InstallDriver(ctx, "snowflake", tryLoadDriver); err != nil {
 		return err
 	}
 
