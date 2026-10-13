@@ -21,12 +21,6 @@ var (
 func MapPostgresToDataType(pgType string) (schema.DataType, int, int, schema.DataType) {
 	pgType = strings.ToLower(strings.TrimSpace(pgType))
 
-	if matches := numericPrecisionRegex.FindStringSubmatch(pgType); len(matches) == 3 {
-		precision, _ := strconv.Atoi(matches[1])
-		scale, _ := strconv.Atoi(matches[2])
-		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
-	}
-
 	if matches := arrayTypeRegex.FindStringSubmatch(pgType); len(matches) == 2 {
 		elemType, precision, scale, _ := MapPostgresToDataType(matches[1])
 		return schema.TypeArray, precision, scale, elemType
@@ -35,6 +29,12 @@ func MapPostgresToDataType(pgType string) (schema.DataType, int, int, schema.Dat
 	if strings.HasPrefix(pgType, "_") {
 		elemType, precision, scale, _ := MapPostgresToDataType(pgType[1:])
 		return schema.TypeArray, precision, scale, elemType
+	}
+
+	if matches := numericPrecisionRegex.FindStringSubmatch(pgType); len(matches) == 3 {
+		precision, _ := strconv.Atoi(matches[1])
+		scale, _ := strconv.Atoi(matches[2])
+		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
 	}
 
 	baseType := pgType

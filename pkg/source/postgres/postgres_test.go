@@ -75,3 +75,10 @@ func TestNumericTypmodPrecisionScale(t *testing.T) {
 		}
 	}
 }
+
+func TestMapPostgresArrayOfNumeric(t *testing.T) {
+	dt, p, s, at := MapPostgresToDataType("numeric(5,2)[]")
+	if dt != schema.TypeArray || at != schema.TypeDecimal || p != 5 || s != 2 {
+		t.Errorf("numeric(5,2)[]: got (%s, %d, %d, %s), want (array, 5, 2, decimal)", dt, p, s, at)
+	}
+}

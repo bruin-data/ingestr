@@ -142,9 +142,13 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 			c.numeric_scale,
 			c.character_maximum_length,
 			c.udt_name,
-			pk.ordinal_position
+			pk.ordinal_position,
+			COALESCE(attr.atttypmod, -1)
 		FROM information_schema.columns c
 		LEFT JOIN primary_keys pk ON pk.column_name = c.column_name
+		LEFT JOIN pg_catalog.pg_namespace nsp ON nsp.nspname = c.table_schema
+		LEFT JOIN pg_catalog.pg_class rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
+		LEFT JOIN pg_catalog.pg_attribute attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
 		WHERE c.table_schema = $1 AND c.table_name = $2
 		ORDER BY c.ordinal_position
 	`
@@ -164,8 +168,9 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		var columnName, dataType, isNullable, udtName string
 		var numericPrecision, numericScale, charMaxLen *int
 		var pkOrdinal *int
+		var typmod int32
 
-		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName, &pkOrdinal); err != nil {
+		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName, &pkOrdinal, &typmod); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -178,6 +183,9 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		}
 
 		dt, precision, scale, arrayType := MapPostgresToDataType(pgType)
+		if p, sc := NumericTypmodPrecisionScale(typmod); udtName == "_numeric" && p > 0 {
+			precision, scale = p, sc
+		}
 
 		col := schema.Column{
 			Name:      columnName,
