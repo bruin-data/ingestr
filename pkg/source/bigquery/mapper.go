@@ -19,16 +19,6 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	bqType = strings.TrimSpace(bqType)
 	upperType := strings.ToUpper(bqType)
 
-	// Handle NUMERIC(p,s), BIGNUMERIC(p,s), DECIMAL(p,s)
-	if matches := numericPrecisionRegex.FindStringSubmatch(bqType); len(matches) >= 2 {
-		precision, _ := strconv.Atoi(matches[1])
-		scale := 0
-		if len(matches) >= 3 && matches[2] != "" {
-			scale, _ = strconv.Atoi(matches[2])
-		}
-		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
-	}
-
 	// Handle ARRAY<element_type>
 	if matches := arrayTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
 		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
@@ -38,6 +28,16 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	// Handle STRUCT<...>
 	if structTypeRegex.MatchString(bqType) {
 		return schema.TypeJSON, 0, 0, schema.TypeUnknown
+	}
+
+	// Handle NUMERIC(p,s), BIGNUMERIC(p,s), DECIMAL(p,s)
+	if matches := numericPrecisionRegex.FindStringSubmatch(bqType); len(matches) >= 2 {
+		precision, _ := strconv.Atoi(matches[1])
+		scale := 0
+		if len(matches) >= 3 && matches[2] != "" {
+			scale, _ = strconv.Atoi(matches[2])
+		}
+		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
 	}
 
 	// Extract base type

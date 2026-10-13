@@ -66,7 +66,8 @@ func TestNumericTypmodPrecisionScale(t *testing.T) {
 		{-1, 0, 0},
 		{(5<<16 | 2) + 4, 5, 2},
 		{38<<16 + 4, 38, 0},
-		{(10<<16 | 0x7fe) + 4, 10, -2},
+		{(10<<16 | 0x7fe) + 4, 12, 0},
+		{(2<<16 | 0x7fd) + 4, 5, 0},
 	}
 	for _, c := range cases {
 		p, s := NumericTypmodPrecisionScale(c.typmod)

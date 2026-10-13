@@ -17,12 +17,6 @@ var (
 func MapCrateDBToDataType(crateType string) (schema.DataType, int, int, schema.DataType) {
 	lower := strings.ToLower(strings.TrimSpace(crateType))
 
-	if matches := numericPrecisionRegex.FindStringSubmatch(lower); len(matches) == 3 {
-		precision, _ := strconv.Atoi(matches[1])
-		scale, _ := strconv.Atoi(matches[2])
-		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
-	}
-
 	if lower == "object_array" {
 		return schema.TypeJSON, 0, 0, schema.TypeUnknown
 	}
@@ -35,6 +29,12 @@ func MapCrateDBToDataType(crateType string) (schema.DataType, int, int, schema.D
 	if matches := arrayParenRegex.FindStringSubmatch(lower); len(matches) == 2 {
 		elemType, precision, scale, _ := MapCrateDBToDataType(matches[1])
 		return schema.TypeArray, precision, scale, elemType
+	}
+
+	if matches := numericPrecisionRegex.FindStringSubmatch(lower); len(matches) == 3 {
+		precision, _ := strconv.Atoi(matches[1])
+		scale, _ := strconv.Atoi(matches[2])
+		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
 	}
 
 	switch {

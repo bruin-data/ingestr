@@ -86,5 +86,9 @@ func NumericTypmodPrecisionScale(typmod int32) (int, int) {
 		return 0, 0
 	}
 	tm := typmod - 4
-	return int((tm >> 16) & 0xffff), int(((tm & 0x7ff) ^ 1024) - 1024)
+	precision, scale := int((tm>>16)&0xffff), int(((tm&0x7ff)^1024)-1024)
+	if scale < 0 {
+		return precision - scale, 0
+	}
+	return precision, scale
 }
