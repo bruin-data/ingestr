@@ -36,12 +36,12 @@ func MapDuckDBToDataType(duckdbType string) (schema.DataType, int, int, schema.D
 
 	// Handle array types (DuckDB uses TYPE[] or TYPE LIST)
 	if matches := arrayTypeRegex.FindStringSubmatch(lowerType); len(matches) == 2 {
-		elemType, _, _, _ := MapDuckDBToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapDuckDBToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 	if matches := listTypeRegex.FindStringSubmatch(duckdbType); len(matches) == 2 {
-		elemType, _, _, _ := MapDuckDBToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapDuckDBToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	// Extract base type (remove parenthetical parameters)

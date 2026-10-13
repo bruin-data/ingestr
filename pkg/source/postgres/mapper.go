@@ -28,13 +28,13 @@ func MapPostgresToDataType(pgType string) (schema.DataType, int, int, schema.Dat
 	}
 
 	if matches := arrayTypeRegex.FindStringSubmatch(pgType); len(matches) == 2 {
-		elemType, _, _, _ := MapPostgresToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapPostgresToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	if strings.HasPrefix(pgType, "_") {
-		elemType, _, _, _ := MapPostgresToDataType(pgType[1:])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapPostgresToDataType(pgType[1:])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	baseType := pgType
@@ -78,4 +78,13 @@ func MapPostgresToDataType(pgType string) (schema.DataType, int, int, schema.Dat
 	default:
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	}
+}
+
+// information_schema reports no precision for numeric[]; decode it from atttypmod.
+func NumericTypmodPrecisionScale(typmod int32) (int, int) {
+	if typmod < 4 {
+		return 0, 0
+	}
+	tm := typmod - 4
+	return int((tm >> 16) & 0xffff), int(((tm & 0x7ff) ^ 1024) - 1024)
 }

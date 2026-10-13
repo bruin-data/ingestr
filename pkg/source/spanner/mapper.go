@@ -33,8 +33,8 @@ func MapSpannerCodeToDataType(colType *sppb.Type) (schema.DataType, int, int, sc
 		return schema.TypeJSON, 0, 0, schema.TypeUnknown
 	case sppb.TypeCode_ARRAY:
 		if colType.ArrayElementType != nil {
-			elemType, _, _, _ := MapSpannerCodeToDataType(colType.ArrayElementType)
-			return schema.TypeArray, 0, 0, elemType
+			elemType, precision, scale, _ := MapSpannerCodeToDataType(colType.ArrayElementType)
+			return schema.TypeArray, precision, scale, elemType
 		}
 		return schema.TypeArray, 0, 0, schema.TypeString
 	default:

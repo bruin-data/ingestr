@@ -28,13 +28,13 @@ func MapCrateDBToDataType(crateType string) (schema.DataType, int, int, schema.D
 	}
 
 	if matches := arrayTypeRegex.FindStringSubmatch(lower); len(matches) == 2 {
-		elemType, _, _, _ := MapCrateDBToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapCrateDBToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	if matches := arrayParenRegex.FindStringSubmatch(lower); len(matches) == 2 {
-		elemType, _, _, _ := MapCrateDBToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapCrateDBToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	switch {

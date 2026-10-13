@@ -31,8 +31,8 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 
 	// Handle ARRAY<element_type>
 	if matches := arrayTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
-		elemType, _, _, _ := MapBigQueryToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	// Handle STRUCT<...>
