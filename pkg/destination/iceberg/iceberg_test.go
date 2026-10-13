@@ -1347,14 +1347,11 @@ func TestDestinationConnectSignsSigV4RESTCatalog(t *testing.T) {
 
 func TestNormalizeSchemaEvolutionSourceColumnKeepsDecimalArrayScale(t *testing.T) {
 	d := &Destination{}
-	src := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 5, Scale: 2}
-	dest := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 38, Scale: 0}
+	decimalArray := func(p, s int) schema.Column {
+		return schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: p, Scale: s}
+	}
 
-	got := d.NormalizeSchemaEvolutionSourceColumn(src, dest)
-	require.Equal(t, 38, got.Precision)
-	require.Equal(t, 0, got.Scale)
-
-	dest.Scale = 2
-	dest.Precision = 4
-	require.Equal(t, src, d.NormalizeSchemaEvolutionSourceColumn(src, dest))
+	require.Equal(t, decimalArray(3, 0), d.NormalizeSchemaEvolutionSourceColumn(decimalArray(5, 2), decimalArray(38, 0)))
+	require.Equal(t, decimalArray(8, 2), d.NormalizeSchemaEvolutionSourceColumn(decimalArray(10, 4), decimalArray(5, 2)))
+	require.Equal(t, decimalArray(6, 1), d.NormalizeSchemaEvolutionSourceColumn(decimalArray(6, 1), decimalArray(5, 2)))
 }
