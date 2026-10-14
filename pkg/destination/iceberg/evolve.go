@@ -12,6 +12,16 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
+// Iceberg can't change a decimal's scale; keep an existing decimal array element's scale
+// while still letting its integer digits widen.
+func (d *Destination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	if source.DataType == schema.TypeArray && dest.DataType == schema.TypeArray &&
+		source.ArrayType == schema.TypeDecimal && dest.ArrayType == schema.TypeDecimal && source.Scale > dest.Scale {
+		source.Precision, source.Scale = source.Precision-source.Scale+dest.Scale, dest.Scale
+	}
+	return source
+}
+
 func (d *Destination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
 	if comparison == nil || !comparison.HasChanges {
 		return nil, nil

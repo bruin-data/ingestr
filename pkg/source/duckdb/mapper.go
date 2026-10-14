@@ -22,6 +22,16 @@ func MapDuckDBToDataType(duckdbType string) (schema.DataType, int, int, schema.D
 	duckdbType = strings.TrimSpace(duckdbType)
 	lowerType := strings.ToLower(duckdbType)
 
+	// Handle array types (DuckDB uses TYPE[] or TYPE LIST)
+	if matches := arrayTypeRegex.FindStringSubmatch(lowerType); len(matches) == 2 {
+		elemType, precision, scale, _ := MapDuckDBToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
+	}
+	if matches := listTypeRegex.FindStringSubmatch(duckdbType); len(matches) == 2 {
+		elemType, precision, scale, _ := MapDuckDBToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
+	}
+
 	// Handle DECIMAL(p,s) or NUMERIC(p,s)
 	if matches := decimalPrecisionRegex.FindStringSubmatch(duckdbType); len(matches) == 3 {
 		precision, _ := strconv.Atoi(matches[1])
@@ -32,16 +42,6 @@ func MapDuckDBToDataType(duckdbType string) (schema.DataType, int, int, schema.D
 		precision, _ := strconv.Atoi(matches[1])
 		scale, _ := strconv.Atoi(matches[2])
 		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
-	}
-
-	// Handle array types (DuckDB uses TYPE[] or TYPE LIST)
-	if matches := arrayTypeRegex.FindStringSubmatch(lowerType); len(matches) == 2 {
-		elemType, _, _, _ := MapDuckDBToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
-	}
-	if matches := listTypeRegex.FindStringSubmatch(duckdbType); len(matches) == 2 {
-		elemType, _, _, _ := MapDuckDBToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
 	}
 
 	// Extract base type (remove parenthetical parameters)

@@ -285,7 +285,8 @@ func needsWidening(src, dest schema.Column) bool {
 			}
 			switch src.ArrayType {
 			case schema.TypeDecimal:
-				return decimalNeedsWidening(src, dest)
+				// Precision 0 is an unbounded element (e.g. Postgres numeric[]); never narrow it.
+				return dest.Precision > 0 && decimalNeedsWidening(src, dest)
 			case schema.TypeString:
 				return stringNeedsWidening(src.MaxLength, dest.MaxLength)
 			default:

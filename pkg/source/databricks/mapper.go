@@ -30,8 +30,8 @@ func MapDatabricksToDataType(dbType string) (schema.DataType, int, int, schema.D
 	}
 
 	if matches := arrayRegex.FindStringSubmatch(dbType); len(matches) == 2 {
-		elemType, _, _, _ := MapDatabricksToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapDatabricksToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	switch {

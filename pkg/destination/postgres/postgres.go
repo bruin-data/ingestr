@@ -19,6 +19,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	srcpostgres "github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1832,12 +1833,15 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 	}
 
 	query := `
-		SELECT column_name, data_type, is_nullable,
-		       numeric_precision, numeric_scale, character_maximum_length,
-		       udt_name
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position`
+		SELECT c.column_name, c.data_type, c.is_nullable,
+		       c.numeric_precision, c.numeric_scale, c.character_maximum_length,
+		       c.udt_name, COALESCE(attr.atttypmod, -1)
+		FROM information_schema.columns AS c
+		LEFT JOIN pg_catalog.pg_namespace AS nsp ON nsp.nspname = c.table_schema
+		LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
+		LEFT JOIN pg_catalog.pg_attribute AS attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
+		WHERE c.table_schema = $1 AND c.table_name = $2
+		ORDER BY c.ordinal_position`
 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
@@ -1850,8 +1854,9 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 	for rows.Next() {
 		var colName, dataType, isNullable, udtName string
 		var numPrecision, numScale, charMaxLen *int
+		var typmod int32
 
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &udtName); err != nil {
+		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &udtName, &typmod); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
@@ -1871,6 +1876,9 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 		}
 		if charMaxLen != nil {
 			col.MaxLength = *charMaxLen
+		}
+		if udtName == "_numeric" {
+			col.Precision, col.Scale = srcpostgres.NumericTypmodPrecisionScale(typmod)
 		}
 
 		columns = append(columns, col)

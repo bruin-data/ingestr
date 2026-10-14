@@ -471,6 +471,28 @@ func TestConformArrayListElements(t *testing.T) {
 	assert.True(t, tss.IsNull(1))
 }
 
+func TestMapDatabricksArrayOfDecimal(t *testing.T) {
+	dt, p, sc, at := MapDatabricksToDataType("ARRAY<DECIMAL(5,2)>")
+	assert.Equal(t, schema.TypeArray, dt)
+	assert.Equal(t, schema.TypeDecimal, at)
+	assert.Equal(t, 5, p)
+	assert.Equal(t, 2, sc)
+
+	src := arrow.NewSchema([]arrow.Field{
+		{Name: "arr_dec", Type: arrow.ListOf(&arrow.Decimal128Type{Precision: 5, Scale: 2}), Nullable: true},
+	}, nil)
+	rec := recordFromJSON(t, src, `[{"arr_dec": ["1.25"]}]`)
+	defer rec.Release()
+
+	target := buildArrowSchema([]schema.Column{{Name: "arr_dec", DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true}})
+	out, err := conformRecord(memory.NewGoAllocator(), rec, target, nil)
+	require.NoError(t, err)
+	defer out.Release()
+
+	values := out.Column(0).(*array.List).ListValues().(*array.Decimal128)
+	assert.Equal(t, "1.25", values.ValueStr(0))
+}
+
 func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
 	sc := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
 	rec0 := recordFromJSON(t, sc, `[{"id": 1}]`)

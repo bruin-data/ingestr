@@ -57,3 +57,28 @@ func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
 		t.Fatalf("query = %q, want %q", query, want)
 	}
 }
+
+func TestNumericTypmodPrecisionScale(t *testing.T) {
+	cases := []struct {
+		typmod        int32
+		precision, sc int
+	}{
+		{-1, 0, 0},
+		{(5<<16 | 2) + 4, 5, 2},
+		{38<<16 + 4, 38, 0},
+		{(10<<16 | 0x7fe) + 4, 10, -2},
+	}
+	for _, c := range cases {
+		p, s := NumericTypmodPrecisionScale(c.typmod)
+		if p != c.precision || s != c.sc {
+			t.Errorf("typmod %d: got (%d,%d), want (%d,%d)", c.typmod, p, s, c.precision, c.sc)
+		}
+	}
+}
+
+func TestMapPostgresArrayOfNumeric(t *testing.T) {
+	dt, p, s, at := MapPostgresToDataType("numeric(5,2)[]")
+	if dt != schema.TypeArray || at != schema.TypeDecimal || p != 5 || s != 2 {
+		t.Errorf("numeric(5,2)[]: got (%s, %d, %d, %s), want (array, 5, 2, decimal)", dt, p, s, at)
+	}
+}

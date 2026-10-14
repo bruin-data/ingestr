@@ -121,6 +121,7 @@ func TestMapCrateDBToDataType(t *testing.T) {
 		{"boolean_array", schema.TypeArray, 0, 0, schema.TypeBoolean},
 		{"array(bigint)", schema.TypeArray, 0, 0, schema.TypeInt64},
 		{"array(text)", schema.TypeArray, 0, 0, schema.TypeString},
+		{"array(numeric(5,2))", schema.TypeArray, 5, 2, schema.TypeDecimal},
 		{"ip", schema.TypeString, 0, 0, schema.TypeUnknown},
 		{"geo_point", schema.TypeString, 0, 0, schema.TypeUnknown},
 		{"geo_shape", schema.TypeString, 0, 0, schema.TypeUnknown},
