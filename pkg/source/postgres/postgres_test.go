@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"math/big"
 	"testing"
 	"time"
 
@@ -31,6 +32,22 @@ func TestConvertValueNormalizesUUID(t *testing.T) {
 				t.Fatalf("convertValue() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConvertValueConvertsNumericArrayElements(t *testing.T) {
+	col := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 5, Scale: 2}
+	val := []any{pgtype.Numeric{Int: big.NewInt(125), Exp: -2, Valid: true}, nil}
+
+	got, ok := convertValue(val, col).([]any)
+	if !ok || len(got) != 2 {
+		t.Fatalf("convertValue() = %#v, want two elements", got)
+	}
+	if n, ok := got[0].(*big.Int); !ok || n.Int64() != 125 {
+		t.Fatalf("element 0 = %#v, want 125 (1.25 at scale 2)", got[0])
+	}
+	if got[1] != nil {
+		t.Fatalf("element 1 = %#v, want nil", got[1])
 	}
 }
 

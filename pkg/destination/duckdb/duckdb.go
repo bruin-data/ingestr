@@ -2203,14 +2203,18 @@ func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table stri
 				primaryKeys = append(primaryKeys, strings.Clone(colName))
 			}
 
-			dataType := mapDuckDBTypeToSchema(colType)
+			dataType, arrayType, valueType := mapDuckDBTypeToSchema(colType), schema.TypeUnknown, colType
+			if elem, ok := strings.CutSuffix(colType, "[]"); ok {
+				dataType, arrayType, valueType = schema.TypeArray, mapDuckDBTypeToSchema(elem), elem
+			}
 			precision, scale := 0, 0
-			if dataType == schema.TypeDecimal {
-				precision, scale = duckDBDecimalPrecisionScale(colType)
+			if dataType == schema.TypeDecimal || arrayType == schema.TypeDecimal {
+				precision, scale = duckDBDecimalPrecisionScale(valueType)
 			}
 			columns = append(columns, schema.Column{
 				Name:         strings.Clone(colName),
 				DataType:     dataType,
+				ArrayType:    arrayType,
 				Nullable:     nullable,
 				IsPrimaryKey: isPrimaryKey,
 				Precision:    precision,

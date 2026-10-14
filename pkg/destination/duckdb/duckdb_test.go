@@ -2322,6 +2322,26 @@ func TestGetTableSchema_Basic(t *testing.T) {
 	assert.Equal(t, schema.TypeBoolean, colMap["active"].DataType)
 }
 
+func TestGetTableSchema_Arrays(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE array_test (amounts DECIMAL(5,2)[], labels VARCHAR[], ids INTEGER[])`))
+
+	tableSchema, err := dest.GetTableSchema(ctx, "array_test")
+	require.NoError(t, err)
+	require.Len(t, tableSchema.Columns, 3)
+
+	amounts, labels, ids := tableSchema.Columns[0], tableSchema.Columns[1], tableSchema.Columns[2]
+	assert.Equal(t, schema.TypeArray, amounts.DataType)
+	assert.Equal(t, schema.TypeDecimal, amounts.ArrayType)
+	assert.Equal(t, 5, amounts.Precision)
+	assert.Equal(t, 2, amounts.Scale)
+	assert.Equal(t, schema.TypeArray, labels.DataType)
+	assert.Equal(t, schema.TypeString, labels.ArrayType)
+	assert.Equal(t, schema.TypeArray, ids.DataType)
+	assert.Equal(t, schema.TypeInt32, ids.ArrayType)
+}
+
 func TestGetTableSchema_NonExistentTable(t *testing.T) {
 	ctx := context.Background()
 	dest, _ := connectTestDuckDB(t, ctx)
