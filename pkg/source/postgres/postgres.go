@@ -644,7 +644,7 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 		}
 		return out
 	case pgtype.Numeric:
-		if !v.Valid || v.NaN {
+		if !v.Valid || v.NaN || v.InfinityModifier != pgtype.Finite {
 			return nil
 		}
 		if col.DataType == schema.TypeString {
