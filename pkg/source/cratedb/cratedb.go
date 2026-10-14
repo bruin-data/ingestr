@@ -14,6 +14,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -114,7 +115,7 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 	schemaName, tableName := parseTableName(table)
 
 	query := `
-		SELECT column_name, data_type, is_nullable, character_maximum_length
+		SELECT column_name, data_type, is_nullable, character_maximum_length, numeric_precision, numeric_scale
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
 		AND column_name !~ '.*\[''.*''\]'
@@ -130,13 +131,16 @@ func (s *CrateDBSource) getSchema(ctx context.Context, table string) (*schema.Ta
 	var columns []schema.Column
 	for rows.Next() {
 		var columnName, dataType, isNullable string
-		var charMaxLen *int
+		var charMaxLen, numPrecision, numScale *int
 
-		if err := rows.Scan(&columnName, &dataType, &isNullable, &charMaxLen); err != nil {
+		if err := rows.Scan(&columnName, &dataType, &isNullable, &charMaxLen, &numPrecision, &numScale); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
 		dt, precision, scale, arrayType := MapCrateDBToDataType(dataType)
+		if dt == schema.TypeDecimal && numPrecision != nil && numScale != nil {
+			precision, scale = *numPrecision, *numScale
+		}
 
 		col := schema.Column{
 			Name:      columnName,
@@ -476,85 +480,28 @@ func rowsToArrowRecordBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []
 }
 
 func convertValue(val interface{}) interface{} {
-	if val == nil {
-		return nil
-	}
-	slice, ok := val.([]interface{})
-	if !ok {
-		return val
-	}
-	if len(slice) == 0 {
-		return []string{}
-	}
-
-	var firstNonNil interface{}
-	for _, v := range slice {
-		if v != nil {
-			firstNonNil = v
-			break
+	switch v := val.(type) {
+	case pgtype.Numeric:
+		if !v.Valid || v.NaN || v.InfinityModifier != pgtype.Finite {
+			return nil
 		}
-	}
-	if firstNonNil == nil {
-		return []string{}
-	}
-
-	switch firstNonNil.(type) {
-	case string:
-		out := make([]string, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = v.(string)
-			}
-		}
-		return out
-	case int32:
-		out := make([]int32, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = v.(int32)
-			}
-		}
-		return out
-	case int64:
-		out := make([]int64, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = v.(int64)
-			}
-		}
-		return out
-	case float32:
-		out := make([]float32, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = v.(float32)
-			}
-		}
-		return out
-	case float64:
-		out := make([]float64, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = v.(float64)
-			}
-		}
-		return out
-	case bool:
-		out := make([]bool, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = v.(bool)
+		str, _ := v.Value()
+		return str
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, e := range v {
+			switch e.(type) {
+			case nil, string, int32, int64, float32, float64, bool:
+				out[i] = e
+			case pgtype.Numeric:
+				out[i] = convertValue(e)
+			default:
+				out[i] = fmt.Sprintf("%v", e)
 			}
 		}
 		return out
 	default:
-		out := make([]string, len(slice))
-		for i, v := range slice {
-			if v != nil {
-				out[i] = fmt.Sprintf("%v", v)
-			}
-		}
-		return out
+		return val
 	}
 }
 
