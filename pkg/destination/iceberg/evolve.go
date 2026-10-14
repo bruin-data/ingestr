@@ -22,6 +22,10 @@ func (d *Destination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.C
 	return source
 }
 
+func (d *Destination) MaxDecimalPrecision() int {
+	return 38
+}
+
 func (d *Destination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
 	if comparison == nil || !comparison.HasChanges {
 		return nil, nil
