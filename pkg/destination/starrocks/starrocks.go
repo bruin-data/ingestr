@@ -14,7 +14,6 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
-	srcstarrocks "github.com/bruin-data/ingestr/pkg/source/starrocks"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -449,7 +448,8 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 			col.MaxLength = *charMaxLen
 		}
 		if strings.EqualFold(dataType, "array") {
-			col.DataType, col.Precision, col.Scale, col.ArrayType = srcstarrocks.MapStarRocksToDataType(columnType)
+			col.DataType = schema.TypeArray
+			col.ArrayType, col.Precision, col.Scale = mapStarRocksArrayType(columnType)
 		}
 		columns = append(columns, col)
 	}
