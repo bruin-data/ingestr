@@ -633,8 +633,18 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 		return convertUUIDValue(val)
 	}
 	switch v := val.(type) {
+	case []any:
+		if col.DataType != schema.TypeArray {
+			return val
+		}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = convertValue(e, elemCol)
+		}
+		return out
 	case pgtype.Numeric:
-		if !v.Valid || v.NaN {
+		if !v.Valid || v.NaN || v.InfinityModifier != pgtype.Finite {
 			return nil
 		}
 		if col.DataType == schema.TypeString {
