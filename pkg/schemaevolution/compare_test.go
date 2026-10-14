@@ -262,6 +262,7 @@ func TestCompare_DecimalWideningRespectsMaxPrecision(t *testing.T) {
 		wantChange    bool
 		wantPrecision int
 		wantScale     int
+		wantErr       bool
 	}{
 		{
 			name:   "extra scale dropped to fit",
@@ -294,6 +295,13 @@ func TestCompare_DecimalWideningRespectsMaxPrecision(t *testing.T) {
 			max:    38,
 		},
 		{
+			name:    "integer digits and existing scale cannot fit",
+			source:  schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 36, Scale: 12},
+			dest:    schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 30, Scale: 16},
+			max:     38,
+			wantErr: true,
+		},
+		{
 			name:          "no limit widens",
 			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
 			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
@@ -309,6 +317,10 @@ func TestCompare_DecimalWideningRespectsMaxPrecision(t *testing.T) {
 				&schema.TableSchema{Columns: []schema.Column{tt.dest}},
 				&CompareOptions{MaxDecimalPrecision: tt.max},
 			)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "destination maximum is 38")
+				return
+			}
 			require.NoError(t, err)
 			if !tt.wantChange {
 				assert.False(t, result.HasChanges)
@@ -319,6 +331,18 @@ func TestCompare_DecimalWideningRespectsMaxPrecision(t *testing.T) {
 			assert.Equal(t, tt.wantScale, result.Changes[0].NewColumn.Scale)
 		})
 	}
+}
+
+func TestCompare_DecimalOverrideRespectsMaxPrecision(t *testing.T) {
+	overrides, err := ParseColumnOverrides("v:decimal(20,12)")
+	require.NoError(t, err)
+	result, err := Compare(
+		&schema.TableSchema{Columns: []schema.Column{{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12}}},
+		&schema.TableSchema{Columns: []schema.Column{{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9}}},
+		&CompareOptions{Overrides: overrides, MaxDecimalPrecision: 38},
+	)
+	require.NoError(t, err)
+	assert.False(t, result.HasChanges)
 }
 
 func TestCompare_CaseInsensitiveColumnNames(t *testing.T) {
