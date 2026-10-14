@@ -2955,6 +2955,11 @@ func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) 
 			DataType: mapBigQueryTypeToSchema(field),
 			Nullable: !field.Required,
 		}
+		if field.Repeated {
+			elem := *field
+			elem.Repeated = false
+			col.ArrayType = mapBigQueryTypeToSchema(&elem)
+		}
 
 		if field.Type == bigquery.NumericFieldType || field.Type == bigquery.BigNumericFieldType {
 			col.Precision, col.Scale = normalizeBigQueryDecimalPrecisionScale(field.Type, field.Precision, field.Scale)
