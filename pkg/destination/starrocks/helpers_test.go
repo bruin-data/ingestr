@@ -6,6 +6,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
 // Binary columns are base64-encoded in the body (so json.Marshal can't mangle
@@ -69,5 +70,25 @@ func TestRecordBatchToJSONList(t *testing.T) {
 	want := `[{"c":[1,2,3]},{"c":[9,null]}]`
 	if string(body) != want {
 		t.Fatalf("body: got %s want %s", string(body), want)
+	}
+}
+
+func TestMapStarRocksArrayType(t *testing.T) {
+	tests := []struct {
+		columnType       string
+		elem             schema.DataType
+		precision, scale int
+	}{
+		{"array<DECIMAL64(5,2)>", schema.TypeDecimal, 5, 2},
+		{"array<DECIMAL128(20,12)>", schema.TypeDecimal, 20, 12},
+		{"array<int(11)>", schema.TypeInt32, 0, 0},
+		{"array<varchar(65533)>", schema.TypeString, 0, 0},
+		{"array<array<int(11)>>", schema.TypeArray, 0, 0},
+	}
+	for _, tt := range tests {
+		elem, precision, scale := mapStarRocksArrayType(tt.columnType)
+		if elem != tt.elem || precision != tt.precision || scale != tt.scale {
+			t.Errorf("%s: got (%s, %d, %d), want (%s, %d, %d)", tt.columnType, elem, precision, scale, tt.elem, tt.precision, tt.scale)
+		}
 	}
 }

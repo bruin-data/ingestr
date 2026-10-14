@@ -414,7 +414,7 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 	}
 
 	query := `
-		SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH
+		SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH
 		FROM information_schema.columns
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION`
@@ -428,9 +428,9 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 
 	var columns []schema.Column
 	for rows.Next() {
-		var colName, dataType, isNullable string
+		var colName, dataType, columnType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
+		if err := rows.Scan(&colName, &dataType, &columnType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 		col := schema.Column{
@@ -446,6 +446,10 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 		}
 		if charMaxLen != nil {
 			col.MaxLength = *charMaxLen
+		}
+		if strings.EqualFold(dataType, "array") {
+			col.DataType = schema.TypeArray
+			col.ArrayType, col.Precision, col.Scale = mapStarRocksArrayType(columnType)
 		}
 		columns = append(columns, col)
 	}

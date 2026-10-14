@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -223,4 +225,27 @@ func mapStarRocksTypeToSchema(dataType string) schema.DataType {
 	default:
 		return schema.TypeString
 	}
+}
+
+var starRocksDecimalArgs = regexp.MustCompile(`\((\d+)\s*,\s*(\d+)\)`)
+
+// mapStarRocksArrayType reads an array column's element from COLUMN_TYPE, e.g. array<DECIMAL64(5,2)>.
+func mapStarRocksArrayType(columnType string) (elem schema.DataType, precision, scale int) {
+	inner := strings.TrimSpace(columnType)
+	if i, j := strings.Index(inner, "<"), strings.LastIndex(inner, ">"); i >= 0 && j > i {
+		inner = strings.TrimSpace(inner[i+1 : j])
+	}
+	base := strings.ToLower(inner)
+	if i := strings.IndexAny(base, "(<"); i >= 0 {
+		base = base[:i]
+	}
+	if base == "array" {
+		return schema.TypeArray, 0, 0
+	}
+	elem = mapStarRocksTypeToSchema(base)
+	if m := starRocksDecimalArgs.FindStringSubmatch(inner); elem == schema.TypeDecimal && m != nil {
+		precision, _ = strconv.Atoi(m[1])
+		scale, _ = strconv.Atoi(m[2])
+	}
+	return elem, precision, scale
 }
