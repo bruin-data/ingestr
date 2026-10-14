@@ -283,6 +283,12 @@ type SchemaEvolutionSourceColumnNormalizer interface {
 	NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column
 }
 
+// DecimalPrecisionLimiter reports the widest decimal precision a destination can store,
+// so schema evolution trims extra scale instead of widening past it.
+type DecimalPrecisionLimiter interface {
+	MaxDecimalPrecision() int
+}
+
 // TableWriteConfig contains per-table write configuration for multi-table writes.
 type TableWriteConfig struct {
 	DestTable              string

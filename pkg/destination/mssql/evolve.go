@@ -21,6 +21,10 @@ func (d *MSSQLDestination) NormalizeSchemaEvolutionSourceColumn(source, dest sch
 	return source
 }
 
+func (d *MSSQLDestination) MaxDecimalPrecision() int {
+	return 38
+}
+
 // ApplySchemaEvolution renders the abstract schema-change plan into this
 // destination's DDL using the local dialect and applies each statement.
 func (d *MSSQLDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {

@@ -254,6 +254,73 @@ func TestCompare_DecimalPrecisionWidening(t *testing.T) {
 	assert.GreaterOrEqual(t, change.NewColumn.Scale, 4)
 }
 
+func TestCompare_DecimalWideningRespectsMaxPrecision(t *testing.T) {
+	tests := []struct {
+		name          string
+		source, dest  schema.Column
+		max           int
+		wantChange    bool
+		wantPrecision int
+		wantScale     int
+	}{
+		{
+			name:   "extra scale dropped to fit",
+			source: schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:   schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			max:    38,
+		},
+		{
+			name:          "scale kept when it fits",
+			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 18, Scale: 2},
+			max:           38,
+			wantChange:    true,
+			wantPrecision: 28,
+			wantScale:     12,
+		},
+		{
+			name:          "scale trimmed to remaining digits",
+			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 30, Scale: 15},
+			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 30, Scale: 2},
+			max:           38,
+			wantChange:    true,
+			wantPrecision: 38,
+			wantScale:     10,
+		},
+		{
+			name:   "array element",
+			source: schema.Column{Name: "v", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:   schema.Column{Name: "v", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			max:    38,
+		},
+		{
+			name:          "no limit widens",
+			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			wantChange:    true,
+			wantPrecision: 41,
+			wantScale:     12,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := Compare(
+				&schema.TableSchema{Columns: []schema.Column{tt.source}},
+				&schema.TableSchema{Columns: []schema.Column{tt.dest}},
+				&CompareOptions{MaxDecimalPrecision: tt.max},
+			)
+			require.NoError(t, err)
+			if !tt.wantChange {
+				assert.False(t, result.HasChanges)
+				return
+			}
+			require.Len(t, result.Changes, 1)
+			assert.Equal(t, tt.wantPrecision, result.Changes[0].NewColumn.Precision)
+			assert.Equal(t, tt.wantScale, result.Changes[0].NewColumn.Scale)
+		})
+	}
+}
+
 func TestCompare_CaseInsensitiveColumnNames(t *testing.T) {
 	source := &schema.TableSchema{
 		Name: "test",
