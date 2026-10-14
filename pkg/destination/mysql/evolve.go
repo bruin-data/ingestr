@@ -236,6 +236,10 @@ func containsFold(values []string, target string) bool {
 	return false
 }
 
+func (d *MySQLDestination) MaxDecimalPrecision() int {
+	return 65
+}
+
 // ApplySchemaEvolution renders the abstract schema-change plan into this
 // destination's DDL using the local dialect and applies each statement.
 func (d *MySQLDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
