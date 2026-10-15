@@ -833,6 +833,10 @@ var engineTypeMap = map[string]struct {
 func validateEngineType(engineType string, hasPrimaryKeys bool) (string, bool) {
 	if engineType != "" {
 		if e, ok := engineTypeMap[strings.ToLower(engineType)]; ok {
+			// Without a sorting key ReplacingMergeTree collapses every row into one.
+			if !hasPrimaryKeys && e.name == "ReplacingMergeTree()" {
+				return "MergeTree()", true
+			}
 			return e.name, e.mergeTree
 		}
 		valid := make([]string, 0, len(engineTypeMap))
