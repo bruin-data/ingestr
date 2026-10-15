@@ -1694,11 +1694,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	// Schema contract handling: build a per-table evolution plan so destination
-	// tables gain columns added at the source (skip for replace, which drops and
-	// recreates). Plans are built sequentially because evolveSchemaIfNeeded
+	// tables gain columns added at the source (skip for swap-based replace).
+	// Plans are built sequentially because evolveSchemaIfNeeded
 	// keeps comparison state on the pipeline; strategies apply them per table.
 	var evolutionPlans map[string]*schemaevolution.EvolutionPlan
-	if resolvedStrategy != config.StrategyReplace {
+	if resolvedStrategy != config.StrategyReplace || usesInPlaceReplace(resolvedStrategy, p.config.DestURI) {
 		evolutionPlans = make(map[string]*schemaevolution.EvolutionPlan)
 		for _, table := range tables {
 			plan, err := p.evolveSchemaIfNeeded(ctx, tableDestNames[table.Name], table.Schema, resolvedStrategy)

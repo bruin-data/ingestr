@@ -20,9 +20,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
+	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -592,6 +594,142 @@ func TestDestinations_MultiTable_Replace(t *testing.T) {
 			var productsCount int
 			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(productsTable)).Scan(&productsCount))
 			assert.Equal(t, multiTableProductsRows, productsCount, "products table should have correct row count")
+		})
+	}
+}
+
+func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	sourceContainer, sourceURI := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	sourceDB, err := sql.Open("pgx", sourceURI)
+	require.NoError(t, err)
+	defer func() { _ = sourceDB.Close() }()
+	_, err = sourceDB.ExecContext(ctx, "CREATE PUBLICATION refresh_pub FOR ALL TABLES")
+	require.NoError(t, err)
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	for _, withView := range []bool{false, true} {
+		t.Run(fmt.Sprintf("view=%t", withView), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			ensurePostgresSchema(t, ctx, sourceURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			tables := make([]string, 0, 2)
+			oids := make(map[string]int64)
+			for _, name := range []string{"users", "orders"} {
+				table := pqTable(destSchema, name)
+				_, err := sourceDB.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (7, '"+name+"')")
+				require.NoError(t, err)
+				_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (99, 'stale'); GRANT SELECT ON "+table+" TO PUBLIC")
+				require.NoError(t, err)
+				if name == "orders" {
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT orders_pkey; INSERT INTO "+table+" VALUES (99, 'duplicate stale row')")
+					require.NoError(t, err)
+				}
+				if withView {
+					_, err = db.ExecContext(ctx, "CREATE VIEW "+pqTable(destSchema, name+"_view")+" AS SELECT id, name FROM "+table)
+					require.NoError(t, err)
+				}
+				var oid int64
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+				oids[name] = oid
+				tables = append(tables, destSchema+"."+name)
+			}
+			cfg := &config.IngestConfig{
+				SourceURI:    strings.Replace(sourceURI, "postgres://", "postgres+cdc://", 1) + "&publication=refresh_pub&mode=batch",
+				SourceTables: tables, DestURI: destURI,
+				IncrementalStrategy: config.StrategyMerge, FullRefresh: true,
+				NoLoadTimestamp: true, NoRunID: true,
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			for _, name := range []string{"users", "orders"} {
+				table := pqTable(destSchema, name)
+				var oid int64
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+				assert.Equal(t, oids[name], oid, "table identity must survive full refresh")
+				var granted bool
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_class, LATERAL aclexplode(relacl) acl WHERE oid = $1::regclass AND acl.grantee = 0 AND acl.privilege_type = 'SELECT')`, table).Scan(&granted))
+				assert.True(t, granted, "explicit PUBLIC SELECT grant must survive full refresh")
+				var hasPrimaryKey bool
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
+				assert.True(t, hasPrimaryKey, "missing primary keys must be added after stale rows are removed")
+				if withView {
+					table = pqTable(destSchema, name+"_view")
+				}
+				var count, id int64
+				var value string
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*), min(id), min(name) FROM "+table).Scan(&count, &id, &value))
+				assert.Equal(t, int64(1), count, "replacement must remove stale rows, including through views")
+				assert.Equal(t, int64(7), id)
+				assert.Equal(t, name, value)
+			}
+			_, err = sourceDB.ExecContext(ctx, "UPDATE "+pqTable(destSchema, "users")+" SET name = 'resumed' WHERE id = 7")
+			require.NoError(t, err)
+			cfg.FullRefresh = false
+			require.NoError(t, pipeline.New(cfg).Run(ctx), "CDC must resume against the preserved table identity")
+			var resumed string
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT name FROM "+pqTable(destSchema, "users")+" WHERE id = 7").Scan(&resumed))
+			assert.Equal(t, "resumed", resumed)
+		})
+	}
+}
+
+func TestPostgresMultiTableRefreshReadFailurePreservesTargetKeys(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "failed_refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			table := pqTable(destSchema, "orders")
+			var originalOID int64
+			if existing {
+				_, err := db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint); INSERT INTO "+table+" VALUES (99), (99)")
+				require.NoError(t, err)
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&originalOID))
+			}
+			dest := postgresdest.NewPostgresDestination()
+			require.NoError(t, dest.Connect(ctx, destURI))
+			defer func() { _ = dest.Close(ctx) }()
+			src := newMockMultiTableSource()
+			src.tables["orders"] = filepath.Join(t.TempDir(), "missing.jsonl")
+			job := &strategy.MultiTableIngestionJob{
+				Config: &config.IngestConfig{FullRefresh: true}, Source: src, Destination: dest,
+				Tables: []source.SourceTableInfo{{Name: "orders", PrimaryKeys: []string{"id"}, Schema: &schema.TableSchema{
+					Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+				}}},
+				TableDestNames: map[string]string{"orders": destSchema + ".orders"},
+			}
+			err = (&strategy.ReplaceStrategy{}).ExecuteMultiTable(ctx, job)
+			require.ErrorContains(t, err, "missing.jsonl")
+			var count, oid int64
+			var hasPrimaryKey bool
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count))
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
+			if existing {
+				require.Equal(t, originalOID, oid)
+				require.Equal(t, int64(2), count)
+				require.False(t, hasPrimaryKey, "CREATE IF NOT EXISTS must not add constraints to a target that already exists")
+			} else {
+				require.Zero(t, count)
+				require.True(t, hasPrimaryKey, "a new target must be keyed even if extraction fails")
+			}
 		})
 	}
 }
