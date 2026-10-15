@@ -8,7 +8,9 @@ import (
 )
 
 // Dialect implements the destination.Dialect interface for ClickHouse.
-type Dialect struct{}
+type Dialect struct {
+	cluster string
+}
 
 func (d *Dialect) Name() string {
 	return "ClickHouse"
@@ -19,8 +21,9 @@ func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
 	if col.Nullable {
 		typeName = fmt.Sprintf("Nullable(%s)", typeName)
 	}
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+	return fmt.Sprintf("ALTER TABLE %s%s ADD COLUMN %s %s",
 		table,
+		onClusterClause(d.cluster),
 		d.QuoteIdentifier(col.Name),
 		typeName)
 }
@@ -30,8 +33,9 @@ func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Colum
 	if newType.Nullable {
 		typeName = fmt.Sprintf("Nullable(%s)", typeName)
 	}
-	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s",
+	return fmt.Sprintf("ALTER TABLE %s%s MODIFY COLUMN %s %s",
 		table,
+		onClusterClause(d.cluster),
 		d.QuoteIdentifier(colName),
 		typeName)
 }
