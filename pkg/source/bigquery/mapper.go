@@ -11,6 +11,7 @@ import (
 var (
 	numericPrecisionRegex = regexp.MustCompile(`(?i)(?:numeric|bignumeric|decimal)\((\d+)(?:,\s*(\d+))?\)`)
 	arrayTypeRegex        = regexp.MustCompile(`(?i)^ARRAY<(.+)>$`)
+	arrowListTypeRegex    = regexp.MustCompile(`^list<item: (.+?)(?:, nullable)?>$`)
 	structTypeRegex       = regexp.MustCompile(`(?i)^STRUCT<.+>$`)
 )
 
@@ -22,6 +23,15 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	// Handle ARRAY<element_type>
 	if matches := arrayTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
 		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
+	}
+
+	// Custom queries report Arrow type names, e.g. list<item: decimal(38, 9), nullable>.
+	if matches := arrowListTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
+		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
+		if elemType == schema.TypeJSON {
+			return schema.TypeJSON, 0, 0, schema.TypeUnknown
+		}
 		return schema.TypeArray, precision, scale, elemType
 	}
 

@@ -323,6 +323,12 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 
 // mapBigQueryFieldToDataType maps a BigQuery field schema to our internal data types.
 func mapBigQueryFieldToDataType(field *bigquery.FieldSchema) (schema.DataType, int, int, schema.DataType) {
+	if field.Repeated && field.Type != bigquery.RecordFieldType {
+		elem := *field
+		elem.Repeated = false
+		elemType, precision, scale, _ := mapBigQueryFieldToDataType(&elem)
+		return schema.TypeArray, precision, scale, elemType
+	}
 	switch field.Type {
 	case bigquery.BooleanFieldType:
 		return schema.TypeBoolean, 0, 0, schema.TypeUnknown
@@ -334,6 +340,9 @@ func mapBigQueryFieldToDataType(field *bigquery.FieldSchema) (schema.DataType, i
 		return schema.TypeFloat64, 0, 0, schema.TypeUnknown
 
 	case bigquery.NumericFieldType:
+		if field.Precision == 0 {
+			return schema.TypeDecimal, 38, 9, schema.TypeUnknown
+		}
 		return schema.TypeDecimal, int(field.Precision), int(field.Scale), schema.TypeUnknown
 
 	case bigquery.BigNumericFieldType:
