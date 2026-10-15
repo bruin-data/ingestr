@@ -18,6 +18,7 @@ type strategySQLConn struct {
 	t            *testing.T
 	statements   []string
 	failExchange bool
+	targetEngine string
 }
 
 func (c *strategySQLConn) Exec(_ context.Context, query string, _ ...any) error {
@@ -33,6 +34,22 @@ func (c *strategySQLConn) Query(_ context.Context, query string, args ...any) (d
 	require.Equal(c.t, []any{"warehouse", "order"}, args)
 	c.statements = append(c.statements, "WAIT FOR MUTATIONS")
 	return &completedMutationRows{}, nil
+}
+
+func (c *strategySQLConn) QueryRow(_ context.Context, query string, args ...any) driver.Row {
+	require.Equal(c.t, "SELECT engine FROM system.tables WHERE database = ? AND name = ?", query)
+	require.Equal(c.t, []any{"warehouse", "order"}, args)
+	return &engineRow{engine: c.targetEngine}
+}
+
+type engineRow struct {
+	driver.Row
+	engine string
+}
+
+func (r *engineRow) Scan(dest ...any) error {
+	*dest[0].(*string) = r.engine
+	return nil
 }
 
 type completedMutationRows struct{ driver.Rows }
@@ -164,4 +181,40 @@ func TestSCD2ClusterExpectedSQL(t *testing.T) {
 
 	require.Contains(t, c.statements[0], "ALTER TABLE `warehouse`.`order` ON CLUSTER `analytics_cluster` UPDATE")
 	require.Contains(t, c.statements[2], "ALTER TABLE `warehouse`.`order` ON CLUSTER `analytics_cluster` UPDATE")
+}
+
+func TestSCD2ReplicatedClusterExpectedSQL(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t, targetEngine: "ReplicatedMergeTree"}
+	d := &ClickHouseDestination{conn: c, database: "warehouse", cluster: "analytics_cluster", engineType: "replicated_merge_tree"}
+	require.NoError(t, d.SCD2Table(t.Context(), destination.SCD2Options{
+		TargetTable: "order", StagingTable: "landing.stage",
+		Columns:     []string{"id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+		PrimaryKeys: []string{"id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+	}))
+
+	require.Equal(t, "SYSTEM SYNC REPLICA ON CLUSTER `analytics_cluster` `landing`.`stage`", c.statements[0])
+	require.Equal(t, "SYSTEM SYNC REPLICA ON CLUSTER `analytics_cluster` `warehouse`.`order`", c.statements[1])
+	for _, i := range []int{2, 4} {
+		require.True(t, strings.HasSuffix(c.statements[i], " SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2"), c.statements[i])
+	}
+	require.NotContains(t, c.statements[6], "SETTINGS")
+}
+
+func TestSCD2ReplicatedEngineOnExistingMergeTreeTarget(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t, targetEngine: "MergeTree"}
+	d := &ClickHouseDestination{conn: c, database: "warehouse", cluster: "analytics_cluster", engineType: "replicated_merge_tree"}
+	require.NoError(t, d.SCD2Table(t.Context(), destination.SCD2Options{
+		TargetTable: "order", StagingTable: "landing.stage",
+		Columns:     []string{"id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+		PrimaryKeys: []string{"id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+	}))
+
+	for _, statement := range c.statements {
+		require.NotContains(t, statement, "SYNC REPLICA")
+		require.NotContains(t, statement, "SETTINGS")
+	}
 }
