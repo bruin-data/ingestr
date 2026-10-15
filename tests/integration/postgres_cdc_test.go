@@ -578,9 +578,8 @@ func TestPostgresCDC_Snapshot(t *testing.T) {
 	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 
-	// Convert source URI to CDC format - sourceConnString is already postgres://user:pass@host:port/db?sslmode=disable
-	// We need to change scheme and add publication param
-	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
+	// The alias must retain default snapshot behavior when both snapshot flags are omitted.
+	cdcSourceURI := "postgresql+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
 
 	// Run the CDC pipeline
 	cfg := &config.IngestConfig{

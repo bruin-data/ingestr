@@ -297,7 +297,7 @@ func (c *IngestConfig) ValidateCDCSnapshotMode() error {
 		return nil
 	}
 	u, err := url.Parse(c.SourceURI)
-	if err != nil || u.Scheme != "postgres+cdc" {
+	if err != nil || (u.Scheme != "postgres+cdc" && u.Scheme != "postgresql+cdc") {
 		return &ValidationError{Field: "cdc-snapshot-mode", Message: "is only supported for postgres+cdc sources"}
 	}
 	if c.CDCSnapshotMode != "" && c.CDCSnapshotMode != "initial" && c.CDCSnapshotMode != "never" {

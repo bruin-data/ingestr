@@ -691,6 +691,14 @@ func TestIngestConfigValidate_CDCNoSnapshot(t *testing.T) {
 	}{
 		{name: "bootstrap", change: func(c *IngestConfig) { c.CDCStartLSN = "1/ABCDEF" }},
 		{name: "resume", change: func(c *IngestConfig) {}},
+		{name: "alias initial", change: func(c *IngestConfig) {
+			c.SourceURI = "postgresql+cdc://localhost/db"
+			c.CDCSnapshotMode = "initial"
+		}},
+		{name: "alias bootstrap", change: func(c *IngestConfig) {
+			c.SourceURI = "postgresql+cdc://localhost/db?slot=external"
+			c.CDCStartLSN = "1/ABCDEF"
+		}},
 		{name: "subset", change: func(c *IngestConfig) { c.SourceTable = ""; c.SourceTables = []string{"a", "b"} }},
 		{name: "unknown mode", change: func(c *IngestConfig) { c.CDCSnapshotMode = "skip" }, wantErr: "must be initial or never"},
 		{name: "wrong source", change: func(c *IngestConfig) { c.SourceURI = "mysql+cdc://localhost/db" }, wantErr: "only supported for postgres+cdc"},
