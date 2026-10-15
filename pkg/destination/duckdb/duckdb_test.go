@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -948,6 +949,32 @@ func TestPrepareTable_CreateTable(t *testing.T) {
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'test_table'").Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count, "table should exist")
+}
+
+func TestPrepareTable_AppendSkipsPrimaryKeyConstraint(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+	}
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "appended", Schema: tableSchema, PrimaryKeys: []string{"id"}, Strategy: string(config.StrategyAppend),
+	}))
+	appended, err := dest.GetTableSchema(ctx, "appended")
+	require.NoError(t, err)
+	assert.Empty(t, appended.PrimaryKeys)
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO appended VALUES (1, 'a'), (1, 'b')`))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "merged", Schema: tableSchema, PrimaryKeys: []string{"id"},
+	}))
+	merged, err := dest.GetTableSchema(ctx, "merged")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id"}, merged.PrimaryKeys)
 }
 
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {

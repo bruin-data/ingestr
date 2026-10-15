@@ -31,8 +31,8 @@ type PrepareOptions struct {
 	PreserveExistingLayout bool // Leave an existing table's properties, partition spec, and sort order unchanged.
 	TableProperties        map[string]string
 	OwnershipToken         string
-	// Strategy names the write behavior for reverse-ETL destinations so they can
-	// validate the dest-table up front. Ignored by SQL destinations.
+	// Strategy names the write behavior so reverse-ETL destinations can validate the
+	// dest-table up front and SQL destinations can skip key constraints on append.
 	Strategy string
 }
 

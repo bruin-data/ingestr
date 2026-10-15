@@ -265,8 +265,13 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 		config.Debug("[DUCKDB] DROP TABLE took %v", time.Since(startDrop))
 	}
 
+	// DuckDB can't declare an unenforced key, so append tables get none and keep every row.
+	primaryKeys := opts.PrimaryKeys
+	if opts.Strategy == string(config.StrategyAppend) {
+		primaryKeys = nil
+	}
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, primaryKeys)
 	config.Debug("[DUCKDB] CREATE SQL: %s", createSQL)
 	if err := d.exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
