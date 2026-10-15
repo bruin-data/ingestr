@@ -26,9 +26,21 @@ func TestMapBigQueryArrowListTypes(t *testing.T) {
 	assert.Equal(t, 38, p)
 	assert.Equal(t, 9, s)
 
-	dt, _, _, at = MapBigQueryToDataType("list<item: int64, nullable>")
-	assert.Equal(t, schema.TypeArray, dt)
-	assert.Equal(t, schema.TypeInt64, at)
+	for arrowType, want := range map[string]schema.DataType{
+		"int64":                 schema.TypeInt64,
+		"bool":                  schema.TypeBoolean,
+		"float64":               schema.TypeFloat64,
+		"utf8":                  schema.TypeString,
+		"binary":                schema.TypeBinary,
+		"date32":                schema.TypeDate,
+		"time64[us]":            schema.TypeTime,
+		"timestamp[us]":         schema.TypeTimestamp,
+		"timestamp[us, tz=UTC]": schema.TypeTimestampTZ,
+	} {
+		dt, _, _, at = MapBigQueryToDataType("list<item: " + arrowType + ", nullable>")
+		assert.Equal(t, schema.TypeArray, dt, arrowType)
+		assert.Equal(t, want, at, arrowType)
+	}
 }
 
 func TestMapBigQueryRepeatedField(t *testing.T) {

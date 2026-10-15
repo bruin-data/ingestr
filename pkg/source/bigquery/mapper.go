@@ -58,6 +58,12 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	if idx := strings.Index(baseType, "<"); idx != -1 {
 		baseType = baseType[:idx]
 	}
+	if idx := strings.Index(baseType, "["); idx != -1 {
+		if baseType[:idx] == "TIMESTAMP" && !strings.Contains(upperType, "TZ=") {
+			return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
+		}
+		baseType = baseType[:idx]
+	}
 
 	switch baseType {
 	// Boolean
@@ -81,17 +87,17 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 		return schema.TypeDecimal, 38, 9, schema.TypeUnknown
 
 	// String
-	case "STRING":
+	case "STRING", "UTF8", "LARGE_UTF8":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 
 	// Binary
-	case "BYTES":
+	case "BYTES", "BINARY", "LARGE_BINARY":
 		return schema.TypeBinary, 0, 0, schema.TypeUnknown
 
-	// Date/Time
-	case "DATE":
+	// Date/Time (BigQuery SQL names, plus Arrow names reported by custom queries)
+	case "DATE", "DATE32", "DATE64":
 		return schema.TypeDate, 0, 0, schema.TypeUnknown
-	case "TIME":
+	case "TIME", "TIME32", "TIME64":
 		return schema.TypeTime, 0, 0, schema.TypeUnknown
 	case "DATETIME":
 		// DATETIME in BigQuery has no timezone
