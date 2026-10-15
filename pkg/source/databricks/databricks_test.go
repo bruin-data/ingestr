@@ -604,6 +604,13 @@ func TestFormatIntervals(t *testing.T) {
 	assert.Equal(t, int64(2), out.Column(2).(*array.Int64).Value(1))
 }
 
+func TestBuildIncrementalWhereSkipsMissingBounds(t *testing.T) {
+	start := time.Date(1998, 1, 1, 0, 0, 0, 0, time.UTC)
+	assert.Equal(t, "`d` >= TIMESTAMP '1998-01-01 00:00:00.000000'", buildIncrementalWhere("d", &start, nil))
+	assert.Equal(t, "`d` <= TIMESTAMP '1998-01-01 00:00:00.000000'", buildIncrementalWhere("d", nil, &start))
+	assert.Empty(t, buildIncrementalWhere("d", nil, nil))
+}
+
 func TestConformRecordMatchesColumnsByPosition(t *testing.T) {
 	sc := arrow.NewSchema([]arrow.Field{
 		{Name: "x", Type: arrow.PrimitiveTypes.Int8, Nullable: true},
