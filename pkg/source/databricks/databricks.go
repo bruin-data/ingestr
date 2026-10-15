@@ -798,7 +798,7 @@ func quoteIdentifier(name string) string {
 	return fmt.Sprintf("`%s`", strings.ReplaceAll(name, "`", "``"))
 }
 
-func buildIncrementalWhere(key string, start, end interface{}) string {
+func buildIncrementalWhere(key string, start, end *time.Time) string {
 	var conditions []string
 
 	if start != nil {
