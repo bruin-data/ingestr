@@ -55,8 +55,8 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 
 	go func() {
 		aborted := false
-		defer func() { r.closeChannels(aborted) }()
 		defer close(r.done)
+		defer func() { r.closeChannels(aborted) }()
 
 		for {
 			select {
@@ -73,7 +73,6 @@ func (r *Router) Route(ctx context.Context, input <-chan source.RecordBatchResul
 				}
 
 				if result.Err != nil {
-					aborted = true
 					r.setError(result.Err)
 					r.broadcastError(result.Err)
 					releaseResult(result)
@@ -135,10 +134,18 @@ func (r *Router) setError(err error) {
 
 func (r *Router) broadcastError(err error) {
 	for _, ch := range r.tableChannels {
-		select {
-		case ch <- source.RecordBatchResult{Err: err}:
-		default:
+		// Discard queued batches on failure, but leave the terminal error for
+		// the consumer. The router is the only sender, so this cannot block.
+	drain:
+		for {
+			select {
+			case result := <-ch:
+				releaseResult(result)
+			default:
+				break drain
+			}
 		}
+		ch <- source.RecordBatchResult{Err: err}
 	}
 }
 
