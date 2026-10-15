@@ -252,7 +252,9 @@ ingestr ingest \
    --columns 'id:bigint,signup_date:date,balance:decimal(18,2)'
 ```
 
-Supported types include `bigint`, `int`, `smallint`, `tinyint`, `float`, `double`, `decimal(p,s)`, `string`, `text`, `varchar(n)`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `json`, `uuid`, and `binary`.
+Supported types include `bigint`, `int`, `int32`, `smallint`, `tinyint`, `float`, `double`, `decimal(p,s)`, `string`, `text`, `varchar(n)`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `json`, `uuid`, and `binary`.
+
+`int` and `integer` are 64-bit, the same as `bigint`. Use `int32` for a 32-bit integer column, such as `INTEGER` on DuckDB or PostgreSQL. `timestamp` is timezone-aware; use `timestamp_ntz` for a timestamp without a time zone.
 
 #### Sized string types
 
