@@ -396,7 +396,15 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 
 	// Replicas re-run mutations against their own copies, so the subqueries need identical data everywhere.
 	mutationSettings := ""
+	replicated := false
 	if d.cluster != "" && strings.EqualFold(d.engineType, "replicated_merge_tree") {
+		var engine string
+		if err := d.conn.QueryRow(ctx, "SELECT engine FROM system.tables WHERE database = ? AND name = ?", targetDB, targetName).Scan(&engine); err != nil {
+			return fmt.Errorf("failed to read engine of %s.%s: %w", targetDB, targetName, err)
+		}
+		replicated = strings.HasPrefix(engine, "Replicated")
+	}
+	if replicated {
 		for _, table := range []string{
 			fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName)),
 			fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName)),
