@@ -165,3 +165,22 @@ func TestSCD2ClusterExpectedSQL(t *testing.T) {
 	require.Contains(t, c.statements[0], "ALTER TABLE `warehouse`.`order` ON CLUSTER `analytics_cluster` UPDATE")
 	require.Contains(t, c.statements[2], "ALTER TABLE `warehouse`.`order` ON CLUSTER `analytics_cluster` UPDATE")
 }
+
+func TestSCD2ReplicatedClusterExpectedSQL(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t}
+	d := &ClickHouseDestination{conn: c, database: "warehouse", cluster: "analytics_cluster", engineType: "replicated_merge_tree"}
+	require.NoError(t, d.SCD2Table(t.Context(), destination.SCD2Options{
+		TargetTable: "order", StagingTable: "landing.stage",
+		Columns:     []string{"id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+		PrimaryKeys: []string{"id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+	}))
+
+	require.Equal(t, "SYSTEM SYNC REPLICA ON CLUSTER `analytics_cluster` `landing`.`stage`", c.statements[0])
+	require.Equal(t, "SYSTEM SYNC REPLICA ON CLUSTER `analytics_cluster` `warehouse`.`order`", c.statements[1])
+	for _, i := range []int{2, 4} {
+		require.True(t, strings.HasSuffix(c.statements[i], " SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2"), c.statements[i])
+	}
+	require.NotContains(t, c.statements[6], "SETTINGS")
+}

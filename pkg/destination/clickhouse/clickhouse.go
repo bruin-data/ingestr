@@ -394,6 +394,22 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	// Format timestamp as ClickHouse DateTime64 literal
 	tsLiteral := fmt.Sprintf("toDateTime64('%s', 6)", opts.Timestamp.Format("2006-01-02 15:04:05.999999"))
 
+	// Replicas re-run mutations against their own copies, so the subqueries need identical data everywhere.
+	mutationSettings := ""
+	if d.cluster != "" && strings.EqualFold(d.engineType, "replicated_merge_tree") {
+		for _, table := range []string{
+			fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName)),
+			fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName)),
+		} {
+			syncSQL := fmt.Sprintf("SYSTEM SYNC REPLICA%s %s", onClusterClause(d.cluster), table)
+			if err := d.conn.Exec(ctx, syncSQL); err != nil {
+				config.LogFailedQuery(syncSQL, err)
+				return fmt.Errorf("failed to sync replicas of %s: %w", table, err)
+			}
+		}
+		mutationSettings = " SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2"
+	}
+
 	// Step 1: Close changed records (update _scd_valid_to and _scd_is_current)
 	// ClickHouse doesn't support UPDATE...FROM, so we use ALTER TABLE UPDATE with a subquery
 	// that finds PKs of records that exist in staging AND have changed
@@ -412,13 +428,13 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 			SELECT %s FROM %s.%s AS target
 			INNER JOIN %s.%s AS source ON %s
 			WHERE target._scd_is_current = 1 AND (%s)
-		  )`,
+		  )%s`,
 		quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster),
 		tsLiteral,
 		strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 		strings.Join(pkSelectTarget, ", "), quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		quoteIdentifier(stagingDB), quoteIdentifier(stagingName), onCondition,
-		changeConditions,
+		changeConditions, mutationSettings,
 	)
 	config.Debug("[CLICKHOUSE SCD2] Step 1 - Close changed records: %s", updateSQL)
 
@@ -441,11 +457,12 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 				_scd_valid_to = %s,
 				_scd_is_current = 0
 			WHERE _scd_is_current = 1
-			  AND (%s) NOT IN (SELECT %s FROM %s.%s)`,
+			  AND (%s) NOT IN (SELECT %s FROM %s.%s)%s`,
 			quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster),
 			tsLiteral,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
+			mutationSettings,
 		)
 		config.Debug("[CLICKHOUSE SCD2] Step 2 - Soft-delete missing: %s", softDeleteSQL)
 
