@@ -158,6 +158,8 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 		return err
 	}
 	config.Debug("[DB2] Stream: sending PRPSQLSTT + SQLSTT")
+	config.Debug("[DB2] Stream: PRPSQLSTT wire bytes (object only, no DSS frame): %x", prpSQLSTT)
+	config.Debug("[DB2] Stream: SQLSTT wire bytes (object only, no DSS frame): %x", sqlSTT)
 	if curID, err = writeRequestDSS(c.conn, prpSQLSTT, curID, true, false); err != nil {
 		return fmt.Errorf("sending PRPSQLSTT: %w", err)
 	}
