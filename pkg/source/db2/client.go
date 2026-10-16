@@ -49,6 +49,21 @@ const (
 	// packages it implicitly creates on IBM i, and is present and
 	// generally writable on every system, unlike NULLID.
 	db2PackageCollectionIBMi = "QGPL"
+	// db2PackageNameIBMi: confirmed via QSYS2.SYSPACKAGE on the real
+	// Signature host - QGPL/QSQCLIPKGC is IBM i's own pre-bound system
+	// CLI package for cursor-based operations (what jt400/ODBC use for
+	// queries that return rows). SYSSH200 doesn't exist under QGPL
+	// either; this is the actual package, not another ad hoc default.
+	db2PackageNameIBMi = "QSQCLIPKGC"
+	// db2PackageTokenIBMi is UNVERIFIED - still SYSLVL01, the LUW token,
+	// as a placeholder. QSQCLIPKGC is a real pre-bound package (not one
+	// we can implicitly create), so its actual RDB package consistency
+	// token must match what IBM i bound it with, or the server will
+	// reject the reference. Query the real value directly:
+	//   SELECT HEX(CONSISTENCY_TOKEN) FROM QSYS2.SYSPACKAGE
+	//   WHERE PACKAGE_SCHEMA = 'QGPL' AND PACKAGE_NAME = 'QSQCLIPKGC'
+	// and replace this once we have it from the real host.
+	db2PackageTokenIBMi = db2PackageToken
 )
 
 type db2StreamHandler struct {
@@ -608,16 +623,16 @@ func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	// are cp500-encoded elsewhere in this file. This one was left as raw
 	// ASCII, which a real IBM i host rejects outright (EOF on PRPSQLSTT
 	// before it even reaches the SQL text).
-	collection := db2PackageCollectionLUW
+	collection, pkgName, token := db2PackageCollectionLUW, db2PackageName, db2PackageToken
 	if c.platform == db2PlatformIBMi {
-		collection = db2PackageCollectionIBMi
+		collection, pkgName, token = db2PackageCollectionIBMi, db2PackageNameIBMi, db2PackageTokenIBMi
 	}
-	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, collection, db2PackageName, db2PackageToken)
+	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, collection, pkgName, token)
 	raw, err := encodeString(text, "cp500")
 	if err != nil {
 		return nil, fmt.Errorf("encoding PKGNAMCSN: %w", err)
 	}
-	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q section=%d", c.database, collection, db2PackageName, db2PackageToken, statementNumber)
+	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q (hex %x) section=%d", c.database, collection, pkgName, token, []byte(token), statementNumber)
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
 	return packBinary(cpPKGNAMCSN, raw), nil
 }

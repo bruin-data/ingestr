@@ -131,15 +131,18 @@ func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
 	require.Equal(t, []byte{0x00, db2PackageSectionQuery}, packet[len(packet)-2:])
 }
 
-func TestPackPKGNAMCSNUsesQGPLCollectionOnIBMi(t *testing.T) {
+func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
 	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
 
 	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
 
 	require.NoError(t, err)
 	collection := decodeString(packet[4+18:4+18+18], "cp500")
-	require.Equal(t, strings.TrimRight(collection, " "), "QGPL",
+	pkgName := decodeString(packet[4+18+18:4+18+18+18], "cp500")
+	require.Equal(t, "QGPL", strings.TrimRight(collection, " "),
 		"NULLID isn't a real package collection on IBM i (confirmed empty via QSYS2.SYSPACKAGE) - QGPL is what IBM's own ODBC driver defaults to there")
+	require.Equal(t, "QSQCLIPKGC", strings.TrimRight(pkgName, " "),
+		"SYSSH200 doesn't exist under QGPL either - QSQCLIPKGC is IBM i's real pre-bound system CLI package for cursor operations, confirmed via QSYS2.SYSPACKAGE")
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
