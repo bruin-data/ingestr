@@ -131,6 +131,24 @@ func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
 	require.Equal(t, []byte{0x00, db2PackageSectionQuery}, packet[len(packet)-2:])
 }
 
+func TestPackACCRDBUsesQTDSQL400OnIBMi(t *testing.T) {
+	packet := packACCRDB(padDatabaseName("RDBNAME2"), db2PlatformIBMi)
+
+	fields := parseReplyObject(packet[4:])
+	typdefnam := decodeString(fields[cpTYPDEFNAM], "cp500")
+	require.Equal(t, "QTDSQL400", typdefnam,
+		"QTDSQLX86 is an Intel/x86-oriented type definition; DRDA has a dedicated AS/400 value that IBM i's own server expects")
+}
+
+func TestPackACCRDBUsesQTDSQLX86OnOtherPlatforms(t *testing.T) {
+	packet := packACCRDB(padDatabaseName("SAMPLE"), db2PlatformLUW)
+
+	fields := parseReplyObject(packet[4:])
+	typdefnam := decodeString(fields[cpTYPDEFNAM], "cp500")
+	require.Equal(t, "QTDSQLX86", typdefnam,
+		"non-IBM-i platforms keep the existing typedef - no evidence they need QTDSQL400")
+}
+
 func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
 	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
 

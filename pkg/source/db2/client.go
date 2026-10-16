@@ -69,12 +69,17 @@ const (
 	// trusting the translation blind: encodeString("QSQCLI", "cp500")
 	// produces that exact byte sequence.
 	db2PackageTokenIBMi = "QSQCLI"
-	// db2PackageSectionQueryIBMi: still unverified against the real
-	// host - package/collection/token are all now confirmed correct via
-	// QSYS2.SYSPACKAGE, but PRPSQLSTT still gets EOF, so section 64
-	// (safe on paper - QSQCLIPKGC has 512 sections, 0-511) is the next
-	// thing to try changing. 1 was flagged as the fallback worth trying.
+	// db2PackageSectionQueryIBMi: switched from 64 to 1 as an experiment
+	// while PRPSQLSTT was still failing; confirmed structurally fine by
+	// a hex dump of the real wire bytes, so keeping it even though the
+	// section number itself was never conclusively the problem.
 	db2PackageSectionQueryIBMi = 1
+	// db2TypDefNameIBMi: DRDA defines a dedicated TYPDEFNAM for this
+	// platform - every other value (QTDSQLX86 etc.) is for other
+	// architectures. ACCRDB was sending QTDSQLX86 unconditionally; this
+	// is an isolated experiment (not yet confirmed via the real host)
+	// after a hex dump ruled out PKGNAMCSN/PRPSQLSTT/SQLSTT structure.
+	db2TypDefNameIBMi = "QTDSQL400"
 )
 
 type db2StreamHandler struct {
@@ -283,6 +288,17 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	}
 	secmec = resolved
 
+	// PRDID (the other platform-detection signal) only arrives in
+	// ACCRDBRM, the response to the packet we're about to build - too
+	// late to inform it. The SECMEC pattern is the only signal available
+	// before ACCRDB is sent, so resolve it now rather than after the
+	// round trip, letting ACCRDB declare the right TYPDEFNAM up front
+	// instead of the LUW/z-OS default.
+	if c.platform == db2PlatformAuto && secmecDowngradedToEUSRIDPWD {
+		config.Debug("[DB2] handshake: SECMEC 9->8 downgrade pattern matches IBM i (resolved before ACCRDB, PRDID not available yet)")
+		c.platform = db2PlatformIBMi
+	}
+
 	secchk, err := c.packSECCHK(secmec, sectkn)
 	if err != nil {
 		return err
@@ -293,15 +309,11 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	if curID, err = writeRequestDSS(c.conn, secchk, curID, false, false); err != nil {
 		return fmt.Errorf("sending SECCHK: %w", err)
 	}
-	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database), curID, false, true); err != nil {
+	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database, c.platform), curID, false, true); err != nil {
 		return fmt.Errorf("sending ACCRDB: %w", err)
 	}
 	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
 		return fmt.Errorf("reading SECCHKRM/ACCRDBRM: %w", err)
-	}
-	if c.platform == db2PlatformAuto && secmecDowngradedToEUSRIDPWD {
-		config.Debug("[DB2] handshake: PRDID didn't resolve platform, but SECMEC 9->8 downgrade pattern matches IBM i")
-		c.platform = db2PlatformIBMi
 	}
 	config.Debug("[DB2] handshake: SECCHKRM/ACCRDBRM received, authenticated, platform=%s", c.platform)
 
@@ -767,12 +779,16 @@ func packACCSEC(database string, secmec int, sectkn []byte) []byte {
 	return mustPackDSSObject(cpACCSEC, body.Bytes())
 }
 
-func packACCRDB(database string) []byte {
+func packACCRDB(database string, platform db2Platform) []byte {
+	typdefnam := "QTDSQLX86"
+	if platform == db2PlatformIBMi {
+		typdefnam = db2TypDefNameIBMi
+	}
 	body := bytes.NewBuffer(nil)
 	body.Write(mustPackString(cpRDBNAM, database, "cp500"))
 	body.Write(packUint(cpRDBACCCL, int(cpSQLAM), 2))
 	body.Write(mustPackString(cpPRDID, "SQL11014", "cp500"))
-	body.Write(mustPackString(cpTYPDEFNAM, "QTDSQLX86", "cp500"))
+	body.Write(mustPackString(cpTYPDEFNAM, typdefnam, "cp500"))
 	body.Write(packBinary(cpCRRTKN, mustHex("d5c6f0f0f0f0f0f12ec3f0c1f50155630d5a11")))
 	body.Write(packBinary(cpTYPDEFOVR, mustHex("0006119c04b80006119d04b00006119e04b8")))
 	return mustPackDSSObject(cpACCRDB, body.Bytes())
