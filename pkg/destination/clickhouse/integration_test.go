@@ -615,7 +615,7 @@ func TestClickHouseDestination_ArraysKeepNullElements(t *testing.T) {
 	for run := int64(0); run < 2; run++ {
 		require.NoError(t, dest.PrepareTable(ctx, destpkg.PrepareOptions{Table: table, Schema: ts}))
 		records := make(chan source.RecordBatchResult, 1)
-		records <- source.RecordBatchResult{Batch: arraysWithNulls(run*2)}
+		records <- source.RecordBatchResult{Batch: arraysWithNulls(run * 2)}
 		close(records)
 		require.NoError(t, dest.Write(ctx, records, destpkg.WriteOptions{Table: table, Schema: ts}))
 

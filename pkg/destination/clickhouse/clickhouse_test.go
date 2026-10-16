@@ -462,6 +462,13 @@ func TestArrayColumnsUseNullableElements(t *testing.T) {
 	if got := MapDataTypeToClickHouse(schema.Column{DataType: schema.TypeInt32, Nullable: true}); got != "Nullable(Int32)" {
 		t.Errorf("scalar column = %q", got)
 	}
+	notNull := schema.Column{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt32}
+	if got := MapDataTypeToClickHouse(notNull); got != "Array(Int32)" {
+		t.Errorf("NOT NULL array = %q", got)
+	}
+	if got := d.AddColumnSQL("t", notNull); !strings.HasSuffix(got, "`nums` Array(Int32)") {
+		t.Errorf("NOT NULL AddColumnSQL = %q", got)
+	}
 }
 
 func TestExtractValueArrays(t *testing.T) {
