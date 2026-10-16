@@ -123,7 +123,7 @@ func stageIcebergUpdateColumn(update *icebergtable.UpdateSchema, tbl *icebergtab
 	}
 
 	changed := false
-	if !field.Type.Equals(targetType) {
+	if !sameIcebergType(field.Type, targetType) {
 		oldList, oldIsList := field.Type.(*iceberggo.ListType)
 		newList, newIsList := targetType.(*iceberggo.ListType)
 		if oldIsList && newIsList {

@@ -816,3 +816,28 @@ func TestMergeTableRejectsNullPrimaryKeys(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "contains NULL")
 }
+
+func TestReplaceTableWithArrayColumns(t *testing.T) {
+	dest := newHadoopDestination(t)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true},
+			{Name: "tags", DataType: schema.TypeArray, ArrayType: schema.TypeString, Nullable: true},
+		},
+	}
+	for run := 0; run < 2; run++ {
+		writeTableRows(t, dest, "lake.replace.arrays", tableSchema, true, [][]any{
+			{int64(1), []any{int64(1), int64(2)}, []any{"a", "b"}},
+		})
+	}
+	require.Len(t, readTableRows(t, dest, "lake.replace.arrays").Rows, 1)
+}
+
+func TestSameIcebergTypeIgnoresListElementIDs(t *testing.T) {
+	a := &iceberggo.ListType{ElementID: 2, Element: iceberggo.PrimitiveTypes.Int64, ElementRequired: false}
+	b := &iceberggo.ListType{ElementID: 5, Element: iceberggo.PrimitiveTypes.Int64, ElementRequired: false}
+	require.True(t, sameIcebergType(a, b))
+	require.False(t, a.Equals(b))
+	require.False(t, sameIcebergType(a, &iceberggo.ListType{ElementID: 2, Element: iceberggo.PrimitiveTypes.String}))
+}
