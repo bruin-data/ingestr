@@ -373,11 +373,14 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 			return
 		}
 
-		// SECCHK, then ACCRDB.
-		if _, err := readDSS(serverConn); err != nil {
+		// SECCHK and ACCRDB are now two separate round trips.
+		if _, err := readDSS(serverConn); err != nil { // SECCHK
 			return
 		}
-		if _, err := readDSS(serverConn); err != nil {
+		if writeTestDSS(serverConn, cpSECCHKRM, nil, false) != nil {
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil { // ACCRDB
 			return
 		}
 		// ACCRDBRM with no PRDID at all - the real server's quirk reported
@@ -407,7 +410,7 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 	require.Equal(t, db2PlatformIBMi, client.Platform(), "SECMEC 9->8 downgrade should be detected as IBM i when PRDID can't resolve it")
 }
 
-func TestHandshakeDetectsMissingACCRDBRM(t *testing.T) {
+func TestHandshakeFailsLoudlyWhenACCRDBRMNeverArrives(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
 	defer func() { _ = clientConn.Close() }()
@@ -451,18 +454,20 @@ func TestHandshakeDetectsMissingACCRDBRM(t *testing.T) {
 			return
 		}
 
-		// SECCHK, then ACCRDB.
-		if _, err := readDSS(serverConn); err != nil {
+		// SECCHK and ACCRDB are two separate round trips. The server
+		// replies to SECCHK with SECCHKRM, then reads ACCRDB and sends
+		// nothing at all - reproducing the real packet capture from
+		// issue #3 (no ACCRDBRM, no error). Closing the pipe afterwards
+		// simulates that silence surfacing as an EOF to the client.
+		if _, err := readDSS(serverConn); err != nil { // SECCHK
 			return
 		}
-		if _, err := readDSS(serverConn); err != nil {
+		if writeTestDSS(serverConn, cpSECCHKRM, nil, false) != nil {
 			return
 		}
-		// Reproduces the real packet capture from issue #3: the server
-		// replies to SECCHK with SECCHKRM (not chained - this is the only
-		// reply) and never sends ACCRDBRM for the ACCRDB at all, no error
-		// either.
-		_ = writeTestDSS(serverConn, cpSECCHKRM, nil, false)
+		if _, err := readDSS(serverConn); err != nil { // ACCRDB
+			return
+		}
 	}()
 
 	done := make(chan error, 1)
@@ -475,12 +480,17 @@ func TestHandshakeDetectsMissingACCRDBRM(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("server script did not complete in time")
 	}
+	// The server script reads ACCRDB and sends nothing back - closing the
+	// pipe here simulates that silence surfacing as an EOF, same as a
+	// real connection that just never responds eventually would.
+	_ = serverConn.Close()
 
 	select {
 	case err := <-done:
-		require.NoError(t, err, "handshake doesn't treat a missing ACCRDBRM as fatal on its own")
+		require.Error(t, err, "splitting SECCHK/ACCRDB into separate round trips means a missing ACCRDBRM now surfaces as a real error instead of a silent success")
+		require.False(t, client.sawACCRDBRM)
 	case <-time.After(time.Second):
-		t.Fatal("handshake did not return in time")
+		t.Fatal("handshake did not return after connection closed")
 	}
 
 	require.False(t, client.sawACCRDBRM, "no ACCRDBRM was ever sent by the fake server, so the flag must reflect that")
@@ -544,15 +554,16 @@ func TestHandshakeSendsResolvedRDBNameInACCRDB(t *testing.T) {
 		if _, err := readDSS(serverConn); err != nil { // SECCHK
 			return
 		}
+		if writeTestDSS(serverConn, cpSECCHKRM, nil, false) != nil {
+			return
+		}
 		accrdb, err := readDSS(serverConn)
 		if err != nil {
 			return
 		}
 		fields := parseReplyObject(accrdb.object)
 		accrdbRDBNAM = strings.TrimSpace(decodeString(fields[cpRDBNAM], "cp500"))
-		// Real capture from issue #3: server replies to SECCHK but never
-		// sends ACCRDBRM. Matched here deliberately.
-		_ = writeTestDSS(serverConn, cpSECCHKRM, nil, false)
+		_ = writeTestDSS(serverConn, cpACCRDBRM, nil, false)
 	}()
 
 	done := make(chan error, 1)

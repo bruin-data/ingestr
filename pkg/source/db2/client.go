@@ -329,17 +329,34 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	// RDBNAM but keeps using c.database unchanged here: it got a reply
 	// with *LOCAL as-is, so there's no evidence that one needs resolving.
 	accrdbDatabase := c.resolvedRDBName()
-	config.Debug("[DB2] handshake: sending SECCHK (secmec=%d) + ACCRDB (RDBNAM=%q)", secmec, accrdbDatabase)
+
+	// SECCHK and ACCRDB used to be sent chained in one round trip (corr=1,
+	// corr=2). A real packet capture on issue #3 showed the server
+	// replying to SECCHK (corr=1) but silently dropping ACCRDB (corr=2) -
+	// no error, nothing. That's not actually explained by the differing
+	// correlation IDs themselves: EXCSAT/ACCSEC earlier in this same
+	// handshake use the identical corr=1/corr=2 chained pattern and both
+	// get properly chained replies back. Splitting these into two
+	// isolated round trips - same isolation principle already used for
+	// PRPSQLSTT/OPNQRY in Stream() and each statement in
+	// setClientVariables() - rules DSS chaining in or out conclusively
+	// either way, and costs nothing if it turns out not to matter.
+	config.Debug("[DB2] handshake: sending SECCHK (secmec=%d)", secmec)
 	curID = 1
-	if curID, err = writeRequestDSS(c.conn, secchk, curID, false, false); err != nil {
+	if _, err = writeRequestDSS(c.conn, secchk, curID, false, true); err != nil {
 		return fmt.Errorf("sending SECCHK: %w", err)
 	}
-	if _, err = writeRequestDSS(c.conn, packACCRDB(accrdbDatabase, c.platform, crrtkn), curID, false, true); err != nil {
+	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
+		return fmt.Errorf("reading SECCHKRM: %w", err)
+	}
+
+	config.Debug("[DB2] handshake: sending ACCRDB (RDBNAM=%q)", accrdbDatabase)
+	if _, err = writeRequestDSS(c.conn, packACCRDB(accrdbDatabase, c.platform, crrtkn), 1, false, true); err != nil {
 		return fmt.Errorf("sending ACCRDB: %w", err)
 	}
 	c.sawACCRDBRM = false
 	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
-		return fmt.Errorf("reading SECCHKRM/ACCRDBRM: %w", err)
+		return fmt.Errorf("reading ACCRDBRM: %w", err)
 	}
 	if !c.sawACCRDBRM {
 		config.Debug("[DB2] handshake: WARNING - no ACCRDBRM was received for ACCRDB; the RDB session is likely not established despite no error")
