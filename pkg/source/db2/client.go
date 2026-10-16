@@ -86,6 +86,15 @@ const (
 	// is an isolated experiment (not yet confirmed via the real host)
 	// after a hex dump ruled out PKGNAMCSN/PRPSQLSTT/SQLSTT structure.
 	db2TypDefNameIBMi = "QTDSQL400"
+	// db2PRDIDIBMi: ACCRDB's PRDID identifies the requester product and
+	// follows a documented vvrrm-style family prefix convention - "QSQ"
+	// for Db2 for i itself, "DSN" for z/OS, "SQL" for LUW/CLI/ODBC (what
+	// this client sends unconditionally, including against IBM i).
+	// Nothing confirms IBM i rejects an "SQL"-family PRDID specifically,
+	// but every other field in ACCRDB has now been tried and ruled out
+	// (RDBNAM both ways, CRRTKN, TYPDEFNAM, chaining structure) without
+	// ACCRDBRM ever arriving, so this is the last untried field.
+	db2PRDIDIBMi = "QSQ08060"
 )
 
 type db2StreamHandler struct {
@@ -840,13 +849,15 @@ func packACCSEC(database string, secmec int, sectkn []byte) []byte {
 
 func packACCRDB(database string, platform db2Platform, crrtkn []byte) []byte {
 	typdefnam := "QTDSQLX86"
+	prdid := "SQL11014"
 	if platform == db2PlatformIBMi {
 		typdefnam = db2TypDefNameIBMi
+		prdid = db2PRDIDIBMi
 	}
 	body := bytes.NewBuffer(nil)
 	body.Write(mustPackString(cpRDBNAM, database, "cp500"))
 	body.Write(packUint(cpRDBACCCL, int(cpSQLAM), 2))
-	body.Write(mustPackString(cpPRDID, "SQL11014", "cp500"))
+	body.Write(mustPackString(cpPRDID, prdid, "cp500"))
 	body.Write(mustPackString(cpTYPDEFNAM, typdefnam, "cp500"))
 	body.Write(packBinary(cpCRRTKN, crrtkn))
 	body.Write(packBinary(cpTYPDEFOVR, mustHex("0006119c04b80006119d04b00006119e04b8")))

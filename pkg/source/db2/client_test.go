@@ -149,6 +149,24 @@ func TestPackACCRDBUsesQTDSQLX86OnOtherPlatforms(t *testing.T) {
 		"non-IBM-i platforms keep the existing typedef - no evidence they need QTDSQL400")
 }
 
+func TestPackACCRDBUsesQSQPRDIDOnIBMi(t *testing.T) {
+	packet := packACCRDB(padDatabaseName("RDBNAME2"), db2PlatformIBMi, []byte("12345678"))
+
+	fields := parseReplyObject(packet[4:])
+	prdid := decodeString(fields[cpPRDID], "cp500")
+	require.Equal(t, "QSQ08060", prdid,
+		"SQL11014 is the LUW/CLI product family - IBM i's documented own family prefix is QSQ, and every other ACCRDB field has been ruled out already")
+}
+
+func TestPackACCRDBUsesSQLPRDIDOnOtherPlatforms(t *testing.T) {
+	packet := packACCRDB(padDatabaseName("SAMPLE"), db2PlatformLUW, []byte("12345678"))
+
+	fields := parseReplyObject(packet[4:])
+	prdid := decodeString(fields[cpPRDID], "cp500")
+	require.Equal(t, "SQL11014", prdid,
+		"non-IBM-i platforms keep the existing PRDID - no evidence they need the QSQ family")
+}
+
 func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
 	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
 
