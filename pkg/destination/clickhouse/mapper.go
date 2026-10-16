@@ -9,7 +9,8 @@ import (
 func MapDataTypeToClickHouse(col schema.Column) string {
 	baseType := mapBaseType(col)
 
-	if col.Nullable {
+	// ClickHouse arrays can't be Nullable; their elements are instead.
+	if col.Nullable && col.DataType != schema.TypeArray {
 		return fmt.Sprintf("Nullable(%s)", baseType)
 	}
 	return baseType
@@ -63,6 +64,9 @@ func mapBaseType(col schema.Column) string {
 		return "UUID"
 	case schema.TypeArray:
 		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		if col.Nullable {
+			return fmt.Sprintf("Array(Nullable(%s))", mapBaseType(elemCol))
+		}
 		return fmt.Sprintf("Array(%s)", mapBaseType(elemCol))
 	default:
 		return "String"
