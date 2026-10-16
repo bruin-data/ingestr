@@ -11,12 +11,17 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/testutil"
 	destpkg "github.com/bruin-data/ingestr/pkg/destination"
 	chdest "github.com/bruin-data/ingestr/pkg/destination/clickhouse"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -582,4 +587,87 @@ _scd_is_current, ifNull(toString(_scd_valid_to), '') FROM %s ORDER BY tenant, id
 			}, got)
 		})
 	}
+}
+
+func TestClickHouseDestination_ArraysKeepNullElements(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	container, uri, err := startClickHouseContainer(ctx)
+	if err != nil {
+		t.Skipf("failed to start ClickHouse container: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	table := fmt.Sprintf("%s.dest_arrays_%d", clickhouseDB, time.Now().UnixNano())
+	defer cleanupClickHouseTable(ctx, uri, table)
+	ts := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true},
+		{Name: "scores", DataType: schema.TypeArray, ArrayType: schema.TypeFloat64, Nullable: true},
+		{Name: "tags", DataType: schema.TypeArray, ArrayType: schema.TypeString, Nullable: true},
+	}}
+	dest := chdest.NewClickHouseDestination()
+	require.NoError(t, dest.Connect(ctx, uri))
+	t.Cleanup(func() { _ = dest.Close(ctx) })
+
+	for run := int64(0); run < 2; run++ {
+		require.NoError(t, dest.PrepareTable(ctx, destpkg.PrepareOptions{Table: table, Schema: ts}))
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: arraysWithNulls(run*2)}
+		close(records)
+		require.NoError(t, dest.Write(ctx, records, destpkg.WriteOptions{Table: table, Schema: ts}))
+
+		readBack, err := dest.GetTableSchema(ctx, table)
+		require.NoError(t, err)
+		comparison, err := schemaevolution.Compare(ts, readBack, nil)
+		require.NoError(t, err)
+		require.False(t, comparison.HasChanges, "%+v", comparison.Changes)
+	}
+
+	opts, err := clickhouse.ParseDSN(uri)
+	require.NoError(t, err)
+	db := clickhouse.OpenDB(opts)
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id, toString(nums), toString(scores), toString(tags) FROM %s ORDER BY id", table))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var id int64
+		var nums, scores, tags string
+		require.NoError(t, rows.Scan(&id, &nums, &scores, &tags))
+		got = append(got, fmt.Sprintf("%d %s %s %s", id, nums, scores, tags))
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{
+		"0 [1,NULL,3] [1.5,NULL] ['a',NULL]",
+		"1 [] [] []",
+		"2 [1,NULL,3] [1.5,NULL] ['a',NULL]",
+		"3 [] [] []",
+	}, got)
+}
+
+// arraysWithNulls builds two rows: arrays with a NULL element, then NULL arrays.
+func arraysWithNulls(firstID int64) arrow.RecordBatch {
+	b := array.NewRecordBuilder(memory.DefaultAllocator, arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "nums", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: true},
+		{Name: "scores", Type: arrow.ListOf(arrow.PrimitiveTypes.Float64), Nullable: true},
+		{Name: "tags", Type: arrow.ListOf(arrow.BinaryTypes.String), Nullable: true},
+	}, nil))
+	defer b.Release()
+	b.Field(0).(*array.Int64Builder).AppendValues([]int64{firstID, firstID + 1}, nil)
+	nums, scores, tags := b.Field(1).(*array.ListBuilder), b.Field(2).(*array.ListBuilder), b.Field(3).(*array.ListBuilder)
+	nums.Append(true)
+	nums.ValueBuilder().(*array.Int64Builder).AppendValues([]int64{1, 0, 3}, []bool{true, false, true})
+	scores.Append(true)
+	scores.ValueBuilder().(*array.Float64Builder).AppendValues([]float64{1.5, 0}, []bool{true, false})
+	tags.Append(true)
+	tags.ValueBuilder().(*array.StringBuilder).AppendValues([]string{"a", ""}, []bool{true, false})
+	nums.AppendNull()
+	scores.AppendNull()
+	tags.AppendNull()
+	return b.NewRecordBatch()
 }
