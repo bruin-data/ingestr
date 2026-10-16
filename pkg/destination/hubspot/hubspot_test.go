@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2689,6 +2690,49 @@ func TestWriteNullsIsFlagOnly(t *testing.T) {
 
 // TestPropertyValueDecimal256: high-precision decimals (precision >38) map to
 // Decimal256 per repo convention; without the case they serialized as a Go struct.
+func TestNonFiniteFloatsFollowWriteNulls(t *testing.T) {
+	sch := arrow.NewSchema([]arrow.Field{
+		{Name: "email", Type: arrow.BinaryTypes.String},
+		{Name: "score", Type: arrow.PrimitiveTypes.Float64},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, sch)
+	defer b.Release()
+	b.Field(0).(*array.StringBuilder).AppendValues([]string{"a@x.com", "b@x.com", "c@x.com"}, nil)
+	b.Field(1).(*array.Float64Builder).AppendValues([]float64{math.NaN(), math.Inf(1), 1.5}, nil)
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+
+	for _, writeNulls := range []bool{false, true} {
+		sh, err := parseShaper("contacts?id_property=email", "merge", []string{"email"}, "", writeNulls)
+		require.NoError(t, err)
+		for row := 0; row < 2; row++ {
+			in, _, ok := sh.shapeRow(rec, colIndexOf(rec), row)
+			require.True(t, ok)
+			if writeNulls {
+				require.Contains(t, in.Properties, "score")
+				assert.Equal(t, "", in.Properties["score"])
+			} else {
+				assert.NotContains(t, in.Properties, "score")
+			}
+		}
+		in, _, _ := sh.shapeRow(rec, colIndexOf(rec), 2)
+		assert.Equal(t, "1.5", in.Properties["score"])
+	}
+}
+
+func TestNonFiniteFloatsInListsBecomeNull(t *testing.T) {
+	b := array.NewListBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Float64)
+	defer b.Release()
+	b.Append(true)
+	b.ValueBuilder().(*array.Float64Builder).AppendValues([]float64{1.5, math.NaN(), math.Inf(1)}, nil)
+	arr := b.NewArray()
+	defer arr.Release()
+
+	val, ok := propertyValue(arr, 0)
+	require.True(t, ok)
+	assert.Equal(t, "[1.5,null,null]", val)
+}
+
 func TestPropertyValueDecimal256(t *testing.T) {
 	dt := &arrow.Decimal256Type{Precision: 50, Scale: 4}
 	bld := array.NewDecimal256Builder(memory.DefaultAllocator, dt)
