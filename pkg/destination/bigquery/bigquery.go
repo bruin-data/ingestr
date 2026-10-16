@@ -979,6 +979,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
+		if d.partitionOrClusterMismatch(existingMeta, opts.ClusterBy) {
+			output.Warnf("[WARNING] %s keeps its existing partitioning/clustering: BigQuery can't change it in place, so a new partition_by/cluster_by is applied only by a replace or --full-refresh run\n", opts.Table)
+		}
 		// The table existed at evolution-planning time, so a planned ALTER
 		// backs any type-kind difference.
 		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)

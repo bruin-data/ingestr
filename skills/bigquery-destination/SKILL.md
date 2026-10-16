@@ -126,7 +126,7 @@ The old data is kept until the new table is confirmed, so a failed swap is recov
 
 > **Caveat:** recreating the target drops any table-level metadata ingestr does not itself manage but a user may have set manually on the destination — table/partition expiration, `require_partition_filter`, description, labels, column policy tags, row-level access policies, and CMEK. (The CTAS path already reset these via `CREATE OR REPLACE` regardless; the copy-job path preserved them on an in-place `WRITE_TRUNCATE` but not through a rename-aside recreate.)
 
-**Scope:** this runs only in `SwapTable`, i.e. only for the replace strategy (and full-refresh, which forces replace). Merge and append upsert/insert in place and do not repartition.
+**Scope:** this runs only in `SwapTable`, i.e. only for the replace strategy (and full-refresh, which forces replace). Merge and append upsert/insert in place and do not repartition. When an existing table's partitioning (or an explicitly configured `cluster_by`) differs from the requested spec, the non-DropFirst `PrepareTable` path logs a warning that the old spec is kept until a replace or `--full-refresh` run.
 
 ## 7. Partition / Cluster Mismatch Check (`partitionOrClusterMismatch`)
 
