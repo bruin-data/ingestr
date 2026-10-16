@@ -322,13 +322,19 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		return fmt.Errorf("generating CRRTKN: %w", err)
 	}
 
-	// ACCRDB's own RDBNAM needs the resolved real RDB directory name, same
-	// as PKGNAMCSN - a real packet capture on issue #3 showed ACCRDB going
-	// out with the raw *LOCAL alias despite ?rdb_name= being set, and the
-	// server never replying with ACCRDBRM at all. SECCHK also carries
-	// RDBNAM but keeps using c.database unchanged here: it got a reply
-	// with *LOCAL as-is, so there's no evidence that one needs resolving.
-	accrdbDatabase := c.resolvedRDBName()
+	// v22 switched ACCRDB's own RDBNAM to the resolved real RDB name,
+	// matching what PKGNAMCSN already needed - confirmed correct on the
+	// wire by a packet capture, but ACCRDBRM still never arrived in that
+	// round or the next (v23's clean round-trip split). Meanwhile ACCSEC
+	// sends the raw *LOCAL alias on both of its round trips (initial and
+	// re-negotiated) and gets a reply every time, and so does SECCHK.
+	// Reverting ACCRDB specifically back to the raw alias - the one
+	// RDBNAM/chaining combination not yet tried - on the theory the
+	// server resolves *LOCAL internally for ACCRDB too, the same way it
+	// evidently does for ACCSEC/SECCHK. PKGNAMCSN keeps the resolved name
+	// unchanged: it's a different request sent later, after a real RDB
+	// session would exist, and has no evidence against it either way.
+	accrdbDatabase := c.database
 
 	// SECCHK and ACCRDB used to be sent chained in one round trip (corr=1,
 	// corr=2). A real packet capture on issue #3 showed the server

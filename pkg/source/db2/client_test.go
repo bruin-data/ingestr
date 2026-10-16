@@ -507,7 +507,7 @@ func TestNewCorrelationTokenIsRandomPerCall(t *testing.T) {
 	require.NotEqual(t, a, b, "CRRTKN must correlate one specific unit of work - reusing the same bytes across connections is exactly the bug issue #3's capture pointed at")
 }
 
-func TestHandshakeSendsResolvedRDBNameInACCRDB(t *testing.T) {
+func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
 	defer func() { _ = clientConn.Close() }()
@@ -584,8 +584,8 @@ func TestHandshakeSendsResolvedRDBNameInACCRDB(t *testing.T) {
 		t.Fatal("handshake did not return in time")
 	}
 
-	require.Equal(t, "RDBNAME2", accrdbRDBNAM,
-		"ACCRDB's own RDBNAM must use the resolved real RDB name on IBM i, not the raw *LOCAL alias - a real capture on issue #3 showed the server never replying with ACCRDBRM when it was sent as *LOCAL")
+	require.Equal(t, "*LOCAL", accrdbRDBNAM,
+		"ACCRDB's own RDBNAM reverted to the raw alias - using the resolved name (v22) still never got ACCRDBRM back in two separate captures, while ACCSEC/SECCHK consistently succeed sending *LOCAL as-is on this server")
 }
 
 func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
