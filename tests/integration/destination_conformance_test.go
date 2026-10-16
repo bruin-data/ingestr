@@ -2876,9 +2876,8 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 // TestDestinations_Replace_DedupesByPK verifies that, for destinations that opt
 // into deduplicated replace (DuckDB, SQLite, BigQuery, Postgres), a source
 // containing duplicate primary keys collapses to one row per key in the target,
-// keeping the latest row by incremental key. The fixture has 5 rows over 3
-// distinct ids ({1,1,2,3,3}); incremental key = score, so the higher-score row
-// wins.
+// keeping the greatest non-NULL incremental key. NULLs precede and follow
+// non-NULL scores for ids 1 and 3; id 2 has only NULL scores and must survive.
 func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -2921,7 +2920,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(destTable)).Scan(&count))
 			assert.Equal(t, 3, count, "duplicate primary keys should collapse to one row per key")
 
-			// Latest row per key wins (highest score).
+			// Highest non-NULL score wins, regardless of NULL row arrival order.
 			var name1Raw []byte
 			require.NoError(t, db.QueryRow(tc.sqlBackend.nameByIDQuery(destTable, 1)).Scan(&name1Raw))
 			assert.Equal(t, "v1-latest", string(name1Raw), "id=1 should keep the latest row by incremental key")
@@ -2938,7 +2937,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 // keys to one row per key. Without an incremental key the dedup ORDER BY falls
 // back to "(SELECT NULL)", so the surviving row per key is arbitrary; this test
 // asserts only the collapse and that each survivor is a real source row — not
-// which duplicate wins. Uses the same fixture (5 rows over 3 distinct ids).
+// which duplicate wins. Uses the same fixture (8 rows over 3 distinct ids).
 func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
