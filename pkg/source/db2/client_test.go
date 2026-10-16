@@ -151,6 +151,32 @@ func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
 		"db2PackageSectionQuery (64) should be remapped to 1 on IBM i - 64 still got EOF on PRPSQLSTT even with the right package/token")
 }
 
+func TestPackPKGNAMCSNUsesResolvedRDBNameOnIBMi(t *testing.T) {
+	client := &db2Client{
+		database: padDatabaseName("*LOCAL"),
+		rdbName:  "RDBNAME2",
+		platform: db2PlatformIBMi,
+	}
+
+	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
+
+	require.NoError(t, err)
+	database := decodeString(packet[4:4+18], "cp500")
+	require.Equal(t, "RDBNAME2", strings.TrimRight(database, " "),
+		"*LOCAL is a symbolic alias ACCSEC/ACCRDB resolve themselves - PKGNAMCSN needs the real RDB directory name (confirmed via QSYS2.SYSPACKAGE's PACKAGE_CATALOG column) or the server can't find the package")
+}
+
+func TestPackPKGNAMCSNFallsBackToDatabaseWhenRDBNameUnresolved(t *testing.T) {
+	client := &db2Client{database: padDatabaseName("*LOCAL"), platform: db2PlatformIBMi}
+
+	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
+
+	require.NoError(t, err)
+	database := decodeString(packet[4:4+18], "cp500")
+	require.Equal(t, "*LOCAL", strings.TrimRight(database, " "),
+		"without a resolved RDB name, falling back to the raw database value keeps today's (known-broken-on-alias) behavior instead of crashing")
+}
+
 func TestPackPKGNAMCSNKeepsNonQuerySectionsUnchangedOnIBMi(t *testing.T) {
 	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
 
@@ -516,6 +542,63 @@ func TestParseResponseDetectsIBMiPlatformFromPRDID(t *testing.T) {
 	}
 
 	require.Equal(t, db2PlatformIBMi, client.Platform())
+}
+
+func TestParseResponseAutoDetectsRDBNameFromACCRDBRM(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	prdid, err := packString(cpPRDID, "QSQ07030", "cp500")
+	require.NoError(t, err)
+	rdbnam, err := packString(cpRDBNAM, "RDBNAME2", "cp500")
+	require.NoError(t, err)
+	object := append(append([]byte{}, prdid...), rdbnam...)
+	require.NoError(t, writeTestDSS(serverConn, cpACCRDBRM, object, false))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected parseResponse to finish")
+	}
+
+	require.Equal(t, "RDBNAME2", client.rdbName,
+		"database (e.g. *LOCAL) is a symbolic alias - PKGNAMCSN needs the real RDB name the server echoes back in ACCRDBRM")
+}
+
+func TestParseResponseKeepsRDBNameOverrideFromACCRDBRM(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second, rdbName: "MANUALOVERRIDE"}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	rdbnam, err := packString(cpRDBNAM, "RDBNAME2", "cp500")
+	require.NoError(t, err)
+	require.NoError(t, writeTestDSS(serverConn, cpACCRDBRM, rdbnam, false))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected parseResponse to finish")
+	}
+
+	require.Equal(t, "MANUALOVERRIDE", client.rdbName,
+		"an explicit rdb_name override must take precedence over whatever ACCRDBRM echoes back")
 }
 
 func TestParseResponseHonorsPlatformOverride(t *testing.T) {

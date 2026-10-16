@@ -25,6 +25,12 @@ type db2Client struct {
 	private  *big.Int
 	mu       sync.Mutex
 	platform db2Platform
+	// rdbName is the real RDB directory name (e.g. "RDBNAME2"), distinct
+	// from database which is commonly a symbolic alias like *LOCAL on
+	// IBM i. ACCSEC/ACCRDB resolve the alias themselves, but PKGNAMCSN
+	// needs the real name. Set directly from the URI's rdb_name override
+	// if given, otherwise auto-detected from ACCRDBRM during handshake.
+	rdbName string
 }
 
 // Platform returns the Db2 platform serving the RDB: either the value
@@ -101,6 +107,7 @@ func dialDb2(ctx context.Context, cfg db2ConnConfig) (*db2Client, error) {
 	client := &db2Client{
 		conn:     conn,
 		database: padDatabaseName(cfg.Database),
+		rdbName:  strings.TrimSpace(cfg.RDBName),
 		user:     cfg.User,
 		password: cfg.Password,
 		timeout:  cfg.Timeout,
@@ -413,17 +420,28 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 					}
 				}
 			case cpACCRDBRM:
+				fields := parseReplyObject(packet.object)
 				if c.platform == db2PlatformAuto {
-					v, ok := parseReplyObject(packet.object)[cpPRDID]
-					if !ok || len(v) == 0 {
+					if v, ok := fields[cpPRDID]; ok && len(v) > 0 {
+						prdid := decodeString(v, "cp500")
+						detected := detectDb2PlatformFromPRDID(prdid)
+						config.Debug("[DB2] handshake: ACCRDBRM PRDID=%q, detected platform=%s", prdid, detected)
+						if detected != db2PlatformAuto {
+							c.platform = detected
+						}
+					} else {
 						config.Debug("[DB2] handshake: ACCRDBRM has no PRDID, platform stays auto (LUW-shaped catalog queries)")
-						break
 					}
-					prdid := decodeString(v, "cp500")
-					detected := detectDb2PlatformFromPRDID(prdid)
-					config.Debug("[DB2] handshake: ACCRDBRM PRDID=%q, detected platform=%s", prdid, detected)
-					if detected != db2PlatformAuto {
-						c.platform = detected
+				}
+				// database (e.g. *LOCAL on IBM i) is a symbolic alias that
+				// ACCSEC/ACCRDB resolve themselves; PKGNAMCSN needs the real
+				// RDB directory name instead. Capture it from ACCRDBRM if
+				// the server echoes it back, unless an explicit rdb_name
+				// override already took precedence.
+				if c.rdbName == "" {
+					if v, ok := fields[cpRDBNAM]; ok && len(v) > 0 {
+						c.rdbName = strings.TrimSpace(decodeString(v, "cp500"))
+						config.Debug("[DB2] handshake: ACCRDBRM RDBNAM=%q, using as the real RDB name for PKGNAMCSN", c.rdbName)
 					}
 				}
 			case cpSECCHKRM, cpEXCSATRD:
@@ -628,14 +646,24 @@ func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	// are cp500-encoded elsewhere in this file. This one was left as raw
 	// ASCII, which a real IBM i host rejects outright (EOF on PRPSQLSTT
 	// before it even reaches the SQL text).
+	database := c.database
 	collection, pkgName, token := db2PackageCollectionLUW, db2PackageName, db2PackageToken
 	if c.platform == db2PlatformIBMi {
 		collection, pkgName, token = db2PackageCollectionIBMi, db2PackageNameIBMi, db2PackageTokenIBMi
 		if statementNumber == db2PackageSectionQuery {
 			statementNumber = db2PackageSectionQueryIBMi
 		}
+		// database is commonly a symbolic alias (*LOCAL) that only
+		// ACCSEC/ACCRDB resolve; package lookups need the real RDB
+		// directory name (confirmed via QSYS2.SYSPACKAGE's
+		// PACKAGE_CATALOG column - *LOCAL isn't a valid catalog name).
+		if c.rdbName != "" {
+			database = padDatabaseName(c.rdbName)
+		} else {
+			config.Debug("[DB2] PKGNAMCSN: no resolved RDB name on IBM i, falling back to %q (likely wrong if this is a symbolic alias)", c.database)
+		}
 	}
-	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, collection, pkgName, token)
+	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", database, collection, pkgName, token)
 	raw, err := encodeString(text, "cp500")
 	if err != nil {
 		return nil, fmt.Errorf("encoding PKGNAMCSN: %w", err)
@@ -643,7 +671,7 @@ func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	// Log the bytes actually going on the wire (raw, post-cp500), not the
 	// pre-encoding Go string - %x on the Go string here would print its
 	// ASCII bytes and misleadingly look like the encoding step never ran.
-	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q wire_hex=%x section=%d", c.database, collection, pkgName, token, raw, statementNumber)
+	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q wire_hex=%x section=%d", database, collection, pkgName, token, raw, statementNumber)
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
 	return packBinary(cpPKGNAMCSN, raw), nil
 }

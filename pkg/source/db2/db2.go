@@ -302,6 +302,7 @@ type db2ConnConfig struct {
 	Address  string
 	Host     string
 	Database string
+	RDBName  string
 	User     string
 	Password string
 	Schema   string
@@ -369,6 +370,12 @@ func parseDb2URI(raw string) (db2ConnConfig, error) {
 		Address:  net.JoinHostPort(host, port),
 		Host:     host,
 		Database: database,
+		// RDBName lets IBM i users override the real RDB directory name
+		// when auto-detecting it from ACCRDBRM doesn't work. PKGNAMCSN
+		// needs the real name (e.g. "RDBNAME2") - the database value is
+		// commonly a symbolic alias like *LOCAL, which only ACCRDB/ACCSEC
+		// resolve, not package lookups.
+		RDBName:  query.Get("rdb_name"),
 		User:     user,
 		Password: password,
 		Schema:   query.Get("schema"),

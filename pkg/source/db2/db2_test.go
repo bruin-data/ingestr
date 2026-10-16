@@ -29,6 +29,12 @@ func TestParseDb2URIPlatformOverride(t *testing.T) {
 	require.Equal(t, db2PlatformIBMi, cfg.Platform)
 }
 
+func TestParseDb2URIRDBNameOverride(t *testing.T) {
+	cfg, err := parseDb2URI("db2://db2inst1:password@example.com/%2ALOCAL?platform=ibmi&rdb_name=RDBNAME2")
+	require.NoError(t, err)
+	require.Equal(t, "RDBNAME2", cfg.RDBName)
+}
+
 func TestParseDb2URIRejectsInvalidPlatform(t *testing.T) {
 	_, err := parseDb2URI("db2://db2inst1:password@example.com/sample?platform=bogus")
 	require.ErrorContains(t, err, "unsupported platform")
