@@ -328,6 +328,8 @@ func ArrowFieldToColumn(name string, dt arrow.DataType, nullable bool) schema.Co
 		}
 		col.DataType = schema.TypeArray
 		col.ArrayType = elemCol.DataType
+		col.Precision = elemCol.Precision
+		col.Scale = elemCol.Scale
 	case arrow.FIXED_SIZE_LIST, arrow.STRUCT, arrow.MAP:
 		col.DataType = schema.TypeJSON
 	case arrow.EXTENSION:
