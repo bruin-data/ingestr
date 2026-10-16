@@ -2538,3 +2538,44 @@ func TestCDCStateBeginRunRetainsCompletedGenerationForPrune(t *testing.T) {
 	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, "public.table_000"))
 	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, fmt.Sprintf("public.table_%03d", cdcStatePruneThreshold-1)))
 }
+
+func TestCDCStateExternalBaselineSurvivesRestartAndPruning(t *testing.T) {
+	dest := newCDCStateDestination()
+	dest.defaultMaxLSN = "" // External rows have no CDC metadata yet.
+	tables := map[string]string{"public.orders": "raw.orders"}
+	const connector = "external-baseline"
+	const baseline = "00000001/00000020"
+	manager := restartedCDCStateManager(t, dest, connector, tables)
+	mode, err := manager.ResolveSnapshotMode(t.Context(), "never")
+	require.NoError(t, err)
+	require.Equal(t, "never", mode)
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+	require.NoError(t, manager.AdoptBaseline(t.Context(), map[string]string{"public.orders": baseline}))
+	for range 40 {
+		manager = restartedCDCStateManager(t, dest, connector, tables)
+		mode, err = manager.ResolveSnapshotMode(t.Context(), "")
+		require.NoError(t, err)
+		require.Equal(t, "never", mode)
+		require.Equal(t, baseline, mustKeyedResumePosition(t, manager, "public.orders"))
+		require.NoError(t, manager.BeginRun(t.Context(), false))
+		// A killed run must not require non-NULL CDC metadata to resume.
+		manager = restartedCDCStateManager(t, dest, connector, tables)
+		require.Equal(t, baseline, mustKeyedResumePosition(t, manager, "public.orders"))
+		require.NoError(t, manager.BeginRun(t.Context(), false))
+		require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{Position: baseline}))
+	}
+	manager = restartedCDCStateManager(t, dest, connector, tables)
+	_, err = manager.ResolveSnapshotMode(t.Context(), "initial")
+	require.ErrorContains(t, err, "durable never-snapshot policy")
+	require.ErrorContains(t, manager.BeginRun(t.Context(), true), "never-snapshot policy")
+
+	// Newer keyed merges are replayable, but a replaced target is not.
+	require.Equal(t, baseline, mustKeyedResumePosition(t, manager, "public.orders"))
+	require.NoError(t, manager.BeginRun(t.Context(), false))
+	dest.defaultMaxLSN = "00000001/00000040"
+	manager = restartedCDCStateManager(t, dest, connector, tables)
+	require.Equal(t, baseline, mustKeyedResumePosition(t, manager, "public.orders"))
+	dest.incarnations["raw.orders"] = "replaced"
+	manager = restartedCDCStateManager(t, dest, connector, tables)
+	require.Empty(t, mustKeyedResumePosition(t, manager, "public.orders"))
+}

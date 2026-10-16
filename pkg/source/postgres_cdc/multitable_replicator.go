@@ -136,6 +136,9 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 
 	config.Debug("[CDC] Starting replication for slot %s from LSN %s", r.cdcConfig.SlotName, r.startLSN)
 
+	if err := r.source.validateNoSnapshotSlot(ctx, r.startLSN); err != nil {
+		return err
+	}
 	err := pglogrepl.StartReplication(
 		ctx,
 		r.source.replConn,

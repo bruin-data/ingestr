@@ -120,6 +120,16 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("CDC_TABLE_NAMING", "INGESTR_CDC_TABLE_NAMING"),
 			},
 			&cli.StringFlag{
+				Name:    "cdc-snapshot-mode",
+				Usage:   "PostgreSQL CDC snapshot policy: initial (default) or never; omitted inherits the saved policy",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_MODE"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-start-lsn",
+				Usage:   "Bootstrap preloaded PostgreSQL CDC targets at this LSN (requires --cdc-snapshot-mode never; first run only)",
+				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
+			},
+			&cli.StringFlag{
 				Name:    "progress",
 				Usage:   "The progress display type (interactive, log, json)",
 				Value:   "interactive",
@@ -359,6 +369,8 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.SchemaContract = c.String("schema-contract")
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))
+	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
+	cfg.CDCStartLSN = c.String("cdc-start-lsn")
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
 	switch mb := int64(c.Int("batch-size")); {
