@@ -2719,6 +2719,19 @@ func TestNonFiniteFloatsFollowWriteNulls(t *testing.T) {
 	}
 }
 
+func TestNonFiniteFloatsInListsBecomeNull(t *testing.T) {
+	b := array.NewListBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Float64)
+	defer b.Release()
+	b.Append(true)
+	b.ValueBuilder().(*array.Float64Builder).AppendValues([]float64{1.5, math.NaN(), math.Inf(1)}, nil)
+	arr := b.NewArray()
+	defer arr.Release()
+
+	val, ok := propertyValue(arr, 0)
+	require.True(t, ok)
+	assert.Equal(t, "[1.5,null,null]", val)
+}
+
 func TestPropertyValueDecimal256(t *testing.T) {
 	dt := &arrow.Decimal256Type{Precision: 50, Scale: 4}
 	bld := array.NewDecimal256Builder(memory.DefaultAllocator, dt)

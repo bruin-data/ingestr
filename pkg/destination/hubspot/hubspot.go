@@ -2796,7 +2796,7 @@ func jsonString(v interface{}) string {
 // arrowToValue decodes nested struct/list values so they can be JSON-encoded
 // into a single HubSpot property string.
 func arrowToValue(arr arrow.Array, idx int) interface{} {
-	if arr.IsNull(idx) {
+	if arr.IsNull(idx) || nonFinite(arr, idx) {
 		return nil
 	}
 	switch a := arr.(type) {
