@@ -31,6 +31,12 @@ type db2Client struct {
 	// needs the real name. Set directly from the URI's rdb_name override
 	// if given, otherwise auto-detected from ACCRDBRM during handshake.
 	rdbName string
+	// sawACCRDBRM records whether the handshake's parseResponse call
+	// actually observed an ACCRDBRM reply. parseResponse returns
+	// successfully once the chain ends with no error reply, even if
+	// ACCRDBRM specifically never arrived - this flag lets handshake
+	// tell the two cases apart instead of silently assuming success.
+	sawACCRDBRM bool
 }
 
 // Platform returns the Db2 platform serving the RDB: either the value
@@ -304,16 +310,32 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		return err
 	}
 
+	// CRRTKN correlates this specific unit of work for the server - it must
+	// not repeat across unrelated connections. A hardcoded constant was
+	// used here previously; a real packet capture against IBM i showed
+	// SECCHK (no CRRTKN) gets a reply (SECCHKRM) but the chained ACCRDB
+	// (which carries CRRTKN) gets none at all, no error either - exactly
+	// the field that differs between the two. Generating a fresh one here
+	// is the narrowest fix matching that evidence.
+	crrtkn, err := newCorrelationToken()
+	if err != nil {
+		return fmt.Errorf("generating CRRTKN: %w", err)
+	}
+
 	config.Debug("[DB2] handshake: sending SECCHK (secmec=%d) + ACCRDB", secmec)
 	curID = 1
 	if curID, err = writeRequestDSS(c.conn, secchk, curID, false, false); err != nil {
 		return fmt.Errorf("sending SECCHK: %w", err)
 	}
-	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database, c.platform), curID, false, true); err != nil {
+	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database, c.platform, crrtkn), curID, false, true); err != nil {
 		return fmt.Errorf("sending ACCRDB: %w", err)
 	}
+	c.sawACCRDBRM = false
 	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
 		return fmt.Errorf("reading SECCHKRM/ACCRDBRM: %w", err)
+	}
+	if !c.sawACCRDBRM {
+		config.Debug("[DB2] handshake: WARNING - no ACCRDBRM was received for ACCRDB; the RDB session is likely not established despite no error")
 	}
 	config.Debug("[DB2] handshake: SECCHKRM/ACCRDBRM received, authenticated, platform=%s", c.platform)
 
@@ -434,6 +456,7 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 					}
 				}
 			case cpACCRDBRM:
+				c.sawACCRDBRM = true
 				fields := parseReplyObject(packet.object)
 				if c.platform == db2PlatformAuto {
 					if v, ok := fields[cpPRDID]; ok && len(v) > 0 {
@@ -779,7 +802,7 @@ func packACCSEC(database string, secmec int, sectkn []byte) []byte {
 	return mustPackDSSObject(cpACCSEC, body.Bytes())
 }
 
-func packACCRDB(database string, platform db2Platform) []byte {
+func packACCRDB(database string, platform db2Platform, crrtkn []byte) []byte {
 	typdefnam := "QTDSQLX86"
 	if platform == db2PlatformIBMi {
 		typdefnam = db2TypDefNameIBMi
@@ -789,7 +812,7 @@ func packACCRDB(database string, platform db2Platform) []byte {
 	body.Write(packUint(cpRDBACCCL, int(cpSQLAM), 2))
 	body.Write(mustPackString(cpPRDID, "SQL11014", "cp500"))
 	body.Write(mustPackString(cpTYPDEFNAM, typdefnam, "cp500"))
-	body.Write(packBinary(cpCRRTKN, mustHex("d5c6f0f0f0f0f0f12ec3f0c1f50155630d5a11")))
+	body.Write(packBinary(cpCRRTKN, crrtkn))
 	body.Write(packBinary(cpTYPDEFOVR, mustHex("0006119c04b80006119d04b00006119e04b8")))
 	return mustPackDSSObject(cpACCRDB, body.Bytes())
 }

@@ -23,6 +23,21 @@ func newPrivateKey() (*big.Int, error) {
 	return n.Add(n, big.NewInt(2)), nil
 }
 
+// newCorrelationToken returns a connection-unique DRDA correlation token
+// (CRRTKN), sent on ACCRDB. The DDM spec defines CRRTKN as correlating the
+// processing of one particular unit of work between requester and server -
+// it must not be the same value across unrelated connections. 8 bytes
+// keeps it comfortably under the 12-byte CRRTKN limit documented for some
+// Db2 server versions (longer tokens have been observed to break the
+// connection outright on those).
+func newCorrelationToken() ([]byte, error) {
+	token := make([]byte, 8)
+	if _, err := rand.Read(token); err != nil {
+		return nil, fmt.Errorf("generating CRRTKN: %w", err)
+	}
+	return token, nil
+}
+
 func publicKey(private *big.Int) []byte {
 	v := new(big.Int).Exp(dhBase, private, dhPrime).Bytes()
 	if len(v) >= 32 {
