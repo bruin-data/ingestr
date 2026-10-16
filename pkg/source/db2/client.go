@@ -197,6 +197,14 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	config.Debug("[DB2] handshake: ACCSECRD received, secmec=%d, token_len=%d", secmec, len(sectkn))
 	resolved := resolveSecMec(secmec, sectkn)
 
+	// A server claiming secmecEncryptedUserPassword with no token, then
+	// confirming secmecEUSRIDPWD once we re-propose plain-text auth, is a
+	// pattern we've only observed against Db2 for i - it doesn't happen on
+	// LUW or z/OS. Used below as a platform-detection fallback for hosts
+	// whose ACCRDBRM doesn't carry a PRDID we can match.
+	claimedEncryptedNoToken := secmec == secmecEncryptedUserPassword && len(sectkn) == 0
+	secmecDowngradedToEUSRIDPWD := false
+
 	if resolved != secmecEncryptedUserPassword {
 		// The server couldn't actually back the mechanism it claimed (or
 		// claimed none), and we're downgrading locally. DRDA requires
@@ -218,6 +226,7 @@ func (c *db2Client) handshake(ctx context.Context) error {
 			resolved = confirmedSecmec
 		}
 		sectkn = confirmedSectkn
+		secmecDowngradedToEUSRIDPWD = claimedEncryptedNoToken && resolved == secmecEUSRIDPWD
 	}
 	secmec = resolved
 
@@ -236,6 +245,10 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	}
 	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
 		return fmt.Errorf("reading SECCHKRM/ACCRDBRM: %w", err)
+	}
+	if c.platform == db2PlatformAuto && secmecDowngradedToEUSRIDPWD {
+		config.Debug("[DB2] handshake: PRDID didn't resolve platform, but SECMEC 9->8 downgrade pattern matches IBM i")
+		c.platform = db2PlatformIBMi
 	}
 	config.Debug("[DB2] handshake: SECCHKRM/ACCRDBRM received, authenticated, platform=%s", c.platform)
 

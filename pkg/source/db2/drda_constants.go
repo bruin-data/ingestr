@@ -67,6 +67,13 @@ const (
 const (
 	secmecUserPassword          = 3
 	secmecEncryptedUserPassword = 9
+	// secmecEUSRIDPWD is not in the public DRDA SECMEC registry. Observed
+	// on a real Db2 for i host: it claims secmecEncryptedUserPassword with
+	// no token, then confirms this value once the client re-proposes
+	// secmecUserPassword. Used as a platform-detection fallback when PRDID
+	// in ACCRDBRM doesn't resolve the platform (see handshake's
+	// secmecDowngradedToEUSRIDPWD).
+	secmecEUSRIDPWD = 8
 )
 
 const (

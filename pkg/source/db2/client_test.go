@@ -251,6 +251,84 @@ func TestHandshakeRenegotiatesACCSECWhenDowngrading(t *testing.T) {
 	require.Equal(t, []uint16{cpEXCSAT, cpACCSEC, cpACCSEC}, codePoints)
 }
 
+func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	private, err := newPrivateKey()
+	require.NoError(t, err)
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		user:     "user",
+		password: "pass",
+		timeout:  time.Second,
+		private:  private,
+	}
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		// EXCSAT, then ACCSEC.
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		// Claims SECMEC 9, no token - same quirk as DBHPROD2.
+		if writeTestDSS(serverConn, cpEXCSATRD, nil, true) != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEncryptedUserPassword, 2), false) != nil {
+			return
+		}
+
+		// Re-proposed ACCSEC; confirm with the undocumented SECMEC 8.
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		// SECCHK, then ACCRDB.
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		// ACCRDBRM with no PRDID at all - the real server's quirk reported
+		// on issue #3: PRDID-based detection has nothing to match, so the
+		// SECMEC downgrade pattern is the only signal left.
+		_ = writeTestDSS(serverConn, cpACCRDBRM, nil, false)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handshake(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("handshake did not return in time")
+	}
+
+	require.Equal(t, db2PlatformIBMi, client.Platform(), "SECMEC 9->8 downgrade should be detected as IBM i when PRDID can't resolve it")
+}
+
 // drainOneRequest reads DSS packets from conn until a non-chained one is
 // seen, recording each codepoint, then writes back a single innocuous
 // reply so the caller's parseResponse completes without error.
