@@ -1032,6 +1032,10 @@ func buildChangeConditionsClickHouse(columns []string, targetAlias, sourceAlias 
 
 func extractValue(arr arrow.Array, idx int) interface{} {
 	if arr.IsNull(idx) {
+		// ClickHouse arrays can't be NULL, so a NULL list is written as empty.
+		if _, ok := arr.(*array.List); ok {
+			return []interface{}{}
+		}
 		return nil
 	}
 

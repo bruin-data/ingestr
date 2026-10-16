@@ -372,7 +372,7 @@ func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 		},
 		"clickhouse": {
 			"String", "Bool", "Int8", "Int16", "Int32", "Int64", "Float32", "Float64", "Decimal(18,4)",
-			"String", "String", "Date", "String", "DateTime64(6)", "DateTime64(6, 'UTC')", "String", "String", "UUID", "Array(Int64)",
+			"String", "String", "Date", "String", "DateTime64(6)", "DateTime64(6, 'UTC')", "String", "String", "UUID", "Array(Nullable(Int64))",
 		},
 		"cratedb": {
 			"TEXT", "BOOLEAN", "BIGINT", "BIGINT", "BIGINT", "BIGINT", "DOUBLE PRECISION", "DOUBLE PRECISION", "NUMERIC(18,4)",
@@ -449,7 +449,7 @@ func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 func TestAllDialects_TypeName_StringArray(t *testing.T) {
 	expected := map[string]string{
 		"athena": "ARRAY(VARCHAR)", "bigquery": "ARRAY<STRING>", "cassandra": "list<text>",
-		"clickhouse": "Array(String)", "cratedb": "ARRAY(TEXT)", "duckdb": "VARCHAR[]",
+		"clickhouse": "Array(Nullable(String))", "cratedb": "ARRAY(TEXT)", "duckdb": "VARCHAR[]",
 		"fabric": "VARCHAR(MAX)", "hana": "NCLOB", "maxcompute": "STRING",
 		"mssql": "NVARCHAR(MAX)", "mysql": "JSON", "oracle": "CLOB",
 		"postgres": "TEXT[]", "redshift": "SUPER", "snowflake": "ARRAY",

@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -441,5 +444,40 @@ func TestBeginTransactionUnsupported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not support transactions") {
 		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
+	}
+}
+
+func TestArrayColumnsUseNullableElements(t *testing.T) {
+	col := schema.Column{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt32, Nullable: true}
+	if got := MapDataTypeToClickHouse(col); got != "Array(Nullable(Int32))" {
+		t.Errorf("MapDataTypeToClickHouse = %q", got)
+	}
+	d := &Dialect{}
+	if got := d.AddColumnSQL("t", col); !strings.HasSuffix(got, "`nums` Array(Nullable(Int32))") {
+		t.Errorf("AddColumnSQL = %q", got)
+	}
+	if got := d.AlterColumnTypeSQL("t", "nums", col); !strings.HasSuffix(got, "`nums` Array(Nullable(Int32))") {
+		t.Errorf("AlterColumnTypeSQL = %q", got)
+	}
+	if got := MapDataTypeToClickHouse(schema.Column{DataType: schema.TypeInt32, Nullable: true}); got != "Nullable(Int32)" {
+		t.Errorf("scalar column = %q", got)
+	}
+}
+
+func TestExtractValueArrays(t *testing.T) {
+	b := array.NewListBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Int32)
+	defer b.Release()
+	vb := b.ValueBuilder().(*array.Int32Builder)
+	b.Append(true)
+	vb.AppendValues([]int32{1, 0, 3}, []bool{true, false, true})
+	b.AppendNull()
+	arr := b.NewArray()
+	defer arr.Release()
+
+	if got := extractValue(arr, 0).([]interface{}); len(got) != 3 || got[1] != nil {
+		t.Errorf("NULL element = %v, want [1 <nil> 3]", got)
+	}
+	if got, ok := extractValue(arr, 1).([]interface{}); !ok || len(got) != 0 {
+		t.Errorf("NULL array = %#v, want empty array", extractValue(arr, 1))
 	}
 }

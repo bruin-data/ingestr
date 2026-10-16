@@ -18,7 +18,7 @@ func (d *Dialect) Name() string {
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
 	typeName := d.TypeName(col)
-	if col.Nullable {
+	if col.Nullable && col.DataType != schema.TypeArray {
 		typeName = fmt.Sprintf("Nullable(%s)", typeName)
 	}
 	return fmt.Sprintf("ALTER TABLE %s%s ADD COLUMN %s %s",
@@ -30,7 +30,7 @@ func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
 
 func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {
 	typeName := d.TypeName(newType)
-	if newType.Nullable {
+	if newType.Nullable && newType.DataType != schema.TypeArray {
 		typeName = fmt.Sprintf("Nullable(%s)", typeName)
 	}
 	return fmt.Sprintf("ALTER TABLE %s%s MODIFY COLUMN %s %s",
@@ -85,7 +85,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 		return "UUID"
 	case schema.TypeArray:
 		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
-		return fmt.Sprintf("Array(%s)", d.TypeName(elemCol))
+		return fmt.Sprintf("Array(Nullable(%s))", d.TypeName(elemCol))
 	default:
 		return "String"
 	}
