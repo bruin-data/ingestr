@@ -267,20 +267,17 @@ func drainOneRequest(t *testing.T, conn net.Conn, codePoints *[]uint16) {
 	require.NoError(t, writeTestDSS(conn, cpRDBCMM, nil, false))
 }
 
-func TestSetClientVariablesSkipsLUWStatementsOnIBMi(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close() }()
+func TestSetClientVariablesSkipsEntirelyOnIBMi(t *testing.T) {
+	// No server goroutine at all: a real IBM i host drops the connection
+	// on the very first thing this function used to send (the post-auth
+	// CCSID renegotiation EXCSAT), so on IBM i it must return immediately
+	// without writing anything to the wire. net.Pipe's Write blocks until
+	// something Reads, so if setClientVariables wrote anything here, this
+	// test would hang until the timeout instead of completing.
+	_, clientConn := net.Pipe()
 	defer func() { _ = clientConn.Close() }()
 
 	client := &db2Client{conn: clientConn, timeout: time.Second, platform: db2PlatformIBMi}
-
-	var codePoints []uint16
-	serverDone := make(chan struct{})
-	go func() {
-		defer close(serverDone)
-		drainOneRequest(t, serverConn, &codePoints) // CCSID EXCSAT
-		drainOneRequest(t, serverConn, &codePoints) // commit
-	}()
 
 	done := make(chan error, 1)
 	go func() {
@@ -288,18 +285,11 @@ func TestSetClientVariablesSkipsLUWStatementsOnIBMi(t *testing.T) {
 	}()
 
 	select {
-	case <-serverDone:
-	case <-time.After(time.Second):
-		t.Fatal("server script did not complete in time")
-	}
-	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("setClientVariables did not return in time")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("setClientVariables should return immediately on IBM i without writing to the connection")
 	}
-
-	require.Equal(t, []uint16{cpEXCSAT, cpRDBCMM}, codePoints)
 }
 
 func TestSetClientVariablesSendsLUWStatementsOnLUW(t *testing.T) {

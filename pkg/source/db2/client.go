@@ -397,27 +397,33 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 // statement the server rejects is isolated and reported precisely instead
 // of surfacing as an opaque EOF for the whole function.
 func (c *db2Client) setClientVariables(ctx context.Context) error {
+	if c.platform == db2PlatformIBMi {
+		// Everything below is DB2-LUW/z/OS-specific: the post-auth CCSID
+		// manager renegotiation (confirmed via a real IBM i host to drop
+		// the connection outright - the actual character-encoding
+		// negotiation already happened via cpUNICODE in the very first,
+		// pre-auth EXCSAT, so this second one is redundant anyway), and
+		// SET CLIENT WRKSTNNAME / SET CURRENT LOCALE, which are DB2-LUW
+		// SQL special registers IBM i doesn't recognize (workstation name
+		// travels in DRDA's own EXCSAT/ACCRDB fields there, and CCSID/
+		// locale is a job-level attribute, not a settable SQL register).
+		config.Debug("[DB2] setClientVariables: skipping entirely on IBM i")
+		return nil
+	}
+
 	config.Debug("[DB2] setClientVariables: renegotiating CCSID manager (UTF-8)")
 	if err := c.sendAndAwait(ctx, packEXCSATMGRLVLLS()); err != nil {
 		return fmt.Errorf("renegotiating CCSID manager: %w", err)
 	}
 
-	if c.platform == db2PlatformIBMi {
-		// SET CLIENT WRKSTNNAME and SET CURRENT LOCALE are DB2-LUW SQL
-		// special registers; IBM i doesn't recognize them (workstation
-		// name travels in DRDA's own EXCSAT/ACCRDB fields, and locale/CCSID
-		// is a job-level attribute, not a settable SQL register).
-		config.Debug("[DB2] setClientVariables: skipping SET CLIENT WRKSTNNAME / SET CURRENT LOCALE on IBM i")
-	} else {
-		config.Debug("[DB2] setClientVariables: setting client workstation name")
-		if err := c.execSetStatement(ctx, "SET CLIENT WRKSTNNAME 'ingestr'"); err != nil {
-			return fmt.Errorf("setting client workstation name: %w", err)
-		}
+	config.Debug("[DB2] setClientVariables: setting client workstation name")
+	if err := c.execSetStatement(ctx, "SET CLIENT WRKSTNNAME 'ingestr'"); err != nil {
+		return fmt.Errorf("setting client workstation name: %w", err)
+	}
 
-		config.Debug("[DB2] setClientVariables: setting current locale")
-		if err := c.execSetStatement(ctx, "SET CURRENT LOCALE LC_CTYPE='en_US'"); err != nil {
-			return fmt.Errorf("setting current locale: %w", err)
-		}
+	config.Debug("[DB2] setClientVariables: setting current locale")
+	if err := c.execSetStatement(ctx, "SET CURRENT LOCALE LC_CTYPE='en_US'"); err != nil {
+		return fmt.Errorf("setting current locale: %w", err)
 	}
 
 	config.Debug("[DB2] setClientVariables: committing")
