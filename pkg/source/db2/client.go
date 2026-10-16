@@ -63,6 +63,12 @@ const (
 	// trusting the translation blind: encodeString("QSQCLI", "cp500")
 	// produces that exact byte sequence.
 	db2PackageTokenIBMi = "QSQCLI"
+	// db2PackageSectionQueryIBMi: still unverified against the real
+	// host - package/collection/token are all now confirmed correct via
+	// QSYS2.SYSPACKAGE, but PRPSQLSTT still gets EOF, so section 64
+	// (safe on paper - QSQCLIPKGC has 512 sections, 0-511) is the next
+	// thing to try changing. 1 was flagged as the fallback worth trying.
+	db2PackageSectionQueryIBMi = 1
 )
 
 type db2StreamHandler struct {
@@ -625,13 +631,19 @@ func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	collection, pkgName, token := db2PackageCollectionLUW, db2PackageName, db2PackageToken
 	if c.platform == db2PlatformIBMi {
 		collection, pkgName, token = db2PackageCollectionIBMi, db2PackageNameIBMi, db2PackageTokenIBMi
+		if statementNumber == db2PackageSectionQuery {
+			statementNumber = db2PackageSectionQueryIBMi
+		}
 	}
 	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, collection, pkgName, token)
 	raw, err := encodeString(text, "cp500")
 	if err != nil {
 		return nil, fmt.Errorf("encoding PKGNAMCSN: %w", err)
 	}
-	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q (hex %x) section=%d", c.database, collection, pkgName, token, []byte(token), statementNumber)
+	// Log the bytes actually going on the wire (raw, post-cp500), not the
+	// pre-encoding Go string - %x on the Go string here would print its
+	// ASCII bytes and misleadingly look like the encoding step never ran.
+	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q wire_hex=%x section=%d", c.database, collection, pkgName, token, raw, statementNumber)
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
 	return packBinary(cpPKGNAMCSN, raw), nil
 }

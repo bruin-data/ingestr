@@ -146,6 +146,20 @@ func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
 	token := packet[4+18+18+18 : 4+18+18+18+8]
 	require.Equal(t, []byte{0xd8, 0xe2, 0xd8, 0xc3, 0xd3, 0xc9, 0x40, 0x40}, token,
 		"must match QSYS2.SYSPACKAGE's real CONSISTENCY_TOKEN for QGPL/QSQCLIPKGC (hex D8E2D8C3D3C94040) - a pre-bound package rejects any other token")
+	section := packet[len(packet)-2:]
+	require.Equal(t, []byte{0x00, 0x01}, section,
+		"db2PackageSectionQuery (64) should be remapped to 1 on IBM i - 64 still got EOF on PRPSQLSTT even with the right package/token")
+}
+
+func TestPackPKGNAMCSNKeepsNonQuerySectionsUnchangedOnIBMi(t *testing.T) {
+	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
+
+	packet, err := client.packPKGNAMCSN(db2PackageSectionSet)
+
+	require.NoError(t, err)
+	section := packet[len(packet)-2:]
+	require.Equal(t, []byte{0x00, byte(db2PackageSectionSet)}, section,
+		"only the query section (64) is remapped on IBM i - other section numbers should pass through untouched")
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
