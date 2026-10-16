@@ -237,7 +237,7 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	if err = c.parseResponse(ctx, db2StreamHandler{}); err != nil {
 		return fmt.Errorf("reading SECCHKRM/ACCRDBRM: %w", err)
 	}
-	config.Debug("[DB2] handshake: SECCHKRM/ACCRDBRM received, authenticated")
+	config.Debug("[DB2] handshake: SECCHKRM/ACCRDBRM received, authenticated, platform=%s", c.platform)
 
 	if err := c.setClientVariables(ctx); err != nil {
 		return fmt.Errorf("setting client variables: %w", err)
@@ -357,10 +357,16 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 				}
 			case cpACCRDBRM:
 				if c.platform == db2PlatformAuto {
-					if v, ok := parseReplyObject(packet.object)[cpPRDID]; ok && len(v) > 0 {
-						if detected := detectDb2PlatformFromPRDID(decodeString(v, "cp500")); detected != db2PlatformAuto {
-							c.platform = detected
-						}
+					v, ok := parseReplyObject(packet.object)[cpPRDID]
+					if !ok || len(v) == 0 {
+						config.Debug("[DB2] handshake: ACCRDBRM has no PRDID, platform stays auto (LUW-shaped catalog queries)")
+						break
+					}
+					prdid := decodeString(v, "cp500")
+					detected := detectDb2PlatformFromPRDID(prdid)
+					config.Debug("[DB2] handshake: ACCRDBRM PRDID=%q, detected platform=%s", prdid, detected)
+					if detected != db2PlatformAuto {
+						c.platform = detected
 					}
 				}
 			case cpSECCHKRM, cpEXCSATRD:
