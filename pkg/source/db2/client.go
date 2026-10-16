@@ -322,12 +322,19 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		return fmt.Errorf("generating CRRTKN: %w", err)
 	}
 
-	config.Debug("[DB2] handshake: sending SECCHK (secmec=%d) + ACCRDB", secmec)
+	// ACCRDB's own RDBNAM needs the resolved real RDB directory name, same
+	// as PKGNAMCSN - a real packet capture on issue #3 showed ACCRDB going
+	// out with the raw *LOCAL alias despite ?rdb_name= being set, and the
+	// server never replying with ACCRDBRM at all. SECCHK also carries
+	// RDBNAM but keeps using c.database unchanged here: it got a reply
+	// with *LOCAL as-is, so there's no evidence that one needs resolving.
+	accrdbDatabase := c.resolvedRDBName()
+	config.Debug("[DB2] handshake: sending SECCHK (secmec=%d) + ACCRDB (RDBNAM=%q)", secmec, accrdbDatabase)
 	curID = 1
 	if curID, err = writeRequestDSS(c.conn, secchk, curID, false, false); err != nil {
 		return fmt.Errorf("sending SECCHK: %w", err)
 	}
-	if _, err = writeRequestDSS(c.conn, packACCRDB(c.database, c.platform, crrtkn), curID, false, true); err != nil {
+	if _, err = writeRequestDSS(c.conn, packACCRDB(accrdbDatabase, c.platform, crrtkn), curID, false, true); err != nil {
 		return fmt.Errorf("sending ACCRDB: %w", err)
 	}
 	c.sawACCRDBRM = false
@@ -677,26 +684,32 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 	return packDSSObject(cpSECCHK, body.Bytes())
 }
 
+// resolvedRDBName returns the real RDB directory name to use wherever a
+// DRDA request needs one to actually resolve (ACCRDB, PKGNAMCSN), falling
+// back to c.database (commonly a symbolic alias like *LOCAL on IBM i) when
+// no override/auto-detected value is available yet. Gated to IBM i since
+// that's the only platform where c.rdbName is ever populated.
+func (c *db2Client) resolvedRDBName() string {
+	if c.platform == db2PlatformIBMi && c.rdbName != "" {
+		return padDatabaseName(c.rdbName)
+	}
+	return c.database
+}
+
 func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	// PKGNAMCSN's RDB/collection/package/token fields are text, same as
 	// every other DRDA character field (RDBNAM, PRDID, ...) - all of which
 	// are cp500-encoded elsewhere in this file. This one was left as raw
 	// ASCII, which a real IBM i host rejects outright (EOF on PRPSQLSTT
 	// before it even reaches the SQL text).
-	database := c.database
+	database := c.resolvedRDBName()
 	collection, pkgName, token := db2PackageCollectionLUW, db2PackageName, db2PackageToken
 	if c.platform == db2PlatformIBMi {
 		collection, pkgName, token = db2PackageCollectionIBMi, db2PackageNameIBMi, db2PackageTokenIBMi
 		if statementNumber == db2PackageSectionQuery {
 			statementNumber = db2PackageSectionQueryIBMi
 		}
-		// database is commonly a symbolic alias (*LOCAL) that only
-		// ACCSEC/ACCRDB resolve; package lookups need the real RDB
-		// directory name (confirmed via QSYS2.SYSPACKAGE's
-		// PACKAGE_CATALOG column - *LOCAL isn't a valid catalog name).
-		if c.rdbName != "" {
-			database = padDatabaseName(c.rdbName)
-		} else {
+		if c.rdbName == "" {
 			config.Debug("[DB2] PKGNAMCSN: no resolved RDB name on IBM i, falling back to %q (likely wrong if this is a symbolic alias)", c.database)
 		}
 	}

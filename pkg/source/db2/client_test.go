@@ -497,6 +497,86 @@ func TestNewCorrelationTokenIsRandomPerCall(t *testing.T) {
 	require.NotEqual(t, a, b, "CRRTKN must correlate one specific unit of work - reusing the same bytes across connections is exactly the bug issue #3's capture pointed at")
 }
 
+func TestHandshakeSendsResolvedRDBNameInACCRDB(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	private, err := newPrivateKey()
+	require.NoError(t, err)
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("*LOCAL"),
+		rdbName:  "RDBNAME2",
+		platform: db2PlatformIBMi,
+		user:     "user",
+		password: "pass",
+		timeout:  time.Second,
+		private:  private,
+	}
+
+	var accrdbRDBNAM string
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		if _, err := readDSS(serverConn); err != nil { // EXCSAT
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil { // ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpEXCSATRD, nil, true) != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEncryptedUserPassword, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // SECCHK
+			return
+		}
+		accrdb, err := readDSS(serverConn)
+		if err != nil {
+			return
+		}
+		fields := parseReplyObject(accrdb.object)
+		accrdbRDBNAM = strings.TrimSpace(decodeString(fields[cpRDBNAM], "cp500"))
+		// Real capture from issue #3: server replies to SECCHK but never
+		// sends ACCRDBRM. Matched here deliberately.
+		_ = writeTestDSS(serverConn, cpSECCHKRM, nil, false)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handshake(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("handshake did not return in time")
+	}
+
+	require.Equal(t, "RDBNAME2", accrdbRDBNAM,
+		"ACCRDB's own RDBNAM must use the resolved real RDB name on IBM i, not the raw *LOCAL alias - a real capture on issue #3 showed the server never replying with ACCRDBRM when it was sent as *LOCAL")
+}
+
 func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
