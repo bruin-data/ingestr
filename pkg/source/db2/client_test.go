@@ -329,6 +329,49 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 	require.Equal(t, db2PlatformIBMi, client.Platform(), "SECMEC 9->8 downgrade should be detected as IBM i when PRDID can't resolve it")
 }
 
+func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		timeout:  time.Second,
+	}
+
+	var codePoints []uint16
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		// PRPSQLSTT + SQLSTT must be fully drained and replied to before
+		// OPNQRY is ever sent - if Stream still chained them together,
+		// this second drain would see OPNQRY mixed into the first one.
+		drainOneRequest(t, serverConn, &codePoints)
+		drainOneRequest(t, serverConn, &codePoints)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Stream(context.Background(), "SELECT 1 FROM QSYS2.SYSTABLES", db2StreamHandler{})
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Stream did not return in time")
+	}
+
+	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpOPNQRY}, codePoints)
+}
+
 // drainOneRequest reads DSS packets from conn until a non-chained one is
 // seen, recording each codepoint, then writes back a single innocuous
 // reply so the caller's parseResponse completes without error.

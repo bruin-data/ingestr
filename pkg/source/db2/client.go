@@ -105,30 +105,44 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 	clearDeadline := c.setDeadline(ctx)
 	defer clearDeadline()
 
+	config.Debug("[DB2] Stream: query=%s", query)
+
+	// PRPSQLSTT (prepare) and OPNQRY (open cursor) are each given their own
+	// round trip rather than one combined chain, same reasoning as
+	// setClientVariables: if IBM i rejects one of these, we want to know
+	// which, not an opaque EOF for the whole sequence.
 	curID := uint16(1)
-	var err error
 	prpSQLSTT, err := c.packPRPSQLSTT()
 	if err != nil {
-		return err
-	}
-	if curID, err = writeRequestDSS(c.conn, prpSQLSTT, curID, true, false); err != nil {
 		return err
 	}
 	sqlSTT, err := packSQLSTT(query)
 	if err != nil {
 		return err
 	}
-	if curID, err = writeRequestDSS(c.conn, sqlSTT, curID, false, false); err != nil {
-		return err
+	config.Debug("[DB2] Stream: sending PRPSQLSTT + SQLSTT")
+	if curID, err = writeRequestDSS(c.conn, prpSQLSTT, curID, true, false); err != nil {
+		return fmt.Errorf("sending PRPSQLSTT: %w", err)
 	}
+	if _, err = writeRequestDSS(c.conn, sqlSTT, curID, false, true); err != nil {
+		return fmt.Errorf("sending SQLSTT: %w", err)
+	}
+	if err := c.parseResponse(ctx, handler); err != nil {
+		return fmt.Errorf("preparing statement: %w", err)
+	}
+
 	opnQRY, err := c.packOPNQRY()
 	if err != nil {
 		return err
 	}
-	if _, err = writeRequestDSS(c.conn, opnQRY, curID, false, true); err != nil {
-		return err
+	config.Debug("[DB2] Stream: sending OPNQRY")
+	if _, err = writeRequestDSS(c.conn, opnQRY, 1, false, true); err != nil {
+		return fmt.Errorf("sending OPNQRY: %w", err)
 	}
-	return c.parseResponse(ctx, handler)
+	if err := c.parseResponse(ctx, handler); err != nil {
+		return fmt.Errorf("opening query: %w", err)
+	}
+	return nil
 }
 
 func (c *db2Client) Exec(ctx context.Context, query string) error {
