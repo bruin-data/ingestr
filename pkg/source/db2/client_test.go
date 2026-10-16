@@ -123,8 +123,11 @@ func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
 	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
 
 	require.NoError(t, err)
-	require.Equal(t, byte('['), packet[4])
-	require.Equal(t, []byte(db2PackageToken), packet[4+18+18+18:4+18+18+18+8])
+	// PKGNAMCSN is text, same as every other DRDA character field - it
+	// travels cp500-encoded, not raw ASCII (a real IBM i host rejects the
+	// prepare outright if it isn't).
+	require.Equal(t, "[", decodeString(packet[4:5], "cp500"))
+	require.Equal(t, db2PackageToken, decodeString(packet[4+18+18+18:4+18+18+18+8], "cp500"))
 	require.Equal(t, []byte{0x00, db2PackageSectionQuery}, packet[len(packet)-2:])
 }
 

@@ -593,8 +593,17 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 }
 
 func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
-	// PKGNAMCSN names pre-bound CLI packages by their catalog bytes; the consistency token is binary.
-	raw := []byte(fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, "NULLID", db2PackageName, db2PackageToken))
+	// PKGNAMCSN's RDB/collection/package/token fields are text, same as
+	// every other DRDA character field (RDBNAM, PRDID, ...) - all of which
+	// are cp500-encoded elsewhere in this file. This one was left as raw
+	// ASCII, which a real IBM i host rejects outright (EOF on PRPSQLSTT
+	// before it even reaches the SQL text).
+	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, "NULLID", db2PackageName, db2PackageToken)
+	raw, err := encodeString(text, "cp500")
+	if err != nil {
+		return nil, fmt.Errorf("encoding PKGNAMCSN: %w", err)
+	}
+	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q section=%d", c.database, "NULLID", db2PackageName, db2PackageToken, statementNumber)
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
 	return packBinary(cpPKGNAMCSN, raw), nil
 }
