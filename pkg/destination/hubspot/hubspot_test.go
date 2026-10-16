@@ -2709,6 +2709,7 @@ func TestNonFiniteFloatsFollowWriteNulls(t *testing.T) {
 			in, _, ok := sh.shapeRow(rec, colIndexOf(rec), row)
 			require.True(t, ok)
 			if writeNulls {
+				require.Contains(t, in.Properties, "score")
 				assert.Equal(t, "", in.Properties["score"])
 			} else {
 				assert.NotContains(t, in.Properties, "score")
