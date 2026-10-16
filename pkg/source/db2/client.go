@@ -55,15 +55,14 @@ const (
 	// queries that return rows). SYSSH200 doesn't exist under QGPL
 	// either; this is the actual package, not another ad hoc default.
 	db2PackageNameIBMi = "QSQCLIPKGC"
-	// db2PackageTokenIBMi is UNVERIFIED - still SYSLVL01, the LUW token,
-	// as a placeholder. QSQCLIPKGC is a real pre-bound package (not one
-	// we can implicitly create), so its actual RDB package consistency
-	// token must match what IBM i bound it with, or the server will
-	// reject the reference. Query the real value directly:
-	//   SELECT HEX(CONSISTENCY_TOKEN) FROM QSYS2.SYSPACKAGE
-	//   WHERE PACKAGE_SCHEMA = 'QGPL' AND PACKAGE_NAME = 'QSQCLIPKGC'
-	// and replace this once we have it from the real host.
-	db2PackageTokenIBMi = db2PackageToken
+	// db2PackageTokenIBMi: confirmed via QSYS2.SYSPACKAGE on the real
+	// Signature host - CONSISTENCY_TOKEN for QGPL/QSQCLIPKGC is hex
+	// D8E2D8C3D3C94040, which is cp500 for "QSQCLI" + two trailing
+	// spaces (%-8s below pads it the rest of the way). Verified by
+	// round-tripping through this file's own cp500 table rather than
+	// trusting the translation blind: encodeString("QSQCLI", "cp500")
+	// produces that exact byte sequence.
+	db2PackageTokenIBMi = "QSQCLI"
 )
 
 type db2StreamHandler struct {

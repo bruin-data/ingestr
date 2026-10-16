@@ -143,6 +143,9 @@ func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
 		"NULLID isn't a real package collection on IBM i (confirmed empty via QSYS2.SYSPACKAGE) - QGPL is what IBM's own ODBC driver defaults to there")
 	require.Equal(t, "QSQCLIPKGC", strings.TrimRight(pkgName, " "),
 		"SYSSH200 doesn't exist under QGPL either - QSQCLIPKGC is IBM i's real pre-bound system CLI package for cursor operations, confirmed via QSYS2.SYSPACKAGE")
+	token := packet[4+18+18+18 : 4+18+18+18+8]
+	require.Equal(t, []byte{0xd8, 0xe2, 0xd8, 0xc3, 0xd3, 0xc9, 0x40, 0x40}, token,
+		"must match QSYS2.SYSPACKAGE's real CONSISTENCY_TOKEN for QGPL/QSQCLIPKGC (hex D8E2D8C3D3C94040) - a pre-bound package rejects any other token")
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
