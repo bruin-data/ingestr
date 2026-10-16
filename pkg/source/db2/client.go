@@ -39,6 +39,16 @@ const (
 	db2PackageSectionSet   = 1
 	db2PackageName         = "SYSSH200"
 	db2PackageToken        = "SYSLVL01"
+	// db2PackageCollectionLUW is a default package DB2 LUW/z-OS always
+	// provisions for ad hoc dynamic SQL from unbound/thin clients.
+	db2PackageCollectionLUW = "NULLID"
+	// db2PackageCollectionIBMi: Db2 for i doesn't ship that NULLID
+	// default - confirmed on the real Signature host via
+	// QSYS2.SYSPACKAGE (no rows under NULLID at all). QGPL is the
+	// library IBM's own ODBC/ACS driver uses by default for the SQL
+	// packages it implicitly creates on IBM i, and is present and
+	// generally writable on every system, unlike NULLID.
+	db2PackageCollectionIBMi = "QGPL"
 )
 
 type db2StreamHandler struct {
@@ -598,12 +608,16 @@ func (c *db2Client) packPKGNAMCSN(statementNumber uint16) ([]byte, error) {
 	// are cp500-encoded elsewhere in this file. This one was left as raw
 	// ASCII, which a real IBM i host rejects outright (EOF on PRPSQLSTT
 	// before it even reaches the SQL text).
-	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, "NULLID", db2PackageName, db2PackageToken)
+	collection := db2PackageCollectionLUW
+	if c.platform == db2PlatformIBMi {
+		collection = db2PackageCollectionIBMi
+	}
+	text := fmt.Sprintf("%-18s%-18s%-18s%-8s", c.database, collection, db2PackageName, db2PackageToken)
 	raw, err := encodeString(text, "cp500")
 	if err != nil {
 		return nil, fmt.Errorf("encoding PKGNAMCSN: %w", err)
 	}
-	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q section=%d", c.database, "NULLID", db2PackageName, db2PackageToken, statementNumber)
+	config.Debug("[DB2] PKGNAMCSN: database=%q collection=%q package=%q token=%q section=%d", c.database, collection, db2PackageName, db2PackageToken, statementNumber)
 	raw = append(raw, byte(statementNumber>>8), byte(statementNumber))
 	return packBinary(cpPKGNAMCSN, raw), nil
 }

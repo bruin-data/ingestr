@@ -131,6 +131,17 @@ func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
 	require.Equal(t, []byte{0x00, db2PackageSectionQuery}, packet[len(packet)-2:])
 }
 
+func TestPackPKGNAMCSNUsesQGPLCollectionOnIBMi(t *testing.T) {
+	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
+
+	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
+
+	require.NoError(t, err)
+	collection := decodeString(packet[4+18:4+18+18], "cp500")
+	require.Equal(t, strings.TrimRight(collection, " "), "QGPL",
+		"NULLID isn't a real package collection on IBM i (confirmed empty via QSYS2.SYSPACKAGE) - QGPL is what IBM's own ODBC driver defaults to there")
+}
+
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
