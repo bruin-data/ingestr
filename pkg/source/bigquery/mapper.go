@@ -11,7 +11,6 @@ import (
 var (
 	numericPrecisionRegex = regexp.MustCompile(`(?i)(?:numeric|bignumeric|decimal)\((\d+)(?:,\s*(\d+))?\)`)
 	arrayTypeRegex        = regexp.MustCompile(`(?i)^ARRAY<(.+)>$`)
-	arrowListTypeRegex    = regexp.MustCompile(`^list<item: (.+?)(?:, nullable)?>$`)
 	structTypeRegex       = regexp.MustCompile(`(?i)^STRUCT<.+>$`)
 )
 
@@ -23,15 +22,6 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	// Handle ARRAY<element_type>
 	if matches := arrayTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
 		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
-		return schema.TypeArray, precision, scale, elemType
-	}
-
-	// Custom queries report Arrow type names, e.g. list<item: decimal(38, 9), nullable>.
-	if matches := arrowListTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
-		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
-		if elemType == schema.TypeJSON {
-			return schema.TypeJSON, 0, 0, schema.TypeUnknown
-		}
 		return schema.TypeArray, precision, scale, elemType
 	}
 
@@ -58,12 +48,6 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	if idx := strings.Index(baseType, "<"); idx != -1 {
 		baseType = baseType[:idx]
 	}
-	if idx := strings.Index(baseType, "["); idx != -1 {
-		if baseType[:idx] == "TIMESTAMP" && !strings.Contains(upperType, "TZ=") {
-			return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
-		}
-		baseType = baseType[:idx]
-	}
 
 	switch baseType {
 	// Boolean
@@ -87,17 +71,17 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 		return schema.TypeDecimal, 38, 9, schema.TypeUnknown
 
 	// String
-	case "STRING", "UTF8", "LARGE_UTF8":
+	case "STRING":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 
 	// Binary
-	case "BYTES", "BINARY", "LARGE_BINARY":
+	case "BYTES":
 		return schema.TypeBinary, 0, 0, schema.TypeUnknown
 
-	// Date/Time (BigQuery SQL names, plus Arrow names reported by custom queries)
-	case "DATE", "DATE32", "DATE64":
+	// Date/Time
+	case "DATE":
 		return schema.TypeDate, 0, 0, schema.TypeUnknown
-	case "TIME", "TIME32", "TIME64":
+	case "TIME":
 		return schema.TypeTime, 0, 0, schema.TypeUnknown
 	case "DATETIME":
 		// DATETIME in BigQuery has no timezone
