@@ -1458,3 +1458,58 @@ func TestClusterByClauseFor(t *testing.T) {
 	// Already-bare expression (no LINEAR wrapper) is wrapped as-is.
 	assert.Equal(t, "CLUSTER BY (C1)", clusterByClauseFor("C1"))
 }
+
+func TestCheckDuplicatePrimaryKeys(t *testing.T) {
+	t.Run("returns duplicated keys", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		d := &SnowflakeDestination{db: db}
+		mock.ExpectQuery(`SELECT "ID", COUNT\(\*\) FROM "RAW"\."PUBLIC"\."ITEMS" GROUP BY "ID" HAVING COUNT\(\*\) > 1 LIMIT 25`).
+			WillReturnRows(sqlmock.NewRows([]string{"ID", "COUNT(*)"}).AddRow("K1", 2).AddRow("K2", 3))
+
+		duplicates, err := d.CheckDuplicatePrimaryKeys(context.Background(), "raw.public.items", []string{"id"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"K1", "K2"}, duplicates)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("missing table means no duplicates", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		d := &SnowflakeDestination{db: db}
+		mock.ExpectQuery(`SELECT "ID", COUNT\(\*\)`).WillReturnError(errors.New("does not exist"))
+
+		duplicates, err := d.CheckDuplicatePrimaryKeys(context.Background(), "raw.public.items", []string{"id"})
+		require.NoError(t, err)
+		require.Empty(t, duplicates)
+	})
+
+	t.Run("composite keys are reported as tuples", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		d := &SnowflakeDestination{db: db}
+		mock.ExpectQuery(`SELECT "ID", "NAME", COUNT\(\*\) FROM "RAW"\."PUBLIC"\."ITEMS" GROUP BY "ID", "NAME" HAVING COUNT\(\*\) > 1 LIMIT 25`).
+			WillReturnRows(sqlmock.NewRows([]string{"ID", "NAME", "COUNT(*)"}).AddRow("K1", "ann", 2))
+
+		duplicates, err := d.CheckDuplicatePrimaryKeys(context.Background(), "raw.public.items", []string{"id", "name"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"K1, ann"}, duplicates)
+	})
+
+	t.Run("no keys means no query", func(t *testing.T) {
+		db, _, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		d := &SnowflakeDestination{db: db}
+		duplicates, err := d.CheckDuplicatePrimaryKeys(context.Background(), "raw.public.items", nil)
+		require.NoError(t, err)
+		require.Empty(t, duplicates)
+	})
+}
