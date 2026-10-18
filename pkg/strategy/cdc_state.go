@@ -97,6 +97,7 @@ type CDCStateManager struct {
 	incarnation    destination.CDCTargetIncarnationProvider
 	initializer    destination.CDCTargetIncarnationInitializer
 	pruneBatchSize int
+	refresh        *cdcRefresh
 	connectorID    string
 	stateTable     string
 	targetTable    string
@@ -830,7 +831,7 @@ func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable string
 		return "", err
 	}
 
-	if len(m.runs) != 1 {
+	if len(m.runs) != 1 || (m.refresh != nil && m.generation < m.refresh.Generation) {
 		return "", nil
 	}
 	certificate, outcome, err := m.evaluateGeneration(ctx, sourceTable, m.runs, m.states)
@@ -934,6 +935,9 @@ func (m *CDCStateManager) resumeFromCompletedGeneration(ctx context.Context, sou
 	for _, generation := range m.generationsDescending() {
 		if generation >= m.generation {
 			continue
+		}
+		if m.refresh != nil && generation < m.refresh.Generation {
+			break
 		}
 		runs, states := m.reducedGeneration(generation)
 		if len(runs) != 1 {
@@ -1048,6 +1052,9 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	m.runs = map[string]struct{}{runID: {}}
 	m.states = make(map[cdcStateKey]reducedCDCState)
 	runEvent := m.newStateWriteEvent("", "", cdcStateKindRun, m.generation, cdcStateStatusInProgress, zeroCDCPosition)
+	if m.refresh != nil {
+		runEvent.entry.DestinationTable = "refresh:" + m.refresh.writer.connectorID
+	}
 	m.runEventID = runEvent.entry.EventID
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
@@ -1237,6 +1244,9 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 			delete(m.boundDestinations, sourceTable)
 			delete(m.boundRawDestinations, sourceTable)
 		}
+	}
+	if err := m.completeRefresh(ctx); err != nil {
+		return err
 	}
 	m.pruneSuperseded(ctx)
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -1801,7 +1811,7 @@ func cdcStatePositionValid(position string) bool {
 	if _, err := pglogrepl.ParseLSN(position); err == nil {
 		return true
 	}
-	return mysqlCDCStatePositionRE.MatchString(position) || mssqlCDCStatePositionRE.MatchString(position)
+	return mysqlCDCStatePositionRE.MatchString(position) || mssqlCDCStatePositionRE.MatchString(position) || mssqlCTStatePositionRE.MatchString(position)
 }
 
 func cdcStateEntryPositionValid(entry destination.CDCStateEntry) bool {
@@ -1827,9 +1837,10 @@ func compareCDCPositions(left, right string) int {
 		if mysqlCDCStatePositionRE.MatchString(left) && mysqlCDCStatePositionRE.MatchString(right) {
 			return strings.Compare(left, right)
 		}
-		// SQL Server CDC positions are fixed-width uppercase hex, so their
-		// lexicographic order is their LSN order.
-		if mssqlCDCStatePositionRE.MatchString(left) && mssqlCDCStatePositionRE.MatchString(right) {
+		// SQL Server CDC positions and Change Tracking versions are
+		// fixed-width, so lexicographic order preserves position order.
+		if (mssqlCDCStatePositionRE.MatchString(left) && mssqlCDCStatePositionRE.MatchString(right)) ||
+			(mssqlCTStatePositionRE.MatchString(left) && mssqlCTStatePositionRE.MatchString(right)) {
 			return strings.Compare(left, right)
 		}
 		return 0
@@ -1845,6 +1856,8 @@ func compareCDCPositions(left, right string) int {
 }
 
 var mysqlCDCStatePositionRE = regexp.MustCompile(`^\d{20}:[^:]+:\d{20}:\d{20}(?::l1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*)?$`)
+
+var mssqlCTStatePositionRE = regexp.MustCompile(`^[0-9]{20}$`)
 
 // mssqlCDCStatePositionRE matches SQL Server CDC stored positions:
 // start LSN and seqval as fixed-width uppercase hex plus a two-digit

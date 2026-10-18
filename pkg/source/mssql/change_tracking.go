@@ -216,11 +216,20 @@ func (s *MSSQLChangeTrackingSource) ReplicationLag() (source.LagSnapshot, bool) 
 // CommitStream records the version whose rows the destination has made
 // durable. Until it is called, progress within a read window is not lag.
 func (s *MSSQLChangeTrackingSource) CommitStream(_ context.Context, token any) error {
-	commit, ok := token.(ctCommitToken)
-	if !ok {
+	var version int64
+	switch commit := token.(type) {
+	case ctCommitToken:
+		version = commit.version
+	case source.CDCStateCommitToken:
+		var ok bool
+		version, ok = parseStoredCTVersion(commit.Position)
+		if !ok {
+			return fmt.Errorf("invalid SQL Server Change Tracking commit position %q", commit.Position)
+		}
+	default:
 		return fmt.Errorf("unexpected SQL Server Change Tracking commit token %T", token)
 	}
-	s.noteCTDurableVersion(commit.version)
+	s.noteCTDurableVersion(version)
 	return nil
 }
 
@@ -354,24 +363,40 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 		// carry its version, so the first change read has nothing to restamp.
 		var heartbeat *ctHeartbeatGate
 		if resumed {
-			heartbeat = newCTHeartbeatGate(heartbeatInterval)
+			if !opts.CDCManagedState {
+				heartbeat = newCTHeartbeatGate(heartbeatInterval)
+			}
 		} else {
+			if opts.CDCManagedState {
+				if err := emitCTResult(ctx, results, source.RecordBatchResult{Truncate: true}); err != nil {
+					return
+				}
+			}
 			snapshotVersion, err := t.source.snapshotCTTable(ctx, t.tableName, tableSchema, opts, results)
 			if err != nil {
 				_ = emitCTResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
 				return
 			}
-			// --full-refresh and --stream are mutually exclusive at the
-			// config layer, so a refresh always stops after the snapshot.
-			if opts.FullRefresh {
+			if opts.CDCManagedState {
+				t.source.noteCTServerVersion(snapshotVersion)
+				position := formatCTVersion(snapshotVersion)
+				if err := emitCTResult(ctx, results, source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{
+					Position: position, SnapshotPositions: map[string]string{t.tableName: position},
+				}}); err != nil {
+					return
+				}
+			}
+			if opts.FullRefresh && !opts.Streaming {
 				return
 			}
 			version = snapshotVersion
 		}
 
-		// The starting version is already in the destination, either as the
-		// resume cursor or as the snapshot rows just emitted.
-		t.source.noteCTDurableVersion(version)
+		// Managed snapshots become durable only after the destination acknowledges
+		// their completion token; a stored resume cursor is already durable.
+		if resumed || !opts.CDCManagedState {
+			t.source.noteCTDurableVersion(version)
+		}
 
 		for {
 			next, err := t.source.readCTChanges(ctx, t.tableName, tableSchema, t.primaryKeys, version, opts, results, heartbeat)
@@ -386,11 +411,15 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 			}
 			// Past the first pass the snapshot version is no longer fresh, so
 			// idle polls take over keeping the cursor current.
-			if heartbeat == nil {
+			if heartbeat == nil && !opts.CDCManagedState {
 				heartbeat = newCTHeartbeatGate(heartbeatInterval)
 			}
+			var commitToken any = ctCommitToken{version: version}
+			if opts.CDCManagedState {
+				commitToken = source.CDCStateCommitToken{Position: formatCTVersion(version)}
+			}
 			if err := emitCTResult(ctx, results, source.RecordBatchResult{
-				CommitToken: ctCommitToken{version: version},
+				CommitToken: commitToken,
 			}); err != nil {
 				return
 			}
@@ -664,7 +693,7 @@ func (s *MSSQLChangeTrackingSource) snapshotCTTableWithIsolation(ctx context.Con
 	if err := rows.Close(); err != nil {
 		return 0, emittedRows, fmt.Errorf("failed to read snapshot for %s: %w", table, err)
 	}
-	if emittedRows == 0 && !opts.FullRefresh {
+	if emittedRows == 0 && !opts.FullRefresh && !opts.CDCManagedState {
 		if err := emitSyntheticCTHeartbeat(ctx, tableSchema.Columns, tableSchema.PrimaryKeys, version, results); err != nil {
 			return 0, 0, err
 		}

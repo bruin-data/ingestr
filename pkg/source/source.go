@@ -121,6 +121,7 @@ type ReadOptions struct {
 	CDCResumeSchemaFingerprint      string              // Source schema fingerprint that authorized CDCResumeLSN
 	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
 	CDCLegacySlotSuffix             string              // Optional: prior auto-slot suffix used only for upgrade resume
+	CDCManagedState                 bool                // Consumer persists CDCStateCommitTokens independently of destination rows
 	CDCSnapshotReplace              bool                // Consumer can apply a full-snapshot replacement boundary
 	CDCStableDataBatches            bool                // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool

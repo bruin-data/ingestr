@@ -109,6 +109,7 @@ type IngestConfig struct {
 	ClusterBy   []string
 
 	FullRefresh    bool
+	RefreshID      string
 	SchemaContract string      // Schema contract mode: evolve, freeze, discard_row, discard_value
 	SchemaNaming   string      // Schema naming convention: direct, snake_case, auto
 	CDCTableNaming TableNaming // Multi-table CDC destination naming: schema_table, table
@@ -249,10 +250,10 @@ func (c *IngestConfig) Validate() error {
 			return &ValidationError{Field: "incremental-predicate", Message: "cannot be combined with --full-refresh"}
 		}
 	}
+	if c.RefreshID != "" && (!c.FullRefresh || !c.Stream) {
+		return &ValidationError{Field: "refresh-id", Message: "requires --full-refresh and --stream"}
+	}
 	if c.Stream {
-		if c.FullRefresh {
-			return &ValidationError{Field: "full-refresh", Message: "cannot be combined with --stream"}
-		}
 		if c.IntervalEnd != nil {
 			return &ValidationError{Field: "interval-end", Message: "cannot be combined with --stream (a bounded end contradicts continuous ingestion)"}
 		}

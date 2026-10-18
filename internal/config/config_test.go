@@ -242,9 +242,8 @@ func TestIngestConfigValidate_Stream(t *testing.T) {
 			mutate: func(c *IngestConfig) {},
 		},
 		{
-			name:    "full refresh rejected",
-			mutate:  func(c *IngestConfig) { c.FullRefresh = true },
-			wantErr: "full-refresh",
+			name:   "full refresh allowed",
+			mutate: func(c *IngestConfig) { c.FullRefresh = true },
 		},
 		{
 			name:    "interval end rejected",
@@ -680,5 +679,35 @@ func TestIngestConfigValidate_SubsetLeavesDestTableEmpty(t *testing.T) {
 	// DestTable must not be defaulted to a joined name.
 	if cfg.DestTable != "" {
 		t.Fatalf("DestTable = %q, want empty", cfg.DestTable)
+	}
+}
+
+func TestIngestConfigValidateRefreshID(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		stream, fullRefresh bool
+		wantError           bool
+	}{
+		{"durable streaming refresh", true, true, false},
+		{"missing refresh", true, false, true},
+		{"missing streaming", false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost/db"
+			cfg.DestURI = "postgres://localhost/dest"
+			cfg.IncrementalStrategy = StrategyMerge
+			cfg.Stream = tc.stream
+			cfg.FullRefresh = tc.fullRefresh
+			cfg.RefreshID = "stream:opaque-request"
+			err := cfg.Validate()
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "refresh-id") {
+					t.Fatalf("expected refresh-id validation, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

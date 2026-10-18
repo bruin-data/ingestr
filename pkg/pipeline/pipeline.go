@@ -197,7 +197,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if isMSSQLCDCSource(p.config.SourceURI) && !managedMSSQLCDC {
 		config.Debug("[PIPELINE] Destination %q does not support managed CDC state; SQL Server CDC uses destination-data resume", dest.GetScheme())
 	}
-	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC
+	managedChangeTracking := isChangeTrackingSource(p.config.SourceURI) && p.config.Stream && p.config.FullRefresh
+	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC || managedChangeTracking
+	if p.config.Stream && p.config.FullRefresh && !managedDestinationCDC {
+		return fmt.Errorf("--full-refresh --stream requires a PostgreSQL, MySQL, or SQL Server change source and destination-managed CDC state")
+	}
 	if managedMySQLCDC {
 		if err := validateMySQLCDCSourceDestination(p.config, src, dest); err != nil {
 			return err
@@ -215,11 +219,21 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			return fmt.Errorf("failed to resolve PostgreSQL CDC destination identity: %w", err)
 		}
 		p.cdcConnectorID = resolvedCDCStateConnectorID(p.config, postgresCDCIdentity, destinationIdentity)
-	} else if isCDCSource(p.config.SourceURI) {
-		if managedMySQLCDC || managedMSSQLCDC {
+	} else if isManagedChangeSource(p.config.SourceURI) {
+		if managedMySQLCDC || managedMSSQLCDC || managedChangeTracking {
 			destinationTarget = managedCDCDestinationTarget(p.config, dest)
 		}
 		p.cdcConnectorID = genericCDCConnectorID(p.config)
+	}
+
+	if p.config.Stream && p.config.FullRefresh && p.config.RefreshID != "" {
+		savedConnectorID, err := strategy.RefreshConnectorID(ctx, dest, p.config.RefreshID, p.streamingRefreshScope(), p.config.StagingDataset)
+		if err != nil {
+			return err
+		}
+		if savedConnectorID != "" {
+			p.cdcConnectorID = savedConnectorID
+		}
 	}
 
 	var cdcStateManager *strategy.CDCStateManager
@@ -351,6 +365,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err := validateChangeTrackingDestination(dest); err != nil {
 			return err
 		}
+	}
+	if err := p.prepareStreamingRefresh(ctx, cdcStateManager); err != nil {
+		return err
 	}
 	// For managed change sources, check if we can resume from existing data
 	if cdcStateManager != nil && !p.config.FullRefresh {
@@ -1559,10 +1576,10 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			resolvedStrategy = ss.DefaultStreamingStrategy()
 		}
 	}
-	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
+	if isCDCSource(p.config.SourceURI) && (!p.config.FullRefresh || p.config.Stream) && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
 		resolvedStrategy = config.StrategyMerge
 	}
-	if p.config.FullRefresh {
+	if p.config.FullRefresh && !p.config.Stream {
 		resolvedStrategy = config.StrategyReplace
 	}
 
@@ -1626,6 +1643,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			}
 		}
 	}
+
+	if err := p.prepareStreamingRefresh(ctx, cdcStateManager); err != nil {
+		return err
+	}
+	resolvedConfig.FullRefresh = p.config.FullRefresh
 
 	// For CDC sources, query per-table max LSNs for resume
 	var cdcResumeLSNs map[string]string
@@ -2731,7 +2753,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 			s = ss.DefaultStreamingStrategy()
 		}
 	}
-	if isManagedChangeSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
+	if isManagedChangeSource(cfg.SourceURI) && (!cfg.FullRefresh || cfg.Stream) && (s == "" || s == config.StrategyReplace) {
 		s = config.StrategyMerge
 		if len(resolvePrimaryKeys(cfg, table)) == 0 {
 			// Keyless CDC table (no primary key, no replica identity index):
@@ -2739,7 +2761,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 			s = config.StrategyAppend
 		}
 	}
-	if cfg.FullRefresh {
+	if cfg.FullRefresh && !cfg.Stream {
 		s = config.StrategyReplace
 	}
 	return s
