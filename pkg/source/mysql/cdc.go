@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -1461,9 +1460,9 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	// Streaming checkpoints may only name a transaction boundary: resuming
 	// between a TABLE_MAP event and its rows event fails, and resuming inside
 	// a transaction would skip its earlier rows. Timer, heartbeat and drain
-	// flushes wait for a boundary, so only a keyed table's buffer filled
-	// mid-transaction loads rows past the checkpoint; its merge ignores the
-	// replay.
+	// flushes wait for a boundary, so only a buffer filled mid-transaction
+	// loads rows past the checkpoint: keyed merges ignore their replay, and
+	// keyless change logs are at-least-once.
 	txnBoundary := start
 	inTransaction := false
 	streamingToken := func() (source.CDCStateCommitToken, error) {
@@ -1550,28 +1549,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			return fmt.Errorf("missing output schema for MySQL CDC table %s", table)
 		}
 		resultTable := mysqlCDCResultTableName(meta.Name, len(tables), tagResults)
-		limit := batchSize
-		if opts.Streaming && len(outputSchema.PrimaryKeys) == 0 {
-			// Keyless tables load as an append-only log that cannot absorb
-			// a replay, so their rows wait for the transaction boundary.
-			limit = math.MaxInt
-		}
-		return appendMySQLCDCBufferedChangesWithTokenContext(ctx, buffers, meta.Name, outputSchema, resultTable, changes, limit, results, tokenFn)
-	}
-	flushFullBuffers := func() error {
-		for _, buffer := range buffers {
-			if len(buffer.changes) < batchSize {
-				continue
-			}
-			// One record: a chunk emitted without the transaction's token
-			// could be committed under an older checkpoint and replayed.
-			if err := buffer.flush(ctx, results, tokenFn); err != nil {
-				return err
-			}
-			// Release the transaction-sized backing array.
-			buffer.changes = nil
-		}
-		return nil
+		return appendMySQLCDCBufferedChangesWithTokenContext(ctx, buffers, meta.Name, outputSchema, resultTable, changes, batchSize, results, tokenFn)
 	}
 	releaseXA := func(xaID string, commit bool) error {
 		pending := pendingXA[xaID]
@@ -1860,9 +1838,6 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		switch {
 		case mysqlCDCEndsTransaction(logicalEvents):
 			txnBoundary, inTransaction = eventPos, false
-			if err := flushFullBuffers(); err != nil {
-				return err
-			}
 		case mysqlCDCInTransaction(logicalEvents):
 			inTransaction = true
 		}
