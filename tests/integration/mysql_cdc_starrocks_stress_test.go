@@ -11,7 +11,7 @@
 // Run with e.g.:
 //
 //	make build && STRESS_LOAD_DURATION=30m go test -tags stress -count=1 -v -timeout 120m \
-//	  -run '^TestMySQLCDC_StressStarRocks$' ./tests/integration/
+//	  -run '^TestMySQLCDC_StarRocksStress$' ./tests/integration/
 package integration
 
 import (
@@ -234,7 +234,7 @@ func srMySQLAwaitStream(t *testing.T, ctx context.Context, sink *srStressSink, s
 	}
 }
 
-func TestMySQLCDC_StressStarRocks(t *testing.T) {
+func TestMySQLCDC_StarRocksStress(t *testing.T) {
 	ctx := context.Background()
 	if !testutil.DockerProviderHealthy(ctx) {
 		t.Skip("skipping stress test: Docker provider is not available/healthy")
