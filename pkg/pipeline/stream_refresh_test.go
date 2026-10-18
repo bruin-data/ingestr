@@ -65,3 +65,39 @@ func TestStreamingRefreshScopeSurvivesBigQueryCredentialChanges(t *testing.T) {
 	cfg.SourceTables = []string{"orders"}
 	require.NotEqual(t, scope, p.streamingRefreshScope())
 }
+
+func TestStreamingRefreshScopeIncludesSQLServerDatabase(t *testing.T) {
+	for _, scheme := range []string{
+		"mssql+ct", "sqlserver+ct", "azuresql+ct", "azure-sql+ct",
+		"mssql+cdc", "sqlserver+cdc", "azuresql+cdc", "azure-sql+cdc",
+		"mssql", "sqlserver", "mssql+pyodbc",
+	} {
+		t.Run(scheme, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://source/db"
+			cfg.DestURI = "postgres://destination/db"
+			cfg.SourceTable = "dbo.orders"
+			cfg.DestTable = "raw.orders"
+			uri := &cfg.SourceURI
+			if scheme == "mssql" || scheme == "sqlserver" || scheme == "mssql+pyodbc" {
+				uri = &cfg.DestURI
+			}
+			*uri = scheme + "://host?database=databaseA"
+			p := &Pipeline{config: cfg}
+			scope := p.streamingRefreshScope()
+			*uri = scheme + "://host?database=databaseB"
+			require.NotEqual(t, scope, p.streamingRefreshScope(), "different SQL Server databases cannot share a refresh request")
+			for _, suffix := range []string{
+				"/databaseA",
+				"/databaseA?database=ignored",
+				"/?database=databaseA",
+				"?Database=databaseA",
+			} {
+				*uri = scheme + "://host" + suffix
+				require.Equal(t, scope, p.streamingRefreshScope(), "equivalent SQL Server database selection: %s", suffix)
+			}
+			*uri = scheme + "://host?dbname=databaseA"
+			require.NotEqual(t, scope, p.streamingRefreshScope(), "dbname is not a SQL Server URL database parameter")
+		})
+	}
+}

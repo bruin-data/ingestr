@@ -1005,6 +1005,20 @@ func (m *CDCStateManager) currentDestinationIncarnation(ctx context.Context, sou
 	return cdcDestinationIncarnationDigest(incarnation), true, nil
 }
 
+// HasCDCState checks whether a connector has entered destination-managed state,
+// including runs whose snapshot has not completed. It does not create metadata.
+func HasCDCState(ctx context.Context, dest destination.Destination, connectorID, stagingDataset string) (bool, error) {
+	reader, ok := dest.(destination.CDCStateReader)
+	if !ok {
+		return false, nil
+	}
+	entries, err := reader.LoadCDCState(ctx, managedCDCStateTableName(dest, cdcStateTableName, stagingDataset), connectorID)
+	if err != nil {
+		return false, fmt.Errorf("failed to detect destination-managed CDC state: %w", err)
+	}
+	return len(entries) > 0, nil
+}
+
 // StateEmpty reports whether this connector has no state events at all. Once
 // state exists, an empty resume position can mean a crashed or conflicting run
 // and must force a snapshot instead of trusting a potentially partial

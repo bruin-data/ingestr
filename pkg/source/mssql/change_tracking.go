@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"strconv"
@@ -50,6 +51,8 @@ type MSSQLChangeTrackingSource struct {
 	MSSQLSource
 	ctConfig ctConfig
 	lag      ctLagState
+	stateMu  sync.Mutex
+	state    source.CDCStateCommitToken
 }
 
 type ctLagState struct {
@@ -233,6 +236,20 @@ func (s *MSSQLChangeTrackingSource) CommitStream(_ context.Context, token any) e
 	return nil
 }
 
+func (s *MSSQLChangeTrackingSource) CDCState() source.CDCStateCommitToken {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	state := s.state
+	state.SnapshotPositions = maps.Clone(state.SnapshotPositions)
+	return state
+}
+
+func (s *MSSQLChangeTrackingSource) setCTBatchState(state source.CDCStateCommitToken) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.state = state
+}
+
 func (s *MSSQLChangeTrackingSource) noteCTDurableVersion(version int64) {
 	s.lag.mu.Lock()
 	defer s.lag.mu.Unlock()
@@ -327,6 +344,9 @@ func (t *changeTrackingTable) GetSchema(ctx context.Context) (*schema.TableSchem
 }
 
 func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	if t.source != nil {
+		t.source.setCTBatchState(source.CDCStateCommitToken{})
+	}
 	if opts.Limit > 0 {
 		return nil, fmt.Errorf("SQL Server Change Tracking sources do not support --sql-limit because partial snapshots cannot safely advance the resume cursor")
 	}
@@ -359,6 +379,7 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 		}
 
 		version, resumed := parseStoredCTVersion(opts.CDCResumeLSN)
+		var batchState source.CDCStateCommitToken
 		// A nil gate skips the heartbeat: a fresh snapshot's rows already
 		// carry its version, so the first change read has nothing to restamp.
 		var heartbeat *ctHeartbeatGate
@@ -367,7 +388,7 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 				heartbeat = newCTHeartbeatGate(heartbeatInterval)
 			}
 		} else {
-			if opts.CDCManagedState {
+			if opts.CDCManagedState && opts.CDCSnapshotReplace {
 				if err := emitCTResult(ctx, results, source.RecordBatchResult{Truncate: true}); err != nil {
 					return
 				}
@@ -380,13 +401,17 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 			if opts.CDCManagedState {
 				t.source.noteCTServerVersion(snapshotVersion)
 				position := formatCTVersion(snapshotVersion)
-				if err := emitCTResult(ctx, results, source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{
+				batchState = source.CDCStateCommitToken{
 					Position: position, SnapshotPositions: map[string]string{t.tableName: position},
-				}}); err != nil {
-					return
+				}
+				if opts.Streaming {
+					if err := emitCTResult(ctx, results, source.RecordBatchResult{CommitToken: batchState}); err != nil {
+						return
+					}
 				}
 			}
 			if opts.FullRefresh && !opts.Streaming {
+				t.source.setCTBatchState(batchState)
 				return
 			}
 			version = snapshotVersion
@@ -407,6 +432,10 @@ func (t *changeTrackingTable) Read(ctx context.Context, opts source.ReadOptions)
 			version = next
 
 			if !opts.Streaming {
+				if opts.CDCManagedState {
+					batchState.Position = formatCTVersion(version)
+					t.source.setCTBatchState(batchState)
+				}
 				return
 			}
 			// Past the first pass the snapshot version is no longer fresh, so
@@ -1076,7 +1105,8 @@ func objectIDName(table string) string {
 }
 
 var (
-	_ source.StreamingSource = (*MSSQLChangeTrackingSource)(nil)
-	_ source.StreamCommitter = (*MSSQLChangeTrackingSource)(nil)
-	_ source.LagReporter     = (*MSSQLChangeTrackingSource)(nil)
+	_ source.StreamingSource  = (*MSSQLChangeTrackingSource)(nil)
+	_ source.CDCStateProvider = (*MSSQLChangeTrackingSource)(nil)
+	_ source.StreamCommitter  = (*MSSQLChangeTrackingSource)(nil)
+	_ source.LagReporter      = (*MSSQLChangeTrackingSource)(nil)
 )

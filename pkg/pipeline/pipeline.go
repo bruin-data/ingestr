@@ -198,6 +198,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		config.Debug("[PIPELINE] Destination %q does not support managed CDC state; SQL Server CDC uses destination-data resume", dest.GetScheme())
 	}
 	managedChangeTracking := isChangeTrackingSource(p.config.SourceURI) && p.config.Stream && p.config.FullRefresh
+	if isChangeTrackingSource(p.config.SourceURI) && !managedChangeTracking {
+		managedChangeTracking, err = strategy.HasCDCState(ctx, dest, genericCDCConnectorID(p.config), p.config.StagingDataset)
+		if err != nil {
+			return err
+		}
+	}
 	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC || managedChangeTracking
 	if p.config.Stream && p.config.FullRefresh && !managedDestinationCDC {
 		return fmt.Errorf("--full-refresh --stream requires a PostgreSQL, MySQL, or SQL Server change source and destination-managed CDC state")
@@ -3042,9 +3048,14 @@ func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Dest
 }
 
 func genericCDCConnectorID(cfg *config.IngestConfig) string {
+	sourceURI, destinationURI := canonicalCDCStateURI(cfg.SourceURI), canonicalCDCStateURI(cfg.DestURI)
+	if isChangeTrackingSource(cfg.SourceURI) {
+		sourceURI = canonicalStreamingRefreshURI(cfg.SourceURI)
+		destinationURI = canonicalStreamingRefreshURI(cfg.DestURI)
+	}
 	parts := []string{
-		canonicalCDCStateURI(cfg.SourceURI),
-		canonicalCDCStateURI(cfg.DestURI),
+		sourceURI,
+		destinationURI,
 		cfg.SourceTable,
 		cfg.DestTable,
 	}

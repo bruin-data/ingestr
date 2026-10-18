@@ -200,3 +200,125 @@ func TestChangeTrackingCommitStreamAcceptsManagedAndLegacyTokens(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, formatCTVersion(9), lag.DurablePosition)
 }
+
+func TestChangeTrackingManagedBatchState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		resume      bool
+		empty       bool
+		fullRefresh bool
+		stagingSwap bool
+	}{
+		{name: "snapshot and changes"},
+		{name: "empty snapshot and changes", empty: true},
+		{name: "empty full refresh", empty: true, fullRefresh: true},
+		{name: "staged full refresh", fullRefresh: true, stagingSwap: true},
+		{name: "resume", resume: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+			opts := source.ReadOptions{
+				PageSize: 100, CDCSnapshotReplace: !tc.stagingSwap, CDCManagedState: true, FullRefresh: tc.fullRefresh,
+			}
+			if tc.resume {
+				opts.CDCResumeLSN = formatCTVersion(7)
+			} else {
+				rows := ctChangeRows(1, 7)
+				if tc.empty {
+					rows = ctEmptyChangeRows()
+				}
+				expectCTRefreshSnapshot(mock, rows)
+				mock.ExpectCommit()
+				expectCTIsolationReset(mock)
+			}
+			if !tc.fullRefresh {
+				mock.ExpectQuery("snapshot_isolation_state").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(1))
+				mock.ExpectBegin()
+				mock.ExpectQuery("CHANGE_TRACKING_MIN_VALID_VERSION").WillReturnRows(ctVersionRows(0))
+				mock.ExpectQuery("CHANGE_TRACKING_CURRENT_VERSION").WillReturnRows(ctVersionRows(9))
+				mock.ExpectQuery("CHANGETABLE").WithArgs(int64(7), int64(9)).WillReturnRows(ctChangeRows(2, 9))
+				mock.ExpectCommit()
+				expectCTIsolationReset(mock)
+			}
+
+			results, err := newCTStreamTestTable(src).Read(t.Context(), opts)
+			require.NoError(t, err)
+			var truncates int
+			for res := range results {
+				require.NoError(t, res.Err)
+				assert.Nil(t, res.CommitToken, "batch state is exposed only after the complete read succeeds")
+				if res.Truncate {
+					truncates++
+				}
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+			}
+			if tc.resume || tc.stagingSwap {
+				assert.Zero(t, truncates)
+			} else {
+				assert.Equal(t, 1, truncates)
+			}
+			state := src.CDCState()
+			if tc.fullRefresh {
+				assert.Equal(t, formatCTVersion(7), state.Position)
+			} else {
+				assert.Equal(t, formatCTVersion(9), state.Position)
+			}
+			if tc.resume {
+				assert.Empty(t, state.SnapshotPositions)
+			} else {
+				assert.Equal(t, map[string]string{"dbo.items": formatCTVersion(7)}, state.SnapshotPositions)
+				state.SnapshotPositions["dbo.items"] = "changed"
+				assert.Equal(t, formatCTVersion(7), src.CDCState().SnapshotPositions["dbo.items"], "callers must not mutate the source's completed certificate")
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestChangeTrackingManagedBatchFailureDoesNotExposePreviousOrPartialState(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	src := &MSSQLChangeTrackingSource{MSSQLSource: MSSQLSource{db: db}}
+	table := newCTStreamTestTable(src)
+	opts := source.ReadOptions{PageSize: 100, CDCSnapshotReplace: true, CDCManagedState: true, FullRefresh: true}
+
+	expectCTRefreshSnapshot(mock, ctEmptyChangeRows())
+	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
+	results, err := table.Read(t.Context(), opts)
+	require.NoError(t, err)
+	for res := range results {
+		require.NoError(t, res.Err)
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+	}
+	require.Equal(t, formatCTVersion(7), src.CDCState().Position)
+
+	opts.FullRefresh = false
+	expectCTRefreshSnapshot(mock, ctChangeRows(1, 7))
+	mock.ExpectCommit()
+	expectCTIsolationReset(mock)
+	mock.ExpectQuery("snapshot_isolation_state").WillReturnError(errors.New("poll failed"))
+	results, err = table.Read(t.Context(), opts)
+	require.NoError(t, err)
+	var failures int
+	for res := range results {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		if res.Err != nil {
+			failures++
+			assert.ErrorContains(t, res.Err, "poll failed")
+		}
+	}
+	require.Equal(t, 1, failures)
+	require.Equal(t, source.CDCStateCommitToken{}, src.CDCState())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
