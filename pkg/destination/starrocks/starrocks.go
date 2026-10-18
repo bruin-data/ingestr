@@ -372,7 +372,7 @@ func (d *StarRocksDestination) nextLabel(table string) string {
 	n := atomic.AddInt64(&d.labelCounter, 1)
 	safe := []byte(table)
 	for i, c := range safe {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
 			safe[i] = '_'
 		}
 	}
