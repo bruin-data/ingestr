@@ -267,23 +267,8 @@ func TestStarRocksCDC(t *testing.T) {
 	})
 
 	t.Run("Postgres snapshot resume stream and refresh", func(t *testing.T) {
-		sourceURI := os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
-		if sourceURI == "" {
-			container, u := setupPostgresCDCContainer(t, ctx)
-			sourceURI = u
-			t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-		}
-		pg, err := pgxpool.New(ctx, sourceURI)
-		require.NoError(t, err)
-		t.Cleanup(pg.Close)
 		sourceSchema := database
-		pgExec := func(query string) { t.Helper(); _, err := pg.Exec(ctx, query); require.NoError(t, err) }
-		pgExec("CREATE SCHEMA " + sourceSchema)
-		t.Cleanup(func() {
-			_, _ = pg.Exec(context.Background(), "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active", database)
-			_, _ = pg.Exec(context.Background(), "DROP PUBLICATION IF EXISTS "+database)
-			_, _ = pg.Exec(context.Background(), "DROP SCHEMA "+sourceSchema+" CASCADE")
-		})
+		pg, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, sourceSchema)
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.items(id BIGINT PRIMARY KEY, payload TEXT, n BIGINT, active BOOLEAN, amount NUMERIC(18,4), doc JSONB, ts TIMESTAMP);
    ALTER TABLE %[1]s.items ALTER COLUMN payload SET STORAGE EXTERNAL;
    ALTER TABLE %[1]s.items ALTER COLUMN doc SET STORAGE EXTERNAL;
@@ -427,23 +412,8 @@ func TestStarRocksCDC(t *testing.T) {
 		require.Equal(t, "single resumed", singleValue)
 	})
 	t.Run("Postgres mid-stream re-snapshot keeps rows readable", func(t *testing.T) {
-		sourceURI := os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
-		if sourceURI == "" {
-			container, u := setupPostgresCDCContainer(t, ctx)
-			sourceURI = u
-			t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-		}
-		pg, err := pgxpool.New(ctx, sourceURI)
-		require.NoError(t, err)
-		t.Cleanup(pg.Close)
 		name := database + "_soft"
-		pgExec := func(query string) { t.Helper(); _, err := pg.Exec(ctx, query); require.NoError(t, err) }
-		pgExec("CREATE SCHEMA " + name)
-		t.Cleanup(func() {
-			_, _ = pg.Exec(context.Background(), "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active", name)
-			_, _ = pg.Exec(context.Background(), "DROP PUBLICATION IF EXISTS "+name)
-			_, _ = pg.Exec(context.Background(), "DROP SCHEMA "+name+" CASCADE")
-		})
+		pg, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, name)
 		const rows = 20000
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.soft_items(id BIGINT PRIMARY KEY, payload TEXT, dropme TEXT, n BIGINT);
    INSERT INTO %[1]s.soft_items SELECT g, 'p' || g, 'd' || g, g FROM generate_series(1,%[2]d) g;
@@ -568,23 +538,8 @@ func TestStarRocksCDC(t *testing.T) {
 		require.Equal(t, "p3", payload)
 	})
 	t.Run("Postgres varchar widened to text mid-stream", func(t *testing.T) {
-		sourceURI := os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
-		if sourceURI == "" {
-			container, u := setupPostgresCDCContainer(t, ctx)
-			sourceURI = u
-			t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-		}
-		pg, err := pgxpool.New(ctx, sourceURI)
-		require.NoError(t, err)
-		t.Cleanup(pg.Close)
 		name := database + "_widen"
-		pgExec := func(query string) { t.Helper(); _, err := pg.Exec(ctx, query); require.NoError(t, err) }
-		pgExec("CREATE SCHEMA " + name)
-		t.Cleanup(func() {
-			_, _ = pg.Exec(context.Background(), "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active", name)
-			_, _ = pg.Exec(context.Background(), "DROP PUBLICATION IF EXISTS "+name)
-			_, _ = pg.Exec(context.Background(), "DROP SCHEMA "+name+" CASCADE")
-		})
+		_, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, name)
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.t(id INT PRIMARY KEY, name VARCHAR(5));
    INSERT INTO %[1]s.t SELECT g, 'n' || g FROM generate_series(1,100) g;
    CREATE PUBLICATION %[1]s FOR TABLE %[1]s.t;`, name))
@@ -633,23 +588,8 @@ func TestStarRocksCDC(t *testing.T) {
 	})
 
 	t.Run("Postgres snapshot values match WAL values", func(t *testing.T) {
-		sourceURI := os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
-		if sourceURI == "" {
-			container, u := setupPostgresCDCContainer(t, ctx)
-			sourceURI = u
-			t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-		}
-		pg, err := pgxpool.New(ctx, sourceURI)
-		require.NoError(t, err)
-		t.Cleanup(pg.Close)
 		name := database + "_types"
-		pgExec := func(query string) { t.Helper(); _, err := pg.Exec(ctx, query); require.NoError(t, err) }
-		pgExec("CREATE SCHEMA " + name)
-		t.Cleanup(func() {
-			_, _ = pg.Exec(context.Background(), "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active", name)
-			_, _ = pg.Exec(context.Background(), "DROP PUBLICATION IF EXISTS "+name)
-			_, _ = pg.Exec(context.Background(), "DROP SCHEMA "+name+" CASCADE")
-		})
+		_, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, name)
 		columns := "t, ttz, iv, inet_h, bits, vb, money_c, r, tr, mr, pt, bx, tsv, c, t24, tarr, inarr, barr, far"
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.t(id INT PRIMARY KEY, t TIME, ttz TIMETZ, iv INTERVAL, inet_h INET, bits BIT(4), vb VARBIT, money_c MONEY, r INT4RANGE, tr TSTZRANGE, mr INT4MULTIRANGE, pt POINT, bx BOX, tsv TSVECTOR, c CHAR(3), t24 TIME, tarr TIME[], inarr INET[], barr BIT(2)[], far TSTZRANGE);
    INSERT INTO %[1]s.t VALUES (1,'13:14:15.123456','10:00:00+02','1 day 02:03:04','10.0.0.1',B'1010',B'101','12.34','[1,5)','[2026-01-01,2026-02-01)','{[1,3),[5,7)}','(1,2)','((0,0),(1,1))','a fat cat','ab','24:00:00','{13:14:15.5,24:00:00}','{10.0.0.1}','{10,01}','[10000-01-01,10001-01-01)');
@@ -672,4 +612,27 @@ func TestStarRocksCDC(t *testing.T) {
 		require.Contains(t, snapshot, "13:14:15.123456|10:00:00+02|1 day 02:03:04|10.0.0.1|1010|101|$12.34|[1,5)|")
 		require.Contains(t, snapshot, "|13:14:15.500000,00:00:00.000000|10.0.0.1|10,01|")
 	})
+}
+
+// setupStarRocksCDCPostgres creates schema name on the CDC source and drops it,
+// with the publication and inactive slot of the same name, on cleanup.
+func setupStarRocksCDCPostgres(t *testing.T, ctx context.Context, name string) (*pgxpool.Pool, string, func(string)) {
+	t.Helper()
+	sourceURI := os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
+	if sourceURI == "" {
+		container, u := setupPostgresCDCContainer(t, ctx)
+		sourceURI = u
+		t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+	}
+	pg, err := pgxpool.New(ctx, sourceURI)
+	require.NoError(t, err)
+	t.Cleanup(pg.Close)
+	pgExec := func(query string) { t.Helper(); _, err := pg.Exec(ctx, query); require.NoError(t, err) }
+	pgExec("CREATE SCHEMA " + name)
+	t.Cleanup(func() {
+		_, _ = pg.Exec(context.Background(), "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active", name)
+		_, _ = pg.Exec(context.Background(), "DROP PUBLICATION IF EXISTS "+name)
+		_, _ = pg.Exec(context.Background(), "DROP SCHEMA "+name+" CASCADE")
+	})
+	return pg, sourceURI, pgExec
 }

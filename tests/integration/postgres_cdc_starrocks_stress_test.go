@@ -76,6 +76,24 @@ func srStressContainer(t *testing.T, ctx context.Context) (dsn, uri string) {
 		fmt.Sprintf("starrocks://root@%s:%s/?http_port=%s&replication_num=1", host, port.Port(), httpPort.Port())
 }
 
+// srStressOpenDB connects to StarRocks and drops the databases a previous run
+// left behind. StarRocks drops DATETIME fractional seconds in the binary
+// protocol that parameterized queries use; interpolated queries use the text
+// protocol.
+func srStressOpenDB(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	sr, err := sql.Open("mysql", dsn+"?interpolateParams=true")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sr.Close() })
+	sr.SetMaxOpenConns(8)
+	srStressWaitReady(t, sr)
+	for _, db := range []string{srStressDatabase, "_bruin_staging"} {
+		_, err = sr.Exec("DROP DATABASE IF EXISTS " + db + " FORCE")
+		require.NoError(t, err)
+	}
+	return sr
+}
+
 // srStressWaitReady waits until StarRocks can create a table: the backend is
 // alive and has reported disk capacity.
 func srStressWaitReady(t *testing.T, db *sql.DB) {
@@ -312,17 +330,7 @@ func TestPostgresCDC_StressStarRocks(t *testing.T) {
 
 	sourceContainer, sourceConnString := stressSourceContainer(t, ctx)
 	srDSN, srURI := srStressContainer(t, ctx)
-	// StarRocks drops DATETIME fractional seconds in the binary protocol that
-	// parameterized queries use; interpolated queries use the text protocol.
-	sr, err := sql.Open("mysql", srDSN+"?interpolateParams=true")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sr.Close() })
-	sr.SetMaxOpenConns(8)
-	srStressWaitReady(t, sr)
-	_, err = sr.Exec("DROP DATABASE IF EXISTS " + srStressDatabase + " FORCE")
-	require.NoError(t, err)
-	_, err = sr.Exec("DROP DATABASE IF EXISTS _bruin_staging FORCE")
-	require.NoError(t, err)
+	sr := srStressOpenDB(t, srDSN)
 
 	srcPool, err := pgxpool.New(ctx, fmt.Sprintf("%s&pool_max_conns=%d", sourceConnString, max(32, stressWorkers+8)))
 	require.NoError(t, err)

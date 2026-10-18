@@ -186,7 +186,7 @@ func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destinatio
 		}
 	}
 	if opts.RequirePrimaryKeyMatch {
-		return d.validateCDCPrimaryKey(ctx, opts.Table, opts.PrimaryKeys)
+		return d.validatePrimaryKey(ctx, "CDC target", opts.Table, opts.PrimaryKeys)
 	}
 	return nil
 }

@@ -246,21 +246,16 @@ func (d *StarRocksDestination) ApplySchemaEvolution(ctx context.Context, table s
 	}
 	if comparison != nil {
 		for _, change := range comparison.Changes {
-			if change.Type == schemaevolution.ChangeRelaxNullability || change.Type == schemaevolution.ChangeRemoveColumn {
-				key := strings.ToLower(change.ColumnName)
+			key := strings.ToLower(change.ColumnName)
+			switch change.Type {
+			case schemaevolution.ChangeRelaxNullability, schemaevolution.ChangeRemoveColumn:
 				col := dialect.columns[key]
 				col.Nullable = true
 				dialect.columns[key] = col
-			}
-		}
-	}
-	if comparison != nil {
-		for _, change := range comparison.Changes {
-			if change.Type != schemaevolution.ChangeWidenType && change.Type != schemaevolution.ChangeOverrideType {
-				continue
-			}
-			if col, ok := dialect.columns[strings.ToLower(change.ColumnName)]; ok && col.IsPrimaryKey {
-				return nil, fmt.Errorf("StarRocks cannot change the type of primary key column %q in %s; rerun with --full-refresh to rebuild the table", change.ColumnName, table)
+			case schemaevolution.ChangeWidenType, schemaevolution.ChangeOverrideType:
+				if col, ok := dialect.columns[key]; ok && col.IsPrimaryKey {
+					return nil, fmt.Errorf("StarRocks cannot change the type of primary key column %q in %s; rerun with --full-refresh to rebuild the table", change.ColumnName, table)
+				}
 			}
 		}
 	}

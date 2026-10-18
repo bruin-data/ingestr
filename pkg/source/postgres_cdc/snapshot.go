@@ -1,7 +1,6 @@
 package postgres_cdc
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -259,7 +258,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		return fmt.Errorf("failed to describe snapshot query: %w", err)
 	}
 	s.typeMap = tx.Conn().TypeMap()
-	rows, err := tx.Query(ctx, query, pgx.QueryExecModeDescribeExec, snapshotResultFormats(s.typeMap, description.Fields, sourceColumns))
+	rows, err := tx.Query(ctx, query, pgx.QueryExecModeDescribeExec, postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn))
 	if err != nil {
 		return fmt.Errorf("failed to query: %w", err)
 	}
@@ -337,13 +336,10 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 		// Append source column values
 		for i, buf := range raw {
 			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
-			if err != nil {
-				for _, b := range builders {
-					b.Release()
-				}
-				return nil, 0, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
+			var converted any
+			if err == nil {
+				converted, err = convertValue(val, columns[i])
 			}
-			converted, err := convertValue(val, columns[i])
 			if err != nil {
 				for _, b := range builders {
 					b.Release()
@@ -413,25 +409,9 @@ func snapshotTextColumn(col schema.Column) bool {
 	case schema.TypeString, schema.TypeInterval, schema.TypeTime:
 		return true
 	case schema.TypeArray:
-		switch col.ArrayType {
-		case schema.TypeDate, schema.TypeTimestamp, schema.TypeTimestampTZ:
-			return false
-		}
-		return true
+		return col.ArrayType != schema.TypeDate && col.ArrayType != schema.TypeTimestamp && col.ArrayType != schema.TypeTimestampTZ
 	}
 	return false
-}
-
-func snapshotResultFormats(typeMap *pgtype.Map, fields []pgconn.FieldDescription, columns []schema.Column) pgx.QueryResultFormats {
-	formats := make(pgx.QueryResultFormats, len(fields))
-	for i, field := range fields {
-		if i < len(columns) && snapshotTextColumn(columns[i]) {
-			formats[i] = pgtype.TextFormatCode
-			continue
-		}
-		formats[i] = typeMap.FormatCodeForOID(field.DataTypeOID)
-	}
-	return formats
 }
 
 // snapshotValue decodes one column like pgx's Rows.Values, except that
@@ -441,18 +421,9 @@ func snapshotValue(typeMap *pgtype.Map, field pgconn.FieldDescription, buf []byt
 		return nil, nil
 	}
 	if field.Format == pgtype.TextFormatCode && snapshotTextColumn(col) {
-		if col.DataType == schema.TypeString || col.DataType == schema.TypeInterval {
-			return string(buf), nil
-		}
 		return convertTextValueWithDelim(string(buf), col, typeMap, postgres.ArrayDelimiter(field.DataTypeOID))
 	}
-	if dt, ok := typeMap.TypeForOID(field.DataTypeOID); ok {
-		return dt.Codec.DecodeValue(typeMap, field.DataTypeOID, field.Format, buf)
-	}
-	if field.Format == pgtype.TextFormatCode {
-		return string(buf), nil
-	}
-	return bytes.Clone(buf), nil
+	return postgres.DecodePostgresValue(typeMap, field, buf)
 }
 
 func convertValue(val interface{}, col schema.Column) (interface{}, error) {

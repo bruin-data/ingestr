@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,7 +63,6 @@ type srWideColumn struct {
 }
 
 func srWideColumns() []srWideColumn {
-	str := func(s string) any { return s }
 	pick := func(rng *rand.Rand, values ...string) any { return values[rng.Intn(len(values))] }
 	maybeNull := func(rng *rand.Rand, v any) any {
 		if rng.Intn(100) < 15 {
@@ -144,7 +144,7 @@ func srWideColumns() []srWideColumn {
 			if r.Intn(10) == 0 {
 				return fmt.Sprintf("big-%d-%s", id, strings.Repeat("toast-", 2000+r.Intn(2000)))
 			}
-			return str(fmt.Sprintf("small-%d", id))
+			return fmt.Sprintf("small-%d", id)
 		}},
 	}
 	fillerTypes := []string{"integer", "text", "numeric(18,4)", "boolean", "timestamptz"}
@@ -498,15 +498,7 @@ func TestPostgresCDC_StarRocksScenarios(t *testing.T) {
 
 	sourceContainer, sourceConnString := stressSourceContainer(t, ctx)
 	srDSN, srURI := srStressContainer(t, ctx)
-	sr, err := sql.Open("mysql", srDSN+"?interpolateParams=true")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sr.Close() })
-	sr.SetMaxOpenConns(8)
-	srStressWaitReady(t, sr)
-	for _, db := range []string{srStressDatabase, "_bruin_staging"} {
-		_, err = sr.Exec("DROP DATABASE IF EXISTS " + db + " FORCE")
-		require.NoError(t, err)
-	}
+	sr := srStressOpenDB(t, srDSN)
 	srcPool, err := pgxpool.New(ctx, fmt.Sprintf("%s&pool_max_conns=%d", sourceConnString, max(32, stressWorkers+8)))
 	require.NoError(t, err)
 	t.Cleanup(srcPool.Close)
@@ -584,7 +576,8 @@ func TestPostgresCDC_StarRocksScenarios(t *testing.T) {
 		"--yes",
 	}
 	if scenarios["single"] {
-		args = slicesDeleteFlag(args, "--cdc-table-naming")
+		i := slices.Index(args, "--cdc-table-naming")
+		args = slices.Delete(args, i, i+2)
 		args = append(args, "--source-table", "public."+srWideTable, "--dest-table", srStressDatabase+"."+srWideTable)
 	}
 	sink := &srStressSink{t: t, bin: bin, logDir: t.TempDir(), args: args, dockerNetwork: dockerNetwork}
@@ -848,17 +841,4 @@ func TestPostgresCDC_StarRocksScenarios(t *testing.T) {
 	}
 	require.Empty(t, problems, "StarRocks diverged from the source:\n%s", strings.Join(problems, "\n"))
 	t.Logf("scenarios %v passed: %s, bulk transactions=%d, StarRocks faults=%d", scenarios, sink.summary(), bulkTxns.Load(), faults.Load())
-}
-
-// slicesDeleteFlag removes a flag and its value from args.
-func slicesDeleteFlag(args []string, flag string) []string {
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == flag {
-			i++
-			continue
-		}
-		out = append(out, args[i])
-	}
-	return out
 }

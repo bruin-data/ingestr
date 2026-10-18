@@ -40,17 +40,16 @@ var (
 )
 
 type srMySQLRunner struct {
-	t      *testing.T
 	bin    string
 	logDir string
 	base   []string
 
-	mu                        sync.Mutex
-	runs                      int
-	ok, sigkill, sigterm      int
-	leaseBusy, retryable      int
-	overlaps, overlapFailures int
-	logs                      []string
+	mu                   sync.Mutex
+	runs                 int
+	ok, sigkill, sigterm int
+	leaseBusy, retryable int
+	overlaps             int
+	logs                 []string
 }
 
 func (r *srMySQLRunner) summary() string {
@@ -261,17 +260,7 @@ func TestMySQLCDC_StarRocksStress(t *testing.T) {
 		"--sync-binlog=0",
 	})
 	srDSN, srURI := srStressContainer(t, ctx)
-	// StarRocks drops DATETIME fractional seconds in the binary protocol that
-	// parameterized queries use; interpolated queries use the text protocol.
-	sr, err := sql.Open("mysql", srDSN+"?interpolateParams=true")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sr.Close() })
-	sr.SetMaxOpenConns(8)
-	srStressWaitReady(t, sr)
-	_, err = sr.Exec("DROP DATABASE IF EXISTS " + srStressDatabase + " FORCE")
-	require.NoError(t, err)
-	_, err = sr.Exec("DROP DATABASE IF EXISTS _bruin_staging FORCE")
-	require.NoError(t, err)
+	sr := srStressOpenDB(t, srDSN)
 
 	loadDB := mysqlStressOpenDB(t, sourceDSN, stressWorkers+8)
 	verifyDSN := strings.Replace(sourceDSN, "?parseTime=true", "?time_zone=%27%2B00%3A00%27", 1)
@@ -290,7 +279,6 @@ func TestMySQLCDC_StarRocksStress(t *testing.T) {
 	tables.add(typesTbl)
 
 	runner := &srMySQLRunner{
-		t:      t,
 		bin:    bin,
 		logDir: t.TempDir(),
 		base: []string{

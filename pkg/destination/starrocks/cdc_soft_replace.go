@@ -33,7 +33,7 @@ func (d *StarRocksDestination) RetireCDCRowsBefore(ctx context.Context, opts des
 	if opts.Boundary == "" {
 		return fmt.Errorf("StarRocks CDC retire requires a boundary position")
 	}
-	if err := d.validateCDCPrimaryKey(ctx, opts.Table, opts.PrimaryKeys); err != nil {
+	if err := d.validatePrimaryKey(ctx, "CDC target", opts.Table, opts.PrimaryKeys); err != nil {
 		return err
 	}
 	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.ExpectedIncarnation); err != nil {
@@ -46,11 +46,7 @@ func (d *StarRocksDestination) RetireCDCRowsBefore(ctx context.Context, opts des
 	if tableSchema == nil {
 		return fmt.Errorf("StarRocks CDC target %s does not exist", opts.Table)
 	}
-	columns := make([]string, len(tableSchema.Columns))
-	for i, col := range tableSchema.Columns {
-		columns[i] = col.Name
-	}
-	body, err := buildCDCRetireSQL(d.tableRef(opts.Table), columns, opts)
+	body, err := buildCDCRetireSQL(d.tableRef(opts.Table), tableSchema.ColumnNames(), opts)
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,6 @@ package starrocks
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -45,13 +44,9 @@ func (d *StarRocksDestination) CanonicalCDCTarget(_ context.Context, table strin
 
 func (d *StarRocksDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
 	db, name := d.tableParts(table)
-	var id string
-	err := d.db.QueryRowContext(ctx, `SELECT TABLE_ID FROM information_schema.tables_config WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND TABLE_ENGINE IN ('OLAP', 'CLOUD_NATIVE')`, db, name).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("read StarRocks CDC target identity: %w", err)
+	id, exists, err := d.tableID(ctx, db, name)
+	if err != nil || !exists {
+		return "", false, err
 	}
 	return destination.CDCTargetKey(db, name, id), true, nil
 }
@@ -216,10 +211,6 @@ func (d *StarRocksDestination) TruncateTable(ctx context.Context, table string) 
 
 func (d *StarRocksDestination) TruncateCDCTable(ctx context.Context, table string) error {
 	return d.TruncateTable(ctx, table)
-}
-
-func (d *StarRocksDestination) validateCDCPrimaryKey(ctx context.Context, table string, keys []string) error {
-	return d.validatePrimaryKey(ctx, "CDC target", table, keys)
 }
 
 // validatePrimaryKey requires a PRIMARY KEY table keyed on exactly keys:

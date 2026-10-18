@@ -691,19 +691,8 @@ func AppendValue(builder array.Builder, val interface{}) {
 		case []byte:
 			if num, ok := ParseDecimal128BytesFast(v, dt.Precision, dt.Scale); ok {
 				b.Append(num)
-				return
-			}
-			s := strings.TrimSpace(string(v))
-			if s == "" {
-				b.AppendNull()
 			} else {
-				// decimal128.FromString rounds through a binary float and
-				// misrounds exact halves; scale exactly instead.
-				if bi, ok := ScaledDecimal(s, dt.Scale); ok {
-					appendBigIntDecimal128(b, bi)
-				} else {
-					b.AppendNull()
-				}
+				AppendValue(b, string(v))
 			}
 		case *big.Int:
 			appendBigIntDecimal128(b, v)

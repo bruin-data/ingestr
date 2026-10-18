@@ -601,13 +601,10 @@ func convertTextValueWithDelim(text string, col schema.Column, typeMap *pgtype.M
 
 // decimalPrecision mirrors schema.DataTypeToArrowType's decimal sizing.
 func decimalPrecision(col schema.Column) int {
-	switch {
-	case col.Precision <= 0:
+	if col.Precision <= 0 {
 		return 38
-	case col.Precision > 76:
-		return 76
 	}
-	return col.Precision
+	return min(col.Precision, 76)
 }
 
 // checkDecimalRange rejects finite values that, rounded to the column's scale

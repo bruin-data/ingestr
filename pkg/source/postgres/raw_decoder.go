@@ -26,7 +26,7 @@ type postgresRawAppender func([]byte) error
 
 func newPostgresRawAppender(builder array.Builder, field pgconn.FieldDescription, column schema.Column, typeMap *pgtype.Map) postgresRawAppender {
 	fallback := func(src []byte) error {
-		value, err := decodePostgresValue(typeMap, field, src)
+		value, err := DecodePostgresValue(typeMap, field, src)
 		if err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func appendPostgresTextInt(src []byte, format int16, bitSize int, appendValue fu
 	return fallback(src)
 }
 
-func decodePostgresValue(typeMap *pgtype.Map, field pgconn.FieldDescription, src []byte) (any, error) {
+func DecodePostgresValue(typeMap *pgtype.Map, field pgconn.FieldDescription, src []byte) (any, error) {
 	if dataType, ok := typeMap.TypeForOID(field.DataTypeOID); ok {
 		return dataType.Codec.DecodeValue(typeMap, field.DataTypeOID, field.Format, src)
 	}

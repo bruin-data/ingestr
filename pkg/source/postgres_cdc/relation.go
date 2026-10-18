@@ -258,11 +258,10 @@ func mapRelationToSchema(rel, prev *RelationInfo, tableSchema *schema.TableSchem
 				// it must pass or the error would recur on every restart.
 				newMatches, newKnown := oidMatchesColumn(col.DataType, tableSchema.Columns[idx])
 				_, prevKnown := oidMatchesColumn(prevCol.DataType, tableSchema.Columns[idx])
-				if newKnown && !newMatches || !newKnown && prevKnown {
-					addMismatch(col.Name, fmt.Sprintf("changed type mid-stream (OID %d -> %d)", prevCol.DataType, col.DataType))
-				} else if typmodMatches, relevant := typmodMatchesColumn(col, tableSchema.Columns[idx]); relevant && !typmodMatches {
-					// varchar(n) -> text keeps the internal type but lifts the
-					// length bound the destination column was sized for.
+				// varchar(n) -> text keeps the internal type but lifts the
+				// length bound the destination column was sized for.
+				typmodMatches, relevant := typmodMatchesColumn(col, tableSchema.Columns[idx])
+				if newKnown && !newMatches || !newKnown && prevKnown || relevant && !typmodMatches {
 					addMismatch(col.Name, fmt.Sprintf("changed type mid-stream (OID %d -> %d)", prevCol.DataType, col.DataType))
 				}
 				if !newKnown && !prevKnown {

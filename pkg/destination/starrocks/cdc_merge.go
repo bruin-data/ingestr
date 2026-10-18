@@ -3,6 +3,7 @@ package starrocks
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -18,7 +19,7 @@ func (d *StarRocksDestination) mergeCDC(ctx context.Context, opts destination.Me
 	if len(opts.PrimaryKeys) == 0 {
 		return fmt.Errorf("StarRocks CDC merge requires primary keys")
 	}
-	if err := d.validateCDCPrimaryKey(ctx, opts.TargetTable, opts.PrimaryKeys); err != nil {
+	if err := d.validatePrimaryKey(ctx, "CDC target", opts.TargetTable, opts.PrimaryKeys); err != nil {
 		return err
 	}
 	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
@@ -60,19 +61,10 @@ func (d *StarRocksDestination) buildCDCMergeSQL(opts destination.MergeOptions) s
 		return strings.Join(values, ", ")
 	}
 	unique := func(base string) string {
-		for {
-			found := false
-			for _, col := range opts.Columns {
-				if strings.EqualFold(base, col) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return quoteColumn(base)
-			}
+		for slices.ContainsFunc(opts.Columns, func(col string) bool { return strings.EqualFold(base, col) }) {
 			base += "_"
 		}
+		return quoteColumn(base)
 	}
 	origin, rank := unique("__ingestr_target"), unique("__ingestr_rank")
 	unchanged := "'[]'"

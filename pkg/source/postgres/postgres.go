@@ -430,7 +430,7 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 		var columns []schema.Column
 		if description, descErr := conn.Conn().PgConn().Prepare(ctx, "", query, nil); descErr == nil {
 			columns = customQueryColumns(typeMap, description.Fields)
-			rows, err = conn.Query(ctx, query, textStringFormats(typeMap, description.Fields, columns))
+			rows, err = conn.Query(ctx, query, TextResultFormats(typeMap, description.Fields, columns, postgresTextFormat))
 		} else {
 			rows, err = conn.Query(ctx, query)
 		}
@@ -509,14 +509,16 @@ func queryWithTextStrings(ctx context.Context, conn *pgxpool.Conn, query string,
 	if err != nil || len(description.Fields) != len(columns) {
 		return conn.Query(ctx, query)
 	}
-	return conn.Query(ctx, query, textStringFormats(conn.Conn().TypeMap(), description.Fields, columns))
+	return conn.Query(ctx, query, TextResultFormats(conn.Conn().TypeMap(), description.Fields, columns, postgresTextFormat))
 }
 
-func textStringFormats(typeMap *pgtype.Map, fields []pgconn.FieldDescription, columns []schema.Column) pgx.QueryResultFormats {
+// TextResultFormats requests text for the columns useText selects and each
+// type's preferred format otherwise.
+func TextResultFormats(typeMap *pgtype.Map, fields []pgconn.FieldDescription, columns []schema.Column, useText func(schema.Column) bool) pgx.QueryResultFormats {
 	formats := make(pgx.QueryResultFormats, len(fields))
 	for i, field := range fields {
 		formats[i] = typeMap.FormatCodeForOID(field.DataTypeOID)
-		if i < len(columns) && postgresTextFormat(columns[i]) {
+		if i < len(columns) && useText(columns[i]) {
 			formats[i] = pgx.TextFormatCode
 		}
 	}
