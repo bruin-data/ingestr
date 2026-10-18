@@ -3330,7 +3330,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			return err
 		}
 	}
-	if isPostgresCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+	if isPostgresCDCSource(cfg.SourceURI) && (!cfg.FullRefresh || cfg.Stream) {
 		switch cfg.IncrementalStrategy {
 		case config.StrategyDeleteInsert, config.StrategySCD2:
 			return &config.ValidationError{
@@ -3339,7 +3339,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			}
 		}
 	}
-	if isMSSQLCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+	if isMSSQLCDCSource(cfg.SourceURI) && (!cfg.FullRefresh || cfg.Stream) {
 		switch cfg.IncrementalStrategy {
 		case "", config.StrategyMerge, config.StrategyReplace:
 		default:
@@ -3350,7 +3350,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 		}
 	}
 	if isMySQLCDCSource(cfg.SourceURI) {
-		if !cfg.FullRefresh {
+		if !cfg.FullRefresh || cfg.Stream {
 			switch cfg.IncrementalStrategy {
 			case "", config.StrategyMerge, config.StrategyReplace:
 			default:

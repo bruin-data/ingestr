@@ -4363,3 +4363,26 @@ func TestApplyReverseETLNamingRejectsUnknownConvention(t *testing.T) {
 		t.Fatalf("error = %v, want the unknown convention rejected", err)
 	}
 }
+
+func TestStreamingRefreshPreservesCDCStrategyRestrictions(t *testing.T) {
+	for _, sourceURI := range []string{"mysql+cdc://source/db", "mariadb+cdc://source/db", "mssql+cdc://source/db"} {
+		t.Run(sourceURI, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = sourceURI
+			cfg.Stream = true
+			cfg.FullRefresh = true
+			cfg.IncrementalStrategy = config.StrategyAppend
+			require.ErrorContains(t, validateManagedChangeConfig(cfg), "incremental-strategy")
+			cfg.IncrementalStrategy = config.StrategyMerge
+			require.NoError(t, validateManagedChangeConfig(cfg))
+			cfg.Stream = false
+			cfg.IncrementalStrategy = config.StrategyAppend
+			require.NoError(t, validateManagedChangeConfig(cfg), "batch refresh replaces rather than appends")
+		})
+	}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db"
+	cfg.Stream, cfg.FullRefresh = true, true
+	cfg.IncrementalStrategy = config.StrategyAppend
+	require.NoError(t, validateManagedChangeConfig(cfg), "PostgreSQL keyless streams retain append support")
+}

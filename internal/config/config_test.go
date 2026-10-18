@@ -711,3 +711,25 @@ func TestIngestConfigValidateRefreshID(t *testing.T) {
 		})
 	}
 }
+
+func TestChangeTrackingStreamingRefreshRequiresMerge(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://source/db"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "postgres://destination/db"
+	cfg.Stream, cfg.FullRefresh = true, true
+	cfg.IncrementalStrategy, cfg.IncrementalStrategyExplicit = StrategyAppend, true
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "incremental-strategy") {
+		t.Fatalf("expected CT streaming strategy rejection, got %v", err)
+	}
+	cfg.IncrementalStrategy = StrategyMerge
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Stream = false
+	cfg.IncrementalStrategy = StrategyReplace
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("batch refresh should still allow replace: %v", err)
+	}
+}

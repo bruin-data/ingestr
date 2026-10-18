@@ -280,8 +280,8 @@ func (c *IngestConfig) Validate() error {
 	if c.IsChangeTrackingSource() && c.SQLLimit > 0 {
 		return &ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
 	}
-	if c.IsChangeTrackingSource() && !c.FullRefresh && c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge {
-		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless full-refresh is enabled", StrategyMerge)}
+	if c.IsChangeTrackingSource() && (!c.FullRefresh || c.Stream) && c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge {
+		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless batch full-refresh is enabled", StrategyMerge)}
 	}
 	return nil
 }
