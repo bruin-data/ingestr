@@ -35,12 +35,12 @@ func TestStreamingRefreshScopeSurvivesBigQueryCredentialChanges(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.SourceURI = "mysql+cdc://source/db"
 	cfg.SourceTables = []string{"orders", "users"}
-	cfg.DestURI = "bigquery://project/dataset?location=EU&credentials_base64=b3JpZ2luYWw="
+	cfg.DestURI = "bigquery://project/dataset?location=EU&credentials_base64=YWFhYWFh"
 	p := &Pipeline{config: cfg}
 	scope := p.streamingRefreshScope()
 	connectorID := genericCDCConnectorID(cfg)
 	for _, uri := range []string{
-		"bigquery://project/dataset?location=EU&credentials_base64=cm90YXRlZA==",
+		"bigquery://project/dataset?location=EU&credentials_base64=YmJiYmJi",
 		"bigquery://project/dataset?location=EU&credentials_path=/tmp/credentials-1.json",
 		"bigquery://project/dataset?location=EU&credentials_path=/tmp/credentials-2.json",
 		"bigquery://project/dataset?location=EU",
